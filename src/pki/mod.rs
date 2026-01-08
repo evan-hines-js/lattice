@@ -1,0 +1,754 @@
+//! PKI operations for mTLS certificates
+//!
+//! This module handles certificate authority operations and CSR signing.
+//! The cell acts as a CA and signs CSRs from agents - it never sees agent private keys.
+//!
+//! # Security Model
+//!
+//! - Cell generates and holds the CA key pair
+//! - Agents generate their own key pairs locally
+//! - Agents send only CSRs (no private keys)
+//! - Cell signs CSRs and returns certificates
+//! - All agent-cell communication uses mTLS with signed certificates
+
+use rcgen::{
+    string::Ia5String, BasicConstraints, CertificateParams, CertificateSigningRequestParams,
+    DistinguishedName, DnType, DnValue, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
+};
+use thiserror::Error;
+use x509_parser::prelude::*;
+
+/// PKI errors
+#[derive(Debug, Error)]
+pub enum PkiError {
+    /// CA not initialized
+    #[error("CA not initialized")]
+    CaNotInitialized,
+
+    /// Invalid CSR
+    #[error("invalid CSR: {0}")]
+    InvalidCsr(String),
+
+    /// Certificate generation failed
+    #[error("certificate generation failed: {0}")]
+    CertificateGenerationFailed(String),
+
+    /// Key generation failed
+    #[error("key generation failed: {0}")]
+    KeyGenerationFailed(String),
+
+    /// IO error
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Certificate parsing error
+    #[error("certificate parsing error: {0}")]
+    ParseError(String),
+}
+
+/// Result type for PKI operations
+pub type Result<T> = std::result::Result<T, PkiError>;
+
+/// Parse PEM-encoded data and return the DER bytes
+pub fn parse_pem(pem_data: &str) -> std::result::Result<Vec<u8>, PkiError> {
+    let pem_obj = ::pem::parse(pem_data.as_bytes())
+        .map_err(|e| PkiError::ParseError(format!("failed to parse PEM: {}", e)))?;
+    Ok(pem_obj.contents().to_vec())
+}
+
+/// Certificate Authority for signing agent CSRs
+pub struct CertificateAuthority {
+    /// CA key pair serialized as PEM (we need to deserialize each time since KeyPair isn't Clone)
+    ca_key_pem: String,
+    /// PEM-encoded CA certificate for distribution
+    ca_cert_pem: String,
+}
+
+impl CertificateAuthority {
+    /// Create a new self-signed CA
+    pub fn new(common_name: &str) -> Result<Self> {
+        let mut params = CertificateParams::default();
+
+        // Set distinguished name
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, DnValue::Utf8String(common_name.to_string()));
+        dn.push(DnType::OrganizationName, DnValue::Utf8String("Lattice".to_string()));
+        params.distinguished_name = dn;
+
+        // CA settings
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+
+        // 10 year validity
+        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2034, 1, 1);
+
+        // Generate key pair
+        let key_pair = KeyPair::generate().map_err(|e| {
+            PkiError::KeyGenerationFailed(format!("failed to generate CA key: {}", e))
+        })?;
+
+        let ca_key_pem = key_pair.serialize_pem();
+
+        let cert = params.self_signed(&key_pair).map_err(|e| {
+            PkiError::CertificateGenerationFailed(format!("failed to create CA cert: {}", e))
+        })?;
+
+        let ca_cert_pem = cert.pem();
+
+        Ok(Self {
+            ca_key_pem,
+            ca_cert_pem,
+        })
+    }
+
+    /// Load CA from PEM files
+    pub fn from_pem(cert_pem: &str, key_pem: &str) -> Result<Self> {
+        // Validate key can be parsed
+        let _ = KeyPair::from_pem(key_pem)
+            .map_err(|e| PkiError::ParseError(format!("failed to parse CA key: {}", e)))?;
+
+        // Validate cert can be parsed
+        let _ = parse_pem(cert_pem)?;
+
+        Ok(Self {
+            ca_key_pem: key_pem.to_string(),
+            ca_cert_pem: cert_pem.to_string(),
+        })
+    }
+
+    /// Get the CA certificate in PEM format (for distribution to agents)
+    pub fn ca_cert_pem(&self) -> &str {
+        &self.ca_cert_pem
+    }
+
+    /// Get the CA private key in PEM format (for backup/storage)
+    pub fn ca_key_pem(&self) -> &str {
+        &self.ca_key_pem
+    }
+
+    /// Load the key pair from stored PEM
+    fn load_key_pair(&self) -> Result<KeyPair> {
+        KeyPair::from_pem(&self.ca_key_pem)
+            .map_err(|e| PkiError::ParseError(format!("failed to load CA key: {}", e)))
+    }
+
+    /// Sign a CSR and return the signed certificate in PEM format
+    ///
+    /// The CSR contains the agent's public key. The cell extracts it
+    /// and signs a new certificate with it, ensuring the cell never
+    /// sees the agent's private key.
+    pub fn sign_csr(&self, csr_pem: &str, cluster_id: &str) -> Result<String> {
+        // Parse the CSR using rcgen's built-in parser
+        let mut csr_params = CertificateSigningRequestParams::from_pem(csr_pem)
+            .map_err(|e| PkiError::InvalidCsr(format!("failed to parse CSR: {}", e)))?;
+
+        // Override the certificate parameters from the CSR with our own
+        // This ensures we control the subject, validity, and extensions
+
+        // Set subject from cluster ID
+        let mut dn = DistinguishedName::new();
+        dn.push(
+            DnType::CommonName,
+            DnValue::Utf8String(format!("lattice-agent-{}", cluster_id)),
+        );
+        dn.push(
+            DnType::OrganizationName,
+            DnValue::Utf8String("Lattice".to_string()),
+        );
+        csr_params.params.distinguished_name = dn;
+
+        // Not a CA
+        csr_params.params.is_ca = IsCa::NoCa;
+        csr_params.params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+
+        // Extended key usage for TLS client and server
+        csr_params.params.extended_key_usages = vec![
+            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+        ];
+
+        // 5 year validity
+        csr_params.params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        csr_params.params.not_after = rcgen::date_time_ymd(2029, 1, 1);
+
+        // Add SANs for the agent
+        csr_params.params.subject_alt_names = vec![
+            SanType::DnsName(
+                Ia5String::try_from(format!("lattice-agent-{}", cluster_id))
+                    .expect("valid DNS name"),
+            ),
+            SanType::DnsName(
+                Ia5String::try_from("lattice-agent.lattice-system.svc").expect("valid DNS name"),
+            ),
+            SanType::DnsName(
+                Ia5String::try_from("lattice-agent.lattice-system.svc.cluster.local")
+                    .expect("valid DNS name"),
+            ),
+        ];
+
+        // Create the Issuer from our CA certificate and key
+        let ca_key = self.load_key_pair()?;
+        let issuer = Issuer::from_ca_cert_pem(&self.ca_cert_pem, &ca_key)
+            .map_err(|e| PkiError::ParseError(format!("failed to create issuer: {}", e)))?;
+
+        // Sign the certificate with the CA
+        let signed_cert = csr_params.signed_by(&issuer).map_err(|e| {
+            PkiError::CertificateGenerationFailed(format!("failed to sign certificate: {}", e))
+        })?;
+
+        Ok(signed_cert.pem())
+    }
+}
+
+/// Agent certificate request (generates keypair and CSR locally)
+pub struct AgentCertRequest {
+    /// The generated key pair PEM (kept private)
+    key_pem: String,
+    /// CSR in PEM format (sent to cell)
+    csr_pem: String,
+}
+
+impl AgentCertRequest {
+    /// Generate a new key pair and CSR for an agent
+    pub fn new(cluster_id: &str) -> Result<Self> {
+        // Generate key pair locally (never leaves agent)
+        let key_pair = KeyPair::generate().map_err(|e| {
+            PkiError::KeyGenerationFailed(format!("failed to generate agent key: {}", e))
+        })?;
+
+        let key_pem = key_pair.serialize_pem();
+
+        // Create CSR params
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, DnValue::Utf8String(format!("lattice-agent-{}", cluster_id)));
+        dn.push(DnType::OrganizationName, DnValue::Utf8String("Lattice".to_string()));
+        params.distinguished_name = dn;
+
+        // Generate CSR
+        let csr = params.serialize_request(&key_pair).map_err(|e| {
+            PkiError::CertificateGenerationFailed(format!("failed to create CSR: {}", e))
+        })?;
+
+        let csr_pem = csr.pem().map_err(|e| {
+            PkiError::CertificateGenerationFailed(format!("failed to serialize CSR: {}", e))
+        })?;
+
+        Ok(Self { key_pem, csr_pem })
+    }
+
+    /// Get the CSR in PEM format (to send to cell for signing)
+    pub fn csr_pem(&self) -> &str {
+        &self.csr_pem
+    }
+
+    /// Get the private key in PEM format (to store locally)
+    pub fn private_key_pem(&self) -> &str {
+        &self.key_pem
+    }
+}
+
+/// Verification result for client certificates
+#[derive(Debug, Clone)]
+pub struct VerificationResult {
+    /// Cluster ID extracted from certificate
+    pub cluster_id: String,
+    /// Whether the certificate is valid
+    pub valid: bool,
+    /// Reason if invalid
+    pub reason: Option<String>,
+}
+
+/// Verify a client certificate was signed by our CA
+pub fn verify_client_cert(
+    cert_der: &[u8],
+    ca_cert_pem: &str,
+) -> std::result::Result<VerificationResult, PkiError> {
+    // Parse the presented certificate
+    let (_, cert) = X509Certificate::from_der(cert_der)
+        .map_err(|e| PkiError::ParseError(format!("failed to parse client cert: {}", e)))?;
+
+    // Parse the CA certificate
+    let ca_cert_der = parse_pem(ca_cert_pem)?;
+    let (_, ca_cert) = X509Certificate::from_der(&ca_cert_der)
+        .map_err(|e| PkiError::ParseError(format!("failed to parse CA cert: {}", e)))?;
+
+    // Verify signature using x509-parser's built-in verification
+    let ca_public_key = ca_cert.public_key();
+    match cert.verify_signature(Some(ca_public_key)) {
+        Ok(_) => {}
+        Err(_) => {
+            return Ok(VerificationResult {
+                cluster_id: String::new(),
+                valid: false,
+                reason: Some("signature verification failed".to_string()),
+            });
+        }
+    }
+
+    // Check validity period
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let not_before = cert.validity().not_before.timestamp();
+    let not_after = cert.validity().not_after.timestamp();
+
+    if now < not_before {
+        return Ok(VerificationResult {
+            cluster_id: String::new(),
+            valid: false,
+            reason: Some("certificate not yet valid".to_string()),
+        });
+    }
+
+    if now > not_after {
+        return Ok(VerificationResult {
+            cluster_id: String::new(),
+            valid: false,
+            reason: Some("certificate expired".to_string()),
+        });
+    }
+
+    // Extract cluster ID from CN
+    let cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .unwrap_or("");
+
+    let cluster_id = cn
+        .strip_prefix("lattice-agent-")
+        .unwrap_or("")
+        .to_string();
+
+    if cluster_id.is_empty() {
+        return Ok(VerificationResult {
+            cluster_id: String::new(),
+            valid: false,
+            reason: Some("invalid CN format, expected lattice-agent-<cluster_id>".to_string()),
+        });
+    }
+
+    Ok(VerificationResult {
+        cluster_id,
+        valid: true,
+        reason: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ca_can_be_created() {
+        let ca = CertificateAuthority::new("Lattice Test CA").unwrap();
+        assert!(!ca.ca_cert_pem().is_empty());
+        assert!(ca.ca_cert_pem().contains("BEGIN CERTIFICATE"));
+    }
+
+    #[test]
+    fn agent_can_generate_csr() {
+        let request = AgentCertRequest::new("test-cluster-123").unwrap();
+
+        // CSR should be generated
+        assert!(!request.csr_pem().is_empty());
+        assert!(request.csr_pem().contains("BEGIN CERTIFICATE REQUEST"));
+
+        // Private key should be available
+        assert!(!request.private_key_pem().is_empty());
+        assert!(request.private_key_pem().contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
+    fn ca_can_sign_csr() {
+        // Setup: CA and agent CSR
+        let ca = CertificateAuthority::new("Lattice Test CA").unwrap();
+        let request = AgentCertRequest::new("my-cluster").unwrap();
+
+        // Sign the CSR
+        let signed_cert = ca.sign_csr(request.csr_pem(), "my-cluster").unwrap();
+
+        // Should be a valid certificate
+        assert!(signed_cert.contains("BEGIN CERTIFICATE"));
+        assert!(!signed_cert.contains("CERTIFICATE REQUEST"));
+    }
+
+    #[test]
+    fn signed_cert_can_be_verified() {
+        // Setup: CA signs agent CSR
+        let ca = CertificateAuthority::new("Lattice Test CA").unwrap();
+        let request = AgentCertRequest::new("verified-cluster").unwrap();
+        let signed_cert_pem = ca.sign_csr(request.csr_pem(), "verified-cluster").unwrap();
+
+        // Parse to DER for verification
+        let cert_der = parse_pem(&signed_cert_pem).unwrap();
+
+        // Verify
+        let result = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
+
+        assert!(result.valid);
+        assert_eq!(result.cluster_id, "verified-cluster");
+        assert!(result.reason.is_none());
+    }
+
+    #[test]
+    fn invalid_signature_rejected() {
+        // Create two different CAs
+        let ca1 = CertificateAuthority::new("CA One").unwrap();
+        let ca2 = CertificateAuthority::new("CA Two").unwrap();
+
+        // Agent gets cert signed by CA1
+        let request = AgentCertRequest::new("cluster").unwrap();
+        let signed_cert_pem = ca1.sign_csr(request.csr_pem(), "cluster").unwrap();
+
+        // Try to verify with CA2 (should fail)
+        let cert_der = parse_pem(&signed_cert_pem).unwrap();
+        let result = verify_client_cert(&cert_der, ca2.ca_cert_pem()).unwrap();
+
+        assert!(!result.valid);
+        assert!(result.reason.unwrap().contains("signature verification failed"));
+    }
+
+    #[test]
+    fn invalid_csr_rejected() {
+        let ca = CertificateAuthority::new("Test CA").unwrap();
+
+        let result = ca.sign_csr("not a valid csr", "cluster");
+
+        assert!(matches!(result, Err(PkiError::InvalidCsr(_))));
+    }
+
+    #[test]
+    fn cluster_id_extracted_from_cert() {
+        let ca = CertificateAuthority::new("Test CA").unwrap();
+        let request = AgentCertRequest::new("prod-us-west-123").unwrap();
+        let signed_cert_pem = ca
+            .sign_csr(request.csr_pem(), "prod-us-west-123")
+            .unwrap();
+
+        let cert_der = parse_pem(&signed_cert_pem).unwrap();
+        let result = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
+
+        assert!(result.valid);
+        assert_eq!(result.cluster_id, "prod-us-west-123");
+    }
+
+    #[test]
+    fn private_key_never_in_csr() {
+        let request = AgentCertRequest::new("secure-cluster").unwrap();
+
+        // CSR should NOT contain private key
+        assert!(!request.csr_pem().contains("PRIVATE KEY"));
+
+        // But private key should still be accessible separately
+        assert!(request.private_key_pem().contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn ca_can_be_saved_and_loaded() {
+        let ca1 = CertificateAuthority::new("Persistent CA").unwrap();
+        let cert_pem = ca1.ca_cert_pem().to_string();
+        let key_pem = ca1.ca_key_pem().to_string();
+
+        // Load from saved PEM
+        let ca2 = CertificateAuthority::from_pem(&cert_pem, &key_pem).unwrap();
+
+        // Should be able to sign CSRs
+        let request = AgentCertRequest::new("test").unwrap();
+        let signed = ca2.sign_csr(request.csr_pem(), "test");
+        assert!(signed.is_ok());
+    }
+
+    // ==========================================================================
+    // Story Tests: PKI Certificate Lifecycle
+    // ==========================================================================
+    //
+    // The PKI system enables secure mTLS communication between cells and agents.
+    // Key security properties:
+    // - Agent private keys never leave the agent (CSR model)
+    // - Only cell CA can sign valid certificates
+    // - Certificates bind to specific cluster IDs
+    // - Cross-CA certificates are rejected
+
+    /// Story: Complete certificate lifecycle for a new agent
+    ///
+    /// This demonstrates the full PKI flow from CA creation to agent
+    /// certificate verification.
+    #[test]
+    fn story_complete_certificate_lifecycle() {
+        // Chapter 1: Cell creates its CA during initialization
+        // -----------------------------------------------------
+        let ca = CertificateAuthority::new("Lattice Production CA").unwrap();
+        let ca_cert = ca.ca_cert_pem();
+        assert!(ca_cert.contains("BEGIN CERTIFICATE"));
+
+        // Chapter 2: New workload cluster needs a certificate
+        // ----------------------------------------------------
+        // Agent generates its own keypair - private key NEVER transmitted
+        let agent_request = AgentCertRequest::new("workload-east-1").unwrap();
+
+        // Verify the CSR doesn't leak the private key
+        assert!(!agent_request.csr_pem().contains("PRIVATE KEY"));
+        assert!(agent_request.csr_pem().contains("CERTIFICATE REQUEST"));
+
+        // But agent does have its private key locally
+        assert!(agent_request.private_key_pem().contains("PRIVATE KEY"));
+
+        // Chapter 3: Cell signs the CSR
+        // ------------------------------
+        let signed_cert = ca.sign_csr(agent_request.csr_pem(), "workload-east-1").unwrap();
+        assert!(signed_cert.contains("BEGIN CERTIFICATE"));
+
+        // Chapter 4: Agent uses certificate for mTLS connection
+        // -------------------------------------------------------
+        // When agent connects, cell verifies the certificate
+        let cert_der = parse_pem(&signed_cert).unwrap();
+        let verification = verify_client_cert(&cert_der, ca_cert).unwrap();
+
+        assert!(verification.valid);
+        assert_eq!(verification.cluster_id, "workload-east-1");
+        assert!(verification.reason.is_none());
+    }
+
+    /// Story: Security - Certificates from different CAs are rejected
+    ///
+    /// An attacker who creates their own CA cannot get their agents
+    /// accepted by our cell.
+    #[test]
+    fn story_cross_ca_attack_prevention() {
+        // Legitimate cell CA
+        let legitimate_ca = CertificateAuthority::new("Legitimate CA").unwrap();
+
+        // Attacker creates their own CA
+        let attacker_ca = CertificateAuthority::new("Attacker CA").unwrap();
+
+        // Attacker signs their own agent's CSR
+        let evil_agent = AgentCertRequest::new("trojan-cluster").unwrap();
+        let evil_cert = attacker_ca.sign_csr(evil_agent.csr_pem(), "trojan-cluster").unwrap();
+
+        // Attacker tries to connect to legitimate cell
+        let cert_der = parse_pem(&evil_cert).unwrap();
+        let verification = verify_client_cert(&cert_der, legitimate_ca.ca_cert_pem()).unwrap();
+
+        // Attack detected and blocked!
+        assert!(!verification.valid);
+        assert!(verification.reason.as_ref().unwrap().contains("signature verification failed"));
+    }
+
+    /// Story: Cluster ID is cryptographically bound to certificate
+    ///
+    /// The cluster ID is embedded in the certificate CN and cannot be
+    /// spoofed. An agent with a valid certificate can only claim the
+    /// identity it was issued for.
+    #[test]
+    fn story_cluster_identity_binding() {
+        let ca = CertificateAuthority::new("Identity CA").unwrap();
+
+        // Sign certificates for different clusters
+        let clusters = ["prod-us-west", "staging-eu-central", "dev-local"];
+
+        for cluster_id in clusters {
+            let request = AgentCertRequest::new(cluster_id).unwrap();
+            let signed_cert = ca.sign_csr(request.csr_pem(), cluster_id).unwrap();
+
+            let cert_der = parse_pem(&signed_cert).unwrap();
+            let verification = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
+
+            // Each certificate is bound to its specific cluster ID
+            assert!(verification.valid);
+            assert_eq!(verification.cluster_id, cluster_id);
+        }
+    }
+
+    /// Story: CA persistence for disaster recovery
+    ///
+    /// The CA can be saved and restored, allowing the cell to restart
+    /// without invalidating existing agent certificates.
+    #[test]
+    fn story_ca_persistence_and_recovery() {
+        // Initial setup: Create CA and issue a certificate
+        let original_ca = CertificateAuthority::new("Persistent CA").unwrap();
+        let agent_request = AgentCertRequest::new("long-lived-cluster").unwrap();
+        let original_cert = original_ca.sign_csr(agent_request.csr_pem(), "long-lived-cluster").unwrap();
+
+        // Simulate disaster: Save CA state
+        let saved_cert_pem = original_ca.ca_cert_pem().to_string();
+        let saved_key_pem = original_ca.ca_key_pem().to_string();
+
+        // Recovery: Restore CA from saved state
+        let restored_ca = CertificateAuthority::from_pem(&saved_cert_pem, &saved_key_pem).unwrap();
+
+        // Restored CA can verify certificates issued by original
+        let cert_der = parse_pem(&original_cert).unwrap();
+        let verification = verify_client_cert(&cert_der, restored_ca.ca_cert_pem()).unwrap();
+        assert!(verification.valid);
+
+        // Restored CA can issue new certificates
+        let new_agent = AgentCertRequest::new("new-cluster").unwrap();
+        let new_cert = restored_ca.sign_csr(new_agent.csr_pem(), "new-cluster");
+        assert!(new_cert.is_ok());
+    }
+
+    /// Story: Error handling - Invalid CSR submission
+    ///
+    /// When an agent submits malformed data as a CSR, the error
+    /// is handled gracefully with a descriptive message.
+    #[test]
+    fn story_malformed_csr_rejection() {
+        let ca = CertificateAuthority::new("Strict CA").unwrap();
+
+        // Various forms of invalid CSR data
+        let invalid_inputs = [
+            "not a csr at all",
+            "-----BEGIN CERTIFICATE-----\nwrong type\n-----END CERTIFICATE-----",
+            "-----BEGIN CERTIFICATE REQUEST-----\ncorrupted\n-----END CERTIFICATE REQUEST-----",
+        ];
+
+        for invalid in invalid_inputs {
+            let result = ca.sign_csr(invalid, "test-cluster");
+            assert!(result.is_err());
+
+            match result {
+                Err(PkiError::InvalidCsr(msg)) => {
+                    assert!(!msg.is_empty(), "Should provide error details");
+                }
+                _ => panic!("Expected InvalidCsr error"),
+            }
+        }
+    }
+
+    /// Story: Error handling - Invalid CA restoration
+    ///
+    /// When loading a CA from corrupted or mismatched PEM files,
+    /// errors are caught before any certificates can be issued.
+    #[test]
+    fn story_corrupted_ca_detection() {
+        let good_ca = CertificateAuthority::new("Good CA").unwrap();
+
+        // Corrupted key
+        let result = CertificateAuthority::from_pem(good_ca.ca_cert_pem(), "invalid key pem");
+        assert!(result.is_err());
+
+        // Corrupted cert
+        let result = CertificateAuthority::from_pem("invalid cert pem", good_ca.ca_key_pem());
+        assert!(result.is_err());
+
+        // Key and cert don't match (would require different CA generation)
+        // This is caught by the signature verification in verify_client_cert
+    }
+
+    /// Story: PEM parsing error handling
+    ///
+    /// Invalid PEM data is rejected with clear error messages.
+    #[test]
+    fn story_pem_parsing_errors() {
+        let invalid_pem = "this is not valid PEM data at all";
+        let result = parse_pem(invalid_pem);
+
+        assert!(result.is_err());
+        match result {
+            Err(PkiError::ParseError(msg)) => {
+                assert!(msg.contains("parse PEM"));
+            }
+            _ => panic!("Expected ParseError"),
+        }
+    }
+
+    /// Story: Error conversion from I/O errors
+    ///
+    /// I/O errors (from file operations) are properly wrapped in PkiError.
+    #[test]
+    fn story_io_error_conversion() {
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "cannot read CA key file"
+        );
+        let pki_err: PkiError = io_err.into();
+
+        assert!(pki_err.to_string().contains("IO error"));
+        assert!(pki_err.to_string().contains("cannot read CA key file"));
+    }
+
+    /// Test parsing invalid certificate DER data
+    #[test]
+    fn test_verify_invalid_cert_data() {
+        let ca = CertificateAuthority::new("Test CA").unwrap();
+
+        // Invalid DER data
+        let invalid_der = b"not valid DER data";
+        let result = verify_client_cert(invalid_der, ca.ca_cert_pem());
+
+        assert!(result.is_err());
+        match result {
+            Err(PkiError::ParseError(msg)) => {
+                assert!(msg.contains("failed to parse client cert"));
+            }
+            _ => panic!("Expected ParseError"),
+        }
+    }
+
+    /// Test verify_client_cert with invalid CA certificate
+    #[test]
+    fn test_verify_with_invalid_ca() {
+        let ca = CertificateAuthority::new("Test CA").unwrap();
+        let request = AgentCertRequest::new("test").unwrap();
+        let signed_cert = ca.sign_csr(request.csr_pem(), "test").unwrap();
+
+        // Try to verify with invalid CA PEM
+        let cert_der = parse_pem(&signed_cert).unwrap();
+        let result = verify_client_cert(&cert_der, "not valid PEM");
+
+        assert!(result.is_err());
+    }
+
+    /// Test VerificationResult default values
+    #[test]
+    fn test_verification_result_creation() {
+        let result = VerificationResult {
+            cluster_id: "test-cluster".to_string(),
+            valid: true,
+            reason: None,
+        };
+        assert!(result.valid);
+        assert_eq!(result.cluster_id, "test-cluster");
+
+        let invalid_result = VerificationResult {
+            cluster_id: String::new(),
+            valid: false,
+            reason: Some("test reason".to_string()),
+        };
+        assert!(!invalid_result.valid);
+        assert_eq!(invalid_result.reason.unwrap(), "test reason");
+    }
+
+    /// Test VerificationResult debug and clone
+    #[test]
+    fn test_verification_result_traits() {
+        let result = VerificationResult {
+            cluster_id: "debug-test".to_string(),
+            valid: true,
+            reason: None,
+        };
+
+        // Test Debug
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("debug-test"));
+
+        // Test Clone
+        let cloned = result.clone();
+        assert_eq!(cloned.cluster_id, "debug-test");
+        assert!(cloned.valid);
+    }
+}

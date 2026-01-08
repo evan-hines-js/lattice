@@ -1,0 +1,48 @@
+//! gRPC protocol definitions for agent-cell communication
+//!
+//! This module contains the generated Protobuf and gRPC code for the
+//! bidirectional streaming protocol between agents and cells.
+//!
+//! # Protocol Overview
+//!
+//! Agents (running on workload clusters) initiate outbound gRPC connections
+//! to their parent cell (management cluster). The connection establishes a
+//! bidirectional stream where:
+//!
+//! - Agents send: `AgentMessage` (ready, heartbeat, pivot complete, etc.)
+//! - Cells send: `CellCommand` (bootstrap, pivot, reconcile, etc.)
+//!
+//! # Example
+//!
+//! ```ignore
+//! use lattice::proto::lattice_agent_client::LatticeAgentClient;
+//!
+//! // Agent connects to cell
+//! let mut client = LatticeAgentClient::connect("https://cell.example.com:443").await?;
+//!
+//! // Establish bidirectional stream
+//! let (tx, rx) = mpsc::channel(32);
+//! let response = client.connect(ReceiverStream::new(rx)).await?;
+//! let mut inbound = response.into_inner();
+//!
+//! // Send ready message
+//! tx.send(AgentMessage { ... }).await?;
+//!
+//! // Receive commands
+//! while let Some(command) = inbound.message().await? {
+//!     handle_command(command);
+//! }
+//! ```
+
+#![allow(missing_docs)] // Generated code doesn't have docs
+
+/// Generated protobuf and gRPC code for agent-cell communication
+pub mod agent {
+    /// Version 1 of the agent protocol
+    pub mod v1 {
+        tonic::include_proto!("lattice.agent.v1");
+    }
+}
+
+// Re-export commonly used types at the module level for convenience
+pub use agent::v1::*;
