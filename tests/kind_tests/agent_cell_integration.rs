@@ -44,6 +44,7 @@ async fn integration_bootstrap_http_full_flow() {
         "integration-cluster".to_string(),
         "https://cell.test:443".to_string(),
         ca.ca_cert_pem().to_string(),
+        None,
     );
 
     let router = bootstrap_router(state.clone());
@@ -109,6 +110,7 @@ async fn integration_bootstrap_token_replay_blocked() {
         "replay-test".to_string(),
         "https://cell:443".to_string(),
         ca.ca_cert_pem().to_string(),
+        None,
     );
 
     let router = bootstrap_router(state);
@@ -155,6 +157,7 @@ async fn integration_full_stack_bootstrap_to_ready() {
         "full-stack-test".to_string(),
         "https://cell:443".to_string(),
         ca.ca_cert_pem().to_string(),
+        None,
     );
 
     // Step 2: Bootstrap (get manifests and CA cert)

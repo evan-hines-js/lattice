@@ -594,6 +594,8 @@ mod tests {
         let mut cluster = sample_cluster(name, 2);
         cluster.spec.cell = Some(CellSpec {
             host: "172.18.255.1".to_string(),
+            grpc_port: 50051,
+            bootstrap_port: 443,
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },

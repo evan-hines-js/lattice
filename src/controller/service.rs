@@ -322,7 +322,11 @@ pub async fn reconcile(
 ///
 /// This function is called when reconciliation fails. It determines
 /// the requeue strategy using exponential backoff.
-pub fn error_policy(service: Arc<LatticeService>, error: &Error, _ctx: Arc<ServiceContext>) -> Action {
+pub fn error_policy(
+    service: Arc<LatticeService>,
+    error: &Error,
+    _ctx: Arc<ServiceContext>,
+) -> Action {
     error!(
         ?error,
         service = %service.name_any(),
@@ -672,14 +676,14 @@ mod tests {
 
     fn mock_kube_success() -> MockServiceKubeClient {
         let mut mock = MockServiceKubeClient::new();
-        mock.expect_patch_service_status()
-            .returning(|_, _| Ok(()));
+        mock.expect_patch_service_status().returning(|_, _| Ok(()));
         mock.expect_patch_external_service_status()
             .returning(|_, _| Ok(()));
         mock.expect_get_service().returning(|_| Ok(None));
         mock.expect_get_external_service().returning(|_| Ok(None));
         mock.expect_list_services().returning(|| Ok(vec![]));
-        mock.expect_list_external_services().returning(|| Ok(vec![]));
+        mock.expect_list_external_services()
+            .returning(|| Ok(vec![]));
         mock
     }
 
@@ -896,8 +900,7 @@ mod tests {
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Add same-named service to different environments
-        ctx.graph
-            .put_service("prod", "api", &sample_service_spec());
+        ctx.graph.put_service("prod", "api", &sample_service_spec());
         ctx.graph
             .put_service("staging", "api", &sample_service_spec());
 
@@ -926,7 +929,8 @@ mod tests {
         let ctx2 = ServiceContext::new(mock_kube2, Arc::clone(&shared_graph), "env2");
 
         // Add service via ctx1
-        ctx1.graph.put_service("shared", "svc", &sample_service_spec());
+        ctx1.graph
+            .put_service("shared", "svc", &sample_service_spec());
 
         // Should be visible via ctx2
         assert!(ctx2.graph.get_service("shared", "svc").is_some());

@@ -1,6 +1,5 @@
 //! Lattice Operator - Kubernetes multi-cluster lifecycle management
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,15 +11,9 @@ use kube::{Api, Client, CustomResourceExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lattice::agent::client::{AgentClient, AgentClientConfig};
-use lattice::agent::connection::AgentRegistry;
-use lattice::agent::mtls::ServerMtlsConfig;
-use lattice::agent::server::AgentServer;
-use lattice::bootstrap::{bootstrap_router, BootstrapState, DefaultManifestGenerator};
-use lattice::controller::{
-    error_policy, reconcile, CellCapabilities, ClusterBootstrapImpl, Context, PivotOperationsImpl,
-};
+use lattice::cell::{CellConfig, CellServers};
+use lattice::controller::{error_policy, reconcile, Context};
 use lattice::crd::LatticeCluster;
-use lattice::pki::CertificateAuthority;
 
 /// Lattice - CRD-driven Kubernetes operator for multi-cluster lifecycle management
 #[derive(Parser, Debug)]
@@ -36,37 +29,12 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run as controller/cell (default mode)
-    Controller(ControllerArgs),
+    /// Run as controller (default mode)
+    /// Cell servers start automatically when Pending LatticeCluster CRDs are detected
+    Controller,
 
     /// Run as agent on a workload cluster
     Agent(AgentArgs),
-}
-
-/// Controller mode arguments
-#[derive(Parser, Debug)]
-struct ControllerArgs {
-    /// Bootstrap HTTPS server listen address
-    #[arg(long, default_value = "0.0.0.0:443")]
-    bootstrap_addr: SocketAddr,
-
-    /// gRPC server listen address
-    #[arg(long, default_value = "0.0.0.0:50051")]
-    grpc_addr: SocketAddr,
-
-    /// Bootstrap token TTL in seconds
-    #[arg(long, default_value = "3600")]
-    token_ttl_secs: u64,
-
-    /// Cell gRPC endpoint (host:port) for agents to connect to
-    /// Required when running as a cell that provisions workload clusters
-    #[arg(long)]
-    cell_endpoint: Option<String>,
-
-    /// Cell bootstrap endpoint (https://host:port) for kubeadm webhook
-    /// Required when running as a cell that provisions workload clusters
-    #[arg(long)]
-    bootstrap_endpoint: Option<String>,
 }
 
 /// Agent mode arguments
@@ -122,18 +90,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Agent(args)) => run_agent(args).await,
-        Some(Commands::Controller(args)) => run_controller(args).await,
-        None => {
-            // Default to controller mode with default args
-            run_controller(ControllerArgs {
-                bootstrap_addr: "0.0.0.0:443".parse().unwrap(),
-                grpc_addr: "0.0.0.0:50051".parse().unwrap(),
-                token_ttl_secs: 3600,
-                cell_endpoint: None,
-                bootstrap_endpoint: None,
-            })
-            .await
-        }
+        Some(Commands::Controller) | None => run_controller().await,
     }
 }
 
@@ -155,9 +112,10 @@ async fn run_agent(args: AgentArgs) -> anyhow::Result<()> {
 
     // Step 1: Request CSR signing from cell
     tracing::info!("Requesting certificate from cell...");
-    let credentials = AgentClient::request_certificate(&args.cell_http_endpoint, &args.cluster_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to get certificate: {}", e))?;
+    let credentials =
+        AgentClient::request_certificate(&args.cell_http_endpoint, &args.cluster_id, &ca_cert_pem)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get certificate: {}", e))?;
 
     tracing::info!("Certificate received and validated");
 
@@ -196,7 +154,10 @@ async fn run_agent(args: AgentArgs) -> anyhow::Result<()> {
 }
 
 /// Run in controller mode - manages clusters
-async fn run_controller(args: ControllerArgs) -> anyhow::Result<()> {
+///
+/// Cell servers (gRPC + bootstrap HTTP) start automatically when needed.
+/// Cell endpoint configuration is read from the local LatticeCluster CRD's spec.cell.
+async fn run_controller() -> anyhow::Result<()> {
     tracing::info!("Lattice controller starting...");
 
     // Create Kubernetes client
@@ -204,129 +165,26 @@ async fn run_controller(args: ControllerArgs) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create Kubernetes client: {}", e))?;
 
-    // Create Certificate Authority for signing agent certificates
-    let ca = Arc::new(
-        CertificateAuthority::new("Lattice CA")
-            .map_err(|e| anyhow::anyhow!("Failed to create CA: {}", e))?,
+    // Create cell servers (starts on-demand when Pending CRDs detected)
+    let cell_servers = Arc::new(
+        CellServers::new(CellConfig::default())
+            .map_err(|e| anyhow::anyhow!("Failed to create cell servers: {}", e))?,
     );
-    tracing::info!("Certificate Authority initialized");
 
-    // Create manifest generator with Cilium CNI
-    let manifest_generator = DefaultManifestGenerator::new()
-        .map_err(|e| anyhow::anyhow!("Failed to create manifest generator: {}", e))?;
-
-    // Create bootstrap state
-    let bootstrap_state = Arc::new(BootstrapState::new(
-        manifest_generator,
-        Duration::from_secs(args.token_ttl_secs),
-        ca.clone(),
-    ));
-
-    // Create agent registry for connected agents
-    let agent_registry = Arc::new(AgentRegistry::new());
-
-    // Create controller context with bootstrap if this is a cell
-    let ctx = if let (Some(ref cell_endpoint), Some(ref bootstrap_endpoint)) =
-        (&args.cell_endpoint, &args.bootstrap_endpoint)
-    {
-        tracing::info!(
-            cell_endpoint = %cell_endpoint,
-            bootstrap_endpoint = %bootstrap_endpoint,
-            "Running as cell - enabling workload cluster provisioning"
-        );
-        let cluster_bootstrap = Arc::new(ClusterBootstrapImpl::new(
-            bootstrap_state.clone(),
-            cell_endpoint.clone(),
-            bootstrap_endpoint.clone(),
-        ));
-        let pivot_ops = Arc::new(PivotOperationsImpl::new(agent_registry.clone()));
-        let cell_caps = CellCapabilities::new(cluster_bootstrap, agent_registry.clone(), pivot_ops);
-
-        Arc::new(
-            Context::builder(client.clone())
-                .cell_capabilities(cell_caps)
-                .build(),
-        )
-    } else {
-        tracing::info!("Running without cell endpoint - workload cluster provisioning disabled");
-        Arc::new(Context::new(client.clone()))
-    };
+    // Create controller context with cell servers
+    // Cell endpoint config is read from CRD spec.cell during reconciliation
+    let ctx = Arc::new(Context::new_with_cell(client.clone(), cell_servers.clone()));
 
     // Create API for LatticeCluster (cluster-scoped)
     let clusters: Api<LatticeCluster> = Api::all(client);
 
-    // Start bootstrap HTTPS server with TLS
-    let bootstrap_router = bootstrap_router(bootstrap_state.clone());
-
-    // Generate server certificate with proper SANs for TLS
-    // Include common hostnames that workload clusters might use to reach us
-    let server_sans = [
-        "localhost",
-        "host.docker.internal", // Docker desktop
-        "host.containers.internal", // Podman
-        "172.17.0.1",           // Docker bridge gateway
-        "127.0.0.1",
-    ];
-    let (server_cert_pem, server_key_pem) = ca
-        .generate_server_cert(&server_sans)
-        .map_err(|e| anyhow::anyhow!("Failed to generate server certificate: {}", e))?;
-    tracing::info!("Generated server certificate with SANs: {:?}", server_sans);
-
-    // Configure TLS using the server certificate signed by our CA
-    let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
-        server_cert_pem.as_bytes().to_vec(),
-        server_key_pem.as_bytes().to_vec(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to configure TLS: {}", e))?;
-
-    let bootstrap_addr = args.bootstrap_addr;
-    tracing::info!(addr = %bootstrap_addr, "Bootstrap HTTPS server listening");
-
-    let bootstrap_server = tokio::spawn(async move {
-        axum_server::bind_rustls(bootstrap_addr, tls_config)
-            .serve(bootstrap_router.into_make_service())
-            .await
-            .map_err(|e| tracing::error!(error = %e, "Bootstrap server error"))
-    });
-
-    // Start gRPC server for agent connections (only if running as cell)
-    let grpc_server = if args.cell_endpoint.is_some() {
-        // Generate a server certificate for gRPC with proper SANs
-        let (grpc_cert_pem, grpc_key_pem) = ca
-            .generate_server_cert(&server_sans)
-            .map_err(|e| anyhow::anyhow!("Failed to generate gRPC server certificate: {}", e))?;
-
-        // Create mTLS config using the server cert (not CA cert)
-        // CA cert is used for verifying client certificates
-        let mtls_config = ServerMtlsConfig::new(
-            grpc_cert_pem,
-            grpc_key_pem,
-            ca.ca_cert_pem().to_string(),
-        );
-
-        let registry_clone = agent_registry.clone();
-        let grpc_addr = args.grpc_addr;
-
-        Some(tokio::spawn(async move {
-            tracing::info!(addr = %grpc_addr, "Starting gRPC server for agent connections");
-            if let Err(e) =
-                AgentServer::serve_with_mtls(registry_clone, grpc_addr, mtls_config).await
-            {
-                tracing::error!(error = %e, "gRPC server error");
-            }
-        }))
-    } else {
-        tracing::info!("gRPC server disabled (not running as cell)");
-        None
-    };
-
     tracing::info!("Starting LatticeCluster controller...");
+    tracing::info!("Cell config will be read from LatticeCluster CRD spec.cell");
 
     // Run the controller
     let controller = Controller::new(clusters, WatcherConfig::default())
         .shutdown_on_signal()
-        .run(reconcile, error_policy, ctx)
+        .run(reconcile, error_policy, ctx.clone())
         .for_each(|result| async move {
             match result {
                 Ok(action) => {
@@ -341,11 +199,8 @@ async fn run_controller(args: ControllerArgs) -> anyhow::Result<()> {
     // Run controller and wait for shutdown
     controller.await;
 
-    // Shutdown servers
-    bootstrap_server.abort();
-    if let Some(grpc) = grpc_server {
-        grpc.abort();
-    }
+    // Shutdown cell servers
+    cell_servers.shutdown().await;
 
     tracing::info!("Lattice controller shutting down");
     Ok(())

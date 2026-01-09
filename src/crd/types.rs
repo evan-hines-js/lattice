@@ -124,7 +124,7 @@ pub struct NetworkingSpec {
 /// Network pool for Cilium LB-IPAM
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct NetworkPool {
-    /// CIDR block for the network pool
+    /// CIDR block for the network pool (e.g., "172.18.255.1/32" for single IP)
     pub cidr: String,
 }
 
@@ -134,8 +134,36 @@ pub struct CellSpec {
     /// Host address for agent connections
     pub host: String,
 
+    /// gRPC port for agent connections (default: 50051)
+    #[serde(default = "default_grpc_port", rename = "grpcPort")]
+    pub grpc_port: u16,
+
+    /// Bootstrap HTTPS port for kubeadm webhook (default: 443)
+    #[serde(default = "default_bootstrap_port", rename = "bootstrapPort")]
+    pub bootstrap_port: u16,
+
     /// Service exposure configuration
     pub service: ServiceSpec,
+}
+
+fn default_grpc_port() -> u16 {
+    50051
+}
+
+fn default_bootstrap_port() -> u16 {
+    443
+}
+
+impl CellSpec {
+    /// Get the gRPC endpoint URL for agent connections
+    pub fn grpc_endpoint(&self) -> String {
+        format!("https://{}:{}", self.host, self.grpc_port)
+    }
+
+    /// Get the bootstrap endpoint URL for kubeadm webhook
+    pub fn bootstrap_endpoint(&self) -> String {
+        format!("https://{}:{}", self.host, self.bootstrap_port)
+    }
 }
 
 /// Service exposure specification
@@ -628,6 +656,8 @@ mod tests {
         fn test_cell_spec_roundtrip() {
             let spec = CellSpec {
                 host: "cell.example.com".to_string(),
+                grpc_port: 50051,
+                bootstrap_port: 443,
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
@@ -635,6 +665,29 @@ mod tests {
             let json = serde_json::to_string(&spec).unwrap();
             let parsed: CellSpec = serde_json::from_str(&json).unwrap();
             assert_eq!(spec, parsed);
+        }
+
+        #[test]
+        fn test_cell_spec_endpoints() {
+            let spec = CellSpec {
+                host: "172.18.255.1".to_string(),
+                grpc_port: 50051,
+                bootstrap_port: 443,
+                service: ServiceSpec {
+                    type_: "LoadBalancer".to_string(),
+                },
+            };
+            assert_eq!(spec.grpc_endpoint(), "https://172.18.255.1:50051");
+            assert_eq!(spec.bootstrap_endpoint(), "https://172.18.255.1:443");
+        }
+
+        #[test]
+        fn test_cell_spec_default_ports() {
+            // Ports should default when not specified in JSON
+            let json = r#"{"host":"example.com","service":{"type":"LoadBalancer"}}"#;
+            let spec: CellSpec = serde_json::from_str(json).unwrap();
+            assert_eq!(spec.grpc_port, 50051);
+            assert_eq!(spec.bootstrap_port, 443);
         }
 
         #[test]

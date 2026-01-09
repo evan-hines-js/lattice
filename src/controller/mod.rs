@@ -13,6 +13,6 @@ pub use cluster::{
 
 pub use service::{
     cleanup_external_service, cleanup_service, error_policy as service_error_policy,
-    error_policy_external, reconcile as service_reconcile, reconcile_external,
-    ServiceContext, ServiceKubeClient, ServiceKubeClientImpl,
+    error_policy_external, reconcile as service_reconcile, reconcile_external, ServiceContext,
+    ServiceKubeClient, ServiceKubeClientImpl,
 };

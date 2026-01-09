@@ -86,6 +86,31 @@ fn run_cmd_allow_fail(cmd: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+/// Get base64-encoded registry credentials for ghcr.io
+/// Format: {"auths":{"ghcr.io":{"auth":"base64(user:token)"}}}
+///
+/// Requires GHCR_TOKEN and GHCR_USER environment variables to be set.
+/// Create a .env file (gitignored) with:
+///   GHCR_USER=your-github-username
+///   GHCR_TOKEN=ghp_your_token_here
+fn get_registry_credentials_base64() -> String {
+    let token =
+        std::env::var("GHCR_TOKEN").expect("GHCR_TOKEN env var required - set in .env file");
+    let user = std::env::var("GHCR_USER").expect("GHCR_USER env var required - set in .env file");
+
+    // Create the auth string (base64 of user:token)
+    let auth = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        format!("{}:{}", user, token),
+    );
+
+    // Create dockerconfigjson
+    let config = format!(r#"{{"auths":{{"ghcr.io":{{"auth":"{}"}}}}}}"#, auth);
+
+    // Return base64 encoded for the secret
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, config)
+}
+
 /// Build and push the lattice Docker image to registry
 async fn build_and_push_lattice_image() -> Result<(), String> {
     println!("  Building lattice Docker image...");
@@ -352,10 +377,6 @@ spec:
           imagePullPolicy: Never
           args:
             - "controller"
-            - "--bootstrap-addr=0.0.0.0:443"
-            - "--grpc-addr=0.0.0.0:50051"
-            - "--cell-endpoint=host.docker.internal:30051"
-            - "--bootstrap-endpoint=https://host.docker.internal:30443"
           ports:
             - containerPort: 443
               name: https
@@ -364,8 +385,28 @@ spec:
           env:
             - name: RUST_LOG
               value: "info,lattice=debug"
+            - name: REGISTRY_CREDENTIALS_FILE
+              value: "/var/run/secrets/registry/.dockerconfigjson"
+          volumeMounts:
+            - name: registry-creds
+              mountPath: /var/run/secrets/registry
+              readOnly: true
+      volumes:
+        - name: registry-creds
+          secret:
+            secretName: lattice-registry-creds
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lattice-registry-creds
+  namespace: lattice-system
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: {registry_creds}
 "#,
-        image = LATTICE_IMAGE
+        image = LATTICE_IMAGE,
+        registry_creds = get_registry_credentials_base64()
     );
 
     kubectl_apply(&operator_manifest)?;

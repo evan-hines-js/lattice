@@ -150,7 +150,9 @@ pub struct LatticeExternalServiceSpec {
 impl LatticeExternalServiceSpec {
     /// Check if a service is allowed to access this external service
     pub fn allows(&self, service_name: &str) -> bool {
-        self.allowed_requesters.iter().any(|r| r == "*" || r == service_name)
+        self.allowed_requesters
+            .iter()
+            .any(|r| r == "*" || r == service_name)
     }
 
     /// Parse all endpoints into structured format
@@ -370,7 +372,10 @@ mod tests {
 
         let result = spec.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("at least one endpoint"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("at least one endpoint"));
     }
 
     #[test]
@@ -384,7 +389,10 @@ mod tests {
 
         let result = spec.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid endpoint URL"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid endpoint URL"));
     }
 
     // =========================================================================

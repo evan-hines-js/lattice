@@ -17,10 +17,11 @@ use tracing::{debug, error, info, instrument, warn};
 use mockall::automock;
 
 use crate::agent::connection::SharedAgentRegistry;
+use crate::bootstrap::DefaultManifestGenerator;
 use crate::capi::{ensure_capi_installed_with, CapiDetector, CapiInstaller};
+use crate::cell::CellServers;
 use crate::crd::{
-    Condition, ClusterPhase, ConditionStatus, LatticeCluster, LatticeClusterStatus,
-    ProviderType,
+    ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus, ProviderType,
 };
 use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
 use crate::provider::{CAPIManifest, DockerProvider, Provider};
@@ -66,6 +67,7 @@ pub trait ClusterBootstrap: Send + Sync {
     /// * `cluster_id` - Unique cluster identifier
     /// * `cell_endpoint` - gRPC endpoint for the parent cell
     /// * `ca_certificate` - CA certificate PEM for the parent cell
+    /// * `networking` - Optional networking config for Cilium LB-IPAM
     ///
     /// # Returns
     ///
@@ -75,6 +77,7 @@ pub trait ClusterBootstrap: Send + Sync {
         cluster_id: String,
         cell_endpoint: String,
         ca_certificate: String,
+        networking: Option<crate::crd::NetworkingSpec>,
     ) -> String;
 
     /// Check if a cluster is already registered
@@ -156,10 +159,11 @@ impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap
         cluster_id: String,
         cell_endpoint: String,
         ca_certificate: String,
+        networking: Option<crate::crd::NetworkingSpec>,
     ) -> String {
-        let token = self
-            .state
-            .register_cluster(cluster_id, cell_endpoint, ca_certificate);
+        let token =
+            self.state
+                .register_cluster(cluster_id, cell_endpoint, ca_certificate, networking);
         token.as_str().to_string()
     }
 
@@ -536,7 +540,10 @@ const CAPI_KIND_PLURALS: &[(&str, &str)] = &[
     ("machinepool", "machinepools"),
     // Control plane provider (controlplane.cluster.x-k8s.io)
     ("kubeadmcontrolplane", "kubeadmcontrolplanes"),
-    ("kubeadmcontrolplanetemplate", "kubeadmcontrolplanetemplates"),
+    (
+        "kubeadmcontrolplanetemplate",
+        "kubeadmcontrolplanetemplates",
+    ),
     // Bootstrap provider (bootstrap.cluster.x-k8s.io)
     ("kubeadmconfig", "kubeadmconfigs"),
     ("kubeadmconfigtemplate", "kubeadmconfigtemplates"),
@@ -611,6 +618,9 @@ pub trait PivotOperations: Send + Sync {
     /// Check if agent is ready for pivot
     fn is_agent_ready(&self, cluster_name: &str) -> bool;
 
+    /// Check if pivot is already in progress
+    fn is_pivot_in_progress(&self, cluster_name: &str) -> bool;
+
     /// Check if pivot is complete (agent reports Ready state)
     fn is_pivot_complete(&self, cluster_name: &str) -> bool;
 
@@ -681,6 +691,8 @@ pub struct Context {
     pub capi_namespace: String,
     /// Cell capabilities (present only when running as a cell)
     pub cell: Option<CellCapabilities>,
+    /// Cell servers (started on-demand when Pending CRDs detected)
+    pub cell_servers: Option<Arc<CellServers<DefaultManifestGenerator>>>,
 }
 
 impl Context {
@@ -694,6 +706,17 @@ impl Context {
     /// This is a convenience method equivalent to `Context::builder(client).build()`.
     pub fn new(client: Client) -> Self {
         Self::builder(client).build()
+    }
+
+    /// Create a new controller context with cell servers for dynamic startup
+    ///
+    /// Cell servers will start automatically when Pending LatticeCluster CRDs are detected.
+    /// Cell endpoint configuration is read from the LatticeCluster CRD's spec.cell.
+    pub fn new_with_cell(
+        client: Client,
+        cell_servers: Arc<CellServers<DefaultManifestGenerator>>,
+    ) -> Self {
+        Self::builder(client).cell_servers(cell_servers).build()
     }
 
     /// Access bootstrap registration (convenience accessor)
@@ -735,6 +758,7 @@ impl Context {
             capi_installer,
             capi_namespace: namespace.to_string(),
             cell: None,
+            cell_servers: None,
         }
     }
 
@@ -758,6 +782,7 @@ impl Context {
             capi_installer,
             capi_namespace: namespace.to_string(),
             cell: Some(cell),
+            cell_servers: None,
         }
     }
 }
@@ -801,6 +826,7 @@ pub struct ContextBuilder {
     capi_installer: Option<Arc<dyn CapiInstaller>>,
     capi_namespace: String,
     cell: Option<CellCapabilities>,
+    cell_servers: Option<Arc<CellServers<DefaultManifestGenerator>>>,
 }
 
 impl ContextBuilder {
@@ -814,6 +840,7 @@ impl ContextBuilder {
             capi_installer: None,
             capi_namespace: "default".to_string(),
             cell: None,
+            cell_servers: None,
         }
     }
 
@@ -853,6 +880,12 @@ impl ContextBuilder {
         self
     }
 
+    /// Set cell servers for on-demand startup
+    pub fn cell_servers(mut self, servers: Arc<CellServers<DefaultManifestGenerator>>) -> Self {
+        self.cell_servers = Some(servers);
+        self
+    }
+
     /// Build the Context
     pub fn build(self) -> Context {
         use crate::capi::{ClusterctlInstaller, KubeCapiDetector};
@@ -872,6 +905,7 @@ impl ContextBuilder {
                 .unwrap_or_else(|| Arc::new(ClusterctlInstaller::new())),
             capi_namespace: self.capi_namespace,
             cell: self.cell,
+            cell_servers: self.cell_servers,
         }
     }
 }
@@ -916,6 +950,22 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // State machine: transition based on current phase
     match current_phase {
         ClusterPhase::Pending => {
+            // Start cell servers if we have them configured
+            // This makes this cluster a "cell" that can provision child clusters
+            if let Some(ref cell_servers) = ctx.cell_servers {
+                if !cell_servers.is_running() {
+                    info!("starting cell servers for cluster provisioning");
+                    // Create the manifest generator
+                    let manifest_generator = crate::bootstrap::DefaultManifestGenerator::new()
+                        .map_err(|e| Error::Bootstrap(e.to_string()))?;
+                    cell_servers
+                        .ensure_running_with(manifest_generator)
+                        .await
+                        .map_err(|e| Error::Bootstrap(e.to_string()))?;
+                    info!("cell servers started");
+                }
+            }
+
             // Ensure CAPI is installed before provisioning
             info!("ensuring CAPI is installed for provider");
             ensure_capi_installed_with(
@@ -972,8 +1022,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     return Ok(Action::requeue(Duration::from_secs(60)));
                 }
 
-                // Check if agent is connected and ready for pivot
-                if pivot_ops.is_agent_ready(&name) {
+                // Check if pivot is already in progress (waiting for agent to complete)
+                if pivot_ops.is_pivot_in_progress(&name) {
+                    debug!("pivot in progress, waiting for agent to complete");
+                } else if pivot_ops.is_agent_ready(&name) {
                     // Store post-pivot manifests before triggering pivot
                     // These will be sent to the agent after PivotComplete
                     use kube::CustomResourceExt;
@@ -984,8 +1036,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
                     pivot_ops.store_post_pivot_manifests(&name, Some(crd_yaml), Some(cluster_yaml));
 
-                    // Agent is ready, trigger pivot if not already in progress
-                    // The pivot_ops checks internally if pivot is already running
+                    // Agent is ready, trigger pivot
                     info!("agent ready, triggering pivot");
                     match pivot_ops
                         .trigger_pivot(&name, &ctx.capi_namespace, "default")
@@ -1075,11 +1126,12 @@ async fn generate_capi_manifests(
         let cell_endpoint = bootstrap_ctx.cell_endpoint().to_string();
         let bootstrap_endpoint = bootstrap_ctx.bootstrap_endpoint().to_string();
 
-        // Register cluster and get token
+        // Register cluster and get token (with networking config for LB-IPAM)
         let token = bootstrap_ctx.register_cluster(
             name.to_string(),
             cell_endpoint.clone(),
             ca_cert.clone(),
+            cluster.spec.networking.clone(),
         );
 
         BootstrapInfo::new(bootstrap_endpoint, token, cell_endpoint, ca_cert)
@@ -1211,8 +1263,7 @@ async fn update_status_failed(
 ) -> Result<(), Error> {
     let name = cluster.name_any();
 
-    let condition =
-        Condition::new("Ready", ConditionStatus::False, "ValidationFailed", message);
+    let condition = Condition::new("Ready", ConditionStatus::False, "ValidationFailed", message);
 
     let status = LatticeClusterStatus::with_phase(ClusterPhase::Failed)
         .message(message.to_string())
@@ -1306,6 +1357,10 @@ impl PivotOperations for PivotOperationsImpl {
         }
     }
 
+    fn is_pivot_in_progress(&self, cluster_name: &str) -> bool {
+        self.pivot_in_progress.contains(cluster_name)
+    }
+
     fn is_pivot_complete(&self, cluster_name: &str) -> bool {
         if let Some(agent) = self.agent_registry.get(cluster_name) {
             matches!(agent.state, AgentState::Ready)
@@ -1375,6 +1430,8 @@ mod tests {
         let mut cluster = sample_cluster(name);
         cluster.spec.cell = Some(CellSpec {
             host: "172.18.255.1".to_string(),
+            grpc_port: 50051,
+            bootstrap_port: 443,
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },
@@ -2057,6 +2114,7 @@ mod tests {
                 cluster_id: String,
                 _cell_endpoint: String,
                 _ca_certificate: String,
+                _networking: Option<crate::crd::NetworkingSpec>,
             ) -> String {
                 self.registered_clusters
                     .lock()
@@ -2782,7 +2840,13 @@ mod tests {
         struct StubClusterBootstrap;
 
         impl ClusterBootstrap for StubClusterBootstrap {
-            fn register_cluster(&self, _: String, _: String, _: String) -> String {
+            fn register_cluster(
+                &self,
+                _: String,
+                _: String,
+                _: String,
+                _: Option<crate::crd::NetworkingSpec>,
+            ) -> String {
                 "stub-token".to_string()
             }
             fn is_cluster_registered(&self, _: &str) -> bool {
@@ -2802,6 +2866,7 @@ mod tests {
         /// Test implementation of PivotOperations for controlled testing
         struct TestPivotOps {
             agent_ready: bool,
+            pivot_in_progress: bool,
             pivot_complete: bool,
             trigger_should_fail: bool,
             stored_manifests: StdArc<Mutex<Option<(String, Option<String>, Option<String>)>>>,
@@ -2811,6 +2876,7 @@ mod tests {
             fn agent_ready() -> Self {
                 Self {
                     agent_ready: true,
+                    pivot_in_progress: false,
                     pivot_complete: false,
                     trigger_should_fail: false,
                     stored_manifests: StdArc::new(Mutex::new(None)),
@@ -2820,6 +2886,7 @@ mod tests {
             fn agent_not_ready() -> Self {
                 Self {
                     agent_ready: false,
+                    pivot_in_progress: false,
                     pivot_complete: false,
                     trigger_should_fail: false,
                     stored_manifests: StdArc::new(Mutex::new(None)),
@@ -2829,6 +2896,7 @@ mod tests {
             fn pivot_already_complete() -> Self {
                 Self {
                     agent_ready: true,
+                    pivot_in_progress: false,
                     pivot_complete: true,
                     trigger_should_fail: false,
                     stored_manifests: StdArc::new(Mutex::new(None)),
@@ -2838,6 +2906,7 @@ mod tests {
             fn pivot_trigger_fails() -> Self {
                 Self {
                     agent_ready: true,
+                    pivot_in_progress: false,
                     pivot_complete: false,
                     trigger_should_fail: true,
                     stored_manifests: StdArc::new(Mutex::new(None)),
@@ -2866,6 +2935,10 @@ mod tests {
 
             fn is_agent_ready(&self, _cluster_name: &str) -> bool {
                 self.agent_ready
+            }
+
+            fn is_pivot_in_progress(&self, _cluster_name: &str) -> bool {
+                self.pivot_in_progress
             }
 
             fn is_pivot_complete(&self, _cluster_name: &str) -> bool {
