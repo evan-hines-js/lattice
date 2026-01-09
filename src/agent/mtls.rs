@@ -163,12 +163,7 @@ mod tests {
         let agent_cert = ca.sign_csr(agent_req.csr_pem(), "test-cluster").unwrap();
         let agent_key = agent_req.private_key_pem().to_string();
 
-        (
-            ca,
-            agent_cert,
-            agent_key,
-            "test-cluster".to_string(),
-        )
+        (ca, agent_cert, agent_key, "test-cluster".to_string())
     }
 
     #[test]
@@ -200,11 +195,7 @@ mod tests {
         let (ca, agent_cert, agent_key, _) = create_test_certs();
 
         // For server, we'd use a server cert, but for testing use agent cert
-        let config = ServerMtlsConfig::new(
-            agent_cert,
-            agent_key,
-            ca.ca_cert_pem().to_string(),
-        );
+        let config = ServerMtlsConfig::new(agent_cert, agent_key, ca.ca_cert_pem().to_string());
 
         let tonic_config = config.to_tonic_config();
         assert!(tonic_config.is_ok());
@@ -232,7 +223,10 @@ mod tests {
 
         let mut params = CertificateParams::default();
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, DnValue::Utf8String("wrong-format".to_string()));
+        dn.push(
+            DnType::CommonName,
+            DnValue::Utf8String("wrong-format".to_string()),
+        );
         params.distinguished_name = dn;
 
         let key_pair = KeyPair::generate().unwrap();

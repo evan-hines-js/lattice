@@ -102,7 +102,7 @@ pub trait CommandRunner: Send + Sync {
 }
 
 /// Real command runner that executes actual system commands
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct RealCommandRunner;
 
 impl CommandRunner for RealCommandRunner {
@@ -226,12 +226,7 @@ impl<R: CommandRunner> PivotOrchestrator<R> {
         // Execute with timeout
         let result = timeout(self.pivot_timeout, async move {
             tokio::task::spawn_blocking(move || {
-                let output = runner.run_clusterctl_move(
-                    &target,
-                    &namespace,
-                    &cluster,
-                    source,
-                )?;
+                let output = runner.run_clusterctl_move(&target, &namespace, &cluster, source)?;
 
                 if output.success {
                     let resources = extract_resource_count(&output.stdout);
@@ -260,10 +255,7 @@ impl<R: CommandRunner> PivotOrchestrator<R> {
     }
 
     /// Generate a temporary proxy kubeconfig file
-    pub fn write_proxy_kubeconfig(
-        kubeconfig_content: &str,
-        path: &Path,
-    ) -> Result<(), PivotError> {
+    pub fn write_proxy_kubeconfig(kubeconfig_content: &str, path: &Path) -> Result<(), PivotError> {
         std::fs::write(path, kubeconfig_content)
             .map_err(|e| PivotError::KubeconfigFailed(e.to_string()))?;
         Ok(())
@@ -319,13 +311,12 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
 
     /// Check if CAPI resources exist in the cluster
     pub fn check_capi_resources_present(&self) -> Result<bool, PivotError> {
-        let output = self.runner.run_kubectl_get(
-            "clusters.cluster.x-k8s.io",
-            &self.capi_namespace,
-        )?;
+        let output = self
+            .runner
+            .run_kubectl_get("clusters.cluster.x-k8s.io", &self.capi_namespace)?;
 
-        let has_resources = !output.stdout.trim().is_empty()
-            && !output.stdout.contains("No resources found");
+        let has_resources =
+            !output.stdout.trim().is_empty() && !output.stdout.contains("No resources found");
 
         debug!(
             has_resources = has_resources,
@@ -369,8 +360,14 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
         let mut total = 0;
 
         for resource_type in &resource_types {
-            let output = self.runner.run_kubectl_get(resource_type, &self.capi_namespace)?;
-            let count = output.stdout.lines().filter(|l| !l.trim().is_empty()).count();
+            let output = self
+                .runner
+                .run_kubectl_get(resource_type, &self.capi_namespace)?;
+            let count = output
+                .stdout
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count();
             total += count as u32;
         }
 
@@ -402,8 +399,7 @@ mod tests {
             + Send
             + Sync,
     >;
-    type KubectlMockFn =
-        Box<dyn Fn(&str, &str) -> Result<CommandOutput, PivotError> + Send + Sync>;
+    type KubectlMockFn = Box<dyn Fn(&str, &str) -> Result<CommandOutput, PivotError> + Send + Sync>;
 
     /// Mock command runner for testing
     #[derive(Clone)]
@@ -450,7 +446,12 @@ mod tests {
         ) -> Result<CommandOutput, PivotError> {
             let guard = self.clusterctl_fn.lock().unwrap();
             match &*guard {
-                Some(f) => f(target_kubeconfig, namespace, cluster_name, source_kubeconfig),
+                Some(f) => f(
+                    target_kubeconfig,
+                    namespace,
+                    cluster_name,
+                    source_kubeconfig,
+                ),
                 None => Ok(CommandOutput {
                     success: true,
                     stdout: String::new(),
@@ -503,8 +504,7 @@ Done."#
             })
         });
 
-        let orchestrator =
-            PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
+        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
 
         let temp_kubeconfig = NamedTempFile::new().unwrap();
         let result = orchestrator
@@ -530,8 +530,7 @@ Done."#
             })
         });
 
-        let orchestrator =
-            PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
+        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
 
         let temp_kubeconfig = NamedTempFile::new().unwrap();
         let result = orchestrator
@@ -566,8 +565,7 @@ Done."#
             })
         });
 
-        let orchestrator =
-            PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
+        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
 
         let target = NamedTempFile::new().unwrap();
         let source = NamedTempFile::new().unwrap();
@@ -578,7 +576,10 @@ Done."#
             .unwrap();
 
         assert!(result.success);
-        assert!(source_was_some.load(Ordering::SeqCst), "Source kubeconfig should have been passed");
+        assert!(
+            source_was_some.load(Ordering::SeqCst),
+            "Source kubeconfig should have been passed"
+        );
     }
 
     /// Story: Agent detects CAPI resources after pivot
@@ -661,10 +662,8 @@ clusters:
   name: proxy
 "#;
 
-        let result = PivotOrchestrator::<RealCommandRunner>::write_proxy_kubeconfig(
-            kubeconfig,
-            temp.path(),
-        );
+        let result =
+            PivotOrchestrator::<RealCommandRunner>::write_proxy_kubeconfig(kubeconfig, temp.path());
         assert!(result.is_ok());
 
         let written = std::fs::read_to_string(temp.path()).unwrap();
@@ -717,8 +716,8 @@ Other log line
 
     #[test]
     fn test_orchestrator_configuration() {
-        let orchestrator = PivotOrchestrator::new(Duration::from_secs(600))
-            .with_capi_namespace("capi-system");
+        let orchestrator =
+            PivotOrchestrator::new(Duration::from_secs(600)).with_capi_namespace("capi-system");
 
         assert_eq!(orchestrator.timeout(), Duration::from_secs(600));
         assert_eq!(orchestrator.namespace(), "capi-system");
@@ -726,8 +725,7 @@ Other log line
 
     #[test]
     fn test_handler_configuration() {
-        let handler = AgentPivotHandler::new()
-            .with_capi_namespace("my-namespace");
+        let handler = AgentPivotHandler::new().with_capi_namespace("my-namespace");
 
         assert_eq!(handler.namespace(), "my-namespace");
     }
@@ -1054,7 +1052,9 @@ Other log line
     #[test]
     fn when_kubectl_fails_should_propagate_error() {
         let mock = MockCommandRunner::new().with_kubectl(|_, _| {
-            Err(PivotError::Internal("kubectl: command not found".to_string()))
+            Err(PivotError::Internal(
+                "kubectl: command not found".to_string(),
+            ))
         });
 
         let handler = AgentPivotHandler::with_runner(mock);
@@ -1067,9 +1067,8 @@ Other log line
     /// return the error.
     #[tokio::test]
     async fn when_kubectl_fails_during_wait_should_return_error() {
-        let mock = MockCommandRunner::new().with_kubectl(|_, _| {
-            Err(PivotError::Internal("connection refused".to_string()))
-        });
+        let mock = MockCommandRunner::new()
+            .with_kubectl(|_, _| Err(PivotError::Internal("connection refused".to_string())));
 
         let handler = AgentPivotHandler::with_runner(mock);
         let result = handler

@@ -161,7 +161,8 @@ mod tests {
         assert!(err.to_string().contains("YAML"));
 
         // Scenario: JSON parsing failure in API response
-        let err = Error::serialization("failed to parse CAPI Machine status: missing field 'phase'");
+        let err =
+            Error::serialization("failed to parse CAPI Machine status: missing field 'phase'");
         assert!(err.to_string().contains("missing field"));
 
         // Serialization errors are categorized correctly
@@ -200,11 +201,11 @@ mod tests {
     fn story_error_categorization_for_controller_handling() {
         fn categorize_error(err: &Error) -> &'static str {
             match err {
-                Error::Validation(_) => "reject_and_fail",       // User error, don't retry
-                Error::Provider(_) => "retry_with_backoff",      // Infra might recover
-                Error::Pivot(_) => "manual_intervention",        // State needs review
-                Error::Serialization(_) => "reject_and_fail",    // Code/config bug
-                Error::Kube(_) => "retry_with_backoff",          // K8s API might recover
+                Error::Validation(_) => "reject_and_fail", // User error, don't retry
+                Error::Provider(_) => "retry_with_backoff", // Infra might recover
+                Error::Pivot(_) => "manual_intervention",  // State needs review
+                Error::Serialization(_) => "reject_and_fail", // Code/config bug
+                Error::Kube(_) => "retry_with_backoff",    // K8s API might recover
                 Error::CapiInstallation(_) => "retry_with_backoff", // CAPI install might recover
             }
         }

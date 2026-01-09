@@ -16,7 +16,9 @@ use lattice::agent::connection::AgentRegistry;
 use lattice::agent::mtls::ServerMtlsConfig;
 use lattice::agent::server::AgentServer;
 use lattice::bootstrap::{bootstrap_router, BootstrapState, DefaultManifestGenerator};
-use lattice::controller::{error_policy, reconcile, Context, RealClusterBootstrap};
+use lattice::controller::{
+    error_policy, reconcile, ClusterBootstrapImpl, Context, PivotOperationsImpl,
+};
 use lattice::crd::LatticeCluster;
 use lattice::pki::CertificateAuthority;
 
@@ -78,7 +80,11 @@ struct AgentArgs {
     cell_grpc_endpoint: String,
 
     /// Path to CA certificate file
-    #[arg(long, env = "CA_CERT_PATH", default_value = "/var/run/secrets/lattice/ca/ca.crt")]
+    #[arg(
+        long,
+        env = "CA_CERT_PATH",
+        default_value = "/var/run/secrets/lattice/ca/ca.crt"
+    )]
     ca_cert_path: String,
 
     /// Heartbeat interval in seconds
@@ -210,14 +216,23 @@ async fn run_controller(args: ControllerArgs) -> anyhow::Result<()> {
         ca.clone(),
     ));
 
+    // Create agent registry for connected agents
+    let agent_registry = Arc::new(AgentRegistry::new());
+
     // Create controller context with bootstrap if this is a cell
     let ctx = if let Some(ref cell_endpoint) = args.cell_endpoint {
         tracing::info!(endpoint = %cell_endpoint, "Running as cell - enabling workload cluster provisioning");
-        let cluster_bootstrap = Arc::new(RealClusterBootstrap::new(
+        let cluster_bootstrap = Arc::new(ClusterBootstrapImpl::new(
             bootstrap_state.clone(),
             cell_endpoint.clone(),
         ));
-        Arc::new(Context::with_bootstrap(client.clone(), cluster_bootstrap))
+        let pivot_ops = Arc::new(PivotOperationsImpl::new(agent_registry.clone()));
+        Arc::new(Context::with_cell_capabilities(
+            client.clone(),
+            cluster_bootstrap,
+            agent_registry.clone(),
+            pivot_ops,
+        ))
     } else {
         tracing::info!("Running without cell endpoint - workload cluster provisioning disabled");
         Arc::new(Context::new(client.clone()))
@@ -248,7 +263,6 @@ async fn run_controller(args: ControllerArgs) -> anyhow::Result<()> {
     });
 
     // Start gRPC server for agent connections (only if running as cell)
-    let _agent_registry = Arc::new(AgentRegistry::new());
     let grpc_server = if args.cell_endpoint.is_some() {
         // Create mTLS config using CA cert/key
         // In production, you'd want a separate server certificate signed by the CA
@@ -258,7 +272,7 @@ async fn run_controller(args: ControllerArgs) -> anyhow::Result<()> {
             ca.ca_cert_pem().to_string(),
         );
 
-        let registry_clone = _agent_registry.clone();
+        let registry_clone = agent_registry.clone();
         let grpc_addr = args.grpc_addr;
 
         Some(tokio::spawn(async move {

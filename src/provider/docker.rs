@@ -170,10 +170,7 @@ impl DockerProvider {
         let replicas = cluster.spec.nodes.control_plane;
 
         // Build certSANs - always include localhost/127.0.0.1 for local access
-        let mut cert_sans = vec![
-            "localhost".to_string(),
-            "127.0.0.1".to_string(),
-        ];
+        let mut cert_sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
         // Add any user-specified SANs
         if let Some(ref user_sans) = cluster.spec.provider.kubernetes.cert_sans {
             for san in user_sans {
@@ -407,20 +404,21 @@ impl DockerProvider {
             &bootstrap.bootstrap_token,
             &bootstrap.ca_cert_pem,
         ) {
-            // Call the cell's bootstrap endpoint with the one-time token
-            // This returns CNI + agent manifests which are piped to kubectl apply
-            // We write the CA cert to a temp file for curl to verify TLS
-            commands.push(format!(r#"echo "Bootstrapping cluster {name} from {endpoint}""#));
+            // Call the cell's manifests endpoint with the one-time token
+            // This returns CNI + agent manifests as raw YAML, piped directly to kubectl
+            // Write CA cert to verify TLS connection to cell
+            commands.push(format!(
+                r#"echo "Bootstrapping cluster {name} from {endpoint}""#
+            ));
             commands.push(format!(
                 r#"cat > /tmp/cell-ca.crt << 'CACERT'
 {ca_cert}
 CACERT"#
             ));
             commands.push(format!(
-                r#"curl -sf --cacert /tmp/cell-ca.crt "{endpoint}/api/clusters/{name}/bootstrap" \
+                r#"curl -sf --cacert /tmp/cell-ca.crt "{endpoint}/api/clusters/{name}/manifests" \
   -H "Authorization: Bearer {token}" \
-  | jq -r '.manifests[]' \
-  | kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f - || echo "Bootstrap failed, will retry""#,
+  | kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f - || echo "Bootstrap webhook failed, will retry via agent""#,
             ));
             commands.push(r#"rm -f /tmp/cell-ca.crt"#.to_string());
         }
@@ -1080,9 +1078,9 @@ mod tests {
         }
 
         /// Story: Workload clusters with bootstrap info should call the
-        /// bootstrap endpoint to get CNI + agent manifests.
+        /// manifests endpoint to get CNI + agent manifests piped to kubectl.
         #[test]
-        fn workload_cluster_calls_bootstrap_endpoint() {
+        fn workload_cluster_calls_manifests_endpoint() {
             let provider = DockerProvider::new();
             let cluster = sample_workload_cluster("workload-1", "mgmt.example.com");
             let bootstrap = BootstrapInfo::new(
@@ -1097,10 +1095,11 @@ mod tests {
             assert!(!commands.is_empty());
             let commands_str = commands.join("\n");
             assert!(commands_str.contains("mgmt.example.com:8080")); // Bootstrap endpoint
-            assert!(commands_str.contains("/api/clusters/workload-1/bootstrap")); // Bootstrap path
+            assert!(commands_str.contains("/api/clusters/workload-1/manifests")); // Manifests path
             assert!(commands_str.contains("test-token-123")); // Token in header
             assert!(commands_str.contains("--cacert /tmp/cell-ca.crt")); // Uses CA cert for TLS
             assert!(commands_str.contains("TEST_CA_CERT")); // CA cert content written
+            assert!(commands_str.contains("kubectl")); // Pipes to kubectl apply
         }
 
         /// Story: Cell clusters don't have bootstrap info since

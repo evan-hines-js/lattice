@@ -119,7 +119,11 @@ impl KubeProxy {
             .await
             .map_err(|e| ProxyError::BindFailed(e.to_string()))?;
 
-        self.local_addr = Some(listener.local_addr().map_err(|e| ProxyError::BindFailed(e.to_string()))?);
+        self.local_addr = Some(
+            listener
+                .local_addr()
+                .map_err(|e| ProxyError::BindFailed(e.to_string()))?,
+        );
 
         info!(addr = ?self.local_addr, "K8s API proxy listening");
 
@@ -438,29 +442,35 @@ mod tests {
         }
 
         // Handle responses out of order
-        proxy.handle_response(KubeProxyResponse {
-            request_id: "req-2".to_string(),
-            status_code: 201,
-            headers: vec![],
-            body: b"second".to_vec(),
-            error: String::new(),
-        }).await;
+        proxy
+            .handle_response(KubeProxyResponse {
+                request_id: "req-2".to_string(),
+                status_code: 201,
+                headers: vec![],
+                body: b"second".to_vec(),
+                error: String::new(),
+            })
+            .await;
 
-        proxy.handle_response(KubeProxyResponse {
-            request_id: "req-1".to_string(),
-            status_code: 200,
-            headers: vec![],
-            body: b"first".to_vec(),
-            error: String::new(),
-        }).await;
+        proxy
+            .handle_response(KubeProxyResponse {
+                request_id: "req-1".to_string(),
+                status_code: 200,
+                headers: vec![],
+                body: b"first".to_vec(),
+                error: String::new(),
+            })
+            .await;
 
-        proxy.handle_response(KubeProxyResponse {
-            request_id: "req-3".to_string(),
-            status_code: 404,
-            headers: vec![],
-            body: b"not found".to_vec(),
-            error: String::new(),
-        }).await;
+        proxy
+            .handle_response(KubeProxyResponse {
+                request_id: "req-3".to_string(),
+                status_code: 404,
+                headers: vec![],
+                body: b"not found".to_vec(),
+                error: String::new(),
+            })
+            .await;
 
         // Verify all responses received correctly
         let r1 = rx1.await.unwrap();
@@ -605,9 +615,7 @@ mod tests {
 
         // Start proxy server in background
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let proxy_handle = tokio::spawn(async move {
-            proxy.start(bind_addr, response_rx).await
-        });
+        let proxy_handle = tokio::spawn(async move { proxy.start(bind_addr, response_rx).await });
 
         // Give server time to start
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -624,7 +632,11 @@ mod tests {
                         key: "content-type".to_string(),
                         value: "application/json".to_string(),
                     }],
-                    body: format!(r#"{{"method":"{}","path":"{}"}}"#, request.method, request.path).into_bytes(),
+                    body: format!(
+                        r#"{{"method":"{}","path":"{}"}}"#,
+                        request.method, request.path
+                    )
+                    .into_bytes(),
                     error: String::new(),
                 };
                 let _ = response_tx_clone.send(response).await;
@@ -681,7 +693,8 @@ mod tests {
             "/api/v1/namespaces".parse().unwrap(),
             HeaderMap::new(),
             Body::empty(),
-        ).await;
+        )
+        .await;
 
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -711,7 +724,8 @@ mod tests {
             "/api/v1/pods".parse().unwrap(),
             HeaderMap::new(),
             Body::empty(),
-        ).await;
+        )
+        .await;
 
         // Should fail because channel is closed
         assert!(result.is_err());
@@ -758,7 +772,8 @@ mod tests {
             "/api/v1/namespaces".parse().unwrap(),
             HeaderMap::new(),
             Body::empty(),
-        ).await;
+        )
+        .await;
 
         // Should return BAD_GATEWAY because of error in response
         assert!(result.is_err());
@@ -816,7 +831,8 @@ mod tests {
             "/api/v1/secrets".parse().unwrap(),
             headers,
             Body::empty(),
-        ).await;
+        )
+        .await;
 
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -865,14 +881,17 @@ mod tests {
             "/api/v1/namespaces".parse().unwrap(),
             HeaderMap::new(),
             Body::from(body_content),
-        ).await;
+        )
+        .await;
 
         assert!(result.is_ok());
         let response = result.unwrap();
         assert_eq!(response.status(), 201);
 
         // Read response body
-        let body_bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         assert_eq!(body_bytes.as_ref(), body_content.as_bytes());
     }
 }

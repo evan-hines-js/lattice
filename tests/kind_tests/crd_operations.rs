@@ -110,7 +110,9 @@ async fn cleanup_cluster(client: &Client, name: &str) {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_operator_creates_management_cluster() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-mgmt-create";
 
@@ -126,18 +128,21 @@ async fn story_operator_creates_management_cluster() {
 
     // Assert: The cluster is created and recognized as a cell
     assert_eq!(created.metadata.name.as_deref(), Some(name));
-    assert!(created.spec.is_cell(), "Management cluster should be a cell");
-    assert!(!created.spec.is_workload_cluster(), "Cell should not be a workload cluster");
+    assert!(
+        created.spec.is_cell(),
+        "Management cluster should be a cell"
+    );
+    assert!(
+        !created.spec.is_workload_cluster(),
+        "Cell should not be a workload cluster"
+    );
 
     // Assert: Configuration is persisted correctly
     let fetched = api.get(name).await.expect("failed to get cluster");
     assert_eq!(fetched.spec.provider.type_, ProviderType::Docker);
     assert_eq!(fetched.spec.nodes.control_plane, 1);
     assert_eq!(fetched.spec.nodes.workers, 2);
-    assert_eq!(
-        fetched.spec.cell.as_ref().unwrap().host,
-        "172.18.255.1"
-    );
+    assert_eq!(fetched.spec.cell.as_ref().unwrap().host, "172.18.255.1");
 
     // Cleanup
     cleanup_cluster(&client, name).await;
@@ -163,7 +168,9 @@ async fn story_operator_creates_management_cluster() {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_operator_creates_workload_cluster_for_production() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-workload-create";
 
@@ -179,8 +186,14 @@ async fn story_operator_creates_workload_cluster_for_production() {
 
     // Assert: The cluster is created as a workload cluster
     assert_eq!(created.metadata.name.as_deref(), Some(name));
-    assert!(created.spec.is_workload_cluster(), "Should be a workload cluster");
-    assert!(!created.spec.is_cell(), "Workload cluster should not be a cell");
+    assert!(
+        created.spec.is_workload_cluster(),
+        "Should be a workload cluster"
+    );
+    assert!(
+        !created.spec.is_cell(),
+        "Workload cluster should not be a cell"
+    );
     assert_eq!(created.spec.cell_ref.as_deref(), Some("mgmt"));
 
     // Assert: Environment metadata is preserved
@@ -204,7 +217,9 @@ async fn story_operator_creates_workload_cluster_for_production() {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_operator_lists_all_managed_clusters() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
 
     // Cleanup from previous runs
@@ -223,7 +238,10 @@ async fn story_operator_lists_all_managed_clusters() {
         .expect("failed to create workload cluster");
 
     // Assert: Both clusters are visible in the list
-    let list = api.list(&Default::default()).await.expect("failed to list clusters");
+    let list = api
+        .list(&Default::default())
+        .await
+        .expect("failed to list clusters");
     let names: Vec<_> = list
         .items
         .iter()
@@ -231,7 +249,10 @@ async fn story_operator_lists_all_managed_clusters() {
         .collect();
 
     assert!(names.contains(&"test-list-mgmt"), "Cell should be listed");
-    assert!(names.contains(&"test-list-prod"), "Workload cluster should be listed");
+    assert!(
+        names.contains(&"test-list-prod"),
+        "Workload cluster should be listed"
+    );
 
     // Cleanup
     cleanup_cluster(&client, "test-list-mgmt").await;
@@ -257,7 +278,9 @@ async fn story_operator_lists_all_managed_clusters() {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_operator_scales_cluster_to_handle_increased_load() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-scale-up";
 
@@ -286,7 +309,10 @@ async fn story_operator_scales_cluster_to_handle_increased_load() {
     // Assert: Change persists
     let fetched = api.get(name).await.expect("failed to get cluster");
     assert_eq!(fetched.spec.nodes.workers, 5);
-    assert_eq!(fetched.spec.nodes.control_plane, 1, "Control plane unchanged");
+    assert_eq!(
+        fetched.spec.nodes.control_plane, 1,
+        "Control plane unchanged"
+    );
 
     // Cleanup
     cleanup_cluster(&client, name).await;
@@ -304,7 +330,9 @@ async fn story_operator_scales_cluster_to_handle_increased_load() {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_operator_decommissions_unused_cluster() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-decommission";
 
@@ -315,7 +343,10 @@ async fn story_operator_decommissions_unused_cluster() {
         .expect("failed to create cluster");
 
     // Verify it exists
-    assert!(api.get(name).await.is_ok(), "Cluster should exist before deletion");
+    assert!(
+        api.get(name).await.is_ok(),
+        "Cluster should exist before deletion"
+    );
 
     // Act: Decommission the cluster
     api.delete(name, &DeleteParams::default())
@@ -347,7 +378,9 @@ async fn story_operator_decommissions_unused_cluster() {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_operator_creates_cluster_with_conflicting_cell_config() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-invalid-config";
 

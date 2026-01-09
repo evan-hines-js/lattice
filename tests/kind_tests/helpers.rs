@@ -90,8 +90,11 @@ pub async fn install_crd(client: &Client) -> Result<(), kube::Error> {
     match crds.get(&crd.metadata.name.clone().unwrap()).await {
         Ok(_) => {
             println!("CRD already installed, deleting and reinstalling...");
-            crds.delete(&crd.metadata.name.clone().unwrap(), &DeleteParams::default())
-                .await?;
+            crds.delete(
+                &crd.metadata.name.clone().unwrap(),
+                &DeleteParams::default(),
+            )
+            .await?;
             // Wait for deletion
             sleep(Duration::from_secs(2)).await;
         }

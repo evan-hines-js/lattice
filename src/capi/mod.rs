@@ -436,8 +436,7 @@ mod tests {
         // CRITICAL: installer should NOT be called
         installer.expect_install().never();
 
-        let result =
-            ensure_capi_installed_with(&detector, &installer, &ProviderType::Docker).await;
+        let result = ensure_capi_installed_with(&detector, &installer, &ProviderType::Docker).await;
 
         assert!(result.is_ok(), "Should succeed without installing");
     }
@@ -460,8 +459,7 @@ mod tests {
             .times(1)
             .returning(|_| Ok(()));
 
-        let result =
-            ensure_capi_installed_with(&detector, &installer, &ProviderType::Docker).await;
+        let result = ensure_capi_installed_with(&detector, &installer, &ProviderType::Docker).await;
 
         assert!(result.is_ok(), "Installation should succeed");
     }
@@ -547,14 +545,16 @@ mod tests {
             .with(eq("infrastructure.cluster.x-k8s.io"), eq("dockerclusters"))
             .returning(|_, _| Ok(false));
 
-        installer.expect_install().with(eq("docker")).returning(|_| {
-            Err(Error::CapiInstallation(
-                "clusterctl init failed: timeout".to_string(),
-            ))
-        });
+        installer
+            .expect_install()
+            .with(eq("docker"))
+            .returning(|_| {
+                Err(Error::CapiInstallation(
+                    "clusterctl init failed: timeout".to_string(),
+                ))
+            });
 
-        let result =
-            ensure_capi_installed_with(&detector, &installer, &ProviderType::Docker).await;
+        let result = ensure_capi_installed_with(&detector, &installer, &ProviderType::Docker).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -571,15 +571,16 @@ mod tests {
         let mut detector = MockCapiDetector::new();
         let mut installer = MockCapiInstaller::new();
 
-        detector
-            .expect_crd_exists()
-            .returning(|_, _| Err(Error::CapiInstallation("API server unavailable".to_string())));
+        detector.expect_crd_exists().returning(|_, _| {
+            Err(Error::CapiInstallation(
+                "API server unavailable".to_string(),
+            ))
+        });
 
         // CRITICAL: installer should NOT be called when detection fails
         installer.expect_install().never();
 
-        let result =
-            ensure_capi_installed_with(&detector, &installer, &ProviderType::Docker).await;
+        let result = ensure_capi_installed_with(&detector, &installer, &ProviderType::Docker).await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unavailable"));

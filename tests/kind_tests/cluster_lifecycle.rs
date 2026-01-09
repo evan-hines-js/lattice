@@ -13,7 +13,7 @@ use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::Client;
 
-use lattice::controller::{reconcile, Context, RealKubeClient};
+use lattice::controller::{reconcile, Context, KubeClientImpl};
 use lattice::crd::{
     CellSpec, ClusterPhase, KubernetesSpec, LatticeCluster, LatticeClusterSpec,
     LatticeClusterStatus, NodeSpec, ProviderSpec, ProviderType, ServiceSpec,
@@ -110,7 +110,9 @@ async fn set_cluster_phase(api: &Api<LatticeCluster>, name: &str, phase: Cluster
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_new_cluster_triggers_provisioning() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-new-cluster-provision";
 
@@ -131,13 +133,20 @@ async fn story_new_cluster_triggers_provisioning() {
     // Assert: Reconcile succeeds and returns a requeue action
     assert!(result.is_ok(), "Reconcile should succeed");
     let action = result.unwrap();
-    assert!(matches!(action, Action { .. }), "Should return requeue action");
+    assert!(
+        matches!(action, Action { .. }),
+        "Should return requeue action"
+    );
 
     // Assert: Cluster status transitions to Provisioning
     let updated = api.get(name).await.expect("failed to get cluster");
     assert!(updated.status.is_some(), "Status should be set");
     let status = updated.status.unwrap();
-    assert_eq!(status.phase, ClusterPhase::Provisioning, "Should be in Provisioning phase");
+    assert_eq!(
+        status.phase,
+        ClusterPhase::Provisioning,
+        "Should be in Provisioning phase"
+    );
     assert!(status.message.is_some(), "Should have a status message");
 
     // Cleanup
@@ -154,7 +163,9 @@ async fn story_new_cluster_triggers_provisioning() {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_provisioning_cluster_polls_for_infrastructure() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-provision-polling";
 
@@ -199,7 +210,9 @@ async fn story_provisioning_cluster_polls_for_infrastructure() {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_invalid_spec_immediately_fails_with_explanation() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-invalid-fails";
 
@@ -218,13 +231,20 @@ async fn story_invalid_spec_immediately_fails_with_explanation() {
     let result = reconcile(Arc::new(created), ctx).await;
 
     // Assert: Reconcile succeeds (validation failure is handled gracefully)
-    assert!(result.is_ok(), "Reconcile should succeed even with validation failure");
+    assert!(
+        result.is_ok(),
+        "Reconcile should succeed even with validation failure"
+    );
 
     // Assert: Cluster transitions to Failed with explanatory message
     let updated = api.get(name).await.expect("failed to get cluster");
     assert!(updated.status.is_some(), "Status should be set");
     let status = updated.status.unwrap();
-    assert_eq!(status.phase, ClusterPhase::Failed, "Should be in Failed phase");
+    assert_eq!(
+        status.phase,
+        ClusterPhase::Failed,
+        "Should be in Failed phase"
+    );
     assert!(status.message.is_some(), "Should have error message");
     assert!(
         status.message.as_ref().unwrap().contains("control plane"),
@@ -251,7 +271,9 @@ async fn story_invalid_spec_immediately_fails_with_explanation() {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_ready_cluster_performs_periodic_drift_detection() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-ready-drift";
 
@@ -276,7 +298,11 @@ async fn story_ready_cluster_performs_periodic_drift_detection() {
     // Assert: Cluster remains in Ready state
     let updated = api.get(name).await.expect("failed to get cluster");
     assert!(updated.status.is_some(), "Status should be preserved");
-    assert_eq!(updated.status.unwrap().phase, ClusterPhase::Ready, "Should remain Ready");
+    assert_eq!(
+        updated.status.unwrap().phase,
+        ClusterPhase::Ready,
+        "Should remain Ready"
+    );
 
     // Cleanup
     cleanup_cluster(&client, name).await;
@@ -299,7 +325,9 @@ async fn story_ready_cluster_performs_periodic_drift_detection() {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_failed_cluster_awaits_user_intervention() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-failed-awaits";
 
@@ -329,7 +357,10 @@ async fn story_failed_cluster_awaits_user_intervention() {
     let result = reconcile(Arc::new(failed), ctx).await;
 
     // Assert: Reconcile succeeds but returns await_change (not requeue)
-    assert!(result.is_ok(), "Reconcile should succeed even for failed cluster");
+    assert!(
+        result.is_ok(),
+        "Reconcile should succeed even for failed cluster"
+    );
     // Note: The action should be Action::await_change() but we can't easily assert
     // the exact action type without pattern matching on the internal Duration
 
@@ -353,7 +384,9 @@ async fn story_failed_cluster_awaits_user_intervention() {
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_new_cluster_progresses_through_lifecycle() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-full-lifecycle";
 
@@ -396,21 +429,23 @@ async fn story_new_cluster_progresses_through_lifecycle() {
 }
 
 // =============================================================================
-// RealKubeClient Integration Stories
+// KubeClientImpl Integration Stories
 // =============================================================================
 //
-// These tests verify the RealKubeClient implementation works correctly
+// These tests verify the KubeClientImpl implementation works correctly
 // against a real Kubernetes API.
 
-/// Story: RealKubeClient correctly patches cluster status
+/// Story: KubeClientImpl correctly patches cluster status
 ///
-/// The RealKubeClient trait implementation must correctly communicate
+/// The KubeClientImpl trait implementation must correctly communicate
 /// with the Kubernetes API to update cluster status. This is critical
 /// for the controller to persist state changes.
 #[tokio::test]
 #[ignore = "requires kind cluster - run with: cargo test --test integration -- --ignored"]
 async fn story_kube_client_persists_status_changes() {
-    let client = ensure_test_cluster().await.expect("failed to setup cluster");
+    let client = ensure_test_cluster()
+        .await
+        .expect("failed to setup cluster");
     let api: Api<LatticeCluster> = Api::all(client.clone());
     let name = "test-client-patch";
 
@@ -423,14 +458,14 @@ async fn story_kube_client_persists_status_changes() {
         .await
         .expect("failed to create cluster");
 
-    // Act: Use RealKubeClient to patch the status
+    // Act: Use KubeClientImpl to patch the status
     use lattice::controller::KubeClient;
-    let real_client = RealKubeClient::new(client.clone());
+    let kube_client = KubeClientImpl::new(client.clone());
 
     let status = LatticeClusterStatus::with_phase(ClusterPhase::Provisioning)
         .message("Infrastructure creation in progress");
 
-    let result = real_client.patch_status(name, &status).await;
+    let result = kube_client.patch_status(name, &status).await;
 
     // Assert: Patch succeeds
     assert!(result.is_ok(), "Status patch should succeed");

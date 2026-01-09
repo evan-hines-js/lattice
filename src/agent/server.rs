@@ -22,8 +22,8 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
 use crate::proto::{
-    AgentMessage, AgentState, CellCommand, KubeProxyRequest, KubeProxyResponse,
-    agent_message::Payload,
+    agent_message::Payload, AgentMessage, AgentState, CellCommand, KubeProxyRequest,
+    KubeProxyResponse,
 };
 
 use super::connection::{AgentConnection, AgentRegistry, SharedAgentRegistry};
@@ -32,6 +32,147 @@ use super::mtls::ServerMtlsConfig;
 /// gRPC server for agent communication
 pub struct AgentServer {
     registry: SharedAgentRegistry,
+}
+
+/// Handle an agent message (standalone function to avoid temporary object creation)
+async fn handle_agent_message_impl(
+    registry: &AgentRegistry,
+    msg: &AgentMessage,
+    command_tx: &mpsc::Sender<CellCommand>,
+) {
+    let cluster_name = &msg.cluster_name;
+
+    match &msg.payload {
+        Some(Payload::Ready(ready)) => {
+            info!(
+                cluster = %cluster_name,
+                agent_version = %ready.agent_version,
+                k8s_version = %ready.kubernetes_version,
+                "Agent ready"
+            );
+
+            // Register the agent
+            let conn = AgentConnection::new(
+                cluster_name.clone(),
+                ready.agent_version.clone(),
+                ready.kubernetes_version.clone(),
+                command_tx.clone(),
+            );
+            registry.register(conn);
+            registry.update_state(cluster_name, ready.state());
+        }
+        Some(Payload::BootstrapComplete(bc)) => {
+            info!(
+                cluster = %cluster_name,
+                flux_ready = bc.flux_ready,
+                cilium_ready = bc.cilium_ready,
+                "Bootstrap complete"
+            );
+        }
+        Some(Payload::PivotStarted(ps)) => {
+            info!(
+                cluster = %cluster_name,
+                target_namespace = %ps.target_namespace,
+                "Pivot started"
+            );
+            registry.update_state(cluster_name, AgentState::Pivoting);
+        }
+        Some(Payload::PivotComplete(pc)) => {
+            if pc.success {
+                info!(
+                    cluster = %cluster_name,
+                    resources_imported = pc.resources_imported,
+                    "Pivot complete"
+                );
+                registry.update_state(cluster_name, AgentState::Ready);
+
+                // Send post-pivot manifests (LatticeCluster CRD + resource)
+                if let Some(manifests) = registry.take_post_pivot_manifests(cluster_name) {
+                    let mut additional_manifests = Vec::new();
+
+                    // Clone the YAML strings so we can restore on failure
+                    let crd_yaml = manifests.crd_yaml.clone();
+                    let cluster_yaml = manifests.cluster_yaml.clone();
+
+                    if let Some(ref crd) = crd_yaml {
+                        additional_manifests.push(crd.clone().into_bytes());
+                    }
+                    if let Some(ref cluster) = cluster_yaml {
+                        additional_manifests.push(cluster.clone().into_bytes());
+                    }
+
+                    if !additional_manifests.is_empty() {
+                        info!(
+                            cluster = %cluster_name,
+                            manifest_count = additional_manifests.len(),
+                            "Sending post-pivot BootstrapCommand with LatticeCluster"
+                        );
+
+                        let bootstrap_cmd = CellCommand {
+                            command_id: format!("post-pivot-bootstrap-{}", cluster_name),
+                            command: Some(crate::proto::cell_command::Command::Bootstrap(
+                                crate::proto::BootstrapCommand {
+                                    git_repository: vec![],
+                                    kustomization: vec![],
+                                    additional_manifests,
+                                },
+                            )),
+                        };
+
+                        if let Err(e) = command_tx.send(bootstrap_cmd).await {
+                            error!(
+                                cluster = %cluster_name,
+                                error = %e,
+                                "Failed to send post-pivot BootstrapCommand, restoring manifests"
+                            );
+                            // Restore manifests so they can be retried on next PivotComplete
+                            registry.set_post_pivot_manifests(
+                                cluster_name,
+                                super::connection::PostPivotManifests {
+                                    crd_yaml,
+                                    cluster_yaml,
+                                },
+                            );
+                        }
+                    }
+                }
+            } else {
+                error!(
+                    cluster = %cluster_name,
+                    error = %pc.error_message,
+                    "Pivot failed"
+                );
+                registry.update_state(cluster_name, AgentState::Failed);
+            }
+        }
+        Some(Payload::Heartbeat(hb)) => {
+            debug!(
+                cluster = %cluster_name,
+                state = ?hb.state(),
+                uptime = hb.uptime_seconds,
+                "Heartbeat received"
+            );
+            registry.update_state(cluster_name, hb.state());
+        }
+        Some(Payload::ClusterHealth(health)) => {
+            debug!(
+                cluster = %cluster_name,
+                ready_nodes = health.ready_nodes,
+                total_nodes = health.total_nodes,
+                "Health update"
+            );
+        }
+        Some(Payload::StatusResponse(sr)) => {
+            debug!(
+                cluster = %cluster_name,
+                request_id = %sr.request_id,
+                "Status response received"
+            );
+        }
+        None => {
+            warn!(cluster = %cluster_name, "Received message with no payload");
+        }
+    }
 }
 
 impl AgentServer {
@@ -96,94 +237,15 @@ impl AgentServer {
         Ok(())
     }
 
-    /// Handle an agent message
-    fn handle_agent_message(
+    /// Handle an agent message (delegates to standalone function)
+    /// Only used in tests - production code uses handle_agent_message_impl directly.
+    #[cfg(test)]
+    pub(crate) async fn handle_agent_message(
         &self,
         msg: &AgentMessage,
         command_tx: &mpsc::Sender<CellCommand>,
     ) {
-        let cluster_name = &msg.cluster_name;
-
-        match &msg.payload {
-            Some(Payload::Ready(ready)) => {
-                info!(
-                    cluster = %cluster_name,
-                    agent_version = %ready.agent_version,
-                    k8s_version = %ready.kubernetes_version,
-                    "Agent ready"
-                );
-
-                // Register the agent
-                let conn = AgentConnection::new(
-                    cluster_name.clone(),
-                    ready.agent_version.clone(),
-                    ready.kubernetes_version.clone(),
-                    command_tx.clone(),
-                );
-                self.registry.register(conn);
-                self.registry.update_state(cluster_name, ready.state());
-            }
-            Some(Payload::BootstrapComplete(bc)) => {
-                info!(
-                    cluster = %cluster_name,
-                    flux_ready = bc.flux_ready,
-                    cilium_ready = bc.cilium_ready,
-                    "Bootstrap complete"
-                );
-            }
-            Some(Payload::PivotStarted(ps)) => {
-                info!(
-                    cluster = %cluster_name,
-                    target_namespace = %ps.target_namespace,
-                    "Pivot started"
-                );
-                self.registry.update_state(cluster_name, AgentState::Pivoting);
-            }
-            Some(Payload::PivotComplete(pc)) => {
-                if pc.success {
-                    info!(
-                        cluster = %cluster_name,
-                        resources_imported = pc.resources_imported,
-                        "Pivot complete"
-                    );
-                    self.registry.update_state(cluster_name, AgentState::Ready);
-                } else {
-                    error!(
-                        cluster = %cluster_name,
-                        error = %pc.error_message,
-                        "Pivot failed"
-                    );
-                    self.registry.update_state(cluster_name, AgentState::Failed);
-                }
-            }
-            Some(Payload::Heartbeat(hb)) => {
-                debug!(
-                    cluster = %cluster_name,
-                    state = ?hb.state(),
-                    uptime = hb.uptime_seconds,
-                    "Heartbeat received"
-                );
-                self.registry.update_state(cluster_name, hb.state());
-            }
-            Some(Payload::ClusterHealth(health)) => {
-                debug!(
-                    cluster = %cluster_name,
-                    ready_nodes = health.ready_nodes,
-                    total_nodes = health.total_nodes,
-                    "Health update"
-                );
-            }
-            Some(Payload::StatusResponse(sr)) => {
-                debug!(
-                    cluster = %cluster_name,
-                    request_id = %sr.request_id,
-                    "Status response received"
-                );
-            }
-            None => {
-                warn!(cluster = %cluster_name, "Received message with no payload");
-            }
-        }
+        handle_agent_message_impl(&self.registry, msg, command_tx).await
     }
 }
 
@@ -221,11 +283,8 @@ impl LatticeAgent for AgentServer {
                             cluster_name = Some(msg.cluster_name.clone());
                         }
 
-                        // Create a temporary server to handle the message
-                        // (In a real implementation, we'd refactor to avoid this)
-                        let temp_registry = registry.clone();
-                        let server = AgentServer::new(temp_registry);
-                        server.handle_agent_message(&msg, &command_tx_clone);
+                        // Handle message directly using standalone function (no temp object)
+                        handle_agent_message_impl(&registry, &msg, &command_tx_clone).await;
                     }
                     Err(e) => {
                         error!(error = %e, "Error receiving agent message");
@@ -259,21 +318,38 @@ impl LatticeAgent for AgentServer {
 
         let mut inbound = request.into_inner();
 
-        // Channel for sending proxy requests to the agent
-        let (_request_tx, request_rx) = mpsc::channel::<KubeProxyRequest>(32);
+        // Channel for sending proxy requests to the agent (cell -> agent)
+        let (request_tx, request_rx) = mpsc::channel::<KubeProxyRequest>(32);
 
-        // Channel for receiving proxy responses from the agent
-        let (response_tx, _response_rx) = mpsc::channel::<KubeProxyResponse>(32);
+        // Channel for receiving proxy responses from the agent (agent -> cell)
+        let (response_tx, response_rx) = mpsc::channel::<KubeProxyResponse>(32);
 
-        let _registry = self.registry.clone();
+        let registry = self.registry.clone();
 
         // Spawn task to handle incoming responses and route them
         tokio::spawn(async move {
-            let cluster_name: Option<String> = None;
+            let mut cluster_name: Option<String> = None;
+            // Wrap in Option so we can take ownership once for registration
+            let mut response_rx_opt = Some(response_rx);
 
+            // Wait for first response to identify the cluster and register channels
             while let Some(result) = inbound.next().await {
                 match result {
                     Ok(response) => {
+                        // Extract cluster name from first response if not yet known
+                        if response_rx_opt.is_some() && !response.request_id.is_empty() {
+                            // Request ID format: "{cluster_name}:{uuid}"
+                            if let Some(name) = response.request_id.split(':').next() {
+                                cluster_name = Some(name.to_string());
+                                // Register proxy channels with the agent connection
+                                // Note: response_rx ownership is transferred here
+                                if let Some(rx) = response_rx_opt.take() {
+                                    registry.set_proxy_channels(name, request_tx.clone(), rx);
+                                    debug!(cluster = %name, "K8s API proxy channels registered");
+                                }
+                            }
+                        }
+
                         debug!(
                             request_id = %response.request_id,
                             status = response.status_code,
@@ -281,6 +357,8 @@ impl LatticeAgent for AgentServer {
                         );
 
                         // Forward to response channel for the waiting request
+                        // After registration, response_rx is owned by registry
+                        // so response_tx.send() delivers to registry holder
                         if let Err(e) = response_tx.send(response).await {
                             error!(error = %e, "Failed to forward proxy response");
                             break;
@@ -293,9 +371,14 @@ impl LatticeAgent for AgentServer {
                 }
             }
 
-            // Cleanup
+            // Cleanup proxy channels on disconnect
             if let Some(name) = cluster_name {
                 debug!(cluster = %name, "K8s API proxy disconnected");
+                // Clear proxy channels from the agent connection
+                if let Some(mut agent) = registry.get_mut(&name) {
+                    agent.proxy_tx = None;
+                    agent.proxy_rx = None;
+                }
             }
         });
 
@@ -309,8 +392,8 @@ impl LatticeAgent for AgentServer {
 mod tests {
     use super::*;
     use crate::proto::{
-        AgentReady, BootstrapComplete, ClusterHealth, Heartbeat, PivotComplete, PivotStarted,
-        StatusResponse, agent_message::Payload,
+        agent_message::Payload, AgentReady, BootstrapComplete, ClusterHealth, Heartbeat,
+        PivotComplete, PivotStarted, StatusResponse,
     };
 
     #[test]
@@ -348,7 +431,7 @@ mod tests {
             })),
         };
 
-        server.handle_agent_message(&msg, &tx);
+        server.handle_agent_message(&msg, &tx).await;
 
         // Verify agent was registered
         assert!(!registry.is_empty());
@@ -374,7 +457,7 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        server.handle_agent_message(&msg1, &tx);
+        server.handle_agent_message(&msg1, &tx).await;
 
         // Second ready message with updated state
         let msg2 = AgentMessage {
@@ -386,7 +469,7 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        server.handle_agent_message(&msg2, &tx);
+        server.handle_agent_message(&msg2, &tx).await;
 
         let conn = registry.get("test-cluster").unwrap();
         assert_eq!(conn.state, AgentState::Ready);
@@ -407,7 +490,7 @@ mod tests {
         };
 
         // Should not panic
-        server.handle_agent_message(&msg, &tx);
+        server.handle_agent_message(&msg, &tx).await;
     }
 
     // Test handle_agent_message with PivotStarted payload
@@ -426,7 +509,7 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        server.handle_agent_message(&ready_msg, &tx);
+        server.handle_agent_message(&ready_msg, &tx).await;
 
         // Then send pivot started
         let msg = AgentMessage {
@@ -435,7 +518,7 @@ mod tests {
                 target_namespace: "capi-system".to_string(),
             })),
         };
-        server.handle_agent_message(&msg, &tx);
+        server.handle_agent_message(&msg, &tx).await;
 
         // Verify state changed to Pivoting
         let conn = registry.get("test-cluster").unwrap();
@@ -458,7 +541,7 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        server.handle_agent_message(&ready_msg, &tx);
+        server.handle_agent_message(&ready_msg, &tx).await;
 
         // Send pivot complete (success)
         let msg = AgentMessage {
@@ -469,7 +552,7 @@ mod tests {
                 resources_imported: 5,
             })),
         };
-        server.handle_agent_message(&msg, &tx);
+        server.handle_agent_message(&msg, &tx).await;
 
         // Verify state changed to Ready
         let conn = registry.get("test-cluster").unwrap();
@@ -492,7 +575,7 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        server.handle_agent_message(&ready_msg, &tx);
+        server.handle_agent_message(&ready_msg, &tx).await;
 
         // Send pivot complete (failure)
         let msg = AgentMessage {
@@ -503,7 +586,7 @@ mod tests {
                 resources_imported: 0,
             })),
         };
-        server.handle_agent_message(&msg, &tx);
+        server.handle_agent_message(&msg, &tx).await;
 
         // Verify state changed to Failed
         let conn = registry.get("test-cluster").unwrap();
@@ -526,7 +609,7 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        server.handle_agent_message(&ready_msg, &tx);
+        server.handle_agent_message(&ready_msg, &tx).await;
 
         // Send heartbeat
         let msg = AgentMessage {
@@ -537,7 +620,7 @@ mod tests {
                 uptime_seconds: 3600,
             })),
         };
-        server.handle_agent_message(&msg, &tx);
+        server.handle_agent_message(&msg, &tx).await;
 
         // State should remain Ready
         let conn = registry.get("test-cluster").unwrap();
@@ -562,7 +645,7 @@ mod tests {
         };
 
         // Should not panic
-        server.handle_agent_message(&msg, &tx);
+        server.handle_agent_message(&msg, &tx).await;
     }
 
     // Test handle_agent_message with StatusResponse payload
@@ -582,7 +665,7 @@ mod tests {
         };
 
         // Should not panic
-        server.handle_agent_message(&msg, &tx);
+        server.handle_agent_message(&msg, &tx).await;
     }
 
     // Test handle_agent_message with no payload
@@ -597,7 +680,7 @@ mod tests {
         };
 
         // Should not panic, just log warning
-        server.handle_agent_message(&msg, &tx);
+        server.handle_agent_message(&msg, &tx).await;
     }
 
     // Test registry interactions through server
@@ -616,7 +699,7 @@ mod tests {
                 api_server_endpoint: "https://api.cluster1:6443".to_string(),
             })),
         };
-        server.handle_agent_message(&msg1, &tx);
+        server.handle_agent_message(&msg1, &tx).await;
 
         // Register second agent
         let msg2 = AgentMessage {
@@ -628,7 +711,7 @@ mod tests {
                 api_server_endpoint: "https://api.cluster2:6443".to_string(),
             })),
         };
-        server.handle_agent_message(&msg2, &tx);
+        server.handle_agent_message(&msg2, &tx).await;
 
         // Verify both are registered
         assert_eq!(registry.len(), 2);
@@ -656,8 +739,11 @@ mod tests {
                 api_server_endpoint: "https://api.test:6443".to_string(),
             })),
         };
-        server.handle_agent_message(&msg, &tx);
-        assert_eq!(registry.get("test-cluster").unwrap().state, AgentState::Provisioning);
+        server.handle_agent_message(&msg, &tx).await;
+        assert_eq!(
+            registry.get("test-cluster").unwrap().state,
+            AgentState::Provisioning
+        );
 
         // Heartbeat with Ready state
         let msg = AgentMessage {
@@ -668,8 +754,11 @@ mod tests {
                 uptime_seconds: 60,
             })),
         };
-        server.handle_agent_message(&msg, &tx);
-        assert_eq!(registry.get("test-cluster").unwrap().state, AgentState::Ready);
+        server.handle_agent_message(&msg, &tx).await;
+        assert_eq!(
+            registry.get("test-cluster").unwrap().state,
+            AgentState::Ready
+        );
 
         // Pivot started
         let msg = AgentMessage {
@@ -678,8 +767,11 @@ mod tests {
                 target_namespace: "capi-system".to_string(),
             })),
         };
-        server.handle_agent_message(&msg, &tx);
-        assert_eq!(registry.get("test-cluster").unwrap().state, AgentState::Pivoting);
+        server.handle_agent_message(&msg, &tx).await;
+        assert_eq!(
+            registry.get("test-cluster").unwrap().state,
+            AgentState::Pivoting
+        );
 
         // Pivot complete
         let msg = AgentMessage {
@@ -690,8 +782,11 @@ mod tests {
                 resources_imported: 10,
             })),
         };
-        server.handle_agent_message(&msg, &tx);
-        assert_eq!(registry.get("test-cluster").unwrap().state, AgentState::Ready);
+        server.handle_agent_message(&msg, &tx).await;
+        assert_eq!(
+            registry.get("test-cluster").unwrap().state,
+            AgentState::Ready
+        );
     }
 
     // ==========================================================================
@@ -815,7 +910,7 @@ mod tests {
     /// Integration test: Cell sends command to agent
     #[tokio::test]
     async fn integration_cell_sends_command_to_agent() {
-        use crate::proto::{BootstrapCommand, cell_command::Command};
+        use crate::proto::{cell_command::Command, BootstrapCommand};
 
         let registry = Arc::new(AgentRegistry::new());
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -866,24 +961,22 @@ mod tests {
 
         // Send command through registry
         let conn = registry.get("cmd-test-cluster").unwrap();
-        let send_result = conn.send_command(CellCommand {
-            command_id: "cmd-1".to_string(),
-            command: Some(Command::Bootstrap(BootstrapCommand {
-                git_repository: vec![],
-                kustomization: vec![],
-                additional_manifests: vec![],
-            })),
-        })
-        .await;
+        let send_result = conn
+            .send_command(CellCommand {
+                command_id: "cmd-1".to_string(),
+                command: Some(Command::Bootstrap(BootstrapCommand {
+                    git_repository: vec![],
+                    kustomization: vec![],
+                    additional_manifests: vec![],
+                })),
+            })
+            .await;
 
         assert!(send_result.is_ok());
 
         // Receive command on agent side
-        let received = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            inbound.next(),
-        )
-        .await;
+        let received =
+            tokio::time::timeout(std::time::Duration::from_secs(1), inbound.next()).await;
 
         assert!(received.is_ok());
         let cmd = received.unwrap().unwrap().unwrap();
@@ -985,7 +1078,10 @@ mod tests {
         let mut client1 = LatticeAgentClient::new(channel1);
 
         let (tx1, rx1) = mpsc::channel::<AgentMessage>(32);
-        let _resp1 = client1.stream_messages(ReceiverStream::new(rx1)).await.unwrap();
+        let _resp1 = client1
+            .stream_messages(ReceiverStream::new(rx1))
+            .await
+            .unwrap();
 
         tx1.send(AgentMessage {
             cluster_name: "agent-1".to_string(),
@@ -1008,7 +1104,10 @@ mod tests {
         let mut client2 = LatticeAgentClient::new(channel2);
 
         let (tx2, rx2) = mpsc::channel::<AgentMessage>(32);
-        let _resp2 = client2.stream_messages(ReceiverStream::new(rx2)).await.unwrap();
+        let _resp2 = client2
+            .stream_messages(ReceiverStream::new(rx2))
+            .await
+            .unwrap();
 
         tx2.send(AgentMessage {
             cluster_name: "agent-2".to_string(),
@@ -1033,751 +1132,306 @@ mod tests {
     }
 
     // ==========================================================================
-    // Story-Driven Tests: Covering Edge Cases and Error Paths
+    // Post-Pivot Manifest Delivery Tests
     // ==========================================================================
+    //
+    // These tests verify the critical business logic that sends LatticeCluster
+    // CRD and resource manifests to agents after pivot completes. This enables
+    // the workload cluster to become fully self-managing.
 
-    /// Story: When the gRPC server starts, it should accept incoming connections
+    /// Story: When pivot completes successfully and post-pivot manifests exist,
+    /// they should be sent to the agent via a BootstrapCommand.
     ///
-    /// The server must bind to the specified address and begin accepting connections
-    /// from agents. Each new connection is logged with the remote address.
+    /// This is critical for self-management: after pivot, the workload cluster
+    /// needs its own LatticeCluster CRD and resource to manage itself.
     #[tokio::test]
-    async fn story_grpc_server_starts_and_accepts_connections() {
-        // Background: A cell (management cluster) needs to accept agent connections
-        let registry = Arc::new(AgentRegistry::new());
+    async fn test_pivot_complete_sends_post_pivot_manifests() {
+        use crate::agent::connection::PostPivotManifests;
 
-        // Given: The server is configured to listen on an ephemeral port
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
+        let (server, registry) = AgentServer::with_new_registry();
+        let (tx, mut rx) = mpsc::channel::<CellCommand>(32);
 
-        // When: The server starts
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Then: It should accept incoming gRPC connections
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint)
-            .unwrap()
-            .connect()
-            .await
-            .expect("Server should accept connections");
-
-        let mut client = LatticeAgentClient::new(channel);
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-
-        // And: The stream_messages RPC should succeed
-        let stream_result = client.stream_messages(ReceiverStream::new(rx)).await;
-        assert!(stream_result.is_ok(), "stream_messages RPC should succeed");
-
-        // Cleanup
-        drop(tx);
-        server_handle.abort();
-    }
-
-    /// Story: When an agent connects, the server should register it in the registry
-    ///
-    /// Upon receiving an AgentReady message, the server extracts the agent details
-    /// (cluster name, versions, state) and adds the agent to the registry for
-    /// future command dispatching.
-    #[tokio::test]
-    async fn story_agent_registration_on_connect() {
-        // Background: The cell maintains a registry of all connected agents
-        let registry = Arc::new(AgentRegistry::new());
-
-        // Given: A running server with an empty registry
-        assert!(registry.is_empty(), "Registry starts empty");
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // When: An agent connects and sends its Ready message
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
-        let mut client = LatticeAgentClient::new(channel);
-
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-        let _stream = client.stream_messages(ReceiverStream::new(rx)).await.unwrap();
-
-        tx.send(AgentMessage {
-            cluster_name: "production-cluster".to_string(),
+        // Register agent
+        let ready_msg = AgentMessage {
+            cluster_name: "self-managed-cluster".to_string(),
             payload: Some(Payload::Ready(AgentReady {
-                agent_version: "2.1.0".to_string(),
-                kubernetes_version: "1.31.0".to_string(),
-                state: AgentState::Provisioning.into(),
-                api_server_endpoint: "https://k8s.prod.example.com:6443".to_string(),
+                agent_version: "0.1.0".to_string(),
+                kubernetes_version: "1.28.0".to_string(),
+                state: AgentState::Pivoting.into(),
+                api_server_endpoint: "https://api.test:6443".to_string(),
             })),
-        }).await.unwrap();
+        };
+        server.handle_agent_message(&ready_msg, &tx).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Store post-pivot manifests
+        let crd_yaml = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\n...";
+        let cluster_yaml = "apiVersion: lattice.dev/v1alpha1\nkind: LatticeCluster\n...";
+        registry.set_post_pivot_manifests(
+            "self-managed-cluster",
+            PostPivotManifests {
+                crd_yaml: Some(crd_yaml.to_string()),
+                cluster_yaml: Some(cluster_yaml.to_string()),
+            },
+        );
 
-        // Then: The agent should be registered with all its details
-        assert!(!registry.is_empty(), "Registry should have the agent");
+        // Verify manifests are stored
+        assert!(registry.has_post_pivot_manifests("self-managed-cluster"));
 
-        let agent = registry.get("production-cluster").expect("Agent should be findable by name");
-        assert_eq!(agent.cluster_name, "production-cluster");
-        assert_eq!(agent.agent_version, "2.1.0");
-        assert_eq!(agent.kubernetes_version, "1.31.0");
-        assert_eq!(agent.state, AgentState::Provisioning);
-
-        // Cleanup
-        server_handle.abort();
-    }
-
-    /// Story: When a command is sent to an agent, it should be delivered over the stream
-    ///
-    /// The cell can send commands (bootstrap, pivot, reconcile) to specific agents
-    /// through the bidirectional gRPC stream. Commands are routed based on cluster name.
-    #[tokio::test]
-    async fn story_command_dispatching_to_connected_agent() {
-        use crate::proto::{StartPivotCommand, cell_command::Command};
-
-        // Background: The cell needs to orchestrate cluster lifecycle operations
-        let registry = Arc::new(AgentRegistry::new());
-
-        // Given: A server with a connected agent
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
-        let mut client = LatticeAgentClient::new(channel);
-
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-        let response = client.stream_messages(ReceiverStream::new(rx)).await.unwrap();
-        let mut inbound_stream = response.into_inner();
-
-        // Register the agent
-        tx.send(AgentMessage {
-            cluster_name: "workload-alpha".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "1.0.0".to_string(),
-                kubernetes_version: "1.30.0".to_string(),
-                state: AgentState::Ready.into(),
-                api_server_endpoint: "https://alpha.k8s:6443".to_string(),
-            })),
-        }).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // When: The cell sends a start pivot command to the agent
-        let agent_conn = registry.get("workload-alpha").expect("Agent should be registered");
-        agent_conn.send_command(CellCommand {
-            command_id: "pivot-op-42".to_string(),
-            command: Some(Command::StartPivot(StartPivotCommand {
-                cluster_name: "workload-alpha".to_string(),
-                source_namespace: "capi-cell".to_string(),
-                target_namespace: "capi-system".to_string(),
-            })),
-        }).await.expect("Command should be sent successfully");
-
-        // Then: The agent should receive the command on its stream
-        let received = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            inbound_stream.next(),
-        ).await.expect("Should receive within timeout")
-          .expect("Stream should have item")
-          .expect("Item should be valid");
-
-        assert_eq!(received.command_id, "pivot-op-42");
-        match received.command {
-            Some(Command::StartPivot(pivot)) => {
-                assert_eq!(pivot.cluster_name, "workload-alpha");
-                assert_eq!(pivot.target_namespace, "capi-system");
-            }
-            _ => panic!("Expected StartPivot command"),
-        }
-
-        server_handle.abort();
-    }
-
-    /// Story: When an agent disconnects, the server should clean up its registration
-    ///
-    /// If an agent's connection drops (network failure, agent restart, etc.),
-    /// the server detects this and removes the agent from the registry to
-    /// prevent stale connections from accumulating.
-    #[tokio::test]
-    async fn story_connection_cleanup_on_agent_disconnect() {
-        // Background: Clean disconnection handling is critical for resilience
-        let registry = Arc::new(AgentRegistry::new());
-
-        // Given: A server with a connected agent
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
-        let mut client = LatticeAgentClient::new(channel);
-
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-        let stream_response = client.stream_messages(ReceiverStream::new(rx)).await.unwrap();
-
-        // Register the agent
-        tx.send(AgentMessage {
-            cluster_name: "ephemeral-cluster".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "1.0.0".to_string(),
-                kubernetes_version: "1.30.0".to_string(),
-                state: AgentState::Ready.into(),
-                api_server_endpoint: "https://ephemeral:6443".to_string(),
-            })),
-        }).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(registry.get("ephemeral-cluster").is_some(), "Agent should be registered");
-
-        // When: The agent disconnects (simulated by dropping the sender and stream)
-        drop(tx);
-        drop(stream_response);
-
-        // Then: After the server detects the disconnect, the agent should be unregistered
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(registry.get("ephemeral-cluster").is_none(), "Agent should be unregistered after disconnect");
-
-        server_handle.abort();
-    }
-
-    /// Story: When multiple agents send state updates, each agent's state is tracked independently
-    ///
-    /// The registry must maintain separate state for each connected agent,
-    /// allowing the cell to understand the health of all managed clusters.
-    #[tokio::test]
-    async fn story_independent_state_tracking_for_multiple_agents() {
-        let registry = Arc::new(AgentRegistry::new());
-
-        // Given: A server with multiple connected agents
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let endpoint = format!("http://{}", server_addr);
-
-        // Connect three agents representing different environments
-        let agents = vec![
-            ("prod-west", AgentState::Ready),
-            ("staging-east", AgentState::Provisioning),
-            ("dev-local", AgentState::Degraded),
-        ];
-
-        let mut senders = Vec::new();
-
-        for (name, initial_state) in &agents {
-            let channel = Channel::from_shared(endpoint.clone()).unwrap().connect().await.unwrap();
-            let mut client = LatticeAgentClient::new(channel);
-
-            let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-            let _stream = client.stream_messages(ReceiverStream::new(rx)).await.unwrap();
-
-            tx.send(AgentMessage {
-                cluster_name: name.to_string(),
-                payload: Some(Payload::Ready(AgentReady {
-                    agent_version: "1.0.0".to_string(),
-                    kubernetes_version: "1.30.0".to_string(),
-                    state: (*initial_state).into(),
-                    api_server_endpoint: format!("https://{}:6443", name),
-                })),
-            }).await.unwrap();
-
-            senders.push(tx);
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        // Then: Each agent has its own tracked state
-        assert_eq!(registry.len(), 3);
-
-        let prod = registry.get("prod-west").unwrap();
-        assert_eq!(prod.state, AgentState::Ready);
-
-        let staging = registry.get("staging-east").unwrap();
-        assert_eq!(staging.state, AgentState::Provisioning);
-
-        let dev = registry.get("dev-local").unwrap();
-        assert_eq!(dev.state, AgentState::Degraded);
-
-        // When: One agent sends a state update
-        senders[1].send(AgentMessage {
-            cluster_name: "staging-east".to_string(),
-            payload: Some(Payload::Heartbeat(Heartbeat {
-                state: AgentState::Ready.into(),
-                timestamp: None,
-                uptime_seconds: 3600,
-            })),
-        }).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Then: Only that agent's state changes
-        let staging_updated = registry.get("staging-east").unwrap();
-        assert_eq!(staging_updated.state, AgentState::Ready);
-
-        // Other agents remain unchanged
-        let prod_unchanged = registry.get("prod-west").unwrap();
-        assert_eq!(prod_unchanged.state, AgentState::Ready);
-
-        server_handle.abort();
-    }
-
-    /// Story: When an agent goes through the full pivot lifecycle, all state transitions are recorded
-    ///
-    /// The pivot flow: Ready -> PivotStarted (Pivoting) -> PivotComplete (Ready or Failed)
-    #[tokio::test]
-    async fn story_full_pivot_lifecycle_state_transitions() {
-        let registry = Arc::new(AgentRegistry::new());
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
-        let mut client = LatticeAgentClient::new(channel);
-
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-        let _stream = client.stream_messages(ReceiverStream::new(rx)).await.unwrap();
-
-        // Phase 1: Agent connects and is ready
-        tx.send(AgentMessage {
-            cluster_name: "pivoting-cluster".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "1.0.0".to_string(),
-                kubernetes_version: "1.30.0".to_string(),
-                state: AgentState::Ready.into(),
-                api_server_endpoint: "https://pivot:6443".to_string(),
-            })),
-        }).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(registry.get("pivoting-cluster").unwrap().state, AgentState::Ready);
-
-        // Phase 2: Agent reports pivot started
-        tx.send(AgentMessage {
-            cluster_name: "pivoting-cluster".to_string(),
-            payload: Some(Payload::PivotStarted(PivotStarted {
-                target_namespace: "capi-workload".to_string(),
-            })),
-        }).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(registry.get("pivoting-cluster").unwrap().state, AgentState::Pivoting);
-
-        // Phase 3: Agent reports pivot complete (success)
-        tx.send(AgentMessage {
-            cluster_name: "pivoting-cluster".to_string(),
+        // Send pivot complete
+        let pivot_msg = AgentMessage {
+            cluster_name: "self-managed-cluster".to_string(),
             payload: Some(Payload::PivotComplete(PivotComplete {
                 success: true,
                 error_message: String::new(),
-                resources_imported: 15,
+                resources_imported: 10,
             })),
-        }).await.unwrap();
+        };
+        server.handle_agent_message(&pivot_msg, &tx).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(registry.get("pivoting-cluster").unwrap().state, AgentState::Ready);
+        // Verify BootstrapCommand was sent with manifests
+        let cmd = rx.try_recv().expect("should have received a command");
+        assert!(
+            cmd.command_id.starts_with("post-pivot-bootstrap-"),
+            "command_id should indicate post-pivot bootstrap"
+        );
 
-        server_handle.abort();
-    }
-
-    /// Story: When pivot fails, the agent state reflects the failure
-    #[tokio::test]
-    async fn story_pivot_failure_sets_failed_state() {
-        let registry = Arc::new(AgentRegistry::new());
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
-        let mut client = LatticeAgentClient::new(channel);
-
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-        let _stream = client.stream_messages(ReceiverStream::new(rx)).await.unwrap();
-
-        // Agent connects
-        tx.send(AgentMessage {
-            cluster_name: "failing-pivot".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "1.0.0".to_string(),
-                kubernetes_version: "1.30.0".to_string(),
-                state: AgentState::Pivoting.into(),
-                api_server_endpoint: "https://fail:6443".to_string(),
-            })),
-        }).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Pivot fails
-        tx.send(AgentMessage {
-            cluster_name: "failing-pivot".to_string(),
-            payload: Some(Payload::PivotComplete(PivotComplete {
-                success: false,
-                error_message: "clusterctl move failed: etcd timeout".to_string(),
-                resources_imported: 0,
-            })),
-        }).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(registry.get("failing-pivot").unwrap().state, AgentState::Failed);
-
-        server_handle.abort();
-    }
-
-    /// Story: When the K8s API proxy stream is established, the server can forward requests
-    #[tokio::test]
-    async fn story_k8s_api_proxy_stream_established() {
-        use crate::proto::KubeProxyResponse;
-
-        let registry = Arc::new(AgentRegistry::new());
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
-        let mut client = LatticeAgentClient::new(channel);
-
-        // Establish proxy stream
-        let (tx, rx) = mpsc::channel::<KubeProxyResponse>(32);
-        let proxy_result = client.proxy_kubernetes_api(ReceiverStream::new(rx)).await;
-
-        // The proxy stream should be established
-        assert!(proxy_result.is_ok(), "proxy_kubernetes_api RPC should succeed");
-
-        let mut request_stream = proxy_result.unwrap().into_inner();
-
-        // Send a mock response through the proxy channel
-        tx.send(KubeProxyResponse {
-            request_id: "get-pods-123".to_string(),
-            status_code: 200,
-            headers: vec![],
-            body: b"pod list response".to_vec(),
-            error: String::new(),
-        }).await.unwrap();
-
-        // Give server time to process
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // The server should have received and processed the response
-        // (In a full implementation, this would route to waiting requests)
-
-        // Drop sender to close the stream
-        drop(tx);
-
-        // Stream should end gracefully
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Try to read from stream - should return None (stream ended)
-        let next_item = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            request_stream.next(),
-        ).await;
-
-        // Either timeout or None is acceptable (stream is closing/closed)
-        match next_item {
-            Ok(None) => {} // Stream ended
-            Err(_) => {} // Timeout - stream is idle
-            Ok(Some(_)) => {} // Got an item before closing
+        match cmd.command {
+            Some(crate::proto::cell_command::Command::Bootstrap(bootstrap)) => {
+                assert_eq!(
+                    bootstrap.additional_manifests.len(),
+                    2,
+                    "should include both CRD and cluster manifests"
+                );
+                // Verify manifest contents
+                let manifest1 =
+                    String::from_utf8(bootstrap.additional_manifests[0].clone()).unwrap();
+                let manifest2 =
+                    String::from_utf8(bootstrap.additional_manifests[1].clone()).unwrap();
+                assert!(manifest1.contains("CustomResourceDefinition"));
+                assert!(manifest2.contains("LatticeCluster"));
+            }
+            _ => panic!("expected BootstrapCommand"),
         }
 
-        server_handle.abort();
+        // Verify manifests were consumed (not available for retry)
+        assert!(
+            !registry.has_post_pivot_manifests("self-managed-cluster"),
+            "manifests should be consumed after successful send"
+        );
     }
 
-    /// Story: Bootstrap complete message is logged but doesn't change state
+    /// Story: When pivot completes but no post-pivot manifests exist,
+    /// no BootstrapCommand should be sent.
     #[tokio::test]
-    async fn story_bootstrap_complete_message_handling() {
-        let registry = Arc::new(AgentRegistry::new());
+    async fn test_pivot_complete_without_manifests_sends_nothing() {
+        let (server, registry) = AgentServer::with_new_registry();
+        let (tx, mut rx) = mpsc::channel::<CellCommand>(32);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
-        let mut client = LatticeAgentClient::new(channel);
-
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-        let _stream = client.stream_messages(ReceiverStream::new(rx)).await.unwrap();
-
-        // Agent connects
-        tx.send(AgentMessage {
-            cluster_name: "bootstrap-cluster".to_string(),
+        // Register agent (no manifests stored)
+        let ready_msg = AgentMessage {
+            cluster_name: "no-manifests-cluster".to_string(),
             payload: Some(Payload::Ready(AgentReady {
-                agent_version: "1.0.0".to_string(),
-                kubernetes_version: "1.30.0".to_string(),
-                state: AgentState::Provisioning.into(),
-                api_server_endpoint: "https://bootstrap:6443".to_string(),
+                agent_version: "0.1.0".to_string(),
+                kubernetes_version: "1.28.0".to_string(),
+                state: AgentState::Pivoting.into(),
+                api_server_endpoint: "https://api.test:6443".to_string(),
             })),
-        }).await.unwrap();
+        };
+        server.handle_agent_message(&ready_msg, &tx).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Verify no manifests stored
+        assert!(!registry.has_post_pivot_manifests("no-manifests-cluster"));
 
-        // Bootstrap complete - this is informational, state managed separately
-        tx.send(AgentMessage {
-            cluster_name: "bootstrap-cluster".to_string(),
-            payload: Some(Payload::BootstrapComplete(BootstrapComplete {
-                flux_ready: true,
-                cilium_ready: true,
+        // Send pivot complete
+        let pivot_msg = AgentMessage {
+            cluster_name: "no-manifests-cluster".to_string(),
+            payload: Some(Payload::PivotComplete(PivotComplete {
+                success: true,
+                error_message: String::new(),
+                resources_imported: 5,
             })),
-        }).await.unwrap();
+        };
+        server.handle_agent_message(&pivot_msg, &tx).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // State doesn't change from bootstrap complete (managed via Ready/Heartbeat)
-        let agent = registry.get("bootstrap-cluster").unwrap();
-        assert_eq!(agent.state, AgentState::Provisioning);
-
-        server_handle.abort();
+        // No command should be sent
+        assert!(
+            rx.try_recv().is_err(),
+            "should not send command when no manifests exist"
+        );
     }
 
-    /// Story: Health updates are received and logged
+    /// Story: When pivot fails, post-pivot manifests should not be sent
+    /// and state should transition to Failed.
     #[tokio::test]
-    async fn story_cluster_health_updates_received() {
-        let registry = Arc::new(AgentRegistry::new());
+    async fn test_pivot_failure_does_not_send_manifests() {
+        use crate::agent::connection::PostPivotManifests;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
+        let (server, registry) = AgentServer::with_new_registry();
+        let (tx, mut rx) = mpsc::channel::<CellCommand>(32);
 
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
-        let mut client = LatticeAgentClient::new(channel);
-
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-        let _stream = client.stream_messages(ReceiverStream::new(rx)).await.unwrap();
-
-        // Agent connects
-        tx.send(AgentMessage {
-            cluster_name: "health-cluster".to_string(),
+        // Register agent
+        let ready_msg = AgentMessage {
+            cluster_name: "failed-pivot-cluster".to_string(),
             payload: Some(Payload::Ready(AgentReady {
-                agent_version: "1.0.0".to_string(),
-                kubernetes_version: "1.30.0".to_string(),
-                state: AgentState::Ready.into(),
-                api_server_endpoint: "https://health:6443".to_string(),
+                agent_version: "0.1.0".to_string(),
+                kubernetes_version: "1.28.0".to_string(),
+                state: AgentState::Pivoting.into(),
+                api_server_endpoint: "https://api.test:6443".to_string(),
             })),
-        }).await.unwrap();
+        };
+        server.handle_agent_message(&ready_msg, &tx).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Store manifests (they should remain after failed pivot)
+        registry.set_post_pivot_manifests(
+            "failed-pivot-cluster",
+            PostPivotManifests {
+                crd_yaml: Some("crd".to_string()),
+                cluster_yaml: Some("cluster".to_string()),
+            },
+        );
 
-        // Send health update
-        tx.send(AgentMessage {
-            cluster_name: "health-cluster".to_string(),
-            payload: Some(Payload::ClusterHealth(ClusterHealth {
-                ready_nodes: 5,
-                total_nodes: 5,
-                ready_control_plane: 3,
-                total_control_plane: 3,
-                conditions: vec![crate::proto::NodeCondition {
-                    r#type: "Ready".to_string(),
-                    status: "True".to_string(),
-                    reason: "AllNodesHealthy".to_string(),
-                    message: "All nodes are healthy".to_string(),
-                }],
+        // Send pivot complete with failure
+        let pivot_msg = AgentMessage {
+            cluster_name: "failed-pivot-cluster".to_string(),
+            payload: Some(Payload::PivotComplete(PivotComplete {
+                success: false,
+                error_message: "clusterctl move failed".to_string(),
+                resources_imported: 0,
             })),
-        }).await.unwrap();
+        };
+        server.handle_agent_message(&pivot_msg, &tx).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // No command should be sent
+        assert!(
+            rx.try_recv().is_err(),
+            "should not send manifests on pivot failure"
+        );
 
-        // Agent is still tracked (health is informational)
-        assert!(registry.get("health-cluster").is_some());
+        // State should be Failed
+        let conn = registry.get("failed-pivot-cluster").unwrap();
+        assert_eq!(conn.state, AgentState::Failed);
 
-        server_handle.abort();
+        // Manifests should still exist (can retry after fixing pivot)
+        assert!(
+            registry.has_post_pivot_manifests("failed-pivot-cluster"),
+            "manifests should remain after failed pivot for retry"
+        );
     }
 
-    /// Story: Status response messages are received and logged
+    /// Story: When post-pivot manifest send fails, manifests should be
+    /// restored for retry on next PivotComplete.
+    ///
+    /// This tests the error recovery path where the command channel is closed
+    /// (simulating disconnect) but we need to preserve manifests for retry.
     #[tokio::test]
-    async fn story_status_response_handling() {
-        let registry = Arc::new(AgentRegistry::new());
+    async fn test_pivot_complete_restores_manifests_on_send_failure() {
+        use crate::agent::connection::PostPivotManifests;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
+        let (server, registry) = AgentServer::with_new_registry();
+        let (tx, rx) = mpsc::channel::<CellCommand>(32);
 
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
-        let mut client = LatticeAgentClient::new(channel);
-
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-        let _stream = client.stream_messages(ReceiverStream::new(rx)).await.unwrap();
-
-        // Agent connects
-        tx.send(AgentMessage {
-            cluster_name: "status-cluster".to_string(),
+        // Register agent
+        let ready_msg = AgentMessage {
+            cluster_name: "restore-test".to_string(),
             payload: Some(Payload::Ready(AgentReady {
-                agent_version: "1.0.0".to_string(),
-                kubernetes_version: "1.30.0".to_string(),
-                state: AgentState::Ready.into(),
-                api_server_endpoint: "https://status:6443".to_string(),
+                agent_version: "0.1.0".to_string(),
+                kubernetes_version: "1.28.0".to_string(),
+                state: AgentState::Pivoting.into(),
+                api_server_endpoint: "https://api.test:6443".to_string(),
             })),
-        }).await.unwrap();
+        };
+        server.handle_agent_message(&ready_msg, &tx).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Store manifests
+        registry.set_post_pivot_manifests(
+            "restore-test",
+            PostPivotManifests {
+                crd_yaml: Some("crd-yaml-content".to_string()),
+                cluster_yaml: Some("cluster-yaml-content".to_string()),
+            },
+        );
 
-        // Send status response (response to a StatusRequest)
-        tx.send(AgentMessage {
-            cluster_name: "status-cluster".to_string(),
-            payload: Some(Payload::StatusResponse(StatusResponse {
-                request_id: "status-req-456".to_string(),
-                state: AgentState::Ready.into(),
-                health: None,
-                capi_status: None,
+        // Drop the receiver to simulate channel closure / agent disconnect
+        drop(rx);
+
+        // Send pivot complete - the send will fail because channel is closed
+        let pivot_msg = AgentMessage {
+            cluster_name: "restore-test".to_string(),
+            payload: Some(Payload::PivotComplete(PivotComplete {
+                success: true,
+                error_message: String::new(),
+                resources_imported: 5,
             })),
-        }).await.unwrap();
+        };
+        server.handle_agent_message(&pivot_msg, &tx).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Manifests should be restored for retry (can be sent on reconnect)
+        assert!(
+            registry.has_post_pivot_manifests("restore-test"),
+            "manifests should be restored after send failure for retry"
+        );
 
-        // Agent is still registered
-        assert!(registry.get("status-cluster").is_some());
-
-        server_handle.abort();
+        // Verify the restored manifests still have their content
+        let manifests = registry.take_post_pivot_manifests("restore-test").unwrap();
+        assert_eq!(manifests.crd_yaml, Some("crd-yaml-content".to_string()));
+        assert_eq!(
+            manifests.cluster_yaml,
+            Some("cluster-yaml-content".to_string())
+        );
     }
 
-    /// Story: Messages with no payload are handled gracefully
+    /// Story: Post-pivot manifests with only CRD (no cluster resource)
+    /// should still be sent correctly.
     #[tokio::test]
-    async fn story_empty_payload_messages_logged_as_warning() {
-        let registry = Arc::new(AgentRegistry::new());
+    async fn test_pivot_complete_with_partial_manifests() {
+        use crate::agent::connection::PostPivotManifests;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
+        let (server, registry) = AgentServer::with_new_registry();
+        let (tx, mut rx) = mpsc::channel::<CellCommand>(32);
 
-        let registry_clone = registry.clone();
-        let server_handle = tokio::spawn(async move {
-            let server = AgentServer::new(registry_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-        });
+        // Register agent
+        let ready_msg = AgentMessage {
+            cluster_name: "partial-manifests".to_string(),
+            payload: Some(Payload::Ready(AgentReady {
+                agent_version: "0.1.0".to_string(),
+                kubernetes_version: "1.28.0".to_string(),
+                state: AgentState::Pivoting.into(),
+                api_server_endpoint: "https://api.test:6443".to_string(),
+            })),
+        };
+        server.handle_agent_message(&ready_msg, &tx).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Store only CRD (no cluster yaml)
+        registry.set_post_pivot_manifests(
+            "partial-manifests",
+            PostPivotManifests {
+                crd_yaml: Some("apiVersion: apiextensions.k8s.io/v1\nkind: CRD".to_string()),
+                cluster_yaml: None,
+            },
+        );
 
-        let endpoint = format!("http://{}", server_addr);
-        let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
-        let mut client = LatticeAgentClient::new(channel);
+        // Send pivot complete
+        let pivot_msg = AgentMessage {
+            cluster_name: "partial-manifests".to_string(),
+            payload: Some(Payload::PivotComplete(PivotComplete {
+                success: true,
+                error_message: String::new(),
+                resources_imported: 3,
+            })),
+        };
+        server.handle_agent_message(&pivot_msg, &tx).await;
 
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-        let _stream = client.stream_messages(ReceiverStream::new(rx)).await.unwrap();
-
-        // Send message with no payload (malformed message)
-        tx.send(AgentMessage {
-            cluster_name: "malformed-sender".to_string(),
-            payload: None,
-        }).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Server should not crash, agent not registered (no Ready message)
-        assert!(registry.is_empty());
-
-        server_handle.abort();
+        // Should receive command with only one manifest
+        let cmd = rx.try_recv().expect("should have received a command");
+        match cmd.command {
+            Some(crate::proto::cell_command::Command::Bootstrap(bootstrap)) => {
+                assert_eq!(
+                    bootstrap.additional_manifests.len(),
+                    1,
+                    "should include only the CRD manifest"
+                );
+            }
+            _ => panic!("expected BootstrapCommand"),
+        }
     }
 }

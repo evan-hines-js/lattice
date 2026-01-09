@@ -16,13 +16,13 @@ use tracing::{debug, error, info, instrument, warn};
 #[cfg(test)]
 use mockall::automock;
 
-use crate::capi::{
-    ensure_capi_installed_with, CapiDetector, CapiInstaller,
-};
+use crate::agent::connection::SharedAgentRegistry;
+use crate::capi::{ensure_capi_installed_with, CapiDetector, CapiInstaller};
 use crate::crd::{
     ClusterCondition, ClusterPhase, ConditionStatus, LatticeCluster, LatticeClusterStatus,
     ProviderType,
 };
+use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
 use crate::provider::{CAPIManifest, DockerProvider, Provider};
 use crate::Error;
 
@@ -40,6 +40,17 @@ pub trait KubeClient: Send + Sync {
     /// * `name` - Name of the cluster to update
     /// * `status` - New status to apply
     async fn patch_status(&self, name: &str, status: &LatticeClusterStatus) -> Result<(), Error>;
+
+    /// Get the count of ready worker nodes
+    ///
+    /// Worker nodes are nodes without the control-plane role label.
+    async fn get_ready_worker_count(&self) -> Result<u32, Error>;
+
+    /// Check if control plane nodes have the NoSchedule taint
+    async fn are_control_plane_nodes_tainted(&self) -> Result<bool, Error>;
+
+    /// Apply NoSchedule taint to all control plane nodes
+    async fn taint_control_plane_nodes(&self) -> Result<(), Error>;
 }
 
 /// Trait for cluster bootstrap registration
@@ -113,13 +124,13 @@ pub trait CAPIClient: Send + Sync {
 }
 
 /// Real bootstrap implementation wrapping BootstrapState
-pub struct RealClusterBootstrap<G: crate::bootstrap::ManifestGenerator> {
+pub struct ClusterBootstrapImpl<G: crate::bootstrap::ManifestGenerator> {
     state: Arc<crate::bootstrap::BootstrapState<G>>,
     cell_endpoint: String,
 }
 
-impl<G: crate::bootstrap::ManifestGenerator> RealClusterBootstrap<G> {
-    /// Create a new RealClusterBootstrap wrapping the given BootstrapState
+impl<G: crate::bootstrap::ManifestGenerator> ClusterBootstrapImpl<G> {
+    /// Create a new ClusterBootstrapImpl wrapping the given BootstrapState
     pub fn new(state: Arc<crate::bootstrap::BootstrapState<G>>, cell_endpoint: String) -> Self {
         Self {
             state,
@@ -128,7 +139,9 @@ impl<G: crate::bootstrap::ManifestGenerator> RealClusterBootstrap<G> {
     }
 }
 
-impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap for RealClusterBootstrap<G> {
+impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap
+    for ClusterBootstrapImpl<G>
+{
     fn register_cluster(
         &self,
         cluster_id: String,
@@ -155,19 +168,19 @@ impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap for Real
 }
 
 /// Real Kubernetes client implementation
-pub struct RealKubeClient {
+pub struct KubeClientImpl {
     client: Client,
 }
 
-impl RealKubeClient {
-    /// Create a new RealKubeClient wrapping the given kube Client
+impl KubeClientImpl {
+    /// Create a new KubeClientImpl wrapping the given kube Client
     pub fn new(client: Client) -> Self {
         Self { client }
     }
 }
 
 #[async_trait]
-impl KubeClient for RealKubeClient {
+impl KubeClient for KubeClientImpl {
     async fn patch_status(&self, name: &str, status: &LatticeClusterStatus) -> Result<(), Error> {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
 
@@ -184,22 +197,158 @@ impl KubeClient for RealKubeClient {
 
         Ok(())
     }
+
+    async fn get_ready_worker_count(&self) -> Result<u32, Error> {
+        use k8s_openapi::api::core::v1::Node;
+
+        let api: Api<Node> = Api::all(self.client.clone());
+        let nodes = api.list(&Default::default()).await?;
+
+        let ready_workers = nodes
+            .items
+            .iter()
+            .filter(|node| {
+                // Check if it's NOT a control plane node
+                let labels = node.metadata.labels.as_ref();
+                let is_control_plane = labels
+                    .map(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
+                    .unwrap_or(false);
+
+                if is_control_plane {
+                    return false;
+                }
+
+                // Check if node is Ready
+                let conditions = node.status.as_ref().and_then(|s| s.conditions.as_ref());
+                conditions
+                    .map(|conds| {
+                        conds
+                            .iter()
+                            .any(|c| c.type_ == "Ready" && c.status == "True")
+                    })
+                    .unwrap_or(false)
+            })
+            .count() as u32;
+
+        Ok(ready_workers)
+    }
+
+    async fn are_control_plane_nodes_tainted(&self) -> Result<bool, Error> {
+        use k8s_openapi::api::core::v1::Node;
+
+        let api: Api<Node> = Api::all(self.client.clone());
+        let nodes = api.list(&Default::default()).await?;
+
+        // Check all control plane nodes have the NoSchedule taint
+        for node in nodes.items.iter() {
+            let labels = node.metadata.labels.as_ref();
+            let is_control_plane = labels
+                .map(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
+                .unwrap_or(false);
+
+            if !is_control_plane {
+                continue;
+            }
+
+            // Check for NoSchedule taint
+            let taints = node.spec.as_ref().and_then(|s| s.taints.as_ref());
+            let has_no_schedule = taints
+                .map(|t| {
+                    t.iter().any(|taint| {
+                        taint.key == "node-role.kubernetes.io/control-plane"
+                            && taint.effect == "NoSchedule"
+                    })
+                })
+                .unwrap_or(false);
+
+            if !has_no_schedule {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    async fn taint_control_plane_nodes(&self) -> Result<(), Error> {
+        use k8s_openapi::api::core::v1::Node;
+
+        let api: Api<Node> = Api::all(self.client.clone());
+        let nodes = api.list(&Default::default()).await?;
+
+        for node in nodes.items.iter() {
+            let labels = node.metadata.labels.as_ref();
+            let is_control_plane = labels
+                .map(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
+                .unwrap_or(false);
+
+            if !is_control_plane {
+                continue;
+            }
+
+            let node_name = node
+                .metadata
+                .name
+                .as_ref()
+                .ok_or_else(|| Error::Provider("node has no name".to_string()))?;
+
+            // Check if already tainted
+            let taints = node.spec.as_ref().and_then(|s| s.taints.as_ref());
+            let has_no_schedule = taints
+                .map(|t| {
+                    t.iter().any(|taint| {
+                        taint.key == "node-role.kubernetes.io/control-plane"
+                            && taint.effect == "NoSchedule"
+                    })
+                })
+                .unwrap_or(false);
+
+            if has_no_schedule {
+                debug!(node = %node_name, "control plane node already tainted");
+                continue;
+            }
+
+            // Add the taint
+            info!(node = %node_name, "applying NoSchedule taint to control plane node");
+
+            let patch = serde_json::json!({
+                "spec": {
+                    "taints": [
+                        {
+                            "key": "node-role.kubernetes.io/control-plane",
+                            "effect": "NoSchedule"
+                        }
+                    ]
+                }
+            });
+
+            api.patch(
+                node_name,
+                &PatchParams::apply("lattice-controller"),
+                &Patch::Strategic(&patch),
+            )
+            .await?;
+
+            info!(node = %node_name, "control plane node tainted");
+        }
+
+        Ok(())
+    }
 }
 
 /// Real CAPI client implementation using DynamicObject for untyped resources
-pub struct RealCAPIClient {
+pub struct CAPIClientImpl {
     client: Client,
 }
 
-impl RealCAPIClient {
-    /// Create a new RealCAPIClient
+impl CAPIClientImpl {
+    /// Create a new CAPIClientImpl
     pub fn new(client: Client) -> Self {
         Self { client }
     }
 }
 
 #[async_trait]
-impl CAPIClient for RealCAPIClient {
+impl CAPIClient for CAPIClientImpl {
     async fn apply_manifests(
         &self,
         manifests: &[CAPIManifest],
@@ -331,6 +480,38 @@ fn pluralize_kind(kind: &str) -> String {
     }
 }
 
+/// Trait abstracting pivot operations for testability
+#[cfg_attr(test, automock)]
+#[async_trait]
+pub trait PivotOperations: Send + Sync {
+    /// Trigger pivot for a cluster
+    ///
+    /// Sends StartPivotCommand to the agent and executes clusterctl move
+    async fn trigger_pivot(
+        &self,
+        cluster_name: &str,
+        source_namespace: &str,
+        target_namespace: &str,
+    ) -> Result<(), Error>;
+
+    /// Check if agent is ready for pivot
+    fn is_agent_ready(&self, cluster_name: &str) -> bool;
+
+    /// Check if pivot is complete (agent reports Ready state)
+    fn is_pivot_complete(&self, cluster_name: &str) -> bool;
+
+    /// Store post-pivot manifests to send after PivotComplete
+    ///
+    /// These manifests (LatticeCluster CRD + resource) will be sent
+    /// to the agent via BootstrapCommand after pivot succeeds.
+    fn store_post_pivot_manifests(
+        &self,
+        cluster_name: &str,
+        crd_yaml: Option<String>,
+        cluster_yaml: Option<String>,
+    );
+}
+
 /// Controller context containing shared state and clients
 ///
 /// The context is shared across all reconciliation calls and holds
@@ -348,6 +529,10 @@ pub struct Context {
     pub capi_namespace: String,
     /// Bootstrap registration for workload clusters (None for cells)
     pub bootstrap: Option<Arc<dyn ClusterBootstrap>>,
+    /// Agent registry for connected agents (cells only)
+    pub agent_registry: Option<SharedAgentRegistry>,
+    /// Pivot operations for orchestrating cluster pivots
+    pub pivot_ops: Option<Arc<dyn PivotOperations>>,
 }
 
 impl Context {
@@ -355,12 +540,14 @@ impl Context {
     pub fn new(client: Client) -> Self {
         use crate::capi::{ClusterctlInstaller, KubeCapiDetector};
         Self {
-            kube: Arc::new(RealKubeClient::new(client.clone())),
-            capi: Arc::new(RealCAPIClient::new(client.clone())),
+            kube: Arc::new(KubeClientImpl::new(client.clone())),
+            capi: Arc::new(CAPIClientImpl::new(client.clone())),
             capi_detector: Arc::new(KubeCapiDetector::new(client.clone())),
             capi_installer: Arc::new(ClusterctlInstaller::new()),
             capi_namespace: "default".to_string(),
             bootstrap: None,
+            agent_registry: None,
+            pivot_ops: None,
         }
     }
 
@@ -368,12 +555,14 @@ impl Context {
     pub fn with_namespace(client: Client, namespace: &str) -> Self {
         use crate::capi::{ClusterctlInstaller, KubeCapiDetector};
         Self {
-            kube: Arc::new(RealKubeClient::new(client.clone())),
-            capi: Arc::new(RealCAPIClient::new(client.clone())),
+            kube: Arc::new(KubeClientImpl::new(client.clone())),
+            capi: Arc::new(CAPIClientImpl::new(client.clone())),
             capi_detector: Arc::new(KubeCapiDetector::new(client.clone())),
             capi_installer: Arc::new(ClusterctlInstaller::new()),
             capi_namespace: namespace.to_string(),
             bootstrap: None,
+            agent_registry: None,
+            pivot_ops: None,
         }
     }
 
@@ -383,12 +572,36 @@ impl Context {
     pub fn with_bootstrap(client: Client, bootstrap: Arc<dyn ClusterBootstrap>) -> Self {
         use crate::capi::{ClusterctlInstaller, KubeCapiDetector};
         Self {
-            kube: Arc::new(RealKubeClient::new(client.clone())),
-            capi: Arc::new(RealCAPIClient::new(client.clone())),
+            kube: Arc::new(KubeClientImpl::new(client.clone())),
+            capi: Arc::new(CAPIClientImpl::new(client.clone())),
             capi_detector: Arc::new(KubeCapiDetector::new(client.clone())),
             capi_installer: Arc::new(ClusterctlInstaller::new()),
             capi_namespace: "default".to_string(),
             bootstrap: Some(bootstrap),
+            agent_registry: None,
+            pivot_ops: None,
+        }
+    }
+
+    /// Create a new controller context with full cell capabilities
+    ///
+    /// Use this for cells that provision workload clusters and need pivot orchestration.
+    pub fn with_cell_capabilities(
+        client: Client,
+        bootstrap: Arc<dyn ClusterBootstrap>,
+        agent_registry: SharedAgentRegistry,
+        pivot_ops: Arc<dyn PivotOperations>,
+    ) -> Self {
+        use crate::capi::{ClusterctlInstaller, KubeCapiDetector};
+        Self {
+            kube: Arc::new(KubeClientImpl::new(client.clone())),
+            capi: Arc::new(CAPIClientImpl::new(client.clone())),
+            capi_detector: Arc::new(KubeCapiDetector::new(client.clone())),
+            capi_installer: Arc::new(ClusterctlInstaller::new()),
+            capi_namespace: "default".to_string(),
+            bootstrap: Some(bootstrap),
+            agent_registry: Some(agent_registry),
+            pivot_ops: Some(pivot_ops),
         }
     }
 
@@ -409,6 +622,8 @@ impl Context {
             capi_installer,
             capi_namespace: namespace.to_string(),
             bootstrap: None,
+            agent_registry: None,
+            pivot_ops: None,
         }
     }
 
@@ -430,6 +645,34 @@ impl Context {
             capi_installer,
             capi_namespace: namespace.to_string(),
             bootstrap: Some(bootstrap),
+            agent_registry: None,
+            pivot_ops: None,
+        }
+    }
+
+    /// Create a new controller context with all custom implementations
+    ///
+    /// This is primarily used for testing with mock clients.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_all(
+        kube: Arc<dyn KubeClient>,
+        capi: Arc<dyn CAPIClient>,
+        capi_detector: Arc<dyn CapiDetector>,
+        capi_installer: Arc<dyn CapiInstaller>,
+        bootstrap: Option<Arc<dyn ClusterBootstrap>>,
+        agent_registry: Option<SharedAgentRegistry>,
+        pivot_ops: Option<Arc<dyn PivotOperations>>,
+        namespace: &str,
+    ) -> Self {
+        Self {
+            kube,
+            capi,
+            capi_detector,
+            capi_installer,
+            capi_namespace: namespace.to_string(),
+            bootstrap,
+            agent_registry,
+            pivot_ops,
         }
     }
 }
@@ -491,7 +734,9 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Apply CAPI manifests
             info!(count = manifests.len(), "applying CAPI manifests");
-            ctx.capi.apply_manifests(&manifests, &ctx.capi_namespace).await?;
+            ctx.capi
+                .apply_manifests(&manifests, &ctx.capi_namespace)
+                .await?;
 
             // Update status to Provisioning
             info!("transitioning to Provisioning phase");
@@ -502,7 +747,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Check if CAPI infrastructure is ready
             debug!("checking infrastructure status");
 
-            let is_ready = ctx.capi.is_infrastructure_ready(&name, &ctx.capi_namespace).await?;
+            let is_ready = ctx
+                .capi
+                .is_infrastructure_ready(&name, &ctx.capi_namespace)
+                .await?;
 
             if is_ready {
                 // Infrastructure is ready, transition to Pivoting
@@ -516,14 +764,94 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             }
         }
         ClusterPhase::Pivoting => {
-            // TODO: Check pivot status and transition to Ready when complete
-            // For now, this would be handled by the agent sending pivot_complete
-            debug!("cluster is pivoting");
-            Ok(Action::requeue(Duration::from_secs(10)))
+            // Check if we have pivot operations configured (cell mode)
+            if let Some(ref pivot_ops) = ctx.pivot_ops {
+                // Check if pivot is already complete
+                if pivot_ops.is_pivot_complete(&name) {
+                    info!("pivot complete, transitioning to Ready phase");
+                    update_status_ready(&cluster, &ctx).await?;
+                    return Ok(Action::requeue(Duration::from_secs(60)));
+                }
+
+                // Check if agent is connected and ready for pivot
+                if pivot_ops.is_agent_ready(&name) {
+                    // Store post-pivot manifests before triggering pivot
+                    // These will be sent to the agent after PivotComplete
+                    use kube::CustomResourceExt;
+                    let crd_yaml = serde_yaml::to_string(&LatticeCluster::crd())
+                        .map_err(|e| Error::serialization(e.to_string()))?;
+                    let cluster_yaml = serde_yaml::to_string(cluster.as_ref())
+                        .map_err(|e| Error::serialization(e.to_string()))?;
+
+                    pivot_ops.store_post_pivot_manifests(&name, Some(crd_yaml), Some(cluster_yaml));
+
+                    // Agent is ready, trigger pivot if not already in progress
+                    // The pivot_ops checks internally if pivot is already running
+                    info!("agent ready, triggering pivot");
+                    match pivot_ops
+                        .trigger_pivot(&name, &ctx.capi_namespace, "default")
+                        .await
+                    {
+                        Ok(()) => {
+                            debug!("pivot triggered successfully, waiting for completion");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "pivot trigger failed, will retry");
+                        }
+                    }
+                } else {
+                    debug!("waiting for agent to connect and be ready for pivot");
+                }
+
+                // Requeue to check pivot progress
+                Ok(Action::requeue(Duration::from_secs(10)))
+            } else {
+                // No pivot operations - this is a non-cell mode
+                // Just transition to Ready since pivot is not applicable
+                debug!("no pivot operations configured, transitioning to Ready");
+                update_status_ready(&cluster, &ctx).await?;
+                Ok(Action::requeue(Duration::from_secs(60)))
+            }
         }
         ClusterPhase::Ready => {
-            // Cluster is ready, check for drift
-            debug!("cluster is ready");
+            // Cluster is ready, check for drift and ensure control plane is properly tainted
+            debug!("cluster is ready, checking worker status and control plane taints");
+
+            // Get desired worker count from spec
+            let desired_workers = cluster.spec.nodes.workers;
+
+            // Get current ready worker count
+            let ready_workers = ctx.kube.get_ready_worker_count().await.unwrap_or(0);
+
+            debug!(
+                desired = desired_workers,
+                ready = ready_workers,
+                "worker node status"
+            );
+
+            // If workers match spec, ensure control plane is tainted
+            if ready_workers >= desired_workers {
+                // Check if control plane nodes need tainting
+                let tainted = ctx
+                    .kube
+                    .are_control_plane_nodes_tainted()
+                    .await
+                    .unwrap_or(true);
+
+                if !tainted {
+                    info!(
+                        workers = ready_workers,
+                        "workers ready, re-tainting control plane nodes"
+                    );
+
+                    if let Err(e) = ctx.kube.taint_control_plane_nodes().await {
+                        warn!(error = %e, "failed to taint control plane nodes, will retry");
+                    } else {
+                        info!("control plane nodes tainted successfully");
+                    }
+                }
+            }
+
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         ClusterPhase::Failed => {
@@ -568,15 +896,21 @@ async fn generate_capi_manifests(
         }
         ProviderType::Aws => {
             // TODO: Implement AWS provider
-            Err(Error::Provider("AWS provider not yet implemented".to_string()))
+            Err(Error::Provider(
+                "AWS provider not yet implemented".to_string(),
+            ))
         }
         ProviderType::Gcp => {
             // TODO: Implement GCP provider
-            Err(Error::Provider("GCP provider not yet implemented".to_string()))
+            Err(Error::Provider(
+                "GCP provider not yet implemented".to_string(),
+            ))
         }
         ProviderType::Azure => {
             // TODO: Implement Azure provider
-            Err(Error::Provider("Azure provider not yet implemented".to_string()))
+            Err(Error::Provider(
+                "Azure provider not yet implemented".to_string(),
+            ))
         }
     }
 }
@@ -649,6 +983,27 @@ async fn update_status_pivoting(cluster: &LatticeCluster, ctx: &Context) -> Resu
     Ok(())
 }
 
+/// Update cluster status to Ready phase
+async fn update_status_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<(), Error> {
+    let name = cluster.name_any();
+
+    let condition = ClusterCondition::new(
+        "Ready",
+        ConditionStatus::True,
+        "ClusterReady",
+        "Cluster is self-managed and ready",
+    );
+
+    let status = LatticeClusterStatus::with_phase(ClusterPhase::Ready)
+        .message("Cluster is self-managed and ready")
+        .condition(condition);
+
+    ctx.kube.patch_status(&name, &status).await?;
+
+    info!("updated status to Ready");
+    Ok(())
+}
+
 /// Update cluster status to Failed phase
 async fn update_status_failed(
     cluster: &LatticeCluster,
@@ -668,6 +1023,113 @@ async fn update_status_failed(
 
     warn!(message, "updated status to Failed");
     Ok(())
+}
+
+/// Real implementation of PivotOperations using AgentRegistry and PivotOrchestrator
+pub struct PivotOperationsImpl {
+    /// Agent registry for sending commands
+    agent_registry: SharedAgentRegistry,
+    /// Set of clusters where pivot has been triggered (to avoid double-triggering)
+    pivot_in_progress: dashmap::DashSet<String>,
+}
+
+impl PivotOperationsImpl {
+    /// Create a new PivotOperationsImpl
+    pub fn new(agent_registry: SharedAgentRegistry) -> Self {
+        Self {
+            agent_registry,
+            pivot_in_progress: dashmap::DashSet::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl PivotOperations for PivotOperationsImpl {
+    async fn trigger_pivot(
+        &self,
+        cluster_name: &str,
+        source_namespace: &str,
+        target_namespace: &str,
+    ) -> Result<(), Error> {
+        // Check if pivot is already in progress
+        if self.pivot_in_progress.contains(cluster_name) {
+            debug!(cluster = %cluster_name, "pivot already in progress");
+            return Ok(());
+        }
+
+        // Check if agent is connected
+        let agent_ref = self.agent_registry.get(cluster_name);
+        if agent_ref.is_none() {
+            return Err(Error::Pivot(format!(
+                "agent not connected for cluster {}",
+                cluster_name
+            )));
+        }
+
+        // Mark pivot as in progress
+        self.pivot_in_progress.insert(cluster_name.to_string());
+
+        // Send StartPivotCommand to agent
+        let command_id = uuid::Uuid::new_v4().to_string();
+        let start_pivot_cmd = CellCommand {
+            command_id,
+            command: Some(cell_command::Command::StartPivot(StartPivotCommand {
+                source_namespace: source_namespace.to_string(),
+                target_namespace: target_namespace.to_string(),
+                cluster_name: cluster_name.to_string(),
+            })),
+        };
+
+        match self
+            .agent_registry
+            .send_command(cluster_name, start_pivot_cmd)
+            .await
+        {
+            Ok(()) => {
+                info!(cluster = %cluster_name, "StartPivotCommand sent to agent");
+                // The actual clusterctl move will be triggered after agent confirms PivotStarted
+                // This is handled by the gRPC server when it receives PivotStarted from agent
+                Ok(())
+            }
+            Err(e) => {
+                // Remove from in-progress on failure
+                self.pivot_in_progress.remove(cluster_name);
+                Err(Error::Pivot(format!("failed to send pivot command: {}", e)))
+            }
+        }
+    }
+
+    fn is_agent_ready(&self, cluster_name: &str) -> bool {
+        if let Some(agent) = self.agent_registry.get(cluster_name) {
+            agent.is_ready_for_pivot()
+        } else {
+            false
+        }
+    }
+
+    fn is_pivot_complete(&self, cluster_name: &str) -> bool {
+        if let Some(agent) = self.agent_registry.get(cluster_name) {
+            matches!(agent.state, AgentState::Ready)
+        } else {
+            false
+        }
+    }
+
+    fn store_post_pivot_manifests(
+        &self,
+        cluster_name: &str,
+        crd_yaml: Option<String>,
+        cluster_yaml: Option<String>,
+    ) {
+        use crate::agent::connection::PostPivotManifests;
+
+        let manifests = PostPivotManifests {
+            crd_yaml,
+            cluster_yaml,
+        };
+        self.agent_registry
+            .set_post_pivot_manifests(cluster_name, manifests);
+    }
 }
 
 #[cfg(test)]
@@ -837,9 +1299,7 @@ mod tests {
         fn mock_capi_already_installed() -> (Arc<MockCapiDetector>, Arc<MockCapiInstaller>) {
             let mut detector = MockCapiDetector::new();
             // CAPI is already installed
-            detector
-                .expect_crd_exists()
-                .returning(|_, _| Ok(true));
+            detector.expect_crd_exists().returning(|_, _| Ok(true));
             let installer = MockCapiInstaller::new();
             (Arc::new(detector), Arc::new(installer))
         }
@@ -851,11 +1311,10 @@ mod tests {
             let capture_clone = capture.clone();
 
             let mut mock = MockKubeClient::new();
-            mock.expect_patch_status()
-                .returning(move |_, status| {
-                    capture_clone.record(status.clone());
-                    Ok(())
-                });
+            mock.expect_patch_status().returning(move |_, status| {
+                capture_clone.record(status.clone());
+                Ok(())
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
@@ -876,7 +1335,13 @@ mod tests {
 
         /// Creates a context for read-only scenarios where no status updates happen.
         fn mock_context_readonly() -> Arc<Context> {
-            let mock = MockKubeClient::new();
+            let mut mock = MockKubeClient::new();
+            // Default expectations for node operations (Ready phase)
+            mock.expect_get_ready_worker_count().returning(|| Ok(0));
+            mock.expect_are_control_plane_nodes_tainted()
+                .returning(|| Ok(true));
+            mock.expect_taint_control_plane_nodes().returning(|| Ok(()));
+
             let mut capi_mock = MockCAPIClient::new();
             capi_mock
                 .expect_is_infrastructure_ready()
@@ -897,11 +1362,10 @@ mod tests {
             let capture_clone = capture.clone();
 
             let mut mock = MockKubeClient::new();
-            mock.expect_patch_status()
-                .returning(move |_, status| {
-                    capture_clone.record(status.clone());
-                    Ok(())
-                });
+            mock.expect_patch_status().returning(move |_, status| {
+                capture_clone.record(status.clone());
+                Ok(())
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock
@@ -932,7 +1396,9 @@ mod tests {
             let cluster = Arc::new(sample_cluster("new-cluster"));
             let (ctx, capture) = mock_context_with_status_capture();
 
-            let action = reconcile(cluster, ctx).await.expect("reconcile should succeed");
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
 
             // Verify observable outcomes:
             // 1. Status was updated to Provisioning phase
@@ -949,7 +1415,9 @@ mod tests {
             let cluster = Arc::new(cluster_with_phase("pending-cluster", ClusterPhase::Pending));
             let (ctx, capture) = mock_context_with_status_capture();
 
-            let action = reconcile(cluster, ctx).await.expect("reconcile should succeed");
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
 
             assert!(capture.was_updated(), "status should be updated");
             assert_eq!(capture.last_phase(), Some(ClusterPhase::Provisioning));
@@ -966,7 +1434,9 @@ mod tests {
             ));
             let ctx = mock_context_readonly();
 
-            let action = reconcile(cluster, ctx).await.expect("reconcile should succeed");
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
 
             // Observable outcome: longer requeue interval while waiting
             assert_eq!(action, Action::requeue(Duration::from_secs(30)));
@@ -982,26 +1452,15 @@ mod tests {
             ));
             let (ctx, capture) = mock_context_infra_ready_with_capture();
 
-            let action = reconcile(cluster, ctx).await.expect("reconcile should succeed");
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
 
             // Verify transition to Pivoting phase
             assert!(capture.was_updated(), "status should be updated");
             assert_eq!(capture.last_phase(), Some(ClusterPhase::Pivoting));
             // Quick requeue to monitor pivot progress
             assert_eq!(action, Action::requeue(Duration::from_secs(5)));
-        }
-
-        /// Story: During the pivot phase, the controller monitors the agent's
-        /// progress importing CAPI resources into the workload cluster.
-        #[tokio::test]
-        async fn story_pivoting_cluster_monitors_progress() {
-            let cluster = Arc::new(cluster_with_phase("pivoting-cluster", ClusterPhase::Pivoting));
-            let ctx = mock_context_readonly();
-
-            let action = reconcile(cluster, ctx).await.expect("reconcile should succeed");
-
-            // Moderate requeue interval during pivot
-            assert_eq!(action, Action::requeue(Duration::from_secs(10)));
         }
 
         /// Story: Once a cluster is fully self-managing, the controller only needs
@@ -1011,7 +1470,9 @@ mod tests {
             let cluster = Arc::new(cluster_with_phase("ready-cluster", ClusterPhase::Ready));
             let ctx = mock_context_readonly();
 
-            let action = reconcile(cluster, ctx).await.expect("reconcile should succeed");
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
 
             // Long requeue interval for healthy clusters
             assert_eq!(action, Action::requeue(Duration::from_secs(60)));
@@ -1024,7 +1485,9 @@ mod tests {
             let cluster = Arc::new(cluster_with_phase("failed-cluster", ClusterPhase::Failed));
             let ctx = mock_context_readonly();
 
-            let action = reconcile(cluster, ctx).await.expect("reconcile should succeed");
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
 
             // Wait for spec changes, don't retry on timer
             assert_eq!(action, Action::await_change());
@@ -1037,7 +1500,9 @@ mod tests {
             let cluster = Arc::new(invalid_cluster("invalid-cluster"));
             let (ctx, capture) = mock_context_with_status_capture();
 
-            let action = reconcile(cluster, ctx).await.expect("reconcile should succeed");
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
 
             // Verify transition to Failed phase
             assert!(capture.was_updated(), "status should be updated");
@@ -1075,7 +1540,10 @@ mod tests {
 
             // Observable outcome: error propagates for retry
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("connection refused"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("connection refused"));
         }
 
         /// Story: CAPI manifest application failures should propagate so the
@@ -1104,7 +1572,10 @@ mod tests {
 
             // Observable outcome: error with context propagates
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("CAPI apply failed"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("CAPI apply failed"));
         }
     }
 
@@ -1175,7 +1646,10 @@ mod tests {
             let result = update_status_provisioning(&cluster, &ctx).await;
 
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("connection failed"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("connection failed"));
         }
     }
 
@@ -1217,13 +1691,22 @@ mod tests {
             assert_eq!(pluralize_kind("MachineDeployment"), "machinedeployments");
 
             // Control plane kinds
-            assert_eq!(pluralize_kind("KubeadmControlPlane"), "kubeadmcontrolplanes");
-            assert_eq!(pluralize_kind("KubeadmConfigTemplate"), "kubeadmconfigtemplates");
+            assert_eq!(
+                pluralize_kind("KubeadmControlPlane"),
+                "kubeadmcontrolplanes"
+            );
+            assert_eq!(
+                pluralize_kind("KubeadmConfigTemplate"),
+                "kubeadmconfigtemplates"
+            );
 
             // Docker infrastructure kinds
             assert_eq!(pluralize_kind("DockerCluster"), "dockerclusters");
             assert_eq!(pluralize_kind("DockerMachine"), "dockermachines");
-            assert_eq!(pluralize_kind("DockerMachineTemplate"), "dockermachinetemplates");
+            assert_eq!(
+                pluralize_kind("DockerMachineTemplate"),
+                "dockermachinetemplates"
+            );
         }
 
         /// Story: Unknown resource kinds should fall back to simple 's' suffix pluralization.
@@ -1322,7 +1805,9 @@ mod tests {
 
             assert!(result.is_err());
             let err = result.unwrap_err();
-            assert!(err.to_string().contains("Azure provider not yet implemented"));
+            assert!(err
+                .to_string()
+                .contains("Azure provider not yet implemented"));
         }
     }
 
@@ -1354,7 +1839,10 @@ mod tests {
             }
 
             fn was_cluster_registered(&self, cluster_id: &str) -> bool {
-                self.registered_clusters.lock().unwrap().contains(&cluster_id.to_string())
+                self.registered_clusters
+                    .lock()
+                    .unwrap()
+                    .contains(&cluster_id.to_string())
             }
         }
 
@@ -1365,12 +1853,18 @@ mod tests {
                 _cell_endpoint: String,
                 _ca_certificate: String,
             ) -> String {
-                self.registered_clusters.lock().unwrap().push(cluster_id.clone());
+                self.registered_clusters
+                    .lock()
+                    .unwrap()
+                    .push(cluster_id.clone());
                 format!("bootstrap-token-for-{}", cluster_id)
             }
 
             fn is_cluster_registered(&self, cluster_id: &str) -> bool {
-                self.registered_clusters.lock().unwrap().contains(&cluster_id.to_string())
+                self.registered_clusters
+                    .lock()
+                    .unwrap()
+                    .contains(&cluster_id.to_string())
             }
 
             fn cell_endpoint(&self) -> &str {
@@ -1513,8 +2007,13 @@ mod tests {
                 .expect("Should have KubeadmControlPlane manifest");
 
             // The spec should contain postKubeadmCommands with the bootstrap token
-            let spec = kcp.spec.as_ref().expect("KubeadmControlPlane should have spec");
-            let kubeadm_config = spec.get("kubeadmConfigSpec").expect("Should have kubeadmConfigSpec");
+            let spec = kcp
+                .spec
+                .as_ref()
+                .expect("KubeadmControlPlane should have spec");
+            let kubeadm_config = spec
+                .get("kubeadmConfigSpec")
+                .expect("Should have kubeadmConfigSpec");
             let post_commands = kubeadm_config.get("postKubeadmCommands");
 
             assert!(post_commands.is_some(), "Should have postKubeadmCommands");
@@ -1536,9 +2035,21 @@ mod tests {
         fn story_capi_api_versions_split_correctly() {
             let test_cases = vec![
                 ("cluster.x-k8s.io/v1beta1", "cluster.x-k8s.io", "v1beta1"),
-                ("infrastructure.cluster.x-k8s.io/v1beta1", "infrastructure.cluster.x-k8s.io", "v1beta1"),
-                ("controlplane.cluster.x-k8s.io/v1beta1", "controlplane.cluster.x-k8s.io", "v1beta1"),
-                ("bootstrap.cluster.x-k8s.io/v1beta1", "bootstrap.cluster.x-k8s.io", "v1beta1"),
+                (
+                    "infrastructure.cluster.x-k8s.io/v1beta1",
+                    "infrastructure.cluster.x-k8s.io",
+                    "v1beta1",
+                ),
+                (
+                    "controlplane.cluster.x-k8s.io/v1beta1",
+                    "controlplane.cluster.x-k8s.io",
+                    "v1beta1",
+                ),
+                (
+                    "bootstrap.cluster.x-k8s.io/v1beta1",
+                    "bootstrap.cluster.x-k8s.io",
+                    "v1beta1",
+                ),
             ];
 
             for (input, expected_group, expected_version) in test_cases {
@@ -1583,13 +2094,22 @@ mod tests {
             assert_eq!(pluralize_kind("MachineDeployment"), "machinedeployments");
 
             // Control plane resources
-            assert_eq!(pluralize_kind("KubeadmControlPlane"), "kubeadmcontrolplanes");
-            assert_eq!(pluralize_kind("KubeadmConfigTemplate"), "kubeadmconfigtemplates");
+            assert_eq!(
+                pluralize_kind("KubeadmControlPlane"),
+                "kubeadmcontrolplanes"
+            );
+            assert_eq!(
+                pluralize_kind("KubeadmConfigTemplate"),
+                "kubeadmconfigtemplates"
+            );
 
             // Docker provider resources
             assert_eq!(pluralize_kind("DockerCluster"), "dockerclusters");
             assert_eq!(pluralize_kind("DockerMachine"), "dockermachines");
-            assert_eq!(pluralize_kind("DockerMachineTemplate"), "dockermachinetemplates");
+            assert_eq!(
+                pluralize_kind("DockerMachineTemplate"),
+                "dockermachinetemplates"
+            );
         }
 
         /// Story: Unknown resource kinds should use simple 's' suffix fallback
@@ -1646,7 +2166,9 @@ mod tests {
                 "default",
             ));
 
-            let action = reconcile(cluster, ctx).await.expect("reconcile should succeed");
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
 
             // Should requeue with longer interval while waiting
             assert_eq!(action, Action::requeue(Duration::from_secs(30)));
@@ -1663,15 +2185,15 @@ mod tests {
                 ClusterPhase::Provisioning,
             ));
 
-            let updates: StdArc<Mutex<Vec<LatticeClusterStatus>>> = StdArc::new(Mutex::new(Vec::new()));
+            let updates: StdArc<Mutex<Vec<LatticeClusterStatus>>> =
+                StdArc::new(Mutex::new(Vec::new()));
             let updates_clone = updates.clone();
 
             let mut mock = MockKubeClient::new();
-            mock.expect_patch_status()
-                .returning(move |_, status| {
-                    updates_clone.lock().unwrap().push(status.clone());
-                    Ok(())
-                });
+            mock.expect_patch_status().returning(move |_, status| {
+                updates_clone.lock().unwrap().push(status.clone());
+                Ok(())
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             // Infrastructure IS ready
@@ -1690,7 +2212,9 @@ mod tests {
                 "default",
             ));
 
-            let action = reconcile(cluster, ctx).await.expect("reconcile should succeed");
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
 
             // Should transition to Pivoting and requeue quickly
             let recorded = updates.lock().unwrap();
@@ -1730,7 +2254,10 @@ mod tests {
             let result = reconcile(cluster, ctx).await;
 
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("CAPI API unavailable"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("CAPI API unavailable"));
         }
     }
 
@@ -1749,24 +2276,22 @@ mod tests {
         async fn story_capi_already_installed_skips_installation() {
             let cluster = Arc::new(sample_cluster("ready-to-provision"));
 
-            let updates: StdArc<Mutex<Vec<LatticeClusterStatus>>> = StdArc::new(Mutex::new(Vec::new()));
+            let updates: StdArc<Mutex<Vec<LatticeClusterStatus>>> =
+                StdArc::new(Mutex::new(Vec::new()));
             let updates_clone = updates.clone();
 
             let mut mock = MockKubeClient::new();
-            mock.expect_patch_status()
-                .returning(move |_, status| {
-                    updates_clone.lock().unwrap().push(status.clone());
-                    Ok(())
-                });
+            mock.expect_patch_status().returning(move |_, status| {
+                updates_clone.lock().unwrap().push(status.clone());
+                Ok(())
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
 
             let mut detector = MockCapiDetector::new();
             // CAPI is already installed
-            detector
-                .expect_crd_exists()
-                .returning(|_, _| Ok(true));
+            detector.expect_crd_exists().returning(|_, _| Ok(true));
 
             // Installer should NOT be called
             let installer = MockCapiInstaller::new();
@@ -1793,31 +2318,26 @@ mod tests {
         async fn story_capi_not_installed_triggers_installation() {
             let cluster = Arc::new(sample_cluster("needs-capi"));
 
-            let updates: StdArc<Mutex<Vec<LatticeClusterStatus>>> = StdArc::new(Mutex::new(Vec::new()));
+            let updates: StdArc<Mutex<Vec<LatticeClusterStatus>>> =
+                StdArc::new(Mutex::new(Vec::new()));
             let updates_clone = updates.clone();
 
             let mut mock = MockKubeClient::new();
-            mock.expect_patch_status()
-                .returning(move |_, status| {
-                    updates_clone.lock().unwrap().push(status.clone());
-                    Ok(())
-                });
+            mock.expect_patch_status().returning(move |_, status| {
+                updates_clone.lock().unwrap().push(status.clone());
+                Ok(())
+            });
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
 
             let mut detector = MockCapiDetector::new();
             // CAPI is NOT installed initially
-            detector
-                .expect_crd_exists()
-                .returning(|_, _| Ok(false));
+            detector.expect_crd_exists().returning(|_, _| Ok(false));
 
             let mut installer = MockCapiInstaller::new();
             // Installer should be called
-            installer
-                .expect_install()
-                .times(1)
-                .returning(|_| Ok(()));
+            installer.expect_install().times(1).returning(|_| Ok(()));
 
             let ctx = Arc::new(Context::with_clients(
                 Arc::new(mock),
@@ -1843,9 +2363,7 @@ mod tests {
 
             let mut detector = MockCapiDetector::new();
             // CAPI is NOT installed
-            detector
-                .expect_crd_exists()
-                .returning(|_, _| Ok(false));
+            detector.expect_crd_exists().returning(|_, _| Ok(false));
 
             let mut installer = MockCapiInstaller::new();
             // Installation fails
@@ -1888,11 +2406,10 @@ mod tests {
             let captured_clone = captured_status.clone();
 
             let mut mock = MockKubeClient::new();
-            mock.expect_patch_status()
-                .returning(move |_, status| {
-                    *captured_clone.lock().unwrap() = Some(status.clone());
-                    Ok(())
-                });
+            mock.expect_patch_status().returning(move |_, status| {
+                *captured_clone.lock().unwrap() = Some(status.clone());
+                Ok(())
+            });
 
             let ctx = Context::with_clients(
                 Arc::new(mock),
@@ -1925,11 +2442,10 @@ mod tests {
             let captured_clone = captured_status.clone();
 
             let mut mock = MockKubeClient::new();
-            mock.expect_patch_status()
-                .returning(move |_, status| {
-                    *captured_clone.lock().unwrap() = Some(status.clone());
-                    Ok(())
-                });
+            mock.expect_patch_status().returning(move |_, status| {
+                *captured_clone.lock().unwrap() = Some(status.clone());
+                Ok(())
+            });
 
             let ctx = Context::with_clients(
                 Arc::new(mock),
@@ -1961,11 +2477,10 @@ mod tests {
             let captured_clone = captured_status.clone();
 
             let mut mock = MockKubeClient::new();
-            mock.expect_patch_status()
-                .returning(move |_, status| {
-                    *captured_clone.lock().unwrap() = Some(status.clone());
-                    Ok(())
-                });
+            mock.expect_patch_status().returning(move |_, status| {
+                *captured_clone.lock().unwrap() = Some(status.clone());
+                Ok(())
+            });
 
             let ctx = Context::with_clients(
                 Arc::new(mock),
@@ -1976,7 +2491,9 @@ mod tests {
             );
 
             let error_msg = "control plane count must be at least 1";
-            update_status_failed(&cluster, &ctx, error_msg).await.unwrap();
+            update_status_failed(&cluster, &ctx, error_msg)
+                .await
+                .unwrap();
 
             let status = captured_status.lock().unwrap().clone().unwrap();
             assert_eq!(status.phase, ClusterPhase::Failed);
@@ -2059,6 +2576,340 @@ mod tests {
                     phase
                 );
             }
+        }
+    }
+
+    /// Pivoting Phase Orchestration Tests
+    ///
+    /// These tests verify the reconcile behavior during the Pivoting phase
+    /// when pivot_ops is configured. This covers the agent readiness checks,
+    /// pivot triggering, and post-pivot manifest storage.
+    mod pivoting_phase_orchestration {
+        use super::*;
+        use crate::capi::{MockCapiDetector, MockCapiInstaller};
+        use std::sync::{Arc as StdArc, Mutex};
+
+        /// Test implementation of PivotOperations for controlled testing
+        struct TestPivotOps {
+            agent_ready: bool,
+            pivot_complete: bool,
+            trigger_should_fail: bool,
+            stored_manifests: StdArc<Mutex<Option<(String, Option<String>, Option<String>)>>>,
+        }
+
+        impl TestPivotOps {
+            fn agent_ready() -> Self {
+                Self {
+                    agent_ready: true,
+                    pivot_complete: false,
+                    trigger_should_fail: false,
+                    stored_manifests: StdArc::new(Mutex::new(None)),
+                }
+            }
+
+            fn agent_not_ready() -> Self {
+                Self {
+                    agent_ready: false,
+                    pivot_complete: false,
+                    trigger_should_fail: false,
+                    stored_manifests: StdArc::new(Mutex::new(None)),
+                }
+            }
+
+            fn pivot_already_complete() -> Self {
+                Self {
+                    agent_ready: true,
+                    pivot_complete: true,
+                    trigger_should_fail: false,
+                    stored_manifests: StdArc::new(Mutex::new(None)),
+                }
+            }
+
+            fn pivot_trigger_fails() -> Self {
+                Self {
+                    agent_ready: true,
+                    pivot_complete: false,
+                    trigger_should_fail: true,
+                    stored_manifests: StdArc::new(Mutex::new(None)),
+                }
+            }
+
+            fn manifests_were_stored(&self) -> bool {
+                self.stored_manifests.lock().unwrap().is_some()
+            }
+        }
+
+        #[async_trait]
+        impl PivotOperations for TestPivotOps {
+            async fn trigger_pivot(
+                &self,
+                _cluster_name: &str,
+                _source_namespace: &str,
+                _target_namespace: &str,
+            ) -> Result<(), Error> {
+                if self.trigger_should_fail {
+                    Err(Error::Pivot("trigger failed".to_string()))
+                } else {
+                    Ok(())
+                }
+            }
+
+            fn is_agent_ready(&self, _cluster_name: &str) -> bool {
+                self.agent_ready
+            }
+
+            fn is_pivot_complete(&self, _cluster_name: &str) -> bool {
+                self.pivot_complete
+            }
+
+            fn store_post_pivot_manifests(
+                &self,
+                cluster_name: &str,
+                crd_yaml: Option<String>,
+                cluster_yaml: Option<String>,
+            ) {
+                *self.stored_manifests.lock().unwrap() =
+                    Some((cluster_name.to_string(), crd_yaml, cluster_yaml));
+            }
+        }
+
+        /// Captured status for verification
+        #[derive(Clone)]
+        struct StatusCapture {
+            updates: StdArc<Mutex<Vec<LatticeClusterStatus>>>,
+        }
+
+        impl StatusCapture {
+            fn new() -> Self {
+                Self {
+                    updates: StdArc::new(Mutex::new(Vec::new())),
+                }
+            }
+
+            fn record(&self, status: LatticeClusterStatus) {
+                self.updates.lock().unwrap().push(status);
+            }
+
+            fn last_phase(&self) -> Option<ClusterPhase> {
+                self.updates.lock().unwrap().last().map(|s| s.phase.clone())
+            }
+        }
+
+        fn mock_context_with_pivot_ops(
+            pivot_ops: Arc<dyn PivotOperations>,
+        ) -> (Arc<Context>, StatusCapture) {
+            let capture = StatusCapture::new();
+            let capture_clone = capture.clone();
+
+            let mut mock = MockKubeClient::new();
+            mock.expect_patch_status().returning(move |_, status| {
+                capture_clone.record(status.clone());
+                Ok(())
+            });
+
+            let capi_mock = MockCAPIClient::new();
+
+            let mut detector = MockCapiDetector::new();
+            detector.expect_crd_exists().returning(|_, _| Ok(true));
+            let installer = MockCapiInstaller::new();
+
+            let ctx = Context::with_all(
+                Arc::new(mock),
+                Arc::new(capi_mock),
+                Arc::new(detector),
+                Arc::new(installer),
+                None, // no bootstrap
+                None, // no agent registry
+                Some(pivot_ops),
+                "default",
+            );
+
+            (Arc::new(ctx), capture)
+        }
+
+        /// Story: When pivot is already complete (agent in Ready state),
+        /// the controller should transition to Ready phase.
+        #[tokio::test]
+        async fn story_pivot_complete_transitions_to_ready() {
+            let cluster = Arc::new(cluster_with_phase("pivot-done", ClusterPhase::Pivoting));
+            let pivot_ops = Arc::new(TestPivotOps::pivot_already_complete());
+            let (ctx, capture) = mock_context_with_pivot_ops(pivot_ops);
+
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
+
+            // Should transition to Ready
+            assert_eq!(capture.last_phase(), Some(ClusterPhase::Ready));
+            assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        }
+
+        /// Story: When agent is ready for pivot, controller should store
+        /// post-pivot manifests and trigger the pivot operation.
+        #[tokio::test]
+        async fn story_agent_ready_triggers_pivot() {
+            let cluster = Arc::new(cluster_with_phase("pivot-ready", ClusterPhase::Pivoting));
+            let pivot_ops = Arc::new(TestPivotOps::agent_ready());
+            let (ctx, _capture) = mock_context_with_pivot_ops(pivot_ops.clone());
+
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
+
+            // Manifests should be stored before pivot
+            assert!(pivot_ops.manifests_were_stored());
+            // Should requeue to check pivot progress
+            assert_eq!(action, Action::requeue(Duration::from_secs(10)));
+        }
+
+        /// Story: When agent is not yet connected, controller should wait
+        /// and requeue without triggering pivot.
+        #[tokio::test]
+        async fn story_agent_not_ready_waits() {
+            let cluster = Arc::new(cluster_with_phase("waiting-agent", ClusterPhase::Pivoting));
+            let pivot_ops = Arc::new(TestPivotOps::agent_not_ready());
+            let (ctx, _capture) = mock_context_with_pivot_ops(pivot_ops.clone());
+
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
+
+            // Manifests should NOT be stored (agent not ready)
+            assert!(!pivot_ops.manifests_were_stored());
+            // Should requeue to check again
+            assert_eq!(action, Action::requeue(Duration::from_secs(10)));
+        }
+
+        /// Story: When pivot trigger fails, controller should continue and retry
+        /// (error is logged but doesn't fail reconcile).
+        #[tokio::test]
+        async fn story_pivot_trigger_failure_continues() {
+            let cluster = Arc::new(cluster_with_phase("trigger-fail", ClusterPhase::Pivoting));
+            let pivot_ops = Arc::new(TestPivotOps::pivot_trigger_fails());
+            let (ctx, _capture) = mock_context_with_pivot_ops(pivot_ops);
+
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
+
+            // Should still requeue to retry
+            assert_eq!(action, Action::requeue(Duration::from_secs(10)));
+        }
+
+        /// Story: When no pivot_ops is configured (non-cell mode),
+        /// Pivoting phase should immediately transition to Ready.
+        #[tokio::test]
+        async fn story_no_pivot_ops_skips_to_ready() {
+            let cluster = Arc::new(cluster_with_phase("non-cell", ClusterPhase::Pivoting));
+
+            let capture = StatusCapture::new();
+            let capture_clone = capture.clone();
+
+            let mut mock = MockKubeClient::new();
+            mock.expect_patch_status().returning(move |_, status| {
+                capture_clone.record(status.clone());
+                Ok(())
+            });
+
+            let capi_mock = MockCAPIClient::new();
+            let mut detector = MockCapiDetector::new();
+            detector.expect_crd_exists().returning(|_, _| Ok(true));
+            let installer = MockCapiInstaller::new();
+
+            // Context WITHOUT pivot_ops
+            let ctx = Arc::new(Context::with_clients(
+                Arc::new(mock),
+                Arc::new(capi_mock),
+                Arc::new(detector),
+                Arc::new(installer),
+                "default",
+            ));
+
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
+
+            // Should transition directly to Ready
+            assert_eq!(capture.last_phase(), Some(ClusterPhase::Ready));
+            assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        }
+    }
+
+    /// PivotOperationsImpl Tests
+    ///
+    /// These tests verify the real implementation of PivotOperations
+    /// that uses the AgentRegistry for pivot orchestration.
+    mod pivot_operations_tests {
+        use super::*;
+        use crate::agent::connection::AgentRegistry;
+
+        /// Story: Creating a new PivotOperationsImpl should work
+        #[test]
+        fn story_create_pivot_operations() {
+            let registry = Arc::new(AgentRegistry::new());
+            let ops = PivotOperationsImpl::new(registry);
+            // Just verify it can be created
+            assert!(!ops.is_agent_ready("nonexistent-cluster"));
+        }
+
+        /// Story: Agent ready check should return false for unconnected cluster
+        #[test]
+        fn story_agent_not_ready_when_not_connected() {
+            let registry = Arc::new(AgentRegistry::new());
+            let ops = PivotOperationsImpl::new(registry);
+
+            assert!(!ops.is_agent_ready("test-cluster"));
+        }
+
+        /// Story: Pivot complete check should return false for unconnected cluster
+        #[test]
+        fn story_pivot_not_complete_when_not_connected() {
+            let registry = Arc::new(AgentRegistry::new());
+            let ops = PivotOperationsImpl::new(registry);
+
+            assert!(!ops.is_pivot_complete("test-cluster"));
+        }
+
+        /// Story: Trigger pivot should fail when agent is not connected
+        #[tokio::test]
+        async fn story_trigger_pivot_fails_when_no_agent() {
+            let registry = Arc::new(AgentRegistry::new());
+            let ops = PivotOperationsImpl::new(registry);
+
+            let result = ops
+                .trigger_pivot("test-cluster", "default", "default")
+                .await;
+
+            assert!(result.is_err());
+            match result {
+                Err(Error::Pivot(msg)) => {
+                    assert!(msg.contains("agent not connected"));
+                }
+                _ => panic!("Expected Pivot error"),
+            }
+        }
+
+        /// Story: Double-triggering pivot should be idempotent
+        #[tokio::test]
+        async fn story_double_trigger_is_idempotent() {
+            let registry = Arc::new(AgentRegistry::new());
+            let ops = PivotOperationsImpl::new(registry);
+
+            // First trigger fails (no agent)
+            let _ = ops
+                .trigger_pivot("test-cluster", "default", "default")
+                .await;
+
+            // Manually mark as in progress to test idempotency
+            ops.pivot_in_progress.insert("test-cluster".to_string());
+
+            // Second trigger should succeed (returns Ok, not error)
+            let result = ops
+                .trigger_pivot("test-cluster", "default", "default")
+                .await;
+
+            // Should succeed because it recognizes pivot is already in progress
+            assert!(result.is_ok());
         }
     }
 }

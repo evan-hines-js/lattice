@@ -76,10 +76,7 @@ impl AgentConnection {
     /// Send a K8s API proxy request
     pub async fn send_proxy_request(&self, request: KubeProxyRequest) -> Result<(), SendError> {
         match &self.proxy_tx {
-            Some(tx) => tx
-                .send(request)
-                .await
-                .map_err(|_| SendError::ChannelClosed),
+            Some(tx) => tx.send(request).await.map_err(|_| SendError::ChannelClosed),
             None => Err(SendError::ProxyNotAvailable),
         }
     }
@@ -105,6 +102,15 @@ impl std::fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
+/// Post-pivot manifests to send to an agent after PivotComplete
+#[derive(Clone, Debug, Default)]
+pub struct PostPivotManifests {
+    /// LatticeCluster CRD definition YAML
+    pub crd_yaml: Option<String>,
+    /// LatticeCluster resource YAML (the cluster's spec)
+    pub cluster_yaml: Option<String>,
+}
+
 /// Registry of connected agents
 ///
 /// Thread-safe registry using DashMap for concurrent access from
@@ -112,6 +118,8 @@ impl std::error::Error for SendError {}
 #[derive(Default)]
 pub struct AgentRegistry {
     agents: DashMap<String, AgentConnection>,
+    /// Manifests to send to agents after PivotComplete
+    post_pivot_manifests: DashMap<String, PostPivotManifests>,
 }
 
 impl AgentRegistry {
@@ -119,6 +127,7 @@ impl AgentRegistry {
     pub fn new() -> Self {
         Self {
             agents: DashMap::new(),
+            post_pivot_manifests: DashMap::new(),
         }
     }
 
@@ -137,12 +146,18 @@ impl AgentRegistry {
     }
 
     /// Get an agent connection by cluster name
-    pub fn get(&self, cluster_name: &str) -> Option<dashmap::mapref::one::Ref<'_, String, AgentConnection>> {
+    pub fn get(
+        &self,
+        cluster_name: &str,
+    ) -> Option<dashmap::mapref::one::Ref<'_, String, AgentConnection>> {
         self.agents.get(cluster_name)
     }
 
     /// Get a mutable agent connection by cluster name
-    pub fn get_mut(&self, cluster_name: &str) -> Option<dashmap::mapref::one::RefMut<'_, String, AgentConnection>> {
+    pub fn get_mut(
+        &self,
+        cluster_name: &str,
+    ) -> Option<dashmap::mapref::one::RefMut<'_, String, AgentConnection>> {
         self.agents.get_mut(cluster_name)
     }
 
@@ -191,11 +206,39 @@ impl AgentRegistry {
     }
 
     /// Send a command to a specific agent
-    pub async fn send_command(&self, cluster_name: &str, command: CellCommand) -> Result<(), SendError> {
+    pub async fn send_command(
+        &self,
+        cluster_name: &str,
+        command: CellCommand,
+    ) -> Result<(), SendError> {
         match self.agents.get(cluster_name) {
             Some(agent) => agent.send_command(command).await,
             None => Err(SendError::ChannelClosed),
         }
+    }
+
+    /// Store manifests to send after pivot completes
+    ///
+    /// These manifests (LatticeCluster CRD and resource) will be sent
+    /// to the agent via BootstrapCommand after PivotComplete is received.
+    pub fn set_post_pivot_manifests(&self, cluster_name: &str, manifests: PostPivotManifests) {
+        info!(cluster = %cluster_name, "Stored post-pivot manifests");
+        self.post_pivot_manifests
+            .insert(cluster_name.to_string(), manifests);
+    }
+
+    /// Get and remove post-pivot manifests for a cluster
+    ///
+    /// Returns None if no manifests were stored or if they've already been consumed.
+    pub fn take_post_pivot_manifests(&self, cluster_name: &str) -> Option<PostPivotManifests> {
+        self.post_pivot_manifests
+            .remove(cluster_name)
+            .map(|(_, m)| m)
+    }
+
+    /// Check if post-pivot manifests are stored for a cluster
+    pub fn has_post_pivot_manifests(&self, cluster_name: &str) -> bool {
+        self.post_pivot_manifests.contains_key(cluster_name)
     }
 }
 
@@ -298,7 +341,10 @@ mod tests {
             command: None,
         };
 
-        registry.send_command("test-cluster", command).await.unwrap();
+        registry
+            .send_command("test-cluster", command)
+            .await
+            .unwrap();
 
         let received = rx.recv().await.unwrap();
         assert_eq!(received.command_id, "cmd-1");
@@ -349,7 +395,10 @@ mod tests {
             command_id: "pivot-001".to_string(),
             command: None, // Would contain pivot payload
         };
-        registry.send_command("workload-cluster-1", pivot_command).await.unwrap();
+        registry
+            .send_command("workload-cluster-1", pivot_command)
+            .await
+            .unwrap();
 
         // Agent receives the command
         let received = cmd_rx.recv().await.unwrap();
@@ -366,10 +415,15 @@ mod tests {
         drop(cmd_rx);
 
         // Sending to disconnected agent fails gracefully
-        let result = registry.send_command("workload-cluster-1", CellCommand {
-            command_id: "should-fail".to_string(),
-            command: None,
-        }).await;
+        let result = registry
+            .send_command(
+                "workload-cluster-1",
+                CellCommand {
+                    command_id: "should-fail".to_string(),
+                    command: None,
+                },
+            )
+            .await;
         assert!(matches!(result, Err(SendError::ChannelClosed)));
 
         // Act 6: Cleanup - unregister the agent
@@ -407,20 +461,41 @@ mod tests {
         registry.update_state("staging-us-east", AgentState::Pivoting);
         // dev-local stays in Provisioning
 
-        assert_eq!(registry.get("prod-us-west").unwrap().state, AgentState::Ready);
-        assert_eq!(registry.get("staging-us-east").unwrap().state, AgentState::Pivoting);
-        assert_eq!(registry.get("dev-local").unwrap().state, AgentState::Provisioning);
+        assert_eq!(
+            registry.get("prod-us-west").unwrap().state,
+            AgentState::Ready
+        );
+        assert_eq!(
+            registry.get("staging-us-east").unwrap().state,
+            AgentState::Pivoting
+        );
+        assert_eq!(
+            registry.get("dev-local").unwrap().state,
+            AgentState::Provisioning
+        );
 
         // Send targeted commands to specific clusters
-        registry.send_command("prod-us-west", CellCommand {
-            command_id: "reconcile-prod".to_string(),
-            command: None,
-        }).await.unwrap();
+        registry
+            .send_command(
+                "prod-us-west",
+                CellCommand {
+                    command_id: "reconcile-prod".to_string(),
+                    command: None,
+                },
+            )
+            .await
+            .unwrap();
 
-        registry.send_command("staging-us-east", CellCommand {
-            command_id: "pivot-staging".to_string(),
-            command: None,
-        }).await.unwrap();
+        registry
+            .send_command(
+                "staging-us-east",
+                CellCommand {
+                    command_id: "pivot-staging".to_string(),
+                    command: None,
+                },
+            )
+            .await
+            .unwrap();
 
         // Each cluster receives only its command
         let prod_cmd = rx_prod.recv().await.unwrap();
@@ -430,10 +505,15 @@ mod tests {
         assert_eq!(staging_cmd.command_id, "pivot-staging");
 
         // Sending to unknown cluster fails
-        let result = registry.send_command("nonexistent", CellCommand {
-            command_id: "x".to_string(),
-            command: None,
-        }).await;
+        let result = registry
+            .send_command(
+                "nonexistent",
+                CellCommand {
+                    command_id: "x".to_string(),
+                    command: None,
+                },
+            )
+            .await;
         assert!(matches!(result, Err(SendError::ChannelClosed)));
     }
 
@@ -456,13 +536,15 @@ mod tests {
         // Agent can't handle proxy requests yet
         {
             let agent = registry.get("remote-cluster").unwrap();
-            let result = agent.send_proxy_request(KubeProxyRequest {
-                request_id: "req-1".to_string(),
-                method: "GET".to_string(),
-                path: "/api/v1/namespaces".to_string(),
-                headers: vec![],
-                body: vec![],
-            }).await;
+            let result = agent
+                .send_proxy_request(KubeProxyRequest {
+                    request_id: "req-1".to_string(),
+                    method: "GET".to_string(),
+                    path: "/api/v1/namespaces".to_string(),
+                    headers: vec![],
+                    body: vec![],
+                })
+                .await;
             assert!(matches!(result, Err(SendError::ProxyNotAvailable)));
         }
 
@@ -477,13 +559,16 @@ mod tests {
             assert!(agent.has_proxy());
 
             // Send a kubectl request through the proxy
-            agent.send_proxy_request(KubeProxyRequest {
-                request_id: "get-pods".to_string(),
-                method: "GET".to_string(),
-                path: "/api/v1/namespaces/default/pods".to_string(),
-                headers: vec![],
-                body: vec![],
-            }).await.unwrap();
+            agent
+                .send_proxy_request(KubeProxyRequest {
+                    request_id: "get-pods".to_string(),
+                    method: "GET".to_string(),
+                    path: "/api/v1/namespaces/default/pods".to_string(),
+                    headers: vec![],
+                    body: vec![],
+                })
+                .await
+                .unwrap();
         }
 
         // Agent receives the proxied request
@@ -539,7 +624,10 @@ mod tests {
 
         // Cluster having issues but still operational
         conn.set_state(AgentState::Degraded);
-        assert!(conn.is_ready_for_pivot(), "Can pivot from Degraded (recovery)");
+        assert!(
+            conn.is_ready_for_pivot(),
+            "Can pivot from Degraded (recovery)"
+        );
 
         // Active pivot in progress
         conn.set_state(AgentState::Pivoting);
@@ -559,17 +647,21 @@ mod tests {
         conn.send_command(CellCommand {
             command_id: "health-check".to_string(),
             command: None,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let received = rx.recv().await.unwrap();
         assert_eq!(received.command_id, "health-check");
 
         // When agent disconnects, sends fail
         drop(rx);
-        let result = conn.send_command(CellCommand {
-            command_id: "will-fail".to_string(),
-            command: None,
-        }).await;
+        let result = conn
+            .send_command(CellCommand {
+                command_id: "will-fail".to_string(),
+                command: None,
+            })
+            .await;
         assert!(matches!(result, Err(SendError::ChannelClosed)));
     }
 
