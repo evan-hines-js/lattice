@@ -27,6 +27,7 @@
 
 mod token;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use dashmap::DashMap;
+use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, ConfigMapKeySelector,
+    Namespace, PodSpec, PodTemplateSpec, Secret, SecretVolumeSource, ServiceAccount, Volume,
+    VolumeMount,
+};
+use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+use k8s_openapi::ByteString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info};
@@ -181,6 +191,28 @@ impl DefaultManifestGenerator {
     fn render_cilium(config: &CiliumConfig) -> Result<Vec<String>, BootstrapError> {
         use std::process::Command;
 
+        // Add the Cilium helm repo (idempotent - helm handles if already exists)
+        let repo_add = Command::new("helm")
+            .args(["repo", "add", "cilium", config.repo_url])
+            .output()
+            .map_err(|e| BootstrapError::Internal(format!("failed to run helm repo add: {}", e)))?;
+
+        // Ignore "already exists" errors, fail on other errors
+        if !repo_add.status.success() {
+            let stderr = String::from_utf8_lossy(&repo_add.stderr);
+            if !stderr.contains("already exists") {
+                return Err(BootstrapError::Internal(format!(
+                    "helm repo add failed: {}",
+                    stderr
+                )));
+            }
+        }
+
+        // Update the repo to get latest index
+        let _ = Command::new("helm")
+            .args(["repo", "update", "cilium"])
+            .output();
+
         // Cilium helm values for Istio compatibility (matching Elixir POC)
         let values = [
             "--set",
@@ -229,21 +261,20 @@ impl DefaultManifestGenerator {
 
         let yaml_str = String::from_utf8_lossy(&output.stdout);
 
-        // Parse multi-document YAML properly using serde_yaml
-        let manifests: Vec<String> = serde_yaml::Deserializer::from_str(&yaml_str)
-            .filter_map(|doc| {
-                // Deserialize each document as a generic Value
-                let value: serde_yaml::Value = serde_yaml::Value::deserialize(doc).ok()?;
-                // Skip null/empty documents
-                if value.is_null() {
-                    return None;
+        // Split on document separators and filter out empty documents
+        // We avoid serde_yaml round-trip because it corrupts octal values like defaultMode: 0400
+        // by converting them to quoted strings '0400' which K8s rejects
+        let manifests: Vec<String> = yaml_str
+            .split("\n---")
+            .map(|doc| doc.trim())
+            .filter(|doc| !doc.is_empty() && doc.contains("kind:"))
+            .map(|doc| {
+                // Ensure each document starts with ---
+                if doc.starts_with("---") {
+                    doc.to_string()
+                } else {
+                    format!("---\n{}", doc)
                 }
-                // Only include documents that have a "kind" field (valid K8s resources)
-                if value.get("kind").is_none() {
-                    return None;
-                }
-                // Serialize back to YAML string
-                serde_yaml::to_string(&value).ok()
             })
             .collect();
 
@@ -258,27 +289,10 @@ impl DefaultManifestGenerator {
         cell_endpoint: &str,
         ca_cert: &str,
     ) -> Vec<String> {
-        let namespace = r#"apiVersion: v1
-kind: Namespace
-metadata:
-  name: lattice-system"#
-            .to_string();
-
-        let ca_secret = format!(
-            r#"apiVersion: v1
-kind: Secret
-metadata:
-  name: lattice-ca
-  namespace: lattice-system
-type: Opaque
-data:
-  ca.crt: {}"#,
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ca_cert)
-        );
+        const NAMESPACE: &str = "lattice-system";
 
         // Parse cell_endpoint into HTTP and gRPC endpoints
-        // cell_endpoint format: "host:grpc_port" (e.g., "172.18.255.1:443")
-        // HTTP is on :8080, gRPC (TLS) is on :443 by default
+        // cell_endpoint format: "host:grpc_port" (e.g., "172.18.255.1:50051")
         let (http_endpoint, grpc_endpoint) = {
             let parts: Vec<&str> = cell_endpoint.rsplitn(2, ':').collect();
             if parts.len() == 2 {
@@ -289,7 +303,6 @@ data:
                     format!("https://{}:{}", host, grpc_port),
                 )
             } else {
-                // Fallback - assume host only, use default ports
                 (
                     format!("http://{}:8080", cell_endpoint),
                     format!("https://{}:443", cell_endpoint),
@@ -297,73 +310,190 @@ data:
             }
         };
 
-        let agent_config = format!(
-            r#"apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: lattice-agent-config
-  namespace: lattice-system
-data:
-  cluster_id: "{cluster_id}"
-  cell_http_endpoint: "{http_endpoint}"
-  cell_grpc_endpoint: "{grpc_endpoint}""#
-        );
+        // 1. Namespace
+        let namespace = Namespace {
+            metadata: ObjectMeta {
+                name: Some(NAMESPACE.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
-        // Agent deployment - runs `lattice agent` subcommand
-        let agent_deployment = r#"apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: lattice-agent
-  namespace: lattice-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: lattice-agent
-  template:
-    metadata:
-      labels:
-        app: lattice-agent
-    spec:
-      serviceAccountName: lattice-agent
-      containers:
-      - name: agent
-        image: lattice/agent:latest
-        args:
-        - agent
-        env:
-        - name: CLUSTER_ID
-          valueFrom:
-            configMapKeyRef:
-              name: lattice-agent-config
-              key: cluster_id
-        - name: CELL_HTTP_ENDPOINT
-          valueFrom:
-            configMapKeyRef:
-              name: lattice-agent-config
-              key: cell_http_endpoint
-        - name: CELL_GRPC_ENDPOINT
-          valueFrom:
-            configMapKeyRef:
-              name: lattice-agent-config
-              key: cell_grpc_endpoint
-        - name: CA_CERT_PATH
-          value: /var/run/secrets/lattice/ca/ca.crt
-        volumeMounts:
-        - name: ca-cert
-          mountPath: /var/run/secrets/lattice/ca
-          readOnly: true
-        - name: tls
-          mountPath: /var/run/secrets/lattice/tls
-      volumes:
-      - name: ca-cert
-        secret:
-          secretName: lattice-ca
-      - name: tls
-        emptyDir: {}"#
-            .to_string();
+        // 2. CA Secret
+        let ca_secret = Secret {
+            metadata: ObjectMeta {
+                name: Some("lattice-ca".to_string()),
+                namespace: Some(NAMESPACE.to_string()),
+                ..Default::default()
+            },
+            data: Some(BTreeMap::from([(
+                "ca.crt".to_string(),
+                ByteString(ca_cert.as_bytes().to_vec()),
+            )])),
+            ..Default::default()
+        };
 
-        vec![namespace, ca_secret, agent_config, agent_deployment]
+        // 3. Agent ConfigMap
+        let agent_config = ConfigMap {
+            metadata: ObjectMeta {
+                name: Some("lattice-agent-config".to_string()),
+                namespace: Some(NAMESPACE.to_string()),
+                ..Default::default()
+            },
+            data: Some(BTreeMap::from([
+                ("cluster_id".to_string(), cluster_id.to_string()),
+                ("cell_http_endpoint".to_string(), http_endpoint),
+                ("cell_grpc_endpoint".to_string(), grpc_endpoint),
+            ])),
+            ..Default::default()
+        };
+
+        // 4. ServiceAccount
+        let service_account = ServiceAccount {
+            metadata: ObjectMeta {
+                name: Some("lattice-agent".to_string()),
+                namespace: Some(NAMESPACE.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // 5. ClusterRoleBinding (cluster-admin for pivot operations)
+        let cluster_role_binding = ClusterRoleBinding {
+            metadata: ObjectMeta {
+                name: Some("lattice-agent-cluster-admin".to_string()),
+                ..Default::default()
+            },
+            role_ref: RoleRef {
+                api_group: "rbac.authorization.k8s.io".to_string(),
+                kind: "ClusterRole".to_string(),
+                name: "cluster-admin".to_string(),
+            },
+            subjects: Some(vec![Subject {
+                kind: "ServiceAccount".to_string(),
+                name: "lattice-agent".to_string(),
+                namespace: Some(NAMESPACE.to_string()),
+                ..Default::default()
+            }]),
+        };
+
+        // 6. Agent Deployment
+        let mut labels = BTreeMap::new();
+        labels.insert("app".to_string(), "lattice-agent".to_string());
+
+        let agent_deployment = Deployment {
+            metadata: ObjectMeta {
+                name: Some("lattice-agent".to_string()),
+                namespace: Some(NAMESPACE.to_string()),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(1),
+                selector: LabelSelector {
+                    match_labels: Some(labels.clone()),
+                    ..Default::default()
+                },
+                template: PodTemplateSpec {
+                    metadata: Some(ObjectMeta {
+                        labels: Some(labels),
+                        ..Default::default()
+                    }),
+                    spec: Some(PodSpec {
+                        service_account_name: Some("lattice-agent".to_string()),
+                        containers: vec![Container {
+                            name: "agent".to_string(),
+                            image: Some("ghcr.io/evan-hines-js/lattice:latest".to_string()),
+                            args: Some(vec!["agent".to_string()]),
+                            env: Some(vec![
+                                EnvVar {
+                                    name: "CLUSTER_ID".to_string(),
+                                    value_from: Some(EnvVarSource {
+                                        config_map_key_ref: Some(ConfigMapKeySelector {
+                                            name: "lattice-agent-config".to_string(),
+                                            key: "cluster_id".to_string(),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                EnvVar {
+                                    name: "CELL_HTTP_ENDPOINT".to_string(),
+                                    value_from: Some(EnvVarSource {
+                                        config_map_key_ref: Some(ConfigMapKeySelector {
+                                            name: "lattice-agent-config".to_string(),
+                                            key: "cell_http_endpoint".to_string(),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                EnvVar {
+                                    name: "CELL_GRPC_ENDPOINT".to_string(),
+                                    value_from: Some(EnvVarSource {
+                                        config_map_key_ref: Some(ConfigMapKeySelector {
+                                            name: "lattice-agent-config".to_string(),
+                                            key: "cell_grpc_endpoint".to_string(),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                EnvVar {
+                                    name: "CA_CERT_PATH".to_string(),
+                                    value: Some("/var/run/secrets/lattice/ca/ca.crt".to_string()),
+                                    ..Default::default()
+                                },
+                            ]),
+                            volume_mounts: Some(vec![
+                                VolumeMount {
+                                    name: "ca-cert".to_string(),
+                                    mount_path: "/var/run/secrets/lattice/ca".to_string(),
+                                    read_only: Some(true),
+                                    ..Default::default()
+                                },
+                                VolumeMount {
+                                    name: "tls".to_string(),
+                                    mount_path: "/var/run/secrets/lattice/tls".to_string(),
+                                    ..Default::default()
+                                },
+                            ]),
+                            ..Default::default()
+                        }],
+                        volumes: Some(vec![
+                            Volume {
+                                name: "ca-cert".to_string(),
+                                secret: Some(SecretVolumeSource {
+                                    secret_name: Some("lattice-ca".to_string()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                            Volume {
+                                name: "tls".to_string(),
+                                empty_dir: Some(EmptyDirVolumeSource::default()),
+                                ..Default::default()
+                            },
+                        ]),
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Serialize all resources to JSON (more efficient than YAML, K8s accepts both)
+        vec![
+            serde_json::to_string(&namespace).expect("serialize namespace"),
+            serde_json::to_string(&ca_secret).expect("serialize secret"),
+            serde_json::to_string(&agent_config).expect("serialize configmap"),
+            serde_json::to_string(&service_account).expect("serialize serviceaccount"),
+            serde_json::to_string(&cluster_role_binding).expect("serialize clusterrolebinding"),
+            serde_json::to_string(&agent_deployment).expect("serialize deployment"),
+        ]
     }
 }
 
@@ -859,9 +989,10 @@ mod tests {
         let generator = DefaultManifestGenerator::new().unwrap();
         let manifests = generator.generate("my-cluster", "https://cell:443", "ca-pem");
 
+        // Agent manifests are JSON, check for JSON format
         let has_namespace = manifests
             .iter()
-            .any(|m| m.contains("kind: Namespace") && m.contains("lattice-system"));
+            .any(|m| m.contains("\"kind\":\"Namespace\"") && m.contains("lattice-system"));
         assert!(has_namespace);
     }
 
@@ -870,9 +1001,10 @@ mod tests {
         let generator = DefaultManifestGenerator::new().unwrap();
         let manifests = generator.generate("my-cluster", "https://cell:443", "my-ca-cert");
 
+        // Agent manifests are JSON, check for JSON format
         let has_secret = manifests
             .iter()
-            .any(|m| m.contains("kind: Secret") && m.contains("lattice-ca"));
+            .any(|m| m.contains("\"kind\":\"Secret\"") && m.contains("lattice-ca"));
         assert!(has_secret);
     }
 
@@ -881,9 +1013,10 @@ mod tests {
         let generator = DefaultManifestGenerator::new().unwrap();
         let manifests = generator.generate("my-cluster", "https://cell:443", "ca-pem");
 
+        // Agent manifests are JSON, check for JSON format
         let has_deployment = manifests
             .iter()
-            .any(|m| m.contains("kind: Deployment") && m.contains("lattice-agent"));
+            .any(|m| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-agent"));
         assert!(has_deployment);
     }
 
@@ -1149,27 +1282,27 @@ mod tests {
             "---CA CERT PEM---",
         );
 
-        // Manifests create the lattice-system namespace
+        // Manifests create the lattice-system namespace (JSON format)
         let has_namespace = manifests
             .iter()
-            .any(|m| m.contains("kind: Namespace") && m.contains("lattice-system"));
+            .any(|m| m.contains("\"kind\":\"Namespace\"") && m.contains("lattice-system"));
         assert!(has_namespace, "Should create lattice-system namespace");
 
-        // Manifests include CA certificate for verifying cell
+        // Manifests include CA certificate for verifying cell (JSON format)
         let has_ca_secret = manifests
             .iter()
-            .any(|m| m.contains("kind: Secret") && m.contains("lattice-ca"));
+            .any(|m| m.contains("\"kind\":\"Secret\"") && m.contains("lattice-ca"));
         assert!(has_ca_secret, "Should include CA certificate secret");
 
-        // Manifests deploy the agent
+        // Manifests deploy the agent (JSON format)
         let has_agent = manifests
             .iter()
-            .any(|m| m.contains("kind: Deployment") && m.contains("lattice-agent"));
+            .any(|m| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-agent"));
         assert!(has_agent, "Should deploy lattice-agent");
 
-        // Agent config includes cluster ID and cell endpoint
+        // Agent config includes cluster ID and cell endpoint (JSON format)
         let has_config = manifests.iter().any(|m| {
-            m.contains("kind: ConfigMap")
+            m.contains("\"kind\":\"ConfigMap\"")
                 && m.contains("my-workload-cluster")
                 && m.contains("cell.example.com")
         });

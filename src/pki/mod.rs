@@ -143,6 +143,72 @@ impl CertificateAuthority {
             .map_err(|e| PkiError::ParseError(format!("failed to load CA key: {}", e)))
     }
 
+    /// Generate a server certificate for TLS with the given SANs
+    ///
+    /// This generates a certificate suitable for TLS server authentication,
+    /// signed by this CA. Use this for the bootstrap HTTPS server.
+    pub fn generate_server_cert(&self, sans: &[&str]) -> Result<(String, String)> {
+        let mut params = CertificateParams::default();
+
+        // Set distinguished name
+        let mut dn = DistinguishedName::new();
+        dn.push(
+            DnType::CommonName,
+            DnValue::Utf8String("Lattice Server".to_string()),
+        );
+        dn.push(
+            DnType::OrganizationName,
+            DnValue::Utf8String("Lattice".to_string()),
+        );
+        params.distinguished_name = dn;
+
+        // Not a CA
+        params.is_ca = IsCa::NoCa;
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+
+        // Extended key usage for TLS server
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+
+        // 5 year validity
+        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2029, 1, 1);
+
+        // Add SANs
+        params.subject_alt_names = sans
+            .iter()
+            .map(|san| {
+                // Check if it's an IP address
+                if san.parse::<std::net::IpAddr>().is_ok() {
+                    SanType::IpAddress(san.parse().unwrap())
+                } else {
+                    SanType::DnsName(Ia5String::try_from(san.to_string()).expect("valid DNS name"))
+                }
+            })
+            .collect();
+
+        // Generate key pair for server
+        let server_key = KeyPair::generate().map_err(|e| {
+            PkiError::KeyGenerationFailed(format!("failed to generate server key: {}", e))
+        })?;
+
+        let server_key_pem = server_key.serialize_pem();
+
+        // Create the Issuer from our CA certificate and key
+        let ca_key = self.load_key_pair()?;
+        let issuer = Issuer::from_ca_cert_pem(&self.ca_cert_pem, &ca_key)
+            .map_err(|e| PkiError::ParseError(format!("failed to create issuer: {}", e)))?;
+
+        // Sign the server certificate
+        let server_cert = params.signed_by(&server_key, &issuer).map_err(|e| {
+            PkiError::CertificateGenerationFailed(format!("failed to sign server cert: {}", e))
+        })?;
+
+        Ok((server_cert.pem(), server_key_pem))
+    }
+
     /// Sign a CSR and return the signed certificate in PEM format
     ///
     /// The CSR contains the agent's public key. The cell extracts it

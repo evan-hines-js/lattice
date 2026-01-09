@@ -48,7 +48,7 @@ async fn integration_bootstrap_http_full_flow() {
 
     let router = bootstrap_router(state.clone());
 
-    // Step 1: Get manifests with valid token (returns raw YAML for kubectl apply)
+    // Step 1: Get manifests with valid token (returns JSON for kubectl apply)
     let manifests_req = Request::builder()
         .method("GET")
         .uri("/api/clusters/integration-cluster/manifests")
@@ -62,11 +62,11 @@ async fn integration_bootstrap_http_full_flow() {
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    let manifests_yaml = String::from_utf8(body.to_vec()).unwrap();
+    let manifests_json = String::from_utf8(body.to_vec()).unwrap();
 
     // Should contain Kubernetes manifests (namespace, secrets, deployment)
-    assert!(manifests_yaml.contains("kind: Namespace"));
-    assert!(manifests_yaml.contains("lattice-system"));
+    assert!(manifests_json.contains("\"kind\":\"Namespace\""));
+    assert!(manifests_json.contains("lattice-system"));
 
     // Step 2: CSR signing after bootstrap
     let agent_req = AgentCertRequest::new("integration-cluster").unwrap();

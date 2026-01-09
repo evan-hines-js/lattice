@@ -80,8 +80,11 @@ pub trait ClusterBootstrap: Send + Sync {
     /// Check if a cluster is already registered
     fn is_cluster_registered(&self, cluster_id: &str) -> bool;
 
-    /// Get the cell endpoint for the parent cluster
+    /// Get the cell gRPC endpoint for agents to connect to
     fn cell_endpoint(&self) -> &str;
+
+    /// Get the bootstrap HTTP endpoint for kubeadm webhook
+    fn bootstrap_endpoint(&self) -> &str;
 
     /// Get the CA certificate PEM
     fn ca_cert_pem(&self) -> &str;
@@ -127,14 +130,20 @@ pub trait CAPIClient: Send + Sync {
 pub struct ClusterBootstrapImpl<G: crate::bootstrap::ManifestGenerator> {
     state: Arc<crate::bootstrap::BootstrapState<G>>,
     cell_endpoint: String,
+    bootstrap_endpoint: String,
 }
 
 impl<G: crate::bootstrap::ManifestGenerator> ClusterBootstrapImpl<G> {
     /// Create a new ClusterBootstrapImpl wrapping the given BootstrapState
-    pub fn new(state: Arc<crate::bootstrap::BootstrapState<G>>, cell_endpoint: String) -> Self {
+    pub fn new(
+        state: Arc<crate::bootstrap::BootstrapState<G>>,
+        cell_endpoint: String,
+        bootstrap_endpoint: String,
+    ) -> Self {
         Self {
             state,
             cell_endpoint,
+            bootstrap_endpoint,
         }
     }
 }
@@ -160,6 +169,10 @@ impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap
 
     fn cell_endpoint(&self) -> &str {
         &self.cell_endpoint
+    }
+
+    fn bootstrap_endpoint(&self) -> &str {
+        &self.bootstrap_endpoint
     }
 
     fn ca_cert_pem(&self) -> &str {
@@ -289,7 +302,7 @@ impl KubeClient for KubeClientImpl {
                 .metadata
                 .name
                 .as_ref()
-                .ok_or_else(|| Error::Provider("node has no name".to_string()))?;
+                .ok_or_else(|| Error::provider("node has no name".to_string()))?;
 
             // Check if already tainted
             let taints = node.spec.as_ref().and_then(|s| s.taints.as_ref());
@@ -345,6 +358,57 @@ impl CAPIClientImpl {
     pub fn new(client: Client) -> Self {
         Self { client }
     }
+
+    /// Discover the ApiResource for a given API version and kind using kube-rs discovery.
+    ///
+    /// This queries the API server to get the correct plural form and other metadata.
+    async fn discover_api_resource(
+        &self,
+        api_version: &str,
+        kind: &str,
+    ) -> Result<kube::discovery::ApiResource, Error> {
+        use kube::discovery::Discovery;
+
+        let (group, version) = parse_api_version(api_version);
+
+        // Run discovery to find the resource
+        let discovery = Discovery::new(self.client.clone())
+            .run()
+            .await
+            .map_err(|e| Error::serialization(format!("API discovery failed: {}", e)))?;
+
+        // Search for the matching kind in the discovered resources
+        for api_group in discovery.groups() {
+            // Check if this is the right group
+            let group_name = api_group.name();
+            if group_name != group {
+                continue;
+            }
+
+            // Get all resources in this group and search for our kind
+            for (ar, _caps) in api_group.recommended_resources() {
+                if ar.kind == kind && ar.version == version {
+                    return Ok(ar.clone());
+                }
+            }
+        }
+
+        // If not found via discovery, fall back to constructing it manually
+        // This can happen if the CRD was just installed and discovery cache is stale
+        debug!(
+            api_version = %api_version,
+            kind = %kind,
+            "Resource not found in discovery, using fallback pluralization"
+        );
+
+        Ok(kube::discovery::ApiResource {
+            group: group.to_string(),
+            version: version.to_string(),
+            api_version: api_version.to_string(),
+            kind: kind.to_string(),
+            plural: pluralize_kind(kind),
+        })
+    }
 }
 
 #[async_trait]
@@ -355,19 +419,12 @@ impl CAPIClient for CAPIClientImpl {
         namespace: &str,
     ) -> Result<(), Error> {
         use kube::api::DynamicObject;
-        use kube::discovery::ApiResource;
 
         for manifest in manifests {
-            // Parse API version and kind to create ApiResource
-            let (group, version) = parse_api_version(&manifest.api_version);
-
-            let ar = ApiResource {
-                group: group.to_string(),
-                version: version.to_string(),
-                api_version: manifest.api_version.clone(),
-                kind: manifest.kind.clone(),
-                plural: pluralize_kind(&manifest.kind),
-            };
+            // Discover the API resource from the API server
+            let ar = self
+                .discover_api_resource(&manifest.api_version, &manifest.kind)
+                .await?;
 
             // Create dynamic object from manifest
             let obj: DynamicObject = serde_json::from_value(serde_json::json!({
@@ -462,21 +519,78 @@ fn parse_api_version(api_version: &str) -> (&str, &str) {
     }
 }
 
-/// Convert a Kind to its plural form (simplified)
+/// Known CAPI resource pluralizations.
+///
+/// Kubernetes uses non-standard pluralization rules (all lowercase, no hyphens).
+/// We maintain this static map for known CAPI kinds to avoid runtime discovery
+/// overhead. All CAPI kinds we generate are well-known and listed here.
+///
+/// If a kind is not in this map, we fall back to standard pluralization rules
+/// (lowercase + 's'), which works for most Kubernetes resources.
+const CAPI_KIND_PLURALS: &[(&str, &str)] = &[
+    // Core CAPI types (cluster.x-k8s.io)
+    ("cluster", "clusters"),
+    ("machine", "machines"),
+    ("machinedeployment", "machinedeployments"),
+    ("machineset", "machinesets"),
+    ("machinepool", "machinepools"),
+    // Control plane provider (controlplane.cluster.x-k8s.io)
+    ("kubeadmcontrolplane", "kubeadmcontrolplanes"),
+    ("kubeadmcontrolplanetemplate", "kubeadmcontrolplanetemplates"),
+    // Bootstrap provider (bootstrap.cluster.x-k8s.io)
+    ("kubeadmconfig", "kubeadmconfigs"),
+    ("kubeadmconfigtemplate", "kubeadmconfigtemplates"),
+    // Docker infrastructure provider (infrastructure.cluster.x-k8s.io)
+    ("dockercluster", "dockerclusters"),
+    ("dockerclustertemplate", "dockerclustertemplates"),
+    ("dockermachine", "dockermachines"),
+    ("dockermachinetemplate", "dockermachinetemplates"),
+    ("dockermachinepool", "dockermachinepools"),
+    ("dockermachinepooltemplate", "dockermachinepooltemplates"),
+    // AWS infrastructure provider
+    ("awscluster", "awsclusters"),
+    ("awsmachine", "awsmachines"),
+    ("awsmachinetemplate", "awsmachinetemplates"),
+    ("awsmanagedcluster", "awsmanagedclusters"),
+    ("awsmanagedmachinepool", "awsmanagedmachinepools"),
+    // GCP infrastructure provider
+    ("gcpcluster", "gcpclusters"),
+    ("gcpmachine", "gcpmachines"),
+    ("gcpmachinetemplate", "gcpmachinetemplates"),
+    // Azure infrastructure provider
+    ("azurecluster", "azureclusters"),
+    ("azuremachine", "azuremachines"),
+    ("azuremachinetemplate", "azuremachinetemplates"),
+    ("azuremanagedcluster", "azuremanagedclusters"),
+    ("azuremanagedmachinepool", "azuremanagedmachinepools"),
+    // IPAddress management (ipam.cluster.x-k8s.io)
+    ("ipaddress", "ipaddresses"),
+    ("ipaddressclaim", "ipaddressclaims"),
+];
+
+/// Convert a Kind to its plural form for Kubernetes API resources.
+///
+/// Uses a static lookup for known CAPI kinds, falling back to standard
+/// pluralization (lowercase + 's') for unknown kinds.
 fn pluralize_kind(kind: &str) -> String {
     let lower = kind.to_lowercase();
-    // Handle common CAPI kinds
-    match lower.as_str() {
-        "cluster" => "clusters".to_string(),
-        "machine" => "machines".to_string(),
-        "machinedeployment" => "machinedeployments".to_string(),
-        "machineset" => "machinesets".to_string(),
-        "kubeadmcontrolplane" => "kubeadmcontrolplanes".to_string(),
-        "kubeadmconfigtemplate" => "kubeadmconfigtemplates".to_string(),
-        "dockercluster" => "dockerclusters".to_string(),
-        "dockermachine" => "dockermachines".to_string(),
-        "dockermachinetemplate" => "dockermachinetemplates".to_string(),
-        _ => format!("{}s", lower),
+
+    // Look up in known CAPI kinds
+    for (singular, plural) in CAPI_KIND_PLURALS {
+        if *singular == lower {
+            return (*plural).to_string();
+        }
+    }
+
+    // Fallback: simple pluralization (works for most K8s resources)
+    // Handles common patterns: deployment->deployments, service->services
+    if lower.ends_with('s') || lower.ends_with("ch") || lower.ends_with("sh") {
+        format!("{}es", lower)
+    } else if lower.ends_with('y') && !lower.ends_with("ay") && !lower.ends_with("ey") {
+        // policy -> policies, but not gateway -> gateways
+        format!("{}ies", &lower[..lower.len() - 1])
+    } else {
+        format!("{}s", lower)
     }
 }
 
@@ -512,10 +626,48 @@ pub trait PivotOperations: Send + Sync {
     );
 }
 
+/// Cell-specific capabilities for provisioning workload clusters
+///
+/// These components are only needed when running as a cell (management cluster).
+/// Bundling them together makes it clear they go together and reduces
+/// the number of optional fields in Context.
+pub struct CellCapabilities {
+    /// Bootstrap registration for workload clusters
+    pub bootstrap: Arc<dyn ClusterBootstrap>,
+    /// Agent registry for connected agents
+    pub agent_registry: SharedAgentRegistry,
+    /// Pivot operations for orchestrating cluster pivots
+    pub pivot_ops: Arc<dyn PivotOperations>,
+}
+
+impl CellCapabilities {
+    /// Create new cell capabilities
+    pub fn new(
+        bootstrap: Arc<dyn ClusterBootstrap>,
+        agent_registry: SharedAgentRegistry,
+        pivot_ops: Arc<dyn PivotOperations>,
+    ) -> Self {
+        Self {
+            bootstrap,
+            agent_registry,
+            pivot_ops,
+        }
+    }
+}
+
 /// Controller context containing shared state and clients
 ///
 /// The context is shared across all reconciliation calls and holds
 /// resources that are expensive to create (like Kubernetes clients).
+///
+/// Use [`ContextBuilder`] to construct instances:
+///
+/// ```ignore
+/// let ctx = Context::builder(client)
+///     .namespace("capi-system")
+///     .cell_capabilities(cell_caps)
+///     .build();
+/// ```
 pub struct Context {
     /// Kubernetes client for API operations (trait object for testability)
     pub kube: Arc<dyn KubeClient>,
@@ -527,88 +679,49 @@ pub struct Context {
     pub capi_installer: Arc<dyn CapiInstaller>,
     /// Default namespace for CAPI resources
     pub capi_namespace: String,
-    /// Bootstrap registration for workload clusters (None for cells)
-    pub bootstrap: Option<Arc<dyn ClusterBootstrap>>,
-    /// Agent registry for connected agents (cells only)
-    pub agent_registry: Option<SharedAgentRegistry>,
-    /// Pivot operations for orchestrating cluster pivots
-    pub pivot_ops: Option<Arc<dyn PivotOperations>>,
+    /// Cell capabilities (present only when running as a cell)
+    pub cell: Option<CellCapabilities>,
 }
 
 impl Context {
+    /// Create a builder for constructing a Context
+    pub fn builder(client: Client) -> ContextBuilder {
+        ContextBuilder::new(client)
+    }
+
     /// Create a new controller context with the given Kubernetes client
+    ///
+    /// This is a convenience method equivalent to `Context::builder(client).build()`.
     pub fn new(client: Client) -> Self {
-        use crate::capi::{ClusterctlInstaller, KubeCapiDetector};
-        Self {
-            kube: Arc::new(KubeClientImpl::new(client.clone())),
-            capi: Arc::new(CAPIClientImpl::new(client.clone())),
-            capi_detector: Arc::new(KubeCapiDetector::new(client.clone())),
-            capi_installer: Arc::new(ClusterctlInstaller::new()),
-            capi_namespace: "default".to_string(),
-            bootstrap: None,
-            agent_registry: None,
-            pivot_ops: None,
-        }
+        Self::builder(client).build()
     }
 
-    /// Create a new controller context with a custom CAPI namespace
-    pub fn with_namespace(client: Client, namespace: &str) -> Self {
-        use crate::capi::{ClusterctlInstaller, KubeCapiDetector};
-        Self {
-            kube: Arc::new(KubeClientImpl::new(client.clone())),
-            capi: Arc::new(CAPIClientImpl::new(client.clone())),
-            capi_detector: Arc::new(KubeCapiDetector::new(client.clone())),
-            capi_installer: Arc::new(ClusterctlInstaller::new()),
-            capi_namespace: namespace.to_string(),
-            bootstrap: None,
-            agent_registry: None,
-            pivot_ops: None,
-        }
+    /// Access bootstrap registration (convenience accessor)
+    pub fn bootstrap(&self) -> Option<&Arc<dyn ClusterBootstrap>> {
+        self.cell.as_ref().map(|c| &c.bootstrap)
     }
 
-    /// Create a new controller context with bootstrap support
+    /// Access agent registry (convenience accessor)
+    pub fn agent_registry(&self) -> Option<&SharedAgentRegistry> {
+        self.cell.as_ref().map(|c| &c.agent_registry)
+    }
+
+    /// Access pivot operations (convenience accessor)
+    pub fn pivot_ops(&self) -> Option<&Arc<dyn PivotOperations>> {
+        self.cell.as_ref().map(|c| &c.pivot_ops)
+    }
+
+    /// Check if this context has cell capabilities
+    pub fn is_cell(&self) -> bool {
+        self.cell.is_some()
+    }
+
+    /// Create a context for testing with custom mock clients
     ///
-    /// Use this for cells that provision workload clusters.
-    pub fn with_bootstrap(client: Client, bootstrap: Arc<dyn ClusterBootstrap>) -> Self {
-        use crate::capi::{ClusterctlInstaller, KubeCapiDetector};
-        Self {
-            kube: Arc::new(KubeClientImpl::new(client.clone())),
-            capi: Arc::new(CAPIClientImpl::new(client.clone())),
-            capi_detector: Arc::new(KubeCapiDetector::new(client.clone())),
-            capi_installer: Arc::new(ClusterctlInstaller::new()),
-            capi_namespace: "default".to_string(),
-            bootstrap: Some(bootstrap),
-            agent_registry: None,
-            pivot_ops: None,
-        }
-    }
-
-    /// Create a new controller context with full cell capabilities
-    ///
-    /// Use this for cells that provision workload clusters and need pivot orchestration.
-    pub fn with_cell_capabilities(
-        client: Client,
-        bootstrap: Arc<dyn ClusterBootstrap>,
-        agent_registry: SharedAgentRegistry,
-        pivot_ops: Arc<dyn PivotOperations>,
-    ) -> Self {
-        use crate::capi::{ClusterctlInstaller, KubeCapiDetector};
-        Self {
-            kube: Arc::new(KubeClientImpl::new(client.clone())),
-            capi: Arc::new(CAPIClientImpl::new(client.clone())),
-            capi_detector: Arc::new(KubeCapiDetector::new(client.clone())),
-            capi_installer: Arc::new(ClusterctlInstaller::new()),
-            capi_namespace: "default".to_string(),
-            bootstrap: Some(bootstrap),
-            agent_registry: Some(agent_registry),
-            pivot_ops: Some(pivot_ops),
-        }
-    }
-
-    /// Create a new controller context with custom client implementations
-    ///
-    /// This is primarily used for testing with mock clients.
-    pub fn with_clients(
+    /// This method is primarily for unit tests where a real Kubernetes
+    /// client is not available. For production code, use [`Context::builder`].
+    #[cfg(test)]
+    pub fn for_testing(
         kube: Arc<dyn KubeClient>,
         capi: Arc<dyn CAPIClient>,
         capi_detector: Arc<dyn CapiDetector>,
@@ -621,22 +734,22 @@ impl Context {
             capi_detector,
             capi_installer,
             capi_namespace: namespace.to_string(),
-            bootstrap: None,
-            agent_registry: None,
-            pivot_ops: None,
+            cell: None,
         }
     }
 
-    /// Create a new controller context with custom implementations and bootstrap
+    /// Create a context for testing with cell capabilities
     ///
-    /// This is primarily used for testing with mock clients.
-    pub fn with_clients_and_bootstrap(
+    /// This method is primarily for unit tests where a real Kubernetes
+    /// client is not available but cell capabilities are needed.
+    #[cfg(test)]
+    pub fn for_testing_with_cell(
         kube: Arc<dyn KubeClient>,
         capi: Arc<dyn CAPIClient>,
         capi_detector: Arc<dyn CapiDetector>,
         capi_installer: Arc<dyn CapiInstaller>,
-        bootstrap: Arc<dyn ClusterBootstrap>,
         namespace: &str,
+        cell: CellCapabilities,
     ) -> Self {
         Self {
             kube,
@@ -644,35 +757,121 @@ impl Context {
             capi_detector,
             capi_installer,
             capi_namespace: namespace.to_string(),
-            bootstrap: Some(bootstrap),
-            agent_registry: None,
-            pivot_ops: None,
+            cell: Some(cell),
+        }
+    }
+}
+
+/// Builder for constructing [`Context`] instances
+///
+/// # Examples
+///
+/// Basic context for agent mode:
+/// ```ignore
+/// let ctx = Context::builder(client).build();
+/// ```
+///
+/// Context with custom namespace:
+/// ```ignore
+/// let ctx = Context::builder(client)
+///     .namespace("capi-system")
+///     .build();
+/// ```
+///
+/// Full cell context:
+/// ```ignore
+/// let ctx = Context::builder(client)
+///     .namespace("capi-system")
+///     .cell_capabilities(CellCapabilities::new(bootstrap, registry, pivot_ops))
+///     .build();
+/// ```
+///
+/// Testing with mock clients:
+/// ```ignore
+/// let ctx = Context::builder(client)
+///     .kube_client(mock_kube)
+///     .capi_client(mock_capi)
+///     .build();
+/// ```
+pub struct ContextBuilder {
+    client: Client,
+    kube: Option<Arc<dyn KubeClient>>,
+    capi: Option<Arc<dyn CAPIClient>>,
+    capi_detector: Option<Arc<dyn CapiDetector>>,
+    capi_installer: Option<Arc<dyn CapiInstaller>>,
+    capi_namespace: String,
+    cell: Option<CellCapabilities>,
+}
+
+impl ContextBuilder {
+    /// Create a new builder with the given Kubernetes client
+    fn new(client: Client) -> Self {
+        Self {
+            client,
+            kube: None,
+            capi: None,
+            capi_detector: None,
+            capi_installer: None,
+            capi_namespace: "default".to_string(),
+            cell: None,
         }
     }
 
-    /// Create a new controller context with all custom implementations
-    ///
-    /// This is primarily used for testing with mock clients.
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_all(
-        kube: Arc<dyn KubeClient>,
-        capi: Arc<dyn CAPIClient>,
-        capi_detector: Arc<dyn CapiDetector>,
-        capi_installer: Arc<dyn CapiInstaller>,
-        bootstrap: Option<Arc<dyn ClusterBootstrap>>,
-        agent_registry: Option<SharedAgentRegistry>,
-        pivot_ops: Option<Arc<dyn PivotOperations>>,
-        namespace: &str,
-    ) -> Self {
-        Self {
-            kube,
-            capi,
-            capi_detector,
-            capi_installer,
-            capi_namespace: namespace.to_string(),
-            bootstrap,
-            agent_registry,
-            pivot_ops,
+    /// Set the CAPI namespace
+    pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.capi_namespace = namespace.into();
+        self
+    }
+
+    /// Set cell capabilities for running as a management cluster
+    pub fn cell_capabilities(mut self, cell: CellCapabilities) -> Self {
+        self.cell = Some(cell);
+        self
+    }
+
+    /// Override the Kubernetes client (primarily for testing)
+    pub fn kube_client(mut self, kube: Arc<dyn KubeClient>) -> Self {
+        self.kube = Some(kube);
+        self
+    }
+
+    /// Override the CAPI client (primarily for testing)
+    pub fn capi_client(mut self, capi: Arc<dyn CAPIClient>) -> Self {
+        self.capi = Some(capi);
+        self
+    }
+
+    /// Override the CAPI detector (primarily for testing)
+    pub fn capi_detector(mut self, detector: Arc<dyn CapiDetector>) -> Self {
+        self.capi_detector = Some(detector);
+        self
+    }
+
+    /// Override the CAPI installer (primarily for testing)
+    pub fn capi_installer(mut self, installer: Arc<dyn CapiInstaller>) -> Self {
+        self.capi_installer = Some(installer);
+        self
+    }
+
+    /// Build the Context
+    pub fn build(self) -> Context {
+        use crate::capi::{ClusterctlInstaller, KubeCapiDetector};
+
+        Context {
+            kube: self
+                .kube
+                .unwrap_or_else(|| Arc::new(KubeClientImpl::new(self.client.clone()))),
+            capi: self
+                .capi
+                .unwrap_or_else(|| Arc::new(CAPIClientImpl::new(self.client.clone()))),
+            capi_detector: self
+                .capi_detector
+                .unwrap_or_else(|| Arc::new(KubeCapiDetector::new(self.client.clone()))),
+            capi_installer: self
+                .capi_installer
+                .unwrap_or_else(|| Arc::new(ClusterctlInstaller::new())),
+            capi_namespace: self.capi_namespace,
+            cell: self.cell,
         }
     }
 }
@@ -765,7 +964,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
         }
         ClusterPhase::Pivoting => {
             // Check if we have pivot operations configured (cell mode)
-            if let Some(ref pivot_ops) = ctx.pivot_ops {
+            if let Some(pivot_ops) = ctx.pivot_ops() {
                 // Check if pivot is already complete
                 if pivot_ops.is_pivot_complete(&name) {
                     info!("pivot complete, transitioning to Ready phase");
@@ -870,11 +1069,11 @@ async fn generate_capi_manifests(
     use crate::provider::BootstrapInfo;
 
     // Build bootstrap info from context if this is a workload cluster
-    let bootstrap = if let Some(ref bootstrap_ctx) = ctx.bootstrap {
+    let bootstrap = if let Some(bootstrap_ctx) = ctx.bootstrap() {
         let name = cluster.metadata.name.as_deref().unwrap_or("unknown");
         let ca_cert = bootstrap_ctx.ca_cert_pem().to_string();
         let cell_endpoint = bootstrap_ctx.cell_endpoint().to_string();
-        let bootstrap_endpoint = format!("https://{}", cell_endpoint); // HTTPS with CA cert verification
+        let bootstrap_endpoint = bootstrap_ctx.bootstrap_endpoint().to_string();
 
         // Register cluster and get token
         let token = bootstrap_ctx.register_cluster(
@@ -896,19 +1095,19 @@ async fn generate_capi_manifests(
         }
         ProviderType::Aws => {
             // TODO: Implement AWS provider
-            Err(Error::Provider(
+            Err(Error::provider(
                 "AWS provider not yet implemented".to_string(),
             ))
         }
         ProviderType::Gcp => {
             // TODO: Implement GCP provider
-            Err(Error::Provider(
+            Err(Error::provider(
                 "GCP provider not yet implemented".to_string(),
             ))
         }
         ProviderType::Azure => {
             // TODO: Implement Azure provider
-            Err(Error::Provider(
+            Err(Error::provider(
                 "Azure provider not yet implemented".to_string(),
             ))
         }
@@ -1060,7 +1259,7 @@ impl PivotOperations for PivotOperationsImpl {
         // Check if agent is connected
         let agent_ref = self.agent_registry.get(cluster_name);
         if agent_ref.is_none() {
-            return Err(Error::Pivot(format!(
+            return Err(Error::pivot(format!(
                 "agent not connected for cluster {}",
                 cluster_name
             )));
@@ -1094,7 +1293,7 @@ impl PivotOperations for PivotOperationsImpl {
             Err(e) => {
                 // Remove from in-progress on failure
                 self.pivot_in_progress.remove(cluster_name);
-                Err(Error::Pivot(format!("failed to send pivot command: {}", e)))
+                Err(Error::pivot(format!("failed to send pivot command: {}", e)))
             }
         }
     }
@@ -1322,7 +1521,7 @@ mod tests {
             let (detector, installer) = mock_capi_already_installed();
 
             (
-                Arc::new(Context::with_clients(
+                Arc::new(Context::for_testing(
                     Arc::new(mock),
                     Arc::new(capi_mock),
                     detector,
@@ -1347,7 +1546,7 @@ mod tests {
                 .expect_is_infrastructure_ready()
                 .returning(|_, _| Ok(false));
             let (detector, installer) = mock_capi_already_installed();
-            Arc::new(Context::with_clients(
+            Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 detector,
@@ -1375,7 +1574,7 @@ mod tests {
             let (detector, installer) = mock_capi_already_installed();
 
             (
-                Arc::new(Context::with_clients(
+                Arc::new(Context::for_testing(
                     Arc::new(mock),
                     Arc::new(capi_mock),
                     detector,
@@ -1521,14 +1720,14 @@ mod tests {
 
             let mut mock = MockKubeClient::new();
             mock.expect_patch_status()
-                .returning(|_, _| Err(Error::Provider("connection refused".to_string())));
+                .returning(|_, _| Err(Error::provider("connection refused".to_string())));
 
             let mut capi_mock = MockCAPIClient::new();
             capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
 
             let (detector, installer) = mock_capi_already_installed();
 
-            let ctx = Arc::new(Context::with_clients(
+            let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 detector,
@@ -1556,11 +1755,11 @@ mod tests {
             let mut capi_mock = MockCAPIClient::new();
             capi_mock
                 .expect_apply_manifests()
-                .returning(|_, _| Err(Error::Provider("CAPI apply failed".to_string())));
+                .returning(|_, _| Err(Error::provider("CAPI apply failed".to_string())));
 
             let (detector, installer) = mock_capi_already_installed();
 
-            let ctx = Arc::new(Context::with_clients(
+            let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 detector,
@@ -1589,7 +1788,7 @@ mod tests {
             let capi_mock = MockCAPIClient::new();
             let detector = MockCapiDetector::new();
             let installer = MockCapiInstaller::new();
-            Arc::new(Context::with_clients(
+            Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
@@ -1599,9 +1798,9 @@ mod tests {
         }
 
         #[rstest]
-        #[case::provider_error(Error::Provider("test error".to_string()))]
-        #[case::validation_error(Error::Validation("invalid spec".to_string()))]
-        #[case::pivot_error(Error::Pivot("pivot failed".to_string()))]
+        #[case::provider_error(Error::provider("test error".to_string()))]
+        #[case::validation_error(Error::validation("invalid spec".to_string()))]
+        #[case::pivot_error(Error::pivot("pivot failed".to_string()))]
         fn test_error_policy_always_requeues_with_backoff(#[case] error: Error) {
             // error_policy should always requeue with 5s backoff regardless of error type
             let cluster = Arc::new(sample_cluster("test-cluster"));
@@ -1630,12 +1829,12 @@ mod tests {
 
             let mut mock = MockKubeClient::new();
             mock.expect_patch_status()
-                .returning(|_, _| Err(Error::Provider("connection failed".to_string())));
+                .returning(|_, _| Err(Error::provider("connection failed".to_string())));
 
             let capi_mock = MockCAPIClient::new();
             let detector = MockCapiDetector::new();
             let installer = MockCapiInstaller::new();
-            let ctx = Context::with_clients(
+            let ctx = Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
@@ -1754,7 +1953,7 @@ mod tests {
             let capi_mock = MockCAPIClient::new();
             let detector = MockCapiDetector::new();
             let installer = MockCapiInstaller::new();
-            Arc::new(Context::with_clients(
+            Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
@@ -1825,6 +2024,7 @@ mod tests {
         /// because ClusterBootstrap returns &str which is tricky with mockall.
         struct TestClusterBootstrap {
             cell_endpoint: String,
+            bootstrap_endpoint: String,
             ca_cert: String,
             registered_clusters: std::sync::Mutex<Vec<String>>,
         }
@@ -1833,6 +2033,11 @@ mod tests {
             fn new(cell_endpoint: &str, ca_cert: &str) -> Self {
                 Self {
                     cell_endpoint: cell_endpoint.to_string(),
+                    // Derive bootstrap endpoint from cell endpoint
+                    bootstrap_endpoint: format!(
+                        "https://{}:8080",
+                        cell_endpoint.split(':').next().unwrap_or("localhost")
+                    ),
                     ca_cert: ca_cert.to_string(),
                     registered_clusters: std::sync::Mutex::new(Vec::new()),
                 }
@@ -1871,9 +2076,41 @@ mod tests {
                 &self.cell_endpoint
             }
 
+            fn bootstrap_endpoint(&self) -> &str {
+                &self.bootstrap_endpoint
+            }
+
             fn ca_cert_pem(&self) -> &str {
                 &self.ca_cert
             }
+        }
+
+        /// Creates a cell context for testing with full cell capabilities.
+        /// This represents a real cell configuration with bootstrap, agent registry, and pivot ops.
+        fn cell_context_for_testing(
+            bootstrap: Arc<TestClusterBootstrap>,
+            namespace: &str,
+        ) -> Context {
+            use crate::agent::connection::AgentRegistry;
+
+            let mock = MockKubeClient::new();
+            let capi_mock = MockCAPIClient::new();
+            let detector = MockCapiDetector::new();
+            let installer = MockCapiInstaller::new();
+
+            // Create mock pivot operations (no-op for bootstrap tests)
+            let pivot_ops: Arc<dyn PivotOperations> = Arc::new(MockPivotOperations::new());
+            let agent_registry = Arc::new(AgentRegistry::new());
+            let cell = CellCapabilities::new(bootstrap, agent_registry, pivot_ops);
+
+            Context::for_testing_with_cell(
+                Arc::new(mock),
+                Arc::new(capi_mock),
+                Arc::new(detector),
+                Arc::new(installer),
+                namespace,
+                cell,
+            )
         }
 
         /// Story: When provisioning a workload cluster, the controller should
@@ -1890,19 +2127,7 @@ mod tests {
                 "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----",
             ));
 
-            let mock = MockKubeClient::new();
-            let capi_mock = MockCAPIClient::new();
-            let detector = MockCapiDetector::new();
-            let installer = MockCapiInstaller::new();
-
-            let ctx = Context::with_clients_and_bootstrap(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                Arc::new(detector),
-                Arc::new(installer),
-                bootstrap.clone(),
-                "default",
-            );
+            let ctx = cell_context_for_testing(bootstrap.clone(), "default");
 
             // Generate manifests - this should trigger registration
             let result = generate_capi_manifests(&cluster, &ctx).await;
@@ -1924,23 +2149,11 @@ mod tests {
                 "FAKE_CA_CERT",
             ));
 
-            let mock = MockKubeClient::new();
-            let capi_mock = MockCAPIClient::new();
-            let detector = MockCapiDetector::new();
-            let installer = MockCapiInstaller::new();
-
-            let ctx = Context::with_clients_and_bootstrap(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                Arc::new(detector),
-                Arc::new(installer),
-                bootstrap,
-                "capi-system",
-            );
+            let ctx = cell_context_for_testing(bootstrap, "capi-system");
 
             // Verify bootstrap is present in context
-            assert!(ctx.bootstrap.is_some());
-            let bootstrap_ctx = ctx.bootstrap.as_ref().unwrap();
+            assert!(ctx.bootstrap().is_some());
+            let bootstrap_ctx = ctx.bootstrap().unwrap();
             assert_eq!(bootstrap_ctx.cell_endpoint(), "mgmt.lattice.io:443");
         }
 
@@ -1953,21 +2166,9 @@ mod tests {
                 "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----",
             ));
 
-            let mock = MockKubeClient::new();
-            let capi_mock = MockCAPIClient::new();
-            let detector = MockCapiDetector::new();
-            let installer = MockCapiInstaller::new();
+            let ctx = cell_context_for_testing(bootstrap, "default");
 
-            let ctx = Context::with_clients_and_bootstrap(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                Arc::new(detector),
-                Arc::new(installer),
-                bootstrap,
-                "default",
-            );
-
-            let bootstrap_ctx = ctx.bootstrap.as_ref().unwrap();
+            let bootstrap_ctx = ctx.bootstrap().unwrap();
             assert!(bootstrap_ctx.ca_cert_pem().contains("BEGIN CERTIFICATE"));
         }
 
@@ -1982,19 +2183,7 @@ mod tests {
                 "-----BEGIN CERTIFICATE-----\nCA_CERT\n-----END CERTIFICATE-----",
             ));
 
-            let mock = MockKubeClient::new();
-            let capi_mock = MockCAPIClient::new();
-            let detector = MockCapiDetector::new();
-            let installer = MockCapiInstaller::new();
-
-            let ctx = Context::with_clients_and_bootstrap(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                Arc::new(detector),
-                Arc::new(installer),
-                bootstrap,
-                "default",
-            );
+            let ctx = cell_context_for_testing(bootstrap, "default");
 
             let result = generate_capi_manifests(&cluster, &ctx).await;
             assert!(result.is_ok());
@@ -2158,7 +2347,7 @@ mod tests {
             let detector = MockCapiDetector::new();
             let installer = MockCapiInstaller::new();
 
-            let ctx = Arc::new(Context::with_clients(
+            let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
@@ -2204,7 +2393,7 @@ mod tests {
             let detector = MockCapiDetector::new();
             let installer = MockCapiInstaller::new();
 
-            let ctx = Arc::new(Context::with_clients(
+            let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
@@ -2238,12 +2427,12 @@ mod tests {
             // Infrastructure check fails
             capi_mock
                 .expect_is_infrastructure_ready()
-                .returning(|_, _| Err(Error::Provider("CAPI API unavailable".to_string())));
+                .returning(|_, _| Err(Error::provider("CAPI API unavailable".to_string())));
 
             let detector = MockCapiDetector::new();
             let installer = MockCapiInstaller::new();
 
-            let ctx = Arc::new(Context::with_clients(
+            let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
@@ -2296,7 +2485,7 @@ mod tests {
             // Installer should NOT be called
             let installer = MockCapiInstaller::new();
 
-            let ctx = Arc::new(Context::with_clients(
+            let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
@@ -2339,7 +2528,7 @@ mod tests {
             // Installer should be called
             installer.expect_install().times(1).returning(|_| Ok(()));
 
-            let ctx = Arc::new(Context::with_clients(
+            let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
@@ -2369,9 +2558,9 @@ mod tests {
             // Installation fails
             installer
                 .expect_install()
-                .returning(|_| Err(Error::CapiInstallation("clusterctl not found".to_string())));
+                .returning(|_| Err(Error::capi_installation("clusterctl not found".to_string())));
 
-            let ctx = Arc::new(Context::with_clients(
+            let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
@@ -2411,7 +2600,7 @@ mod tests {
                 Ok(())
             });
 
-            let ctx = Context::with_clients(
+            let ctx = Context::for_testing(
                 Arc::new(mock),
                 Arc::new(MockCAPIClient::new()),
                 Arc::new(MockCapiDetector::new()),
@@ -2447,7 +2636,7 @@ mod tests {
                 Ok(())
             });
 
-            let ctx = Context::with_clients(
+            let ctx = Context::for_testing(
                 Arc::new(mock),
                 Arc::new(MockCAPIClient::new()),
                 Arc::new(MockCapiDetector::new()),
@@ -2482,7 +2671,7 @@ mod tests {
                 Ok(())
             });
 
-            let ctx = Context::with_clients(
+            let ctx = Context::for_testing(
                 Arc::new(mock),
                 Arc::new(MockCAPIClient::new()),
                 Arc::new(MockCapiDetector::new()),
@@ -2516,7 +2705,7 @@ mod tests {
         use crate::capi::{MockCapiDetector, MockCapiInstaller};
 
         fn mock_context_minimal() -> Arc<Context> {
-            Arc::new(Context::with_clients(
+            Arc::new(Context::for_testing(
                 Arc::new(MockKubeClient::new()),
                 Arc::new(MockCAPIClient::new()),
                 Arc::new(MockCapiDetector::new()),
@@ -2533,11 +2722,11 @@ mod tests {
             let ctx = mock_context_minimal();
 
             let error_types = vec![
-                Error::Provider("provider error".to_string()),
-                Error::Validation("validation error".to_string()),
-                Error::Pivot("pivot error".to_string()),
-                Error::Serialization("serialization error".to_string()),
-                Error::CapiInstallation("capi error".to_string()),
+                Error::provider("provider error".to_string()),
+                Error::validation("validation error".to_string()),
+                Error::pivot("pivot error".to_string()),
+                Error::serialization("serialization error".to_string()),
+                Error::capi_installation("capi error".to_string()),
             ];
 
             for error in error_types {
@@ -2566,7 +2755,7 @@ mod tests {
 
             for phase in phases {
                 let cluster = Arc::new(cluster_with_phase("test", phase.clone()));
-                let error = Error::Provider("test error".to_string());
+                let error = Error::provider("test error".to_string());
                 let action = error_policy(cluster, &error, ctx.clone());
 
                 assert_eq!(
@@ -2588,6 +2777,27 @@ mod tests {
         use super::*;
         use crate::capi::{MockCapiDetector, MockCapiInstaller};
         use std::sync::{Arc as StdArc, Mutex};
+
+        /// Simple stub bootstrap for pivot tests (doesn't need full functionality)
+        struct StubClusterBootstrap;
+
+        impl ClusterBootstrap for StubClusterBootstrap {
+            fn register_cluster(&self, _: String, _: String, _: String) -> String {
+                "stub-token".to_string()
+            }
+            fn is_cluster_registered(&self, _: &str) -> bool {
+                false
+            }
+            fn cell_endpoint(&self) -> &str {
+                "cell:443"
+            }
+            fn bootstrap_endpoint(&self) -> &str {
+                "https://cell:8080"
+            }
+            fn ca_cert_pem(&self) -> &str {
+                "STUB_CA"
+            }
+        }
 
         /// Test implementation of PivotOperations for controlled testing
         struct TestPivotOps {
@@ -2648,7 +2858,7 @@ mod tests {
                 _target_namespace: &str,
             ) -> Result<(), Error> {
                 if self.trigger_should_fail {
-                    Err(Error::Pivot("trigger failed".to_string()))
+                    Err(Error::pivot("trigger failed".to_string()))
                 } else {
                     Ok(())
                 }
@@ -2698,6 +2908,8 @@ mod tests {
         fn mock_context_with_pivot_ops(
             pivot_ops: Arc<dyn PivotOperations>,
         ) -> (Arc<Context>, StatusCapture) {
+            use crate::agent::connection::AgentRegistry;
+
             let capture = StatusCapture::new();
             let capture_clone = capture.clone();
 
@@ -2713,15 +2925,18 @@ mod tests {
             detector.expect_crd_exists().returning(|_, _| Ok(true));
             let installer = MockCapiInstaller::new();
 
-            let ctx = Context::with_all(
+            // Create full cell capabilities - this is a real cell configuration
+            let bootstrap: Arc<dyn ClusterBootstrap> = Arc::new(StubClusterBootstrap);
+            let agent_registry = Arc::new(AgentRegistry::new());
+            let cell = CellCapabilities::new(bootstrap, agent_registry, pivot_ops);
+
+            let ctx = Context::for_testing_with_cell(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
                 Arc::new(installer),
-                None, // no bootstrap
-                None, // no agent registry
-                Some(pivot_ops),
                 "default",
+                cell,
             );
 
             (Arc::new(ctx), capture)
@@ -2817,7 +3032,7 @@ mod tests {
             let installer = MockCapiInstaller::new();
 
             // Context WITHOUT pivot_ops
-            let ctx = Arc::new(Context::with_clients(
+            let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(detector),
@@ -2882,8 +3097,8 @@ mod tests {
 
             assert!(result.is_err());
             match result {
-                Err(Error::Pivot(msg)) => {
-                    assert!(msg.contains("agent not connected"));
+                Err(Error::Pivot { message, .. }) => {
+                    assert!(message.contains("agent not connected"));
                 }
                 _ => panic!("Expected Pivot error"),
             }

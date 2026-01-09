@@ -1,5 +1,4 @@
 # Build stage
-# Note: Requires Rust 1.88+ due to home crate dependency
 FROM rust:latest AS builder
 
 # Install build dependencies
@@ -19,8 +18,8 @@ COPY src ./src
 # Build the binary
 RUN cargo build --release
 
-# Runtime stage
-FROM debian:bookworm-slim
+# Runtime stage - rust:latest is Debian trixie, so use matching runtime
+FROM debian:trixie-slim
 
 # Install runtime dependencies and tools
 RUN apt-get update && apt-get install -y \
@@ -40,11 +39,23 @@ RUN ARCH=$(echo ${TARGETARCH:-amd64} | sed 's/arm64/arm64/;s/amd64/amd64/') && \
     curl -L "https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.9.4/clusterctl-linux-${ARCH}" -o /usr/local/bin/clusterctl && \
     chmod +x /usr/local/bin/clusterctl
 
+# Install helm for CNI manifest generation
+RUN ARCH=$(echo ${TARGETARCH:-amd64} | sed 's/arm64/arm64/;s/amd64/amd64/') && \
+    curl -fsSL https://get.helm.sh/helm-v3.16.0-linux-${ARCH}.tar.gz | tar xz && \
+    mv linux-${ARCH}/helm /usr/local/bin/helm && \
+    rm -rf linux-${ARCH}
+
 # Copy binary from builder
 COPY --from=builder /app/target/release/lattice /usr/local/bin/lattice
 
-# Create non-root user
-RUN useradd -r -u 1000 lattice
+# Create non-root user with home directory for helm cache
+RUN useradd -r -u 1000 -m lattice
 USER lattice
+
+# Set writable locations for helm and kubectl cache
+ENV HOME=/home/lattice
+ENV HELM_CACHE_HOME=/home/lattice/.cache/helm
+ENV HELM_CONFIG_HOME=/home/lattice/.config/helm
+ENV HELM_DATA_HOME=/home/lattice/.local/share/helm
 
 ENTRYPOINT ["/usr/local/bin/lattice"]

@@ -146,7 +146,7 @@ impl CapiDetector for KubeCapiDetector {
         match api.list(&Default::default()).await {
             Ok(_) => Ok(true),
             Err(kube::Error::Api(err)) if err.code == 404 => Ok(false),
-            Err(e) => Err(Error::Kube(e)),
+            Err(e) => Err(e.into()),
         }
     }
 }
@@ -175,7 +175,7 @@ impl CapiInstaller for ClusterctlInstaller {
         let output = Command::new("clusterctl")
             .args(["init", "--infrastructure", provider])
             .output()
-            .map_err(|e| Error::CapiInstallation(format!("failed to run clusterctl: {}", e)))?;
+            .map_err(|e| Error::capi_installation(format!("failed to run clusterctl: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -184,7 +184,7 @@ impl CapiInstaller for ClusterctlInstaller {
                 info!("CAPI already installed");
                 return Ok(());
             }
-            return Err(Error::CapiInstallation(format!(
+            return Err(Error::capi_installation(format!(
                 "clusterctl init failed: {}",
                 stderr
             )));
@@ -398,7 +398,7 @@ mod tests {
     async fn when_detection_fails_error_propagates_to_caller() {
         let mut mock = MockCapiDetector::new();
         mock.expect_crd_exists()
-            .returning(|_, _| Err(Error::CapiInstallation("connection refused".to_string())));
+            .returning(|_, _| Err(Error::capi_installation("connection refused".to_string())));
 
         let result = is_provider_installed_with(&mock, &ProviderType::Docker).await;
 
@@ -549,7 +549,7 @@ mod tests {
             .expect_install()
             .with(eq("docker"))
             .returning(|_| {
-                Err(Error::CapiInstallation(
+                Err(Error::capi_installation(
                     "clusterctl init failed: timeout".to_string(),
                 ))
             });
@@ -572,7 +572,7 @@ mod tests {
         let mut installer = MockCapiInstaller::new();
 
         detector.expect_crd_exists().returning(|_, _| {
-            Err(Error::CapiInstallation(
+            Err(Error::capi_installation(
                 "API server unavailable".to_string(),
             ))
         });

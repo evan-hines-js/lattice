@@ -405,22 +405,56 @@ impl DockerProvider {
             &bootstrap.ca_cert_pem,
         ) {
             // Call the cell's manifests endpoint with the one-time token
-            // This returns CNI + agent manifests as raw YAML, piped directly to kubectl
-            // Write CA cert to verify TLS connection to cell
+            // This returns CNI + agent manifests as raw YAML
+            // We retry fetching forever since the agent can't start without these manifests
             commands.push(format!(
                 r#"echo "Bootstrapping cluster {name} from {endpoint}""#
             ));
+
+            // Write CA cert to verify TLS connection to cell
             commands.push(format!(
                 r#"cat > /tmp/cell-ca.crt << 'CACERT'
 {ca_cert}
 CACERT"#
             ));
+
+            // Retry fetching manifests until success (with backoff)
+            // We must get these manifests - the agent and CNI are included
             commands.push(format!(
-                r#"curl -sf --cacert /tmp/cell-ca.crt "{endpoint}/api/clusters/{name}/manifests" \
-  -H "Authorization: Bearer {token}" \
-  | kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f - || echo "Bootstrap webhook failed, will retry via agent""#,
+                r#"echo "Fetching bootstrap manifests from cell..."
+MANIFEST_FILE=/tmp/bootstrap-manifests.yaml
+RETRY_DELAY=5
+while true; do
+  if curl -sf --cacert /tmp/cell-ca.crt "{endpoint}/api/clusters/{name}/manifests" \
+    -H "Authorization: Bearer {token}" \
+    -o "$MANIFEST_FILE"; then
+    echo "Successfully fetched bootstrap manifests"
+    break
+  fi
+  echo "Failed to fetch manifests, retrying in ${{RETRY_DELAY}}s..."
+  sleep $RETRY_DELAY
+  RETRY_DELAY=$((RETRY_DELAY < 60 ? RETRY_DELAY * 2 : 60))
+done"#,
             ));
-            commands.push(r#"rm -f /tmp/cell-ca.crt"#.to_string());
+
+            // Apply manifests with retry (separate from fetch so we can retry just apply)
+            commands.push(
+                r#"echo "Applying bootstrap manifests..."
+RETRY_DELAY=5
+while true; do
+  if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /tmp/bootstrap-manifests.yaml; then
+    echo "Successfully applied bootstrap manifests"
+    break
+  fi
+  echo "Failed to apply manifests, retrying in ${RETRY_DELAY}s..."
+  sleep $RETRY_DELAY
+  RETRY_DELAY=$((RETRY_DELAY < 60 ? RETRY_DELAY * 2 : 60))
+done"#
+                    .to_string(),
+            );
+
+            // Clean up temp files
+            commands.push(r#"rm -f /tmp/cell-ca.crt /tmp/bootstrap-manifests.yaml"#.to_string());
         }
 
         // Untaint control plane so it can run workloads (single-node clusters)
