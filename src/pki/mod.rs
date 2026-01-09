@@ -71,8 +71,14 @@ impl CertificateAuthority {
 
         // Set distinguished name
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, DnValue::Utf8String(common_name.to_string()));
-        dn.push(DnType::OrganizationName, DnValue::Utf8String("Lattice".to_string()));
+        dn.push(
+            DnType::CommonName,
+            DnValue::Utf8String(common_name.to_string()),
+        );
+        dn.push(
+            DnType::OrganizationName,
+            DnValue::Utf8String("Lattice".to_string()),
+        );
         params.distinguished_name = dn;
 
         // CA settings
@@ -229,8 +235,14 @@ impl AgentCertRequest {
         // Create CSR params
         let mut params = CertificateParams::default();
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, DnValue::Utf8String(format!("lattice-agent-{}", cluster_id)));
-        dn.push(DnType::OrganizationName, DnValue::Utf8String("Lattice".to_string()));
+        dn.push(
+            DnType::CommonName,
+            DnValue::Utf8String(format!("lattice-agent-{}", cluster_id)),
+        );
+        dn.push(
+            DnType::OrganizationName,
+            DnValue::Utf8String("Lattice".to_string()),
+        );
         params.distinguished_name = dn;
 
         // Generate CSR
@@ -327,10 +339,7 @@ pub fn verify_client_cert(
         .and_then(|cn| cn.as_str().ok())
         .unwrap_or("");
 
-    let cluster_id = cn
-        .strip_prefix("lattice-agent-")
-        .unwrap_or("")
-        .to_string();
+    let cluster_id = cn.strip_prefix("lattice-agent-").unwrap_or("").to_string();
 
     if cluster_id.is_empty() {
         return Ok(VerificationResult {
@@ -418,7 +427,10 @@ mod tests {
         let result = verify_client_cert(&cert_der, ca2.ca_cert_pem()).unwrap();
 
         assert!(!result.valid);
-        assert!(result.reason.unwrap().contains("signature verification failed"));
+        assert!(result
+            .reason
+            .unwrap()
+            .contains("signature verification failed"));
     }
 
     #[test]
@@ -434,9 +446,7 @@ mod tests {
     fn cluster_id_extracted_from_cert() {
         let ca = CertificateAuthority::new("Test CA").unwrap();
         let request = AgentCertRequest::new("prod-us-west-123").unwrap();
-        let signed_cert_pem = ca
-            .sign_csr(request.csr_pem(), "prod-us-west-123")
-            .unwrap();
+        let signed_cert_pem = ca.sign_csr(request.csr_pem(), "prod-us-west-123").unwrap();
 
         let cert_der = parse_pem(&signed_cert_pem).unwrap();
         let result = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
@@ -508,7 +518,9 @@ mod tests {
 
         // Chapter 3: Cell signs the CSR
         // ------------------------------
-        let signed_cert = ca.sign_csr(agent_request.csr_pem(), "workload-east-1").unwrap();
+        let signed_cert = ca
+            .sign_csr(agent_request.csr_pem(), "workload-east-1")
+            .unwrap();
         assert!(signed_cert.contains("BEGIN CERTIFICATE"));
 
         // Chapter 4: Agent uses certificate for mTLS connection
@@ -536,7 +548,9 @@ mod tests {
 
         // Attacker signs their own agent's CSR
         let evil_agent = AgentCertRequest::new("trojan-cluster").unwrap();
-        let evil_cert = attacker_ca.sign_csr(evil_agent.csr_pem(), "trojan-cluster").unwrap();
+        let evil_cert = attacker_ca
+            .sign_csr(evil_agent.csr_pem(), "trojan-cluster")
+            .unwrap();
 
         // Attacker tries to connect to legitimate cell
         let cert_der = parse_pem(&evil_cert).unwrap();
@@ -544,7 +558,11 @@ mod tests {
 
         // Attack detected and blocked!
         assert!(!verification.valid);
-        assert!(verification.reason.as_ref().unwrap().contains("signature verification failed"));
+        assert!(verification
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("signature verification failed"));
     }
 
     /// Story: Cluster ID is cryptographically bound to certificate
@@ -581,7 +599,9 @@ mod tests {
         // Initial setup: Create CA and issue a certificate
         let original_ca = CertificateAuthority::new("Persistent CA").unwrap();
         let agent_request = AgentCertRequest::new("long-lived-cluster").unwrap();
-        let original_cert = original_ca.sign_csr(agent_request.csr_pem(), "long-lived-cluster").unwrap();
+        let original_cert = original_ca
+            .sign_csr(agent_request.csr_pem(), "long-lived-cluster")
+            .unwrap();
 
         // Simulate disaster: Save CA state
         let saved_cert_pem = original_ca.ca_cert_pem().to_string();
@@ -673,7 +693,7 @@ mod tests {
     fn story_io_error_conversion() {
         let io_err = std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "cannot read CA key file"
+            "cannot read CA key file",
         );
         let pki_err: PkiError = io_err.into();
 

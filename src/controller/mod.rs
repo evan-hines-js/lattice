@@ -6,6 +6,6 @@
 mod cluster;
 
 pub use cluster::{
-    error_policy, reconcile, ClusterBootstrap, Context, KubeClient, RealClusterBootstrap,
-    RealKubeClient,
+    error_policy, reconcile, ClusterBootstrap, ClusterBootstrapImpl, Context, KubeClient,
+    KubeClientImpl, PivotOperations, PivotOperationsImpl,
 };

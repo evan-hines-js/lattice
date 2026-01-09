@@ -34,7 +34,7 @@ async fn integration_bootstrap_http_full_flow() {
 
     let ca = Arc::new(CertificateAuthority::new("Integration Test CA").unwrap());
     let state = Arc::new(BootstrapState::new(
-        DefaultManifestGenerator::without_cilium(),
+        DefaultManifestGenerator::new().unwrap(),
         Duration::from_secs(3600),
         ca.clone(),
     ));
@@ -48,25 +48,25 @@ async fn integration_bootstrap_http_full_flow() {
 
     let router = bootstrap_router(state.clone());
 
-    // Step 1: Bootstrap request with valid token
-    let bootstrap_req = Request::builder()
+    // Step 1: Get manifests with valid token (returns raw YAML for kubectl apply)
+    let manifests_req = Request::builder()
         .method("GET")
-        .uri("/api/clusters/integration-cluster/bootstrap")
+        .uri("/api/clusters/integration-cluster/manifests")
         .header("authorization", format!("Bearer {}", token.as_str()))
         .body(Body::empty())
         .unwrap();
 
-    let response = router.clone().oneshot(bootstrap_req).await.unwrap();
+    let response = router.clone().oneshot(manifests_req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    let bootstrap_response: lattice::bootstrap::BootstrapResponse =
-        serde_json::from_slice(&body).unwrap();
+    let manifests_yaml = String::from_utf8(body.to_vec()).unwrap();
 
-    assert_eq!(bootstrap_response.cluster_id, "integration-cluster");
-    assert!(!bootstrap_response.manifests.is_empty());
+    // Should contain Kubernetes manifests (namespace, secrets, deployment)
+    assert!(manifests_yaml.contains("kind: Namespace"));
+    assert!(manifests_yaml.contains("lattice-system"));
 
     // Step 2: CSR signing after bootstrap
     let agent_req = AgentCertRequest::new("integration-cluster").unwrap();
@@ -100,7 +100,7 @@ async fn integration_bootstrap_token_replay_blocked() {
 
     let ca = Arc::new(CertificateAuthority::new("Replay Test CA").unwrap());
     let state = Arc::new(BootstrapState::new(
-        DefaultManifestGenerator::without_cilium(),
+        DefaultManifestGenerator::new().unwrap(),
         Duration::from_secs(3600),
         ca.clone(),
     ));
@@ -116,7 +116,7 @@ async fn integration_bootstrap_token_replay_blocked() {
     // First request succeeds
     let req1 = Request::builder()
         .method("GET")
-        .uri("/api/clusters/replay-test/bootstrap")
+        .uri("/api/clusters/replay-test/manifests")
         .header("authorization", format!("Bearer {}", token.as_str()))
         .body(Body::empty())
         .unwrap();
@@ -127,7 +127,7 @@ async fn integration_bootstrap_token_replay_blocked() {
     // Second request with same token fails (replay attack blocked)
     let req2 = Request::builder()
         .method("GET")
-        .uri("/api/clusters/replay-test/bootstrap")
+        .uri("/api/clusters/replay-test/manifests")
         .header("authorization", format!("Bearer {}", token.as_str()))
         .body(Body::empty())
         .unwrap();
@@ -146,7 +146,7 @@ async fn integration_full_stack_bootstrap_to_ready() {
     // Step 1: Setup bootstrap server
     let ca = Arc::new(CertificateAuthority::new("Full Stack CA").unwrap());
     let bootstrap_state = Arc::new(BootstrapState::new(
-        DefaultManifestGenerator::without_cilium(),
+        DefaultManifestGenerator::new().unwrap(),
         Duration::from_secs(3600),
         ca.clone(),
     ));
@@ -176,8 +176,7 @@ async fn integration_full_stack_bootstrap_to_ready() {
 
     // Step 4: Verify certificate is valid
     let cert_der = lattice::pki::parse_pem(&csr_response.certificate_pem).unwrap();
-    let verification =
-        lattice::pki::verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
+    let verification = lattice::pki::verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
 
     assert!(verification.valid);
     assert_eq!(verification.cluster_id, "full-stack-test");
@@ -202,7 +201,11 @@ async fn integration_full_stack_bootstrap_to_ready() {
 
     // Step 6: Connect and register via gRPC
     let endpoint = format!("http://{}", actual_addr);
-    let channel = Channel::from_shared(endpoint).unwrap().connect().await.unwrap();
+    let channel = Channel::from_shared(endpoint)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
     let mut client = LatticeAgentClient::new(channel);
 
     let (tx, rx) = mpsc::channel::<AgentMessage>(32);

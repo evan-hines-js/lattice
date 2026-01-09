@@ -14,7 +14,7 @@
 //!
 //! 1. Cluster created → bootstrap token generated
 //! 2. kubeadm runs postKubeadmCommands
-//! 3. Script calls `GET /api/clusters/{id}/bootstrap` with Bearer token
+//! 3. Script calls `GET /api/clusters/{id}/manifests` with Bearer token
 //! 4. Endpoint validates token, marks as used
 //! 5. Returns: agent manifest, CNI manifest, CA certificate
 //!
@@ -83,15 +83,14 @@ impl IntoResponse for BootstrapError {
             BootstrapError::TokenAlreadyUsed => (StatusCode::GONE, self.to_string()),
             BootstrapError::ClusterNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             BootstrapError::MissingAuth => (StatusCode::UNAUTHORIZED, self.to_string()),
-            BootstrapError::CsrSigningFailed(_) => {
-                (StatusCode::BAD_REQUEST, self.to_string())
-            }
+            BootstrapError::CsrSigningFailed(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             BootstrapError::ClusterNotBootstrapped(_) => {
                 (StatusCode::PRECONDITION_FAILED, self.to_string())
             }
-            BootstrapError::Internal(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
-            }
+            BootstrapError::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".to_string(),
+            ),
         };
 
         (status, Json(serde_json::json!({"error": message}))).into_response()
@@ -136,6 +135,10 @@ pub struct CsrResponse {
 /// Bootstrap manifest generator
 pub trait ManifestGenerator: Send + Sync {
     /// Generate bootstrap manifests for a cluster
+    ///
+    /// These manifests are applied during initial bootstrap (before pivot).
+    /// They include CNI and agent - NOT LatticeCluster CRD (that comes post-pivot
+    /// via BootstrapCommand to avoid fighting with pivot).
     fn generate(&self, cluster_id: &str, cell_endpoint: &str, ca_cert: &str) -> Vec<String>;
 }
 
@@ -174,31 +177,30 @@ impl DefaultManifestGenerator {
         Ok(Self { cilium_manifests })
     }
 
-    /// Create without Cilium (for testing only)
-    ///
-    /// This should only be used in tests where Cilium is not needed.
-    /// In production, use `new()` to include Cilium CNI manifests.
-    pub fn without_cilium() -> Self {
-        Self {
-            cilium_manifests: vec![],
-        }
-    }
-
     /// Render Cilium manifests using helm template
     fn render_cilium(config: &CiliumConfig) -> Result<Vec<String>, BootstrapError> {
         use std::process::Command;
 
         // Cilium helm values for Istio compatibility (matching Elixir POC)
         let values = [
-            "--set", "hubble.enabled=false",
-            "--set", "hubble.relay.enabled=false",
-            "--set", "hubble.ui.enabled=false",
-            "--set", "prometheus.enabled=false",
-            "--set", "operator.prometheus.enabled=false",
-            "--set", "cni.exclusive=false",  // Istio compatibility
-            "--set", "kubeProxyReplacement=false",
-            "--set", "l2announcements.enabled=true",
-            "--set", "externalIPs.enabled=true",
+            "--set",
+            "hubble.enabled=false",
+            "--set",
+            "hubble.relay.enabled=false",
+            "--set",
+            "hubble.ui.enabled=false",
+            "--set",
+            "prometheus.enabled=false",
+            "--set",
+            "operator.prometheus.enabled=false",
+            "--set",
+            "cni.exclusive=false", // Istio compatibility
+            "--set",
+            "kubeProxyReplacement=false",
+            "--set",
+            "l2announcements.enabled=true",
+            "--set",
+            "externalIPs.enabled=true",
         ];
 
         let output = Command::new("helm")
@@ -206,9 +208,12 @@ impl DefaultManifestGenerator {
                 "template",
                 "cilium",
                 "cilium",
-                "--repo", config.repo_url,
-                "--version", config.version,
-                "--namespace", "kube-system",
+                "--repo",
+                config.repo_url,
+                "--version",
+                config.version,
+                "--namespace",
+                "kube-system",
             ])
             .args(&values)
             .output()
@@ -371,6 +376,9 @@ impl ManifestGenerator for DefaultManifestGenerator {
 
         // Then agent manifests
         manifests.extend(self.generate_agent_manifests(cluster_id, cell_endpoint, ca_cert));
+
+        // Note: LatticeCluster CRD and resource are sent post-pivot via BootstrapCommand
+        // to avoid the local controller fighting with the pivot process
 
         manifests
     }
@@ -544,28 +552,6 @@ fn extract_bearer_token(headers: &HeaderMap) -> Result<String, BootstrapError> {
         .ok_or(BootstrapError::InvalidToken)
 }
 
-/// Bootstrap endpoint handler
-pub async fn bootstrap_handler<G: ManifestGenerator>(
-    State(state): State<Arc<BootstrapState<G>>>,
-    Path(cluster_id): Path<String>,
-    headers: HeaderMap,
-) -> Result<Json<BootstrapResponse>, BootstrapError> {
-    debug!(cluster_id = %cluster_id, "Bootstrap request received");
-
-    // Extract token
-    let token = extract_bearer_token(&headers)?;
-
-    // Validate and consume
-    let info = state.validate_and_consume(&cluster_id, &token)?;
-
-    info!(cluster_id = %cluster_id, "Bootstrap token validated");
-
-    // Generate response
-    let response = state.generate_response(&info);
-
-    Ok(Json(response))
-}
-
 /// CSR signing endpoint handler
 ///
 /// Agents call this endpoint to get their CSR signed after bootstrap.
@@ -585,18 +571,55 @@ pub async fn csr_handler<G: ManifestGenerator>(
     Ok(Json(response))
 }
 
+/// Bootstrap manifests endpoint handler - returns raw YAML for kubectl apply
+///
+/// This endpoint is called by kubeadm postKubeadmCommands. It validates the
+/// one-time token and returns the manifests as concatenated YAML that can
+/// be piped directly to `kubectl apply -f -`.
+pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
+    State(state): State<Arc<BootstrapState<G>>>,
+    Path(cluster_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, BootstrapError> {
+    debug!(cluster_id = %cluster_id, "Bootstrap manifests request received");
+
+    // Extract token
+    let token = extract_bearer_token(&headers)?;
+
+    // Validate and consume
+    let info = state.validate_and_consume(&cluster_id, &token)?;
+
+    info!(cluster_id = %cluster_id, "Bootstrap token validated, returning manifests");
+
+    // Generate manifests and concatenate as YAML
+    let manifests = state.manifest_generator.generate(
+        &info.cluster_id,
+        &info.cell_endpoint,
+        &info.ca_certificate,
+    );
+
+    // Join with YAML document separator
+    let yaml_output = manifests.join("\n---\n");
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/x-yaml")],
+        yaml_output,
+    )
+        .into_response())
+}
+
 /// Create the bootstrap router
 ///
 /// Routes:
-/// - `GET /api/clusters/{cluster_id}/bootstrap` - Get bootstrap manifests (one-time with token)
+/// - `GET /api/clusters/{cluster_id}/manifests` - Get raw YAML manifests for kubectl apply (one-time with token)
 /// - `POST /api/clusters/{cluster_id}/csr` - Sign a CSR (after bootstrap)
 pub fn bootstrap_router<G: ManifestGenerator + 'static>(
     state: Arc<BootstrapState<G>>,
 ) -> axum::Router {
     axum::Router::new()
         .route(
-            "/api/clusters/{cluster_id}/bootstrap",
-            get(bootstrap_handler::<G>),
+            "/api/clusters/{cluster_id}/manifests",
+            get(bootstrap_manifests_handler::<G>),
         )
         .route("/api/clusters/{cluster_id}/csr", post(csr_handler::<G>))
         .with_state(state)
@@ -782,7 +805,9 @@ mod tests {
             "https://cell:443".to_string(),
             state.ca_cert_pem().to_string(),
         );
-        state.validate_and_consume("csr-test", token.as_str()).unwrap();
+        state
+            .validate_and_consume("csr-test", token.as_str())
+            .unwrap();
 
         // Now CSR signing should work
         let agent_req = AgentCertRequest::new("csr-test").unwrap();
@@ -804,7 +829,9 @@ mod tests {
             "https://cell:443".to_string(),
             state.ca_cert_pem().to_string(),
         );
-        state.validate_and_consume("cluster-xyz", token.as_str()).unwrap();
+        state
+            .validate_and_consume("cluster-xyz", token.as_str())
+            .unwrap();
 
         // Sign CSR
         let agent_req = AgentCertRequest::new("cluster-xyz").unwrap();
@@ -814,7 +841,8 @@ mod tests {
         // Parse and check (using x509-parser)
         let cert_pem = &response.certificate_pem;
         let pem_obj = ::pem::parse(cert_pem.as_bytes()).unwrap();
-        let (_, cert) = x509_parser::prelude::X509Certificate::from_der(pem_obj.contents()).unwrap();
+        let (_, cert) =
+            x509_parser::prelude::X509Certificate::from_der(pem_obj.contents()).unwrap();
 
         let cn = cert
             .subject()
@@ -828,7 +856,7 @@ mod tests {
 
     #[test]
     fn default_generator_creates_namespace() {
-        let generator = DefaultManifestGenerator::without_cilium();
+        let generator = DefaultManifestGenerator::new().unwrap();
         let manifests = generator.generate("my-cluster", "https://cell:443", "ca-pem");
 
         let has_namespace = manifests
@@ -839,7 +867,7 @@ mod tests {
 
     #[test]
     fn default_generator_creates_ca_secret() {
-        let generator = DefaultManifestGenerator::without_cilium();
+        let generator = DefaultManifestGenerator::new().unwrap();
         let manifests = generator.generate("my-cluster", "https://cell:443", "my-ca-cert");
 
         let has_secret = manifests
@@ -850,7 +878,7 @@ mod tests {
 
     #[test]
     fn default_generator_creates_agent_deployment() {
-        let generator = DefaultManifestGenerator::without_cilium();
+        let generator = DefaultManifestGenerator::new().unwrap();
         let manifests = generator.generate("my-cluster", "https://cell:443", "ca-pem");
 
         let has_deployment = manifests
@@ -938,7 +966,9 @@ mod tests {
         // ---------------------------------------------------------------
         // The bootstrap script calls: GET /api/clusters/prod-us-west-001/bootstrap
         // with Authorization: Bearer <token>
-        let info = state.validate_and_consume("prod-us-west-001", token.as_str()).unwrap();
+        let info = state
+            .validate_and_consume("prod-us-west-001", token.as_str())
+            .unwrap();
         assert_eq!(info.cluster_id, "prod-us-west-001");
         assert_eq!(info.cell_endpoint, "https://cell.lattice.example.com:443");
 
@@ -947,7 +977,10 @@ mod tests {
         let response = state.generate_response(&info);
         assert!(!response.manifests.is_empty());
         assert!(!response.ca_certificate.is_empty());
-        assert_eq!(response.cell_endpoint, "https://cell.lattice.example.com:443");
+        assert_eq!(
+            response.cell_endpoint,
+            "https://cell.lattice.example.com:443"
+        );
 
         // Chapter 4: Agent generates keypair and submits CSR
         // ---------------------------------------------------
@@ -957,9 +990,13 @@ mod tests {
 
         // Chapter 5: Cell signs the CSR
         // ------------------------------
-        let csr_response = state.sign_csr("prod-us-west-001", agent_request.csr_pem()).unwrap();
+        let csr_response = state
+            .sign_csr("prod-us-west-001", agent_request.csr_pem())
+            .unwrap();
         assert!(csr_response.certificate_pem.contains("BEGIN CERTIFICATE"));
-        assert!(csr_response.ca_certificate_pem.contains("BEGIN CERTIFICATE"));
+        assert!(csr_response
+            .ca_certificate_pem
+            .contains("BEGIN CERTIFICATE"));
 
         // Epilogue: Agent now has everything needed for mTLS
         // - Private key (locally generated, never transmitted)
@@ -983,13 +1020,18 @@ mod tests {
         );
 
         // Legitimate bootstrap succeeds
-        let _ = state.validate_and_consume("secure-cluster", token.as_str()).unwrap();
+        let _ = state
+            .validate_and_consume("secure-cluster", token.as_str())
+            .unwrap();
 
         // Attacker captures the token and tries to replay it
         let replay_result = state.validate_and_consume("secure-cluster", token.as_str());
 
         // Attack is blocked!
-        assert!(matches!(replay_result, Err(BootstrapError::TokenAlreadyUsed)));
+        assert!(matches!(
+            replay_result,
+            Err(BootstrapError::TokenAlreadyUsed)
+        ));
     }
 
     /// Story: Security - Wrong tokens are rejected
@@ -1016,8 +1058,12 @@ mod tests {
             "https://cell:443".to_string(),
             "cert".to_string(),
         );
-        let cross_cluster_result = state.validate_and_consume("guarded-cluster", other_token.as_str());
-        assert!(matches!(cross_cluster_result, Err(BootstrapError::InvalidToken)));
+        let cross_cluster_result =
+            state.validate_and_consume("guarded-cluster", other_token.as_str());
+        assert!(matches!(
+            cross_cluster_result,
+            Err(BootstrapError::InvalidToken)
+        ));
     }
 
     /// Story: Security - CSR signing requires completed bootstrap
@@ -1040,7 +1086,10 @@ mod tests {
         let result = state.sign_csr("premature-cluster", agent_request.csr_pem());
 
         // Blocked! Must complete bootstrap first
-        assert!(matches!(result, Err(BootstrapError::ClusterNotBootstrapped(_))));
+        assert!(matches!(
+            result,
+            Err(BootstrapError::ClusterNotBootstrapped(_))
+        ));
     }
 
     /// Story: Security - Unknown clusters cannot bootstrap
@@ -1058,7 +1107,10 @@ mod tests {
         // Unknown cluster can't get CSR signed either
         let agent_request = AgentCertRequest::new("hacker-cluster").unwrap();
         let csr_result = state.sign_csr("hacker-cluster", agent_request.csr_pem());
-        assert!(matches!(csr_result, Err(BootstrapError::ClusterNotFound(_))));
+        assert!(matches!(
+            csr_result,
+            Err(BootstrapError::ClusterNotFound(_))
+        ));
     }
 
     /// Story: Token expiration for time-limited bootstrap windows
@@ -1090,7 +1142,7 @@ mod tests {
     /// the Lattice agent on the new cluster.
     #[test]
     fn story_manifest_generation() {
-        let generator = DefaultManifestGenerator::without_cilium();
+        let generator = DefaultManifestGenerator::new().unwrap();
         let manifests = generator.generate(
             "my-workload-cluster",
             "https://cell.example.com:443",
@@ -1098,29 +1150,29 @@ mod tests {
         );
 
         // Manifests create the lattice-system namespace
-        let has_namespace = manifests.iter().any(|m|
-            m.contains("kind: Namespace") && m.contains("lattice-system")
-        );
+        let has_namespace = manifests
+            .iter()
+            .any(|m| m.contains("kind: Namespace") && m.contains("lattice-system"));
         assert!(has_namespace, "Should create lattice-system namespace");
 
         // Manifests include CA certificate for verifying cell
-        let has_ca_secret = manifests.iter().any(|m|
-            m.contains("kind: Secret") && m.contains("lattice-ca")
-        );
+        let has_ca_secret = manifests
+            .iter()
+            .any(|m| m.contains("kind: Secret") && m.contains("lattice-ca"));
         assert!(has_ca_secret, "Should include CA certificate secret");
 
         // Manifests deploy the agent
-        let has_agent = manifests.iter().any(|m|
-            m.contains("kind: Deployment") && m.contains("lattice-agent")
-        );
+        let has_agent = manifests
+            .iter()
+            .any(|m| m.contains("kind: Deployment") && m.contains("lattice-agent"));
         assert!(has_agent, "Should deploy lattice-agent");
 
         // Agent config includes cluster ID and cell endpoint
-        let has_config = manifests.iter().any(|m|
-            m.contains("kind: ConfigMap") &&
-            m.contains("my-workload-cluster") &&
-            m.contains("cell.example.com")
-        );
+        let has_config = manifests.iter().any(|m| {
+            m.contains("kind: ConfigMap")
+                && m.contains("my-workload-cluster")
+                && m.contains("cell.example.com")
+        });
         assert!(has_config, "Should include agent configuration");
     }
 
@@ -1183,6 +1235,51 @@ mod tests {
         assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    /// Story: PkiError converts to BootstrapError correctly
+    ///
+    /// When CSR signing fails due to PKI errors (invalid CSR format, etc.),
+    /// the error should be properly converted to a BootstrapError.
+    #[test]
+    fn story_pki_error_converts_to_bootstrap_error() {
+        use crate::pki::PkiError;
+
+        // Test the From<PkiError> implementation
+        let pki_error = PkiError::InvalidCsr("malformed CSR data".to_string());
+        let bootstrap_error: BootstrapError = pki_error.into();
+
+        match bootstrap_error {
+            BootstrapError::CsrSigningFailed(msg) => {
+                assert!(msg.contains("malformed CSR"));
+            }
+            _ => panic!("Expected CsrSigningFailed"),
+        }
+    }
+
+    /// Story: CSR signing with malformed CSR returns proper error
+    ///
+    /// When an agent submits an invalid CSR (not proper PEM format),
+    /// the signing should fail with a descriptive error.
+    #[test]
+    fn story_malformed_csr_returns_error() {
+        let state = test_state();
+
+        // Register and bootstrap
+        let token = state.register_cluster(
+            "malformed-csr-test".to_string(),
+            "https://cell:443".to_string(),
+            state.ca_cert_pem().to_string(),
+        );
+        state
+            .validate_and_consume("malformed-csr-test", token.as_str())
+            .unwrap();
+
+        // Try to sign a malformed CSR
+        let result = state.sign_csr("malformed-csr-test", "not a valid CSR");
+
+        // Should fail with CsrSigningFailed
+        assert!(matches!(result, Err(BootstrapError::CsrSigningFailed(_))));
+    }
+
     /// Story: CA certificate availability for distribution
     #[test]
     fn story_ca_certificate_distribution() {
@@ -1198,7 +1295,9 @@ mod tests {
             "https://cell:443".to_string(),
             ca_cert.to_string(),
         );
-        let info = state.validate_and_consume("ca-test", token.as_str()).unwrap();
+        let info = state
+            .validate_and_consume("ca-test", token.as_str())
+            .unwrap();
         let response = state.generate_response(&info);
 
         assert_eq!(response.ca_certificate, ca_cert);
@@ -1221,9 +1320,9 @@ mod tests {
         // Router should be created without panic
     }
 
-    /// Integration test: bootstrap endpoint with valid token
+    /// Integration test: manifests endpoint with valid token
     #[tokio::test]
-    async fn integration_bootstrap_handler_success() {
+    async fn integration_manifests_handler_success() {
         let state = Arc::new(test_state());
         let token = state.register_cluster(
             "http-test".to_string(),
@@ -1235,7 +1334,7 @@ mod tests {
 
         let request = Request::builder()
             .method("GET")
-            .uri("/api/clusters/http-test/bootstrap")
+            .uri("/api/clusters/http-test/manifests")
             .header("authorization", format!("Bearer {}", token.as_str()))
             .body(Body::empty())
             .unwrap();
@@ -1243,20 +1342,19 @@ mod tests {
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Parse response body
+        // Response is raw YAML for kubectl apply
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap();
-        let bootstrap_response: BootstrapResponse = serde_json::from_slice(&body).unwrap();
+        let manifests_yaml = String::from_utf8(body.to_vec()).unwrap();
 
-        assert_eq!(bootstrap_response.cluster_id, "http-test");
-        assert_eq!(bootstrap_response.cell_endpoint, "https://cell:443");
-        assert!(!bootstrap_response.manifests.is_empty());
+        // Should contain test manifest from TestManifestGenerator
+        assert!(manifests_yaml.contains("http-test"));
     }
 
-    /// Integration test: bootstrap endpoint with missing auth
+    /// Integration test: manifests endpoint with missing auth
     #[tokio::test]
-    async fn integration_bootstrap_handler_missing_auth() {
+    async fn integration_manifests_handler_missing_auth() {
         let state = Arc::new(test_state());
         state.register_cluster(
             "auth-test".to_string(),
@@ -1268,7 +1366,7 @@ mod tests {
 
         let request = Request::builder()
             .method("GET")
-            .uri("/api/clusters/auth-test/bootstrap")
+            .uri("/api/clusters/auth-test/manifests")
             // No authorization header
             .body(Body::empty())
             .unwrap();
@@ -1277,9 +1375,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// Integration test: bootstrap endpoint with invalid token
+    /// Integration test: manifests endpoint with invalid token
     #[tokio::test]
-    async fn integration_bootstrap_handler_invalid_token() {
+    async fn integration_manifests_handler_invalid_token() {
         let state = Arc::new(test_state());
         state.register_cluster(
             "token-test".to_string(),
@@ -1291,7 +1389,7 @@ mod tests {
 
         let request = Request::builder()
             .method("GET")
-            .uri("/api/clusters/token-test/bootstrap")
+            .uri("/api/clusters/token-test/manifests")
             .header("authorization", "Bearer wrong-token")
             .body(Body::empty())
             .unwrap();
@@ -1300,15 +1398,15 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// Integration test: bootstrap endpoint for unknown cluster
+    /// Integration test: manifests endpoint for unknown cluster
     #[tokio::test]
-    async fn integration_bootstrap_handler_unknown_cluster() {
+    async fn integration_manifests_handler_unknown_cluster() {
         let state = Arc::new(test_state());
         let router = bootstrap_router(state);
 
         let request = Request::builder()
             .method("GET")
-            .uri("/api/clusters/nonexistent/bootstrap")
+            .uri("/api/clusters/nonexistent/manifests")
             .header("authorization", "Bearer any-token")
             .body(Body::empty())
             .unwrap();
@@ -1328,7 +1426,9 @@ mod tests {
             "https://cell:443".to_string(),
             state.ca_cert_pem().to_string(),
         );
-        state.validate_and_consume("csr-http-test", token.as_str()).unwrap();
+        state
+            .validate_and_consume("csr-http-test", token.as_str())
+            .unwrap();
 
         // Generate CSR
         let agent_req = AgentCertRequest::new("csr-http-test").unwrap();
@@ -1355,7 +1455,9 @@ mod tests {
         let csr_response: CsrResponse = serde_json::from_slice(&body).unwrap();
 
         assert!(csr_response.certificate_pem.contains("BEGIN CERTIFICATE"));
-        assert!(csr_response.ca_certificate_pem.contains("BEGIN CERTIFICATE"));
+        assert!(csr_response
+            .ca_certificate_pem
+            .contains("BEGIN CERTIFICATE"));
     }
 
     /// Integration test: CSR endpoint before bootstrap
@@ -1411,7 +1513,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    /// Integration test: Full HTTP bootstrap flow
+    /// Integration test: Full HTTP bootstrap flow (manifests + CSR)
     #[tokio::test]
     async fn integration_full_http_bootstrap_flow() {
         let state = Arc::new(test_state());
@@ -1426,22 +1528,22 @@ mod tests {
 
         let router = bootstrap_router(state);
 
-        // Step 2: Bootstrap request
-        let bootstrap_request = Request::builder()
+        // Step 2: Get manifests (returns raw YAML for kubectl apply)
+        let manifests_request = Request::builder()
             .method("GET")
-            .uri("/api/clusters/full-flow-test/bootstrap")
+            .uri("/api/clusters/full-flow-test/manifests")
             .header("authorization", format!("Bearer {}", token.as_str()))
             .body(Body::empty())
             .unwrap();
 
-        let response = router.clone().oneshot(bootstrap_request).await.unwrap();
+        let response = router.clone().oneshot(manifests_request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap();
-        let bootstrap_response: BootstrapResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(bootstrap_response.cluster_id, "full-flow-test");
+        let manifests_yaml = String::from_utf8(body.to_vec()).unwrap();
+        assert!(manifests_yaml.contains("full-flow-test"));
 
         // Step 3: CSR signing
         let agent_req = AgentCertRequest::new("full-flow-test").unwrap();

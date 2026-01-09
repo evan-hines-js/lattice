@@ -228,7 +228,10 @@ mod tests {
 
         // Verify URL-safe encoding
         assert!(
-            token.as_str().chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
+            token
+                .as_str()
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
             "Token should contain only URL-safe characters"
         );
     }
@@ -272,7 +275,10 @@ mod tests {
         );
 
         // Hash should appear for traceability
-        assert!(debug.contains("hash"), "Debug output should show hash for traceability");
+        assert!(
+            debug.contains("hash"),
+            "Debug output should show hash for traceability"
+        );
     }
 
     // =========================================================================
@@ -334,7 +340,10 @@ mod tests {
         let token = store.create_token("secure-cluster");
 
         // First use succeeds
-        assert!(store.consume("secure-cluster", token.as_str()), "First use should succeed");
+        assert!(
+            store.consume("secure-cluster", token.as_str()),
+            "First use should succeed"
+        );
 
         // Replay attempt fails
         assert!(

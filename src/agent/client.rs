@@ -23,13 +23,12 @@ use tonic::transport::Endpoint;
 use tracing::{debug, error, info, warn};
 
 use crate::bootstrap::{CsrRequest, CsrResponse};
-use crate::pki::AgentCertRequest;
 use crate::pivot::AgentPivotHandler;
+use crate::pki::AgentCertRequest;
 use crate::proto::lattice_agent_client::LatticeAgentClient;
 use crate::proto::{
-    AgentMessage, AgentReady, AgentState, BootstrapComplete, CellCommand,
-    Heartbeat, PivotComplete, PivotStarted,
-    agent_message::Payload, cell_command::Command,
+    agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
+    BootstrapComplete, CellCommand, Heartbeat, PivotComplete, PivotStarted,
 };
 
 use super::mtls::ClientMtlsConfig;
@@ -390,10 +389,7 @@ impl AgentClient {
     /// Send a message to the cell
     async fn send_message(&self, msg: AgentMessage) -> Result<(), ClientError> {
         match &self.message_tx {
-            Some(tx) => tx
-                .send(msg)
-                .await
-                .map_err(|_| ClientError::ChannelClosed),
+            Some(tx) => tx.send(msg).await.map_err(|_| ClientError::ChannelClosed),
             None => Err(ClientError::NotConnected),
         }
     }
@@ -454,6 +450,42 @@ impl AgentClient {
         self.send_message(msg).await
     }
 
+    /// Apply a Kubernetes manifest using kubectl
+    ///
+    /// This is used to apply manifests received via BootstrapCommand
+    /// (e.g., LatticeCluster CRD and resource after pivot).
+    async fn apply_manifest(yaml: &str) -> Result<(), std::io::Error> {
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt;
+        use tokio::process::Command;
+
+        debug!("Applying manifest via kubectl");
+
+        let mut child = Command::new("kubectl")
+            .args(["apply", "-f", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(yaml.as_bytes()).await?;
+        }
+
+        let output = child.wait_with_output().await?;
+
+        if output.status.success() {
+            debug!("kubectl apply succeeded");
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("kubectl apply failed: {}", stderr),
+            ))
+        }
+    }
+
     /// Handle incoming command from cell
     async fn handle_command(
         command: &CellCommand,
@@ -464,9 +496,47 @@ impl AgentClient {
         debug!(command_id = %command.command_id, "Received command");
 
         match &command.command {
-            Some(Command::Bootstrap(_cmd)) => {
+            Some(Command::Bootstrap(cmd)) => {
                 info!("Received bootstrap command");
-                // TODO: Apply Flux manifests
+
+                // Apply additional manifests (LatticeCluster CRD + resource)
+                let manifests_count = cmd.additional_manifests.len();
+                let mut applied = 0;
+                let mut errors = Vec::new();
+
+                for manifest in &cmd.additional_manifests {
+                    match String::from_utf8(manifest.clone()) {
+                        Ok(yaml) => {
+                            if let Err(e) = Self::apply_manifest(&yaml).await {
+                                error!(error = %e, "Failed to apply manifest");
+                                errors.push(e.to_string());
+                            } else {
+                                applied += 1;
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Invalid UTF-8 in manifest");
+                            errors.push(format!("invalid UTF-8: {}", e));
+                        }
+                    }
+                }
+
+                info!(
+                    total = manifests_count,
+                    applied = applied,
+                    errors = errors.len(),
+                    "Bootstrap manifests applied"
+                );
+
+                // Send BootstrapComplete
+                let msg = AgentMessage {
+                    cluster_name: cluster_name.to_string(),
+                    payload: Some(Payload::BootstrapComplete(BootstrapComplete {
+                        flux_ready: false,  // Flux not implemented yet
+                        cilium_ready: true, // Cilium was applied during initial bootstrap
+                    })),
+                };
+                let _ = message_tx.send(msg).await;
             }
             Some(Command::StartPivot(cmd)) => {
                 info!(
@@ -492,16 +562,21 @@ impl AgentClient {
                 let cluster_name_clone = cluster_name.to_string();
 
                 tokio::spawn(async move {
-                    let handler = AgentPivotHandler::new()
-                        .with_capi_namespace(&target_namespace);
+                    let handler = AgentPivotHandler::new().with_capi_namespace(&target_namespace);
 
                     // Wait up to 10 minutes for CAPI resources with 5s polling
                     let timeout = Duration::from_secs(600);
                     let poll_interval = Duration::from_secs(5);
 
-                    match handler.wait_for_capi_resources(timeout, poll_interval).await {
+                    match handler
+                        .wait_for_capi_resources(timeout, poll_interval)
+                        .await
+                    {
                         Ok(resource_count) => {
-                            info!(resources = resource_count, "CAPI resources imported successfully");
+                            info!(
+                                resources = resource_count,
+                                "CAPI resources imported successfully"
+                            );
                             *agent_state_clone.write().await = AgentState::Ready;
 
                             let msg = AgentMessage {
@@ -1301,11 +1376,13 @@ mod tests {
         client.set_agent_state(AgentState::Pivoting).await;
 
         // Pivot fails with an error
-        let result = client.send_pivot_complete(
-            false,
-            "CAPI resources could not be imported: timeout waiting for CRDs",
-            0,
-        ).await;
+        let result = client
+            .send_pivot_complete(
+                false,
+                "CAPI resources could not be imported: timeout waiting for CRDs",
+                0,
+            )
+            .await;
         assert!(result.is_ok());
 
         // Agent should be in Failed state
@@ -1491,8 +1568,10 @@ mod tests {
         let command = CellCommand {
             command_id: "boot-123".to_string(),
             command: Some(Command::Bootstrap(BootstrapCommand {
-                git_repository: b"apiVersion: source.toolkit.fluxcd.io/v1\nkind: GitRepository".to_vec(),
-                kustomization: b"apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization".to_vec(),
+                git_repository: b"apiVersion: source.toolkit.fluxcd.io/v1\nkind: GitRepository"
+                    .to_vec(),
+                kustomization: b"apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization"
+                    .to_vec(),
                 additional_manifests: vec![],
             })),
         };
@@ -1613,10 +1692,15 @@ mod tests {
             agent_version: "2.0.0".to_string(),
             heartbeat_interval: Duration::from_secs(60),
             connect_timeout: Duration::from_secs(30),
-            ca_cert_pem: Some("-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----".to_string()),
+            ca_cert_pem: Some(
+                "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----".to_string(),
+            ),
         };
 
-        assert_eq!(config.cell_grpc_endpoint, "https://cell.prod.example.com:443");
+        assert_eq!(
+            config.cell_grpc_endpoint,
+            "https://cell.prod.example.com:443"
+        );
         assert_eq!(config.heartbeat_interval, Duration::from_secs(60));
         assert_eq!(config.connect_timeout, Duration::from_secs(30));
         assert!(config.ca_cert_pem.is_some());
@@ -1768,7 +1852,8 @@ mod tests {
         let creds = AgentCredentials {
             cert_pem: "-----BEGIN CERTIFICATE-----\nMIIC...\n-----END CERTIFICATE-----".to_string(),
             key_pem: "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----".to_string(),
-            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nMIID...\n-----END CERTIFICATE-----".to_string(),
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nMIID...\n-----END CERTIFICATE-----"
+                .to_string(),
         };
 
         let cloned = creds.clone();
@@ -1857,7 +1942,10 @@ mod tests {
         assert_eq!(client.agent_state().await, AgentState::Pivoting);
 
         // 3. Pivot fails - transitions to Failed
-        client.send_pivot_complete(false, "CAPI CRDs not installed", 0).await.unwrap();
+        client
+            .send_pivot_complete(false, "CAPI CRDs not installed", 0)
+            .await
+            .unwrap();
         assert_eq!(client.agent_state().await, AgentState::Failed);
     }
 
@@ -2057,6 +2145,64 @@ mod tests {
     // ==========================================================================
     // Story Tests: Command Handling with Various Payload Sizes
     // ==========================================================================
+
+    /// Story: Agent handles bootstrap command with invalid UTF-8 manifests gracefully
+    ///
+    /// When a manifest contains invalid UTF-8 bytes (corrupted data), the agent
+    /// should log the error and continue processing other manifests rather than
+    /// crashing.
+    #[tokio::test]
+    async fn story_agent_handles_invalid_utf8_manifests() {
+        let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
+
+        // Create manifests with invalid UTF-8
+        let valid_manifest = b"apiVersion: v1\nkind: ConfigMap".to_vec();
+        let invalid_utf8 = vec![0xFF, 0xFE, 0x00, 0x01]; // Invalid UTF-8 sequence
+
+        let command = CellCommand {
+            command_id: "utf8-test".to_string(),
+            command: Some(Command::Bootstrap(BootstrapCommand {
+                git_repository: vec![],
+                kustomization: vec![],
+                additional_manifests: vec![invalid_utf8, valid_manifest],
+            })),
+        };
+
+        // Should handle without panicking
+        AgentClient::handle_command(&command, &agent_state, &tx, "utf8-cluster").await;
+
+        // Should still send BootstrapComplete (even with partial failures)
+        let msg = rx.recv().await.unwrap();
+        match msg.payload {
+            Some(Payload::BootstrapComplete(_)) => {
+                // Expected - agent reports completion even if some manifests failed
+            }
+            _ => panic!("Expected BootstrapComplete payload"),
+        }
+    }
+
+    /// Story: Agent handles bootstrap command with empty manifest list
+    #[tokio::test]
+    async fn story_agent_handles_empty_manifests() {
+        let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
+
+        let command = CellCommand {
+            command_id: "empty-manifests".to_string(),
+            command: Some(Command::Bootstrap(BootstrapCommand {
+                git_repository: vec![],
+                kustomization: vec![],
+                additional_manifests: vec![], // No manifests
+            })),
+        };
+
+        AgentClient::handle_command(&command, &agent_state, &tx, "empty-cluster").await;
+
+        // Should still send BootstrapComplete
+        let msg = rx.recv().await.unwrap();
+        assert!(matches!(msg.payload, Some(Payload::BootstrapComplete(_))));
+    }
 
     /// Story: Agent handles bootstrap command with large manifests
     #[tokio::test]

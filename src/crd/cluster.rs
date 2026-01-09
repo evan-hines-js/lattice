@@ -210,7 +210,10 @@ mod tests {
         };
 
         assert!(spec.is_cell(), "Should be recognized as a cell");
-        assert!(!spec.is_workload_cluster(), "Cell is not a workload cluster");
+        assert!(
+            !spec.is_workload_cluster(),
+            "Cell is not a workload cluster"
+        );
     }
 
     /// Story: A cluster with cellRef is recognized as a workload cluster
@@ -230,7 +233,10 @@ mod tests {
             workload: None,
         };
 
-        assert!(spec.is_workload_cluster(), "Should be recognized as workload cluster");
+        assert!(
+            spec.is_workload_cluster(),
+            "Should be recognized as workload cluster"
+        );
         assert!(!spec.is_cell(), "Workload cluster is not a cell");
     }
 
@@ -256,7 +262,10 @@ mod tests {
             workload: None,
         };
 
-        assert!(spec.validate().is_ok(), "Valid cell spec should pass validation");
+        assert!(
+            spec.validate().is_ok(),
+            "Valid cell spec should pass validation"
+        );
     }
 
     /// Story: Valid workload cluster configuration passes validation
@@ -275,7 +284,10 @@ mod tests {
             workload: None,
         };
 
-        assert!(spec.validate().is_ok(), "Valid workload spec should pass validation");
+        assert!(
+            spec.validate().is_ok(),
+            "Valid workload spec should pass validation"
+        );
     }
 
     /// Story: Cluster cannot be both a cell AND reference another cell
@@ -322,7 +334,10 @@ mod tests {
             workload: None,
         };
 
-        assert!(spec.validate().is_err(), "Zero control plane nodes should fail");
+        assert!(
+            spec.validate().is_err(),
+            "Zero control plane nodes should fail"
+        );
     }
 
     // =========================================================================
@@ -381,7 +396,11 @@ mod tests {
             .condition(provisioning)
             .condition(ready);
 
-        assert_eq!(status.conditions.len(), 1, "Should only have one Ready condition");
+        assert_eq!(
+            status.conditions.len(),
+            1,
+            "Should only have one Ready condition"
+        );
         assert_eq!(
             status.conditions[0].status,
             ConditionStatus::True,

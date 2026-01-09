@@ -644,8 +644,12 @@ mod tests {
         fn test_workload_spec_with_services() {
             let spec = WorkloadSpec {
                 services: vec![
-                    ServiceRef { name: "nginx".to_string() },
-                    ServiceRef { name: "redis".to_string() },
+                    ServiceRef {
+                        name: "nginx".to_string(),
+                    },
+                    ServiceRef {
+                        name: "redis".to_string(),
+                    },
                 ],
             };
             let json = serde_json::to_string(&spec).unwrap();
