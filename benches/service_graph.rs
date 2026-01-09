@@ -390,8 +390,18 @@ fn bench_list_active_edges(c: &mut Criterion) {
                 black_box(graph.list_active_edges("default"));
             });
         });
+    }
 
-        group.bench_with_input(BenchmarkId::new("mesh", size), &size, |b, &size| {
+    group.finish();
+
+    // Mesh benchmarks are O(n²) and very slow - use reduced sample size
+    let mut mesh_group = c.benchmark_group("list_active_edges_mesh");
+    mesh_group.sample_size(10);
+
+    for size in [10usize, 100, 500] {
+        mesh_group.throughput(Throughput::Elements(1));
+
+        mesh_group.bench_with_input(BenchmarkId::new("mesh", size), &size, |b, &size| {
             let graph = setup_mesh_graph(size);
             b.iter(|| {
                 black_box(graph.list_active_edges("default"));
@@ -399,7 +409,7 @@ fn bench_list_active_edges(c: &mut Criterion) {
         });
     }
 
-    group.finish();
+    mesh_group.finish();
 }
 
 // =============================================================================
