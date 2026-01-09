@@ -393,7 +393,10 @@ impl LatticeServiceSpec {
             .iter()
             .filter(|(_, spec)| {
                 spec.direction.is_outbound()
-                    && matches!(spec.type_, ResourceType::Service | ResourceType::ExternalService)
+                    && matches!(
+                        spec.type_,
+                        ResourceType::Service | ResourceType::ExternalService
+                    )
             })
             .map(|(name, _)| name.as_str())
             .collect()

@@ -35,6 +35,7 @@
 //! ```
 
 #![allow(missing_docs)] // Generated code doesn't have docs
+#![allow(clippy::doc_overindented_list_items)] // Generated proto docs have formatting issues
 
 /// Generated protobuf and gRPC code for agent-cell communication
 pub mod agent {

@@ -70,6 +70,10 @@ pub enum Error {
         /// Provider being installed (if applicable)
         provider: Option<String>,
     },
+
+    /// Bootstrap/cell server error
+    #[error("bootstrap error: {0}")]
+    Bootstrap(String),
 }
 
 impl Error {
@@ -232,6 +236,7 @@ impl Error {
             Error::Pivot { .. } => true, // Pivots are generally retryable
             Error::Serialization { .. } => false,
             Error::CapiInstallation { .. } => true,
+            Error::Bootstrap(_) => true, // Bootstrap errors are generally retryable
         }
     }
 
@@ -244,6 +249,7 @@ impl Error {
             Error::Pivot { cluster, .. } => Some(cluster),
             Error::Serialization { .. } => None,
             Error::CapiInstallation { .. } => None,
+            Error::Bootstrap(_) => None,
         }
     }
 }
@@ -295,11 +301,8 @@ mod tests {
         assert_eq!(err.cluster(), Some("prod-cluster"));
 
         // Validation error with field path
-        let err = Error::validation_for_field(
-            "test-cluster",
-            "spec.nodes.controlPlane",
-            "must be odd",
-        );
+        let err =
+            Error::validation_for_field("test-cluster", "spec.nodes.controlPlane", "must be odd");
         match &err {
             Error::Validation { field, .. } => {
                 assert_eq!(field.as_deref(), Some("spec.nodes.controlPlane"));

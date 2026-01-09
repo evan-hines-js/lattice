@@ -20,6 +20,7 @@
 //! - [`pki`] - PKI operations for mTLS certificates
 //! - [`bootstrap`] - Bootstrap endpoint for kubeadm callback
 //! - [`capi`] - CAPI installation and management
+//! - [`cell`] - On-demand cell servers (gRPC + bootstrap HTTP)
 //! - [`graph`] - Service dependency graph for network policy generation
 //! - [`error`] - Error types for the operator
 
@@ -28,6 +29,8 @@
 pub mod agent;
 pub mod bootstrap;
 pub mod capi;
+pub mod cell;
+pub mod cilium;
 pub mod controller;
 pub mod crd;
 pub mod error;

@@ -183,18 +183,23 @@ fn setup_realistic_graph(n: usize) -> ServiceGraph {
     // Average 2-3 dependencies per service
     for i in 0..n {
         let num_deps = rng.gen_range(0..=4.min(n.saturating_sub(1)));
-        let dep_indices: Vec<usize> = (0..n).filter(|&j| j != i).choose_multiple(&mut rng, num_deps);
+        let dep_indices: Vec<usize> = (0..n)
+            .filter(|&j| j != i)
+            .choose_multiple(&mut rng, num_deps);
 
         let dep_names: Vec<String> = dep_indices.iter().map(|j| format!("svc-{}", j)).collect();
         let dep_refs: Vec<&str> = dep_names.iter().map(|s| s.as_str()).collect();
 
         // Random callers (simulating bilateral agreements)
         let num_callers = rng.gen_range(0..=3.min(n.saturating_sub(1)));
-        let caller_indices: Vec<usize> =
-            (0..n).filter(|&j| j != i).choose_multiple(&mut rng, num_callers);
+        let caller_indices: Vec<usize> = (0..n)
+            .filter(|&j| j != i)
+            .choose_multiple(&mut rng, num_callers);
 
-        let caller_names: Vec<String> =
-            caller_indices.iter().map(|j| format!("svc-{}", j)).collect();
+        let caller_names: Vec<String> = caller_indices
+            .iter()
+            .map(|j| format!("svc-{}", j))
+            .collect();
         let caller_refs: Vec<&str> = caller_names.iter().map(|s| s.as_str()).collect();
 
         let spec = service_spec_with_deps(&dep_refs, &caller_refs);
@@ -223,16 +228,20 @@ fn bench_put_service(c: &mut Criterion) {
             });
         });
 
-        group.bench_with_input(BenchmarkId::new("existing_graph", size), &size, |b, &size| {
-            let graph = setup_realistic_graph(size);
-            let spec = simple_service_spec();
-            let mut i = 0;
-            b.iter(|| {
-                // Update existing service
-                graph.put_service("default", &format!("svc-{}", i % size), black_box(&spec));
-                i += 1;
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("existing_graph", size),
+            &size,
+            |b, &size| {
+                let graph = setup_realistic_graph(size);
+                let spec = simple_service_spec();
+                let mut i = 0;
+                b.iter(|| {
+                    // Update existing service
+                    graph.put_service("default", &format!("svc-{}", i % size), black_box(&spec));
+                    i += 1;
+                });
+            },
+        );
     }
 
     group.finish();
@@ -367,12 +376,16 @@ fn bench_get_active_edges(c: &mut Criterion) {
         });
 
         // Star hub (many inbound)
-        group.bench_with_input(BenchmarkId::new("star_hub_inbound", size), &size, |b, &size| {
-            let graph = setup_star_graph(size);
-            b.iter(|| {
-                black_box(graph.get_active_inbound_edges("default", "hub"));
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("star_hub_inbound", size),
+            &size,
+            |b, &size| {
+                let graph = setup_star_graph(size);
+                b.iter(|| {
+                    black_box(graph.get_active_inbound_edges("default", "hub"));
+                });
+            },
+        );
     }
 
     group.finish();
@@ -504,40 +517,46 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
     for size in [100usize, 500] {
         group.throughput(Throughput::Elements(4)); // 4 threads
 
-        group.bench_with_input(BenchmarkId::new("read_write_mix", size), &size, |b, &size| {
-            b.iter_batched(
-                || Arc::new(setup_realistic_graph(size)),
-                |graph| {
-                    let spec = simple_service_spec();
+        group.bench_with_input(
+            BenchmarkId::new("read_write_mix", size),
+            &size,
+            |b, &size| {
+                b.iter_batched(
+                    || Arc::new(setup_realistic_graph(size)),
+                    |graph| {
+                        let spec = simple_service_spec();
 
-                    let handles: Vec<_> = (0..4)
-                        .map(|t| {
-                            let g = Arc::clone(&graph);
-                            let s = spec.clone();
-                            thread::spawn(move || {
-                                for i in 0..25 {
-                                    let idx = (t * 25 + i) % size;
-                                    if i % 5 == 0 {
-                                        // 20% writes
-                                        g.put_service("default", &format!("svc-{}", idx), &s);
-                                    } else {
-                                        // 80% reads
-                                        black_box(g.get_service("default", &format!("svc-{}", idx)));
+                        let handles: Vec<_> = (0..4)
+                            .map(|t| {
+                                let g = Arc::clone(&graph);
+                                let s = spec.clone();
+                                thread::spawn(move || {
+                                    for i in 0..25 {
+                                        let idx = (t * 25 + i) % size;
+                                        if i % 5 == 0 {
+                                            // 20% writes
+                                            g.put_service("default", &format!("svc-{}", idx), &s);
+                                        } else {
+                                            // 80% reads
+                                            black_box(
+                                                g.get_service("default", &format!("svc-{}", idx)),
+                                            );
+                                        }
                                     }
-                                }
+                                })
                             })
-                        })
-                        .collect();
+                            .collect();
 
-                    for h in handles {
-                        h.join().unwrap();
-                    }
+                        for h in handles {
+                            h.join().unwrap();
+                        }
 
-                    black_box(graph)
-                },
-                criterion::BatchSize::SmallInput,
-            );
-        });
+                        black_box(graph)
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
     }
 
     group.finish();
@@ -554,46 +573,54 @@ fn bench_reconcile_pattern(c: &mut Criterion) {
         group.throughput(Throughput::Elements(1));
 
         // Typical reconcile: get service, update, check deps, get affected
-        group.bench_with_input(BenchmarkId::new("full_reconcile", size), &size, |b, &size| {
-            let graph = setup_realistic_graph(size);
-            let spec = simple_service_spec();
-            let mut rng = rand::thread_rng();
+        group.bench_with_input(
+            BenchmarkId::new("full_reconcile", size),
+            &size,
+            |b, &size| {
+                let graph = setup_realistic_graph(size);
+                let spec = simple_service_spec();
+                let mut rng = rand::thread_rng();
 
-            b.iter(|| {
-                let idx = rng.gen_range(0..size);
-                let name = format!("svc-{}", idx);
+                b.iter(|| {
+                    let idx = rng.gen_range(0..size);
+                    let name = format!("svc-{}", idx);
 
-                // 1. Get current state
-                let _ = black_box(graph.get_service("default", &name));
+                    // 1. Get current state
+                    let _ = black_box(graph.get_service("default", &name));
 
-                // 2. Update service
-                graph.put_service("default", &name, &spec);
+                    // 2. Update service
+                    graph.put_service("default", &name, &spec);
 
-                // 3. Check dependencies exist
-                let deps = graph.get_dependencies("default", &name);
-                for dep in &deps {
-                    black_box(graph.get_service("default", dep));
-                }
+                    // 3. Check dependencies exist
+                    let deps = graph.get_dependencies("default", &name);
+                    for dep in &deps {
+                        black_box(graph.get_service("default", dep));
+                    }
 
-                // 4. Get active edges for network policy
-                let _ = black_box(graph.get_active_inbound_edges("default", &name));
-                let _ = black_box(graph.get_active_outbound_edges("default", &name));
+                    // 4. Get active edges for network policy
+                    let _ = black_box(graph.get_active_inbound_edges("default", &name));
+                    let _ = black_box(graph.get_active_outbound_edges("default", &name));
 
-                // 5. Notify affected services
-                let _ = black_box(graph.get_affected_services("default", &name));
-            });
-        });
+                    // 5. Notify affected services
+                    let _ = black_box(graph.get_affected_services("default", &name));
+                });
+            },
+        );
 
         // Policy generation: list all active edges for environment
-        group.bench_with_input(BenchmarkId::new("policy_generation", size), &size, |b, &size| {
-            let graph = setup_realistic_graph(size);
+        group.bench_with_input(
+            BenchmarkId::new("policy_generation", size),
+            &size,
+            |b, &size| {
+                let graph = setup_realistic_graph(size);
 
-            b.iter(|| {
-                // Get all active edges for policy generation
-                let edges = graph.list_active_edges("default");
-                black_box(edges);
-            });
-        });
+                b.iter(|| {
+                    // Get all active edges for policy generation
+                    let edges = graph.list_active_edges("default");
+                    black_box(edges);
+                });
+            },
+        );
     }
 
     group.finish();

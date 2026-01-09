@@ -227,6 +227,7 @@ async fn run_pivot_e2e_test() -> Result<(), String> {
         WORKLOAD_CLUSTER_NAME.to_string(),
         format!("https://{}", grpc_addr),
         ca.ca_cert_pem().to_string(),
+        None,
     );
     println!("  Bootstrap token generated: {}...", &token.as_str()[..16]);
 

@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    CellSpec, Condition, ClusterPhase, NetworkingSpec, NodeSpec, ProviderSpec, WorkloadSpec,
+    CellSpec, ClusterPhase, Condition, NetworkingSpec, NodeSpec, ProviderSpec, WorkloadSpec,
 };
 
 /// Specification for a LatticeCluster
@@ -178,6 +178,8 @@ mod tests {
     fn cell_spec() -> CellSpec {
         CellSpec {
             host: "172.18.255.1".to_string(),
+            grpc_port: 50051,
+            bootstrap_port: 443,
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },

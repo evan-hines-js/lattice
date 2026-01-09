@@ -148,12 +148,14 @@ impl AgentClient {
     /// # Arguments
     /// * `http_endpoint` - Cell's HTTP endpoint for CSR signing
     /// * `cluster_id` - The cluster ID to include in the certificate
+    /// * `ca_cert_pem` - CA certificate PEM for verifying cell's TLS certificate
     ///
     /// # Returns
     /// Agent credentials including the signed certificate, private key, and CA cert
     pub async fn request_certificate(
         http_endpoint: &str,
         cluster_id: &str,
+        ca_cert_pem: &str,
     ) -> Result<AgentCredentials, CertificateError> {
         info!(cluster_id = %cluster_id, "Generating keypair and CSR");
 
@@ -168,7 +170,17 @@ impl AgentClient {
         let url = format!("{}/api/clusters/{}/csr", http_endpoint, cluster_id);
         info!(url = %url, "Submitting CSR to cell");
 
-        let http_client = reqwest::Client::new();
+        // Build HTTP client with CA certificate for TLS verification
+        let ca_cert = reqwest::Certificate::from_pem(ca_cert_pem.as_bytes())
+            .map_err(|e| CertificateError::HttpError(format!("Invalid CA certificate: {}", e)))?;
+
+        let http_client = reqwest::Client::builder()
+            .add_root_certificate(ca_cert)
+            .build()
+            .map_err(|e| {
+                CertificateError::HttpError(format!("Failed to build HTTP client: {}", e))
+            })?;
+
         let response = http_client
             .post(&url)
             .json(&CsrRequest { csr_pem })
@@ -479,10 +491,10 @@ impl AgentClient {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("kubectl apply failed: {}", stderr),
-            ))
+            Err(std::io::Error::other(format!(
+                "kubectl apply failed: {}",
+                stderr
+            )))
         }
     }
 

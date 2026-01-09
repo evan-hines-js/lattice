@@ -14,6 +14,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto ./proto
 COPY src ./src
+COPY benches ./benches
 
 # Build the binary
 RUN cargo build --release

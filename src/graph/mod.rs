@@ -54,9 +54,17 @@ impl ServiceNode {
             name: name.to_string(),
             type_: ServiceType::Local,
             dependencies: spec.dependencies().into_iter().map(String::from).collect(),
-            allowed_callers: spec.allowed_callers().into_iter().map(String::from).collect(),
+            allowed_callers: spec
+                .allowed_callers()
+                .into_iter()
+                .map(String::from)
+                .collect(),
             image: spec.primary_image().map(String::from),
-            ports: spec.ports().into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            ports: spec
+                .ports()
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
             endpoints: BTreeMap::new(),
         }
     }
@@ -446,8 +454,8 @@ mod tests {
 
     fn make_service_spec(deps: Vec<&str>, callers: Vec<&str>) -> LatticeServiceSpec {
         use crate::crd::{
-            ContainerSpec, DependencyDirection, ResourceSpec, ResourceType,
-            ServicePortsSpec, PortSpec, ReplicaSpec, DeploySpec,
+            ContainerSpec, DependencyDirection, DeploySpec, PortSpec, ReplicaSpec, ResourceSpec,
+            ResourceType, ServicePortsSpec,
         };
 
         let mut containers = BTreeMap::new();
@@ -493,7 +501,14 @@ mod tests {
         }
 
         let mut ports = BTreeMap::new();
-        ports.insert("http".to_string(), PortSpec { port: 8080, target_port: None, protocol: None });
+        ports.insert(
+            "http".to_string(),
+            PortSpec {
+                port: 8080,
+                target_port: None,
+                protocol: None,
+            },
+        );
 
         LatticeServiceSpec {
             containers,
@@ -934,10 +949,26 @@ mod tests {
         //                         v
         //                       cache
 
-        graph.put_service("prod", "cache", &make_service_spec(vec![], vec!["api", "worker"]));
-        graph.put_service("prod", "api", &make_service_spec(vec!["cache"], vec!["frontend"]));
-        graph.put_service("prod", "worker", &make_service_spec(vec!["cache"], vec!["frontend"]));
-        graph.put_service("prod", "frontend", &make_service_spec(vec!["api", "worker"], vec![]));
+        graph.put_service(
+            "prod",
+            "cache",
+            &make_service_spec(vec![], vec!["api", "worker"]),
+        );
+        graph.put_service(
+            "prod",
+            "api",
+            &make_service_spec(vec!["cache"], vec!["frontend"]),
+        );
+        graph.put_service(
+            "prod",
+            "worker",
+            &make_service_spec(vec!["cache"], vec!["frontend"]),
+        );
+        graph.put_service(
+            "prod",
+            "frontend",
+            &make_service_spec(vec!["api", "worker"], vec![]),
+        );
 
         // Check diamond edges
         let frontend_deps = graph.get_dependencies("prod", "frontend");
@@ -1004,7 +1035,11 @@ mod tests {
         for i in 0..10 {
             let name = format!("dep-{}", i);
             deps.push(name.clone());
-            graph.put_service("prod", &name, &make_service_spec(vec![], vec!["orchestrator"]));
+            graph.put_service(
+                "prod",
+                &name,
+                &make_service_spec(vec![], vec!["orchestrator"]),
+            );
         }
 
         let dep_refs: Vec<&str> = deps.iter().map(|s| s.as_str()).collect();
@@ -1028,7 +1063,11 @@ mod tests {
         let graph = ServiceGraph::new();
 
         graph.put_service("prod", "public-api", &make_service_spec(vec![], vec!["*"]));
-        graph.put_service("prod", "random-service", &make_service_spec(vec!["public-api"], vec![]));
+        graph.put_service(
+            "prod",
+            "random-service",
+            &make_service_spec(vec!["public-api"], vec![]),
+        );
 
         let edges = graph.get_active_outbound_edges("prod", "random-service");
         assert_eq!(edges.len(), 1);
@@ -1038,9 +1077,21 @@ mod tests {
     fn test_specific_caller_only() {
         let graph = ServiceGraph::new();
 
-        graph.put_service("prod", "private-api", &make_service_spec(vec![], vec!["allowed-service"]));
-        graph.put_service("prod", "allowed-service", &make_service_spec(vec!["private-api"], vec![]));
-        graph.put_service("prod", "blocked-service", &make_service_spec(vec!["private-api"], vec![]));
+        graph.put_service(
+            "prod",
+            "private-api",
+            &make_service_spec(vec![], vec!["allowed-service"]),
+        );
+        graph.put_service(
+            "prod",
+            "allowed-service",
+            &make_service_spec(vec!["private-api"], vec![]),
+        );
+        graph.put_service(
+            "prod",
+            "blocked-service",
+            &make_service_spec(vec!["private-api"], vec![]),
+        );
 
         // allowed-service should have access
         let allowed_edges = graph.get_active_outbound_edges("prod", "allowed-service");
@@ -1055,9 +1106,21 @@ mod tests {
     fn test_external_service_access_control() {
         let graph = ServiceGraph::new();
 
-        graph.put_external_service("prod", "stripe", &make_external_spec(vec!["payment-service"]));
-        graph.put_service("prod", "payment-service", &make_service_spec(vec!["stripe"], vec![]));
-        graph.put_service("prod", "random-service", &make_service_spec(vec!["stripe"], vec![]));
+        graph.put_external_service(
+            "prod",
+            "stripe",
+            &make_external_spec(vec!["payment-service"]),
+        );
+        graph.put_service(
+            "prod",
+            "payment-service",
+            &make_service_spec(vec!["stripe"], vec![]),
+        );
+        graph.put_service(
+            "prod",
+            "random-service",
+            &make_service_spec(vec!["stripe"], vec![]),
+        );
 
         // payment-service has access to stripe
         let payment_edges = graph.get_active_outbound_edges("prod", "payment-service");
@@ -1077,7 +1140,11 @@ mod tests {
         let graph = ServiceGraph::new();
 
         // Initial: api -> cache, redis
-        graph.put_service("prod", "api", &make_service_spec(vec!["cache", "redis"], vec![]));
+        graph.put_service(
+            "prod",
+            "api",
+            &make_service_spec(vec!["cache", "redis"], vec![]),
+        );
 
         assert_eq!(graph.get_dependencies("prod", "api").len(), 2);
 
@@ -1095,7 +1162,11 @@ mod tests {
         let graph = ServiceGraph::new();
 
         // Initial: api allows frontend, mobile
-        graph.put_service("prod", "api", &make_service_spec(vec![], vec!["frontend", "mobile"]));
+        graph.put_service(
+            "prod",
+            "api",
+            &make_service_spec(vec![], vec!["frontend", "mobile"]),
+        );
 
         // Update: api allows only frontend
         graph.put_service("prod", "api", &make_service_spec(vec![], vec!["frontend"]));
@@ -1111,11 +1182,17 @@ mod tests {
 
         // Start as local service
         graph.put_service("prod", "service", &make_service_spec(vec![], vec![]));
-        assert_eq!(graph.get_service("prod", "service").unwrap().type_, ServiceType::Local);
+        assert_eq!(
+            graph.get_service("prod", "service").unwrap().type_,
+            ServiceType::Local
+        );
 
         // Convert to external
         graph.put_external_service("prod", "service", &make_external_spec(vec![]));
-        assert_eq!(graph.get_service("prod", "service").unwrap().type_, ServiceType::External);
+        assert_eq!(
+            graph.get_service("prod", "service").unwrap().type_,
+            ServiceType::External
+        );
     }
 
     // =========================================================================
@@ -1138,7 +1215,11 @@ mod tests {
     fn test_list_active_edges_with_agreements() {
         let graph = ServiceGraph::new();
 
-        graph.put_service("prod", "api", &make_service_spec(vec!["cache"], vec!["frontend"]));
+        graph.put_service(
+            "prod",
+            "api",
+            &make_service_spec(vec!["cache"], vec!["frontend"]),
+        );
         graph.put_service("prod", "cache", &make_service_spec(vec![], vec!["api"]));
         graph.put_service("prod", "frontend", &make_service_spec(vec!["api"], vec![]));
 
@@ -1299,7 +1380,11 @@ mod tests {
 
         // Add services first
         for i in 0..100 {
-            graph.put_service("prod", &format!("svc-{}", i), &make_service_spec(vec![], vec![]));
+            graph.put_service(
+                "prod",
+                &format!("svc-{}", i),
+                &make_service_spec(vec![], vec![]),
+            );
         }
 
         let mut handles = vec![];

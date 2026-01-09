@@ -39,9 +39,9 @@ use axum::Json;
 use dashmap::DashMap;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, ConfigMapKeySelector,
-    Namespace, PodSpec, PodTemplateSpec, Secret, SecretVolumeSource, ServiceAccount, Volume,
-    VolumeMount,
+    ConfigMap, ConfigMapKeySelector, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource,
+    LocalObjectReference, Namespace, PodSpec, PodTemplateSpec, Secret, SecretVolumeSource,
+    ServiceAccount, Volume, VolumeMount,
 };
 use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -247,7 +247,7 @@ impl DefaultManifestGenerator {
                 "--namespace",
                 "kube-system",
             ])
-            .args(&values)
+            .args(values)
             .output()
             .map_err(|e| BootstrapError::Internal(format!("failed to run helm: {}", e)))?;
 
@@ -291,24 +291,28 @@ impl DefaultManifestGenerator {
     ) -> Vec<String> {
         const NAMESPACE: &str = "lattice-system";
 
-        // Parse cell_endpoint into HTTP and gRPC endpoints
-        // cell_endpoint format: "host:grpc_port" (e.g., "172.18.255.1:50051")
+        // Parse cell_endpoint: "host:http_port:grpc_port" (e.g., "host.docker.internal:443:50051")
         let (http_endpoint, grpc_endpoint) = {
-            let parts: Vec<&str> = cell_endpoint.rsplitn(2, ':').collect();
-            if parts.len() == 2 {
-                let host = parts[1];
-                let grpc_port = parts[0];
-                (
-                    format!("http://{}:8080", host),
-                    format!("https://{}:{}", host, grpc_port),
-                )
-            } else {
-                (
-                    format!("http://{}:8080", cell_endpoint),
-                    format!("https://{}:443", cell_endpoint),
-                )
+            let parts: Vec<&str> = cell_endpoint.split(':').collect();
+            if parts.len() != 3 {
+                panic!(
+                    "cell_endpoint must be in format 'host:http_port:grpc_port', got: {}",
+                    cell_endpoint
+                );
             }
+            let host = parts[0];
+            let http_port = parts[1];
+            let grpc_port = parts[2];
+            (
+                format!("https://{}:{}", host, http_port),
+                format!("https://{}:{}", host, grpc_port),
+            )
         };
+
+        // Read registry credentials if available
+        let registry_creds = std::env::var("REGISTRY_CREDENTIALS_FILE")
+            .ok()
+            .and_then(|path| std::fs::read_to_string(&path).ok());
 
         // 1. Namespace
         let namespace = Namespace {
@@ -332,6 +336,21 @@ impl DefaultManifestGenerator {
             )])),
             ..Default::default()
         };
+
+        // 2b. Registry credentials secret (if available)
+        let registry_secret = registry_creds.as_ref().map(|creds| Secret {
+            metadata: ObjectMeta {
+                name: Some("lattice-registry".to_string()),
+                namespace: Some(NAMESPACE.to_string()),
+                ..Default::default()
+            },
+            type_: Some("kubernetes.io/dockerconfigjson".to_string()),
+            data: Some(BTreeMap::from([(
+                ".dockerconfigjson".to_string(),
+                ByteString(creds.as_bytes().to_vec()),
+            )])),
+            ..Default::default()
+        });
 
         // 3. Agent ConfigMap
         let agent_config = ConfigMap {
@@ -400,6 +419,13 @@ impl DefaultManifestGenerator {
                     }),
                     spec: Some(PodSpec {
                         service_account_name: Some("lattice-agent".to_string()),
+                        image_pull_secrets: if registry_secret.is_some() {
+                            Some(vec![LocalObjectReference {
+                                name: "lattice-registry".to_string(),
+                            }])
+                        } else {
+                            None
+                        },
                         containers: vec![Container {
                             name: "agent".to_string(),
                             image: Some("ghcr.io/evan-hines-js/lattice:latest".to_string()),
@@ -486,14 +512,20 @@ impl DefaultManifestGenerator {
         };
 
         // Serialize all resources to JSON (more efficient than YAML, K8s accepts both)
-        vec![
+        let mut manifests = vec![
             serde_json::to_string(&namespace).expect("serialize namespace"),
             serde_json::to_string(&ca_secret).expect("serialize secret"),
+        ];
+        if let Some(ref reg_secret) = registry_secret {
+            manifests.push(serde_json::to_string(reg_secret).expect("serialize registry secret"));
+        }
+        manifests.extend([
             serde_json::to_string(&agent_config).expect("serialize configmap"),
             serde_json::to_string(&service_account).expect("serialize serviceaccount"),
             serde_json::to_string(&cluster_role_binding).expect("serialize clusterrolebinding"),
             serde_json::to_string(&agent_deployment).expect("serialize deployment"),
-        ]
+        ]);
+        manifests
     }
 }
 
@@ -529,6 +561,8 @@ pub struct ClusterBootstrapInfo {
     pub token_created: Instant,
     /// Whether the token has been used
     pub token_used: bool,
+    /// Networking configuration for Cilium LB-IPAM
+    pub networking: Option<crate::crd::NetworkingSpec>,
 }
 
 /// Bootstrap endpoint state
@@ -565,6 +599,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         cluster_id: String,
         cell_endpoint: String,
         ca_certificate: String,
+        networking: Option<crate::crd::NetworkingSpec>,
     ) -> BootstrapToken {
         let token = BootstrapToken::generate();
         let token_hash = token.hash();
@@ -576,6 +611,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             token_hash,
             token_created: Instant::now(),
             token_used: false,
+            networking,
         };
 
         self.clusters.insert(cluster_id, info);
@@ -619,11 +655,17 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
     /// Generate bootstrap response for a cluster
     pub fn generate_response(&self, info: &ClusterBootstrapInfo) -> BootstrapResponse {
-        let manifests = self.manifest_generator.generate(
+        let mut manifests = self.manifest_generator.generate(
             &info.cluster_id,
             &info.cell_endpoint,
             &info.ca_certificate,
         );
+
+        // Add Cilium LB-IPAM resources if networking is configured
+        if let Some(ref networking) = info.networking {
+            let lb_resources = crate::cilium::generate_lb_resources(networking);
+            manifests.extend(lb_resources);
+        }
 
         BootstrapResponse {
             cluster_id: info.cluster_id.clone(),
@@ -781,13 +823,29 @@ mod tests {
         BootstrapState::new(TestManifestGenerator, ttl, test_ca())
     }
 
+    /// Test helper to register cluster without networking config
+    fn register_test_cluster<G: ManifestGenerator>(
+        state: &BootstrapState<G>,
+        cluster_id: impl Into<String>,
+        cell_endpoint: impl Into<String>,
+        ca_certificate: impl Into<String>,
+    ) -> BootstrapToken {
+        state.register_cluster(
+            cluster_id.into(),
+            cell_endpoint.into(),
+            ca_certificate.into(),
+            None,
+        )
+    }
+
     #[test]
     fn cluster_can_be_registered() {
         let state = test_state();
 
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "test-cluster".to_string(),
-            "https://cell.example.com:443".to_string(),
+            "cell.example.com:443:50051".to_string(),
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
         );
 
@@ -798,9 +856,10 @@ mod tests {
     fn valid_token_is_accepted() {
         let state = test_state();
 
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "test-cluster".to_string(),
-            "https://cell.example.com:443".to_string(),
+            "cell.example.com:443:50051".to_string(),
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
         );
 
@@ -815,9 +874,10 @@ mod tests {
     fn invalid_token_is_rejected() {
         let state = test_state();
 
-        state.register_cluster(
+        register_test_cluster(
+            &state,
             "test-cluster".to_string(),
-            "https://cell.example.com:443".to_string(),
+            "cell.example.com:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -830,9 +890,10 @@ mod tests {
     fn token_can_only_be_used_once() {
         let state = test_state();
 
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "test-cluster".to_string(),
-            "https://cell.example.com:443".to_string(),
+            "cell.example.com:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -850,9 +911,10 @@ mod tests {
     fn expired_token_is_rejected() {
         let state = test_state_with_ttl(Duration::from_millis(1));
 
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "test-cluster".to_string(),
-            "https://cell.example.com:443".to_string(),
+            "cell.example.com:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -875,9 +937,10 @@ mod tests {
     fn response_contains_manifests() {
         let state = test_state();
 
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "test-cluster".to_string(),
-            "https://cell.example.com:443".to_string(),
+            "cell.example.com:443:50051".to_string(),
             "ca-cert".to_string(),
         );
 
@@ -887,7 +950,7 @@ mod tests {
         let response = state.generate_response(&info);
 
         assert_eq!(response.cluster_id, "test-cluster");
-        assert_eq!(response.cell_endpoint, "https://cell.example.com:443");
+        assert_eq!(response.cell_endpoint, "cell.example.com:443:50051");
         assert_eq!(response.ca_certificate, "ca-cert");
         assert!(!response.manifests.is_empty());
         assert!(response.manifests[0].contains("test-cluster"));
@@ -900,9 +963,10 @@ mod tests {
         let state = test_state();
 
         // Register but don't bootstrap
-        state.register_cluster(
+        register_test_cluster(
+            &state,
             "not-bootstrapped".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -930,9 +994,10 @@ mod tests {
         let state = test_state();
 
         // Register and bootstrap
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "csr-test".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             state.ca_cert_pem().to_string(),
         );
         state
@@ -954,9 +1019,10 @@ mod tests {
         let state = test_state();
 
         // Register and bootstrap
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "cluster-xyz".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             state.ca_cert_pem().to_string(),
         );
         state
@@ -987,7 +1053,7 @@ mod tests {
     #[test]
     fn default_generator_creates_namespace() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("my-cluster", "https://cell:443", "ca-pem");
+        let manifests = generator.generate("my-cluster", "cell:443:50051", "ca-pem");
 
         // Agent manifests are JSON, check for JSON format
         let has_namespace = manifests
@@ -999,7 +1065,7 @@ mod tests {
     #[test]
     fn default_generator_creates_ca_secret() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("my-cluster", "https://cell:443", "my-ca-cert");
+        let manifests = generator.generate("my-cluster", "cell:443:50051", "my-ca-cert");
 
         // Agent manifests are JSON, check for JSON format
         let has_secret = manifests
@@ -1011,7 +1077,7 @@ mod tests {
     #[test]
     fn default_generator_creates_agent_deployment() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("my-cluster", "https://cell:443", "ca-pem");
+        let manifests = generator.generate("my-cluster", "cell:443:50051", "ca-pem");
 
         // Agent manifests are JSON, check for JSON format
         let has_deployment = manifests
@@ -1023,7 +1089,7 @@ mod tests {
     #[test]
     fn default_generator_creates_cilium_cni() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("my-cluster", "https://cell:443", "ca-pem");
+        let manifests = generator.generate("my-cluster", "cell:443:50051", "ca-pem");
 
         // Should include Cilium DaemonSet (rendered from helm template)
         let has_cilium_daemonset = manifests
@@ -1088,9 +1154,10 @@ mod tests {
         // ---------------------------------------------------------
         // When CAPI creates a cluster, the cell registers it with a bootstrap token.
         // This token will be embedded in kubeadm postKubeadmCommands.
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "prod-us-west-001".to_string(),
-            "https://cell.lattice.example.com:443".to_string(),
+            "cell.lattice.example.com:443:50051".to_string(),
             state.ca_cert_pem().to_string(),
         );
         assert!(state.is_cluster_registered("prod-us-west-001"));
@@ -1103,7 +1170,7 @@ mod tests {
             .validate_and_consume("prod-us-west-001", token.as_str())
             .unwrap();
         assert_eq!(info.cluster_id, "prod-us-west-001");
-        assert_eq!(info.cell_endpoint, "https://cell.lattice.example.com:443");
+        assert_eq!(info.cell_endpoint, "cell.lattice.example.com:443:50051");
 
         // Chapter 3: Cell returns bootstrap response with manifests
         // ----------------------------------------------------------
@@ -1112,7 +1179,7 @@ mod tests {
         assert!(!response.ca_certificate.is_empty());
         assert_eq!(
             response.cell_endpoint,
-            "https://cell.lattice.example.com:443"
+            "cell.lattice.example.com:443:50051"
         );
 
         // Chapter 4: Agent generates keypair and submits CSR
@@ -1146,9 +1213,10 @@ mod tests {
         let state = test_state();
 
         // Legitimate cluster gets registered
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "secure-cluster".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1175,9 +1243,10 @@ mod tests {
     fn story_invalid_token_rejection() {
         let state = test_state();
 
-        state.register_cluster(
+        register_test_cluster(
+            &state,
             "guarded-cluster".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1186,9 +1255,10 @@ mod tests {
         assert!(matches!(result, Err(BootstrapError::InvalidToken)));
 
         // Token for wrong cluster
-        let other_token = state.register_cluster(
+        let other_token = register_test_cluster(
+            &state,
             "other-cluster".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             "cert".to_string(),
         );
         let cross_cluster_result =
@@ -1208,9 +1278,10 @@ mod tests {
         let state = test_state();
 
         // Register cluster but DON'T complete bootstrap
-        let _token = state.register_cluster(
+        let _token = register_test_cluster(
+            &state,
             "premature-cluster".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1255,9 +1326,10 @@ mod tests {
         // Very short TTL for testing
         let state = test_state_with_ttl(Duration::from_millis(1));
 
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "slow-cluster".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1278,7 +1350,7 @@ mod tests {
         let generator = DefaultManifestGenerator::new().unwrap();
         let manifests = generator.generate(
             "my-workload-cluster",
-            "https://cell.example.com:443",
+            "cell.example.com:443:50051",
             "---CA CERT PEM---",
         );
 
@@ -1397,9 +1469,10 @@ mod tests {
         let state = test_state();
 
         // Register and bootstrap
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "malformed-csr-test".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             state.ca_cert_pem().to_string(),
         );
         state
@@ -1423,9 +1496,10 @@ mod tests {
         assert!(ca_cert.contains("BEGIN CERTIFICATE"));
 
         // This CA cert is included in bootstrap response
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "ca-test".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             ca_cert.to_string(),
         );
         let info = state
@@ -1457,9 +1531,10 @@ mod tests {
     #[tokio::test]
     async fn integration_manifests_handler_success() {
         let state = Arc::new(test_state());
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "http-test".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             "ca-cert".to_string(),
         );
 
@@ -1489,9 +1564,10 @@ mod tests {
     #[tokio::test]
     async fn integration_manifests_handler_missing_auth() {
         let state = Arc::new(test_state());
-        state.register_cluster(
+        register_test_cluster(
+            &state,
             "auth-test".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1512,9 +1588,10 @@ mod tests {
     #[tokio::test]
     async fn integration_manifests_handler_invalid_token() {
         let state = Arc::new(test_state());
-        state.register_cluster(
+        register_test_cluster(
+            &state,
             "token-test".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1554,9 +1631,10 @@ mod tests {
         let state = Arc::new(test_state());
 
         // Register and bootstrap first
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "csr-http-test".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             state.ca_cert_pem().to_string(),
         );
         state
@@ -1599,9 +1677,10 @@ mod tests {
         let state = Arc::new(test_state());
 
         // Register but DON'T bootstrap
-        state.register_cluster(
+        register_test_cluster(
+            &state,
             "not-bootstrapped".to_string(),
-            "https://cell:443".to_string(),
+            "cell:443:50051".to_string(),
             "cert".to_string(),
         );
 
@@ -1653,9 +1732,10 @@ mod tests {
         let ca_cert = state.ca_cert_pem().to_string();
 
         // Step 1: Register cluster
-        let token = state.register_cluster(
+        let token = register_test_cluster(
+            &state,
             "full-flow-test".to_string(),
-            "https://cell.example.com:443".to_string(),
+            "cell.example.com:443:50051".to_string(),
             ca_cert.clone(),
         );
 
