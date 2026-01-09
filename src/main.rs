@@ -17,7 +17,7 @@ use lattice::agent::mtls::ServerMtlsConfig;
 use lattice::agent::server::AgentServer;
 use lattice::bootstrap::{bootstrap_router, BootstrapState, DefaultManifestGenerator};
 use lattice::controller::{
-    error_policy, reconcile, ClusterBootstrapImpl, Context, PivotOperationsImpl,
+    error_policy, reconcile, CellCapabilities, ClusterBootstrapImpl, Context, PivotOperationsImpl,
 };
 use lattice::crd::LatticeCluster;
 use lattice::pki::CertificateAuthority;
@@ -50,7 +50,7 @@ struct ControllerArgs {
     #[arg(long, default_value = "0.0.0.0:443")]
     bootstrap_addr: SocketAddr,
 
-    /// gRPC server listen address (TLS) - internal, agents connect via bootstrap_addr
+    /// gRPC server listen address
     #[arg(long, default_value = "0.0.0.0:50051")]
     grpc_addr: SocketAddr,
 
@@ -58,10 +58,15 @@ struct ControllerArgs {
     #[arg(long, default_value = "3600")]
     token_ttl_secs: u64,
 
-    /// Cell endpoint (host:port) for workload clusters to connect to
+    /// Cell gRPC endpoint (host:port) for agents to connect to
     /// Required when running as a cell that provisions workload clusters
     #[arg(long)]
     cell_endpoint: Option<String>,
+
+    /// Cell bootstrap endpoint (https://host:port) for kubeadm webhook
+    /// Required when running as a cell that provisions workload clusters
+    #[arg(long)]
+    bootstrap_endpoint: Option<String>,
 }
 
 /// Agent mode arguments
@@ -71,7 +76,7 @@ struct AgentArgs {
     #[arg(long, env = "CLUSTER_ID")]
     cluster_id: String,
 
-    /// Cell HTTP endpoint for CSR signing (e.g., "http://cell.example.com:8080")
+    /// Cell HTTP endpoint for CSR signing (e.g., "https://cell.example.com:443")
     #[arg(long, env = "CELL_HTTP_ENDPOINT")]
     cell_http_endpoint: String,
 
@@ -121,10 +126,11 @@ async fn main() -> anyhow::Result<()> {
         None => {
             // Default to controller mode with default args
             run_controller(ControllerArgs {
-                bootstrap_addr: "0.0.0.0:8080".parse().unwrap(),
-                grpc_addr: "0.0.0.0:443".parse().unwrap(),
+                bootstrap_addr: "0.0.0.0:443".parse().unwrap(),
+                grpc_addr: "0.0.0.0:50051".parse().unwrap(),
                 token_ttl_secs: 3600,
                 cell_endpoint: None,
+                bootstrap_endpoint: None,
             })
             .await
         }
@@ -220,19 +226,27 @@ async fn run_controller(args: ControllerArgs) -> anyhow::Result<()> {
     let agent_registry = Arc::new(AgentRegistry::new());
 
     // Create controller context with bootstrap if this is a cell
-    let ctx = if let Some(ref cell_endpoint) = args.cell_endpoint {
-        tracing::info!(endpoint = %cell_endpoint, "Running as cell - enabling workload cluster provisioning");
+    let ctx = if let (Some(ref cell_endpoint), Some(ref bootstrap_endpoint)) =
+        (&args.cell_endpoint, &args.bootstrap_endpoint)
+    {
+        tracing::info!(
+            cell_endpoint = %cell_endpoint,
+            bootstrap_endpoint = %bootstrap_endpoint,
+            "Running as cell - enabling workload cluster provisioning"
+        );
         let cluster_bootstrap = Arc::new(ClusterBootstrapImpl::new(
             bootstrap_state.clone(),
             cell_endpoint.clone(),
+            bootstrap_endpoint.clone(),
         ));
         let pivot_ops = Arc::new(PivotOperationsImpl::new(agent_registry.clone()));
-        Arc::new(Context::with_cell_capabilities(
-            client.clone(),
-            cluster_bootstrap,
-            agent_registry.clone(),
-            pivot_ops,
-        ))
+        let cell_caps = CellCapabilities::new(cluster_bootstrap, agent_registry.clone(), pivot_ops);
+
+        Arc::new(
+            Context::builder(client.clone())
+                .cell_capabilities(cell_caps)
+                .build(),
+        )
     } else {
         tracing::info!("Running without cell endpoint - workload cluster provisioning disabled");
         Arc::new(Context::new(client.clone()))
@@ -244,10 +258,24 @@ async fn run_controller(args: ControllerArgs) -> anyhow::Result<()> {
     // Start bootstrap HTTPS server with TLS
     let bootstrap_router = bootstrap_router(bootstrap_state.clone());
 
-    // Configure TLS using CA's certificate and key
+    // Generate server certificate with proper SANs for TLS
+    // Include common hostnames that workload clusters might use to reach us
+    let server_sans = [
+        "localhost",
+        "host.docker.internal", // Docker desktop
+        "host.containers.internal", // Podman
+        "172.17.0.1",           // Docker bridge gateway
+        "127.0.0.1",
+    ];
+    let (server_cert_pem, server_key_pem) = ca
+        .generate_server_cert(&server_sans)
+        .map_err(|e| anyhow::anyhow!("Failed to generate server certificate: {}", e))?;
+    tracing::info!("Generated server certificate with SANs: {:?}", server_sans);
+
+    // Configure TLS using the server certificate signed by our CA
     let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
-        ca.ca_cert_pem().as_bytes().to_vec(),
-        ca.ca_key_pem().as_bytes().to_vec(),
+        server_cert_pem.as_bytes().to_vec(),
+        server_key_pem.as_bytes().to_vec(),
     )
     .await
     .map_err(|e| anyhow::anyhow!("Failed to configure TLS: {}", e))?;
@@ -264,11 +292,16 @@ async fn run_controller(args: ControllerArgs) -> anyhow::Result<()> {
 
     // Start gRPC server for agent connections (only if running as cell)
     let grpc_server = if args.cell_endpoint.is_some() {
-        // Create mTLS config using CA cert/key
-        // In production, you'd want a separate server certificate signed by the CA
+        // Generate a server certificate for gRPC with proper SANs
+        let (grpc_cert_pem, grpc_key_pem) = ca
+            .generate_server_cert(&server_sans)
+            .map_err(|e| anyhow::anyhow!("Failed to generate gRPC server certificate: {}", e))?;
+
+        // Create mTLS config using the server cert (not CA cert)
+        // CA cert is used for verifying client certificates
         let mtls_config = ServerMtlsConfig::new(
-            ca.ca_cert_pem().to_string(),
-            ca.ca_key_pem().to_string(),
+            grpc_cert_pem,
+            grpc_key_pem,
             ca.ca_cert_pem().to_string(),
         );
 

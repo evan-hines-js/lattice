@@ -1,4 +1,8 @@
 //! Error types for the Lattice operator
+//!
+//! Errors are structured with fields to aid debugging in production.
+//! Each error variant includes contextual information like cluster names,
+//! provider types, and underlying causes.
 
 use thiserror::Error;
 
@@ -7,54 +11,240 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum Error {
     /// Kubernetes API error
-    #[error("kubernetes error: {0}")]
-    Kube(#[from] kube::Error),
+    #[error("kubernetes error: {source}")]
+    Kube {
+        /// The underlying kube-rs error
+        #[from]
+        source: kube::Error,
+    },
 
     /// Validation error for CRD specs
-    #[error("validation error: {0}")]
-    Validation(String),
+    #[error("validation error for {cluster}: {message}")]
+    Validation {
+        /// Name of the cluster with invalid configuration
+        cluster: String,
+        /// Description of what's invalid
+        message: String,
+        /// The invalid field path (e.g., "spec.nodes.controlPlane")
+        field: Option<String>,
+    },
 
     /// Infrastructure provider error
-    #[error("provider error: {0}")]
-    Provider(String),
+    #[error("provider error [{provider}] for {cluster}: {message}")]
+    Provider {
+        /// Name of the cluster being provisioned
+        cluster: String,
+        /// Provider type (docker, aws, gcp, azure)
+        provider: String,
+        /// Description of what failed
+        message: String,
+        /// Whether this error is retryable
+        retryable: bool,
+    },
 
     /// Pivot operation error
-    #[error("pivot error: {0}")]
-    Pivot(String),
+    #[error("pivot error for {cluster}: {message}")]
+    Pivot {
+        /// Name of the cluster being pivoted
+        cluster: String,
+        /// Description of what failed
+        message: String,
+        /// Phase of pivot that failed (export, transfer, import)
+        phase: Option<String>,
+    },
 
     /// Serialization/deserialization error
-    #[error("serialization error: {0}")]
-    Serialization(String),
+    #[error("serialization error: {message}")]
+    Serialization {
+        /// Description of what failed
+        message: String,
+        /// The resource kind being serialized (if known)
+        kind: Option<String>,
+    },
 
     /// CAPI installation error
-    #[error("CAPI installation error: {0}")]
-    CapiInstallation(String),
+    #[error("CAPI installation error: {message}")]
+    CapiInstallation {
+        /// Description of what failed
+        message: String,
+        /// Provider being installed (if applicable)
+        provider: Option<String>,
+    },
 }
 
 impl Error {
     /// Create a validation error with the given message
+    ///
+    /// For simple validation errors without cluster context.
     pub fn validation(msg: impl Into<String>) -> Self {
-        Self::Validation(msg.into())
+        Self::Validation {
+            cluster: "unknown".to_string(),
+            message: msg.into(),
+            field: None,
+        }
+    }
+
+    /// Create a validation error with cluster context
+    pub fn validation_for(cluster: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self::Validation {
+            cluster: cluster.into(),
+            message: msg.into(),
+            field: None,
+        }
+    }
+
+    /// Create a validation error with cluster context and field path
+    pub fn validation_for_field(
+        cluster: impl Into<String>,
+        field: impl Into<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        Self::Validation {
+            cluster: cluster.into(),
+            message: msg.into(),
+            field: Some(field.into()),
+        }
     }
 
     /// Create a provider error with the given message
+    ///
+    /// For simple provider errors without full context.
     pub fn provider(msg: impl Into<String>) -> Self {
-        Self::Provider(msg.into())
+        Self::Provider {
+            cluster: "unknown".to_string(),
+            provider: "unknown".to_string(),
+            message: msg.into(),
+            retryable: true,
+        }
+    }
+
+    /// Create a provider error with full context
+    pub fn provider_for(
+        cluster: impl Into<String>,
+        provider: impl Into<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        Self::Provider {
+            cluster: cluster.into(),
+            provider: provider.into(),
+            message: msg.into(),
+            retryable: true,
+        }
+    }
+
+    /// Create a non-retryable provider error (e.g., configuration error)
+    pub fn provider_permanent(
+        cluster: impl Into<String>,
+        provider: impl Into<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        Self::Provider {
+            cluster: cluster.into(),
+            provider: provider.into(),
+            message: msg.into(),
+            retryable: false,
+        }
     }
 
     /// Create a pivot error with the given message
     pub fn pivot(msg: impl Into<String>) -> Self {
-        Self::Pivot(msg.into())
+        Self::Pivot {
+            cluster: "unknown".to_string(),
+            message: msg.into(),
+            phase: None,
+        }
+    }
+
+    /// Create a pivot error with cluster context
+    pub fn pivot_for(cluster: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self::Pivot {
+            cluster: cluster.into(),
+            message: msg.into(),
+            phase: None,
+        }
+    }
+
+    /// Create a pivot error with phase information
+    pub fn pivot_in_phase(
+        cluster: impl Into<String>,
+        phase: impl Into<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        Self::Pivot {
+            cluster: cluster.into(),
+            message: msg.into(),
+            phase: Some(phase.into()),
+        }
     }
 
     /// Create a serialization error with the given message
     pub fn serialization(msg: impl Into<String>) -> Self {
-        Self::Serialization(msg.into())
+        Self::Serialization {
+            message: msg.into(),
+            kind: None,
+        }
+    }
+
+    /// Create a serialization error with resource kind context
+    pub fn serialization_for_kind(kind: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self::Serialization {
+            message: msg.into(),
+            kind: Some(kind.into()),
+        }
     }
 
     /// Create a CAPI installation error with the given message
     pub fn capi_installation(msg: impl Into<String>) -> Self {
-        Self::CapiInstallation(msg.into())
+        Self::CapiInstallation {
+            message: msg.into(),
+            provider: None,
+        }
+    }
+
+    /// Create a CAPI installation error for a specific provider
+    pub fn capi_installation_for_provider(
+        provider: impl Into<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        Self::CapiInstallation {
+            message: msg.into(),
+            provider: Some(provider.into()),
+        }
+    }
+
+    /// Check if this error is retryable
+    ///
+    /// Validation and serialization errors are not retryable (require config fix).
+    /// Provider and CAPI installation errors may be retryable.
+    /// Kubernetes errors depend on the error type.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Error::Kube { source } => {
+                // Retry on transient K8s errors (connection, timeout)
+                // Don't retry on 4xx errors (validation, not found, etc.)
+                !matches!(
+                    source,
+                    kube::Error::Api(ae) if (400..500).contains(&ae.code)
+                )
+            }
+            Error::Validation { .. } => false,
+            Error::Provider { retryable, .. } => *retryable,
+            Error::Pivot { .. } => true, // Pivots are generally retryable
+            Error::Serialization { .. } => false,
+            Error::CapiInstallation { .. } => true,
+        }
+    }
+
+    /// Get the cluster name if this error is associated with a specific cluster
+    pub fn cluster(&self) -> Option<&str> {
+        match self {
+            Error::Kube { .. } => None,
+            Error::Validation { cluster, .. } => Some(cluster),
+            Error::Provider { cluster, .. } => Some(cluster),
+            Error::Pivot { cluster, .. } => Some(cluster),
+            Error::Serialization { .. } => None,
+            Error::CapiInstallation { .. } => None,
+        }
     }
 }
 
@@ -91,9 +281,37 @@ mod tests {
 
         // Validation errors are categorized correctly for handling
         match Error::validation("any message") {
-            Error::Validation(msg) => assert_eq!(msg, "any message"),
+            Error::Validation { message, .. } => assert_eq!(message, "any message"),
             _ => panic!("Expected Validation variant"),
         }
+    }
+
+    /// Story: Structured errors include cluster context for debugging
+    #[test]
+    fn story_structured_errors_include_cluster_context() {
+        // Validation error with cluster context
+        let err = Error::validation_for("prod-cluster", "invalid node count");
+        assert!(err.to_string().contains("prod-cluster"));
+        assert_eq!(err.cluster(), Some("prod-cluster"));
+
+        // Validation error with field path
+        let err = Error::validation_for_field(
+            "test-cluster",
+            "spec.nodes.controlPlane",
+            "must be odd",
+        );
+        match &err {
+            Error::Validation { field, .. } => {
+                assert_eq!(field.as_deref(), Some("spec.nodes.controlPlane"));
+            }
+            _ => panic!("Expected Validation variant"),
+        }
+
+        // Provider error with full context
+        let err = Error::provider_for("my-cluster", "docker", "daemon not running");
+        assert!(err.to_string().contains("docker"));
+        assert!(err.to_string().contains("my-cluster"));
+        assert_eq!(err.cluster(), Some("my-cluster"));
     }
 
     /// Story: Provider errors surface infrastructure failures
@@ -103,23 +321,21 @@ mod tests {
     #[test]
     fn story_provider_errors_during_cluster_provisioning() {
         // Scenario: Docker daemon not running for local development
-        let err = Error::provider("docker daemon not available: connection refused");
+        let err = Error::provider_for("dev-cluster", "docker", "connection refused");
         assert!(err.to_string().contains("provider error"));
         assert!(err.to_string().contains("docker"));
 
         // Scenario: AWS credentials expired
-        let err = Error::provider("AWS authentication failed: token expired");
-        assert!(err.to_string().contains("AWS"));
+        let err = Error::provider_for("prod-cluster", "aws", "token expired");
+        assert!(err.to_string().contains("aws"));
 
-        // Scenario: GCP quota exceeded
-        let err = Error::provider("GCP quota exceeded for n2-standard-4 instances in us-west1");
-        assert!(err.to_string().contains("quota exceeded"));
+        // Scenario: GCP quota exceeded (retryable)
+        let err = Error::provider_for("gcp-cluster", "gcp", "quota exceeded");
+        assert!(err.is_retryable());
 
-        // Provider errors are categorized correctly
-        match Error::provider("any provider issue") {
-            Error::Provider(msg) => assert_eq!(msg, "any provider issue"),
-            _ => panic!("Expected Provider variant"),
-        }
+        // Scenario: Non-retryable provider error (config problem)
+        let err = Error::provider_permanent("bad-config", "aws", "invalid region");
+        assert!(!err.is_retryable());
     }
 
     /// Story: Pivot errors indicate CAPI migration failures
@@ -130,23 +346,19 @@ mod tests {
     #[test]
     fn story_pivot_errors_during_self_management_transition() {
         // Scenario: clusterctl move command fails
-        let err = Error::pivot("clusterctl move failed: unable to connect to target cluster");
+        let err = Error::pivot_for("target-cluster", "clusterctl move failed");
         assert!(err.to_string().contains("pivot error"));
-        assert!(err.to_string().contains("clusterctl"));
+        assert!(err.to_string().contains("target-cluster"));
 
-        // Scenario: CAPI resources export fails
-        let err = Error::pivot("failed to export CAPI resources: MachineDeployment not found");
-        assert!(err.to_string().contains("export"));
-
-        // Scenario: Target cluster not ready for pivot
-        let err = Error::pivot("target cluster not ready: agent not connected");
-        assert!(err.to_string().contains("agent not connected"));
-
-        // Pivot errors are categorized correctly
-        match Error::pivot("pivot issue") {
-            Error::Pivot(msg) => assert_eq!(msg, "pivot issue"),
+        // Scenario: Pivot fails during export phase
+        let err = Error::pivot_in_phase("my-cluster", "export", "MachineDeployment not found");
+        match &err {
+            Error::Pivot { phase, .. } => assert_eq!(phase.as_deref(), Some("export")),
             _ => panic!("Expected Pivot variant"),
         }
+
+        // Pivot errors are retryable
+        assert!(err.is_retryable());
     }
 
     /// Story: Serialization errors surface manifest/config issues
@@ -156,20 +368,20 @@ mod tests {
     #[test]
     fn story_serialization_errors_in_manifest_processing() {
         // Scenario: Invalid YAML in cluster spec
-        let err = Error::serialization("invalid YAML: unexpected key 'typo_field' at line 15");
+        let err = Error::serialization("invalid YAML: unexpected key");
         assert!(err.to_string().contains("serialization error"));
-        assert!(err.to_string().contains("YAML"));
 
-        // Scenario: JSON parsing failure in API response
-        let err =
-            Error::serialization("failed to parse CAPI Machine status: missing field 'phase'");
-        assert!(err.to_string().contains("missing field"));
-
-        // Serialization errors are categorized correctly
-        match Error::serialization("parse error") {
-            Error::Serialization(msg) => assert_eq!(msg, "parse error"),
+        // Scenario: Serialization error with resource kind context
+        let err = Error::serialization_for_kind("KubeadmControlPlane", "missing field 'spec'");
+        match &err {
+            Error::Serialization { kind, .. } => {
+                assert_eq!(kind.as_deref(), Some("KubeadmControlPlane"));
+            }
             _ => panic!("Expected Serialization variant"),
         }
+
+        // Serialization errors are not retryable (code/config bug)
+        assert!(!err.is_retryable());
     }
 
     /// Story: Error helper functions accept both String and &str
@@ -193,39 +405,53 @@ mod tests {
         assert!(err.to_string().contains("prod-us-west"));
     }
 
-    /// Story: Errors are categorized for proper handling in controllers
-    ///
-    /// Different error types require different handling strategies in the
-    /// reconciliation loop (retry, alert, fail permanently, etc.).
+    /// Story: Errors have is_retryable() for controller retry logic
     #[test]
-    fn story_error_categorization_for_controller_handling() {
-        fn categorize_error(err: &Error) -> &'static str {
-            match err {
-                Error::Validation(_) => "reject_and_fail", // User error, don't retry
-                Error::Provider(_) => "retry_with_backoff", // Infra might recover
-                Error::Pivot(_) => "manual_intervention",  // State needs review
-                Error::Serialization(_) => "reject_and_fail", // Code/config bug
-                Error::Kube(_) => "retry_with_backoff",    // K8s API might recover
-                Error::CapiInstallation(_) => "retry_with_backoff", // CAPI install might recover
-            }
-        }
+    fn story_error_retryability() {
+        // Validation errors should NOT retry (user must fix config)
+        assert!(!Error::validation("bad config").is_retryable());
 
-        // Validation errors should fail permanently (user must fix config)
+        // Provider errors are retryable by default
+        assert!(Error::provider("timeout").is_retryable());
+
+        // Permanent provider errors are NOT retryable
+        assert!(!Error::provider_permanent("c", "p", "invalid config").is_retryable());
+
+        // Pivot errors are retryable
+        assert!(Error::pivot("partial state").is_retryable());
+
+        // Serialization errors are NOT retryable
+        assert!(!Error::serialization("parse error").is_retryable());
+
+        // CAPI installation errors are retryable
+        assert!(Error::capi_installation("timeout").is_retryable());
+    }
+
+    /// Story: Error cluster() accessor returns cluster name when available
+    #[test]
+    fn story_error_cluster_accessor() {
+        // Validation has cluster
         assert_eq!(
-            categorize_error(&Error::validation("bad config")),
-            "reject_and_fail"
+            Error::validation_for("my-cluster", "msg").cluster(),
+            Some("my-cluster")
         );
 
-        // Provider errors might recover (retry)
+        // Provider has cluster
         assert_eq!(
-            categorize_error(&Error::provider("timeout")),
-            "retry_with_backoff"
+            Error::provider_for("my-cluster", "docker", "msg").cluster(),
+            Some("my-cluster")
         );
 
-        // Pivot errors need human review
+        // Pivot has cluster
         assert_eq!(
-            categorize_error(&Error::pivot("partial state")),
-            "manual_intervention"
+            Error::pivot_for("my-cluster", "msg").cluster(),
+            Some("my-cluster")
         );
+
+        // Serialization does NOT have cluster
+        assert_eq!(Error::serialization("msg").cluster(), None);
+
+        // CAPI installation does NOT have cluster
+        assert_eq!(Error::capi_installation("msg").cluster(), None);
     }
 }
