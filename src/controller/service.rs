@@ -426,9 +426,15 @@ pub async fn reconcile(
                 resources = compiled.resource_count(),
                 "applying compiled resources"
             );
-            ctx.kube
+            if let Err(e) = ctx
+                .kube
                 .apply_compiled_service(&name, namespace, &compiled)
-                .await?;
+                .await
+            {
+                error!(error = %e, "failed to apply compiled resources");
+                update_service_status_failed(&service, &ctx, &e.to_string()).await?;
+                return Err(e);
+            }
 
             // Transition to Ready
             info!("service ready");
@@ -462,7 +468,9 @@ pub async fn reconcile(
 /// Error policy for the service controller
 ///
 /// This function is called when reconciliation fails. It determines
-/// the requeue strategy using exponential backoff.
+/// the requeue strategy based on error type:
+/// - Retryable errors (transient): exponential backoff starting at 30 seconds
+/// - Non-retryable errors (permanent): await spec change, don't retry
 pub fn error_policy(
     service: Arc<LatticeService>,
     error: &Error,
@@ -471,11 +479,17 @@ pub fn error_policy(
     error!(
         ?error,
         service = %service.name_any(),
+        retryable = error.is_retryable(),
         "reconciliation failed"
     );
 
-    // Exponential backoff: start at 5 seconds
-    Action::requeue(Duration::from_secs(5))
+    if error.is_retryable() {
+        // Transient error - retry with backoff
+        Action::requeue(Duration::from_secs(30))
+    } else {
+        // Permanent error - requires spec change to fix
+        Action::await_change()
+    }
 }
 
 /// Check which dependencies are missing from the graph
@@ -539,6 +553,10 @@ pub async fn reconcile_external(
 }
 
 /// Error policy for the external service controller
+///
+/// Uses the same retry logic as the service controller:
+/// - Retryable errors: 30 second backoff
+/// - Non-retryable errors: await spec change
 pub fn error_policy_external(
     external: Arc<LatticeExternalService>,
     error: &Error,
@@ -547,10 +565,15 @@ pub fn error_policy_external(
     error!(
         ?error,
         external_service = %external.name_any(),
+        retryable = error.is_retryable(),
         "reconciliation failed"
     );
 
-    Action::requeue(Duration::from_secs(5))
+    if error.is_retryable() {
+        Action::requeue(Duration::from_secs(30))
+    } else {
+        Action::await_change()
+    }
 }
 
 // =============================================================================
@@ -990,18 +1013,22 @@ mod tests {
     // Error Policy Tests
     // =========================================================================
 
-    /// Story: Error policy requeues with backoff
+    /// Story: Error policy distinguishes retryable vs non-retryable errors
     #[test]
     fn story_error_policy_requeues() {
         let service = Arc::new(sample_service("my-service"));
         let mock_kube = mock_kube_success();
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
-        let error = Error::validation("test error");
-        let action = error_policy(service, &error, ctx);
+        // Validation errors are NOT retryable - should await spec change
+        let validation_error = Error::validation("test error");
+        let action = error_policy(Arc::clone(&service), &validation_error, Arc::clone(&ctx));
+        assert_eq!(action, Action::await_change());
 
-        // Should requeue after 5 seconds (base backoff)
-        assert_eq!(action, Action::requeue(Duration::from_secs(5)));
+        // Bootstrap errors ARE retryable - should requeue with backoff
+        let retryable_error = Error::Bootstrap("connection timeout".to_string());
+        let action = error_policy(service, &retryable_error, ctx);
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
     }
 
     // =========================================================================

@@ -492,8 +492,212 @@ impl LatticeServiceSpec {
             }
         }
 
+        // Validate containers
+        for (name, container) in &self.containers {
+            container.validate(name)?;
+        }
+
+        // Validate service ports
+        if let Some(ref svc) = self.service {
+            svc.validate()?;
+        }
+
         Ok(())
     }
+}
+
+impl ContainerSpec {
+    /// Validate container specification
+    pub fn validate(&self, container_name: &str) -> Result<(), crate::Error> {
+        // Validate image format
+        validate_image(&self.image, container_name)?;
+
+        // Validate resource quantities
+        if let Some(ref resources) = self.resources {
+            resources.validate(container_name)?;
+        }
+
+        // Validate file mount modes
+        for (path, file_mount) in &self.files {
+            file_mount.validate(container_name, path)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl ResourceRequirements {
+    /// Validate resource requirements
+    pub fn validate(&self, container_name: &str) -> Result<(), crate::Error> {
+        if let Some(ref requests) = self.requests {
+            requests.validate(container_name, "requests")?;
+        }
+        if let Some(ref limits) = self.limits {
+            limits.validate(container_name, "limits")?;
+        }
+        Ok(())
+    }
+}
+
+impl ResourceQuantity {
+    /// Validate resource quantity values
+    pub fn validate(&self, container_name: &str, field: &str) -> Result<(), crate::Error> {
+        if let Some(ref cpu) = self.cpu {
+            validate_cpu_quantity(cpu, container_name, field)?;
+        }
+        if let Some(ref memory) = self.memory {
+            validate_memory_quantity(memory, container_name, field)?;
+        }
+        Ok(())
+    }
+}
+
+impl FileMount {
+    /// Validate file mount specification
+    pub fn validate(&self, container_name: &str, path: &str) -> Result<(), crate::Error> {
+        // Validate mode is valid octal
+        if let Some(ref mode) = self.mode {
+            validate_file_mode(mode, container_name, path)?;
+        }
+
+        // Ensure at least one content source is specified
+        if self.content.is_none() && self.binary_content.is_none() && self.source.is_none() {
+            return Err(crate::Error::validation(format!(
+                "container '{}' file '{}': must specify content, binary_content, or source",
+                container_name, path
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+impl ServicePortsSpec {
+    /// Validate service port specification
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        let mut seen_ports: std::collections::HashSet<u16> = std::collections::HashSet::new();
+
+        for (name, port_spec) in &self.ports {
+            // Validate port is not zero
+            if port_spec.port == 0 {
+                return Err(crate::Error::validation(format!(
+                    "service port '{}': port cannot be 0",
+                    name
+                )));
+            }
+
+            // Validate target_port is not zero
+            if let Some(target_port) = port_spec.target_port {
+                if target_port == 0 {
+                    return Err(crate::Error::validation(format!(
+                        "service port '{}': target_port cannot be 0",
+                        name
+                    )));
+                }
+            }
+
+            // Check for duplicate port numbers
+            if !seen_ports.insert(port_spec.port) {
+                return Err(crate::Error::validation(format!(
+                    "duplicate service port number: {}",
+                    port_spec.port
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Validate container image format
+fn validate_image(image: &str, container_name: &str) -> Result<(), crate::Error> {
+    if image.is_empty() {
+        return Err(crate::Error::validation(format!(
+            "container '{}': image cannot be empty",
+            container_name
+        )));
+    }
+
+    // Basic validation: image must not contain whitespace or control characters
+    if image.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(crate::Error::validation(format!(
+            "container '{}': image '{}' contains invalid characters",
+            container_name, image
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate CPU quantity format (e.g., "100m", "1", "0.5")
+fn validate_cpu_quantity(qty: &str, container_name: &str, field: &str) -> Result<(), crate::Error> {
+    // CPU can be: integer, decimal, or integer with 'm' suffix
+    let is_valid = if qty.ends_with('m') {
+        // Millicores: must be integer
+        qty[..qty.len() - 1].parse::<u64>().is_ok()
+    } else {
+        // Cores: can be integer or decimal
+        qty.parse::<f64>().is_ok()
+    };
+
+    if !is_valid {
+        return Err(crate::Error::validation(format!(
+            "container '{}' {}.cpu: invalid quantity '{}' (expected e.g., '100m', '1', '0.5')",
+            container_name, field, qty
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate memory quantity format (e.g., "128Mi", "1Gi", "1000000")
+fn validate_memory_quantity(
+    qty: &str,
+    container_name: &str,
+    field: &str,
+) -> Result<(), crate::Error> {
+    // Memory can have these suffixes: Ki, Mi, Gi, Ti, Pi, Ei, k, M, G, T, P, E
+    let suffixes = ["Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "k", "M", "G", "T", "P", "E"];
+
+    let is_valid = if let Some(suffix) = suffixes.iter().find(|s| qty.ends_with(*s)) {
+        // Has suffix: prefix must be a number
+        let prefix = &qty[..qty.len() - suffix.len()];
+        prefix.parse::<u64>().is_ok() || prefix.parse::<f64>().is_ok()
+    } else {
+        // No suffix: must be integer (bytes)
+        qty.parse::<u64>().is_ok()
+    };
+
+    if !is_valid {
+        return Err(crate::Error::validation(format!(
+            "container '{}' {}.memory: invalid quantity '{}' (expected e.g., '128Mi', '1Gi')",
+            container_name, field, qty
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate file mode is valid octal (e.g., "0644", "0755")
+fn validate_file_mode(mode: &str, container_name: &str, path: &str) -> Result<(), crate::Error> {
+    // Mode should be 3-4 octal digits, optionally prefixed with 0
+    let mode_str = mode.strip_prefix('0').unwrap_or(mode);
+
+    if mode_str.len() < 3 || mode_str.len() > 4 {
+        return Err(crate::Error::validation(format!(
+            "container '{}' file '{}': mode '{}' must be 3-4 octal digits (e.g., '0644')",
+            container_name, path, mode
+        )));
+    }
+
+    if !mode_str.chars().all(|c| ('0'..='7').contains(&c)) {
+        return Err(crate::Error::validation(format!(
+            "container '{}' file '{}': mode '{}' contains non-octal digits",
+            container_name, path, mode
+        )));
+    }
+
+    Ok(())
 }
 
 /// Status for a LatticeService
@@ -960,5 +1164,149 @@ deploy:
         assert_eq!(ServicePhase::Compiling.to_string(), "Compiling");
         assert_eq!(ServicePhase::Ready.to_string(), "Ready");
         assert_eq!(ServicePhase::Failed.to_string(), "Failed");
+    }
+
+    // =========================================================================
+    // Field Validation Tests
+    // =========================================================================
+
+    /// Story: Valid CPU quantities pass validation
+    #[test]
+    fn test_valid_cpu_quantities() {
+        assert!(validate_cpu_quantity("100m", "main", "requests").is_ok());
+        assert!(validate_cpu_quantity("1", "main", "limits").is_ok());
+        assert!(validate_cpu_quantity("0.5", "main", "requests").is_ok());
+        assert!(validate_cpu_quantity("2000m", "main", "limits").is_ok());
+    }
+
+    /// Story: Invalid CPU quantities fail validation
+    #[test]
+    fn test_invalid_cpu_quantities() {
+        assert!(validate_cpu_quantity("", "main", "requests").is_err());
+        assert!(validate_cpu_quantity("abc", "main", "limits").is_err());
+        assert!(validate_cpu_quantity("100x", "main", "requests").is_err());
+        assert!(validate_cpu_quantity("1.5m", "main", "limits").is_err()); // millicores must be int
+    }
+
+    /// Story: Valid memory quantities pass validation
+    #[test]
+    fn test_valid_memory_quantities() {
+        assert!(validate_memory_quantity("128Mi", "main", "requests").is_ok());
+        assert!(validate_memory_quantity("1Gi", "main", "limits").is_ok());
+        assert!(validate_memory_quantity("1000000", "main", "requests").is_ok()); // bytes
+        assert!(validate_memory_quantity("512Ki", "main", "limits").is_ok());
+        assert!(validate_memory_quantity("1M", "main", "requests").is_ok());
+    }
+
+    /// Story: Invalid memory quantities fail validation
+    #[test]
+    fn test_invalid_memory_quantities() {
+        assert!(validate_memory_quantity("", "main", "requests").is_err());
+        assert!(validate_memory_quantity("abc", "main", "limits").is_err());
+        assert!(validate_memory_quantity("128Xi", "main", "requests").is_err()); // invalid suffix
+    }
+
+    /// Story: Valid file modes pass validation
+    #[test]
+    fn test_valid_file_modes() {
+        assert!(validate_file_mode("0644", "main", "/etc/config").is_ok());
+        assert!(validate_file_mode("0755", "main", "/usr/bin/script").is_ok());
+        assert!(validate_file_mode("644", "main", "/etc/config").is_ok()); // without leading 0
+        assert!(validate_file_mode("0777", "main", "/tmp/file").is_ok());
+    }
+
+    /// Story: Invalid file modes fail validation
+    #[test]
+    fn test_invalid_file_modes() {
+        assert!(validate_file_mode("0999", "main", "/etc/config").is_err()); // 9 is not octal
+        assert!(validate_file_mode("abc", "main", "/etc/config").is_err());
+        assert!(validate_file_mode("12", "main", "/etc/config").is_err()); // too short
+        assert!(validate_file_mode("12345", "main", "/etc/config").is_err()); // too long
+    }
+
+    /// Story: Empty image fails validation
+    #[test]
+    fn test_empty_image_fails() {
+        assert!(validate_image("", "main").is_err());
+    }
+
+    /// Story: Image with whitespace fails validation
+    #[test]
+    fn test_image_with_whitespace_fails() {
+        assert!(validate_image("nginx latest", "main").is_err());
+        assert!(validate_image("nginx\tlatest", "main").is_err());
+    }
+
+    /// Story: Valid images pass validation
+    #[test]
+    fn test_valid_images() {
+        assert!(validate_image("nginx:latest", "main").is_ok());
+        assert!(validate_image("registry.example.com/app:v1.2.3", "main").is_ok());
+        assert!(validate_image("gcr.io/project/image@sha256:abc123", "main").is_ok());
+    }
+
+    /// Story: Duplicate service ports fail validation
+    #[test]
+    fn test_duplicate_service_ports_fail() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "http".to_string(),
+            PortSpec {
+                port: 80,
+                target_port: None,
+                protocol: None,
+            },
+        );
+        ports.insert(
+            "http2".to_string(),
+            PortSpec {
+                port: 80, // duplicate!
+                target_port: None,
+                protocol: None,
+            },
+        );
+
+        let svc = ServicePortsSpec { ports };
+        assert!(svc.validate().is_err());
+    }
+
+    /// Story: Port zero fails validation
+    #[test]
+    fn test_port_zero_fails() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "http".to_string(),
+            PortSpec {
+                port: 0,
+                target_port: None,
+                protocol: None,
+            },
+        );
+
+        let svc = ServicePortsSpec { ports };
+        assert!(svc.validate().is_err());
+    }
+
+    /// Story: File mount must have content source
+    #[test]
+    fn test_file_mount_requires_content() {
+        let file = FileMount {
+            content: None,
+            binary_content: None,
+            source: None,
+            mode: None,
+            no_expand: None,
+        };
+        assert!(file.validate("main", "/etc/config").is_err());
+
+        // With content, it passes
+        let file_with_content = FileMount {
+            content: Some("data".to_string()),
+            binary_content: None,
+            source: None,
+            mode: None,
+            no_expand: None,
+        };
+        assert!(file_with_content.validate("main", "/etc/config").is_ok());
     }
 }

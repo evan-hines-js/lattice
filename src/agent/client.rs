@@ -12,7 +12,7 @@
 //! 4. Use certificate for mTLS gRPC connection
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use kube::Client as KubeClient;
@@ -119,6 +119,8 @@ pub struct AgentClient {
     message_tx: Option<mpsc::Sender<AgentMessage>>,
     /// Shutdown signal
     shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Time when the agent was started (for uptime tracking)
+    start_time: Instant,
 }
 
 impl AgentClient {
@@ -131,7 +133,24 @@ impl AgentClient {
             kube_client: None,
             message_tx: None,
             shutdown_tx: None,
+            start_time: Instant::now(),
         }
+    }
+
+    /// Get the agent uptime in seconds
+    pub fn uptime_seconds(&self) -> i64 {
+        self.start_time.elapsed().as_secs() as i64
+    }
+
+    /// Get the Kubernetes API server endpoint from environment
+    fn get_api_server_endpoint() -> String {
+        std::env::var("KUBERNETES_SERVICE_HOST")
+            .map(|host| {
+                let port =
+                    std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_string());
+                format!("https://{}:{}", host, port)
+            })
+            .unwrap_or_default()
     }
 
     /// Set the Kubernetes client for API proxying
@@ -353,6 +372,7 @@ impl AgentClient {
         let heartbeat_state = agent_state.clone();
         let heartbeat_tx = message_tx.clone();
         let cluster_name = config.cluster_name.clone();
+        let start_time = self.start_time;
 
         tokio::spawn(async move {
             let mut ticker = interval(heartbeat_interval);
@@ -365,7 +385,7 @@ impl AgentClient {
                     payload: Some(Payload::Heartbeat(Heartbeat {
                         state: current_state.into(),
                         timestamp: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
-                        uptime_seconds: 0, // TODO: track actual uptime
+                        uptime_seconds: start_time.elapsed().as_secs() as i64,
                     })),
                 };
 
@@ -408,11 +428,15 @@ impl AgentClient {
 
     /// Send the ready message to cell
     async fn send_ready(&self) -> Result<(), ClientError> {
-        let k8s_version = self
-            .kube_client
-            .as_ref()
-            .map(|_| "unknown".to_string()) // TODO: get actual version
-            .unwrap_or_else(|| "unknown".to_string());
+        // Get K8s version from the kube client if available
+        let k8s_version = if let Some(ref client) = self.kube_client {
+            match client.apiserver_version().await {
+                Ok(info) => format!("v{}.{}", info.major, info.minor),
+                Err(_) => "unknown".to_string(),
+            }
+        } else {
+            "unknown".to_string()
+        };
 
         let msg = AgentMessage {
             cluster_name: self.config.cluster_name.clone(),
@@ -420,7 +444,7 @@ impl AgentClient {
                 agent_version: self.config.agent_version.clone(),
                 kubernetes_version: k8s_version,
                 state: (*self.agent_state.read().await).into(),
-                api_server_endpoint: String::new(), // TODO: get actual endpoint
+                api_server_endpoint: Self::get_api_server_endpoint(),
             })),
         };
 
@@ -529,33 +553,32 @@ impl AgentClient {
 
     /// Install CAPI and infrastructure provider
     ///
-    /// Reads provider from LATTICE_PROVIDER env var and runs
-    /// `clusterctl init --infrastructure <provider>`.
-    /// This is idempotent - clusterctl handles if already installed.
+    /// Uses the shared CAPI installation logic which:
+    /// 1. Installs cert-manager from local helm chart
+    /// 2. Runs clusterctl init with air-gapped config
     async fn install_capi() -> Result<String, std::io::Error> {
-        use tokio::process::Command;
+        use crate::capi::ensure_capi_installed;
+        use crate::crd::ProviderType;
 
-        let provider = std::env::var("LATTICE_PROVIDER")
+        let provider_str = std::env::var("LATTICE_PROVIDER")
             .map_err(|_| std::io::Error::other("LATTICE_PROVIDER env var not set"))?;
 
-        info!(provider = %provider, "Running clusterctl init");
+        let provider = match provider_str.as_str() {
+            "docker" => ProviderType::Docker,
+            "aws" => ProviderType::Aws,
+            "gcp" => ProviderType::Gcp,
+            "azure" => ProviderType::Azure,
+            other => return Err(std::io::Error::other(format!("unknown provider: {}", other))),
+        };
 
-        let output = Command::new("clusterctl")
-            .args(["init", "--infrastructure", &provider])
-            .output()
-            .await?;
+        info!(provider = %provider_str, "Installing CAPI with shared installer");
 
-        if output.status.success() {
-            info!(provider = %provider, "clusterctl init completed successfully");
-            Ok(provider)
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            Err(std::io::Error::other(format!(
-                "clusterctl init failed: {} {}",
-                stdout, stderr
-            )))
-        }
+        ensure_capi_installed(&provider)
+            .await
+            .map_err(|e| std::io::Error::other(format!("CAPI installation failed: {}", e)))?;
+
+        info!(provider = %provider_str, "clusterctl init completed successfully");
+        Ok(provider_str)
     }
 
     /// Wait for CAPI CRDs to be available
@@ -2528,6 +2551,117 @@ mod tests {
         writer.await.unwrap();
         for reader in readers {
             reader.await.unwrap();
+        }
+    }
+
+    // ==========================================================================
+    // Story Tests: Uptime Tracking
+    // ==========================================================================
+
+    /// Story: Agent tracks uptime from creation
+    ///
+    /// The agent should track its uptime from the moment it's created,
+    /// not from when it connects to the cell.
+    #[test]
+    fn story_agent_tracks_uptime() {
+        let config = AgentClientConfig::default();
+        let client = AgentClient::new(config);
+
+        // Immediately after creation, uptime should be 0 (or very close to it)
+        let uptime = client.uptime_seconds();
+        assert!(uptime >= 0);
+        assert!(uptime < 2); // Should be < 2 seconds
+    }
+
+    /// Story: Agent uptime increases over time
+    #[tokio::test]
+    async fn story_agent_uptime_increases() {
+        let config = AgentClientConfig::default();
+        let client = AgentClient::new(config);
+
+        let uptime1 = client.uptime_seconds();
+
+        // Wait a moment
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let uptime2 = client.uptime_seconds();
+
+        // Uptime should be at least as much as before (may not have crossed second boundary)
+        assert!(uptime2 >= uptime1);
+    }
+
+    // ==========================================================================
+    // Story Tests: API Server Endpoint Detection
+    // ==========================================================================
+
+    /// Story: API server endpoint is detected from environment
+    ///
+    /// When running inside a Kubernetes cluster, the agent should detect
+    /// the API server endpoint from standard environment variables.
+    #[test]
+    fn story_api_server_endpoint_from_env() {
+        // Save original values
+        let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
+        let orig_port = std::env::var("KUBERNETES_SERVICE_PORT").ok();
+
+        // Set test values
+        std::env::set_var("KUBERNETES_SERVICE_HOST", "10.96.0.1");
+        std::env::set_var("KUBERNETES_SERVICE_PORT", "443");
+
+        let endpoint = AgentClient::get_api_server_endpoint();
+        assert_eq!(endpoint, "https://10.96.0.1:443");
+
+        // Restore original values
+        match orig_host {
+            Some(v) => std::env::set_var("KUBERNETES_SERVICE_HOST", v),
+            None => std::env::remove_var("KUBERNETES_SERVICE_HOST"),
+        }
+        match orig_port {
+            Some(v) => std::env::set_var("KUBERNETES_SERVICE_PORT", v),
+            None => std::env::remove_var("KUBERNETES_SERVICE_PORT"),
+        }
+    }
+
+    /// Story: API server endpoint uses default port when not specified
+    #[test]
+    fn story_api_server_endpoint_default_port() {
+        // Save original values
+        let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
+        let orig_port = std::env::var("KUBERNETES_SERVICE_PORT").ok();
+
+        // Set host only
+        std::env::set_var("KUBERNETES_SERVICE_HOST", "10.96.0.1");
+        std::env::remove_var("KUBERNETES_SERVICE_PORT");
+
+        let endpoint = AgentClient::get_api_server_endpoint();
+        assert_eq!(endpoint, "https://10.96.0.1:443");
+
+        // Restore original values
+        match orig_host {
+            Some(v) => std::env::set_var("KUBERNETES_SERVICE_HOST", v),
+            None => std::env::remove_var("KUBERNETES_SERVICE_HOST"),
+        }
+        match orig_port {
+            Some(v) => std::env::set_var("KUBERNETES_SERVICE_PORT", v),
+            None => std::env::remove_var("KUBERNETES_SERVICE_PORT"),
+        }
+    }
+
+    /// Story: API server endpoint is empty when not in cluster
+    #[test]
+    fn story_api_server_endpoint_empty_outside_cluster() {
+        // Save original value
+        let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
+
+        // Remove the env var
+        std::env::remove_var("KUBERNETES_SERVICE_HOST");
+
+        let endpoint = AgentClient::get_api_server_endpoint();
+        assert!(endpoint.is_empty());
+
+        // Restore original value
+        if let Some(v) = orig_host {
+            std::env::set_var("KUBERNETES_SERVICE_HOST", v);
         }
     }
 }
