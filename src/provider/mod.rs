@@ -149,14 +149,11 @@ pub fn generate_machine_deployment(
     cluster_name: &str,
     namespace: &str,
     k8s_version: &str,
-    infrastructure_api_version: &str,
+    infrastructure_api_group: &str,
     infrastructure_kind: &str,
     labels: std::collections::BTreeMap<String, String>,
 ) -> CAPIManifest {
     let deployment_name = format!("{}-md-0", cluster_name);
-
-    // In CAPI v1beta2, refs use apiGroup instead of apiVersion
-    let infra_api_group = infrastructure_api_version.split('/').next().unwrap_or("infrastructure.cluster.x-k8s.io");
     let spec = serde_json::json!({
         "clusterName": cluster_name,
         "replicas": 0,  // ALWAYS 0 - scaling happens after pivot
@@ -175,7 +172,7 @@ pub fn generate_machine_deployment(
                     }
                 },
                 "infrastructureRef": {
-                    "apiGroup": infra_api_group,
+                    "apiGroup": infrastructure_api_group,
                     "kind": infrastructure_kind,
                     "name": format!("{}-md-0", cluster_name)
                 }
@@ -237,12 +234,11 @@ pub fn generate_kubeadm_config_template(
 pub fn generate_cluster(
     cluster_name: &str,
     namespace: &str,
-    infrastructure_api_version: &str,
+    infrastructure_api_group: &str,
     infrastructure_kind: &str,
     labels: std::collections::BTreeMap<String, String>,
 ) -> CAPIManifest {
-    // Note: In CAPI v1beta2, controlPlaneRef and infrastructureRef use apiGroup (not apiVersion)
-    // and don't include namespace (resources must be in same namespace)
+    // In CAPI v1beta2, refs use apiGroup (not apiVersion) and no namespace
     let spec = serde_json::json!({
         "clusterNetwork": {
             "pods": {
@@ -258,7 +254,7 @@ pub fn generate_cluster(
             "name": format!("{}-control-plane", cluster_name)
         },
         "infrastructureRef": {
-            "apiGroup": infrastructure_api_version.split('/').next().unwrap_or("infrastructure.cluster.x-k8s.io"),
+            "apiGroup": infrastructure_api_group,
             "kind": infrastructure_kind,
             "name": cluster_name
         }
@@ -281,7 +277,7 @@ pub fn generate_control_plane(
     replicas: u32,
     cert_sans: Vec<String>,
     post_kubeadm_commands: Vec<String>,
-    infrastructure_api_version: &str,
+    infrastructure_api_group: &str,
     infrastructure_machine_template_kind: &str,
     labels: std::collections::BTreeMap<String, String>,
 ) -> CAPIManifest {
@@ -327,14 +323,13 @@ pub fn generate_control_plane(
     }
 
     // In CAPI v1beta2, infrastructureRef is nested under machineTemplate.spec
-    let infra_api_group = infrastructure_api_version.split('/').next().unwrap_or("infrastructure.cluster.x-k8s.io");
     let spec = serde_json::json!({
         "replicas": replicas,
         "version": format!("v{}", k8s_version.trim_start_matches('v')),
         "machineTemplate": {
             "spec": {
                 "infrastructureRef": {
-                    "apiGroup": infra_api_group,
+                    "apiGroup": infrastructure_api_group,
                     "kind": infrastructure_machine_template_kind,
                     "name": format!("{}-control-plane", cluster_name)
                 }

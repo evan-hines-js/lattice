@@ -1,34 +1,16 @@
-//! Workload generation for Lattice services
+//! Workload types for Lattice services
 //!
-//! This module generates Kubernetes workload resources from LatticeService specs:
+//! This module defines Kubernetes workload resource types used by the ServiceCompiler:
 //! - Deployment: Container orchestration
 //! - Service: Network exposure
 //! - ServiceAccount: SPIFFE identity for mTLS
-//! - HorizontalPodAutoscaler: Auto-scaling (when replicas.max is set)
+//! - HorizontalPodAutoscaler: Auto-scaling
 //!
-//! # Architecture
-//!
-//! The workload compiler takes a LatticeService and produces standard Kubernetes
-//! resources that can be applied to the cluster. Combined with the policy module,
-//! this gives a complete deployment with network security.
-//!
-//! ```text
-//! LatticeService
-//!       │
-//!       ▼
-//! WorkloadCompiler.compile()
-//!       │
-//!       ├──► Deployment
-//!       ├──► Service
-//!       ├──► ServiceAccount
-//!       └──► HorizontalPodAutoscaler (optional)
-//! ```
+//! For workload generation, use [`crate::compiler::ServiceCompiler`].
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-
-use crate::crd::{DeployStrategy, LatticeService, LatticeServiceSpec};
 
 // =============================================================================
 // Kubernetes Resource Types
@@ -531,60 +513,61 @@ impl GeneratedWorkloads {
 // Workload Compiler
 // =============================================================================
 
-/// Workload compiler that generates Kubernetes resources from LatticeService specs
-pub struct WorkloadCompiler {
-    namespace: String,
-}
+use crate::crd::{DeployStrategy, LatticeService, LatticeServiceSpec};
+
+/// Compiler for generating Kubernetes workload resources from LatticeService
+///
+/// This compiler generates:
+/// - ServiceAccount: For SPIFFE identity (always)
+/// - Deployment: Container orchestration (always)
+/// - Service: Network exposure (if ports defined)
+/// - HPA: Auto-scaling (if max replicas set)
+pub struct WorkloadCompiler;
 
 impl WorkloadCompiler {
-    /// Create a new workload compiler
-    pub fn new(namespace: impl Into<String>) -> Self {
-        Self {
-            namespace: namespace.into(),
-        }
-    }
-
-    /// Compile all workload resources for a LatticeService
-    pub fn compile(&self, service: &LatticeService) -> GeneratedWorkloads {
+    /// Compile a LatticeService into workload resources
+    pub fn compile(service: &LatticeService) -> GeneratedWorkloads {
         let name = service
             .metadata
             .name
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or("unknown");
+        let namespace = service
+            .metadata
+            .namespace
+            .as_deref()
+            .unwrap_or("default");
 
-        let mut workloads = GeneratedWorkloads::new();
+        let mut output = GeneratedWorkloads::new();
 
         // Always generate ServiceAccount for SPIFFE identity
-        workloads.service_account = Some(self.compile_service_account(name));
+        output.service_account = Some(Self::compile_service_account(name, namespace));
 
         // Always generate Deployment
-        workloads.deployment = Some(self.compile_deployment(name, &service.spec));
+        output.deployment = Some(Self::compile_deployment(name, namespace, &service.spec));
 
         // Generate Service if ports are defined
         if service.spec.service.is_some() {
-            workloads.service = Some(self.compile_service(name, &service.spec));
+            output.service = Some(Self::compile_service(name, namespace, &service.spec));
         }
 
         // Generate HPA if max replicas is set
         if service.spec.replicas.max.is_some() {
-            workloads.hpa = Some(self.compile_hpa(name, &service.spec));
+            output.hpa = Some(Self::compile_hpa(name, namespace, &service.spec));
         }
 
-        workloads
+        output
     }
 
-    /// Compile ServiceAccount
-    fn compile_service_account(&self, name: &str) -> ServiceAccount {
+    fn compile_service_account(name: &str, namespace: &str) -> ServiceAccount {
         ServiceAccount {
             api_version: "v1".to_string(),
             kind: "ServiceAccount".to_string(),
-            metadata: ObjectMeta::new(name, &self.namespace),
+            metadata: ObjectMeta::new(name, namespace),
         }
     }
 
-    /// Compile Deployment
-    fn compile_deployment(&self, name: &str, spec: &LatticeServiceSpec) -> Deployment {
+    fn compile_deployment(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> Deployment {
         let mut labels = BTreeMap::new();
         labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
         labels.insert(
@@ -677,7 +660,7 @@ impl WorkloadCompiler {
                     resources,
                     liveness_probe,
                     readiness_probe,
-                    volume_mounts: vec![], // TODO: implement file mounts
+                    volume_mounts: vec![],
                 }
             })
             .collect();
@@ -691,22 +674,19 @@ impl WorkloadCompiler {
                     max_surge: Some("25%".to_string()),
                 }),
             }),
-            DeployStrategy::Canary => {
-                // Canary is handled by Flagger, use RollingUpdate as base
-                Some(DeploymentStrategy {
-                    type_: "RollingUpdate".to_string(),
-                    rolling_update: Some(RollingUpdateConfig {
-                        max_unavailable: Some("0".to_string()),
-                        max_surge: Some("100%".to_string()),
-                    }),
-                })
-            }
+            DeployStrategy::Canary => Some(DeploymentStrategy {
+                type_: "RollingUpdate".to_string(),
+                rolling_update: Some(RollingUpdateConfig {
+                    max_unavailable: Some("0".to_string()),
+                    max_surge: Some("100%".to_string()),
+                }),
+            }),
         };
 
         Deployment {
             api_version: "apps/v1".to_string(),
             kind: "Deployment".to_string(),
-            metadata: ObjectMeta::new(name, &self.namespace),
+            metadata: ObjectMeta::new(name, namespace),
             spec: DeploymentSpec {
                 replicas: spec.replicas.min,
                 selector: LabelSelector {
@@ -728,8 +708,7 @@ impl WorkloadCompiler {
         }
     }
 
-    /// Compile Service
-    fn compile_service(&self, name: &str, spec: &LatticeServiceSpec) -> Service {
+    fn compile_service(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> Service {
         let mut selector = BTreeMap::new();
         selector.insert("app.kubernetes.io/name".to_string(), name.to_string());
 
@@ -752,21 +731,20 @@ impl WorkloadCompiler {
         Service {
             api_version: "v1".to_string(),
             kind: "Service".to_string(),
-            metadata: ObjectMeta::new(name, &self.namespace),
+            metadata: ObjectMeta::new(name, namespace),
             spec: ServiceSpec {
                 selector,
                 ports,
-                type_: None, // ClusterIP by default
+                type_: None,
             },
         }
     }
 
-    /// Compile HorizontalPodAutoscaler
-    fn compile_hpa(&self, name: &str, spec: &LatticeServiceSpec) -> HorizontalPodAutoscaler {
+    fn compile_hpa(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> HorizontalPodAutoscaler {
         HorizontalPodAutoscaler {
             api_version: "autoscaling/v2".to_string(),
             kind: "HorizontalPodAutoscaler".to_string(),
-            metadata: ObjectMeta::new(name, &self.namespace),
+            metadata: ObjectMeta::new(name, namespace),
             spec: HpaSpec {
                 scale_target_ref: ScaleTargetRef {
                     api_version: "apps/v1".to_string(),
@@ -801,18 +779,7 @@ mod tests {
         ContainerSpec, DeploySpec, PortSpec, ReplicaSpec, ServicePortsSpec,
     };
 
-    fn make_service(name: &str, spec: LatticeServiceSpec) -> LatticeService {
-        LatticeService {
-            metadata: kube::api::ObjectMeta {
-                name: Some(name.to_string()),
-                ..Default::default()
-            },
-            spec,
-            status: None,
-        }
-    }
-
-    fn make_basic_spec() -> LatticeServiceSpec {
+    fn make_service(name: &str, namespace: &str) -> LatticeService {
         let mut containers = BTreeMap::new();
         containers.insert(
             "main".to_string(),
@@ -839,136 +806,131 @@ mod tests {
             },
         );
 
-        LatticeServiceSpec {
-            containers,
-            resources: BTreeMap::new(),
-            service: Some(ServicePortsSpec { ports }),
-            replicas: ReplicaSpec { min: 1, max: None },
-            deploy: DeploySpec::default(),
+        LatticeService {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                ..Default::default()
+            },
+            spec: crate::crd::LatticeServiceSpec {
+                containers,
+                resources: BTreeMap::new(),
+                service: Some(ServicePortsSpec { ports }),
+                replicas: ReplicaSpec { min: 1, max: None },
+                deploy: DeploySpec::default(),
+            },
+            status: None,
         }
     }
 
     // =========================================================================
-    // Story: Basic Deployment Generation
+    // Story: Always Generate ServiceAccount
     // =========================================================================
 
     #[test]
-    fn story_generates_deployment_from_spec() {
-        let spec = make_basic_spec();
-        let service = make_service("my-app", spec);
+    fn story_always_generates_service_account() {
+        let service = make_service("my-app", "default");
+        let output = WorkloadCompiler::compile(&service);
 
-        let compiler = WorkloadCompiler::new("default");
-        let workloads = compiler.compile(&service);
-
-        let deployment = workloads.deployment.expect("should have deployment");
-        assert_eq!(deployment.metadata.name, "my-app");
-        assert_eq!(deployment.metadata.namespace, "default");
-        assert_eq!(deployment.spec.replicas, 1);
-        assert_eq!(deployment.spec.template.spec.containers.len(), 1);
-        assert_eq!(deployment.spec.template.spec.containers[0].image, "nginx:latest");
-    }
-
-    // =========================================================================
-    // Story: Service Account for SPIFFE Identity
-    // =========================================================================
-
-    #[test]
-    fn story_generates_service_account() {
-        let spec = make_basic_spec();
-        let service = make_service("my-app", spec);
-
-        let compiler = WorkloadCompiler::new("default");
-        let workloads = compiler.compile(&service);
-
-        let sa = workloads.service_account.expect("should have service account");
+        let sa = output.service_account.expect("should have service account");
         assert_eq!(sa.metadata.name, "my-app");
+        assert_eq!(sa.metadata.namespace, "default");
+        assert_eq!(sa.api_version, "v1");
         assert_eq!(sa.kind, "ServiceAccount");
     }
 
     // =========================================================================
-    // Story: Kubernetes Service Generation
+    // Story: Always Generate Deployment
     // =========================================================================
 
     #[test]
-    fn story_generates_service_when_ports_defined() {
-        let spec = make_basic_spec();
-        let service = make_service("my-app", spec);
+    fn story_always_generates_deployment() {
+        let service = make_service("my-app", "prod");
+        let output = WorkloadCompiler::compile(&service);
 
-        let compiler = WorkloadCompiler::new("default");
-        let workloads = compiler.compile(&service);
+        let deployment = output.deployment.expect("should have deployment");
+        assert_eq!(deployment.metadata.name, "my-app");
+        assert_eq!(deployment.metadata.namespace, "prod");
+        assert_eq!(deployment.api_version, "apps/v1");
+        assert_eq!(deployment.kind, "Deployment");
+        assert_eq!(deployment.spec.replicas, 1);
+    }
 
-        let svc = workloads.service.expect("should have service");
+    #[test]
+    fn story_deployment_has_correct_labels() {
+        let service = make_service("my-app", "default");
+        let output = WorkloadCompiler::compile(&service);
+
+        let deployment = output.deployment.unwrap();
+        assert_eq!(
+            deployment.spec.selector.match_labels.get("app.kubernetes.io/name"),
+            Some(&"my-app".to_string())
+        );
+        assert_eq!(
+            deployment.spec.template.metadata.labels.get("app.kubernetes.io/managed-by"),
+            Some(&"lattice".to_string())
+        );
+    }
+
+    #[test]
+    fn story_deployment_uses_service_account() {
+        let service = make_service("my-app", "default");
+        let output = WorkloadCompiler::compile(&service);
+
+        let deployment = output.deployment.unwrap();
+        assert_eq!(deployment.spec.template.spec.service_account_name, "my-app");
+    }
+
+    // =========================================================================
+    // Story: Generate Service When Ports Defined
+    // =========================================================================
+
+    #[test]
+    fn story_generates_service_with_ports() {
+        let service = make_service("my-app", "default");
+        let output = WorkloadCompiler::compile(&service);
+
+        let svc = output.service.expect("should have service");
         assert_eq!(svc.metadata.name, "my-app");
-        assert_eq!(svc.spec.ports.len(), 1);
-        assert_eq!(svc.spec.ports[0].port, 80);
+        assert_eq!(svc.api_version, "v1");
+        assert_eq!(svc.kind, "Service");
+        assert!(!svc.spec.ports.is_empty());
     }
 
     #[test]
     fn story_no_service_without_ports() {
-        let mut spec = make_basic_spec();
-        spec.service = None;
-        let service = make_service("my-app", spec);
+        let mut service = make_service("my-app", "default");
+        service.spec.service = None;
 
-        let compiler = WorkloadCompiler::new("default");
-        let workloads = compiler.compile(&service);
-
-        assert!(workloads.service.is_none());
+        let output = WorkloadCompiler::compile(&service);
+        assert!(output.service.is_none());
     }
 
     // =========================================================================
-    // Story: HPA Generation
+    // Story: Generate HPA When Max Replicas Set
     // =========================================================================
 
     #[test]
-    fn story_generates_hpa_when_max_replicas_set() {
-        let mut spec = make_basic_spec();
-        spec.replicas = ReplicaSpec {
-            min: 2,
-            max: Some(10),
-        };
-        let service = make_service("my-app", spec);
+    fn story_generates_hpa_with_max_replicas() {
+        let mut service = make_service("my-app", "default");
+        service.spec.replicas = ReplicaSpec { min: 2, max: Some(10) };
 
-        let compiler = WorkloadCompiler::new("default");
-        let workloads = compiler.compile(&service);
+        let output = WorkloadCompiler::compile(&service);
 
-        let hpa = workloads.hpa.expect("should have HPA");
+        let hpa = output.hpa.expect("should have HPA");
+        assert_eq!(hpa.metadata.name, "my-app");
+        assert_eq!(hpa.api_version, "autoscaling/v2");
         assert_eq!(hpa.spec.min_replicas, 2);
         assert_eq!(hpa.spec.max_replicas, 10);
         assert_eq!(hpa.spec.scale_target_ref.name, "my-app");
+        assert_eq!(hpa.spec.scale_target_ref.kind, "Deployment");
     }
 
     #[test]
     fn story_no_hpa_without_max_replicas() {
-        let spec = make_basic_spec();
-        let service = make_service("my-app", spec);
-
-        let compiler = WorkloadCompiler::new("default");
-        let workloads = compiler.compile(&service);
-
-        assert!(workloads.hpa.is_none());
-    }
-
-    // =========================================================================
-    // Story: Container Environment Variables
-    // =========================================================================
-
-    #[test]
-    fn story_container_env_vars_mapped() {
-        let mut spec = make_basic_spec();
-        spec.containers.get_mut("main").unwrap().variables = {
-            let mut vars = BTreeMap::new();
-            vars.insert("LOG_LEVEL".to_string(), "debug".to_string());
-            vars.insert("PORT".to_string(), "8080".to_string());
-            vars
-        };
-        let service = make_service("my-app", spec);
-
-        let compiler = WorkloadCompiler::new("default");
-        let workloads = compiler.compile(&service);
-
-        let deployment = workloads.deployment.expect("should have deployment");
-        let env = &deployment.spec.template.spec.containers[0].env;
-        assert_eq!(env.len(), 2);
+        let service = make_service("my-app", "default");
+        let output = WorkloadCompiler::compile(&service);
+        assert!(output.hpa.is_none());
     }
 
     // =========================================================================
@@ -977,35 +939,68 @@ mod tests {
 
     #[test]
     fn story_rolling_strategy() {
-        let mut spec = make_basic_spec();
-        spec.deploy.strategy = DeployStrategy::Rolling;
-        let service = make_service("my-app", spec);
+        let service = make_service("my-app", "default");
+        let output = WorkloadCompiler::compile(&service);
 
-        let compiler = WorkloadCompiler::new("default");
-        let workloads = compiler.compile(&service);
-
-        let deployment = workloads.deployment.expect("should have deployment");
-        let strategy = deployment.spec.strategy.expect("should have strategy");
+        let strategy = output.deployment.unwrap().spec.strategy.unwrap();
         assert_eq!(strategy.type_, "RollingUpdate");
+        let rolling = strategy.rolling_update.unwrap();
+        assert_eq!(rolling.max_unavailable, Some("25%".to_string()));
+        assert_eq!(rolling.max_surge, Some("25%".to_string()));
+    }
+
+    #[test]
+    fn story_canary_strategy() {
+        let mut service = make_service("my-app", "default");
+        service.spec.deploy.strategy = DeployStrategy::Canary;
+
+        let output = WorkloadCompiler::compile(&service);
+
+        let strategy = output.deployment.unwrap().spec.strategy.unwrap();
+        assert_eq!(strategy.type_, "RollingUpdate");
+        let rolling = strategy.rolling_update.unwrap();
+        assert_eq!(rolling.max_unavailable, Some("0".to_string()));
+        assert_eq!(rolling.max_surge, Some("100%".to_string()));
     }
 
     // =========================================================================
-    // Story: YAML Serialization
+    // Story: Container Configuration
     // =========================================================================
 
     #[test]
-    fn story_workloads_serialize_to_yaml() {
-        let spec = make_basic_spec();
-        let service = make_service("my-app", spec);
+    fn story_container_environment_variables() {
+        let mut service = make_service("my-app", "default");
+        let container = service.spec.containers.get_mut("main").unwrap();
+        container.variables.insert("LOG_LEVEL".to_string(), "debug".to_string());
 
-        let compiler = WorkloadCompiler::new("default");
-        let workloads = compiler.compile(&service);
+        let output = WorkloadCompiler::compile(&service);
 
-        let deployment = workloads.deployment.expect("should have deployment");
-        let yaml = serde_yaml::to_string(&deployment).expect("should serialize");
+        let containers = &output.deployment.unwrap().spec.template.spec.containers;
+        let env = &containers.iter().find(|c| c.name == "main").unwrap().env;
+        assert!(env.iter().any(|e| e.name == "LOG_LEVEL" && e.value == "debug"));
+    }
 
-        assert!(yaml.contains("apiVersion: apps/v1"));
-        assert!(yaml.contains("kind: Deployment"));
-        assert!(yaml.contains("name: my-app"));
+    #[test]
+    fn story_container_ports_from_service() {
+        let service = make_service("my-app", "default");
+        let output = WorkloadCompiler::compile(&service);
+
+        let containers = &output.deployment.unwrap().spec.template.spec.containers;
+        let ports = &containers.iter().find(|c| c.name == "main").unwrap().ports;
+        assert!(ports.iter().any(|p| p.container_port == 80));
+    }
+
+    // =========================================================================
+    // Story: GeneratedWorkloads Utility Methods
+    // =========================================================================
+
+    #[test]
+    fn story_is_empty() {
+        let empty = GeneratedWorkloads::new();
+        assert!(empty.is_empty());
+
+        let service = make_service("my-app", "default");
+        let output = WorkloadCompiler::compile(&service);
+        assert!(!output.is_empty());
     }
 }

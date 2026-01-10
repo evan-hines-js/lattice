@@ -22,8 +22,9 @@
 //! - [`capi`] - CAPI installation and management
 //! - [`cell`] - On-demand cell servers (gRPC + bootstrap HTTP)
 //! - [`graph`] - Service dependency graph for network policy generation
-//! - [`policy`] - Network policy generation (Istio AuthorizationPolicy, CiliumNetworkPolicy)
-//! - [`workload`] - Workload generation (Deployment, Service, ServiceAccount, HPA)
+//! - [`compiler`] - Unified service compiler (generates workloads + policies)
+//! - [`policy`] - Network policy types (Istio AuthorizationPolicy, CiliumNetworkPolicy)
+//! - [`workload`] - Workload types (Deployment, Service, ServiceAccount, HPA)
 //! - [`install`] - Installer for bootstrapping management clusters
 //! - [`error`] - Error types for the operator
 
@@ -34,6 +35,7 @@ pub mod bootstrap;
 pub mod capi;
 pub mod cell;
 pub mod cilium;
+pub mod compiler;
 pub mod controller;
 pub mod crd;
 pub mod error;
