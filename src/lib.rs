@@ -40,6 +40,7 @@ pub mod compiler;
 pub mod controller;
 pub mod crd;
 pub mod error;
+pub mod fips;
 pub mod graph;
 pub mod infra;
 pub mod install;

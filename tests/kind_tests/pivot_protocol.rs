@@ -41,7 +41,8 @@ use lattice::agent::connection::{AgentRegistry, PostPivotManifests};
 use lattice::agent::server::AgentServer;
 use lattice::bootstrap::{BootstrapState, DefaultManifestGenerator};
 use lattice::crd::{
-    KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec, ProviderSpec, ProviderType,
+    BootstrapProvider, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec, ProviderSpec,
+    ProviderType,
 };
 use lattice::pki::CertificateAuthority;
 use lattice::proto::agent_message::Payload;
@@ -114,6 +115,7 @@ fn workload_cluster_spec(name: &str, cell_host: &str) -> LatticeCluster {
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
+                    bootstrap: BootstrapProvider::default(),
                 },
             },
             nodes: NodeSpec {
@@ -231,6 +233,7 @@ async fn run_pivot_e2e_test() -> Result<(), String> {
         cluster_manifest,
         None,
         "docker".to_string(),
+        lattice::crd::BootstrapProvider::default(),
     );
     println!("  Bootstrap token generated: {}...", &token.as_str()[..16]);
 

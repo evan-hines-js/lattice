@@ -18,6 +18,7 @@ pub use service::{
     ServicePhase, ServicePortsSpec,
 };
 pub use types::{
-    CellSpec, ClusterPhase, Condition, ConditionStatus, KubernetesSpec, NetworkPool,
-    NetworkingSpec, NodeSpec, ProviderSpec, ProviderType, ServiceRef, ServiceSpec, WorkloadSpec,
+    BootstrapProvider, CellSpec, ClusterPhase, Condition, ConditionStatus, KubernetesSpec,
+    NetworkPool, NetworkingSpec, NodeSpec, ProviderSpec, ProviderType, ServiceRef, ServiceSpec,
+    WorkloadSpec,
 };

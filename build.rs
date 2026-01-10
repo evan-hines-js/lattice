@@ -81,7 +81,9 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
     let cert_manager_chart = charts_dir.join(format!("cert-manager-v{}.tgz", versions.cert_manager));
 
     // Set env vars for runtime code
+    let scripts_dir = Path::new(&manifest_dir).join("scripts");
     println!("cargo:rustc-env=LATTICE_CHARTS_DIR={}", charts_dir.display());
+    println!("cargo:rustc-env=LATTICE_SCRIPTS_DIR={}", scripts_dir.display());
     println!("cargo:rustc-env=CILIUM_VERSION={}", versions.cilium);
     println!("cargo:rustc-env=ISTIO_VERSION={}", versions.istio);
     println!("cargo:rustc-env=CAPI_VERSION={}", versions.capi);

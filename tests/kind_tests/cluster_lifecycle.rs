@@ -14,7 +14,7 @@ use kube::Client;
 
 use lattice::controller::{reconcile, Context, KubeClientImpl};
 use lattice::crd::{
-    CellSpec, ClusterPhase, KubernetesSpec, LatticeCluster, LatticeClusterSpec,
+    BootstrapProvider, CellSpec, ClusterPhase, KubernetesSpec, LatticeCluster, LatticeClusterSpec,
     LatticeClusterStatus, NodeSpec, ProviderSpec, ProviderType, ServiceSpec,
 };
 
@@ -37,6 +37,7 @@ fn sample_cluster(name: &str) -> LatticeCluster {
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string()]),
+                    bootstrap: BootstrapProvider::default(),
                 },
             },
             nodes: NodeSpec {

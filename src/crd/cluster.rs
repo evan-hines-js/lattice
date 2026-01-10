@@ -152,7 +152,7 @@ impl LatticeClusterStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::types::{KubernetesSpec, ProviderType, ServiceSpec};
+    use crate::crd::types::{BootstrapProvider, KubernetesSpec, ProviderType, ServiceSpec};
 
     // =========================================================================
     // Test Fixtures
@@ -164,6 +164,7 @@ mod tests {
             kubernetes: KubernetesSpec {
                 version: "1.31.0".to_string(),
                 cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
+                bootstrap: BootstrapProvider::default(),
             },
         }
     }

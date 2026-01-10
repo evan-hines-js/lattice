@@ -87,6 +87,7 @@ pub trait ClusterBootstrap: Send + Sync {
     /// * `cluster_manifest` - LatticeCluster CRD JSON to apply on workload cluster
     /// * `networking` - Optional networking config for Cilium LB-IPAM
     /// * `provider` - Infrastructure provider (docker, aws, gcp, azure)
+    /// * `bootstrap` - Bootstrap mechanism (kubeadm or rke2)
     ///
     /// # Returns
     ///
@@ -99,6 +100,7 @@ pub trait ClusterBootstrap: Send + Sync {
         cluster_manifest: String,
         networking: Option<crate::crd::NetworkingSpec>,
         provider: String,
+        bootstrap: crate::crd::BootstrapProvider,
     ) -> String;
 
     /// Check if a cluster is already registered
@@ -219,6 +221,7 @@ impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap
         cluster_manifest: String,
         networking: Option<crate::crd::NetworkingSpec>,
         provider: String,
+        bootstrap: crate::crd::BootstrapProvider,
     ) -> String {
         let token = self.state.register_cluster(
             cluster_id,
@@ -227,6 +230,7 @@ impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap
             cluster_manifest,
             networking,
             provider,
+            bootstrap,
         );
         token.as_str().to_string()
     }
@@ -1627,6 +1631,7 @@ async fn generate_capi_manifests(
             cluster_manifest,
             cluster.spec.networking.clone(),
             cluster.spec.provider.type_.to_string(),
+            cluster.spec.provider.kubernetes.bootstrap.clone(),
         );
 
         BootstrapInfo::new(bootstrap_endpoint, token, ca_cert)
@@ -1674,6 +1679,7 @@ async fn generate_capi_manifests(
                         cluster_manifest,
                         cluster.spec.networking.clone(),
                         cluster.spec.provider.type_.to_string(),
+                        cluster.spec.provider.kubernetes.bootstrap.clone(),
                     );
 
                     info!(
@@ -1980,8 +1986,8 @@ impl PivotOperations for PivotOperationsImpl {
 mod tests {
     use super::*;
     use crate::crd::{
-        CellSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec, ProviderType,
-        ServiceSpec,
+        BootstrapProvider, CellSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
+        ProviderType, ServiceSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
@@ -1998,6 +2004,7 @@ mod tests {
                     kubernetes: KubernetesSpec {
                         version: "1.31.0".to_string(),
                         cert_sans: None,
+                        bootstrap: BootstrapProvider::default(),
                     },
                 },
                 nodes: NodeSpec {
@@ -2568,6 +2575,7 @@ mod tests {
                         kubernetes: KubernetesSpec {
                             version: "1.31.0".to_string(),
                             cert_sans: None,
+                            bootstrap: BootstrapProvider::default(),
                         },
                     },
                     nodes: NodeSpec {
@@ -2695,6 +2703,7 @@ mod tests {
                 _cluster_manifest: String,
                 _networking: Option<crate::crd::NetworkingSpec>,
                 _provider: String,
+                _bootstrap: crate::crd::BootstrapProvider,
             ) -> String {
                 self.registered_clusters
                     .lock()
@@ -3369,6 +3378,7 @@ mod tests {
                 _: String,
                 _: Option<crate::crd::NetworkingSpec>,
                 _: String,
+                _: crate::crd::BootstrapProvider,
             ) -> String {
                 "stub-token".to_string()
             }

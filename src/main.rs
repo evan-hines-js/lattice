@@ -81,6 +81,25 @@ struct InstallArgs {
     /// Timeout for the entire installation in seconds
     #[arg(long, default_value = "1200")]
     timeout_secs: u64,
+
+    /// Kubernetes bootstrap provider (overrides config file if set)
+    ///
+    /// RKE2 is FIPS-compliant out of the box and is the recommended default.
+    /// Kubeadm requires FIPS relaxation to communicate with its API server.
+    #[arg(long, default_value = "rke2", value_parser = parse_bootstrap_provider)]
+    bootstrap: lattice::crd::BootstrapProvider,
+}
+
+/// Parse bootstrap provider from CLI argument
+fn parse_bootstrap_provider(s: &str) -> Result<lattice::crd::BootstrapProvider, String> {
+    match s.to_lowercase().as_str() {
+        "rke2" => Ok(lattice::crd::BootstrapProvider::Rke2),
+        "kubeadm" => Ok(lattice::crd::BootstrapProvider::Kubeadm),
+        _ => Err(format!(
+            "invalid bootstrap provider '{}', must be 'rke2' or 'kubeadm'",
+            s
+        )),
+    }
 }
 
 #[tokio::main]
@@ -169,6 +188,7 @@ async fn run_install(args: InstallArgs) -> anyhow::Result<()> {
         "Kubernetes version: {}",
         cluster.spec.provider.kubernetes.version
     );
+    println!("Bootstrap: {}", args.bootstrap);
     println!();
 
     // Read registry credentials if provided
@@ -189,6 +209,7 @@ async fn run_install(args: InstallArgs) -> anyhow::Result<()> {
         keep_bootstrap_on_failure: args.keep_bootstrap_on_failure,
         timeout: Duration::from_secs(args.timeout_secs),
         registry_credentials,
+        bootstrap_override: Some(args.bootstrap),
     };
 
     let installer = Installer::new(config).map_err(|e| anyhow::anyhow!("{}", e))?;

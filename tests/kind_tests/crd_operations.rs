@@ -9,8 +9,8 @@ use kube::api::{Api, DeleteParams, PostParams};
 use kube::Client;
 
 use lattice::crd::{
-    CellSpec, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec, ProviderSpec,
-    ProviderType, ServiceSpec,
+    BootstrapProvider, CellSpec, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec,
+    ProviderSpec, ProviderType, ServiceSpec,
 };
 
 use super::helpers::ensure_test_cluster;
@@ -32,6 +32,7 @@ fn sample_cell_spec(name: &str) -> LatticeCluster {
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
+                    bootstrap: BootstrapProvider::default(),
                 },
             },
             nodes: NodeSpec {
@@ -69,6 +70,7 @@ fn sample_workload_spec(name: &str, cell_ref: &str) -> LatticeCluster {
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: None,
+                    bootstrap: BootstrapProvider::default(),
                 },
             },
             nodes: NodeSpec {
