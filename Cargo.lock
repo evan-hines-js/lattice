@@ -1853,6 +1853,8 @@ dependencies = [
  "fake",
  "futures",
  "insta",
+ "json-patch",
+ "jsonptr",
  "k8s-openapi",
  "kube",
  "mockall",

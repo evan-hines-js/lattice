@@ -1038,7 +1038,7 @@ pub struct Context {
     pub capi_installer: Arc<dyn CapiInstaller>,
     /// Cell capabilities (present only when running as a cell)
     pub cell: Option<CellCapabilities>,
-    /// Cell servers (started on-demand when Pending CRDs detected)
+    /// Cell servers (started at application startup)
     pub cell_servers: Option<Arc<CellServers<DefaultManifestGenerator>>>,
     /// Name of the cluster this controller is running on (from LATTICE_CLUSTER_NAME env var)
     /// When reconciling this cluster, we skip provisioning since we ARE this cluster
@@ -1263,6 +1263,12 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
         return Ok(Action::await_change());
     }
 
+    // Check if we're reconciling our own cluster (the one we're running on)
+    // This is critical: the ClusterController should only do full reconciliation
+    // (worker scaling, tainting, etc.) for its OWN cluster. For workload clusters
+    // provisioned by this cell, we only handle CAPI provisioning and pivot.
+    let is_self = is_self_cluster(&name, ctx.self_cluster_name.as_deref());
+
     // Get current status, defaulting to Pending if not set
     let current_phase = cluster
         .status
@@ -1270,60 +1276,32 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
         .map(|s| s.phase.clone())
         .unwrap_or(ClusterPhase::Pending);
 
-    debug!(?current_phase, "current cluster phase");
+    debug!(?current_phase, is_self, "current cluster phase");
 
     // State machine: transition based on current phase
     match current_phase {
         ClusterPhase::Pending => {
-            // Check if we're the management cluster (have cell spec) and need cell servers
+            // Check if we're the management cluster (have cell spec)
             // This must happen BEFORE the self-cluster check so the management cluster
             // gets its LoadBalancer service created even when reconciling itself.
-            let is_self = is_self_cluster(&name, ctx.self_cluster_name.as_deref());
 
-            // Start cell servers if we have them configured AND this cluster has a cell spec
-            // This makes this cluster a "cell" that can provision child clusters
-            if let Some(ref cell_servers) = ctx.cell_servers {
-                // Only start cell servers if the cluster being reconciled has a cell spec
-                // (i.e., it's the management cluster, not a workload cluster)
-                if cluster.spec.cell.is_some() && !cell_servers.is_running() {
-                    info!("starting cell servers for cluster provisioning");
-                    // Create the manifest generator
-                    let manifest_generator = crate::bootstrap::DefaultManifestGenerator::new()
-                        .map_err(|e| Error::Bootstrap(e.to_string()))?;
-
-                    // Add cell host to certificate SANs so workload clusters can verify the cert
-                    let extra_sans: Vec<String> = cluster
-                        .spec
-                        .cell
-                        .as_ref()
-                        .map(|c| vec![c.host.clone()])
-                        .unwrap_or_default();
-
-                    cell_servers
-                        .ensure_running_with(manifest_generator, &extra_sans)
-                        .await
-                        .map_err(|e| Error::Bootstrap(e.to_string()))?;
-                    info!("cell servers started");
-
-                    // Create LoadBalancer Service to expose cell servers
-                    // This is needed for workload clusters to reach bootstrap + gRPC endpoints
-                    if let Some(ref cell_spec) = cluster.spec.cell {
-                        info!(host = %cell_spec.host, "creating LoadBalancer Service for cell servers");
-                        ctx.kube
-                            .ensure_cell_service(
-                                &cell_spec.host,
-                                cell_spec.bootstrap_port,
-                                cell_spec.grpc_port,
-                            )
-                            .await?;
-                        info!("cell LoadBalancer Service created");
-                    }
-                }
+            // Create LoadBalancer Service if this cluster has a cell spec
+            // This exposes cell servers for workload clusters to reach bootstrap + gRPC endpoints
+            // Note: Cell servers are started at application startup, not on-demand
+            if let Some(ref cell_spec) = cluster.spec.cell {
+                info!(host = %cell_spec.host, "ensuring LoadBalancer Service for cell servers");
+                ctx.kube
+                    .ensure_cell_service(
+                        &cell_spec.host,
+                        cell_spec.bootstrap_port,
+                        cell_spec.grpc_port,
+                    )
+                    .await?;
+                info!("cell LoadBalancer Service created/updated");
             }
 
             // Check if we're reconciling our own cluster (the one we're running on)
             // If so, skip provisioning - we ARE this cluster, we don't need to create it
-            // Cell servers and LoadBalancer are already set up above.
             if is_self {
                 info!("reconciling self-cluster, transitioning directly to Ready");
                 update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
@@ -1496,7 +1474,15 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             }
         }
         ClusterPhase::Ready => {
-            // Cluster is ready - reconcile worker count and ensure control plane is tainted
+            // Only do full reconciliation (worker scaling, tainting) for our OWN cluster.
+            // For workload clusters we provisioned, they are now self-managing after pivot.
+            // The CAPI resources have been moved to the workload cluster.
+            if !is_self {
+                debug!("cluster is ready (post-pivot), monitoring only - workload cluster is self-managing");
+                return Ok(Action::requeue(Duration::from_secs(60)));
+            }
+
+            // Self-cluster: reconcile worker count and ensure control plane is tainted
             debug!("cluster is ready, reconciling worker count");
 
             // Each cluster has its own CAPI namespace

@@ -16,6 +16,8 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
+use kube::Client;
+
 use crate::agent::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::agent::mtls::ServerMtlsConfig;
 use crate::agent::server::AgentServer;
@@ -23,6 +25,7 @@ use crate::bootstrap::{
     bootstrap_router, BootstrapState, DefaultManifestGenerator, ManifestGenerator,
 };
 use crate::pki::CertificateAuthority;
+use crate::webhook::{webhook_router, WebhookState};
 
 /// Configuration for cell servers
 #[derive(Debug, Clone)]
@@ -172,10 +175,12 @@ impl<G: ManifestGenerator + Send + Sync + 'static> CellServers<G> {
     ///
     /// * `manifest_generator` - Generator for bootstrap manifests
     /// * `extra_sans` - Additional SANs to include in server certificate (e.g., cell host IP)
+    /// * `kube_client` - Kubernetes client for webhook to lookup LatticeServices
     pub async fn ensure_running_with(
         &self,
         manifest_generator: G,
         extra_sans: &[String],
+        kube_client: Client,
     ) -> Result<bool, CellServerError> {
         // Use compare_exchange to atomically check and set
         if self
@@ -214,8 +219,13 @@ impl<G: ManifestGenerator + Send + Sync + 'static> CellServers<G> {
 
         info!(sans = ?self.config.server_sans, "Generated server certificate");
 
-        // Start bootstrap HTTPS server
+        // Create routers
         let bootstrap_router = bootstrap_router(bootstrap_state);
+        let webhook_state = Arc::new(WebhookState::new(kube_client));
+        let webhook_router = webhook_router(webhook_state);
+
+        // Merge bootstrap and webhook routers into a single HTTPS server
+        let app_router = bootstrap_router.merge(webhook_router);
         let bootstrap_addr = self.config.bootstrap_addr;
 
         let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
@@ -225,13 +235,13 @@ impl<G: ManifestGenerator + Send + Sync + 'static> CellServers<G> {
         .await
         .map_err(|e| CellServerError::TlsConfig(e.to_string()))?;
 
-        info!(addr = %bootstrap_addr, "Starting bootstrap HTTPS server");
+        info!(addr = %bootstrap_addr, "Starting HTTPS server (bootstrap + webhook)");
         let bootstrap_handle = tokio::spawn(async move {
             if let Err(e) = axum_server::bind_rustls(bootstrap_addr, tls_config)
-                .serve(bootstrap_router.into_make_service())
+                .serve(app_router.into_make_service())
                 .await
             {
-                error!(error = %e, "Bootstrap server error");
+                error!(error = %e, "HTTPS server error");
             }
         });
 
@@ -320,6 +330,12 @@ mod tests {
         CellServers::with_generator(config, ca)
     }
 
+    /// Try to get a Kubernetes client for testing
+    /// Returns None if no kubeconfig is available (e.g., in CI without a cluster)
+    async fn try_test_client() -> Option<Client> {
+        Client::try_default().await.ok()
+    }
+
     #[test]
     fn test_default_config() {
         let config = CellConfig::default();
@@ -356,11 +372,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_running_starts_servers() {
+        let Some(client) = try_test_client().await else {
+            // Skip test if no kubeconfig available
+            return;
+        };
+
         let servers = test_cell_servers();
 
         // Start servers
         let result = servers
-            .ensure_running_with(MockManifestGenerator, &[])
+            .ensure_running_with(MockManifestGenerator, &[], client.clone())
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap()); // Should return true (started)
@@ -368,7 +389,7 @@ mod tests {
 
         // Second call should return false (already running)
         let result = servers
-            .ensure_running_with(MockManifestGenerator, &[])
+            .ensure_running_with(MockManifestGenerator, &[], client)
             .await;
         assert!(result.is_ok());
         assert!(!result.unwrap()); // Should return false (was already running)
@@ -386,21 +407,28 @@ mod tests {
         servers.shutdown().await;
         assert!(!servers.is_running());
 
-        // Start and shutdown
-        servers
-            .ensure_running_with(MockManifestGenerator, &[])
-            .await
-            .unwrap();
-        servers.shutdown().await;
-        assert!(!servers.is_running());
+        // Start and shutdown (only if we have a client)
+        if let Some(client) = try_test_client().await {
+            servers
+                .ensure_running_with(MockManifestGenerator, &[], client)
+                .await
+                .unwrap();
+            servers.shutdown().await;
+            assert!(!servers.is_running());
 
-        // Double shutdown should be safe
-        servers.shutdown().await;
-        assert!(!servers.is_running());
+            // Double shutdown should be safe
+            servers.shutdown().await;
+            assert!(!servers.is_running());
+        }
     }
 
     #[tokio::test]
     async fn test_bootstrap_state_available_after_start() {
+        let Some(client) = try_test_client().await else {
+            // Skip test if no kubeconfig available
+            return;
+        };
+
         let servers = test_cell_servers();
 
         // Before start, bootstrap state should be None
@@ -408,7 +436,7 @@ mod tests {
 
         // After start, bootstrap state should be available
         servers
-            .ensure_running_with(MockManifestGenerator, &[])
+            .ensure_running_with(MockManifestGenerator, &[], client)
             .await
             .unwrap();
         assert!(servers.bootstrap_state().await.is_some());
