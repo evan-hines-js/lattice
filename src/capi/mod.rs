@@ -65,15 +65,119 @@ impl Default for ClusterctlInstaller {
     }
 }
 
+impl ClusterctlInstaller {
+    /// Install cert-manager using local helm chart
+    /// Required before clusterctl can install CAPI providers
+    fn install_cert_manager() -> Result<(), Error> {
+        info!("Installing cert-manager from local helm chart");
+
+        let charts_dir = std::env::var("LATTICE_CHARTS_DIR")
+            .unwrap_or_else(|_| option_env!("LATTICE_CHARTS_DIR")
+                .unwrap_or("/charts")
+                .to_string());
+
+        let chart_path = format!("{}/cert-manager-v1.16.2.tgz", charts_dir);
+
+        // Render cert-manager manifests with helm template
+        let template_output = Command::new("helm")
+            .args([
+                "template", "cert-manager", &chart_path,
+                "--namespace", "cert-manager",
+                "--set", "crds.enabled=true",
+            ])
+            .output()
+            .map_err(|e| Error::capi_installation(format!("failed to run helm template: {}", e)))?;
+
+        if !template_output.status.success() {
+            let stderr = String::from_utf8_lossy(&template_output.stderr);
+            return Err(Error::capi_installation(format!("helm template cert-manager failed: {}", stderr)));
+        }
+
+        // Create namespace first
+        let _ = Command::new("kubectl")
+            .args(["create", "namespace", "cert-manager", "--dry-run=client", "-o", "yaml"])
+            .output()
+            .and_then(|ns_output| {
+                Command::new("kubectl")
+                    .args(["apply", "-f", "-"])
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| {
+                        use std::io::Write;
+                        if let Some(stdin) = child.stdin.as_mut() {
+                            let _ = stdin.write_all(&ns_output.stdout);
+                        }
+                        child.wait()
+                    })
+            });
+
+        // Apply cert-manager manifests
+        let apply_output = Command::new("kubectl")
+            .args(["apply", "-f", "-", "--server-side", "--force-conflicts"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(stdin) = child.stdin.as_mut() {
+                    let _ = stdin.write_all(&template_output.stdout);
+                }
+                child.wait_with_output()
+            })
+            .map_err(|e| Error::capi_installation(format!("failed to apply cert-manager: {}", e)))?;
+
+        if !apply_output.status.success() {
+            let stderr = String::from_utf8_lossy(&apply_output.stderr);
+            return Err(Error::capi_installation(format!("kubectl apply cert-manager failed: {}", stderr)));
+        }
+
+        // Wait for cert-manager to be ready
+        info!("Waiting for cert-manager to be ready");
+        let wait_output = Command::new("kubectl")
+            .args([
+                "wait", "--for=condition=Available",
+                "deployment/cert-manager", "deployment/cert-manager-webhook", "deployment/cert-manager-cainjector",
+                "-n", "cert-manager",
+                "--timeout=120s",
+            ])
+            .output()
+            .map_err(|e| Error::capi_installation(format!("failed to wait for cert-manager: {}", e)))?;
+
+        if !wait_output.status.success() {
+            let stderr = String::from_utf8_lossy(&wait_output.stderr);
+            return Err(Error::capi_installation(format!("cert-manager not ready: {}", stderr)));
+        }
+
+        info!("cert-manager installed successfully");
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl CapiInstaller for ClusterctlInstaller {
     async fn install(&self, provider: &str) -> Result<(), Error> {
         info!(provider, "Installing CAPI with infrastructure provider");
 
-        // Use timeout to fail fast - clusterctl can hang waiting for cert-manager
-        // Better to fail and retry than block for 10+ minutes
+        // Get local provider config path (always use local - we're air-gapped by design)
+        let config_path = std::env::var("CLUSTERCTL_CONFIG")
+            .unwrap_or_else(|_| option_env!("CLUSTERCTL_CONFIG")
+                .unwrap_or("/providers/clusterctl.yaml")
+                .to_string());
+
+        info!(config = %config_path, "Using clusterctl config file");
+
+        // First, install cert-manager using our local helm chart
+        // clusterctl expects cert-manager to be ready before installing providers
+        Self::install_cert_manager()?;
+
+        // Set environment variables for air-gapped operation
+        // GOPROXY=off prevents Go proxy lookups
+        // CLUSTERCTL_DISABLE_VERSIONCHECK=true skips version check requiring internet
         let output = Command::new("timeout")
-            .args(["60", "clusterctl", "init", "--infrastructure", provider])
+            .args(["120", "clusterctl", "init", "--infrastructure", provider, "--config", &config_path])
+            .env("GOPROXY", "off")
+            .env("CLUSTERCTL_DISABLE_VERSIONCHECK", "true")
             .output()
             .map_err(|e| Error::capi_installation(format!("failed to run clusterctl: {}", e)))?;
 

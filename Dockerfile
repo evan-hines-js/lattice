@@ -60,13 +60,41 @@ COPY --from=builder /app/target/release/lattice /usr/local/bin/lattice
 # Copy helm charts from builder (downloaded by build.rs)
 COPY --from=builder /app/test-charts /charts
 
+# Copy CAPI providers from builder (downloaded by build.rs)
+COPY --from=builder /app/test-providers /providers
+
+# Create clusterctl config with local provider repositories
+# Using file:// URLs prevents clusterctl from trying to reach GitHub
+RUN printf '%s\n' \
+  '# Clusterctl config for offline/air-gapped CAPI installation' \
+  'providers:' \
+  '  - name: "cluster-api"' \
+  '    url: "file:///providers/cluster-api/v1.9.4/core-components.yaml"' \
+  '    type: "CoreProvider"' \
+  '  - name: "kubeadm"' \
+  '    url: "file:///providers/bootstrap-kubeadm/v1.9.4/bootstrap-components.yaml"' \
+  '    type: "BootstrapProvider"' \
+  '  - name: "kubeadm"' \
+  '    url: "file:///providers/control-plane-kubeadm/v1.9.4/control-plane-components.yaml"' \
+  '    type: "ControlPlaneProvider"' \
+  '  - name: "docker"' \
+  '    url: "file:///providers/infrastructure-docker/v1.9.4/infrastructure-components-development.yaml"' \
+  '    type: "InfrastructureProvider"' \
+  > /providers/clusterctl.yaml
+
+# Set environment variables for air-gapped clusterctl operation
+ENV GOPROXY=off
+ENV CLUSTERCTL_DISABLE_VERSIONCHECK=true
+
 # Create non-root user
 RUN useradd -r -u 1000 -m lattice && \
-    chown -R lattice:lattice /charts
+    chown -R lattice:lattice /charts /providers
 
 USER lattice
 
 # Set chart location for runtime
 ENV LATTICE_CHARTS_DIR=/charts
+# Set clusterctl config for offline CAPI installation
+ENV CLUSTERCTL_CONFIG=/providers/clusterctl.yaml
 
 ENTRYPOINT ["/usr/local/bin/lattice"]
