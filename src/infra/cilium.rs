@@ -171,15 +171,36 @@ pub fn generate_operator_network_policy(parent_host: Option<&str>, parent_port: 
 
     // Add parent cell if specified
     if let Some(host) = parent_host {
-        egress_rules.push(format!(
-            r#"    - toFQDNs:
+        // Check if host is an IP address or hostname
+        let is_ip = host.parse::<std::net::IpAddr>().is_ok();
+
+        if is_ip {
+            // Use toCIDR for IP addresses
+            egress_rules.push(format!(
+                r#"    - toCIDR:
+        - {}/32
+      toPorts:
+        - ports:
+            - port: "{}"
+              protocol: TCP
+            - port: "{}"
+              protocol: TCP"#,
+                host, DEFAULT_BOOTSTRAP_PORT, parent_port
+            ));
+        } else {
+            // Use toFQDNs for hostnames
+            egress_rules.push(format!(
+                r#"    - toFQDNs:
         - matchName: {}
       toPorts:
         - ports:
             - port: "{}"
+              protocol: TCP
+            - port: "{}"
               protocol: TCP"#,
-            host, parent_port
-        ));
+                host, DEFAULT_BOOTSTRAP_PORT, parent_port
+            ));
+        }
     }
 
     format!(
@@ -248,8 +269,9 @@ mod tests {
         // Should have API server egress
         assert!(policy.contains("kube-apiserver"));
 
-        // Should NOT have parent FQDN rule
+        // Should NOT have parent rules
         assert!(!policy.contains("toFQDNs"));
+        assert!(!policy.contains("toCIDR"));
 
         // Should have ingress for cell ports
         assert!(policy.contains("port: \"8443\""));
@@ -257,13 +279,37 @@ mod tests {
     }
 
     #[test]
-    fn test_operator_network_policy_with_parent() {
+    fn test_operator_network_policy_with_parent_hostname() {
         let policy = generate_operator_network_policy(Some("cell.example.com"), 50051);
 
-        // Should have parent FQDN rule
+        // Should have parent FQDN rule for hostname
         assert!(policy.contains("toFQDNs"));
         assert!(policy.contains("matchName: cell.example.com"));
+        // Should allow both bootstrap and gRPC ports
+        assert!(policy.contains("port: \"8443\""));
         assert!(policy.contains("port: \"50051\""));
+
+        // Should NOT use toCIDR for hostname
+        assert!(!policy.contains("toCIDR"));
+
+        // Should still have DNS and API server
+        assert!(policy.contains("kube-dns"));
+        assert!(policy.contains("kube-apiserver"));
+    }
+
+    #[test]
+    fn test_operator_network_policy_with_parent_ip() {
+        let policy = generate_operator_network_policy(Some("172.18.255.10"), 50051);
+
+        // Should have parent CIDR rule for IP address
+        assert!(policy.contains("toCIDR"));
+        assert!(policy.contains("172.18.255.10/32"));
+        // Should allow both bootstrap and gRPC ports
+        assert!(policy.contains("port: \"8443\""));
+        assert!(policy.contains("port: \"50051\""));
+
+        // Should NOT use toFQDNs for IP
+        assert!(!policy.contains("toFQDNs"));
 
         // Should still have DNS and API server
         assert!(policy.contains("kube-dns"));
@@ -274,8 +320,9 @@ mod tests {
     fn test_operator_network_policy_custom_port() {
         let policy = generate_operator_network_policy(Some("parent.local"), 4001);
 
-        // Should use custom port
+        // Should use custom gRPC port and default bootstrap port
         assert!(policy.contains("port: \"4001\""));
+        assert!(policy.contains("port: \"8443\""));
         assert!(policy.contains("matchName: parent.local"));
     }
 }

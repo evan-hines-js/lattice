@@ -66,25 +66,37 @@ impl ParsedEndpoint {
             return Self::parse_host_port(stripped, "tcp");
         }
         if let Some(stripped) = url.strip_prefix("https://") {
-            return Self::parse_host_port(stripped, "https").or_else(|| {
-                // Default port 443 for https
-                Some(Self {
-                    protocol: "https".to_string(),
-                    host: stripped.split('/').next()?.to_string(),
-                    port: 443,
-                    url: url.to_string(),
-                })
+            // Check if there's an explicit port - if so, use parse_host_port only
+            if Self::has_explicit_port(stripped) {
+                return Self::parse_host_port(stripped, "https");
+            }
+            // Default port 443 for https when no port specified
+            let host = Self::extract_host(stripped)?;
+            if host.is_empty() {
+                return None;
+            }
+            return Some(Self {
+                protocol: "https".to_string(),
+                host,
+                port: 443,
+                url: url.to_string(),
             });
         }
         if let Some(stripped) = url.strip_prefix("http://") {
-            return Self::parse_host_port(stripped, "http").or_else(|| {
-                // Default port 80 for http
-                Some(Self {
-                    protocol: "http".to_string(),
-                    host: stripped.split('/').next()?.to_string(),
-                    port: 80,
-                    url: url.to_string(),
-                })
+            // Check if there's an explicit port - if so, use parse_host_port only
+            if Self::has_explicit_port(stripped) {
+                return Self::parse_host_port(stripped, "http");
+            }
+            // Default port 80 for http when no port specified
+            let host = Self::extract_host(stripped)?;
+            if host.is_empty() {
+                return None;
+            }
+            return Some(Self {
+                protocol: "http".to_string(),
+                host,
+                port: 80,
+                url: url.to_string(),
             });
         }
         if let Some(stripped) = url.strip_prefix("grpc://") {
@@ -95,13 +107,69 @@ impl ParsedEndpoint {
         Self::parse_host_port(url, "tcp")
     }
 
+    /// Check if the URL portion has an explicit port (excluding IPv6 colons)
+    fn has_explicit_port(s: &str) -> bool {
+        // Strip auth
+        let without_auth = s.split('@').last().unwrap_or(s);
+        // Get host:port part (before any path)
+        let host_port = without_auth.split('/').next().unwrap_or(without_auth);
+
+        // For IPv6 in brackets, check for port after the closing bracket
+        if host_port.starts_with('[') {
+            if let Some(bracket_pos) = host_port.find(']') {
+                return host_port[bracket_pos..].contains(':');
+            }
+            return false;
+        }
+
+        // For non-IPv6, count colons - more than 0 means port present
+        host_port.contains(':')
+    }
+
+    /// Extract host from URL, handling IPv6 brackets and stripping auth/path
+    fn extract_host(s: &str) -> Option<String> {
+        // Strip any userinfo (user:pass@)
+        let without_auth = s.split('@').last()?;
+
+        // Remove path
+        let host_port = without_auth.split('/').next()?;
+
+        // Handle IPv6 bracketed notation: [::1]:port or [::1]
+        if host_port.starts_with('[') {
+            if let Some(end_bracket) = host_port.find(']') {
+                return Some(host_port[1..end_bracket].to_string());
+            }
+            return None; // Malformed IPv6
+        }
+
+        // For non-IPv6, take everything before optional port
+        Some(host_port.split(':').next()?.to_string())
+    }
+
     fn parse_host_port(s: &str, protocol: &str) -> Option<Self> {
+        // Strip any userinfo (user:pass@)
+        let without_auth = s.split('@').last()?;
+
         // Remove any path component
-        let host_port = s.split('/').next()?;
+        let host_port = without_auth.split('/').next()?;
+
+        // Handle IPv6 bracketed notation: [::1]:port
+        if host_port.starts_with('[') {
+            return Self::parse_ipv6_host_port(host_port, protocol);
+        }
+
         let parts: Vec<&str> = host_port.rsplitn(2, ':').collect();
         if parts.len() == 2 {
-            let port = parts[0].parse().ok()?;
+            let port: u16 = parts[0].parse().ok()?;
+            // Reject port 0
+            if port == 0 {
+                return None;
+            }
             let host = parts[1].to_string();
+            // Reject empty host
+            if host.is_empty() {
+                return None;
+            }
             Some(Self {
                 protocol: protocol.to_string(),
                 host,
@@ -110,6 +178,36 @@ impl ParsedEndpoint {
             })
         } else {
             None
+        }
+    }
+
+    /// Parse IPv6 host:port format like [::1]:8080
+    fn parse_ipv6_host_port(s: &str, protocol: &str) -> Option<Self> {
+        // Format: [ipv6_addr]:port
+        let end_bracket = s.find(']')?;
+        let host = s[1..end_bracket].to_string();
+
+        // Reject empty IPv6 address
+        if host.is_empty() {
+            return None;
+        }
+
+        // Check for port after bracket
+        let after_bracket = &s[end_bracket + 1..];
+        if let Some(port_str) = after_bracket.strip_prefix(':') {
+            let port: u16 = port_str.parse().ok()?;
+            // Reject port 0
+            if port == 0 {
+                return None;
+            }
+            Some(Self {
+                protocol: protocol.to_string(),
+                host: host.clone(),
+                port,
+                url: format!("{}://[{}]:{}", protocol, host, port),
+            })
+        } else {
+            None // No port specified for IPv6
         }
     }
 }
@@ -298,6 +396,124 @@ mod tests {
         assert_eq!(endpoint.protocol, "tcp");
         assert_eq!(endpoint.host, "redis.default.svc");
         assert_eq!(endpoint.port, 6379);
+    }
+
+    // =========================================================================
+    // IPv6 Address Parsing Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_ipv6_address() {
+        let endpoint = ParsedEndpoint::parse("tcp://[::1]:8080").unwrap();
+        assert_eq!(endpoint.protocol, "tcp");
+        assert_eq!(endpoint.host, "::1");
+        assert_eq!(endpoint.port, 8080);
+    }
+
+    #[test]
+    fn test_parse_ipv6_full_address() {
+        let endpoint =
+            ParsedEndpoint::parse("tcp://[2001:db8:85a3::8a2e:370:7334]:5432").unwrap();
+        assert_eq!(endpoint.protocol, "tcp");
+        assert_eq!(endpoint.host, "2001:db8:85a3::8a2e:370:7334");
+        assert_eq!(endpoint.port, 5432);
+    }
+
+    #[test]
+    fn test_parse_ipv6_https() {
+        let endpoint = ParsedEndpoint::parse("https://[::1]:8443").unwrap();
+        assert_eq!(endpoint.protocol, "https");
+        assert_eq!(endpoint.host, "::1");
+        assert_eq!(endpoint.port, 8443);
+    }
+
+    #[test]
+    fn test_parse_ipv6_without_port_fails() {
+        // IPv6 addresses must have explicit port
+        assert!(ParsedEndpoint::parse("tcp://[::1]").is_none());
+    }
+
+    #[test]
+    fn test_parse_ipv6_malformed_fails() {
+        assert!(ParsedEndpoint::parse("tcp://[::1:8080").is_none()); // Missing ]
+        assert!(ParsedEndpoint::parse("tcp://[]:8080").is_none()); // Empty address
+    }
+
+    // =========================================================================
+    // URL with Auth Stripping Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_url_with_auth() {
+        let endpoint = ParsedEndpoint::parse("https://user:pass@api.example.com:8443").unwrap();
+        assert_eq!(endpoint.protocol, "https");
+        assert_eq!(endpoint.host, "api.example.com");
+        assert_eq!(endpoint.port, 8443);
+    }
+
+    #[test]
+    fn test_parse_url_with_user_only() {
+        let endpoint = ParsedEndpoint::parse("tcp://admin@db.example.com:5432").unwrap();
+        assert_eq!(endpoint.protocol, "tcp");
+        assert_eq!(endpoint.host, "db.example.com");
+        assert_eq!(endpoint.port, 5432);
+    }
+
+    // =========================================================================
+    // Port Validation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_port_zero_fails() {
+        assert!(ParsedEndpoint::parse("tcp://example.com:0").is_none());
+        assert!(ParsedEndpoint::parse("https://example.com:0").is_none());
+        assert!(ParsedEndpoint::parse("tcp://[::1]:0").is_none());
+    }
+
+    #[test]
+    fn test_port_max_valid() {
+        let endpoint = ParsedEndpoint::parse("tcp://example.com:65535").unwrap();
+        assert_eq!(endpoint.port, 65535);
+    }
+
+    #[test]
+    fn test_port_overflow_fails() {
+        // Port 65536 overflows u16
+        assert!(ParsedEndpoint::parse("tcp://example.com:65536").is_none());
+    }
+
+    // =========================================================================
+    // Empty/Invalid Host Tests
+    // =========================================================================
+
+    #[test]
+    fn test_empty_host_fails() {
+        assert!(ParsedEndpoint::parse("tcp://:8080").is_none());
+        assert!(ParsedEndpoint::parse(":8080").is_none());
+    }
+
+    #[test]
+    fn test_protocol_only_fails() {
+        assert!(ParsedEndpoint::parse("https://").is_none());
+        assert!(ParsedEndpoint::parse("tcp://").is_none());
+    }
+
+    // =========================================================================
+    // URL with Path Tests
+    // =========================================================================
+
+    #[test]
+    fn test_url_with_path_extracts_host() {
+        let endpoint = ParsedEndpoint::parse("https://api.stripe.com/v1/charges").unwrap();
+        assert_eq!(endpoint.host, "api.stripe.com");
+        assert_eq!(endpoint.port, 443);
+    }
+
+    #[test]
+    fn test_url_with_port_and_path() {
+        let endpoint = ParsedEndpoint::parse("https://api.example.com:8443/api/v1").unwrap();
+        assert_eq!(endpoint.host, "api.example.com");
+        assert_eq!(endpoint.port, 8443);
     }
 
     // =========================================================================
