@@ -155,6 +155,8 @@ pub fn generate_machine_deployment(
 ) -> CAPIManifest {
     let deployment_name = format!("{}-md-0", cluster_name);
 
+    // In CAPI v1beta2, refs use apiGroup instead of apiVersion
+    let infra_api_group = infrastructure_api_version.split('/').next().unwrap_or("infrastructure.cluster.x-k8s.io");
     let spec = serde_json::json!({
         "clusterName": cluster_name,
         "replicas": 0,  // ALWAYS 0 - scaling happens after pivot
@@ -167,17 +169,15 @@ pub fn generate_machine_deployment(
                 "version": format!("v{}", k8s_version.trim_start_matches('v')),
                 "bootstrap": {
                     "configRef": {
-                        "apiVersion": CAPI_BOOTSTRAP_API_VERSION,
+                        "apiGroup": "bootstrap.cluster.x-k8s.io",
                         "kind": "KubeadmConfigTemplate",
-                        "name": format!("{}-md-0", cluster_name),
-                        "namespace": namespace
+                        "name": format!("{}-md-0", cluster_name)
                     }
                 },
                 "infrastructureRef": {
-                    "apiVersion": infrastructure_api_version,
+                    "apiGroup": infra_api_group,
                     "kind": infrastructure_kind,
-                    "name": format!("{}-md-0", cluster_name),
-                    "namespace": namespace
+                    "name": format!("{}-md-0", cluster_name)
                 }
             }
         }
@@ -203,15 +203,16 @@ pub fn generate_kubeadm_config_template(
 ) -> CAPIManifest {
     let template_name = format!("{}-md-0", cluster_name);
 
+    // In CAPI v1beta2, kubeletExtraArgs is a list of {name, value} objects
     let spec = serde_json::json!({
         "template": {
             "spec": {
                 "joinConfiguration": {
                     "nodeRegistration": {
                         "criSocket": "/var/run/containerd/containerd.sock",
-                        "kubeletExtraArgs": {
-                            "eviction-hard": "nodefs.available<0%,imagefs.available<0%"
-                        }
+                        "kubeletExtraArgs": [
+                            {"name": "eviction-hard", "value": "nodefs.available<0%,imagefs.available<0%"}
+                        ]
                     }
                 }
             }
@@ -240,6 +241,8 @@ pub fn generate_cluster(
     infrastructure_kind: &str,
     labels: std::collections::BTreeMap<String, String>,
 ) -> CAPIManifest {
+    // Note: In CAPI v1beta2, controlPlaneRef and infrastructureRef use apiGroup (not apiVersion)
+    // and don't include namespace (resources must be in same namespace)
     let spec = serde_json::json!({
         "clusterNetwork": {
             "pods": {
@@ -250,16 +253,14 @@ pub fn generate_cluster(
             }
         },
         "controlPlaneRef": {
-            "apiVersion": CAPI_CONTROLPLANE_API_VERSION,
+            "apiGroup": "controlplane.cluster.x-k8s.io",
             "kind": "KubeadmControlPlane",
-            "name": format!("{}-control-plane", cluster_name),
-            "namespace": namespace
+            "name": format!("{}-control-plane", cluster_name)
         },
         "infrastructureRef": {
-            "apiVersion": infrastructure_api_version,
+            "apiGroup": infrastructure_api_version.split('/').next().unwrap_or("infrastructure.cluster.x-k8s.io"),
             "kind": infrastructure_kind,
-            "name": cluster_name,
-            "namespace": namespace
+            "name": cluster_name
         }
     });
 
@@ -286,36 +287,37 @@ pub fn generate_control_plane(
 ) -> CAPIManifest {
     let cp_name = format!("{}-control-plane", cluster_name);
 
+    // In CAPI v1beta2, extraArgs changed from map to list of {name, value} objects
     let mut kubeadm_config_spec = serde_json::json!({
         "clusterConfiguration": {
             "apiServer": {
                 "certSANs": cert_sans
             },
             "controllerManager": {
-                "extraArgs": {
-                    "bind-address": "0.0.0.0"
-                }
+                "extraArgs": [
+                    {"name": "bind-address", "value": "0.0.0.0"}
+                ]
             },
             "scheduler": {
-                "extraArgs": {
-                    "bind-address": "0.0.0.0"
-                }
+                "extraArgs": [
+                    {"name": "bind-address", "value": "0.0.0.0"}
+                ]
             }
         },
         "initConfiguration": {
             "nodeRegistration": {
                 "criSocket": "/var/run/containerd/containerd.sock",
-                "kubeletExtraArgs": {
-                    "eviction-hard": "nodefs.available<0%,imagefs.available<0%"
-                }
+                "kubeletExtraArgs": [
+                    {"name": "eviction-hard", "value": "nodefs.available<0%,imagefs.available<0%"}
+                ]
             }
         },
         "joinConfiguration": {
             "nodeRegistration": {
                 "criSocket": "/var/run/containerd/containerd.sock",
-                "kubeletExtraArgs": {
-                    "eviction-hard": "nodefs.available<0%,imagefs.available<0%"
-                }
+                "kubeletExtraArgs": [
+                    {"name": "eviction-hard", "value": "nodefs.available<0%,imagefs.available<0%"}
+                ]
             }
         }
     });
@@ -324,15 +326,18 @@ pub fn generate_control_plane(
         kubeadm_config_spec["postKubeadmCommands"] = serde_json::json!(post_kubeadm_commands);
     }
 
+    // In CAPI v1beta2, infrastructureRef is nested under machineTemplate.spec
+    let infra_api_group = infrastructure_api_version.split('/').next().unwrap_or("infrastructure.cluster.x-k8s.io");
     let spec = serde_json::json!({
         "replicas": replicas,
         "version": format!("v{}", k8s_version.trim_start_matches('v')),
         "machineTemplate": {
-            "infrastructureRef": {
-                "apiVersion": infrastructure_api_version,
-                "kind": infrastructure_machine_template_kind,
-                "name": format!("{}-control-plane", cluster_name),
-                "namespace": namespace
+            "spec": {
+                "infrastructureRef": {
+                    "apiGroup": infra_api_group,
+                    "kind": infrastructure_machine_template_kind,
+                    "name": format!("{}-control-plane", cluster_name)
+                }
             }
         },
         "kubeadmConfigSpec": kubeadm_config_spec

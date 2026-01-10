@@ -22,6 +22,8 @@
 //! - [`capi`] - CAPI installation and management
 //! - [`cell`] - On-demand cell servers (gRPC + bootstrap HTTP)
 //! - [`graph`] - Service dependency graph for network policy generation
+//! - [`policy`] - Network policy generation (Istio AuthorizationPolicy, CiliumNetworkPolicy)
+//! - [`workload`] - Workload generation (Deployment, Service, ServiceAccount, HPA)
 //! - [`install`] - Installer for bootstrapping management clusters
 //! - [`error`] - Error types for the operator
 
@@ -39,8 +41,10 @@ pub mod graph;
 pub mod install;
 pub mod pivot;
 pub mod pki;
+pub mod policy;
 pub mod proto;
 pub mod provider;
+pub mod workload;
 
 pub use error::Error;
 
