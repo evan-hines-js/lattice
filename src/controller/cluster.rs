@@ -26,7 +26,7 @@ use crate::crd::{
     ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus, ProviderType,
 };
 use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
-use crate::provider::{CAPIManifest, DockerProvider, Provider};
+use crate::provider::{create_provider, CAPIManifest};
 use crate::Error;
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
@@ -1654,31 +1654,8 @@ async fn generate_capi_manifests(
         BootstrapInfo::default()
     };
 
-    match cluster.spec.provider.type_ {
-        ProviderType::Docker => {
-            // Create provider with cluster-specific namespace
-            let provider = DockerProvider::with_namespace(&capi_namespace);
-            provider.generate_capi_manifests(cluster, &bootstrap).await
-        }
-        ProviderType::Aws => {
-            // TODO: Implement AWS provider
-            Err(Error::provider(
-                "AWS provider not yet implemented".to_string(),
-            ))
-        }
-        ProviderType::Gcp => {
-            // TODO: Implement GCP provider
-            Err(Error::provider(
-                "GCP provider not yet implemented".to_string(),
-            ))
-        }
-        ProviderType::Azure => {
-            // TODO: Implement Azure provider
-            Err(Error::provider(
-                "Azure provider not yet implemented".to_string(),
-            ))
-        }
-    }
+    let provider = create_provider(cluster.spec.provider.type_.clone(), &capi_namespace)?;
+    provider.generate_capi_manifests(cluster, &bootstrap).await
 }
 
 /// Error policy for the controller
