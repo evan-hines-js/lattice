@@ -23,7 +23,7 @@ use crate::bootstrap::DefaultManifestGenerator;
 use crate::capi::{ensure_capi_installed_with, CapiInstaller};
 use crate::cell::CellServers;
 use crate::crd::{
-    ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus, ProviderType,
+    ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus,
 };
 use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
 use crate::provider::{create_provider, CAPIManifest};
