@@ -25,6 +25,7 @@
 //! - [`compiler`] - Unified service compiler (generates workloads + policies)
 //! - [`policy`] - Network policy types (Istio AuthorizationPolicy, CiliumNetworkPolicy)
 //! - [`workload`] - Workload types (Deployment, Service, ServiceAccount, HPA)
+//! - [`webhook`] - Mutating admission webhook for Deployment injection
 //! - [`install`] - Installer for bootstrapping management clusters
 //! - [`error`] - Error types for the operator
 
@@ -47,6 +48,7 @@ pub mod pki;
 pub mod policy;
 pub mod proto;
 pub mod provider;
+pub mod webhook;
 pub mod workload;
 
 pub use error::Error;

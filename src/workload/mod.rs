@@ -510,6 +510,42 @@ impl GeneratedWorkloads {
 }
 
 // =============================================================================
+// Compiled Pod Spec (for webhook injection)
+// =============================================================================
+
+/// Compiled pod specification for webhook injection
+///
+/// This contains just the parts of a pod spec that the webhook needs
+/// to inject into a Deployment. Used by the mutating admission webhook.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompiledPodSpec {
+    /// Containers to inject
+    pub containers: Vec<Container>,
+    /// Volumes to inject
+    pub volumes: Vec<Volume>,
+    /// Deployment strategy
+    pub strategy: Option<DeploymentStrategy>,
+}
+
+impl CompiledPodSpec {
+    /// Create a new empty compiled pod spec
+    pub fn new() -> Self {
+        Self {
+            containers: vec![],
+            volumes: vec![],
+            strategy: None,
+        }
+    }
+}
+
+impl Default for CompiledPodSpec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
 // Workload Compiler
 // =============================================================================
 
@@ -522,6 +558,9 @@ use crate::crd::{DeployStrategy, LatticeService, LatticeServiceSpec};
 /// - Deployment: Container orchestration (always)
 /// - Service: Network exposure (if ports defined)
 /// - HPA: Auto-scaling (if max replicas set)
+///
+/// For webhook-based injection, use [`compile_pod_spec`] to get just the
+/// container and volume specifications.
 pub struct WorkloadCompiler;
 
 impl WorkloadCompiler {
@@ -551,25 +590,24 @@ impl WorkloadCompiler {
         output
     }
 
-    fn compile_service_account(name: &str, namespace: &str) -> ServiceAccount {
-        ServiceAccount {
-            api_version: "v1".to_string(),
-            kind: "ServiceAccount".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
+    /// Compile just the pod spec for webhook injection
+    ///
+    /// This returns the containers, volumes, and strategy that the webhook
+    /// will inject into an existing Deployment skeleton.
+    pub fn compile_pod_spec(service: &LatticeService) -> CompiledPodSpec {
+        let containers = Self::compile_containers(&service.spec);
+        let strategy = Self::compile_strategy(&service.spec);
+
+        CompiledPodSpec {
+            containers,
+            volumes: vec![], // TODO: Add volume support from file mounts
+            strategy,
         }
     }
 
-    fn compile_deployment(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> Deployment {
-        let mut labels = BTreeMap::new();
-        labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
-        labels.insert(
-            "app.kubernetes.io/managed-by".to_string(),
-            "lattice".to_string(),
-        );
-
-        // Convert containers
-        let containers: Vec<Container> = spec
-            .containers
+    /// Compile containers from a LatticeServiceSpec
+    fn compile_containers(spec: &LatticeServiceSpec) -> Vec<Container> {
+        spec.containers
             .iter()
             .map(|(container_name, container_spec)| {
                 let env: Vec<EnvVar> = container_spec
@@ -652,10 +690,12 @@ impl WorkloadCompiler {
                     volume_mounts: vec![],
                 }
             })
-            .collect();
+            .collect()
+    }
 
-        // Determine deployment strategy
-        let strategy = match spec.deploy.strategy {
+    /// Compile deployment strategy
+    fn compile_strategy(spec: &LatticeServiceSpec) -> Option<DeploymentStrategy> {
+        match spec.deploy.strategy {
             DeployStrategy::Rolling => Some(DeploymentStrategy {
                 type_: "RollingUpdate".to_string(),
                 rolling_update: Some(RollingUpdateConfig {
@@ -670,7 +710,28 @@ impl WorkloadCompiler {
                     max_surge: Some("100%".to_string()),
                 }),
             }),
-        };
+        }
+    }
+
+    fn compile_service_account(name: &str, namespace: &str) -> ServiceAccount {
+        ServiceAccount {
+            api_version: "v1".to_string(),
+            kind: "ServiceAccount".to_string(),
+            metadata: ObjectMeta::new(name, namespace),
+        }
+    }
+
+    fn compile_deployment(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> Deployment {
+        let mut labels = BTreeMap::new();
+        labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
+        labels.insert(
+            "app.kubernetes.io/managed-by".to_string(),
+            "lattice".to_string(),
+        );
+
+        // Reuse container and strategy compilation
+        let containers = Self::compile_containers(spec);
+        let strategy = Self::compile_strategy(spec);
 
         Deployment {
             api_version: "apps/v1".to_string(),

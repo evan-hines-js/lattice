@@ -369,14 +369,31 @@ async fn run_controller() -> anyhow::Result<()> {
         // Don't fail startup - controllers can still run, services just won't have mesh
     }
 
-    // Create cell servers (starts on-demand when Pending CRDs detected)
+    // Create and start cell servers (runs webhook for all clusters, bootstrap/gRPC for cells)
+    // The webhook is always needed for LatticeService → Deployment mutation
+    // External exposure (LoadBalancer) is configured per-cluster based on spec.cell
     let cell_servers = Arc::new(
         CellServers::new(CellConfig::default())
             .map_err(|e| anyhow::anyhow!("Failed to create cell servers: {}", e))?,
     );
 
+    // Start cell servers immediately with manifest generator
+    let manifest_generator = lattice::bootstrap::DefaultManifestGenerator::new()
+        .map_err(|e| anyhow::anyhow!("Failed to create manifest generator: {}", e))?;
+
+    // Get extra SANs from environment (cell host IP if this is a cell cluster)
+    let extra_sans: Vec<String> = std::env::var("LATTICE_CELL_HOST")
+        .ok()
+        .map(|h| vec![h])
+        .unwrap_or_default();
+
+    cell_servers
+        .ensure_running_with(manifest_generator, &extra_sans, client.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to start cell servers: {}", e))?;
+    tracing::info!("Cell servers started (webhook + bootstrap + gRPC)");
+
     // Create controller context with cell servers
-    // Cell endpoint config is read from CRD spec.cell during reconciliation
     // LATTICE_CLUSTER_NAME tells the controller which cluster it's running on (to avoid self-provisioning)
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
     let mut ctx_builder = Context::builder(client.clone()).cell_servers(cell_servers.clone());
