@@ -57,6 +57,45 @@ impl std::fmt::Display for ProviderType {
     }
 }
 
+/// Bootstrap provider for cluster node initialization
+///
+/// Determines how nodes are bootstrapped during cluster provisioning.
+/// - Kubeadm: Standard Kubernetes bootstrap (requires FIPS relaxation for non-FIPS clusters)
+/// - Rke2: RKE2 bootstrap (FIPS-compliant out of the box)
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum BootstrapProvider {
+    /// Standard kubeadm bootstrap (default)
+    /// Note: May require FIPS relaxation when communicating with non-FIPS clusters
+    #[default]
+    Kubeadm,
+    /// RKE2 bootstrap (FIPS-compliant)
+    Rke2,
+}
+
+impl BootstrapProvider {
+    /// Returns true if this bootstrap provider is FIPS-compliant out of the box
+    pub fn is_fips_native(&self) -> bool {
+        matches!(self, Self::Rke2)
+    }
+
+    /// Returns true if this bootstrap provider may need FIPS relaxation
+    /// when bootstrapping clusters to non-FIPS API servers
+    pub fn needs_fips_relax(&self) -> bool {
+        matches!(self, Self::Kubeadm)
+    }
+}
+
+impl std::fmt::Display for BootstrapProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Kubeadm => write!(f, "kubeadm"),
+            Self::Rke2 => write!(f, "rke2"),
+        }
+    }
+}
+
 /// Infrastructure provider specification
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct ProviderSpec {
@@ -77,6 +116,15 @@ pub struct KubernetesSpec {
     /// Additional Subject Alternative Names for the API server certificate
     #[serde(rename = "certSANs", default, skip_serializing_if = "Option::is_none")]
     pub cert_sans: Option<Vec<String>>,
+
+    /// Bootstrap provider (kubeadm or rke2)
+    /// Defaults to kubeadm for backwards compatibility
+    #[serde(default, skip_serializing_if = "is_default_bootstrap")]
+    pub bootstrap: BootstrapProvider,
+}
+
+fn is_default_bootstrap(b: &BootstrapProvider) -> bool {
+    *b == BootstrapProvider::Kubeadm
 }
 
 /// Node topology specification
@@ -624,6 +672,7 @@ mod tests {
                 kubernetes: KubernetesSpec {
                     version: "1.29.0".to_string(),
                     cert_sans: Some(vec!["10.0.0.1".to_string()]),
+                    bootstrap: BootstrapProvider::default(),
                 },
             };
             let json = serde_json::to_string(&spec).unwrap();
@@ -636,6 +685,7 @@ mod tests {
             let spec = KubernetesSpec {
                 version: "1.29.0".to_string(),
                 cert_sans: None,
+                bootstrap: BootstrapProvider::default(),
             };
             let json = serde_json::to_string(&spec).unwrap();
             assert!(!json.contains("certSANs"));
@@ -764,6 +814,64 @@ mod tests {
         #[test]
         fn test_provider_type_default() {
             assert_eq!(ProviderType::default(), ProviderType::Docker);
+        }
+
+        #[test]
+        fn test_bootstrap_provider_default() {
+            assert_eq!(BootstrapProvider::default(), BootstrapProvider::Kubeadm);
+        }
+
+        #[test]
+        fn test_bootstrap_provider_serde() {
+            let providers = vec![BootstrapProvider::Kubeadm, BootstrapProvider::Rke2];
+            for provider in providers {
+                let json = serde_json::to_string(&provider).unwrap();
+                let parsed: BootstrapProvider = serde_json::from_str(&json).unwrap();
+                assert_eq!(provider, parsed);
+            }
+        }
+
+        #[test]
+        fn test_bootstrap_provider_display() {
+            assert_eq!(BootstrapProvider::Kubeadm.to_string(), "kubeadm");
+            assert_eq!(BootstrapProvider::Rke2.to_string(), "rke2");
+        }
+
+        #[test]
+        fn test_bootstrap_provider_fips_native() {
+            assert!(!BootstrapProvider::Kubeadm.is_fips_native());
+            assert!(BootstrapProvider::Rke2.is_fips_native());
+        }
+
+        #[test]
+        fn test_bootstrap_provider_needs_fips_relax() {
+            assert!(BootstrapProvider::Kubeadm.needs_fips_relax());
+            assert!(!BootstrapProvider::Rke2.needs_fips_relax());
+        }
+
+        #[test]
+        fn test_kubernetes_spec_with_bootstrap_provider() {
+            let spec = KubernetesSpec {
+                version: "1.35.0".to_string(),
+                cert_sans: None,
+                bootstrap: BootstrapProvider::Rke2,
+            };
+            let json = serde_json::to_string(&spec).unwrap();
+            assert!(json.contains("rke2")); // RKE2 should be serialized
+            let parsed: KubernetesSpec = serde_json::from_str(&json).unwrap();
+            assert_eq!(spec.bootstrap, parsed.bootstrap);
+        }
+
+        #[test]
+        fn test_kubernetes_spec_default_bootstrap_not_serialized() {
+            let spec = KubernetesSpec {
+                version: "1.35.0".to_string(),
+                cert_sans: None,
+                bootstrap: BootstrapProvider::Kubeadm, // Default
+            };
+            let json = serde_json::to_string(&spec).unwrap();
+            // Default should not be serialized (skip_serializing_if)
+            assert!(!json.contains("bootstrap"));
         }
     }
 }

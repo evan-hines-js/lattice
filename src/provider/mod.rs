@@ -132,10 +132,14 @@ pub struct ManifestMetadata {
 /// CAPI Cluster API version (shared across all providers)
 /// Updated to v1beta2 as of CAPI v1.11+ (August 2025)
 pub const CAPI_CLUSTER_API_VERSION: &str = "cluster.x-k8s.io/v1beta2";
-/// CAPI Bootstrap API version for KubeadmConfigTemplate (shared across all providers)
+/// CAPI Bootstrap API version for KubeadmConfigTemplate
 pub const CAPI_BOOTSTRAP_API_VERSION: &str = "bootstrap.cluster.x-k8s.io/v1beta2";
-/// CAPI Control Plane API version for KubeadmControlPlane (shared across all providers)
+/// CAPI Control Plane API version for KubeadmControlPlane
 pub const CAPI_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v1beta2";
+/// RKE2 Bootstrap API version for RKE2ConfigTemplate
+pub const RKE2_BOOTSTRAP_API_VERSION: &str = "bootstrap.cluster.x-k8s.io/v1beta1";
+/// RKE2 Control Plane API version for RKE2ControlPlane
+pub const RKE2_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v1beta1";
 
 /// Common cluster configuration for CAPI manifest generation
 #[derive(Clone, Debug)]
@@ -148,6 +152,8 @@ pub struct ClusterConfig<'a> {
     pub k8s_version: &'a str,
     /// Labels to apply to all resources
     pub labels: std::collections::BTreeMap<String, String>,
+    /// Bootstrap mechanism (kubeadm or rke2)
+    pub bootstrap: crate::crd::BootstrapProvider,
 }
 
 /// Infrastructure provider reference configuration
@@ -181,7 +187,16 @@ pub fn generate_machine_deployment(
     config: &ClusterConfig,
     infra: &InfrastructureRef,
 ) -> CAPIManifest {
+    use crate::crd::BootstrapProvider;
+
     let deployment_name = format!("{}-md-0", config.name);
+
+    // Bootstrap config template kind depends on bootstrap provider
+    let bootstrap_config_kind = match config.bootstrap {
+        BootstrapProvider::Kubeadm => "KubeadmConfigTemplate",
+        BootstrapProvider::Rke2 => "RKE2ConfigTemplate",
+    };
+
     let spec = serde_json::json!({
         "clusterName": config.name,
         "replicas": 0,  // ALWAYS 0 - scaling happens after pivot
@@ -195,7 +210,7 @@ pub fn generate_machine_deployment(
                 "bootstrap": {
                     "configRef": {
                         "apiGroup": "bootstrap.cluster.x-k8s.io",
-                        "kind": "KubeadmConfigTemplate",
+                        "kind": bootstrap_config_kind,
                         "name": format!("{}-md-0", config.name)
                     }
                 },
@@ -218,10 +233,26 @@ pub fn generate_machine_deployment(
     .with_spec(spec)
 }
 
-/// Generate a KubeadmConfigTemplate manifest for workers
+/// Generate bootstrap config template for workers (KubeadmConfigTemplate or RKE2ConfigTemplate)
 ///
-/// This is shared across ALL providers since worker kubeadm config is provider-agnostic.
+/// This dispatches to the appropriate config template generator based on the
+/// bootstrap provider configured in the ClusterConfig.
+pub fn generate_bootstrap_config_template(config: &ClusterConfig) -> CAPIManifest {
+    use crate::crd::BootstrapProvider;
+
+    match config.bootstrap {
+        BootstrapProvider::Kubeadm => generate_kubeadm_config_template_impl(config),
+        BootstrapProvider::Rke2 => generate_rke2_config_template(config),
+    }
+}
+
+/// Alias for backwards compatibility
 pub fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest {
+    generate_kubeadm_config_template_impl(config)
+}
+
+/// Generate KubeadmConfigTemplate manifest for workers
+fn generate_kubeadm_config_template_impl(config: &ClusterConfig) -> CAPIManifest {
     let template_name = format!("{}-md-0", config.name);
 
     // In CAPI v1beta2, kubeletExtraArgs is a list of {name, value} objects
@@ -250,12 +281,48 @@ pub fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest 
     .with_spec(spec)
 }
 
+/// Generate RKE2ConfigTemplate manifest for workers
+fn generate_rke2_config_template(config: &ClusterConfig) -> CAPIManifest {
+    let template_name = format!("{}-md-0", config.name);
+
+    let spec = serde_json::json!({
+        "template": {
+            "spec": {
+                "agentConfig": {
+                    "kubelet": {
+                        "extraArgs": [
+                            "eviction-hard=nodefs.available<0%,imagefs.available<0%"
+                        ]
+                    }
+                }
+            }
+        }
+    });
+
+    CAPIManifest::new(
+        RKE2_BOOTSTRAP_API_VERSION,
+        "RKE2ConfigTemplate",
+        &template_name,
+        config.namespace,
+    )
+    .with_labels(config.labels.clone())
+    .with_spec(spec)
+}
+
 /// Generate the main CAPI Cluster resource
 ///
 /// This is shared across ALL providers. The only provider-specific part is the
 /// infrastructureRef which points to the provider's infrastructure cluster resource
 /// (DockerCluster, AWSCluster, etc.)
 pub fn generate_cluster(config: &ClusterConfig, infra: &InfrastructureRef) -> CAPIManifest {
+    use crate::crd::BootstrapProvider;
+
+    // Control plane kind depends on bootstrap provider
+    let cp_kind = match config.bootstrap {
+        BootstrapProvider::Kubeadm => "KubeadmControlPlane",
+        BootstrapProvider::Rke2 => "RKE2ControlPlane",
+    };
+
     // In CAPI v1beta2, refs use apiGroup (not apiVersion) and no namespace
     let spec = serde_json::json!({
         "clusterNetwork": {
@@ -268,7 +335,7 @@ pub fn generate_cluster(config: &ClusterConfig, infra: &InfrastructureRef) -> CA
         },
         "controlPlaneRef": {
             "apiGroup": "controlplane.cluster.x-k8s.io",
-            "kind": "KubeadmControlPlane",
+            "kind": cp_kind,
             "name": format!("{}-control-plane", config.name)
         },
         "infrastructureRef": {
@@ -288,12 +355,25 @@ pub fn generate_cluster(config: &ClusterConfig, infra: &InfrastructureRef) -> CA
     .with_spec(spec)
 }
 
-/// Generate the KubeadmControlPlane resource
+/// Generate control plane resource (KubeadmControlPlane or RKE2ControlPlane)
 ///
-/// This is shared across ALL providers. The only provider-specific part is the
-/// machineTemplate.infrastructureRef which points to the provider's machine template
-/// (DockerMachineTemplate, AWSMachineTemplate, etc.)
+/// This dispatches to the appropriate control plane generator based on the
+/// bootstrap provider configured in the ClusterConfig.
 pub fn generate_control_plane(
+    config: &ClusterConfig,
+    infra: &InfrastructureRef,
+    cp_config: &ControlPlaneConfig,
+) -> CAPIManifest {
+    use crate::crd::BootstrapProvider;
+
+    match config.bootstrap {
+        BootstrapProvider::Kubeadm => generate_kubeadm_control_plane(config, infra, cp_config),
+        BootstrapProvider::Rke2 => generate_rke2_control_plane(config, infra, cp_config),
+    }
+}
+
+/// Generate KubeadmControlPlane resource
+fn generate_kubeadm_control_plane(
     config: &ClusterConfig,
     infra: &InfrastructureRef,
     cp_config: &ControlPlaneConfig,
@@ -366,73 +446,145 @@ pub fn generate_control_plane(
     .with_spec(spec)
 }
 
+/// Generate RKE2ControlPlane resource
+///
+/// RKE2 is FIPS-compliant out of the box and uses a different configuration
+/// structure than kubeadm.
+fn generate_rke2_control_plane(
+    config: &ClusterConfig,
+    infra: &InfrastructureRef,
+    cp_config: &ControlPlaneConfig,
+) -> CAPIManifest {
+    let cp_name = format!("{}-control-plane", config.name);
+
+    // RKE2 agent configuration
+    let mut agent_config = serde_json::json!({
+        "kubelet": {
+            "extraArgs": [
+                "eviction-hard=nodefs.available<0%,imagefs.available<0%"
+            ]
+        }
+    });
+
+    // Add postRKE2Commands if provided (same as postKubeadmCommands but for RKE2)
+    if !cp_config.post_kubeadm_commands.is_empty() {
+        agent_config["postRKE2Commands"] = serde_json::json!(cp_config.post_kubeadm_commands);
+    }
+
+    // RKE2ControlPlane spec structure
+    let spec = serde_json::json!({
+        "replicas": cp_config.replicas,
+        "version": format!("v{}+rke2r1", config.k8s_version.trim_start_matches('v')),
+        "infrastructureRef": {
+            "apiGroup": infra.api_group,
+            "kind": infra.machine_template_kind,
+            "name": format!("{}-control-plane", config.name)
+        },
+        "agentConfig": agent_config,
+        "serverConfig": {
+            "tlsSan": cp_config.cert_sans,
+            "cni": "none"  // We use Cilium, not built-in CNI
+        }
+    });
+
+    CAPIManifest::new(
+        RKE2_CONTROLPLANE_API_VERSION,
+        "RKE2ControlPlane",
+        &cp_name,
+        config.namespace,
+    )
+    .with_labels(config.labels.clone())
+    .with_spec(spec)
+}
+
+/// Default scripts directory (set by LATTICE_SCRIPTS_DIR env var in container)
+const DEFAULT_SCRIPTS_DIR: &str = "/scripts";
+
+/// Get scripts directory - checks runtime env var first, then compile-time, then default
+fn get_scripts_dir() -> String {
+    if let Ok(dir) = std::env::var("LATTICE_SCRIPTS_DIR") {
+        return dir;
+    }
+    if let Some(dir) = option_env!("LATTICE_SCRIPTS_DIR") {
+        return dir.to_string();
+    }
+    DEFAULT_SCRIPTS_DIR.to_string()
+}
+
+/// Load and render the bootstrap script template using minijinja
+fn render_bootstrap_script(
+    endpoint: &str,
+    cluster_name: &str,
+    token: &str,
+    ca_cert_path: &str,
+) -> String {
+    let scripts_dir = get_scripts_dir();
+    let script_path = format!("{}/bootstrap-cluster.sh", scripts_dir);
+    let template = std::fs::read_to_string(&script_path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to load bootstrap script from {}: {}. Set LATTICE_SCRIPTS_DIR env var.",
+            script_path, e
+        )
+    });
+
+    let mut env = minijinja::Environment::new();
+    env.add_template("bootstrap", &template)
+        .expect("Invalid bootstrap template");
+
+    let ctx = minijinja::context! {
+        endpoint => endpoint,
+        cluster_name => cluster_name,
+        token => token,
+        ca_cert_path => ca_cert_path,
+    };
+
+    env.get_template("bootstrap")
+        .expect("Template not found")
+        .render(ctx)
+        .expect("Failed to render bootstrap template")
+}
+
 /// Build postKubeadmCommands for agent bootstrap
 ///
 /// This is shared across ALL providers. These are the shell commands that run
 /// after kubeadm completes on each control plane node.
+///
+/// For RKE2, the same commands are used in postRKE2Commands.
+/// The commands handle "token already used" errors gracefully by continuing.
 pub fn build_post_kubeadm_commands(cluster_name: &str, bootstrap: &BootstrapInfo) -> Vec<String> {
     let mut commands = Vec::new();
 
-    // Untaint control plane so pods can schedule (all clusters need this)
-    commands.push(
-        r#"kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-"#
-            .to_string(),
-    );
-
-    // If cluster has bootstrap info, fetch and apply manifests from parent
+    // If cluster has bootstrap info, embed the bootstrap script with substituted variables
     if let (Some(ref endpoint), Some(ref token), Some(ref ca_cert)) = (
         &bootstrap.bootstrap_endpoint,
         &bootstrap.bootstrap_token,
         &bootstrap.ca_cert_pem,
     ) {
-        commands.push(format!(
-            r#"echo "Bootstrapping cluster {cluster_name} from {endpoint}""#
-        ));
-
-        // Write CA cert to verify TLS connection to parent
+        // Write CA cert to temp file
         commands.push(format!(
             r#"cat > /tmp/cell-ca.crt << 'CACERT'
 {ca_cert}
 CACERT"#
         ));
 
-        // Retry fetching manifests until success (with backoff)
+        // Render script template with variables
+        let script = render_bootstrap_script(endpoint, cluster_name, token, "/tmp/cell-ca.crt");
+
+        // Embed the script as a heredoc and execute it
         commands.push(format!(
-            r#"echo "Fetching bootstrap manifests from parent..."
-MANIFEST_FILE=/tmp/bootstrap-manifests.yaml
-RETRY_DELAY=5
-while true; do
-  if curl -sf --cacert /tmp/cell-ca.crt "{endpoint}/api/clusters/{cluster_name}/manifests" \
-    -H "Authorization: Bearer {token}" \
-    -o "$MANIFEST_FILE"; then
-    echo "Successfully fetched bootstrap manifests"
-    break
-  fi
-  echo "Failed to fetch manifests, retrying in ${{RETRY_DELAY}}s..."
-  sleep $RETRY_DELAY
-  RETRY_DELAY=$((RETRY_DELAY < 60 ? RETRY_DELAY * 2 : 60))
-done"#,
+            r#"bash << 'BOOTSTRAP_SCRIPT'
+{script}
+BOOTSTRAP_SCRIPT"#
         ));
 
-        // Apply manifests with retry
-        // Use --server-side --force-conflicts to handle race with controller updating status
+        // Cleanup CA cert
+        commands.push(r#"rm -f /tmp/cell-ca.crt"#.to_string());
+    } else {
+        // No bootstrap info - just untaint control plane
         commands.push(
-            r#"echo "Applying bootstrap manifests..."
-RETRY_DELAY=5
-while true; do
-  if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply --server-side --force-conflicts -f /tmp/bootstrap-manifests.yaml; then
-    echo "Successfully applied bootstrap manifests"
-    break
-  fi
-  echo "Failed to apply manifests, retrying in ${RETRY_DELAY}s..."
-  sleep $RETRY_DELAY
-  RETRY_DELAY=$((RETRY_DELAY < 60 ? RETRY_DELAY * 2 : 60))
-done"#
+            r#"kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- || true"#
                 .to_string(),
         );
-
-        // Clean up temp files
-        commands.push(r#"rm -f /tmp/cell-ca.crt /tmp/bootstrap-manifests.yaml"#.to_string());
     }
 
     commands
@@ -641,6 +793,188 @@ mod tests {
             let parsed: CAPIManifest = serde_yaml::from_str(&yaml).expect("should deserialize");
 
             assert_eq!(manifest, parsed);
+        }
+    }
+
+    mod bootstrap_provider_manifests {
+        use super::*;
+        use crate::crd::BootstrapProvider;
+
+        fn test_config(bootstrap: BootstrapProvider) -> ClusterConfig<'static> {
+            ClusterConfig {
+                name: "test-cluster",
+                namespace: "default",
+                k8s_version: "1.31.0",
+                labels: std::collections::BTreeMap::new(),
+                bootstrap,
+            }
+        }
+
+        fn test_infra() -> InfrastructureRef<'static> {
+            InfrastructureRef {
+                api_group: "infrastructure.cluster.x-k8s.io",
+                cluster_kind: "DockerCluster",
+                machine_template_kind: "DockerMachineTemplate",
+            }
+        }
+
+        #[test]
+        fn kubeadm_generates_kubeadm_control_plane() {
+            let config = test_config(BootstrapProvider::Kubeadm);
+            let infra = test_infra();
+            let cp_config = ControlPlaneConfig {
+                replicas: 1,
+                cert_sans: vec!["localhost".to_string()],
+                post_kubeadm_commands: vec![],
+            };
+
+            let manifest = generate_control_plane(&config, &infra, &cp_config);
+
+            assert_eq!(manifest.kind, "KubeadmControlPlane");
+            assert_eq!(manifest.api_version, CAPI_CONTROLPLANE_API_VERSION);
+        }
+
+        #[test]
+        fn rke2_generates_rke2_control_plane() {
+            let config = test_config(BootstrapProvider::Rke2);
+            let infra = test_infra();
+            let cp_config = ControlPlaneConfig {
+                replicas: 1,
+                cert_sans: vec!["localhost".to_string()],
+                post_kubeadm_commands: vec![],
+            };
+
+            let manifest = generate_control_plane(&config, &infra, &cp_config);
+
+            assert_eq!(manifest.kind, "RKE2ControlPlane");
+            assert_eq!(manifest.api_version, RKE2_CONTROLPLANE_API_VERSION);
+        }
+
+        #[test]
+        fn kubeadm_generates_kubeadm_config_template() {
+            let config = test_config(BootstrapProvider::Kubeadm);
+
+            let manifest = generate_bootstrap_config_template(&config);
+
+            assert_eq!(manifest.kind, "KubeadmConfigTemplate");
+            assert_eq!(manifest.api_version, CAPI_BOOTSTRAP_API_VERSION);
+        }
+
+        #[test]
+        fn rke2_generates_rke2_config_template() {
+            let config = test_config(BootstrapProvider::Rke2);
+
+            let manifest = generate_bootstrap_config_template(&config);
+
+            assert_eq!(manifest.kind, "RKE2ConfigTemplate");
+            assert_eq!(manifest.api_version, RKE2_BOOTSTRAP_API_VERSION);
+        }
+
+        #[test]
+        fn kubeadm_cluster_references_kubeadm_control_plane() {
+            let config = test_config(BootstrapProvider::Kubeadm);
+            let infra = test_infra();
+
+            let manifest = generate_cluster(&config, &infra);
+            let spec = manifest.spec.expect("should have spec");
+
+            let cp_kind = spec
+                .pointer("/controlPlaneRef/kind")
+                .and_then(|v| v.as_str())
+                .expect("should have controlPlaneRef.kind");
+
+            assert_eq!(cp_kind, "KubeadmControlPlane");
+        }
+
+        #[test]
+        fn rke2_cluster_references_rke2_control_plane() {
+            let config = test_config(BootstrapProvider::Rke2);
+            let infra = test_infra();
+
+            let manifest = generate_cluster(&config, &infra);
+            let spec = manifest.spec.expect("should have spec");
+
+            let cp_kind = spec
+                .pointer("/controlPlaneRef/kind")
+                .and_then(|v| v.as_str())
+                .expect("should have controlPlaneRef.kind");
+
+            assert_eq!(cp_kind, "RKE2ControlPlane");
+        }
+
+        #[test]
+        fn kubeadm_machine_deployment_references_kubeadm_config() {
+            let config = test_config(BootstrapProvider::Kubeadm);
+            let infra = test_infra();
+
+            let manifest = generate_machine_deployment(&config, &infra);
+            let spec = manifest.spec.expect("should have spec");
+
+            let bootstrap_kind = spec
+                .pointer("/template/spec/bootstrap/configRef/kind")
+                .and_then(|v| v.as_str())
+                .expect("should have bootstrap.configRef.kind");
+
+            assert_eq!(bootstrap_kind, "KubeadmConfigTemplate");
+        }
+
+        #[test]
+        fn rke2_machine_deployment_references_rke2_config() {
+            let config = test_config(BootstrapProvider::Rke2);
+            let infra = test_infra();
+
+            let manifest = generate_machine_deployment(&config, &infra);
+            let spec = manifest.spec.expect("should have spec");
+
+            let bootstrap_kind = spec
+                .pointer("/template/spec/bootstrap/configRef/kind")
+                .and_then(|v| v.as_str())
+                .expect("should have bootstrap.configRef.kind");
+
+            assert_eq!(bootstrap_kind, "RKE2ConfigTemplate");
+        }
+
+        #[test]
+        fn rke2_control_plane_has_correct_version_suffix() {
+            let config = test_config(BootstrapProvider::Rke2);
+            let infra = test_infra();
+            let cp_config = ControlPlaneConfig {
+                replicas: 1,
+                cert_sans: vec![],
+                post_kubeadm_commands: vec![],
+            };
+
+            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let spec = manifest.spec.expect("should have spec");
+
+            let version = spec
+                .get("version")
+                .and_then(|v| v.as_str())
+                .expect("should have version");
+
+            assert!(version.ends_with("+rke2r1"), "RKE2 version should end with +rke2r1");
+            assert!(version.starts_with("v1.31.0"), "version should start with v1.31.0");
+        }
+
+        #[test]
+        fn rke2_control_plane_has_cni_none() {
+            let config = test_config(BootstrapProvider::Rke2);
+            let infra = test_infra();
+            let cp_config = ControlPlaneConfig {
+                replicas: 1,
+                cert_sans: vec![],
+                post_kubeadm_commands: vec![],
+            };
+
+            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let spec = manifest.spec.expect("should have spec");
+
+            let cni = spec
+                .pointer("/serverConfig/cni")
+                .and_then(|v| v.as_str())
+                .expect("should have serverConfig.cni");
+
+            assert_eq!(cni, "none", "RKE2 should have cni=none (we use Cilium)");
         }
     }
 }

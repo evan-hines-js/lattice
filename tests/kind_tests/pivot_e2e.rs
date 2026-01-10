@@ -253,6 +253,7 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
+                    bootstrap: Default::default(),
                 },
             },
             nodes: NodeSpec {
@@ -1031,6 +1032,7 @@ spec:
         keep_bootstrap_on_failure: true, // Keep for debugging if it fails
         timeout: Duration::from_secs(1200),
         registry_credentials,
+        bootstrap_override: None, // Use config file default
     };
 
     let installer =

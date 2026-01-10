@@ -72,6 +72,7 @@ COPY Cargo.toml Cargo.lock build.rs versions.toml ./
 COPY proto ./proto
 COPY src ./src
 COPY benches ./benches
+COPY scripts ./scripts
 
 # Build with FIPS if enabled, otherwise standard build
 RUN if [ -n "$FIPS" ]; then \
@@ -109,6 +110,9 @@ COPY --from=rust-builder /app/test-charts /charts
 # Copy CAPI providers from builder (downloaded by build.rs)
 COPY --from=rust-builder /app/test-providers /providers
 
+# Copy scripts for templating
+COPY --from=rust-builder /app/scripts /scripts
+
 # Create clusterctl config with local provider repositories
 RUN echo "providers:" > /providers/clusterctl.yaml && \
     echo "  - name: \"cluster-api\"" >> /providers/clusterctl.yaml && \
@@ -134,12 +138,14 @@ ENV GODEBUG=fips140=only
 
 # Create non-root user
 RUN useradd -r -u 1000 -m lattice && \
-    chown -R lattice:lattice /charts /providers
+    chown -R lattice:lattice /charts /providers /scripts
 
 USER lattice
 
 # Set chart location for runtime
 ENV LATTICE_CHARTS_DIR=/charts
+# Set scripts location for templating
+ENV LATTICE_SCRIPTS_DIR=/scripts
 # Set clusterctl config for offline CAPI installation
 ENV CLUSTERCTL_CONFIG=/providers/clusterctl.yaml
 

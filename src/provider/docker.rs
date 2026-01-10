@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 
 use super::{
     build_post_kubeadm_commands, generate_cluster, generate_control_plane,
-    generate_kubeadm_config_template, generate_machine_deployment, CAPIManifest, ClusterConfig,
+    generate_bootstrap_config_template, generate_machine_deployment, CAPIManifest, ClusterConfig,
     ControlPlaneConfig, InfrastructureRef, Provider,
 };
 use crate::crd::{LatticeCluster, ProviderSpec, ProviderType};
@@ -217,6 +217,7 @@ impl Provider for DockerProvider {
             namespace: &namespace,
             k8s_version,
             labels: Self::create_labels(name),
+            bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
         };
 
         let infra = InfrastructureRef {
@@ -242,7 +243,7 @@ impl Provider for DockerProvider {
         // Worker resources - use shared functions (replicas=0, scaling after pivot)
         manifests.push(generate_machine_deployment(&config, &infra));
         manifests.push(self.generate_worker_machine_template(cluster)?);
-        manifests.push(generate_kubeadm_config_template(&config));
+        manifests.push(generate_bootstrap_config_template(&config));
 
         Ok(manifests)
     }
@@ -297,8 +298,8 @@ impl Provider for DockerProvider {
 mod tests {
     use super::*;
     use crate::crd::{
-        CellSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec, ProviderType,
-        ServiceSpec,
+        BootstrapProvider, CellSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
+        ProviderType, ServiceSpec,
     };
     use crate::provider::{
         build_post_kubeadm_commands, CAPI_BOOTSTRAP_API_VERSION, CAPI_CLUSTER_API_VERSION,
@@ -320,6 +321,7 @@ mod tests {
                     kubernetes: KubernetesSpec {
                         version: "1.31.0".to_string(),
                         cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
+                        bootstrap: BootstrapProvider::default(),
                     },
                 },
                 nodes: NodeSpec {
@@ -733,6 +735,7 @@ mod tests {
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: None,
+                    bootstrap: BootstrapProvider::default(),
                 },
             };
 
@@ -750,6 +753,7 @@ mod tests {
                 kubernetes: KubernetesSpec {
                     version: "v1.31.0".to_string(),
                     cert_sans: None,
+                    bootstrap: BootstrapProvider::default(),
                 },
             };
 
@@ -767,6 +771,7 @@ mod tests {
                 kubernetes: KubernetesSpec {
                     version: "1.31".to_string(),
                     cert_sans: None,
+                    bootstrap: BootstrapProvider::default(),
                 },
             };
 
@@ -784,6 +789,7 @@ mod tests {
                 kubernetes: KubernetesSpec {
                     version: "1.31.0".to_string(),
                     cert_sans: None,
+                    bootstrap: BootstrapProvider::default(),
                 },
             };
 
@@ -802,6 +808,7 @@ mod tests {
                 kubernetes: KubernetesSpec {
                     version: "".to_string(),
                     cert_sans: None,
+                    bootstrap: BootstrapProvider::default(),
                 },
             };
 
@@ -823,6 +830,7 @@ mod tests {
                 kubernetes: KubernetesSpec {
                     version: "latest".to_string(),
                     cert_sans: None,
+                    bootstrap: BootstrapProvider::default(),
                 },
             };
 
@@ -841,6 +849,7 @@ mod tests {
                 kubernetes: KubernetesSpec {
                     version: "1.31.beta".to_string(),
                     cert_sans: None,
+                    bootstrap: BootstrapProvider::default(),
                 },
             };
 
@@ -887,9 +896,11 @@ mod tests {
             assert!(!commands.is_empty());
             let commands_str = commands.join("\n");
             assert!(commands_str.contains("mgmt.example.com:8080")); // Bootstrap endpoint
-            assert!(commands_str.contains("/api/clusters/workload-1/manifests")); // Manifests path
+            // Script sets CLUSTER_NAME variable and uses it in URL
+            assert!(commands_str.contains(r#"CLUSTER_NAME="workload-1""#)); // Cluster name variable
+            assert!(commands_str.contains("/api/clusters/$CLUSTER_NAME/manifests")); // Manifests path with bash var
             assert!(commands_str.contains("test-token-123")); // Token in header
-            assert!(commands_str.contains("--cacert /tmp/cell-ca.crt")); // Uses CA cert for TLS
+            assert!(commands_str.contains("--cacert")); // Uses CA cert for TLS
             assert!(commands_str.contains("TEST_CA_CERT")); // CA cert content written
             assert!(commands_str.contains("kubectl")); // Pipes to kubectl apply
         }

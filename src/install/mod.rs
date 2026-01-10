@@ -63,6 +63,8 @@ pub struct InstallConfig {
     pub timeout: Duration,
     /// Optional registry credentials (dockerconfigjson format) for pulling images
     pub registry_credentials: Option<String>,
+    /// Optional bootstrap provider override (CLI can override config file)
+    pub bootstrap_override: Option<crate::crd::BootstrapProvider>,
 }
 
 /// Errors that can occur during installation
@@ -117,11 +119,18 @@ impl Installer {
     /// Create a new installer with the given configuration
     ///
     /// Parses the LatticeCluster from the config content and validates it.
+    /// If a bootstrap override is provided, it will override the bootstrap
+    /// provider in the cluster spec.
     pub fn new(config: InstallConfig) -> Result<Self, InstallError> {
-        let cluster: LatticeCluster = serde_yaml::from_str(&config.cluster_config_content)
+        let mut cluster: LatticeCluster = serde_yaml::from_str(&config.cluster_config_content)
             .map_err(|e| {
                 InstallError::InvalidConfig(format!("failed to parse LatticeCluster YAML: {}", e))
             })?;
+
+        // Apply bootstrap override if provided (CLI takes precedence over config file)
+        if let Some(bootstrap) = &config.bootstrap_override {
+            cluster.spec.provider.kubernetes.bootstrap = bootstrap.clone();
+        }
 
         // Validate required fields and extract cluster name
         let cluster_name = cluster.metadata.name.clone().ok_or_else(|| {
@@ -378,8 +387,9 @@ nodes:
                 // For bootstrap cluster: relax FIPS to fips140=on (not =only)
                 // This allows talking to non-FIPS kind API server
                 // Production clusters use container default (fips140=only)
-                if s.contains("\"kind\":\"Deployment\"") {
-                    Self::add_godebug_env(s)
+                // Uses shared FIPS utility function
+                if crate::fips::is_deployment(s) {
+                    crate::fips::add_fips_relax_env(s)
                 } else {
                     s.clone()
                 }
@@ -394,29 +404,6 @@ nodes:
 
         println!("  Lattice operator deployed successfully");
         Ok(())
-    }
-
-    /// Add GODEBUG=fips140=on env var to deployment for bootstrap cluster
-    fn add_godebug_env(deployment_json: &str) -> String {
-        // Parse, modify, and re-serialize the deployment
-        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) {
-            if let Some(containers) = value
-                .pointer_mut("/spec/template/spec/containers")
-                .and_then(|c| c.as_array_mut())
-            {
-                for container in containers {
-                    if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
-                        env.push(serde_json::json!({
-                            "name": "GODEBUG",
-                            "value": "fips140=on"
-                        }));
-                    }
-                }
-            }
-            serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
-        } else {
-            deployment_json.to_string()
-        }
     }
 
     /// Create ClusterResourceSet for Cilium CNI + Lattice operator installation
@@ -437,6 +424,8 @@ nodes:
         // Generate all manifests (Cilium YAML + operator JSON + LB-IPAM + CiliumNetworkPolicy)
         // Pass cluster name and provider so management cluster's operator knows its identity
         // Management cluster has no parent, so pass None for parent_host
+        // relax_fips is based on bootstrap provider: kubeadm clusters need FIPS relaxation
+        // because kubeadm's API server uses non-FIPS cipher suites (X25519)
         let cluster_name = self.cluster.metadata.name.as_deref();
         let provider_str = self.cluster.spec.provider.type_.to_string();
         let config = ManifestConfig {
@@ -447,6 +436,7 @@ nodes:
             provider: Some(&provider_str),
             parent_host: None, // Cells have no parent
             parent_grpc_port: crate::DEFAULT_GRPC_PORT,
+            relax_fips: self.cluster.spec.provider.kubernetes.bootstrap.needs_fips_relax(),
         };
         let all_manifests = generate_all_manifests(&generator, &config);
 
@@ -1117,6 +1107,7 @@ spec:
             keep_bootstrap_on_failure: false,
             timeout: Duration::from_secs(1200),
             registry_credentials: None,
+            bootstrap_override: None,
         }
     }
 
@@ -1164,6 +1155,7 @@ spec:
             keep_bootstrap_on_failure: false,
             timeout: Duration::from_secs(1200),
             registry_credentials: None,
+            bootstrap_override: None,
         };
 
         let result = Installer::new(config);
@@ -1185,6 +1177,7 @@ spec:
             keep_bootstrap_on_failure: false,
             timeout: Duration::from_secs(1200),
             registry_credentials: None,
+            bootstrap_override: None,
         };
 
         let result = Installer::new(config);
