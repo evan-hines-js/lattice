@@ -6,8 +6,8 @@ const CILIUM_VERSION: &str = "1.16.5";
 const ISTIO_VERSION: &str = "1.24.2";
 const CERT_MANAGER_VERSION: &str = "1.16.2"; // Required by CAPI
 
-/// CAPI version - pinned to Lattice release
-const CAPI_VERSION: &str = "1.9.4";
+/// CAPI version - must match clusterctl version in Dockerfile
+const CAPI_VERSION: &str = "1.12.1";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Compile proto files
@@ -198,12 +198,8 @@ fn download_capi_providers() -> Result<(), Box<dyn std::error::Error>> {
     download_file(&format!("{}/infrastructure-components-development.yaml", base_url), &docker);
     std::fs::copy(&core_metadata, &docker_metadata).ok();
 
-    // Create clusterctl.yaml with explicit provider definitions using file:// URLs
-    // This prevents clusterctl from trying to reach GitHub at all
-    let config_content = format!(r#"# Clusterctl config for offline/air-gapped CAPI installation
-# Explicit provider definitions with local file:// URLs
-
-providers:
+    // Create clusterctl.yaml with provider definitions using file:// URLs
+    let config_content = format!(r#"providers:
   - name: "cluster-api"
     url: "file://{providers_dir}/cluster-api/v{version}/core-components.yaml"
     type: "CoreProvider"

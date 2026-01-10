@@ -64,21 +64,19 @@ COPY --from=builder /app/test-charts /charts
 COPY --from=builder /app/test-providers /providers
 
 # Create clusterctl config with local provider repositories
-# Using file:// URLs prevents clusterctl from trying to reach GitHub
 RUN printf '%s\n' \
-  '# Clusterctl config for offline/air-gapped CAPI installation' \
   'providers:' \
   '  - name: "cluster-api"' \
-  '    url: "file:///providers/cluster-api/v1.9.4/core-components.yaml"' \
+  '    url: "file:///providers/cluster-api/v1.12.1/core-components.yaml"' \
   '    type: "CoreProvider"' \
   '  - name: "kubeadm"' \
-  '    url: "file:///providers/bootstrap-kubeadm/v1.9.4/bootstrap-components.yaml"' \
+  '    url: "file:///providers/bootstrap-kubeadm/v1.12.1/bootstrap-components.yaml"' \
   '    type: "BootstrapProvider"' \
   '  - name: "kubeadm"' \
-  '    url: "file:///providers/control-plane-kubeadm/v1.9.4/control-plane-components.yaml"' \
+  '    url: "file:///providers/control-plane-kubeadm/v1.12.1/control-plane-components.yaml"' \
   '    type: "ControlPlaneProvider"' \
   '  - name: "docker"' \
-  '    url: "file:///providers/infrastructure-docker/v1.9.4/infrastructure-components-development.yaml"' \
+  '    url: "file:///providers/infrastructure-docker/v1.12.1/infrastructure-components-development.yaml"' \
   '    type: "InfrastructureProvider"' \
   > /providers/clusterctl.yaml
 

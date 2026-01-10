@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
-use kube::runtime::controller::Action;
 use kube::Client;
 
 use lattice::controller::{reconcile, Context, KubeClientImpl};
