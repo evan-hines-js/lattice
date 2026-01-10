@@ -40,8 +40,10 @@ use crate::Result;
 /// Default namespace for CAPI resources
 const DEFAULT_NAMESPACE: &str = "default";
 
-/// Docker infrastructure API version (Docker-specific)
-/// Updated to v1beta2 as of CAPI v1.11+ (August 2025)
+/// Docker infrastructure API group (used in v1beta2 refs)
+const DOCKER_INFRASTRUCTURE_API_GROUP: &str = "infrastructure.cluster.x-k8s.io";
+
+/// Docker infrastructure API version (for resource apiVersion field)
 const DOCKER_INFRASTRUCTURE_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta2";
 
 /// Docker/Kind infrastructure provider
@@ -222,7 +224,7 @@ impl Provider for DockerProvider {
             generate_cluster(
                 name,
                 &namespace,
-                DOCKER_INFRASTRUCTURE_API_VERSION,
+                DOCKER_INFRASTRUCTURE_API_GROUP,
                 "DockerCluster",
                 labels.clone(),
             ),
@@ -236,7 +238,7 @@ impl Provider for DockerProvider {
                 cp_replicas,
                 cert_sans,
                 post_kubeadm_commands,
-                DOCKER_INFRASTRUCTURE_API_VERSION,
+                DOCKER_INFRASTRUCTURE_API_GROUP,
                 "DockerMachineTemplate",
                 labels.clone(),
             ),
@@ -249,7 +251,7 @@ impl Provider for DockerProvider {
             name,
             &namespace,
             k8s_version,
-            DOCKER_INFRASTRUCTURE_API_VERSION,
+            DOCKER_INFRASTRUCTURE_API_GROUP,
             "DockerMachineTemplate",
             labels.clone(),
         ));

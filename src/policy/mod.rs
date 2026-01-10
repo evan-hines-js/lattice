@@ -1,34 +1,16 @@
-//! Network policy generation for Lattice services
+//! Network policy types for Lattice services
 //!
-//! This module generates Istio AuthorizationPolicies and CiliumNetworkPolicies
-//! from the service graph's active edges. It implements a defense-in-depth model:
+//! This module defines the Istio and Cilium policy resource types used by
+//! the ServiceCompiler. These implement a defense-in-depth model:
 //!
 //! - **L7 (Istio AuthorizationPolicy)**: mTLS identity-based access control using SPIFFE principals
 //! - **L4 (CiliumNetworkPolicy)**: eBPF-based network enforcement at the kernel level
 //!
-//! # Architecture
-//!
-//! The policy generation follows the bilateral agreement pattern from the service graph:
-//! only when both caller declares dependency AND callee allows caller do we generate
-//! allow policies.
-//!
-//! ```text
-//! ServiceGraph (active edges)
-//!         │
-//!         ▼
-//! PolicyCompiler.compile_for_service()
-//!         │
-//!         ├──► AuthorizationPolicy (L7 - mTLS identity)
-//!         ├──► WaypointPolicy (L4 - HBONE allow)
-//!         ├──► CiliumNetworkPolicy (L4 - eBPF)
-//!         └──► ServiceEntry (external services)
-//! ```
+//! For policy generation, use [`crate::compiler::ServiceCompiler`].
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-
-use crate::graph::{ActiveEdge, ServiceGraph, ServiceNode, ServiceType};
 
 // =============================================================================
 // Istio AuthorizationPolicy
@@ -343,40 +325,95 @@ impl GeneratedPolicies {
 // Policy Compiler
 // =============================================================================
 
-/// HBONE port for Istio Ambient waypoint communication
-const HBONE_PORT: u16 = 15008;
+use crate::graph::{ActiveEdge, ServiceGraph, ServiceNode, ServiceType};
 
-/// Policy compiler that generates network policies from service graph edges
+/// Compiler for generating network policies from the service graph
+///
+/// This compiler implements defense-in-depth with:
+/// - L7 (Istio AuthorizationPolicy): mTLS identity-based access control
+/// - L4 (CiliumNetworkPolicy): eBPF-based network enforcement
+///
+/// Policies are only generated for edges that satisfy bilateral agreement:
+/// caller declares dependency AND callee allows caller.
 pub struct PolicyCompiler<'a> {
     graph: &'a ServiceGraph,
-    namespace: String,
     trust_domain: String,
 }
 
 impl<'a> PolicyCompiler<'a> {
+    /// HBONE port for Istio Ambient waypoint communication
+    const HBONE_PORT: u16 = 15008;
+
     /// Create a new policy compiler
     ///
     /// # Arguments
-    /// * `graph` - The service graph to compile policies from
-    /// * `namespace` - The Kubernetes namespace for generated policies
-    /// * `trust_domain` - The SPIFFE trust domain (e.g., "mgmt-cluster.lattice.local")
-    pub fn new(
-        graph: &'a ServiceGraph,
-        namespace: impl Into<String>,
-        trust_domain: impl Into<String>,
-    ) -> Self {
+    /// * `graph` - The service graph for bilateral agreement checks
+    /// * `trust_domain` - SPIFFE trust domain (e.g., "prod.lattice.local")
+    pub fn new(graph: &'a ServiceGraph, trust_domain: impl Into<String>) -> Self {
         Self {
             graph,
-            namespace: namespace.into(),
             trust_domain: trust_domain.into(),
         }
     }
 
-    /// Generate the mesh-wide default-deny AuthorizationPolicy
+    /// Compile policies for a service
     ///
-    /// This is applied once per environment in istio-system namespace.
-    /// Uses ALLOW action with empty rules to deny everything by default.
-    pub fn compile_mesh_default_deny(&self) -> AuthorizationPolicy {
+    /// Returns empty policies if service is not in graph or has no active edges.
+    pub fn compile(&self, name: &str, namespace: &str, env: &str) -> GeneratedPolicies {
+        let Some(service_node) = self.graph.get_service(env, name) else {
+            return GeneratedPolicies::new();
+        };
+
+        // Skip Unknown services
+        if service_node.type_ == ServiceType::Unknown {
+            return GeneratedPolicies::new();
+        }
+
+        let mut output = GeneratedPolicies::new();
+
+        // Get active edges
+        let inbound_edges = self.graph.get_active_inbound_edges(env, name);
+        let outbound_edges = self.graph.get_active_outbound_edges(env, name);
+
+        // Generate L7 AuthorizationPolicy for inbound traffic
+        if !inbound_edges.is_empty() {
+            if let Some(auth_policy) =
+                self.compile_authorization_policy(&service_node, namespace, &inbound_edges)
+            {
+                output.authorization_policies.push(auth_policy);
+            }
+
+            // Generate waypoint allow policy
+            if let Some(waypoint_policy) = self.compile_waypoint_policy(&service_node, namespace) {
+                output.authorization_policies.push(waypoint_policy);
+            }
+        }
+
+        // Generate CiliumNetworkPolicy
+        output.cilium_policies.push(self.compile_cilium_policy(
+            &service_node,
+            namespace,
+            env,
+            &inbound_edges,
+            &outbound_edges,
+        ));
+
+        // Generate ServiceEntries for external dependencies
+        for edge in &outbound_edges {
+            if let Some(callee) = self.graph.get_service(env, &edge.callee) {
+                if callee.type_ == ServiceType::External {
+                    if let Some(entry) = self.compile_service_entry(&callee, namespace) {
+                        output.service_entries.push(entry);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+
+    /// Compile the mesh-wide default-deny AuthorizationPolicy
+    pub fn compile_mesh_default_deny() -> AuthorizationPolicy {
         AuthorizationPolicy {
             api_version: "security.istio.io/v1beta1".to_string(),
             kind: "AuthorizationPolicy".to_string(),
@@ -390,138 +427,41 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
-    /// Compile all policies for a specific service
-    ///
-    /// This generates:
-    /// - AuthorizationPolicy for L7 access control (who can call this service)
-    /// - Waypoint AuthorizationPolicy for L4 HBONE traffic
-    /// - CiliumNetworkPolicy for L4 ingress/egress
-    /// - ServiceEntries for external dependencies
-    pub fn compile_for_service(&self, env: &str, service_name: &str) -> GeneratedPolicies {
-        let mut policies = GeneratedPolicies::new();
-
-        let Some(service) = self.graph.get_service(env, service_name) else {
-            return policies;
-        };
-
-        // Skip Unknown services
-        if service.type_ == ServiceType::Unknown {
-            return policies;
-        }
-
-        // Get active edges
-        let inbound_edges = self.graph.get_active_inbound_edges(env, service_name);
-        let outbound_edges = self.graph.get_active_outbound_edges(env, service_name);
-
-        // Generate policies based on service type
-        match service.type_ {
-            ServiceType::Local => {
-                // Generate L7 AuthorizationPolicy for inbound traffic
-                if !inbound_edges.is_empty() {
-                    if let Some(auth_policy) =
-                        self.compile_service_allow_policy(&service, &inbound_edges)
-                    {
-                        policies.authorization_policies.push(auth_policy);
-                    }
-
-                    // Generate waypoint allow policy
-                    if let Some(waypoint_policy) =
-                        self.compile_waypoint_allow_policy(&service)
-                    {
-                        policies.authorization_policies.push(waypoint_policy);
-                    }
-                }
-
-                // Generate CiliumNetworkPolicy
-                policies
-                    .cilium_policies
-                    .push(self.compile_cilium_policy(&service, &inbound_edges, &outbound_edges));
-
-                // Generate ServiceEntries for external dependencies
-                for edge in &outbound_edges {
-                    if let Some(callee) = self.graph.get_service(env, &edge.callee) {
-                        if callee.type_ == ServiceType::External {
-                            if let Some(entry) = self.compile_service_entry(&callee) {
-                                policies.service_entries.push(entry);
-                            }
-                        }
-                    }
-                }
-            }
-            ServiceType::External => {
-                // External services don't get their own policies
-                // They're referenced in caller policies
-            }
-            ServiceType::Unknown => {
-                // Unknown services are placeholders, no policies needed
-            }
-        }
-
-        policies
+    fn spiffe_principal(&self, namespace: &str, service_name: &str) -> String {
+        format!(
+            "spiffe://{}/ns/{}/sa/{}",
+            self.trust_domain, namespace, service_name
+        )
     }
 
-    /// Compile all policies for an entire environment
-    pub fn compile_for_environment(&self, env: &str) -> GeneratedPolicies {
-        let mut policies = GeneratedPolicies::new();
-        let mut seen_external: HashSet<String> = HashSet::new();
-
-        // Add mesh default-deny
-        policies
-            .authorization_policies
-            .push(self.compile_mesh_default_deny());
-
-        // Compile policies for each local service
-        for service in self.graph.list_services(env) {
-            let service_policies = self.compile_for_service(env, &service.name);
-
-            policies
-                .authorization_policies
-                .extend(service_policies.authorization_policies);
-            policies
-                .cilium_policies
-                .extend(service_policies.cilium_policies);
-
-            // Deduplicate service entries
-            for entry in service_policies.service_entries {
-                if seen_external.insert(entry.metadata.name.clone()) {
-                    policies.service_entries.push(entry);
-                }
-            }
-        }
-
-        policies
+    fn waypoint_principal(&self, namespace: &str) -> String {
+        format!(
+            "spiffe://{}/ns/{}/sa/{}-waypoint",
+            self.trust_domain, namespace, namespace
+        )
     }
 
-    /// Generate AuthorizationPolicy for a service (L7 allow policy)
-    fn compile_service_allow_policy(
+    fn compile_authorization_policy(
         &self,
         service: &ServiceNode,
+        namespace: &str,
         inbound_edges: &[ActiveEdge],
     ) -> Option<AuthorizationPolicy> {
         if inbound_edges.is_empty() {
             return None;
         }
 
-        // Collect SPIFFE principals from callers
         let principals: Vec<String> = inbound_edges
             .iter()
-            .map(|edge| self.spiffe_principal(&edge.caller))
+            .map(|edge| self.spiffe_principal(namespace, &edge.caller))
             .collect();
 
-        // Collect allowed ports
-        let ports: Vec<String> = service
-            .ports
-            .values()
-            .map(|p| p.to_string())
-            .collect();
+        let ports: Vec<String> = service.ports.values().map(|p| p.to_string()).collect();
 
         Some(AuthorizationPolicy {
             api_version: "security.istio.io/v1beta1".to_string(),
             kind: "AuthorizationPolicy".to_string(),
-            metadata: PolicyMetadata::new(
-                format!("allow-to-{}", service.name),
-                &self.namespace,
-            ),
+            metadata: PolicyMetadata::new(format!("allow-to-{}", service.name), namespace),
             spec: AuthorizationPolicySpec {
                 target_refs: vec![TargetRef {
                     group: String::new(),
@@ -549,8 +489,11 @@ impl<'a> PolicyCompiler<'a> {
         })
     }
 
-    /// Generate waypoint AuthorizationPolicy (L4 allow from waypoint proxy)
-    fn compile_waypoint_allow_policy(&self, service: &ServiceNode) -> Option<AuthorizationPolicy> {
+    fn compile_waypoint_policy(
+        &self,
+        service: &ServiceNode,
+        namespace: &str,
+    ) -> Option<AuthorizationPolicy> {
         let mut match_labels = BTreeMap::new();
         match_labels.insert("app.kubernetes.io/name".to_string(), service.name.clone());
 
@@ -559,7 +502,7 @@ impl<'a> PolicyCompiler<'a> {
             kind: "AuthorizationPolicy".to_string(),
             metadata: PolicyMetadata::new(
                 format!("allow-waypoint-to-{}", service.name),
-                &self.namespace,
+                namespace,
             ),
             spec: AuthorizationPolicySpec {
                 target_refs: vec![],
@@ -568,7 +511,7 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
-                            principals: vec![self.waypoint_principal()],
+                            principals: vec![self.waypoint_principal(namespace)],
                         },
                     }],
                     to: vec![],
@@ -577,10 +520,11 @@ impl<'a> PolicyCompiler<'a> {
         })
     }
 
-    /// Generate CiliumNetworkPolicy for a service
     fn compile_cilium_policy(
         &self,
         service: &ServiceNode,
+        namespace: &str,
+        env: &str,
         inbound_edges: &[ActiveEdge],
         outbound_edges: &[ActiveEdge],
     ) -> CiliumNetworkPolicy {
@@ -598,7 +542,7 @@ impl<'a> PolicyCompiler<'a> {
                     let mut labels = BTreeMap::new();
                     labels.insert(
                         "k8s:io.kubernetes.pod.namespace".to_string(),
-                        self.namespace.clone(),
+                        namespace.to_string(),
                     );
                     labels.insert("app.kubernetes.io/name".to_string(), edge.caller.clone());
                     EndpointSelector {
@@ -607,7 +551,6 @@ impl<'a> PolicyCompiler<'a> {
                 })
                 .collect();
 
-            // Collect ports from service
             let to_ports: Vec<CiliumPortRule> = if service.ports.is_empty() {
                 vec![]
             } else {
@@ -641,19 +584,16 @@ impl<'a> PolicyCompiler<'a> {
         let mut waypoint_labels = BTreeMap::new();
         waypoint_labels.insert(
             "k8s:io.kubernetes.pod.namespace".to_string(),
-            self.namespace.clone(),
+            namespace.to_string(),
         );
-        waypoint_labels.insert(
-            "istio.io/waypoint-for".to_string(),
-            "service".to_string(),
-        );
+        waypoint_labels.insert("istio.io/waypoint-for".to_string(), "service".to_string());
         ingress_rules.push(CiliumIngressRule {
             from_endpoints: vec![EndpointSelector {
                 match_labels: waypoint_labels,
             }],
             to_ports: vec![CiliumPortRule {
                 ports: vec![CiliumPort {
-                    port: HBONE_PORT.to_string(),
+                    port: Self::HBONE_PORT.to_string(),
                     protocol: "TCP".to_string(),
                 }],
             }],
@@ -691,10 +631,7 @@ impl<'a> PolicyCompiler<'a> {
 
         // Always allow HBONE to waypoint
         let mut waypoint_egress_labels = BTreeMap::new();
-        waypoint_egress_labels.insert(
-            "istio.io/waypoint-for".to_string(),
-            "service".to_string(),
-        );
+        waypoint_egress_labels.insert("istio.io/waypoint-for".to_string(), "service".to_string());
         egress_rules.push(CiliumEgressRule {
             to_endpoints: vec![EndpointSelector {
                 match_labels: waypoint_egress_labels,
@@ -703,26 +640,23 @@ impl<'a> PolicyCompiler<'a> {
             to_cidr: vec![],
             to_ports: vec![CiliumPortRule {
                 ports: vec![CiliumPort {
-                    port: HBONE_PORT.to_string(),
+                    port: Self::HBONE_PORT.to_string(),
                     protocol: "TCP".to_string(),
                 }],
             }],
         });
 
-        // Add egress rules for internal dependencies
+        // Add egress rules for dependencies
         for edge in outbound_edges {
-            if let Some(callee) = self.graph.get_service(&self.namespace, &edge.callee) {
+            if let Some(callee) = self.graph.get_service(env, &edge.callee) {
                 match callee.type_ {
                     ServiceType::Local => {
                         let mut dep_labels = BTreeMap::new();
                         dep_labels.insert(
                             "k8s:io.kubernetes.pod.namespace".to_string(),
-                            self.namespace.clone(),
+                            namespace.to_string(),
                         );
-                        dep_labels.insert(
-                            "app.kubernetes.io/name".to_string(),
-                            edge.callee.clone(),
-                        );
+                        dep_labels.insert("app.kubernetes.io/name".to_string(), edge.callee.clone());
 
                         let to_ports: Vec<CiliumPortRule> = if callee.ports.is_empty() {
                             vec![]
@@ -757,7 +691,6 @@ impl<'a> PolicyCompiler<'a> {
                         });
                     }
                     ServiceType::External => {
-                        // Add FQDN-based egress for external services
                         let fqdns: Vec<FqdnSelector> = callee
                             .endpoints
                             .values()
@@ -797,7 +730,7 @@ impl<'a> PolicyCompiler<'a> {
         CiliumNetworkPolicy {
             api_version: "cilium.io/v2".to_string(),
             kind: "CiliumNetworkPolicy".to_string(),
-            metadata: PolicyMetadata::new(format!("policy-{}", service.name), &self.namespace),
+            metadata: PolicyMetadata::new(format!("policy-{}", service.name), namespace),
             spec: CiliumNetworkPolicySpec {
                 endpoint_selector: EndpointSelector {
                     match_labels: endpoint_labels,
@@ -808,8 +741,11 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
-    /// Generate ServiceEntry for an external service
-    fn compile_service_entry(&self, service: &ServiceNode) -> Option<ServiceEntry> {
+    fn compile_service_entry(
+        &self,
+        service: &ServiceNode,
+        namespace: &str,
+    ) -> Option<ServiceEntry> {
         if service.endpoints.is_empty() {
             return None;
         }
@@ -830,10 +766,10 @@ impl<'a> PolicyCompiler<'a> {
             })
             .collect();
 
-        let mut metadata = PolicyMetadata::new(&service.name, &self.namespace);
+        let mut metadata = PolicyMetadata::new(&service.name, namespace);
         metadata.labels.insert(
             "istio.io/use-waypoint".to_string(),
-            format!("{}-waypoint", self.namespace),
+            format!("{}-waypoint", namespace),
         );
 
         Some(ServiceEntry {
@@ -848,25 +784,6 @@ impl<'a> PolicyCompiler<'a> {
             },
         })
     }
-
-    /// Generate SPIFFE principal for a service
-    ///
-    /// Uses the full SPIFFE URI format with trust domain for cross-cluster identity:
-    /// `spiffe://{trust_domain}/ns/{namespace}/sa/{service}`
-    fn spiffe_principal(&self, service_name: &str) -> String {
-        format!(
-            "spiffe://{}/ns/{}/sa/{}",
-            self.trust_domain, self.namespace, service_name
-        )
-    }
-
-    /// Generate SPIFFE principal for the namespace waypoint
-    fn waypoint_principal(&self) -> String {
-        format!(
-            "spiffe://{}/ns/{}/sa/{}-waypoint",
-            self.trust_domain, self.namespace, self.namespace
-        )
-    }
 }
 
 // =============================================================================
@@ -876,15 +793,22 @@ impl<'a> PolicyCompiler<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{LatticeExternalServiceSpec, LatticeServiceSpec};
+    use crate::crd::{
+        ContainerSpec, DeploySpec, DependencyDirection, LatticeExternalServiceSpec, PortSpec,
+        ReplicaSpec, Resolution, ResourceSpec, ResourceType, ServicePortsSpec,
+    };
+    use crate::graph::ServiceGraph;
 
-    fn make_service_spec(deps: Vec<&str>, callers: Vec<&str>) -> LatticeServiceSpec {
-        use crate::crd::{
-            ContainerSpec, DeploySpec, DependencyDirection, PortSpec, ReplicaSpec, ResourceSpec,
-            ResourceType, ServicePortsSpec,
-        };
-        use std::collections::BTreeMap;
+    fn make_external_spec(allowed: Vec<&str>) -> LatticeExternalServiceSpec {
+        LatticeExternalServiceSpec {
+            endpoints: BTreeMap::from([("api".to_string(), "https://api.stripe.com:443".to_string())]),
+            allowed_requesters: allowed.into_iter().map(String::from).collect(),
+            resolution: Resolution::Dns,
+            description: None,
+        }
+    }
 
+    fn make_service_spec(deps: Vec<&str>, callers: Vec<&str>) -> crate::crd::LatticeServiceSpec {
         let mut resources = BTreeMap::new();
         for dep in deps {
             resources.insert(
@@ -899,7 +823,6 @@ mod tests {
             );
         }
         for caller in callers {
-            // The resource name IS the caller service name (allowed_callers returns the key)
             resources.insert(
                 caller.to_string(),
                 ResourceSpec {
@@ -938,7 +861,7 @@ mod tests {
             },
         );
 
-        LatticeServiceSpec {
+        crate::crd::LatticeServiceSpec {
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
@@ -947,21 +870,153 @@ mod tests {
         }
     }
 
-    fn make_external_spec(endpoints: Vec<(&str, &str)>, allowed: Vec<&str>) -> LatticeExternalServiceSpec {
-        use std::collections::BTreeMap;
-        use crate::crd::Resolution;
+    // =========================================================================
+    // Story: Bilateral Agreement (Policy Only Generated When Both Agree)
+    // =========================================================================
 
-        let mut ep_map = BTreeMap::new();
-        for (name, url) in endpoints {
-            ep_map.insert(name.to_string(), url.to_string());
-        }
+    #[test]
+    fn story_bilateral_agreement_generates_policy() {
+        let graph = ServiceGraph::new();
+        let env = "prod";
 
-        LatticeExternalServiceSpec {
-            endpoints: ep_map,
-            allowed_requesters: allowed.into_iter().map(String::from).collect(),
-            resolution: Resolution::Dns,
-            description: None,
-        }
+        // api allows gateway
+        let api_spec = make_service_spec(vec![], vec!["gateway"]);
+        graph.put_service(env, "api", &api_spec);
+
+        // gateway depends on api
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(env, "gateway", &gateway_spec);
+
+        // Compile policies for api (the callee)
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile("api", "prod-ns", env);
+
+        // Should have auth policy allowing gateway
+        assert!(!output.authorization_policies.is_empty());
+        let auth = &output.authorization_policies[0];
+        assert_eq!(auth.metadata.name, "allow-to-api");
+        assert!(auth.spec.rules[0].from[0]
+            .source
+            .principals
+            .iter()
+            .any(|p| p.contains("gateway")));
+    }
+
+    #[test]
+    fn story_no_policy_without_bilateral_agreement() {
+        let graph = ServiceGraph::new();
+        let env = "prod";
+
+        // api allows gateway, but gateway doesn't declare dependency
+        let api_spec = make_service_spec(vec![], vec!["gateway"]);
+        graph.put_service(env, "api", &api_spec);
+
+        // gateway doesn't depend on api (no bilateral agreement)
+        let gateway_spec = make_service_spec(vec![], vec![]);
+        graph.put_service(env, "gateway", &gateway_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile("api", "prod-ns", env);
+
+        // No auth policy (no bilateral agreement)
+        assert!(output.authorization_policies.is_empty());
+    }
+
+    // =========================================================================
+    // Story: Service Not in Graph
+    // =========================================================================
+
+    #[test]
+    fn story_no_policies_when_not_in_graph() {
+        let graph = ServiceGraph::new();
+
+        let compiler = PolicyCompiler::new(&graph, "test.lattice.local");
+        let output = compiler.compile("nonexistent", "default", "prod");
+
+        assert!(output.is_empty());
+    }
+
+    // =========================================================================
+    // Story: SPIFFE Trust Domain
+    // =========================================================================
+
+    #[test]
+    fn story_spiffe_uses_trust_domain() {
+        let graph = ServiceGraph::new();
+        let env = "prod";
+
+        let api_spec = make_service_spec(vec![], vec!["gateway"]);
+        graph.put_service(env, "api", &api_spec);
+
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(env, "gateway", &gateway_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "my-cluster.example.com");
+        let output = compiler.compile("api", "prod-ns", env);
+
+        let principals = &output.authorization_policies[0].spec.rules[0].from[0]
+            .source
+            .principals;
+        assert!(principals[0].starts_with("spiffe://my-cluster.example.com/"));
+        assert!(principals[0].contains("/ns/prod-ns/sa/gateway"));
+    }
+
+    // =========================================================================
+    // Story: Cilium Policy Always Generated
+    // =========================================================================
+
+    #[test]
+    fn story_cilium_policy_always_generated() {
+        let graph = ServiceGraph::new();
+        let env = "default";
+
+        let spec = make_service_spec(vec![], vec![]);
+        graph.put_service(env, "my-app", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test.lattice.local");
+        let output = compiler.compile("my-app", "default", env);
+
+        assert_eq!(output.cilium_policies.len(), 1);
+        let cnp = &output.cilium_policies[0];
+        assert_eq!(cnp.metadata.name, "policy-my-app");
+
+        // Should always have DNS egress
+        assert!(cnp.spec.egress.iter().any(|e| e
+            .to_ports
+            .iter()
+            .any(|pr| pr.ports.iter().any(|p| p.port == "53"))));
+
+        // Should always have waypoint HBONE ingress
+        assert!(cnp.spec.ingress.iter().any(|i| i
+            .to_ports
+            .iter()
+            .any(|pr| pr.ports.iter().any(|p| p.port == "15008"))));
+    }
+
+    // =========================================================================
+    // Story: External Dependencies
+    // =========================================================================
+
+    #[test]
+    fn story_external_service_generates_service_entry() {
+        let graph = ServiceGraph::new();
+        let env = "prod";
+
+        // api depends on external
+        let api_spec = make_service_spec(vec!["stripe-api"], vec![]);
+        graph.put_service(env, "api", &api_spec);
+
+        // stripe-api is external (allows api)
+        graph.put_external_service(env, "stripe-api", &make_external_spec(vec!["api"]));
+
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile("api", "prod-ns", env);
+
+        assert_eq!(output.service_entries.len(), 1);
+        let entry = &output.service_entries[0];
+        assert_eq!(entry.metadata.name, "stripe-api");
+        assert!(entry.spec.hosts.contains(&"api.stripe.com".to_string()));
+        assert_eq!(entry.spec.location, "MESH_EXTERNAL");
     }
 
     // =========================================================================
@@ -969,297 +1024,36 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_mesh_default_deny_policy() {
-        let graph = ServiceGraph::new();
-        let compiler = PolicyCompiler::new(&graph, "test-ns", "test-cluster.lattice.local");
-
-        let policy = compiler.compile_mesh_default_deny();
+    fn story_mesh_default_deny() {
+        let policy = PolicyCompiler::compile_mesh_default_deny();
 
         assert_eq!(policy.metadata.name, "mesh-default-deny");
         assert_eq!(policy.metadata.namespace, "istio-system");
         assert_eq!(policy.spec.action, "ALLOW");
-        assert!(policy.spec.rules.is_empty(), "Empty rules = deny all");
+        assert!(policy.spec.rules.is_empty()); // Empty = deny all
     }
 
     // =========================================================================
-    // Story: Service With Inbound Edges Gets Allow Policy
+    // Story: GeneratedPolicies Utility Methods
     // =========================================================================
 
     #[test]
-    fn story_service_with_callers_gets_authorization_policy() {
+    fn story_total_count() {
         let graph = ServiceGraph::new();
         let env = "prod";
 
-        // api service allows gateway to call it
-        let api_spec = make_service_spec(vec![], vec!["gateway"]);
-        graph.put_service(env, "api", &api_spec);
-
-        // gateway service calls api
-        let gateway_spec = make_service_spec(vec!["api"], vec![]);
-        graph.put_service(env, "gateway", &gateway_spec);
-
-        let compiler = PolicyCompiler::new(&graph, "prod-ns", "prod.lattice.local");
-        let policies = compiler.compile_for_service(env, "api");
-
-        // Should have AuthorizationPolicy for api
-        assert_eq!(policies.authorization_policies.len(), 2); // allow + waypoint
-
-        let allow_policy = policies
-            .authorization_policies
-            .iter()
-            .find(|p| p.metadata.name == "allow-to-api")
-            .expect("should have allow policy");
-
-        assert_eq!(allow_policy.spec.action, "ALLOW");
-        assert_eq!(allow_policy.spec.target_refs.len(), 1);
-        assert_eq!(allow_policy.spec.target_refs[0].name, "api");
-
-        // Check SPIFFE principal
-        let principals = &allow_policy.spec.rules[0].from[0].source.principals;
-        assert_eq!(principals.len(), 1);
-        assert!(principals[0].contains("gateway"));
-    }
-
-    // =========================================================================
-    // Story: Service Without Callers Gets No Allow Policy
-    // =========================================================================
-
-    #[test]
-    fn story_service_without_callers_gets_no_allow_policy() {
-        let graph = ServiceGraph::new();
-        let env = "prod";
-
-        // api service allows nobody
-        let api_spec = make_service_spec(vec![], vec![]);
-        graph.put_service(env, "api", &api_spec);
-
-        let compiler = PolicyCompiler::new(&graph, "prod-ns", "prod.lattice.local");
-        let policies = compiler.compile_for_service(env, "api");
-
-        // Should have no AuthorizationPolicy (no inbound edges)
-        assert!(
-            policies.authorization_policies.is_empty(),
-            "No callers = no allow policy"
-        );
-    }
-
-    // =========================================================================
-    // Story: Bilateral Agreement Required
-    // =========================================================================
-
-    #[test]
-    fn story_no_policy_without_bilateral_agreement() {
-        let graph = ServiceGraph::new();
-        let env = "prod";
-
-        // api declares it calls database
-        let api_spec = make_service_spec(vec!["database"], vec![]);
-        graph.put_service(env, "api", &api_spec);
-
-        // database does NOT allow api
-        let db_spec = make_service_spec(vec![], vec![]); // No allowed callers
-        graph.put_service(env, "database", &db_spec);
-
-        let compiler = PolicyCompiler::new(&graph, "prod-ns", "prod.lattice.local");
-        let api_policies = compiler.compile_for_service(env, "api");
-        let db_policies = compiler.compile_for_service(env, "database");
-
-        // api should have no egress rules for database (no bilateral agreement)
-        let cilium = api_policies.cilium_policies.first().expect("should have cilium policy");
-        let has_db_egress = cilium.spec.egress.iter().any(|e| {
-            e.to_endpoints.iter().any(|ep| {
-                ep.match_labels
-                    .get("app.kubernetes.io/name")
-                    .map(|v| v == "database")
-                    .unwrap_or(false)
-            })
-        });
-        assert!(!has_db_egress, "No bilateral agreement = no egress rule");
-
-        // database should have no authorization policy (no allowed callers)
-        assert!(db_policies.authorization_policies.is_empty());
-    }
-
-    // =========================================================================
-    // Story: CiliumNetworkPolicy Always Has DNS and HBONE
-    // =========================================================================
-
-    #[test]
-    fn story_cilium_policy_has_dns_and_hbone_egress() {
-        let graph = ServiceGraph::new();
-        let env = "prod";
-
-        let api_spec = make_service_spec(vec![], vec![]);
-        graph.put_service(env, "api", &api_spec);
-
-        let compiler = PolicyCompiler::new(&graph, "prod-ns", "prod.lattice.local");
-        let policies = compiler.compile_for_service(env, "api");
-
-        let cilium = policies.cilium_policies.first().expect("should have cilium policy");
-
-        // Should have DNS egress
-        let has_dns = cilium.spec.egress.iter().any(|e| {
-            e.to_endpoints.iter().any(|ep| {
-                ep.match_labels.get("k8s:k8s-app").map(|v| v == "kube-dns").unwrap_or(false)
-            })
-        });
-        assert!(has_dns, "Should allow DNS egress");
-
-        // Should have HBONE egress to waypoint
-        let has_hbone = cilium.spec.egress.iter().any(|e| {
-            e.to_ports.iter().any(|p| p.ports.iter().any(|port| port.port == "15008"))
-        });
-        assert!(has_hbone, "Should allow HBONE egress");
-
-        // Should have HBONE ingress from waypoint
-        let has_hbone_ingress = cilium.spec.ingress.iter().any(|i| {
-            i.to_ports.iter().any(|p| p.ports.iter().any(|port| port.port == "15008"))
-        });
-        assert!(has_hbone_ingress, "Should allow HBONE ingress");
-    }
-
-    // =========================================================================
-    // Story: External Service Gets ServiceEntry
-    // =========================================================================
-
-    #[test]
-    fn story_external_dependency_generates_service_entry() {
-        let graph = ServiceGraph::new();
-        let env = "prod";
-
-        // api depends on stripe
-        let api_spec = make_service_spec(vec!["stripe"], vec![]);
-        graph.put_service(env, "api", &api_spec);
-
-        // stripe is external service that allows api
-        let stripe_spec = make_external_spec(
-            vec![("api", "https://api.stripe.com")],
-            vec!["api"],
-        );
-        graph.put_external_service(env, "stripe", &stripe_spec);
-
-        let compiler = PolicyCompiler::new(&graph, "prod-ns", "prod.lattice.local");
-        let policies = compiler.compile_for_service(env, "api");
-
-        // Should have ServiceEntry for stripe
-        assert_eq!(policies.service_entries.len(), 1);
-        let entry = &policies.service_entries[0];
-        assert_eq!(entry.metadata.name, "stripe");
-        assert!(entry.spec.hosts.contains(&"api.stripe.com".to_string()));
-        assert_eq!(entry.spec.location, "MESH_EXTERNAL");
-    }
-
-    // =========================================================================
-    // Story: Wildcard Caller Allows Everyone
-    // =========================================================================
-
-    #[test]
-    fn story_wildcard_caller_allows_all() {
-        let graph = ServiceGraph::new();
-        let env = "prod";
-
-        // public-api allows everyone with wildcard
-        let public_spec = make_service_spec(vec![], vec!["*"]);
-        graph.put_service(env, "public-api", &public_spec);
-
-        // service-a calls public-api
-        let a_spec = make_service_spec(vec!["public-api"], vec![]);
-        graph.put_service(env, "service-a", &a_spec);
-
-        // service-b also calls public-api
-        let b_spec = make_service_spec(vec!["public-api"], vec![]);
-        graph.put_service(env, "service-b", &b_spec);
-
-        let compiler = PolicyCompiler::new(&graph, "prod-ns", "prod.lattice.local");
-        let policies = compiler.compile_for_service(env, "public-api");
-
-        // Should have allow policy with both callers
-        let allow_policy = policies
-            .authorization_policies
-            .iter()
-            .find(|p| p.metadata.name == "allow-to-public-api")
-            .expect("should have allow policy");
-
-        let principals = &allow_policy.spec.rules[0].from[0].source.principals;
-        assert_eq!(principals.len(), 2);
-    }
-
-    // =========================================================================
-    // Story: Environment Compilation
-    // =========================================================================
-
-    #[test]
-    fn story_compile_entire_environment() {
-        let graph = ServiceGraph::new();
-        let env = "staging";
-
-        let api_spec = make_service_spec(vec!["database"], vec!["gateway"]);
+        let api_spec = make_service_spec(vec!["stripe"], vec!["gateway"]);
         graph.put_service(env, "api", &api_spec);
 
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(env, "gateway", &gateway_spec);
 
-        let db_spec = make_service_spec(vec![], vec!["api"]);
-        graph.put_service(env, "database", &db_spec);
+        graph.put_external_service(env, "stripe", &make_external_spec(vec!["api"]));
 
-        let compiler = PolicyCompiler::new(&graph, "staging-ns", "staging.lattice.local");
-        let policies = compiler.compile_for_environment(env);
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile("api", "prod-ns", env);
 
-        // Should have mesh-default-deny
-        assert!(policies
-            .authorization_policies
-            .iter()
-            .any(|p| p.metadata.name == "mesh-default-deny"));
-
-        // Should have policies for api, gateway, database
-        assert_eq!(policies.cilium_policies.len(), 3);
-
-        // Should have allow policies for api and database (they have callers)
-        let allow_count = policies
-            .authorization_policies
-            .iter()
-            .filter(|p| p.metadata.name.starts_with("allow-to-"))
-            .count();
-        assert_eq!(allow_count, 2); // api and database
-    }
-
-    // =========================================================================
-    // Story: SPIFFE Principal Format
-    // =========================================================================
-
-    #[test]
-    fn story_spiffe_principals_correctly_formatted() {
-        let graph = ServiceGraph::new();
-        let compiler = PolicyCompiler::new(&graph, "my-namespace", "my-cluster.lattice.local");
-
-        let principal = compiler.spiffe_principal("my-service");
-        assert_eq!(
-            principal,
-            "spiffe://my-cluster.lattice.local/ns/my-namespace/sa/my-service"
-        );
-
-        let waypoint = compiler.waypoint_principal();
-        assert_eq!(
-            waypoint,
-            "spiffe://my-cluster.lattice.local/ns/my-namespace/sa/my-namespace-waypoint"
-        );
-    }
-
-    // =========================================================================
-    // Story: Policy Serialization
-    // =========================================================================
-
-    #[test]
-    fn story_policies_serialize_to_yaml() {
-        let graph = ServiceGraph::new();
-        let compiler = PolicyCompiler::new(&graph, "default", "default.lattice.local");
-
-        let policy = compiler.compile_mesh_default_deny();
-        let yaml = serde_yaml::to_string(&policy).expect("should serialize");
-
-        assert!(yaml.contains("apiVersion: security.istio.io/v1beta1"));
-        assert!(yaml.contains("kind: AuthorizationPolicy"));
-        assert!(yaml.contains("name: mesh-default-deny"));
-        assert!(yaml.contains("namespace: istio-system"));
+        // 2 auth policies (allow + waypoint) + 1 cilium + 1 service entry = 4
+        assert_eq!(output.total_count(), 4);
     }
 }
