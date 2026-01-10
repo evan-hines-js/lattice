@@ -654,7 +654,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         let mut manifests = generate_all_manifests(&self.manifest_generator, &config);
 
         // Add the LatticeCluster CRD definition (CustomResourceDefinition)
-        // This must come before the CRD instance so Kubernetes knows the type
+        // The CRD is needed so post-pivot manifests can create the LatticeCluster instance
         let crd_definition = serde_yaml::to_string(&LatticeCluster::crd()).unwrap_or_else(|e| {
             panic!(
                 "BUG: failed to serialize LatticeCluster CRD to YAML: {}. \
@@ -664,8 +664,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         });
         manifests.push(crd_definition);
 
-        // Add the LatticeCluster CRD instance - this tells the controller it has a parent
-        manifests.push(info.cluster_manifest.clone());
+        // NOTE: LatticeCluster instance is NOT included in bootstrap manifests.
+        // It will be applied via post-pivot manifests after pivot completes.
+        // Before pivot, the workload cluster just needs the agent + parent config.
 
         // Add parent connection config Secret for agent to use
         let parent_config = Secret {

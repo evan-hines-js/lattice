@@ -632,9 +632,9 @@ fn validate_image(image: &str, container_name: &str) -> Result<(), crate::Error>
 /// Validate CPU quantity format (e.g., "100m", "1", "0.5")
 fn validate_cpu_quantity(qty: &str, container_name: &str, field: &str) -> Result<(), crate::Error> {
     // CPU can be: integer, decimal, or integer with 'm' suffix
-    let is_valid = if qty.ends_with('m') {
+    let is_valid = if let Some(stripped) = qty.strip_suffix('m') {
         // Millicores: must be integer
-        qty[..qty.len() - 1].parse::<u64>().is_ok()
+        stripped.parse::<u64>().is_ok()
     } else {
         // Cores: can be integer or decimal
         qty.parse::<f64>().is_ok()

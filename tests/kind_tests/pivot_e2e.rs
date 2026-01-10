@@ -99,8 +99,9 @@ fn run_cmd_allow_fail(cmd: &str, args: &[&str]) -> String {
 async fn build_and_push_lattice_image() -> Result<(), String> {
     println!("  Building lattice Docker image...");
 
-    let output = ProcessCommand::new("docker")
-        .args(["build", "-t", LATTICE_IMAGE, "."])
+    // Use docker-build.sh which reads versions from versions.toml
+    let output = ProcessCommand::new("./scripts/docker-build.sh")
+        .args(["-t", LATTICE_IMAGE])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .map_err(|e| format!("Failed to run docker build: {}", e))?;
@@ -1091,28 +1092,10 @@ spec:
     }
     println!("  LatticeCluster CRD exists");
 
-    // Check that the management cluster's own LatticeCluster is Ready
-    println!("  Checking management cluster's LatticeCluster status...");
+    // Wait for the management cluster's own LatticeCluster to be Ready
+    println!("  Waiting for management cluster's LatticeCluster to be Ready...");
     let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());
-    let mgmt_lc = api
-        .get(MGMT_CLUSTER_NAME)
-        .await
-        .map_err(|e| format!("Failed to get management LatticeCluster: {}", e))?;
-
-    let mgmt_phase = mgmt_lc
-        .status
-        .as_ref()
-        .map(|s| s.phase.clone())
-        .unwrap_or(ClusterPhase::Pending);
-
-    println!("  Management cluster phase: {:?}", mgmt_phase);
-
-    if !matches!(mgmt_phase, ClusterPhase::Ready) {
-        return Err(format!(
-            "Management cluster should be Ready, but is {:?}",
-            mgmt_phase
-        ));
-    }
+    watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME).await?;
 
     println!("\n  SUCCESS: Management cluster is self-managing!");
 

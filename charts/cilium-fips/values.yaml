@@ -1,0 +1,51 @@
+# Cilium FIPS Override Values
+# Use with: helm install cilium cilium/cilium -f values.yaml
+#
+# All images use FIPS 140-3 validated crypto:
+# - cilium-agent: Go 1.24 native FIPS
+# - cilium-operator: Go 1.24 native FIPS
+# - hubble-relay: Go 1.24 native FIPS
+
+image:
+  repository: ghcr.io/evan-hines-js/cilium-fips/cilium
+  tag: "1.16.5"
+  useDigest: false
+
+operator:
+  image:
+    repository: ghcr.io/evan-hines-js/cilium-fips/operator
+    tag: "1.16.5"
+    useDigest: false
+
+hubble:
+  relay:
+    image:
+      repository: ghcr.io/evan-hines-js/cilium-fips/hubble-relay
+      tag: "1.16.5"
+      useDigest: false
+  ui:
+    enabled: true
+
+# Cilium-specific settings for Lattice clusters
+kubeProxyReplacement: true
+k8sServiceHost: "localhost"
+k8sServicePort: "7445"
+
+# LB-IPAM for LoadBalancer services (cell servers)
+l2announcements:
+  enabled: true
+
+externalIPs:
+  enabled: true
+
+# eBPF-based load balancing
+loadBalancer:
+  mode: dsr
+  algorithm: maglev
+
+# Enable Cilium Network Policies
+policyEnforcementMode: default
+
+# BGP for multi-cluster (future)
+bgpControlPlane:
+  enabled: false

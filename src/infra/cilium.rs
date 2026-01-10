@@ -36,7 +36,9 @@ pub struct CiliumConfig {
 
 impl Default for CiliumConfig {
     fn default() -> Self {
-        Self { version: "1.16.5" }
+        Self {
+            version: env!("CILIUM_VERSION"),
+        }
     }
 }
 
@@ -240,14 +242,14 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = CiliumConfig::default();
-        assert_eq!(config.version, "1.16.5");
+        assert_eq!(config.version, env!("CILIUM_VERSION"));
     }
 
     #[test]
     fn test_reconciler_creation() {
         // Only runs if helm is available
         if let Ok(reconciler) = CiliumReconciler::new() {
-            assert_eq!(reconciler.version(), "1.16.5");
+            assert_eq!(reconciler.version(), env!("CILIUM_VERSION"));
             assert!(!reconciler.manifests().is_empty());
         }
     }

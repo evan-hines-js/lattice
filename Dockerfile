@@ -1,88 +1,136 @@
-# Build stage
-FROM rust:latest AS builder
+# =============================================================================
+# FIPS 140-3 Compliant Build
+# =============================================================================
+# All cryptographic operations use FIPS 140-3 validated modules:
+# - Lattice (Rust): aws-lc-rs FIPS module
+# - kubectl/helm/clusterctl (Go 1.24+): Native FIPS crypto module
+# =============================================================================
 
-# Install build dependencies
+ARG FIPS=true
+
+# -----------------------------------------------------------------------------
+# Stage 1: Build Go CLIs with Go 1.25 native FIPS support
+# -----------------------------------------------------------------------------
+FROM golang:1.25-bookworm AS go-builder
+
+ARG TARGETARCH
+ARG FIPS
+
+# Versions from versions.toml - use scripts/docker-build.sh to build
+# or pass --build-arg to override
+ARG KUBECTL_VERSION
+ARG HELM_VERSION
+ARG CLUSTERCTL_VERSION
+ARG CAPI_VERSION
+
+WORKDIR /build
+
+# Go 1.24 native FIPS - no CGO required!
+# GOFIPS140=latest selects the FIPS crypto module at build time
+ENV GOFIPS140=${FIPS:+latest}
+ENV CGO_ENABLED=0
+
+# Build kubectl from source with FIPS
+RUN git clone --depth 1 --branch v${KUBECTL_VERSION} https://github.com/kubernetes/kubernetes.git /build/kubernetes && \
+    cd /build/kubernetes && \
+    go build -o /usr/local/bin/kubectl ./cmd/kubectl
+
+# Build helm from source with FIPS
+# Must use 'make build' to set proper ldflags (k8s version defaults)
+RUN git clone --depth 1 --branch v${HELM_VERSION} https://github.com/helm/helm.git /build/helm && \
+    cd /build/helm && \
+    make build && \
+    cp bin/helm /usr/local/bin/helm
+
+# Build clusterctl from source with FIPS
+RUN git clone --depth 1 --branch v${CLUSTERCTL_VERSION} https://github.com/kubernetes-sigs/cluster-api.git /build/cluster-api && \
+    cd /build/cluster-api && \
+    go build -o /usr/local/bin/clusterctl ./cmd/clusterctl
+
+# -----------------------------------------------------------------------------
+# Stage 2: Build Lattice with aws-lc-rs FIPS
+# -----------------------------------------------------------------------------
+FROM rust:latest AS rust-builder
+
+ARG FIPS
+
+# Install build dependencies for aws-lc-rs FIPS
 RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     libclang-dev \
     cmake \
+    golang \
     && rm -rf /var/lib/apt/lists/*
 
-# Install helm for chart download during build
-ARG TARGETARCH
-RUN ARCH=$(echo ${TARGETARCH:-amd64} | sed 's/arm64/arm64/;s/amd64/amd64/') && \
-    curl -fsSL https://get.helm.sh/helm-v3.16.0-linux-${ARCH}.tar.gz | tar xz && \
-    mv linux-${ARCH}/helm /usr/local/bin/helm && \
-    rm -rf linux-${ARCH}
+# Copy helm from go-builder (FIPS-compliant, built from source)
+COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
 
 WORKDIR /app
 
 # Copy everything needed for build
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock build.rs versions.toml ./
 COPY proto ./proto
 COPY src ./src
 COPY benches ./benches
 
-# Build the binary (build.rs will download helm charts to test-charts/)
-RUN cargo build --release
+# Build with FIPS if enabled, otherwise standard build
+RUN if [ -n "$FIPS" ]; then \
+        echo "Building with FIPS support..." && \
+        cargo build --release --features fips; \
+    else \
+        echo "Building without FIPS..." && \
+        cargo build --release; \
+    fi
 
-# Runtime stage - rust:latest is Debian trixie, so use matching runtime
+# -----------------------------------------------------------------------------
+# Stage 3: Runtime image (minimal)
+# -----------------------------------------------------------------------------
 FROM debian:trixie-slim
 
-# Install runtime dependencies and tools
+# Re-declare ARG for this stage
+ARG CAPI_VERSION
+
+# Install only CA certificates for TLS
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install kubectl
-ARG TARGETARCH
-RUN ARCH=$(echo ${TARGETARCH:-amd64} | sed 's/arm64/arm64/;s/amd64/amd64/') && \
-    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl" && \
-    chmod +x kubectl && \
-    mv kubectl /usr/local/bin/
+# Copy FIPS-compliant Go binaries
+COPY --from=go-builder /usr/local/bin/kubectl /usr/local/bin/kubectl
+COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
+COPY --from=go-builder /usr/local/bin/clusterctl /usr/local/bin/clusterctl
 
-# Install clusterctl for pivot operations (latest version)
-RUN ARCH=$(echo ${TARGETARCH:-amd64} | sed 's/arm64/arm64/;s/amd64/amd64/') && \
-    CLUSTERCTL_VERSION=$(curl -s https://api.github.com/repos/kubernetes-sigs/cluster-api/releases/latest | grep '"tag_name"' | cut -d'"' -f4) && \
-    curl -L "https://github.com/kubernetes-sigs/cluster-api/releases/download/${CLUSTERCTL_VERSION}/clusterctl-linux-${ARCH}" -o /usr/local/bin/clusterctl && \
-    chmod +x /usr/local/bin/clusterctl
-
-# Install helm for CNI manifest generation
-RUN ARCH=$(echo ${TARGETARCH:-amd64} | sed 's/arm64/arm64/;s/amd64/amd64/') && \
-    curl -fsSL https://get.helm.sh/helm-v3.16.0-linux-${ARCH}.tar.gz | tar xz && \
-    mv linux-${ARCH}/helm /usr/local/bin/helm && \
-    rm -rf linux-${ARCH}
-
-# Copy binary from builder
-COPY --from=builder /app/target/release/lattice /usr/local/bin/lattice
+# Copy Lattice binary
+COPY --from=rust-builder /app/target/release/lattice /usr/local/bin/lattice
 
 # Copy helm charts from builder (downloaded by build.rs)
-COPY --from=builder /app/test-charts /charts
+COPY --from=rust-builder /app/test-charts /charts
 
 # Copy CAPI providers from builder (downloaded by build.rs)
-COPY --from=builder /app/test-providers /providers
+COPY --from=rust-builder /app/test-providers /providers
 
 # Create clusterctl config with local provider repositories
-RUN printf '%s\n' \
-  'providers:' \
-  '  - name: "cluster-api"' \
-  '    url: "file:///providers/cluster-api/v1.12.1/core-components.yaml"' \
-  '    type: "CoreProvider"' \
-  '  - name: "kubeadm"' \
-  '    url: "file:///providers/bootstrap-kubeadm/v1.12.1/bootstrap-components.yaml"' \
-  '    type: "BootstrapProvider"' \
-  '  - name: "kubeadm"' \
-  '    url: "file:///providers/control-plane-kubeadm/v1.12.1/control-plane-components.yaml"' \
-  '    type: "ControlPlaneProvider"' \
-  '  - name: "docker"' \
-  '    url: "file:///providers/infrastructure-docker/v1.12.1/infrastructure-components-development.yaml"' \
-  '    type: "InfrastructureProvider"' \
-  > /providers/clusterctl.yaml
+RUN echo "providers:" > /providers/clusterctl.yaml && \
+    echo "  - name: \"cluster-api\"" >> /providers/clusterctl.yaml && \
+    echo "    url: \"file:///providers/cluster-api/v${CAPI_VERSION}/core-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "    type: \"CoreProvider\"" >> /providers/clusterctl.yaml && \
+    echo "  - name: \"kubeadm\"" >> /providers/clusterctl.yaml && \
+    echo "    url: \"file:///providers/bootstrap-kubeadm/v${CAPI_VERSION}/bootstrap-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "    type: \"BootstrapProvider\"" >> /providers/clusterctl.yaml && \
+    echo "  - name: \"kubeadm\"" >> /providers/clusterctl.yaml && \
+    echo "    url: \"file:///providers/control-plane-kubeadm/v${CAPI_VERSION}/control-plane-components.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "    type: \"ControlPlaneProvider\"" >> /providers/clusterctl.yaml && \
+    echo "  - name: \"docker\"" >> /providers/clusterctl.yaml && \
+    echo "    url: \"file:///providers/infrastructure-docker/v${CAPI_VERSION}/infrastructure-components-development.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "    type: \"InfrastructureProvider\"" >> /providers/clusterctl.yaml
 
 # Set environment variables for air-gapped clusterctl operation
 ENV GOPROXY=off
 ENV CLUSTERCTL_DISABLE_VERSIONCHECK=true
+
+# Enforce FIPS mode at runtime for Go binaries (kubectl, helm, clusterctl)
+# This ensures only FIPS-approved algorithms are used
+ENV GODEBUG=fips140=only
 
 # Create non-root user
 RUN useradd -r -u 1000 -m lattice && \

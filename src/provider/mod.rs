@@ -415,11 +415,12 @@ done"#,
         ));
 
         // Apply manifests with retry
+        // Use --server-side --force-conflicts to handle race with controller updating status
         commands.push(
             r#"echo "Applying bootstrap manifests..."
 RETRY_DELAY=5
 while true; do
-  if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /tmp/bootstrap-manifests.yaml; then
+  if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply --server-side --force-conflicts -f /tmp/bootstrap-manifests.yaml; then
     echo "Successfully applied bootstrap manifests"
     break
   fi

@@ -1,0 +1,126 @@
+name: Build Lattice Operator
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'src/**'
+      - 'proto/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Dockerfile'
+      - 'versions.toml'
+      - '.github/workflows/lattice.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'proto/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Dockerfile'
+      - 'versions.toml'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: evan-hines-js/lattice
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse versions.toml
+        id: versions
+        run: |
+          # Parse versions from versions.toml
+          get_version() {
+            local section=$1
+            local key=$2
+            awk -v section="[$section]" -v key="$key" '
+              $0 == section { in_section=1; next }
+              /^\[/ { in_section=0 }
+              in_section && $1 == key { gsub(/[" ]/, "", $3); print $3 }
+            ' versions.toml
+          }
+
+          echo "kubectl=$(get_version kubernetes version)" >> $GITHUB_OUTPUT
+          echo "helm=$(get_version helm version)" >> $GITHUB_OUTPUT
+          echo "clusterctl=$(get_version clusterctl version)" >> $GITHUB_OUTPUT
+          echo "capi=$(get_version capi version)" >> $GITHUB_OUTPUT
+
+          # Debug output
+          echo "Versions:"
+          echo "  kubectl: $(get_version kubernetes version)"
+          echo "  helm: $(get_version helm version)"
+          echo "  clusterctl: $(get_version clusterctl version)"
+          echo "  capi: $(get_version capi version)"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push (FIPS)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            FIPS=true
+            KUBECTL_VERSION=${{ steps.versions.outputs.kubectl }}
+            HELM_VERSION=${{ steps.versions.outputs.helm }}
+            CLUSTERCTL_VERSION=${{ steps.versions.outputs.clusterctl }}
+            CAPI_VERSION=${{ steps.versions.outputs.capi }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (non-FIPS, for testing)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-dev
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            FIPS=
+            KUBECTL_VERSION=${{ steps.versions.outputs.kubectl }}
+            HELM_VERSION=${{ steps.versions.outputs.helm }}
+            CLUSTERCTL_VERSION=${{ steps.versions.outputs.clusterctl }}
+            CAPI_VERSION=${{ steps.versions.outputs.capi }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

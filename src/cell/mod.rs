@@ -372,6 +372,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_running_starts_servers() {
+        // Install crypto provider before creating kube client (which uses TLS)
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let Some(client) = try_test_client().await else {
             // Skip test if no kubeconfig available
             return;
@@ -424,6 +427,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_bootstrap_state_available_after_start() {
+        // Install crypto provider before creating kube client (which uses TLS)
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let Some(client) = try_test_client().await else {
             // Skip test if no kubeconfig available
             return;
