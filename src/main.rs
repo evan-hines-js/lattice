@@ -219,6 +219,116 @@ async fn ensure_crds_installed(client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Ensure the MutatingWebhookConfiguration for Deployment injection is installed
+///
+/// This creates a webhook that intercepts Deployment CREATE/UPDATE and injects
+/// container specs from LatticeService CRDs. Only Deployments with the
+/// `lattice.dev/service` label are intercepted.
+async fn ensure_webhook_config(
+    client: &Client,
+    ca: &std::sync::Arc<lattice::pki::CertificateAuthority>,
+) -> anyhow::Result<()> {
+    use k8s_openapi::api::admissionregistration::v1::{
+        MutatingWebhook, MutatingWebhookConfiguration, RuleWithOperations, ServiceReference,
+        WebhookClientConfig,
+    };
+    use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, LabelSelectorRequirement};
+    use kube::api::{Api, Patch, PatchParams};
+
+    let params = PatchParams::apply("lattice-controller").force();
+
+    // 1. Create ClusterIP Service for the webhook
+    // This exposes the operator's webhook endpoint internally
+    let webhook_service = Service {
+        metadata: kube::api::ObjectMeta {
+            name: Some("lattice-webhook".to_string()),
+            namespace: Some("lattice-system".to_string()),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            selector: Some(std::collections::BTreeMap::from([(
+                "app".to_string(),
+                "lattice-operator".to_string(),
+            )])),
+            ports: Some(vec![ServicePort {
+                name: Some("https".to_string()),
+                port: 443,
+                target_port: Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(
+                    lattice::DEFAULT_BOOTSTRAP_PORT as i32,
+                )),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let services: Api<Service> = Api::namespaced(client.clone(), "lattice-system");
+    services
+        .patch("lattice-webhook", &params, &Patch::Apply(&webhook_service))
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create webhook Service: {}", e))?;
+
+    // 2. Create MutatingWebhookConfiguration
+    // This tells K8s to send Deployment admission requests to our webhook
+    let ca_bundle = ca.ca_cert_pem().as_bytes().to_vec();
+
+    let webhook_config = MutatingWebhookConfiguration {
+        metadata: kube::api::ObjectMeta {
+            name: Some("lattice-deployment-mutator".to_string()),
+            ..Default::default()
+        },
+        webhooks: Some(vec![MutatingWebhook {
+            name: "deployments.lattice.dev".to_string(),
+            admission_review_versions: vec!["v1".to_string()],
+            side_effects: "None".to_string(),
+            failure_policy: Some("Fail".to_string()),
+            match_policy: Some("Equivalent".to_string()),
+            rules: Some(vec![RuleWithOperations {
+                operations: Some(vec!["CREATE".to_string(), "UPDATE".to_string()]),
+                api_groups: Some(vec!["apps".to_string()]),
+                api_versions: Some(vec!["v1".to_string()]),
+                resources: Some(vec!["deployments".to_string()]),
+                scope: Some("Namespaced".to_string()),
+            }]),
+            client_config: WebhookClientConfig {
+                service: Some(ServiceReference {
+                    name: "lattice-webhook".to_string(),
+                    namespace: "lattice-system".to_string(),
+                    path: Some("/mutate/deployments".to_string()),
+                    port: Some(443),
+                }),
+                ca_bundle: Some(k8s_openapi::ByteString(ca_bundle)),
+                ..Default::default()
+            },
+            // Only intercept Deployments with lattice.dev/service label
+            object_selector: Some(LabelSelector {
+                match_expressions: Some(vec![LabelSelectorRequirement {
+                    key: "lattice.dev/service".to_string(),
+                    operator: "Exists".to_string(),
+                    values: None,
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]),
+    };
+
+    let webhooks: Api<MutatingWebhookConfiguration> = Api::all(client.clone());
+    webhooks
+        .patch(
+            "lattice-deployment-mutator",
+            &params,
+            &Patch::Apply(&webhook_config),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create MutatingWebhookConfiguration: {}", e))?;
+
+    tracing::info!("Webhook configuration installed");
+    Ok(())
+}
+
 /// Reconcile infrastructure components
 ///
 /// Ensures Istio is installed at the correct version. Cilium is deployed at bootstrap.
@@ -381,17 +491,53 @@ async fn run_controller() -> anyhow::Result<()> {
     let manifest_generator = lattice::bootstrap::DefaultManifestGenerator::new()
         .map_err(|e| anyhow::anyhow!("Failed to create manifest generator: {}", e))?;
 
-    // Get extra SANs from environment (cell host IP if this is a cell cluster)
-    let extra_sans: Vec<String> = std::env::var("LATTICE_CELL_HOST")
-        .ok()
-        .map(|h| vec![h])
-        .unwrap_or_default();
+    // Get extra SANs from our own LatticeCluster CRD (cell host IP if this is a cell cluster)
+    // This is needed for TLS certificate to be valid for the cell's external IP
+    // Retry until CRD exists (eventually consistent - CRD may not exist on first startup)
+    let extra_sans: Vec<String> = if let Ok(cluster_name) = std::env::var("LATTICE_CLUSTER_NAME") {
+        let clusters: kube::Api<lattice::crd::LatticeCluster> = kube::Api::all(client.clone());
+        let mut retry_delay = std::time::Duration::from_secs(1);
+        let max_delay = std::time::Duration::from_secs(30);
+
+        loop {
+            match clusters.get(&cluster_name).await {
+                Ok(cluster) => {
+                    if let Some(ref cell) = cluster.spec.cell {
+                        tracing::info!(host = %cell.host, "Adding cell host to server certificate SANs");
+                        break vec![cell.host.clone()];
+                    } else {
+                        tracing::debug!("LatticeCluster has no cell spec, no extra SANs needed");
+                        break vec![];
+                    }
+                }
+                Err(kube::Error::Api(e)) if e.code == 404 => {
+                    tracing::info!(
+                        cluster = %cluster_name,
+                        retry_in = ?retry_delay,
+                        "LatticeCluster not found yet, waiting..."
+                    );
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = std::cmp::min(retry_delay * 2, max_delay);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to read LatticeCluster, continuing without cell host SAN");
+                    break vec![];
+                }
+            }
+        }
+    } else {
+        vec![]
+    };
 
     cell_servers
         .ensure_running_with(manifest_generator, &extra_sans, client.clone())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start cell servers: {}", e))?;
     tracing::info!("Cell servers started (webhook + bootstrap + gRPC)");
+
+    // Install MutatingWebhookConfiguration for Deployment injection
+    // This must happen after cell servers start (we need the CA)
+    ensure_webhook_config(&client, cell_servers.ca()).await?;
 
     // Create controller context with cell servers
     // LATTICE_CLUSTER_NAME tells the controller which cluster it's running on (to avoid self-provisioning)
