@@ -25,7 +25,7 @@ pub use docker::DockerProvider;
 
 use async_trait::async_trait;
 
-use crate::crd::{LatticeCluster, ProviderSpec};
+use crate::crd::{LatticeCluster, ProviderSpec, ProviderType};
 use crate::Result;
 
 /// A CAPI manifest represented as an untyped Kubernetes resource
@@ -492,6 +492,38 @@ pub trait Provider: Send + Sync {
     ///
     /// `Ok(())` if the spec is valid, or an error describing what's wrong
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()>;
+}
+
+/// Create a provider instance for the given provider type
+///
+/// This factory function returns the appropriate provider implementation
+/// based on the cluster's provider type. The provider is configured with
+/// the given namespace for CAPI resources.
+///
+/// # Arguments
+///
+/// * `provider_type` - The type of infrastructure provider (Docker, AWS, etc.)
+/// * `namespace` - The Kubernetes namespace for CAPI resources
+///
+/// # Returns
+///
+/// A boxed provider instance, or an error if the provider type is not supported
+pub fn create_provider(
+    provider_type: ProviderType,
+    namespace: &str,
+) -> Result<Box<dyn Provider>> {
+    match provider_type {
+        ProviderType::Docker => Ok(Box::new(DockerProvider::with_namespace(namespace))),
+        ProviderType::Aws => Err(crate::Error::provider(
+            "AWS provider not yet implemented".to_string(),
+        )),
+        ProviderType::Gcp => Err(crate::Error::provider(
+            "GCP provider not yet implemented".to_string(),
+        )),
+        ProviderType::Azure => Err(crate::Error::provider(
+            "Azure provider not yet implemented".to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]
