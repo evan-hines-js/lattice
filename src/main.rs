@@ -79,7 +79,6 @@ struct InstallArgs {
     timeout_secs: u64,
 }
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install crypto provider
@@ -132,7 +131,10 @@ async fn run_install(args: InstallArgs) -> anyhow::Result<()> {
     println!("Config file: {:?}", args.config_file);
     println!("Management cluster: {}", cluster_name);
     println!("Provider: {}", provider);
-    println!("Kubernetes version: {}", cluster.spec.provider.kubernetes.version);
+    println!(
+        "Kubernetes version: {}",
+        cluster.spec.provider.kubernetes.version
+    );
     println!();
 
     // Read registry credentials if provided
@@ -355,10 +357,9 @@ async fn start_agent_if_needed(
     );
 
     // Request certificate from cell
-    let credentials =
-        AgentClient::request_certificate(&http_endpoint, cluster_name, &ca_cert_pem)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get certificate: {}", e))?;
+    let credentials = AgentClient::request_certificate(&http_endpoint, cluster_name, &ca_cert_pem)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get certificate: {}", e))?;
 
     // Create agent client config
     let config = AgentClientConfig {

@@ -188,10 +188,7 @@ async fn story_operator_creates_workload_cluster_for_production() {
 
     // Assert: The cluster is created as a workload cluster
     assert_eq!(created.metadata.name.as_deref(), Some(name));
-    assert!(
-        created.spec.has_parent(),
-        "Should be a workload cluster"
-    );
+    assert!(created.spec.has_parent(), "Should be a workload cluster");
     assert!(
         !created.spec.is_cell(),
         "Workload cluster should not be a cell"

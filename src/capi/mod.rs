@@ -182,11 +182,14 @@ mod tests {
     #[tokio::test]
     async fn when_installation_fails_error_propagates() {
         let mut installer = MockCapiInstaller::new();
-        installer.expect_install().with(eq("docker")).returning(|_| {
-            Err(Error::capi_installation(
-                "clusterctl init failed: timeout".to_string(),
-            ))
-        });
+        installer
+            .expect_install()
+            .with(eq("docker"))
+            .returning(|_| {
+                Err(Error::capi_installation(
+                    "clusterctl init failed: timeout".to_string(),
+                ))
+            });
 
         let result = ensure_capi_installed_with(&installer, &ProviderType::Docker).await;
         assert!(result.is_err());

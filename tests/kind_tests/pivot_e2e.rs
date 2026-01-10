@@ -250,7 +250,7 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
             },
             nodes: NodeSpec {
                 control_plane: 1,
-                workers: 0, // Start with 0 workers for faster provisioning
+                workers: 2, // Workers scale up after pivot when cluster self-manages
             },
             networking: None,
             cell: None,
@@ -260,6 +260,75 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
             workload: None,
         },
         status: None,
+    }
+}
+
+/// Watch worker nodes scaling up on a cluster
+///
+/// Polls kubectl to count ready worker nodes until the desired count is reached.
+/// Worker nodes are those without the control-plane role.
+async fn watch_worker_scaling(
+    kubeconfig_path: &str,
+    cluster_name: &str,
+    expected_workers: u32,
+) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(600); // 10 minutes for workers to scale
+
+    let mut last_count: Option<u32> = None;
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout waiting for {} workers on cluster {}. Last count: {:?}",
+                expected_workers, cluster_name, last_count
+            ));
+        }
+
+        // Count ready worker nodes (nodes without control-plane role)
+        let nodes_output = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "nodes",
+                "-o",
+                "jsonpath={range .items[*]}{.metadata.name},{.status.conditions[?(@.type=='Ready')].status},{.metadata.labels.node-role\\.kubernetes\\.io/control-plane}{\"\\n\"}{end}",
+            ],
+        );
+
+        // Parse output to count ready workers
+        let mut ready_workers = 0u32;
+        for line in nodes_output.lines() {
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() >= 2 {
+                let is_ready = parts.get(1).map(|s| *s == "True").unwrap_or(false);
+                let is_control_plane = parts.get(2).map(|s| !s.is_empty()).unwrap_or(false);
+
+                if is_ready && !is_control_plane {
+                    ready_workers += 1;
+                }
+            }
+        }
+
+        if last_count != Some(ready_workers) {
+            println!(
+                "    {} ready workers on {} (target: {})",
+                ready_workers, cluster_name, expected_workers
+            );
+            last_count = Some(ready_workers);
+        }
+
+        if ready_workers >= expected_workers {
+            println!(
+                "    SUCCESS: {} has {} ready workers!",
+                cluster_name, ready_workers
+            );
+            return Ok(());
+        }
+
+        sleep(Duration::from_secs(15)).await;
     }
 }
 
@@ -450,7 +519,7 @@ spec:
         - "172.18.255.10"
   nodes:
     controlPlane: 1
-    workers: 0
+    workers: 1
   networking:
     default:
       cidr: "172.18.255.10/32"
@@ -487,8 +556,8 @@ spec:
         registry_credentials,
     };
 
-    let installer = Installer::new(install_config)
-        .map_err(|e| format!("Failed to create installer: {}", e))?;
+    let installer =
+        Installer::new(install_config).map_err(|e| format!("Failed to create installer: {}", e))?;
     installer
         .run()
         .await
@@ -603,30 +672,32 @@ spec:
     // =========================================================================
     println!("\n[Phase 7] Verifying workload cluster post-pivot state...\n");
 
-    // Get workload cluster kubeconfig
-    let workload_kubeconfig_raw = run_cmd(
-        "kubectl",
+    // After clusterctl move, the kubeconfig secret is on the WORKLOAD cluster, not management.
+    // Get kubeconfig directly from the workload cluster's control plane container.
+    println!("  Getting workload cluster kubeconfig from control plane container...");
+
+    // Find the workload control plane container
+    let cp_container = run_cmd(
+        "docker",
         &[
-            "--kubeconfig",
-            &kubeconfig_path,
-            "get",
-            "secret",
-            &format!("{}-kubeconfig", WORKLOAD_CLUSTER_NAME),
-            "-n",
-            &format!("capi-{}", WORKLOAD_CLUSTER_NAME),
-            "-o",
-            "jsonpath={.data.value}",
+            "ps",
+            "--filter",
+            &format!("name={}-control-plane", WORKLOAD_CLUSTER_NAME),
+            "--format",
+            "{{.Names}}",
         ],
     )?;
+    let cp_container = cp_container.trim();
+    if cp_container.is_empty() {
+        return Err("Could not find workload cluster control plane container".to_string());
+    }
+    println!("  Found control plane container: {}", cp_container);
 
-    let workload_kubeconfig = String::from_utf8(
-        base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            workload_kubeconfig_raw.trim(),
-        )
-        .map_err(|e| format!("Failed to decode workload kubeconfig: {}", e))?,
-    )
-    .map_err(|e| format!("Invalid UTF-8 in kubeconfig: {}", e))?;
+    // Extract kubeconfig from the container (plain text, not base64)
+    let workload_kubeconfig = run_cmd(
+        "docker",
+        &["exec", cp_container, "cat", "/etc/kubernetes/admin.conf"],
+    )?;
 
     let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
     std::fs::write(&workload_kubeconfig_path, &workload_kubeconfig)
@@ -690,6 +761,23 @@ spec:
     )?;
     println!("  Workload cluster nodes:\n{}", nodes);
 
+    // =========================================================================
+    // Phase 8: Watch Worker Scaling
+    // =========================================================================
+    println!("\n[Phase 8] Watching worker scaling on both clusters...\n");
+    println!("  After pivot, each cluster's local controller should scale workers:");
+    println!("    - Management cluster: 0 -> 1 workers");
+    println!("    - Workload cluster: 0 -> 2 workers");
+    println!();
+
+    // Watch management cluster worker scaling
+    println!("  Waiting for management cluster workers to scale...");
+    watch_worker_scaling(&kubeconfig_path, MGMT_CLUSTER_NAME, 1).await?;
+
+    // Watch workload cluster worker scaling
+    println!("  Waiting for workload cluster workers to scale...");
+    watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 2).await?;
+
     println!("\n============================================================");
     println!("  FULL E2E TEST PASSED!");
     println!("============================================================");
@@ -700,12 +788,14 @@ spec:
     println!("    [x] Management cluster's LatticeCluster is Ready");
     println!("    [x] Workload cluster provisioned from management cluster");
     println!("    [x] Workload cluster pivoted and is self-managing");
+    println!("    [x] Management cluster scaled to 1 worker");
+    println!("    [x] Workload cluster scaled to 2 workers");
     println!();
 
     // =========================================================================
-    // Phase 8: Cleanup
+    // Phase 9: Cleanup
     // =========================================================================
-    println!("\n[Phase 8] Cleaning up...\n");
+    println!("\n[Phase 9] Cleaning up...\n");
     cleanup_all();
 
     Ok(())

@@ -212,10 +212,7 @@ mod tests {
         };
 
         assert!(spec.is_cell(), "Should be recognized as a cell");
-        assert!(
-            !spec.has_parent(),
-            "Cell is not a workload cluster"
-        );
+        assert!(!spec.has_parent(), "Cell is not a workload cluster");
     }
 
     /// Story: A cluster with cellRef is recognized as a workload cluster

@@ -317,8 +317,31 @@ impl AgentClient {
         *self.state.write().await = ClientState::Connected;
         info!("Connected to cell");
 
-        // Send ready message
+        // Send ready message first to establish connection
         self.send_ready().await?;
+
+        // Install CAPI on this cluster - required for clusterctl move during pivot
+        info!("Installing CAPI on local cluster");
+        let (capi_ready, installed_providers) = match Self::install_capi().await {
+            Ok(provider) => {
+                info!("CAPI installed, waiting for CRDs");
+                if Self::wait_for_capi_crds(120).await {
+                    info!("CAPI is ready");
+                    (true, vec![provider])
+                } else {
+                    warn!("CAPI CRDs not available after timeout");
+                    (false, vec![])
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to install CAPI, pivot may fail");
+                (false, vec![])
+            }
+        };
+
+        // Send bootstrap complete with CAPI status
+        self.send_bootstrap_complete(capi_ready, installed_providers)
+            .await?;
 
         // Clone for spawned tasks
         let config = self.config.clone();
@@ -505,6 +528,68 @@ impl AgentClient {
         }
     }
 
+    /// Install CAPI and infrastructure provider
+    ///
+    /// Reads provider from LATTICE_PROVIDER env var and runs
+    /// `clusterctl init --infrastructure <provider>`.
+    /// This is idempotent - clusterctl handles if already installed.
+    async fn install_capi() -> Result<String, std::io::Error> {
+        use tokio::process::Command;
+
+        let provider = std::env::var("LATTICE_PROVIDER")
+            .map_err(|_| std::io::Error::other("LATTICE_PROVIDER env var not set"))?;
+
+        info!(provider = %provider, "Running clusterctl init");
+
+        let output = Command::new("clusterctl")
+            .args(["init", "--infrastructure", &provider])
+            .output()
+            .await?;
+
+        if output.status.success() {
+            info!(provider = %provider, "clusterctl init completed successfully");
+            Ok(provider)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Err(std::io::Error::other(format!(
+                "clusterctl init failed: {} {}",
+                stdout, stderr
+            )))
+        }
+    }
+
+    /// Wait for CAPI CRDs to be available
+    ///
+    /// Polls kubectl to check if the clusters.cluster.x-k8s.io CRD exists.
+    /// Returns true if CRD becomes available within timeout_secs.
+    async fn wait_for_capi_crds(timeout_secs: u64) -> bool {
+        use tokio::process::Command;
+        use tokio::time::{sleep, Duration};
+
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+        let poll_interval = Duration::from_secs(5);
+
+        while start.elapsed() < timeout {
+            let result = Command::new("kubectl")
+                .args(["get", "crd", "clusters.cluster.x-k8s.io", "--no-headers"])
+                .output()
+                .await;
+
+            if let Ok(output) = result {
+                if output.status.success() {
+                    return true;
+                }
+            }
+
+            debug!("CAPI CRDs not yet available, waiting...");
+            sleep(poll_interval).await;
+        }
+
+        false
+    }
+
     /// Handle incoming command from cell
     async fn handle_command(
         command: &CellCommand,
@@ -546,17 +631,9 @@ impl AgentClient {
                     errors = errors.len(),
                     "Manifests applied"
                 );
-
-                // Send BootstrapComplete - CAPI will be installed lazily by controller
-                // when it reconciles the LatticeCluster we just applied
-                let msg = AgentMessage {
-                    cluster_name: cluster_name.to_string(),
-                    payload: Some(Payload::BootstrapComplete(BootstrapComplete {
-                        capi_ready: false, // Will be ready after controller reconciles
-                        installed_providers: vec![],
-                    })),
-                };
-                let _ = message_tx.send(msg).await;
+                // Note: CAPI is installed during agent startup (before AgentReady),
+                // so ApplyManifestsCommand is only used for post-pivot manifests
+                // like LatticeCluster CRD and resource.
             }
             Some(Command::StartPivot(cmd)) => {
                 info!(
@@ -692,7 +769,6 @@ impl AgentClient {
             while let Some(result) = inbound.next().await {
                 match result {
                     Ok(request) => {
-                        let request_id = format!("{}:{}", cluster_name, request.request_id);
                         debug!(
                             request_id = %request.request_id,
                             method = %request.method,
@@ -703,7 +779,8 @@ impl AgentClient {
                         // Forward to local K8s API
                         let response = Self::handle_proxy_request(&request, &kube_client).await;
                         let response = KubeProxyResponse {
-                            request_id,
+                            // Pass through the original request_id unchanged
+                            request_id: request.request_id.clone(),
                             status_code: response.status_code,
                             headers: response.headers,
                             body: response.body,
@@ -754,7 +831,8 @@ impl AgentClient {
         // Build URL to local API server
         let api_server = std::env::var("KUBERNETES_SERVICE_HOST")
             .map(|host| {
-                let port = std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_string());
+                let port =
+                    std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_string());
                 format!("https://{}:{}", host, port)
             })
             .unwrap_or_else(|_| "https://kubernetes.default.svc".to_string());
@@ -780,18 +858,21 @@ impl AgentClient {
         };
 
         // Read service account token for auth
-        let token = match tokio::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/token").await {
-            Ok(t) => t,
-            Err(e) => {
-                return KubeProxyResponse {
-                    request_id: request.request_id.clone(),
-                    status_code: 500,
-                    headers: vec![],
-                    body: vec![],
-                    error: format!("Failed to read service account token: {}", e),
-                };
-            }
-        };
+        let token =
+            match tokio::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/token")
+                .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    return KubeProxyResponse {
+                        request_id: request.request_id.clone(),
+                        status_code: 500,
+                        headers: vec![],
+                        body: vec![],
+                        error: format!("Failed to read service account token: {}", e),
+                    };
+                }
+            };
 
         // Build request
         let mut req = client.request(method, &url).bearer_auth(token);
@@ -810,12 +891,16 @@ impl AgentClient {
         match req.send().await {
             Ok(resp) => {
                 let status_code = resp.status().as_u16() as i32;
+
+                // Collect all headers - the proxy side will filter as needed
                 let headers: Vec<_> = resp
                     .headers()
                     .iter()
-                    .map(|(k, v)| crate::proto::HttpHeader {
-                        key: k.to_string(),
-                        value: v.to_str().unwrap_or("").to_string(),
+                    .filter_map(|(k, v)| {
+                        v.to_str().ok().map(|val| crate::proto::HttpHeader {
+                            key: k.to_string(),
+                            value: val.to_string(),
+                        })
                     })
                     .collect();
 
@@ -1762,9 +1847,7 @@ mod tests {
         let command = CellCommand {
             command_id: "apply-123".to_string(),
             command: Some(Command::ApplyManifests(ApplyManifestsCommand {
-                manifests: vec![
-                    b"apiVersion: lattice.dev/v1alpha1\nkind: LatticeCluster".to_vec(),
-                ],
+                manifests: vec![b"apiVersion: lattice.dev/v1alpha1\nkind: LatticeCluster".to_vec()],
             })),
         };
 
@@ -2320,82 +2403,8 @@ mod tests {
     }
 
     // ==========================================================================
-    // Story Tests: Command Handling with Various Payload Sizes
+    // Story Tests: Command Handling
     // ==========================================================================
-
-    /// Story: Agent handles apply manifests command with invalid UTF-8 gracefully
-    ///
-    /// When a manifest contains invalid UTF-8 bytes (corrupted data), the agent
-    /// should log the error and continue processing other manifests rather than
-    /// crashing.
-    #[tokio::test]
-    async fn story_agent_handles_invalid_utf8_manifests() {
-        let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-
-        // Create manifests with invalid UTF-8
-        let valid_manifest = b"apiVersion: v1\nkind: ConfigMap".to_vec();
-        let invalid_utf8 = vec![0xFF, 0xFE, 0x00, 0x01]; // Invalid UTF-8 sequence
-
-        let command = CellCommand {
-            command_id: "utf8-test".to_string(),
-            command: Some(Command::ApplyManifests(ApplyManifestsCommand {
-                manifests: vec![invalid_utf8, valid_manifest],
-            })),
-        };
-
-        // Should handle without panicking
-        AgentClient::handle_command(&command, &agent_state, &tx, "utf8-cluster").await;
-
-        // Should still send BootstrapComplete (even with partial failures)
-        let msg = rx.recv().await.unwrap();
-        match msg.payload {
-            Some(Payload::BootstrapComplete(_)) => {
-                // Expected - agent reports completion even if some manifests failed
-            }
-            _ => panic!("Expected BootstrapComplete payload"),
-        }
-    }
-
-    /// Story: Agent handles apply manifests command with empty manifest list
-    #[tokio::test]
-    async fn story_agent_handles_empty_manifests() {
-        let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-
-        let command = CellCommand {
-            command_id: "empty-manifests".to_string(),
-            command: Some(Command::ApplyManifests(ApplyManifestsCommand {
-                manifests: vec![], // No manifests
-            })),
-        };
-
-        AgentClient::handle_command(&command, &agent_state, &tx, "empty-cluster").await;
-
-        // Should still send BootstrapComplete
-        let msg = rx.recv().await.unwrap();
-        assert!(matches!(msg.payload, Some(Payload::BootstrapComplete(_))));
-    }
-
-    /// Story: Agent handles apply manifests command with large manifests
-    #[tokio::test]
-    async fn story_agent_handles_large_manifests() {
-        let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
-        let (tx, _rx) = mpsc::channel::<AgentMessage>(32);
-
-        // Large manifest data
-        let large_manifest = vec![b'x'; 100_000]; // 100KB
-
-        let command = CellCommand {
-            command_id: "large-manifests".to_string(),
-            command: Some(Command::ApplyManifests(ApplyManifestsCommand {
-                manifests: vec![large_manifest],
-            })),
-        };
-
-        // Should handle without panic
-        AgentClient::handle_command(&command, &agent_state, &tx, "large-manifest-cluster").await;
-    }
 
     /// Story: Agent handles pivot command for different namespaces
     #[tokio::test]

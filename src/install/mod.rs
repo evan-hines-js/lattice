@@ -29,9 +29,10 @@
 //!         image: "ghcr.io/lattice/lattice:latest".to_string(),
 //!         keep_bootstrap_on_failure: false,
 //!         timeout: Duration::from_secs(1200),
+//!         registry_credentials: None,
 //!     };
 //!
-//!     let installer = Installer::new(config);
+//!     let installer = Installer::new(config).unwrap();
 //!     installer.run().await.unwrap();
 //! }
 //! ```
@@ -115,8 +116,8 @@ impl Installer {
     ///
     /// Parses the LatticeCluster from the config content and validates it.
     pub fn new(config: InstallConfig) -> Result<Self, InstallError> {
-        let cluster: LatticeCluster =
-            serde_yaml::from_str(&config.cluster_config_content).map_err(|e| {
+        let cluster: LatticeCluster = serde_yaml::from_str(&config.cluster_config_content)
+            .map_err(|e| {
                 InstallError::InvalidConfig(format!("failed to parse LatticeCluster YAML: {}", e))
             })?;
 
@@ -349,18 +350,19 @@ nodes:
         use crate::bootstrap::{DefaultManifestGenerator, ManifestGenerator};
 
         // Get operator manifests from the same generator used everywhere
-        let generator = DefaultManifestGenerator::new()
-            .map_err(|e| InstallError::CommandFailed {
+        let generator =
+            DefaultManifestGenerator::new().map_err(|e| InstallError::CommandFailed {
                 command: "generate operator manifests".to_string(),
                 message: e.to_string(),
             })?;
 
         // Generate all manifests but only use operator ones (JSON format)
         // Bootstrap kind cluster already has its own CNI, we don't need Cilium
-        // No cluster_name needed - bootstrap cluster is temporary
+        // No cluster_name or provider needed - bootstrap cluster is temporary
         let all_manifests = generator.generate(
             &self.config.image,
             self.config.registry_credentials.as_deref(),
+            None,
             None,
         );
         let operator_manifests: Vec<&str> = all_manifests
@@ -388,21 +390,23 @@ nodes:
         use crate::bootstrap::{generate_all_manifests, DefaultManifestGenerator};
 
         // Get all manifests using the same function as bootstrap webhook
-        let generator = DefaultManifestGenerator::new()
-            .map_err(|e| InstallError::CommandFailed {
+        let generator =
+            DefaultManifestGenerator::new().map_err(|e| InstallError::CommandFailed {
                 command: "generate bootstrap manifests".to_string(),
                 message: e.to_string(),
             })?;
 
         // Generate all manifests (Cilium YAML + operator JSON + LB-IPAM if networking configured)
-        // Pass cluster name so management cluster's operator knows its identity
+        // Pass cluster name and provider so management cluster's operator knows its identity
         let cluster_name = self.cluster.metadata.name.as_deref();
+        let provider_str = self.cluster.spec.provider.type_.to_string();
         let all_manifests = generate_all_manifests(
             &generator,
             &self.config.image,
             self.config.registry_credentials.as_deref(),
             self.cluster.spec.networking.as_ref(),
             cluster_name,
+            Some(&provider_str),
         );
 
         // Split into YAML (Cilium + LB-IPAM) and JSON (operator)
@@ -436,7 +440,11 @@ data:
 {cilium_data}
 "#,
             namespace = namespace,
-            cilium_data = cilium_yaml.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n")
+            cilium_data = cilium_yaml
+                .lines()
+                .map(|l| format!("    {}", l))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
 
         // Create operator ConfigMap with each manifest in its own key
@@ -444,7 +452,11 @@ data:
         let mut operator_data_keys = String::new();
         for (i, manifest) in operator_manifests.iter().enumerate() {
             let key_name = format!("{:02}-manifest.json", i + 1);
-            let indented = manifest.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n");
+            let indented = manifest
+                .lines()
+                .map(|l| format!("    {}", l))
+                .collect::<Vec<_>>()
+                .join("\n");
             operator_data_keys.push_str(&format!("  {}: |\n{}\n", key_name, indented));
         }
 
@@ -668,7 +680,8 @@ spec:
                     if let Some(start) = kubeconfig.find("server: https://") {
                         if let Some(end) = kubeconfig[start..].find('\n') {
                             let old_server = &kubeconfig[start..start + end];
-                            kubeconfig = kubeconfig.replace(old_server, &format!("server: {}", localhost_url));
+                            kubeconfig = kubeconfig
+                                .replace(old_server, &format!("server: {}", localhost_url));
                             println!("  Rewrote kubeconfig server to {}", localhost_url);
                         }
                     }
@@ -897,7 +910,10 @@ spec:
         env: &[(&str, &str)],
     ) -> Result<(), InstallError> {
         let mut command = Command::new(cmd);
-        command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         for (key, value) in env {
             command.env(key, value);

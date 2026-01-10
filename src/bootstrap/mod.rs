@@ -151,13 +151,15 @@ pub trait ManifestGenerator: Send + Sync {
     /// They include CNI and operator - NOT LatticeCluster CRD (that comes post-pivot
     /// via ApplyManifestsCommand to avoid fighting with pivot).
     ///
-    /// The cluster_name is set as LATTICE_CLUSTER_NAME env var so the controller
-    /// knows which cluster it's running on (to avoid trying to provision itself).
+    /// Environment variables set on the operator:
+    /// - LATTICE_CLUSTER_NAME: So controller knows which cluster it's on
+    /// - LATTICE_PROVIDER: So agent knows which CAPI provider to install
     fn generate(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
+        provider: Option<&str>,
     ) -> Vec<String>;
 }
 
@@ -171,8 +173,9 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
     registry_credentials: Option<&str>,
     networking: Option<&crate::crd::NetworkingSpec>,
     cluster_name: Option<&str>,
+    provider: Option<&str>,
 ) -> Vec<String> {
-    let mut manifests = generator.generate(image, registry_credentials, cluster_name);
+    let mut manifests = generator.generate(image, registry_credentials, cluster_name, provider);
 
     // Add Cilium LB-IPAM resources if networking is configured
     if let Some(networking) = networking {
@@ -317,13 +320,15 @@ impl DefaultManifestGenerator {
     /// Every cluster runs the same deployment - the controller reads its
     /// LatticeCluster CRD to determine behavior (cell vs leaf, parent connection, etc.)
     ///
-    /// If cluster_name is provided, it's set as LATTICE_CLUSTER_NAME env var so the
-    /// controller knows which cluster it's running on and won't try to provision itself.
+    /// Environment variables set:
+    /// - LATTICE_CLUSTER_NAME: So controller knows which cluster it's on
+    /// - LATTICE_PROVIDER: So agent knows which CAPI provider to install
     pub fn generate_operator_manifests(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
+        provider: Option<&str>,
     ) -> Vec<String> {
         const NAMESPACE: &str = "lattice-system";
 
@@ -444,10 +449,19 @@ impl DefaultManifestGenerator {
                                         ..Default::default()
                                     });
                                 }
+                                if let Some(prov) = provider {
+                                    envs.push(EnvVar {
+                                        name: "LATTICE_PROVIDER".to_string(),
+                                        value: Some(prov.to_string()),
+                                        ..Default::default()
+                                    });
+                                }
                                 if registry_secret.is_some() {
                                     envs.push(EnvVar {
                                         name: "REGISTRY_CREDENTIALS_FILE".to_string(),
-                                        value: Some("/etc/lattice/registry/.dockerconfigjson".to_string()),
+                                        value: Some(
+                                            "/etc/lattice/registry/.dockerconfigjson".to_string(),
+                                        ),
                                         ..Default::default()
                                     });
                                 }
@@ -490,9 +504,7 @@ impl DefaultManifestGenerator {
         };
 
         // Serialize all resources to JSON
-        let mut manifests = vec![
-            serde_json::to_string(&namespace).expect("serialize namespace"),
-        ];
+        let mut manifests = vec![serde_json::to_string(&namespace).expect("serialize namespace")];
         if let Some(ref reg_secret) = registry_secret {
             manifests.push(serde_json::to_string(reg_secret).expect("serialize registry secret"));
         }
@@ -511,6 +523,7 @@ impl ManifestGenerator for DefaultManifestGenerator {
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
+        provider: Option<&str>,
     ) -> Vec<String> {
         let mut manifests = Vec::new();
 
@@ -521,7 +534,12 @@ impl ManifestGenerator for DefaultManifestGenerator {
         // Controller reads LatticeCluster CRD to determine behavior:
         // - spec.cell present → starts cell servers, can provision clusters
         // - spec.cellRef present → connects to parent
-        manifests.extend(self.generate_operator_manifests(image, registry_credentials, cluster_name));
+        manifests.extend(self.generate_operator_manifests(
+            image,
+            registry_credentials,
+            cluster_name,
+            provider,
+        ));
 
         // Note: LatticeCluster CRD and resource are sent post-pivot via ApplyManifestsCommand
         // to avoid the local controller fighting with the pivot process
@@ -549,6 +567,8 @@ pub struct ClusterBootstrapInfo {
     pub token_used: bool,
     /// Networking configuration for Cilium LB-IPAM
     pub networking: Option<crate::crd::NetworkingSpec>,
+    /// Infrastructure provider (docker, aws, gcp, azure)
+    pub provider: String,
 }
 
 /// Bootstrap endpoint state
@@ -599,6 +619,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     /// * `ca_certificate` - CA certificate PEM
     /// * `cluster_manifest` - The LatticeCluster CRD JSON to apply on the workload cluster
     /// * `networking` - Optional networking config for Cilium LB-IPAM
+    /// * `provider` - Infrastructure provider (docker, aws, gcp, azure)
     pub fn register_cluster(
         &self,
         cluster_id: String,
@@ -606,6 +627,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         ca_certificate: String,
         cluster_manifest: String,
         networking: Option<crate::crd::NetworkingSpec>,
+        provider: String,
     ) -> BootstrapToken {
         let token = BootstrapToken::generate();
         let token_hash = token.hash();
@@ -619,6 +641,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             token_created: Instant::now(),
             token_used: false,
             networking,
+            provider,
         };
 
         self.clusters.insert(cluster_id, info);
@@ -669,19 +692,20 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     /// - LatticeCluster CRD instance (with cellRef pointing to parent)
     /// - Parent connection config Secret
     pub fn generate_response(&self, info: &ClusterBootstrapInfo) -> BootstrapResponse {
-        // Use the standard manifest generation - pass cluster_id so operator knows its identity
+        // Use the standard manifest generation - pass cluster_id and provider so operator knows its identity
         let mut manifests = generate_all_manifests(
             &self.manifest_generator,
             &self.image,
             self.registry_credentials.as_deref(),
             info.networking.as_ref(),
             Some(&info.cluster_id),
+            Some(&info.provider),
         );
 
         // Add the LatticeCluster CRD definition (CustomResourceDefinition)
         // This must come before the CRD instance so Kubernetes knows the type
-        let crd_definition = serde_yaml::to_string(&LatticeCluster::crd())
-            .expect("serialize CRD definition");
+        let crd_definition =
+            serde_yaml::to_string(&LatticeCluster::crd()).expect("serialize CRD definition");
         manifests.push(crd_definition);
 
         // Add the LatticeCluster CRD instance - this tells the controller it has a parent
@@ -844,6 +868,7 @@ mod tests {
             image: &str,
             _registry_credentials: Option<&str>,
             _cluster_name: Option<&str>,
+            _provider: Option<&str>,
         ) -> Vec<String> {
             vec![format!("# Test manifest with image {}", image)]
         }
@@ -888,6 +913,7 @@ mod tests {
             ca_certificate.into(),
             cluster_manifest,
             None,
+            "docker".to_string(),
         )
     }
 
@@ -1107,7 +1133,7 @@ mod tests {
     #[test]
     fn default_generator_creates_namespace() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("test:latest", None, None);
+        let manifests = generator.generate("test:latest", None, None, None);
 
         // Operator manifests are JSON, check for JSON format
         let has_namespace = manifests
@@ -1119,7 +1145,7 @@ mod tests {
     #[test]
     fn default_generator_creates_operator_deployment() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("test:latest", None, None);
+        let manifests = generator.generate("test:latest", None, None, None);
 
         // Operator manifests are JSON, check for JSON format
         let has_deployment = manifests
@@ -1131,7 +1157,7 @@ mod tests {
     #[test]
     fn default_generator_creates_service_account() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("test:latest", None, None);
+        let manifests = generator.generate("test:latest", None, None, None);
 
         // Should have ServiceAccount for operator
         let has_sa = manifests
@@ -1143,7 +1169,7 @@ mod tests {
     #[test]
     fn default_generator_creates_cilium_cni() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("test:latest", None, None);
+        let manifests = generator.generate("test:latest", None, None, None);
 
         // Should include Cilium DaemonSet (rendered from helm template)
         let has_cilium_daemonset = manifests
@@ -1231,7 +1257,10 @@ mod tests {
         let response = state.generate_response(&info);
         assert!(!response.manifests.is_empty());
         assert!(!response.ca_certificate.is_empty());
-        assert_eq!(response.cell_endpoint, "cell.lattice.example.com:8443:50051");
+        assert_eq!(
+            response.cell_endpoint,
+            "cell.lattice.example.com:8443:50051"
+        );
 
         // Chapter 4: Agent generates keypair and submits CSR
         // ---------------------------------------------------
@@ -1400,7 +1429,7 @@ mod tests {
     #[test]
     fn story_manifest_generation() {
         let generator = DefaultManifestGenerator::new().unwrap();
-        let manifests = generator.generate("test:latest", None, None);
+        let manifests = generator.generate("test:latest", None, None, None);
 
         // Manifests create the lattice-system namespace (JSON format)
         let has_namespace = manifests

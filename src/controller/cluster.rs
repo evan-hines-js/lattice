@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::api::{Api, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams};
+use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
@@ -87,6 +88,7 @@ pub trait ClusterBootstrap: Send + Sync {
     /// * `ca_certificate` - CA certificate PEM for the parent cell
     /// * `cluster_manifest` - LatticeCluster CRD JSON to apply on workload cluster
     /// * `networking` - Optional networking config for Cilium LB-IPAM
+    /// * `provider` - Infrastructure provider (docker, aws, gcp, azure)
     ///
     /// # Returns
     ///
@@ -98,6 +100,7 @@ pub trait ClusterBootstrap: Send + Sync {
         ca_certificate: String,
         cluster_manifest: String,
         networking: Option<crate::crd::NetworkingSpec>,
+        provider: String,
     ) -> String;
 
     /// Check if a cluster is already registered
@@ -163,10 +166,25 @@ pub trait CAPIClient: Send + Sync {
     ///
     /// Sets the `lattice.dev/pivot-complete: "true"` annotation.
     /// Called after agent confirms PivotComplete.
-    async fn mark_pivot_complete(
+    async fn mark_pivot_complete(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
+
+    /// Get the current replica count of a cluster's MachineDeployment
+    ///
+    /// Returns None if no MachineDeployment exists for the cluster.
+    async fn get_machine_deployment_replicas(
         &self,
         cluster_name: &str,
         namespace: &str,
+    ) -> Result<Option<u32>, Error>;
+
+    /// Scale a cluster's MachineDeployment to the desired replica count
+    ///
+    /// Creates the MachineDeployment if it doesn't exist.
+    async fn scale_machine_deployment(
+        &self,
+        cluster_name: &str,
+        namespace: &str,
+        replicas: u32,
     ) -> Result<(), Error>;
 }
 
@@ -202,6 +220,7 @@ impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap
         ca_certificate: String,
         cluster_manifest: String,
         networking: Option<crate::crd::NetworkingSpec>,
+        provider: String,
     ) -> String {
         let token = self.state.register_cluster(
             cluster_id,
@@ -209,6 +228,7 @@ impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap
             ca_certificate,
             cluster_manifest,
             networking,
+            provider,
         );
         token.as_str().to_string()
     }
@@ -419,9 +439,10 @@ impl KubeClient for KubeClientImpl {
         let ns = Namespace {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
-                labels: Some(std::collections::BTreeMap::from([
-                    ("app.kubernetes.io/managed-by".to_string(), "lattice".to_string()),
-                ])),
+                labels: Some(std::collections::BTreeMap::from([(
+                    "app.kubernetes.io/managed-by".to_string(),
+                    "lattice".to_string(),
+                )])),
                 ..Default::default()
             },
             ..Default::default()
@@ -682,11 +703,7 @@ impl CAPIClient for CAPIClientImpl {
         }
     }
 
-    async fn mark_pivot_complete(
-        &self,
-        cluster_name: &str,
-        namespace: &str,
-    ) -> Result<(), Error> {
+    async fn mark_pivot_complete(&self, cluster_name: &str, namespace: &str) -> Result<(), Error> {
         use kube::api::{Patch, PatchParams};
 
         let patch = serde_json::json!({
@@ -698,6 +715,83 @@ impl CAPIClient for CAPIClientImpl {
             .await?;
 
         info!(cluster = %cluster_name, namespace = %namespace, "Marked CAPI Cluster as pivot-complete");
+        Ok(())
+    }
+
+    async fn get_machine_deployment_replicas(
+        &self,
+        cluster_name: &str,
+        namespace: &str,
+    ) -> Result<Option<u32>, Error> {
+        let api: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            namespace,
+            &ApiResource::from_gvk(&GroupVersionKind {
+                group: "cluster.x-k8s.io".to_string(),
+                version: "v1beta1".to_string(),
+                kind: "MachineDeployment".to_string(),
+            }),
+        );
+
+        // MachineDeployment name follows pattern: {cluster_name}-md-0
+        let md_name = format!("{}-md-0", cluster_name);
+
+        match api.get(&md_name).await {
+            Ok(md) => {
+                let replicas = md
+                    .data
+                    .get("spec")
+                    .and_then(|s: &serde_json::Value| s.get("replicas"))
+                    .and_then(|r: &serde_json::Value| r.as_i64())
+                    .map(|r| r as u32);
+                debug!(
+                    cluster = %cluster_name,
+                    replicas = ?replicas,
+                    "Got MachineDeployment replicas"
+                );
+                Ok(replicas)
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                debug!(cluster = %cluster_name, "MachineDeployment not found");
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn scale_machine_deployment(
+        &self,
+        cluster_name: &str,
+        namespace: &str,
+        replicas: u32,
+    ) -> Result<(), Error> {
+        use kube::api::{Patch, PatchParams};
+
+        let api: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            namespace,
+            &ApiResource::from_gvk(&GroupVersionKind {
+                group: "cluster.x-k8s.io".to_string(),
+                version: "v1beta1".to_string(),
+                kind: "MachineDeployment".to_string(),
+            }),
+        );
+
+        // MachineDeployment name follows pattern: {cluster_name}-md-0
+        let md_name = format!("{}-md-0", cluster_name);
+
+        let patch = serde_json::json!({
+            "spec": { "replicas": replicas }
+        });
+
+        api.patch(&md_name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+
+        info!(
+            cluster = %cluster_name,
+            replicas = replicas,
+            "Scaled MachineDeployment"
+        );
         Ok(())
     }
 }
@@ -1189,11 +1283,8 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Ensure CAPI is installed before provisioning
             info!("ensuring CAPI is installed for provider");
-            ensure_capi_installed_with(
-                ctx.capi_installer.as_ref(),
-                &cluster.spec.provider.type_,
-            )
-            .await?;
+            ensure_capi_installed_with(ctx.capi_installer.as_ref(), &cluster.spec.provider.type_)
+                .await?;
 
             // Generate and apply CAPI manifests, then transition to Provisioning
             info!("generating CAPI manifests for cluster");
@@ -1256,55 +1347,43 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // This cluster has a parent (cell_ref) - needs agent-based pivot
             // Get pivot operations - either from pre-configured cell or dynamically from cell_servers
-            let pivot_ops: Option<Arc<dyn PivotOperations>> =
-                if let Some(ops) = ctx.pivot_ops() {
-                    Some(ops.clone())
-                } else if let Some(ref cell_servers) = ctx.cell_servers {
-                    // Create PivotOperationsImpl dynamically from cell_servers
-                    if cell_servers.is_running() {
-                        Some(Arc::new(PivotOperationsImpl::new(
-                            cell_servers.agent_registry(),
-                        )))
-                    } else {
-                        None
-                    }
+            let pivot_ops: Option<Arc<dyn PivotOperations>> = if let Some(ops) = ctx.pivot_ops() {
+                Some(ops.clone())
+            } else if let Some(ref cell_servers) = ctx.cell_servers {
+                // Create PivotOperationsImpl dynamically from cell_servers
+                if cell_servers.is_running() {
+                    Some(Arc::new(PivotOperationsImpl::new(
+                        cell_servers.agent_registry(),
+                    )))
                 } else {
                     None
-                };
+                }
+            } else {
+                None
+            };
 
             // Check if we have pivot operations configured (cell mode)
             if let Some(pivot_ops) = pivot_ops {
                 // Step 1: Check if agent reports pivot complete (Ready state)
+                // After clusterctl move, the CAPI Cluster is on the workload cluster,
+                // not the management cluster - so we can't annotate it here.
+                // Just trust the agent's Ready state.
                 if pivot_ops.is_pivot_complete(&name) {
-                    // Mark the CAPI Cluster with pivot-complete annotation
-                    // This survives controller restarts
-                    if let Err(e) = ctx.capi.mark_pivot_complete(&name, &capi_namespace).await {
-                        warn!(error = %e, "failed to mark pivot complete, will retry");
-                        return Ok(Action::requeue(Duration::from_secs(5)));
-                    }
-                    info!("pivot complete, transitioning to Ready phase");
+                    info!("agent reports pivot complete, transitioning to Ready phase");
                     update_status_ready(&cluster, &ctx).await?;
                     return Ok(Action::requeue(Duration::from_secs(60)));
-                }
-
-                // Step 2: Check if pivot annotation exists (clusterctl already ran successfully)
-                let pivot_annotated = ctx
-                    .capi
-                    .is_pivot_complete_annotated(&name, &capi_namespace)
-                    .await
-                    .unwrap_or(false);
-
-                if pivot_annotated {
-                    // clusterctl move completed, waiting for agent to detect CAPI resources
-                    debug!("pivot annotation present, waiting for agent to confirm completion");
-                    return Ok(Action::requeue(Duration::from_secs(10)));
                 }
 
                 // Step 3: Check if agent is in Pivoting state with proxy available
                 // This means StartPivotCommand was sent, agent is ready - execute clusterctl move
                 if pivot_ops.is_pivot_in_progress(&name) && pivot_ops.is_proxy_available(&name) {
-                    info!("agent in pivoting state with proxy available, executing clusterctl move");
-                    match pivot_ops.execute_clusterctl_move(&name, &capi_namespace).await {
+                    info!(
+                        "agent in pivoting state with proxy available, executing clusterctl move"
+                    );
+                    match pivot_ops
+                        .execute_clusterctl_move(&name, &capi_namespace)
+                        .await
+                    {
                         Ok(()) => {
                             info!("clusterctl move completed, waiting for agent to confirm");
                         }
@@ -1334,9 +1413,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     pivot_ops.store_post_pivot_manifests(&name, Some(crd_yaml), Some(cluster_yaml));
 
                     // Agent is ready, trigger pivot (sends StartPivotCommand)
+                    // Target namespace is same as source - clusterctl move preserves namespace
                     info!("agent ready, triggering pivot");
                     match pivot_ops
-                        .trigger_pivot(&name, &capi_namespace, "default")
+                        .trigger_pivot(&name, &capi_namespace, &capi_namespace)
                         .await
                     {
                         Ok(()) => {
@@ -1361,13 +1441,50 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             }
         }
         ClusterPhase::Ready => {
-            // Cluster is ready, check for drift and ensure control plane is properly tainted
-            debug!("cluster is ready, checking worker status and control plane taints");
+            // Cluster is ready - reconcile worker count and ensure control plane is tainted
+            debug!("cluster is ready, reconciling worker count");
+
+            // Each cluster has its own CAPI namespace
+            let capi_namespace = format!("capi-{}", name);
 
             // Get desired worker count from spec
             let desired_workers = cluster.spec.nodes.workers;
 
-            // Get current ready worker count
+            // Get current MachineDeployment replica count (desired by CAPI)
+            let current_replicas = ctx
+                .capi
+                .get_machine_deployment_replicas(&name, &capi_namespace)
+                .await
+                .unwrap_or(None);
+
+            // Scale MachineDeployment if replicas don't match spec
+            // MachineDeployment always exists (created with replicas=0 if workers=0)
+            if let Some(replicas) = current_replicas {
+                if replicas != desired_workers {
+                    info!(
+                        current = replicas,
+                        desired = desired_workers,
+                        "Scaling MachineDeployment to match spec"
+                    );
+                    if let Err(e) = ctx
+                        .capi
+                        .scale_machine_deployment(&name, &capi_namespace, desired_workers)
+                        .await
+                    {
+                        warn!(error = %e, "Failed to scale MachineDeployment, will retry");
+                        return Ok(Action::requeue(Duration::from_secs(10)));
+                    }
+                }
+            } else {
+                // MachineDeployment not found - this shouldn't happen as we always create it
+                warn!(
+                    "MachineDeployment not found for cluster {}, will retry",
+                    name
+                );
+                return Ok(Action::requeue(Duration::from_secs(10)));
+            }
+
+            // Get current ready worker count (actual running nodes)
             let ready_workers = ctx.kube.get_ready_worker_count().await.unwrap_or(0);
 
             debug!(
@@ -1400,11 +1517,11 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
                 Ok(Action::requeue(Duration::from_secs(60)))
             } else {
-                // Workers not ready yet, poll faster
+                // Workers not ready yet (CAPI still provisioning), poll faster
                 debug!(
                     desired = desired_workers,
                     ready = ready_workers,
-                    "waiting for workers to be ready before re-tainting control plane"
+                    "waiting for workers to be provisioned by CAPI"
                 );
                 Ok(Action::requeue(Duration::from_secs(10)))
             }
@@ -1442,8 +1559,8 @@ async fn generate_capi_manifests(
         let bootstrap_endpoint = bootstrap_ctx.bootstrap_endpoint().to_string();
 
         // Serialize the LatticeCluster CRD to pass to workload cluster
-        let cluster_manifest = serde_json::to_string(&cluster)
-            .map_err(|e| Error::Serialization {
+        let cluster_manifest =
+            serde_json::to_string(&cluster).map_err(|e| Error::Serialization {
                 message: format!("failed to serialize cluster: {}", e),
                 kind: Some("LatticeCluster".to_string()),
             })?;
@@ -1455,6 +1572,7 @@ async fn generate_capi_manifests(
             ca_cert.clone(),
             cluster_manifest,
             cluster.spec.networking.clone(),
+            cluster.spec.provider.type_.to_string(),
         );
 
         BootstrapInfo::new(bootstrap_endpoint, token, ca_cert)
@@ -1488,8 +1606,8 @@ async fn generate_capi_manifests(
                     let ca_cert = cell_servers.ca().ca_cert_pem().to_string();
 
                     // Serialize the LatticeCluster CRD to pass to workload cluster
-                    let cluster_manifest = serde_json::to_string(&cluster)
-                        .map_err(|e| Error::Serialization {
+                    let cluster_manifest =
+                        serde_json::to_string(&cluster).map_err(|e| Error::Serialization {
                             message: format!("failed to serialize cluster: {}", e),
                             kind: Some("LatticeCluster".to_string()),
                         })?;
@@ -1501,6 +1619,7 @@ async fn generate_capi_manifests(
                         ca_cert.clone(),
                         cluster_manifest,
                         cluster.spec.networking.clone(),
+                        cluster.spec.provider.type_.to_string(),
                     );
 
                     info!(
@@ -1775,7 +1894,10 @@ impl PivotOperations for PivotOperationsImpl {
         use crate::agent::connection::PostPivotManifests;
         self.agent_registry.set_post_pivot_manifests(
             cluster_name,
-            PostPivotManifests { crd_yaml, cluster_yaml },
+            PostPivotManifests {
+                crd_yaml,
+                cluster_yaml,
+            },
         );
     }
 
@@ -1790,65 +1912,21 @@ impl PivotOperations for PivotOperationsImpl {
         cluster_name: &str,
         namespace: &str,
     ) -> Result<(), Error> {
-        use crate::agent::proxy::KubeProxy;
-        use std::net::SocketAddr;
+        use crate::agent::proxy::generate_proxy_kubeconfig;
 
         info!(cluster = %cluster_name, namespace = %namespace, "Executing clusterctl move via proxy");
 
-        // Get the agent's proxy channels
-        let (request_tx, response_rx) = {
-            let mut agent = self
-                .agent_registry
-                .get_mut(cluster_name)
-                .ok_or_else(|| Error::pivot(format!("agent not connected: {}", cluster_name)))?;
+        // Get the proxy port from the agent connection
+        // The proxy is already running (started when agent connected)
+        let port = self
+            .agent_registry
+            .get_proxy_port(cluster_name)
+            .ok_or_else(|| Error::pivot(format!("proxy not available for: {}", cluster_name)))?;
 
-            let request_tx = agent
-                .proxy_tx
-                .take()
-                .ok_or_else(|| Error::pivot("proxy not available".to_string()))?;
-            let response_rx = agent
-                .proxy_rx
-                .take()
-                .ok_or_else(|| Error::pivot("proxy response channel not available".to_string()))?;
+        info!(cluster = %cluster_name, port = port, "Using persistent proxy");
 
-            (request_tx, response_rx)
-        };
-
-        // Start local proxy server on a fixed port
-        // Each cluster gets a unique port based on a hash to avoid conflicts
-        let port = 18000 + (cluster_name.bytes().map(|b| b as u32).sum::<u32>() % 1000) as u16;
-        let bind_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-        let proxy_addr = format!("127.0.0.1:{}", port);
-
-        let mut proxy = KubeProxy::new(cluster_name.to_string(), request_tx.clone());
-
-        // Start proxy in background
-        let proxy_handle = tokio::spawn(async move {
-            if let Err(e) = proxy.start(bind_addr, response_rx).await {
-                error!(error = %e, "Proxy server failed");
-            }
-        });
-
-        // Give proxy time to start
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Generate kubeconfig pointing to proxy
-        let kubeconfig_content = format!(
-            r#"apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: http://{proxy_addr}
-  name: {cluster}
-contexts:
-- context:
-    cluster: {cluster}
-  name: {cluster}
-current-context: {cluster}
-"#,
-            proxy_addr = proxy_addr,
-            cluster = cluster_name,
-        );
+        // Generate kubeconfig pointing to the already-running proxy
+        let kubeconfig_content = generate_proxy_kubeconfig(cluster_name, port);
 
         // Write kubeconfig to temp file
         let kubeconfig_path = format!("/tmp/lattice-pivot-{}.kubeconfig", cluster_name);
@@ -1873,20 +1951,16 @@ current-context: {cluster}
         // Clean up kubeconfig
         let _ = tokio::fs::remove_file(&kubeconfig_path).await;
 
-        // Stop proxy
-        proxy_handle.abort();
-
-        // Restore proxy channels to agent
-        if let Some(mut agent) = self.agent_registry.get_mut(cluster_name) {
-            agent.proxy_tx = Some(request_tx);
-            // Note: response_rx was consumed by proxy, need to re-establish
-        }
+        // Proxy stays running - it's persistent for the agent's lifetime
+        // If clusterctl fails, we can retry without the agent reconnecting
 
         if output.status.success() {
             info!(cluster = %cluster_name, "clusterctl move completed successfully");
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            error!(cluster = %cluster_name, stderr = %stderr, stdout = %stdout, "clusterctl move failed");
             Err(Error::pivot(format!("clusterctl move failed: {}", stderr)))
         }
     }
@@ -2112,6 +2186,10 @@ mod tests {
             capi_mock
                 .expect_is_infrastructure_ready()
                 .returning(|_, _| Ok(false));
+            // MachineDeployment has 2 replicas to match spec - no scaling needed
+            capi_mock
+                .expect_get_machine_deployment_replicas()
+                .returning(|_, _| Ok(Some(2)));
             Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
@@ -2387,11 +2465,8 @@ mod tests {
             let capi_mock = MockCAPIClient::new();
             let mut installer = MockCapiInstaller::new();
             installer.expect_install().returning(|_| Ok(()));
-            let ctx = Context::for_testing(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                Arc::new(installer),
-            );
+            let ctx =
+                Context::for_testing(Arc::new(mock), Arc::new(capi_mock), Arc::new(installer));
 
             let result = update_status_provisioning(&cluster, &ctx).await;
 
@@ -2608,6 +2683,7 @@ mod tests {
                 _ca_certificate: String,
                 _cluster_manifest: String,
                 _networking: Option<crate::crd::NetworkingSpec>,
+                _provider: String,
             ) -> String {
                 self.registered_clusters
                     .lock()
@@ -3277,6 +3353,7 @@ mod tests {
                 _: String,
                 _: String,
                 _: Option<crate::crd::NetworkingSpec>,
+                _: String,
             ) -> String {
                 "stub-token".to_string()
             }
@@ -3488,7 +3565,10 @@ mod tests {
         /// post-pivot manifests and trigger the pivot operation.
         #[tokio::test]
         async fn story_agent_ready_triggers_pivot() {
-            let cluster = Arc::new(child_cluster_with_phase("pivot-ready", ClusterPhase::Pivoting));
+            let cluster = Arc::new(child_cluster_with_phase(
+                "pivot-ready",
+                ClusterPhase::Pivoting,
+            ));
             let pivot_ops = Arc::new(TestPivotOps::agent_ready());
             let (ctx, _capture) = mock_context_with_pivot_ops(pivot_ops.clone());
 
@@ -3506,7 +3586,10 @@ mod tests {
         /// and requeue without triggering pivot.
         #[tokio::test]
         async fn story_agent_not_ready_waits() {
-            let cluster = Arc::new(child_cluster_with_phase("waiting-agent", ClusterPhase::Pivoting));
+            let cluster = Arc::new(child_cluster_with_phase(
+                "waiting-agent",
+                ClusterPhase::Pivoting,
+            ));
             let pivot_ops = Arc::new(TestPivotOps::agent_not_ready());
             let (ctx, _capture) = mock_context_with_pivot_ops(pivot_ops.clone());
 
@@ -3524,7 +3607,10 @@ mod tests {
         /// (error is logged but doesn't fail reconcile).
         #[tokio::test]
         async fn story_pivot_trigger_failure_continues() {
-            let cluster = Arc::new(child_cluster_with_phase("trigger-fail", ClusterPhase::Pivoting));
+            let cluster = Arc::new(child_cluster_with_phase(
+                "trigger-fail",
+                ClusterPhase::Pivoting,
+            ));
             let pivot_ops = Arc::new(TestPivotOps::pivot_trigger_fails());
             let (ctx, _capture) = mock_context_with_pivot_ops(pivot_ops);
 
