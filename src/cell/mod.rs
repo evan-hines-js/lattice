@@ -44,8 +44,12 @@ pub struct CellConfig {
 impl Default for CellConfig {
     fn default() -> Self {
         Self {
-            bootstrap_addr: format!("0.0.0.0:{}", crate::DEFAULT_BOOTSTRAP_PORT).parse().unwrap(),
-            grpc_addr: format!("0.0.0.0:{}", crate::DEFAULT_GRPC_PORT).parse().unwrap(),
+            bootstrap_addr: format!("0.0.0.0:{}", crate::DEFAULT_BOOTSTRAP_PORT)
+                .parse()
+                .unwrap(),
+            grpc_addr: format!("0.0.0.0:{}", crate::DEFAULT_GRPC_PORT)
+                .parse()
+                .unwrap(),
             token_ttl: Duration::from_secs(3600),
             server_sans: vec![
                 "localhost".to_string(),
@@ -297,6 +301,7 @@ mod tests {
             _image: &str,
             _registry_credentials: Option<&str>,
             _cluster_name: Option<&str>,
+            _provider: Option<&str>,
         ) -> Vec<String> {
             vec!["mock-manifest".to_string()]
         }
@@ -318,8 +323,18 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = CellConfig::default();
-        assert_eq!(config.bootstrap_addr, format!("0.0.0.0:{}", crate::DEFAULT_BOOTSTRAP_PORT).parse().unwrap());
-        assert_eq!(config.grpc_addr, format!("0.0.0.0:{}", crate::DEFAULT_GRPC_PORT).parse().unwrap());
+        assert_eq!(
+            config.bootstrap_addr,
+            format!("0.0.0.0:{}", crate::DEFAULT_BOOTSTRAP_PORT)
+                .parse()
+                .unwrap()
+        );
+        assert_eq!(
+            config.grpc_addr,
+            format!("0.0.0.0:{}", crate::DEFAULT_GRPC_PORT)
+                .parse()
+                .unwrap()
+        );
         assert_eq!(config.token_ttl, Duration::from_secs(3600));
         assert!(!config.server_sans.is_empty());
     }
@@ -344,13 +359,17 @@ mod tests {
         let servers = test_cell_servers();
 
         // Start servers
-        let result = servers.ensure_running_with(MockManifestGenerator, &[]).await;
+        let result = servers
+            .ensure_running_with(MockManifestGenerator, &[])
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap()); // Should return true (started)
         assert!(servers.is_running());
 
         // Second call should return false (already running)
-        let result = servers.ensure_running_with(MockManifestGenerator, &[]).await;
+        let result = servers
+            .ensure_running_with(MockManifestGenerator, &[])
+            .await;
         assert!(result.is_ok());
         assert!(!result.unwrap()); // Should return false (was already running)
 

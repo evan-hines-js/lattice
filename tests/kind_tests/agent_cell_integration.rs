@@ -49,6 +49,7 @@ async fn integration_bootstrap_http_full_flow() {
         ca.ca_cert_pem().to_string(),
         cluster_manifest,
         None,
+        "docker".to_string(),
     );
 
     let router = bootstrap_router(state.clone());
@@ -119,6 +120,7 @@ async fn integration_bootstrap_token_replay_blocked() {
         ca.ca_cert_pem().to_string(),
         cluster_manifest,
         None,
+        "docker".to_string(),
     );
 
     let router = bootstrap_router(state);
@@ -170,6 +172,7 @@ async fn integration_full_stack_bootstrap_to_ready() {
         ca.ca_cert_pem().to_string(),
         cluster_manifest,
         None,
+        "docker".to_string(),
     );
 
     // Step 2: Bootstrap (get manifests and CA cert)

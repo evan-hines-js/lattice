@@ -30,18 +30,19 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::collections::BTreeMap;
 
-use super::{CAPIManifest, Provider};
+use super::{
+    build_post_kubeadm_commands, generate_cluster, generate_control_plane,
+    generate_kubeadm_config_template, generate_machine_deployment, CAPIManifest, Provider,
+};
 use crate::crd::{LatticeCluster, ProviderSpec, ProviderType};
 use crate::Result;
 
 /// Default namespace for CAPI resources
 const DEFAULT_NAMESPACE: &str = "default";
 
-/// CAPI API versions
-const CAPI_CLUSTER_API_VERSION: &str = "cluster.x-k8s.io/v1beta1";
-const CAPI_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v1beta1";
-const CAPI_BOOTSTRAP_API_VERSION: &str = "bootstrap.cluster.x-k8s.io/v1beta1";
-const DOCKER_INFRASTRUCTURE_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta1";
+/// Docker infrastructure API version (Docker-specific)
+/// Updated to v1beta2 as of CAPI v1.11+ (August 2025)
+const DOCKER_INFRASTRUCTURE_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta2";
 
 /// Docker/Kind infrastructure provider
 ///
@@ -100,43 +101,7 @@ impl DockerProvider {
         labels
     }
 
-    /// Generate the main Cluster resource
-    fn generate_cluster(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
-        let name = Self::get_cluster_name(cluster)?;
-        let namespace = self.get_namespace(cluster);
-        let labels = Self::create_labels(name);
-
-        let spec = json!({
-            "clusterNetwork": {
-                "pods": {
-                    "cidrBlocks": ["192.168.0.0/16"]
-                },
-                "services": {
-                    "cidrBlocks": ["10.128.0.0/12"]
-                }
-            },
-            "controlPlaneRef": {
-                "apiVersion": CAPI_CONTROLPLANE_API_VERSION,
-                "kind": "KubeadmControlPlane",
-                "name": format!("{}-control-plane", name),
-                "namespace": namespace
-            },
-            "infrastructureRef": {
-                "apiVersion": DOCKER_INFRASTRUCTURE_API_VERSION,
-                "kind": "DockerCluster",
-                "name": name,
-                "namespace": namespace
-            }
-        });
-
-        Ok(
-            CAPIManifest::new(CAPI_CLUSTER_API_VERSION, "Cluster", name, &namespace)
-                .with_labels(labels)
-                .with_spec(spec),
-        )
-    }
-
-    /// Generate the DockerCluster resource
+    /// Generate the DockerCluster resource (Docker-specific)
     fn generate_docker_cluster(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
         let name = Self::get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
@@ -155,98 +120,7 @@ impl DockerProvider {
         .with_spec(spec))
     }
 
-    /// Generate the KubeadmControlPlane resource
-    fn generate_control_plane(
-        &self,
-        cluster: &LatticeCluster,
-        bootstrap: &super::BootstrapInfo,
-    ) -> Result<CAPIManifest> {
-        let name = Self::get_cluster_name(cluster)?;
-        let namespace = self.get_namespace(cluster);
-        let labels = Self::create_labels(name);
-        let cp_name = format!("{}-control-plane", name);
-
-        let k8s_version = &cluster.spec.provider.kubernetes.version;
-        let replicas = cluster.spec.nodes.control_plane;
-
-        // Build certSANs - always include localhost/127.0.0.1 for local access
-        let mut cert_sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-        // Add any user-specified SANs
-        if let Some(ref user_sans) = cluster.spec.provider.kubernetes.cert_sans {
-            for san in user_sans {
-                if !cert_sans.contains(san) {
-                    cert_sans.push(san.clone());
-                }
-            }
-        }
-
-        // Build postKubeadmCommands for agent bootstrap
-        let post_kubeadm_commands = self.build_post_kubeadm_commands(cluster, bootstrap);
-
-        let mut kubeadm_config_spec = json!({
-            "clusterConfiguration": {
-                "apiServer": {
-                    "certSANs": cert_sans
-                },
-                "controllerManager": {
-                    "extraArgs": {
-                        "bind-address": "0.0.0.0"
-                    }
-                },
-                "scheduler": {
-                    "extraArgs": {
-                        "bind-address": "0.0.0.0"
-                    }
-                }
-            },
-            "initConfiguration": {
-                "nodeRegistration": {
-                    "criSocket": "/var/run/containerd/containerd.sock",
-                    "kubeletExtraArgs": {
-                        "eviction-hard": "nodefs.available<0%,imagefs.available<0%"
-                    }
-                }
-            },
-            "joinConfiguration": {
-                "nodeRegistration": {
-                    "criSocket": "/var/run/containerd/containerd.sock",
-                    "kubeletExtraArgs": {
-                        "eviction-hard": "nodefs.available<0%,imagefs.available<0%"
-                    }
-                }
-            }
-        });
-
-        // Add postKubeadmCommands if any
-        if !post_kubeadm_commands.is_empty() {
-            kubeadm_config_spec["postKubeadmCommands"] = json!(post_kubeadm_commands);
-        }
-
-        let spec = json!({
-            "replicas": replicas,
-            "version": format!("v{}", k8s_version),
-            "machineTemplate": {
-                "infrastructureRef": {
-                    "apiVersion": DOCKER_INFRASTRUCTURE_API_VERSION,
-                    "kind": "DockerMachineTemplate",
-                    "name": format!("{}-control-plane", name),
-                    "namespace": namespace
-                }
-            },
-            "kubeadmConfigSpec": kubeadm_config_spec
-        });
-
-        Ok(CAPIManifest::new(
-            CAPI_CONTROLPLANE_API_VERSION,
-            "KubeadmControlPlane",
-            &cp_name,
-            &namespace,
-        )
-        .with_labels(labels)
-        .with_spec(spec))
-    }
-
-    /// Generate the DockerMachineTemplate for control plane nodes
+    /// Generate the DockerMachineTemplate for control plane nodes (Docker-specific)
     fn generate_control_plane_machine_template(
         &self,
         cluster: &LatticeCluster,
@@ -277,55 +151,7 @@ impl DockerProvider {
         .with_spec(spec))
     }
 
-    /// Generate the MachineDeployment for worker nodes
-    fn generate_worker_deployment(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
-        let name = Self::get_cluster_name(cluster)?;
-        let namespace = self.get_namespace(cluster);
-        let labels = Self::create_labels(name);
-        let deployment_name = format!("{}-md-0", name);
-
-        let k8s_version = &cluster.spec.provider.kubernetes.version;
-        let replicas = cluster.spec.nodes.workers;
-
-        let spec = json!({
-            "clusterName": name,
-            "replicas": replicas,
-            "selector": {
-                "matchLabels": {}
-            },
-            "template": {
-                "spec": {
-                    "clusterName": name,
-                    "version": format!("v{}", k8s_version),
-                    "bootstrap": {
-                        "configRef": {
-                            "apiVersion": CAPI_BOOTSTRAP_API_VERSION,
-                            "kind": "KubeadmConfigTemplate",
-                            "name": format!("{}-md-0", name),
-                            "namespace": namespace
-                        }
-                    },
-                    "infrastructureRef": {
-                        "apiVersion": DOCKER_INFRASTRUCTURE_API_VERSION,
-                        "kind": "DockerMachineTemplate",
-                        "name": format!("{}-md-0", name),
-                        "namespace": namespace
-                    }
-                }
-            }
-        });
-
-        Ok(CAPIManifest::new(
-            CAPI_CLUSTER_API_VERSION,
-            "MachineDeployment",
-            &deployment_name,
-            &namespace,
-        )
-        .with_labels(labels)
-        .with_spec(spec))
-    }
-
-    /// Generate the DockerMachineTemplate for worker nodes
+    /// Generate the DockerMachineTemplate for worker nodes (Docker-specific)
     fn generate_worker_machine_template(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
         let name = Self::get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
@@ -352,117 +178,6 @@ impl DockerProvider {
         .with_labels(labels)
         .with_spec(spec))
     }
-
-    /// Generate the KubeadmConfigTemplate for worker nodes
-    fn generate_worker_config_template(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
-        let name = Self::get_cluster_name(cluster)?;
-        let namespace = self.get_namespace(cluster);
-        let labels = Self::create_labels(name);
-        let template_name = format!("{}-md-0", name);
-
-        let spec = json!({
-            "template": {
-                "spec": {
-                    "joinConfiguration": {
-                        "nodeRegistration": {
-                            "criSocket": "/var/run/containerd/containerd.sock",
-                            "kubeletExtraArgs": {
-                                "eviction-hard": "nodefs.available<0%,imagefs.available<0%"
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(CAPIManifest::new(
-            CAPI_BOOTSTRAP_API_VERSION,
-            "KubeadmConfigTemplate",
-            &template_name,
-            &namespace,
-        )
-        .with_labels(labels)
-        .with_spec(spec))
-    }
-
-    /// Build postKubeadmCommands for agent bootstrap
-    ///
-    /// This generates the commands that will be run after kubeadm completes.
-    /// For workload clusters with a cell reference, this includes calling
-    /// the registration webhook to get the agent bootstrap payload.
-    fn build_post_kubeadm_commands(
-        &self,
-        cluster: &LatticeCluster,
-        bootstrap: &super::BootstrapInfo,
-    ) -> Vec<String> {
-        let mut commands = Vec::new();
-        let name = cluster.metadata.name.as_deref().unwrap_or("unknown");
-
-        // Untaint control plane so pods can schedule (all clusters need this)
-        commands.push(
-            r#"kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-"#
-                .to_string(),
-        );
-
-        // If cluster has bootstrap info, fetch and apply manifests from parent
-        if let (Some(ref endpoint), Some(ref token), Some(ref ca_cert)) = (
-            &bootstrap.bootstrap_endpoint,
-            &bootstrap.bootstrap_token,
-            &bootstrap.ca_cert_pem,
-        ) {
-            commands.push(format!(
-                r#"echo "Bootstrapping cluster {name} from {endpoint}""#
-            ));
-
-            // Write CA cert to verify TLS connection to parent
-            commands.push(format!(
-                r#"cat > /tmp/cell-ca.crt << 'CACERT'
-{ca_cert}
-CACERT"#
-            ));
-
-            // Retry fetching manifests until success (with backoff)
-            commands.push(format!(
-                r#"echo "Fetching bootstrap manifests from parent..."
-MANIFEST_FILE=/tmp/bootstrap-manifests.yaml
-RETRY_DELAY=5
-while true; do
-  if curl -sf --cacert /tmp/cell-ca.crt "{endpoint}/api/clusters/{name}/manifests" \
-    -H "Authorization: Bearer {token}" \
-    -o "$MANIFEST_FILE"; then
-    echo "Successfully fetched bootstrap manifests"
-    break
-  fi
-  echo "Failed to fetch manifests, retrying in ${{RETRY_DELAY}}s..."
-  sleep $RETRY_DELAY
-  RETRY_DELAY=$((RETRY_DELAY < 60 ? RETRY_DELAY * 2 : 60))
-done"#,
-            ));
-
-            // Apply manifests with retry
-            commands.push(
-                r#"echo "Applying bootstrap manifests..."
-RETRY_DELAY=5
-while true; do
-  if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /tmp/bootstrap-manifests.yaml; then
-    echo "Successfully applied bootstrap manifests"
-    break
-  fi
-  echo "Failed to apply manifests, retrying in ${RETRY_DELAY}s..."
-  sleep $RETRY_DELAY
-  RETRY_DELAY=$((RETRY_DELAY < 60 ? RETRY_DELAY * 2 : 60))
-done"#
-                    .to_string(),
-            );
-
-            // Clean up temp files
-            commands.push(r#"rm -f /tmp/cell-ca.crt /tmp/bootstrap-manifests.yaml"#.to_string());
-
-            // Note: Control plane re-taint happens after pivot completes, not here
-        }
-
-        commands
-    }
 }
 
 #[async_trait]
@@ -482,20 +197,66 @@ impl Provider for DockerProvider {
         cluster: &LatticeCluster,
         bootstrap: &super::BootstrapInfo,
     ) -> Result<Vec<CAPIManifest>> {
-        // Core cluster resources and control plane resources
+        let name = Self::get_cluster_name(cluster)?;
+        let namespace = self.get_namespace(cluster);
+        let labels = Self::create_labels(name);
+        let k8s_version = &cluster.spec.provider.kubernetes.version;
+        let cp_replicas = cluster.spec.nodes.control_plane;
+
+        // Build certSANs - always include localhost/127.0.0.1 for local access
+        let mut cert_sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+        if let Some(ref user_sans) = cluster.spec.provider.kubernetes.cert_sans {
+            for san in user_sans {
+                if !cert_sans.contains(san) {
+                    cert_sans.push(san.clone());
+                }
+            }
+        }
+
+        // Build postKubeadmCommands using shared function
+        let post_kubeadm_commands = build_post_kubeadm_commands(name, bootstrap);
+
+        // Use shared functions for provider-agnostic resources
         let mut manifests = vec![
-            self.generate_cluster(cluster)?,
+            // Cluster resource (shared, just pass Docker-specific infrastructure ref)
+            generate_cluster(
+                name,
+                &namespace,
+                DOCKER_INFRASTRUCTURE_API_VERSION,
+                "DockerCluster",
+                labels.clone(),
+            ),
+            // DockerCluster (Docker-specific)
             self.generate_docker_cluster(cluster)?,
-            self.generate_control_plane(cluster, bootstrap)?,
+            // KubeadmControlPlane (shared, just pass Docker-specific machine template ref)
+            generate_control_plane(
+                name,
+                &namespace,
+                k8s_version,
+                cp_replicas,
+                cert_sans,
+                post_kubeadm_commands,
+                DOCKER_INFRASTRUCTURE_API_VERSION,
+                "DockerMachineTemplate",
+                labels.clone(),
+            ),
+            // DockerMachineTemplate for control plane (Docker-specific)
             self.generate_control_plane_machine_template(cluster)?,
         ];
 
-        // Worker resources (only if workers > 0)
-        if cluster.spec.nodes.workers > 0 {
-            manifests.push(self.generate_worker_deployment(cluster)?);
-            manifests.push(self.generate_worker_machine_template(cluster)?);
-            manifests.push(self.generate_worker_config_template(cluster)?);
-        }
+        // Worker resources - use shared functions (replicas=0, scaling after pivot)
+        manifests.push(generate_machine_deployment(
+            name,
+            &namespace,
+            k8s_version,
+            DOCKER_INFRASTRUCTURE_API_VERSION,
+            "DockerMachineTemplate",
+            labels.clone(),
+        ));
+        // DockerMachineTemplate for workers (Docker-specific)
+        manifests.push(self.generate_worker_machine_template(cluster)?);
+        // KubeadmConfigTemplate for workers (shared)
+        manifests.push(generate_kubeadm_config_template(name, &namespace, labels));
 
         Ok(manifests)
     }
@@ -552,6 +313,10 @@ mod tests {
     use crate::crd::{
         CellSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec, ProviderType,
         ServiceSpec,
+    };
+    use crate::provider::{
+        build_post_kubeadm_commands, CAPI_BOOTSTRAP_API_VERSION, CAPI_CLUSTER_API_VERSION,
+        CAPI_CONTROLPLANE_API_VERSION,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
@@ -692,10 +457,11 @@ mod tests {
             assert_eq!(manifests.len(), 7);
         }
 
-        /// Story: A control-plane-only cluster (useful for single-node dev clusters)
-        /// needs only 4 resources since worker-related resources are skipped.
+        /// Story: A control-plane-only cluster still generates worker resources
+        /// (MachineDeployment, DockerMachineTemplate, KubeadmConfigTemplate) but with
+        /// replicas=0. This makes scaling workers a simple update operation.
         #[tokio::test]
-        async fn control_plane_only_cluster_generates_four_manifests() {
+        async fn control_plane_only_cluster_generates_seven_manifests_with_zero_workers() {
             let provider = DockerProvider::new();
             let cluster = sample_cluster("test-cluster", 0);
             let bootstrap = BootstrapInfo::default();
@@ -704,7 +470,16 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(manifests.len(), 4);
+            // Always 7 manifests - worker resources just have replicas=0
+            assert_eq!(manifests.len(), 7);
+
+            // Verify the MachineDeployment has 0 replicas
+            let deployment = manifests
+                .iter()
+                .find(|m| m.kind == "MachineDeployment")
+                .expect("should have MachineDeployment");
+            let spec = deployment.spec.as_ref().unwrap();
+            assert_eq!(spec.get("replicas").unwrap(), 0);
         }
 
         /// Story: The Cluster resource is the top-level CAPI object that ties
@@ -787,11 +562,13 @@ mod tests {
             assert_eq!(spec.get("version").unwrap(), "v1.31.0");
         }
 
-        /// Story: Worker node count is configurable. The MachineDeployment manages
-        /// scaling workers up or down to match the desired count.
+        /// Story: MachineDeployment is always created with replicas=0 during initial
+        /// provisioning. After pivot, the cluster's local controller will scale up
+        /// to match spec.nodes.workers. This ensures fast cluster creation.
         #[tokio::test]
-        async fn worker_deployment_respects_replica_count() {
+        async fn worker_deployment_starts_with_zero_replicas() {
             let provider = DockerProvider::new();
+            // Even with spec.nodes.workers=5, MachineDeployment starts at 0
             let cluster = sample_cluster("my-cluster", 5);
             let bootstrap = BootstrapInfo::default();
 
@@ -809,7 +586,8 @@ mod tests {
             assert_eq!(deployment.metadata.name, "my-cluster-md-0");
 
             let spec = deployment.spec.as_ref().unwrap();
-            assert_eq!(spec.get("replicas").unwrap(), 5);
+            // Always 0 - scaling happens after pivot
+            assert_eq!(spec.get("replicas").unwrap(), 0);
             assert_eq!(spec.get("clusterName").unwrap(), "my-cluster");
         }
 
@@ -1098,11 +876,9 @@ mod tests {
         /// This is essential for single-node clusters and the pivot flow.
         #[test]
         fn all_clusters_untaint_control_plane() {
-            let provider = DockerProvider::new();
-            let cluster = sample_cluster("test", 0);
             let bootstrap = BootstrapInfo::default();
 
-            let commands = provider.build_post_kubeadm_commands(&cluster, &bootstrap);
+            let commands = build_post_kubeadm_commands("test", &bootstrap);
 
             assert!(!commands.is_empty());
             let commands_str = commands.join("\n");
@@ -1114,15 +890,13 @@ mod tests {
         /// manifests endpoint to get CNI + agent manifests piped to kubectl.
         #[test]
         fn workload_cluster_calls_manifests_endpoint() {
-            let provider = DockerProvider::new();
-            let cluster = sample_workload_cluster("workload-1", "mgmt.example.com");
             let bootstrap = BootstrapInfo::new(
                 "https://mgmt.example.com:8080".to_string(),
                 "test-token-123".to_string(),
                 "-----BEGIN CERTIFICATE-----\nTEST_CA_CERT\n-----END CERTIFICATE-----".to_string(),
             );
 
-            let commands = provider.build_post_kubeadm_commands(&cluster, &bootstrap);
+            let commands = build_post_kubeadm_commands("workload-1", &bootstrap);
 
             assert!(!commands.is_empty());
             let commands_str = commands.join("\n");
@@ -1138,11 +912,9 @@ mod tests {
         /// they ARE the management cluster. They just untaint.
         #[test]
         fn cell_cluster_does_not_call_bootstrap() {
-            let provider = DockerProvider::new();
-            let cluster = sample_cell_cluster("mgmt");
             let bootstrap = BootstrapInfo::default();
 
-            let commands = provider.build_post_kubeadm_commands(&cluster, &bootstrap);
+            let commands = build_post_kubeadm_commands("mgmt", &bootstrap);
 
             let commands_str = commands.join("\n");
             assert!(!commands_str.contains("/api/clusters"));
@@ -1153,11 +925,9 @@ mod tests {
         /// no bootstrap endpoint call needed.
         #[test]
         fn standalone_cluster_only_untaints() {
-            let provider = DockerProvider::new();
-            let cluster = sample_cluster("standalone", 2);
             let bootstrap = BootstrapInfo::default();
 
-            let commands = provider.build_post_kubeadm_commands(&cluster, &bootstrap);
+            let commands = build_post_kubeadm_commands("standalone", &bootstrap);
 
             assert_eq!(commands.len(), 1); // Just the untaint command
             assert!(commands[0].contains("taint"));

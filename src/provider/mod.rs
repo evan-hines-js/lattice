@@ -132,6 +132,293 @@ pub struct ManifestMetadata {
     pub annotations: Option<std::collections::BTreeMap<String, String>>,
 }
 
+/// CAPI Cluster API version (shared across all providers)
+/// Updated to v1beta2 as of CAPI v1.11+ (August 2025)
+pub const CAPI_CLUSTER_API_VERSION: &str = "cluster.x-k8s.io/v1beta2";
+/// CAPI Bootstrap API version for KubeadmConfigTemplate (shared across all providers)
+pub const CAPI_BOOTSTRAP_API_VERSION: &str = "bootstrap.cluster.x-k8s.io/v1beta2";
+/// CAPI Control Plane API version for KubeadmControlPlane (shared across all providers)
+pub const CAPI_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v1beta2";
+
+/// Generate a MachineDeployment manifest
+///
+/// This is shared across ALL providers. MachineDeployment is always created with
+/// replicas=0 during initial provisioning. After pivot, the cluster's local
+/// controller scales up to match spec.nodes.workers.
+pub fn generate_machine_deployment(
+    cluster_name: &str,
+    namespace: &str,
+    k8s_version: &str,
+    infrastructure_api_version: &str,
+    infrastructure_kind: &str,
+    labels: std::collections::BTreeMap<String, String>,
+) -> CAPIManifest {
+    let deployment_name = format!("{}-md-0", cluster_name);
+
+    let spec = serde_json::json!({
+        "clusterName": cluster_name,
+        "replicas": 0,  // ALWAYS 0 - scaling happens after pivot
+        "selector": {
+            "matchLabels": {}
+        },
+        "template": {
+            "spec": {
+                "clusterName": cluster_name,
+                "version": format!("v{}", k8s_version.trim_start_matches('v')),
+                "bootstrap": {
+                    "configRef": {
+                        "apiVersion": CAPI_BOOTSTRAP_API_VERSION,
+                        "kind": "KubeadmConfigTemplate",
+                        "name": format!("{}-md-0", cluster_name),
+                        "namespace": namespace
+                    }
+                },
+                "infrastructureRef": {
+                    "apiVersion": infrastructure_api_version,
+                    "kind": infrastructure_kind,
+                    "name": format!("{}-md-0", cluster_name),
+                    "namespace": namespace
+                }
+            }
+        }
+    });
+
+    CAPIManifest::new(
+        CAPI_CLUSTER_API_VERSION,
+        "MachineDeployment",
+        &deployment_name,
+        namespace,
+    )
+    .with_labels(labels)
+    .with_spec(spec)
+}
+
+/// Generate a KubeadmConfigTemplate manifest for workers
+///
+/// This is shared across ALL providers since worker kubeadm config is provider-agnostic.
+pub fn generate_kubeadm_config_template(
+    cluster_name: &str,
+    namespace: &str,
+    labels: std::collections::BTreeMap<String, String>,
+) -> CAPIManifest {
+    let template_name = format!("{}-md-0", cluster_name);
+
+    let spec = serde_json::json!({
+        "template": {
+            "spec": {
+                "joinConfiguration": {
+                    "nodeRegistration": {
+                        "criSocket": "/var/run/containerd/containerd.sock",
+                        "kubeletExtraArgs": {
+                            "eviction-hard": "nodefs.available<0%,imagefs.available<0%"
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    CAPIManifest::new(
+        CAPI_BOOTSTRAP_API_VERSION,
+        "KubeadmConfigTemplate",
+        &template_name,
+        namespace,
+    )
+    .with_labels(labels)
+    .with_spec(spec)
+}
+
+/// Generate the main CAPI Cluster resource
+///
+/// This is shared across ALL providers. The only provider-specific part is the
+/// infrastructureRef which points to the provider's infrastructure cluster resource
+/// (DockerCluster, AWSCluster, etc.)
+pub fn generate_cluster(
+    cluster_name: &str,
+    namespace: &str,
+    infrastructure_api_version: &str,
+    infrastructure_kind: &str,
+    labels: std::collections::BTreeMap<String, String>,
+) -> CAPIManifest {
+    let spec = serde_json::json!({
+        "clusterNetwork": {
+            "pods": {
+                "cidrBlocks": ["192.168.0.0/16"]
+            },
+            "services": {
+                "cidrBlocks": ["10.128.0.0/12"]
+            }
+        },
+        "controlPlaneRef": {
+            "apiVersion": CAPI_CONTROLPLANE_API_VERSION,
+            "kind": "KubeadmControlPlane",
+            "name": format!("{}-control-plane", cluster_name),
+            "namespace": namespace
+        },
+        "infrastructureRef": {
+            "apiVersion": infrastructure_api_version,
+            "kind": infrastructure_kind,
+            "name": cluster_name,
+            "namespace": namespace
+        }
+    });
+
+    CAPIManifest::new(CAPI_CLUSTER_API_VERSION, "Cluster", cluster_name, namespace)
+        .with_labels(labels)
+        .with_spec(spec)
+}
+
+/// Generate the KubeadmControlPlane resource
+///
+/// This is shared across ALL providers. The only provider-specific part is the
+/// machineTemplate.infrastructureRef which points to the provider's machine template
+/// (DockerMachineTemplate, AWSMachineTemplate, etc.)
+pub fn generate_control_plane(
+    cluster_name: &str,
+    namespace: &str,
+    k8s_version: &str,
+    replicas: u32,
+    cert_sans: Vec<String>,
+    post_kubeadm_commands: Vec<String>,
+    infrastructure_api_version: &str,
+    infrastructure_machine_template_kind: &str,
+    labels: std::collections::BTreeMap<String, String>,
+) -> CAPIManifest {
+    let cp_name = format!("{}-control-plane", cluster_name);
+
+    let mut kubeadm_config_spec = serde_json::json!({
+        "clusterConfiguration": {
+            "apiServer": {
+                "certSANs": cert_sans
+            },
+            "controllerManager": {
+                "extraArgs": {
+                    "bind-address": "0.0.0.0"
+                }
+            },
+            "scheduler": {
+                "extraArgs": {
+                    "bind-address": "0.0.0.0"
+                }
+            }
+        },
+        "initConfiguration": {
+            "nodeRegistration": {
+                "criSocket": "/var/run/containerd/containerd.sock",
+                "kubeletExtraArgs": {
+                    "eviction-hard": "nodefs.available<0%,imagefs.available<0%"
+                }
+            }
+        },
+        "joinConfiguration": {
+            "nodeRegistration": {
+                "criSocket": "/var/run/containerd/containerd.sock",
+                "kubeletExtraArgs": {
+                    "eviction-hard": "nodefs.available<0%,imagefs.available<0%"
+                }
+            }
+        }
+    });
+
+    if !post_kubeadm_commands.is_empty() {
+        kubeadm_config_spec["postKubeadmCommands"] = serde_json::json!(post_kubeadm_commands);
+    }
+
+    let spec = serde_json::json!({
+        "replicas": replicas,
+        "version": format!("v{}", k8s_version.trim_start_matches('v')),
+        "machineTemplate": {
+            "infrastructureRef": {
+                "apiVersion": infrastructure_api_version,
+                "kind": infrastructure_machine_template_kind,
+                "name": format!("{}-control-plane", cluster_name),
+                "namespace": namespace
+            }
+        },
+        "kubeadmConfigSpec": kubeadm_config_spec
+    });
+
+    CAPIManifest::new(
+        CAPI_CONTROLPLANE_API_VERSION,
+        "KubeadmControlPlane",
+        &cp_name,
+        namespace,
+    )
+    .with_labels(labels)
+    .with_spec(spec)
+}
+
+/// Build postKubeadmCommands for agent bootstrap
+///
+/// This is shared across ALL providers. These are the shell commands that run
+/// after kubeadm completes on each control plane node.
+pub fn build_post_kubeadm_commands(cluster_name: &str, bootstrap: &BootstrapInfo) -> Vec<String> {
+    let mut commands = Vec::new();
+
+    // Untaint control plane so pods can schedule (all clusters need this)
+    commands.push(
+        r#"kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-"#
+            .to_string(),
+    );
+
+    // If cluster has bootstrap info, fetch and apply manifests from parent
+    if let (Some(ref endpoint), Some(ref token), Some(ref ca_cert)) = (
+        &bootstrap.bootstrap_endpoint,
+        &bootstrap.bootstrap_token,
+        &bootstrap.ca_cert_pem,
+    ) {
+        commands.push(format!(
+            r#"echo "Bootstrapping cluster {cluster_name} from {endpoint}""#
+        ));
+
+        // Write CA cert to verify TLS connection to parent
+        commands.push(format!(
+            r#"cat > /tmp/cell-ca.crt << 'CACERT'
+{ca_cert}
+CACERT"#
+        ));
+
+        // Retry fetching manifests until success (with backoff)
+        commands.push(format!(
+            r#"echo "Fetching bootstrap manifests from parent..."
+MANIFEST_FILE=/tmp/bootstrap-manifests.yaml
+RETRY_DELAY=5
+while true; do
+  if curl -sf --cacert /tmp/cell-ca.crt "{endpoint}/api/clusters/{cluster_name}/manifests" \
+    -H "Authorization: Bearer {token}" \
+    -o "$MANIFEST_FILE"; then
+    echo "Successfully fetched bootstrap manifests"
+    break
+  fi
+  echo "Failed to fetch manifests, retrying in ${{RETRY_DELAY}}s..."
+  sleep $RETRY_DELAY
+  RETRY_DELAY=$((RETRY_DELAY < 60 ? RETRY_DELAY * 2 : 60))
+done"#,
+        ));
+
+        // Apply manifests with retry
+        commands.push(
+            r#"echo "Applying bootstrap manifests..."
+RETRY_DELAY=5
+while true; do
+  if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /tmp/bootstrap-manifests.yaml; then
+    echo "Successfully applied bootstrap manifests"
+    break
+  fi
+  echo "Failed to apply manifests, retrying in ${RETRY_DELAY}s..."
+  sleep $RETRY_DELAY
+  RETRY_DELAY=$((RETRY_DELAY < 60 ? RETRY_DELAY * 2 : 60))
+done"#
+                .to_string(),
+        );
+
+        // Clean up temp files
+        commands.push(r#"rm -f /tmp/cell-ca.crt /tmp/bootstrap-manifests.yaml"#.to_string());
+    }
+
+    commands
+}
+
 /// Infrastructure provider trait for generating CAPI manifests
 ///
 /// Implementations of this trait generate Cluster API manifests for their

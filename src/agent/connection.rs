@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::proto::{AgentState, CellCommand, KubeProxyRequest, KubeProxyResponse};
+use crate::proto::{AgentState, CellCommand};
 
 /// Represents a connected agent
 pub struct AgentConnection {
@@ -22,10 +22,18 @@ pub struct AgentConnection {
     pub state: AgentState,
     /// Channel to send commands to this agent
     pub command_tx: mpsc::Sender<CellCommand>,
-    /// Channel to send K8s API proxy requests
-    pub proxy_tx: Option<mpsc::Sender<KubeProxyRequest>>,
-    /// Channel to receive K8s API proxy responses
-    pub proxy_rx: Option<mpsc::Receiver<KubeProxyResponse>>,
+    /// Port number of the K8s API proxy server (if running)
+    ///
+    /// When an agent connects with a proxy stream, a local HTTP proxy server
+    /// is started on a random port. This field stores that port so tools like
+    /// clusterctl can connect to it via kubeconfig pointing to 127.0.0.1:{port}.
+    pub proxy_port: Option<u16>,
+    /// Whether CAPI is installed and ready on this cluster
+    ///
+    /// Set to true when agent reports BootstrapComplete with capi_ready=true.
+    /// This must be true before pivot can proceed, since clusterctl move
+    /// requires CAPI to be installed on the target cluster.
+    pub capi_ready: bool,
 }
 
 impl AgentConnection {
@@ -42,8 +50,8 @@ impl AgentConnection {
             kubernetes_version,
             state: AgentState::Provisioning,
             command_tx,
-            proxy_tx: None,
-            proxy_rx: None,
+            proxy_port: None,
+            capi_ready: false,
         }
     }
 
@@ -52,17 +60,31 @@ impl AgentConnection {
         self.state = state;
     }
 
+    /// Set CAPI ready status
+    pub fn set_capi_ready(&mut self, ready: bool) {
+        self.capi_ready = ready;
+    }
+
     /// Check if agent is ready for pivot
+    ///
+    /// Agent must be in a valid state AND have CAPI installed.
+    /// CAPI is required because clusterctl move needs CAPI CRDs on the target.
     pub fn is_ready_for_pivot(&self) -> bool {
-        matches!(
+        let valid_state = matches!(
             self.state,
             AgentState::Provisioning | AgentState::Ready | AgentState::Degraded
-        )
+        );
+        valid_state && self.capi_ready
     }
 
     /// Check if K8s API proxy is available
     pub fn has_proxy(&self) -> bool {
-        self.proxy_tx.is_some()
+        self.proxy_port.is_some()
+    }
+
+    /// Get the proxy port if available
+    pub fn get_proxy_port(&self) -> Option<u16> {
+        self.proxy_port
     }
 
     /// Send a command to this agent
@@ -71,14 +93,6 @@ impl AgentConnection {
             .send(command)
             .await
             .map_err(|_| SendError::ChannelClosed)
-    }
-
-    /// Send a K8s API proxy request
-    pub async fn send_proxy_request(&self, request: KubeProxyRequest) -> Result<(), SendError> {
-        match &self.proxy_tx {
-            Some(tx) => tx.send(request).await.map_err(|_| SendError::ChannelClosed),
-            None => Err(SendError::ProxyNotAvailable),
-        }
     }
 }
 
@@ -191,17 +205,41 @@ impl AgentRegistry {
         }
     }
 
-    /// Set proxy channels for an agent
-    pub fn set_proxy_channels(
-        &self,
-        cluster_name: &str,
-        tx: mpsc::Sender<KubeProxyRequest>,
-        rx: mpsc::Receiver<KubeProxyResponse>,
-    ) {
+    /// Set CAPI ready status for an agent
+    ///
+    /// Called when agent reports BootstrapComplete with capi_ready flag.
+    /// This must be true before pivot can proceed.
+    pub fn set_capi_ready(&self, cluster_name: &str, ready: bool) {
         if let Some(mut agent) = self.agents.get_mut(cluster_name) {
-            debug!(cluster = %cluster_name, "K8s API proxy channels set");
-            agent.proxy_tx = Some(tx);
-            agent.proxy_rx = Some(rx);
+            info!(cluster = %cluster_name, capi_ready = ready, "Agent CAPI status updated");
+            agent.set_capi_ready(ready);
+        } else {
+            warn!(cluster = %cluster_name, "Attempted to set CAPI ready for unknown agent");
+        }
+    }
+
+    /// Set proxy port for an agent
+    ///
+    /// Called when a proxy server is started for an agent connection.
+    /// The port is stored so tools like clusterctl can generate kubeconfigs
+    /// pointing to 127.0.0.1:{port}.
+    pub fn set_proxy_port(&self, cluster_name: &str, port: u16) {
+        if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+            debug!(cluster = %cluster_name, port = port, "K8s API proxy port set");
+            agent.proxy_port = Some(port);
+        }
+    }
+
+    /// Get proxy port for an agent
+    pub fn get_proxy_port(&self, cluster_name: &str) -> Option<u16> {
+        self.agents.get(cluster_name).and_then(|a| a.proxy_port)
+    }
+
+    /// Clear proxy port for an agent (called when proxy disconnects)
+    pub fn clear_proxy_port(&self, cluster_name: &str) {
+        if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+            debug!(cluster = %cluster_name, "K8s API proxy port cleared");
+            agent.proxy_port = None;
         }
     }
 
@@ -316,6 +354,16 @@ mod tests {
     fn test_connection_is_ready_for_pivot() {
         let (mut conn, _rx) = create_test_connection("test");
 
+        // Without CAPI ready, should never be ready for pivot
+        conn.state = AgentState::Provisioning;
+        assert!(
+            !conn.is_ready_for_pivot(),
+            "should not be ready without CAPI"
+        );
+
+        // With CAPI ready, valid states allow pivot
+        conn.capi_ready = true;
+
         conn.state = AgentState::Provisioning;
         assert!(conn.is_ready_for_pivot());
 
@@ -382,8 +430,9 @@ mod tests {
         assert!(registry.is_connected("workload-cluster-1"));
         assert_eq!(registry.len(), 1);
 
-        // Act 2: Agent transitions through states during bootstrap
+        // Act 2: Agent transitions through states during bootstrap and CAPI becomes ready
         registry.update_state("workload-cluster-1", AgentState::Ready);
+        registry.set_capi_ready("workload-cluster-1", true);
         {
             let agent = registry.get("workload-cluster-1").unwrap();
             assert_eq!(agent.state, AgentState::Ready);
@@ -519,10 +568,10 @@ mod tests {
 
     // Story: K8s API proxy for remote cluster access
     //
-    // The cell can proxy kubectl requests to workload clusters through the agent.
-    // This requires setting up proxy channels after the agent connects.
-    #[tokio::test]
-    async fn story_k8s_api_proxy_lifecycle() {
+    // The cell runs a persistent proxy server when the agent connects.
+    // The proxy port is stored in the AgentConnection for tools like clusterctl.
+    #[test]
+    fn story_k8s_api_proxy_lifecycle() {
         let registry = AgentRegistry::new();
         let (conn, _cmd_rx) = create_test_connection("remote-cluster");
         registry.register(conn);
@@ -531,57 +580,39 @@ mod tests {
         {
             let agent = registry.get("remote-cluster").unwrap();
             assert!(!agent.has_proxy());
+            assert!(agent.get_proxy_port().is_none());
         }
 
-        // Agent can't handle proxy requests yet
-        {
-            let agent = registry.get("remote-cluster").unwrap();
-            let result = agent
-                .send_proxy_request(KubeProxyRequest {
-                    request_id: "req-1".to_string(),
-                    method: "GET".to_string(),
-                    path: "/api/v1/namespaces".to_string(),
-                    headers: vec![],
-                    body: vec![],
-                })
-                .await;
-            assert!(matches!(result, Err(SendError::ProxyNotAvailable)));
-        }
+        // No proxy port set yet
+        assert!(registry.get_proxy_port("remote-cluster").is_none());
 
-        // Agent establishes proxy channel
-        let (proxy_tx, mut proxy_rx) = mpsc::channel::<KubeProxyRequest>(16);
-        let (_, response_rx) = mpsc::channel::<KubeProxyResponse>(16);
-        registry.set_proxy_channels("remote-cluster", proxy_tx, response_rx);
+        // Proxy server starts and sets port
+        registry.set_proxy_port("remote-cluster", 18080);
 
         // Now proxy is available
         {
             let agent = registry.get("remote-cluster").unwrap();
             assert!(agent.has_proxy());
-
-            // Send a kubectl request through the proxy
-            agent
-                .send_proxy_request(KubeProxyRequest {
-                    request_id: "get-pods".to_string(),
-                    method: "GET".to_string(),
-                    path: "/api/v1/namespaces/default/pods".to_string(),
-                    headers: vec![],
-                    body: vec![],
-                })
-                .await
-                .unwrap();
+            assert_eq!(agent.get_proxy_port(), Some(18080));
         }
 
-        // Agent receives the proxied request
-        let proxied = proxy_rx.recv().await.unwrap();
-        assert_eq!(proxied.request_id, "get-pods");
-        assert_eq!(proxied.path, "/api/v1/namespaces/default/pods");
+        // Can retrieve port from registry
+        assert_eq!(registry.get_proxy_port("remote-cluster"), Some(18080));
+
+        // When proxy disconnects, port is cleared
+        registry.clear_proxy_port("remote-cluster");
+        assert!(registry.get_proxy_port("remote-cluster").is_none());
+        {
+            let agent = registry.get("remote-cluster").unwrap();
+            assert!(!agent.has_proxy());
+        }
     }
 
     // Story: Graceful handling of edge cases and errors
     //
     // The registry must handle edge cases without panicking:
     // - Operations on unknown clusters
-    // - Setting channels for disconnected agents
+    // - Setting port for disconnected agents
     // - State updates during transitions
     #[test]
     fn story_registry_handles_edge_cases_gracefully() {
@@ -596,9 +627,10 @@ mod tests {
         registry.update_state("ghost-cluster", AgentState::Ready);
         registry.unregister("ghost-cluster");
 
-        let (proxy_tx, _) = mpsc::channel::<KubeProxyRequest>(16);
-        let (_, response_rx) = mpsc::channel::<KubeProxyResponse>(16);
-        registry.set_proxy_channels("ghost-cluster", proxy_tx, response_rx);
+        // Setting proxy port for unknown cluster should not panic
+        registry.set_proxy_port("ghost-cluster", 18080);
+        registry.clear_proxy_port("ghost-cluster");
+        assert!(registry.get_proxy_port("ghost-cluster").is_none());
 
         // Registry still works after edge cases
         let (conn, _rx) = create_test_connection("real-cluster");
@@ -610,13 +642,21 @@ mod tests {
     //
     // Agents transition through states: Provisioning -> Ready/Degraded/Failed
     // The is_ready_for_pivot check guards against invalid pivot attempts.
+    // Pivot also requires CAPI to be installed and ready.
     #[test]
     fn story_agent_state_transitions() {
         let (mut conn, _rx) = create_test_connection("transitioning-cluster");
 
-        // Initial state after connection
+        // Initial state after connection - no CAPI yet
         assert_eq!(conn.state, AgentState::Provisioning);
-        assert!(conn.is_ready_for_pivot(), "Can pivot from Provisioning");
+        assert!(!conn.is_ready_for_pivot(), "Cannot pivot without CAPI");
+
+        // CAPI is installed and ready
+        conn.capi_ready = true;
+        assert!(
+            conn.is_ready_for_pivot(),
+            "Can pivot from Provisioning with CAPI"
+        );
 
         // Successfully bootstrapped
         conn.set_state(AgentState::Ready);

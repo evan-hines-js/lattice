@@ -230,6 +230,7 @@ async fn run_pivot_e2e_test() -> Result<(), String> {
         ca.ca_cert_pem().to_string(),
         cluster_manifest,
         None,
+        "docker".to_string(),
     );
     println!("  Bootstrap token generated: {}...", &token.as_str()[..16]);
 
