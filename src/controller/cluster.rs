@@ -1302,10 +1302,23 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Check if we're reconciling our own cluster (the one we're running on)
             // If so, skip provisioning - we ARE this cluster, we don't need to create it
+            // But we need to wait for CAPI resources to exist (from pivot) before going Ready
             if is_self {
-                info!("reconciling self-cluster, transitioning directly to Ready");
-                update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
-                return Ok(Action::requeue(Duration::from_secs(60)));
+                let capi_namespace = format!("capi-{}", name);
+                let capi_ready = ctx
+                    .capi
+                    .is_infrastructure_ready(&name, &capi_namespace)
+                    .await
+                    .unwrap_or(false);
+
+                if capi_ready {
+                    info!("self-cluster has CAPI resources ready, transitioning to Ready");
+                    update_cluster_status(&cluster, &ctx, ClusterPhase::Ready, None).await?;
+                    return Ok(Action::requeue(Duration::from_secs(60)));
+                } else {
+                    debug!("self-cluster waiting for CAPI resources (pivot not complete yet)");
+                    return Ok(Action::requeue(Duration::from_secs(10)));
+                }
             }
 
             // Ensure CAPI is installed before provisioning

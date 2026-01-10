@@ -1,0 +1,20 @@
+# Lattice Dependency Versions
+# Single source of truth for all dependency versions
+# Used by: Dockerfile, build.rs, runtime code
+
+[kubernetes]
+version = "1.35.0"
+
+[helm]
+version = "4.0.4"
+
+[clusterctl]
+version = "1.12.1"
+
+[capi]
+version = "1.12.1"
+
+[charts]
+cilium = "1.18.5"
+istio = "1.28.2"
+cert-manager = "1.19.2"

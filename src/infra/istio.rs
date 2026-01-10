@@ -33,7 +33,9 @@ pub struct IstioConfig {
 
 impl Default for IstioConfig {
     fn default() -> Self {
-        Self { version: "1.24.2" }
+        Self {
+            version: env!("ISTIO_VERSION"),
+        }
     }
 }
 
@@ -185,7 +187,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = IstioConfig::default();
-        assert_eq!(config.version, "1.24.2");
+        assert_eq!(config.version, env!("ISTIO_VERSION"));
     }
 
     #[test]
@@ -198,7 +200,7 @@ mod tests {
     #[test]
     fn test_reconciler_version() {
         let reconciler = IstioReconciler::new();
-        assert_eq!(reconciler.version(), "1.24.2");
+        assert_eq!(reconciler.version(), env!("ISTIO_VERSION"));
     }
 
     #[test]

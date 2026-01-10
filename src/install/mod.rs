@@ -269,7 +269,7 @@ impl Installer {
             .output()
             .await;
 
-        // Create kind config
+        // Create kind config with FIPS-compatible TLS cipher suites
         let kind_config = r#"kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -284,6 +284,12 @@ nodes:
   - containerPort: 30051
     hostPort: 30051
     protocol: TCP
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        tls-cipher-suites: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
 "#;
 
         println!("  Creating kind cluster 'lattice-bootstrap'...");
@@ -365,20 +371,52 @@ nodes:
             None,
             None,
         );
-        let operator_manifests: Vec<&str> = all_manifests
+        let operator_manifests: Vec<String> = all_manifests
             .iter()
             .filter(|m| m.starts_with("{"))
-            .map(|s| s.as_str())
+            .map(|s| {
+                // For bootstrap cluster: relax FIPS to fips140=on (not =only)
+                // This allows talking to non-FIPS kind API server
+                // Production clusters use container default (fips140=only)
+                if s.contains("\"kind\":\"Deployment\"") {
+                    Self::add_godebug_env(s)
+                } else {
+                    s.clone()
+                }
+            })
             .collect();
 
         // Apply operator manifests (namespace, serviceaccount, clusterrolebinding, deployment)
         println!("  Deploying Lattice operator...");
-        for manifest in operator_manifests {
+        for manifest in &operator_manifests {
             self.kubectl_apply(manifest, None).await?;
         }
 
         println!("  Lattice operator deployed successfully");
         Ok(())
+    }
+
+    /// Add GODEBUG=fips140=on env var to deployment for bootstrap cluster
+    fn add_godebug_env(deployment_json: &str) -> String {
+        // Parse, modify, and re-serialize the deployment
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) {
+            if let Some(containers) = value
+                .pointer_mut("/spec/template/spec/containers")
+                .and_then(|c| c.as_array_mut())
+            {
+                for container in containers {
+                    if let Some(env) = container.get_mut("env").and_then(|e| e.as_array_mut()) {
+                        env.push(serde_json::json!({
+                            "name": "GODEBUG",
+                            "value": "fips140=on"
+                        }));
+                    }
+                }
+            }
+            serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
+        } else {
+            deployment_json.to_string()
+        }
     }
 
     /// Create ClusterResourceSet for Cilium CNI + Lattice operator installation

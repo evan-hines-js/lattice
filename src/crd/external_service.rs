@@ -110,7 +110,7 @@ impl ParsedEndpoint {
     /// Check if the URL portion has an explicit port (excluding IPv6 colons)
     fn has_explicit_port(s: &str) -> bool {
         // Strip auth
-        let without_auth = s.split('@').last().unwrap_or(s);
+        let without_auth = s.split('@').next_back().unwrap_or(s);
         // Get host:port part (before any path)
         let host_port = without_auth.split('/').next().unwrap_or(without_auth);
 
@@ -129,7 +129,7 @@ impl ParsedEndpoint {
     /// Extract host from URL, handling IPv6 brackets and stripping auth/path
     fn extract_host(s: &str) -> Option<String> {
         // Strip any userinfo (user:pass@)
-        let without_auth = s.split('@').last()?;
+        let without_auth = s.split('@').next_back()?;
 
         // Remove path
         let host_port = without_auth.split('/').next()?;
@@ -148,7 +148,7 @@ impl ParsedEndpoint {
 
     fn parse_host_port(s: &str, protocol: &str) -> Option<Self> {
         // Strip any userinfo (user:pass@)
-        let without_auth = s.split('@').last()?;
+        let without_auth = s.split('@').next_back()?;
 
         // Remove any path component
         let host_port = without_auth.split('/').next()?;

@@ -721,16 +721,24 @@ impl WorkloadCompiler {
         }
     }
 
+    /// Compile a skeleton Deployment for webhook mutation.
+    ///
+    /// Creates a Deployment with minimal spec - the mutating webhook will
+    /// inject the actual container spec from the LatticeService.
+    /// The `lattice.dev/service` label links this Deployment to its LatticeService.
     fn compile_deployment(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> Deployment {
+        use crate::webhook::deployment::LATTICE_SERVICE_LABEL;
+
         let mut labels = BTreeMap::new();
         labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
         labels.insert(
             "app.kubernetes.io/managed-by".to_string(),
             "lattice".to_string(),
         );
+        // Label for webhook to find the LatticeService
+        labels.insert(LATTICE_SERVICE_LABEL.to_string(), name.to_string());
 
-        // Reuse container and strategy compilation
-        let containers = Self::compile_containers(spec);
+        // Strategy is set at Deployment level, not patched by webhook
         let strategy = Self::compile_strategy(spec);
 
         Deployment {
@@ -740,7 +748,11 @@ impl WorkloadCompiler {
             spec: DeploymentSpec {
                 replicas: spec.replicas.min,
                 selector: LabelSelector {
-                    match_labels: labels.clone(),
+                    match_labels: {
+                        let mut selector = BTreeMap::new();
+                        selector.insert("app.kubernetes.io/name".to_string(), name.to_string());
+                        selector
+                    },
                 },
                 template: PodTemplateSpec {
                     metadata: PodMeta {
@@ -748,8 +760,9 @@ impl WorkloadCompiler {
                         annotations: BTreeMap::new(),
                     },
                     spec: PodSpec {
-                        service_account_name: name.to_string(),
-                        containers,
+                        // Webhook patches serviceAccountName and containers
+                        service_account_name: String::new(),
+                        containers: vec![],
                         volumes: vec![],
                     },
                 },
@@ -934,12 +947,26 @@ mod tests {
     }
 
     #[test]
-    fn story_deployment_uses_service_account() {
+    fn story_deployment_is_skeleton() {
+        use crate::webhook::deployment::LATTICE_SERVICE_LABEL;
+
         let service = make_service("my-app", "default");
         let output = WorkloadCompiler::compile(&service);
 
         let deployment = output.deployment.unwrap();
-        assert_eq!(deployment.spec.template.spec.service_account_name, "my-app");
+
+        // Skeleton deployment has empty containers (webhook fills these)
+        assert!(deployment.spec.template.spec.containers.is_empty());
+
+        // Skeleton deployment has empty service account (webhook fills this)
+        assert!(deployment.spec.template.spec.service_account_name.is_empty());
+
+        // Has the lattice.dev/service label for webhook to find LatticeService
+        let labels = &deployment.spec.template.metadata.labels;
+        assert_eq!(
+            labels.get(LATTICE_SERVICE_LABEL),
+            Some(&"my-app".to_string())
+        );
     }
 
     // =========================================================================
@@ -1039,10 +1066,15 @@ mod tests {
             .variables
             .insert("LOG_LEVEL".to_string(), "debug".to_string());
 
-        let output = WorkloadCompiler::compile(&service);
+        // Use compile_pod_spec which generates container specs for webhook
+        let pod_spec = WorkloadCompiler::compile_pod_spec(&service);
 
-        let containers = &output.deployment.unwrap().spec.template.spec.containers;
-        let env = &containers.iter().find(|c| c.name == "main").unwrap().env;
+        let env = &pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "main")
+            .unwrap()
+            .env;
         assert!(env
             .iter()
             .any(|e| e.name == "LOG_LEVEL" && e.value == "debug"));
@@ -1051,10 +1083,16 @@ mod tests {
     #[test]
     fn story_container_ports_from_service() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service);
 
-        let containers = &output.deployment.unwrap().spec.template.spec.containers;
-        let ports = &containers.iter().find(|c| c.name == "main").unwrap().ports;
+        // Use compile_pod_spec which generates container specs for webhook
+        let pod_spec = WorkloadCompiler::compile_pod_spec(&service);
+
+        let ports = &pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "main")
+            .unwrap()
+            .ports;
         assert!(ports.iter().any(|p| p.container_port == 80));
     }
 

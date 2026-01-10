@@ -99,6 +99,27 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // When compiled with FIPS feature, verify FIPS mode is actually active
+    #[cfg(feature = "fips")]
+    {
+        if let Err(e) = aws_lc_rs::try_fips_mode() {
+            eprintln!(
+                "CRITICAL: FIPS feature is enabled but FIPS mode failed to initialize: {}. \
+                 This may indicate the aws-lc-rs FIPS module was not compiled correctly. \
+                 Ensure you're building with the correct toolchain and FIPS prerequisites.",
+                e
+            );
+            std::process::exit(1);
+        }
+        // Log FIPS status on startup
+        eprintln!("FIPS mode: ENABLED (aws-lc-rs FIPS 140-3 validated module)");
+    }
+
+    #[cfg(not(feature = "fips"))]
+    {
+        eprintln!("WARNING: Running without FIPS mode. For production, build with --features fips");
+    }
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(fmt::layer())
@@ -479,7 +500,7 @@ async fn run_controller() -> anyhow::Result<()> {
         // Don't fail startup - controllers can still run, services just won't have mesh
     }
 
-    // Create and start cell servers (runs webhook for all clusters, bootstrap/gRPC for cells)
+    // Create cell servers (but don't start them yet - wait for LatticeCluster to get SANs)
     // The webhook is always needed for LatticeService → Deployment mutation
     // External exposure (LoadBalancer) is configured per-cluster based on spec.cell
     let cell_servers = Arc::new(
@@ -487,57 +508,69 @@ async fn run_controller() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to create cell servers: {}", e))?,
     );
 
-    // Start cell servers immediately with manifest generator
-    let manifest_generator = lattice::bootstrap::DefaultManifestGenerator::new()
-        .map_err(|e| anyhow::anyhow!("Failed to create manifest generator: {}", e))?;
+    // Install MutatingWebhookConfiguration for Deployment injection
+    // CA is available immediately from cell_servers (created in CellServers::new)
+    ensure_webhook_config(&client, cell_servers.ca()).await?;
 
-    // Get extra SANs from our own LatticeCluster CRD (cell host IP if this is a cell cluster)
-    // This is needed for TLS certificate to be valid for the cell's external IP
-    // Retry until CRD exists (eventually consistent - CRD may not exist on first startup)
-    let extra_sans: Vec<String> = if let Ok(cluster_name) = std::env::var("LATTICE_CLUSTER_NAME") {
-        let clusters: kube::Api<lattice::crd::LatticeCluster> = kube::Api::all(client.clone());
-        let mut retry_delay = std::time::Duration::from_secs(1);
-        let max_delay = std::time::Duration::from_secs(30);
+    // Spawn background task to start cell servers once LatticeCluster is available
+    // This ensures TLS certificate has correct SANs (spec.cell.host) before serving manifests
+    // Controllers start immediately - they check cell_servers.is_running() before provisioning
+    let cell_servers_clone = cell_servers.clone();
+    let client_clone = client.clone();
+    let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
+    tokio::spawn(async move {
+        let manifest_generator = match lattice::bootstrap::DefaultManifestGenerator::new() {
+            Ok(gen) => gen,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to create manifest generator");
+                return;
+            }
+        };
 
-        loop {
-            match clusters.get(&cluster_name).await {
-                Ok(cluster) => {
-                    if let Some(ref cell) = cluster.spec.cell {
-                        tracing::info!(host = %cell.host, "Adding cell host to server certificate SANs");
-                        break vec![cell.host.clone()];
-                    } else {
-                        tracing::debug!("LatticeCluster has no cell spec, no extra SANs needed");
-                        break vec![];
+        // Wait for LatticeCluster to get extra SANs (cell host IP)
+        let extra_sans: Vec<String> = if let Some(ref cluster_name) = self_cluster_name {
+            let clusters: kube::Api<lattice::crd::LatticeCluster> =
+                kube::Api::all(client_clone.clone());
+
+            tracing::info!(cluster = %cluster_name, "Waiting for LatticeCluster before starting cell servers...");
+            loop {
+                match clusters.get(cluster_name).await {
+                    Ok(cluster) => {
+                        if let Some(ref cell) = cluster.spec.cell {
+                            tracing::info!(host = %cell.host, "Adding cell host to server certificate SANs");
+                            break vec![cell.host.clone()];
+                        } else {
+                            tracing::debug!("LatticeCluster has no cell spec, no extra SANs needed");
+                            break vec![];
+                        }
+                    }
+                    Err(kube::Error::Api(e)) if e.code == 404 => {
+                        tracing::debug!(
+                            cluster = %cluster_name,
+                            "LatticeCluster not found yet, waiting..."
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to read LatticeCluster, retrying...");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                 }
-                Err(kube::Error::Api(e)) if e.code == 404 => {
-                    tracing::info!(
-                        cluster = %cluster_name,
-                        retry_in = ?retry_delay,
-                        "LatticeCluster not found yet, waiting..."
-                    );
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = std::cmp::min(retry_delay * 2, max_delay);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to read LatticeCluster, continuing without cell host SAN");
-                    break vec![];
-                }
             }
+        } else {
+            vec![]
+        };
+
+        // Now start cell servers with correct SANs
+        if let Err(e) = cell_servers_clone
+            .ensure_running_with(manifest_generator, &extra_sans, client_clone)
+            .await
+        {
+            tracing::error!(error = %e, "Failed to start cell servers");
+        } else {
+            tracing::info!("Cell servers started (webhook + bootstrap + gRPC)");
         }
-    } else {
-        vec![]
-    };
-
-    cell_servers
-        .ensure_running_with(manifest_generator, &extra_sans, client.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to start cell servers: {}", e))?;
-    tracing::info!("Cell servers started (webhook + bootstrap + gRPC)");
-
-    // Install MutatingWebhookConfiguration for Deployment injection
-    // This must happen after cell servers start (we need the CA)
-    ensure_webhook_config(&client, cell_servers.ca()).await?;
+    });
 
     // Create controller context with cell servers
     // LATTICE_CLUSTER_NAME tells the controller which cluster it's running on (to avoid self-provisioning)

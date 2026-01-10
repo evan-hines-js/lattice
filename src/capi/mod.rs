@@ -49,6 +49,25 @@ pub async fn ensure_capi_installed_with<I: CapiInstaller + ?Sized>(
 // Real Implementation
 // =============================================================================
 
+/// Find a helm chart by prefix in the charts directory
+fn find_chart(charts_dir: &str, prefix: &str) -> Result<String, Error> {
+    let dir = std::fs::read_dir(charts_dir)
+        .map_err(|e| Error::capi_installation(format!("failed to read charts dir {}: {}", charts_dir, e)))?;
+
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(prefix) && name.ends_with(".tgz") {
+            return Ok(entry.path().to_string_lossy().to_string());
+        }
+    }
+
+    Err(Error::capi_installation(format!(
+        "no {} chart found in {}",
+        prefix, charts_dir
+    )))
+}
+
 /// CAPI installer that uses clusterctl
 pub struct ClusterctlInstaller;
 
@@ -76,7 +95,8 @@ impl ClusterctlInstaller {
                 .unwrap_or("/charts")
                 .to_string());
 
-        let chart_path = format!("{}/cert-manager-v1.16.2.tgz", charts_dir);
+        // Find cert-manager chart dynamically (supports any version)
+        let chart_path = find_chart(&charts_dir, "cert-manager")?;
 
         // Render cert-manager manifests with helm template
         let template_output = Command::new("helm")
