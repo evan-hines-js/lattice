@@ -74,35 +74,6 @@ pub trait KubeClient: Send + Sync {
     async fn is_webhook_config_ready(&self) -> Result<bool, Error>;
 }
 
-/// Trait for cluster bootstrap registration
-///
-/// This trait allows the controller to register clusters for bootstrap
-/// and obtain tokens for kubeadm postKubeadmCommands.
-#[cfg_attr(test, automock)]
-pub trait ClusterBootstrap: Send + Sync {
-    /// Register a cluster for bootstrap and return a one-time token
-    ///
-    /// # Arguments
-    ///
-    /// * `registration` - Cluster registration configuration
-    ///
-    /// # Returns
-    ///
-    /// A one-time bootstrap token
-    fn register_cluster(&self, registration: crate::bootstrap::ClusterRegistration) -> String;
-
-    /// Check if a cluster is already registered
-    fn is_cluster_registered(&self, cluster_id: &str) -> bool;
-
-    /// Get the cell gRPC endpoint for agents to connect to
-    fn cell_endpoint(&self) -> &str;
-
-    /// Get the bootstrap HTTP endpoint for kubeadm webhook
-    fn bootstrap_endpoint(&self) -> &str;
-
-    /// Get the CA certificate PEM
-    fn ca_cert_pem(&self) -> &str;
-}
 
 /// Trait abstracting CAPI resource operations
 ///
@@ -157,53 +128,6 @@ pub trait CAPIClient: Send + Sync {
         namespace: &str,
         replicas: u32,
     ) -> Result<(), Error>;
-}
-
-/// Real bootstrap implementation wrapping BootstrapState
-pub struct ClusterBootstrapImpl<G: crate::bootstrap::ManifestGenerator> {
-    state: Arc<crate::bootstrap::BootstrapState<G>>,
-    cell_endpoint: String,
-    bootstrap_endpoint: String,
-}
-
-impl<G: crate::bootstrap::ManifestGenerator> ClusterBootstrapImpl<G> {
-    /// Create a new ClusterBootstrapImpl wrapping the given BootstrapState
-    pub fn new(
-        state: Arc<crate::bootstrap::BootstrapState<G>>,
-        cell_endpoint: String,
-        bootstrap_endpoint: String,
-    ) -> Self {
-        Self {
-            state,
-            cell_endpoint,
-            bootstrap_endpoint,
-        }
-    }
-}
-
-impl<G: crate::bootstrap::ManifestGenerator + 'static> ClusterBootstrap
-    for ClusterBootstrapImpl<G>
-{
-    fn register_cluster(&self, registration: crate::bootstrap::ClusterRegistration) -> String {
-        let token = self.state.register_cluster(registration);
-        token.as_str().to_string()
-    }
-
-    fn is_cluster_registered(&self, cluster_id: &str) -> bool {
-        self.state.is_cluster_registered(cluster_id)
-    }
-
-    fn cell_endpoint(&self) -> &str {
-        &self.cell_endpoint
-    }
-
-    fn bootstrap_endpoint(&self) -> &str {
-        &self.bootstrap_endpoint
-    }
-
-    fn ca_cert_pem(&self) -> &str {
-        self.state.ca_cert_pem()
-    }
 }
 
 /// Real Kubernetes client implementation
@@ -914,35 +838,6 @@ pub trait PivotOperations: Send + Sync {
     );
 }
 
-/// Cell-specific capabilities for provisioning workload clusters
-///
-/// These components are only needed when running as a cell (management cluster).
-/// Bundling them together makes it clear they go together and reduces
-/// the number of optional fields in Context.
-pub struct ParentCapabilities {
-    /// Bootstrap registration for workload clusters
-    pub bootstrap: Arc<dyn ClusterBootstrap>,
-    /// Agent registry for connected agents
-    pub agent_registry: SharedAgentRegistry,
-    /// Pivot operations for orchestrating cluster pivots
-    pub pivot_ops: Arc<dyn PivotOperations>,
-}
-
-impl ParentCapabilities {
-    /// Create new cell capabilities
-    pub fn new(
-        bootstrap: Arc<dyn ClusterBootstrap>,
-        agent_registry: SharedAgentRegistry,
-        pivot_ops: Arc<dyn PivotOperations>,
-    ) -> Self {
-        Self {
-            bootstrap,
-            agent_registry,
-            pivot_ops,
-        }
-    }
-}
-
 /// Controller context containing shared state and clients
 ///
 /// The context is shared across all reconciliation calls and holds
@@ -955,7 +850,7 @@ impl ParentCapabilities {
 ///
 /// ```text
 /// let ctx = Context::builder(client)
-///     .cell_capabilities(cell_caps)
+///     .parent_servers(servers)
 ///     .build();
 /// ```
 pub struct Context {
@@ -965,8 +860,6 @@ pub struct Context {
     pub capi: Arc<dyn CAPIClient>,
     /// CAPI installer for installing CAPI and providers
     pub capi_installer: Arc<dyn CapiInstaller>,
-    /// Cell capabilities (present only when running as a cell)
-    pub parent: Option<ParentCapabilities>,
     /// Cell servers (started at application startup)
     pub parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     /// Name of the cluster this controller is running on (from LATTICE_CLUSTER_NAME env var)
@@ -998,26 +891,6 @@ impl Context {
         Self::builder(client).parent_servers(parent_servers).build()
     }
 
-    /// Access bootstrap registration (convenience accessor)
-    pub fn bootstrap(&self) -> Option<&Arc<dyn ClusterBootstrap>> {
-        self.parent.as_ref().map(|c| &c.bootstrap)
-    }
-
-    /// Access agent registry (convenience accessor)
-    pub fn agent_registry(&self) -> Option<&SharedAgentRegistry> {
-        self.parent.as_ref().map(|c| &c.agent_registry)
-    }
-
-    /// Access pivot operations (convenience accessor)
-    pub fn pivot_ops(&self) -> Option<&Arc<dyn PivotOperations>> {
-        self.parent.as_ref().map(|c| &c.pivot_ops)
-    }
-
-    /// Check if this context has parent capabilities (can provision child clusters)
-    pub fn has_parent_capabilities(&self) -> bool {
-        self.parent.is_some()
-    }
-
     /// Create a context for testing with custom mock clients
     ///
     /// This method is primarily for unit tests where a real Kubernetes
@@ -1032,28 +905,6 @@ impl Context {
             kube,
             capi,
             capi_installer,
-            parent: None,
-            parent_servers: None,
-            self_cluster_name: None,
-        }
-    }
-
-    /// Create a context for testing with parent capabilities
-    ///
-    /// This method is primarily for unit tests where a real Kubernetes
-    /// client is not available but parent capabilities are needed.
-    #[cfg(test)]
-    pub fn for_testing_with_parent(
-        kube: Arc<dyn KubeClient>,
-        capi: Arc<dyn CAPIClient>,
-        capi_installer: Arc<dyn CapiInstaller>,
-        parent: ParentCapabilities,
-    ) -> Self {
-        Self {
-            kube,
-            capi,
-            capi_installer,
-            parent: Some(parent),
             parent_servers: None,
             self_cluster_name: None,
         }
@@ -1072,7 +923,7 @@ impl Context {
 /// Full cell context:
 /// ```text
 /// let ctx = Context::builder(client)
-///     .cell_capabilities(ParentCapabilities::new(bootstrap, registry, pivot_ops))
+///     .parent_servers(servers)
 ///     .build();
 /// ```
 ///
@@ -1088,7 +939,6 @@ pub struct ContextBuilder {
     kube: Option<Arc<dyn KubeClient>>,
     capi: Option<Arc<dyn CAPIClient>>,
     capi_installer: Option<Arc<dyn CapiInstaller>>,
-    parent: Option<ParentCapabilities>,
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     self_cluster_name: Option<String>,
 }
@@ -1101,7 +951,6 @@ impl ContextBuilder {
             kube: None,
             capi: None,
             capi_installer: None,
-            parent: None,
             parent_servers: None,
             self_cluster_name: None,
         }
@@ -1110,12 +959,6 @@ impl ContextBuilder {
     /// Set the cluster name this controller is running on (from LATTICE_CLUSTER_NAME env var)
     pub fn self_cluster_name(mut self, name: impl Into<String>) -> Self {
         self.self_cluster_name = Some(name.into());
-        self
-    }
-
-    /// Set cell capabilities for running as a management cluster
-    pub fn parent_capabilities(mut self, parent: ParentCapabilities) -> Self {
-        self.parent = Some(parent);
         self
     }
 
@@ -1157,7 +1000,6 @@ impl ContextBuilder {
             capi_installer: self
                 .capi_installer
                 .unwrap_or_else(|| Arc::new(ClusterctlInstaller::new())),
-            parent: self.parent,
             parent_servers: self.parent_servers,
             self_cluster_name: self.self_cluster_name,
         }
@@ -1324,21 +1166,19 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             }
 
             // We're the parent cell, orchestrating pivot for a child cluster
-            // Get pivot operations - either from pre-configured cell or dynamically from parent_servers
-            let pivot_ops: Option<Arc<dyn PivotOperations>> = if let Some(ops) = ctx.pivot_ops() {
-                Some(ops.clone())
-            } else if let Some(ref parent_servers) = ctx.parent_servers {
-                // Create PivotOperationsImpl dynamically from parent_servers
-                if parent_servers.is_running() {
-                    Some(Arc::new(PivotOperationsImpl::new(
-                        parent_servers.agent_registry(),
-                    )))
+            // Get pivot operations from parent_servers
+            let pivot_ops: Option<Arc<dyn PivotOperations>> =
+                if let Some(ref parent_servers) = ctx.parent_servers {
+                    if parent_servers.is_running() {
+                        Some(Arc::new(PivotOperationsImpl::new(
+                            parent_servers.agent_registry(),
+                        )))
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
             // Check if we have pivot operations configured (cell mode)
             if let Some(pivot_ops) = pivot_ops {
@@ -1579,14 +1419,30 @@ async fn generate_capi_manifests(
         .ok_or_else(|| Error::validation("cluster must have a name"))?;
     let capi_namespace = format!("capi-{}", cluster_name);
 
-    // Build bootstrap info for workload clusters
-    // Priority: 1) ctx.bootstrap() (pre-configured), 2) parent_servers (dynamic)
-    let bootstrap = if let Some(bootstrap_ctx) = ctx.bootstrap() {
-        let ca_cert = bootstrap_ctx.ca_cert_pem().to_string();
-        // cell_endpoint() returns "host:http_port:grpc_port" format
-        // bootstrap_endpoint() returns full URL for bootstrap webhook
-        let cell_endpoint = bootstrap_ctx.cell_endpoint().to_string();
-        let bootstrap_endpoint = bootstrap_ctx.bootstrap_endpoint().to_string();
+    // Build bootstrap info for workload clusters using parent_servers
+    let bootstrap = if let Some(ref parent_servers) = ctx.parent_servers {
+        let self_cluster_name = ctx.self_cluster_name.as_ref().ok_or_else(|| {
+            Error::validation("self_cluster_name required when parent_servers is configured")
+        })?;
+
+        // Get the self-cluster's LatticeCluster to read its spec.endpoints
+        let self_cluster = ctx
+            .kube
+            .get_cluster(self_cluster_name)
+            .await?
+            .ok_or_else(|| Error::Bootstrap("self-cluster LatticeCluster not found".into()))?;
+        let endpoints = self_cluster.spec.endpoints.as_ref().ok_or_else(|| {
+            Error::validation("self-cluster must have spec.endpoints to provision workload clusters")
+        })?;
+
+        // Get bootstrap state from parent_servers
+        let bootstrap_state = parent_servers.bootstrap_state().await.ok_or_else(|| {
+            Error::Bootstrap("parent_servers running but bootstrap_state not available".into())
+        })?;
+
+        let ca_cert = bootstrap_state.ca_cert_pem().to_string();
+        let cell_endpoint = endpoints.endpoint();
+        let bootstrap_endpoint = endpoints.bootstrap_endpoint();
 
         // Serialize the LatticeCluster CRD to pass to workload cluster
         let cluster_manifest =
@@ -1595,7 +1451,7 @@ async fn generate_capi_manifests(
                 kind: Some("LatticeCluster".to_string()),
             })?;
 
-        // Register cluster and get token (with networking config for LB-IPAM)
+        // Register cluster and get token
         let registration = crate::bootstrap::ClusterRegistration {
             cluster_id: cluster_name.to_string(),
             cell_endpoint: cell_endpoint.clone(),
@@ -1605,11 +1461,11 @@ async fn generate_capi_manifests(
             provider: cluster.spec.provider.type_.to_string(),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
         };
-        let token = bootstrap_ctx.register_cluster(registration);
+        let token = bootstrap_state.register_cluster(registration);
 
-        BootstrapInfo::new(bootstrap_endpoint, token, ca_cert)
+        BootstrapInfo::new(bootstrap_endpoint, token.as_str().to_string(), ca_cert)
     } else {
-        // No cell capabilities - this is self-provisioning (management cluster bootstrap)
+        // No parent_servers - self-provisioning (management cluster bootstrap)
         BootstrapInfo::default()
     };
 
@@ -2563,200 +2419,6 @@ mod tests {
         }
     }
 
-    /// Workload Cluster Bootstrap Flow Tests
-    ///
-    /// These tests verify that when a workload cluster is provisioned with
-    /// bootstrap context (parent cell information), the manifest generation
-    /// correctly registers the cluster and includes bootstrap information
-    /// in the generated CAPI manifests.
-    mod workload_cluster_bootstrap_flow {
-        use super::*;
-        use crate::capi::MockCapiInstaller;
-
-        /// A simple test implementation of ClusterBootstrap that doesn't use mockall
-        /// because ClusterBootstrap returns &str which is tricky with mockall.
-        struct TestClusterBootstrap {
-            cell_endpoint: String,
-            bootstrap_endpoint: String,
-            ca_cert: String,
-            registered_clusters: std::sync::Mutex<Vec<String>>,
-        }
-
-        impl TestClusterBootstrap {
-            fn new(cell_endpoint: &str, ca_cert: &str) -> Self {
-                Self {
-                    cell_endpoint: cell_endpoint.to_string(),
-                    // Derive bootstrap endpoint from cell endpoint
-                    bootstrap_endpoint: format!(
-                        "https://{}:8080",
-                        cell_endpoint.split(':').next().unwrap_or("localhost")
-                    ),
-                    ca_cert: ca_cert.to_string(),
-                    registered_clusters: std::sync::Mutex::new(Vec::new()),
-                }
-            }
-
-            fn was_cluster_registered(&self, cluster_id: &str) -> bool {
-                self.registered_clusters
-                    .lock()
-                    .unwrap()
-                    .contains(&cluster_id.to_string())
-            }
-        }
-
-        impl ClusterBootstrap for TestClusterBootstrap {
-            fn register_cluster(
-                &self,
-                registration: crate::bootstrap::ClusterRegistration,
-            ) -> String {
-                self.registered_clusters
-                    .lock()
-                    .unwrap()
-                    .push(registration.cluster_id.clone());
-                format!("bootstrap-token-for-{}", registration.cluster_id)
-            }
-
-            fn is_cluster_registered(&self, cluster_id: &str) -> bool {
-                self.registered_clusters
-                    .lock()
-                    .unwrap()
-                    .contains(&cluster_id.to_string())
-            }
-
-            fn cell_endpoint(&self) -> &str {
-                &self.cell_endpoint
-            }
-
-            fn bootstrap_endpoint(&self) -> &str {
-                &self.bootstrap_endpoint
-            }
-
-            fn ca_cert_pem(&self) -> &str {
-                &self.ca_cert
-            }
-        }
-
-        /// Creates a cell context for testing with full cell capabilities.
-        /// This represents a real cell configuration with bootstrap, agent registry, and pivot ops.
-        fn cell_context_for_testing(bootstrap: Arc<TestClusterBootstrap>) -> Context {
-            use crate::agent::connection::AgentRegistry;
-
-            let mock = MockKubeClient::new();
-            let capi_mock = MockCAPIClient::new();
-            let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
-
-            // Create mock pivot operations (no-op for bootstrap tests)
-            let pivot_ops: Arc<dyn PivotOperations> = Arc::new(MockPivotOperations::new());
-            let agent_registry = Arc::new(AgentRegistry::new());
-            let cell = ParentCapabilities::new(bootstrap, agent_registry, pivot_ops);
-
-            Context::for_testing_with_parent(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                Arc::new(installer),
-                cell,
-            )
-        }
-
-        /// Story: When provisioning a workload cluster, the controller should
-        /// register the cluster with the bootstrap service and include the
-        /// bootstrap token in the generated CAPI manifests so kubeadm can
-        /// call back to get the agent and CNI manifests.
-        #[tokio::test]
-        async fn story_workload_cluster_registers_for_bootstrap() {
-            let cluster = sample_cluster("workload-prod-001");
-
-            // Create a test bootstrap service
-            let bootstrap = Arc::new(TestClusterBootstrap::new(
-                "cell.example.com:443",
-                "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----",
-            ));
-
-            let ctx = cell_context_for_testing(bootstrap.clone());
-
-            // Generate manifests - this should trigger registration
-            let result = generate_capi_manifests(&cluster, &ctx).await;
-
-            assert!(result.is_ok());
-            let manifests = result.unwrap();
-            assert!(!manifests.is_empty());
-
-            // Verify the cluster was registered
-            assert!(bootstrap.was_cluster_registered("workload-prod-001"));
-        }
-
-        /// Story: The bootstrap context provides the parent cell's endpoint
-        /// so workload clusters know where to connect after provisioning.
-        #[tokio::test]
-        async fn story_bootstrap_context_provides_cell_endpoint() {
-            let bootstrap = Arc::new(TestClusterBootstrap::new(
-                "mgmt.lattice.io:443",
-                "FAKE_CA_CERT",
-            ));
-
-            let ctx = cell_context_for_testing(bootstrap);
-
-            // Verify bootstrap is present in context
-            assert!(ctx.bootstrap().is_some());
-            let bootstrap_ctx = ctx.bootstrap().unwrap();
-            assert_eq!(bootstrap_ctx.cell_endpoint(), "mgmt.lattice.io:443");
-        }
-
-        /// Story: The CA certificate is included so workload clusters can
-        /// verify the parent cell's TLS certificate during bootstrap.
-        #[tokio::test]
-        async fn story_bootstrap_includes_ca_certificate() {
-            let bootstrap = Arc::new(TestClusterBootstrap::new(
-                "cell:443",
-                "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----",
-            ));
-
-            let ctx = cell_context_for_testing(bootstrap);
-
-            let bootstrap_ctx = ctx.bootstrap().unwrap();
-            assert!(bootstrap_ctx.ca_cert_pem().contains("BEGIN CERTIFICATE"));
-        }
-
-        /// Story: The bootstrap token returned by register_cluster is included
-        /// in the generated CAPI manifests for kubeadm postKubeadmCommands.
-        #[tokio::test]
-        async fn story_bootstrap_token_included_in_manifests() {
-            let cluster = sample_cluster("workload-with-token");
-
-            let bootstrap = Arc::new(TestClusterBootstrap::new(
-                "cell.example.com:443",
-                "-----BEGIN CERTIFICATE-----\nCA_CERT\n-----END CERTIFICATE-----",
-            ));
-
-            let ctx = cell_context_for_testing(bootstrap);
-
-            let result = generate_capi_manifests(&cluster, &ctx).await;
-            assert!(result.is_ok());
-
-            let manifests = result.unwrap();
-            // Find the KubeadmControlPlane manifest
-            let kcp = manifests
-                .iter()
-                .find(|m| m.kind == "KubeadmControlPlane")
-                .expect("Should have KubeadmControlPlane manifest");
-
-            // The spec should contain postKubeadmCommands with the bootstrap token
-            let spec = kcp
-                .spec
-                .as_ref()
-                .expect("KubeadmControlPlane should have spec");
-            let kubeadm_config = spec
-                .get("kubeadmConfigSpec")
-                .expect("Should have kubeadmConfigSpec");
-            let post_commands = kubeadm_config.get("postKubeadmCommands");
-
-            assert!(post_commands.is_some(), "Should have postKubeadmCommands");
-            let commands_str = serde_json::to_string(post_commands.unwrap()).unwrap();
-            assert!(commands_str.contains("bootstrap-token-for-workload-with-token"));
-        }
-    }
-
     /// API Version Parsing Tests
     ///
     /// These tests verify that Kubernetes API versions are correctly parsed
@@ -3257,322 +2919,6 @@ mod tests {
                     phase
                 );
             }
-        }
-    }
-
-    /// Pivoting Phase Orchestration Tests
-    ///
-    /// These tests verify the reconcile behavior during the Pivoting phase
-    /// when pivot_ops is configured. This covers the agent readiness checks,
-    /// pivot triggering, and post-pivot manifest storage.
-    mod pivoting_phase_orchestration {
-        use super::*;
-        use crate::capi::MockCapiInstaller;
-        use std::sync::{Arc as StdArc, Mutex};
-
-        /// Simple stub bootstrap for pivot tests (doesn't need full functionality)
-        struct StubClusterBootstrap;
-
-        impl ClusterBootstrap for StubClusterBootstrap {
-            fn register_cluster(
-                &self,
-                _registration: crate::bootstrap::ClusterRegistration,
-            ) -> String {
-                "stub-token".to_string()
-            }
-            fn is_cluster_registered(&self, _: &str) -> bool {
-                false
-            }
-            fn cell_endpoint(&self) -> &str {
-                "cell:443"
-            }
-            fn bootstrap_endpoint(&self) -> &str {
-                "https://cell:8080"
-            }
-            fn ca_cert_pem(&self) -> &str {
-                "STUB_CA"
-            }
-        }
-
-        /// Stored manifest info: (cluster_name, token, ca_cert)
-        type StoredManifests = Option<(String, Option<String>, Option<String>)>;
-
-        /// Test implementation of PivotOperations for controlled testing
-        struct TestPivotOps {
-            agent_ready: bool,
-            pivot_in_progress: bool,
-            pivot_complete: bool,
-            trigger_should_fail: bool,
-            stored_manifests: StdArc<Mutex<StoredManifests>>,
-        }
-
-        impl TestPivotOps {
-            fn agent_ready() -> Self {
-                Self {
-                    agent_ready: true,
-                    pivot_in_progress: false,
-                    pivot_complete: false,
-                    trigger_should_fail: false,
-                    stored_manifests: StdArc::new(Mutex::new(None)),
-                }
-            }
-
-            fn agent_not_ready() -> Self {
-                Self {
-                    agent_ready: false,
-                    pivot_in_progress: false,
-                    pivot_complete: false,
-                    trigger_should_fail: false,
-                    stored_manifests: StdArc::new(Mutex::new(None)),
-                }
-            }
-
-            fn pivot_already_complete() -> Self {
-                Self {
-                    agent_ready: true,
-                    pivot_in_progress: false,
-                    pivot_complete: true,
-                    trigger_should_fail: false,
-                    stored_manifests: StdArc::new(Mutex::new(None)),
-                }
-            }
-
-            fn pivot_trigger_fails() -> Self {
-                Self {
-                    agent_ready: true,
-                    pivot_in_progress: false,
-                    pivot_complete: false,
-                    trigger_should_fail: true,
-                    stored_manifests: StdArc::new(Mutex::new(None)),
-                }
-            }
-
-            fn manifests_were_stored(&self) -> bool {
-                self.stored_manifests.lock().unwrap().is_some()
-            }
-        }
-
-        #[async_trait]
-        impl PivotOperations for TestPivotOps {
-            async fn trigger_pivot(
-                &self,
-                _cluster_name: &str,
-                _source_namespace: &str,
-                _target_namespace: &str,
-            ) -> Result<(), Error> {
-                if self.trigger_should_fail {
-                    Err(Error::pivot("trigger failed".to_string()))
-                } else {
-                    Ok(())
-                }
-            }
-
-            fn is_agent_ready(&self, _cluster_name: &str) -> bool {
-                self.agent_ready
-            }
-
-            fn is_pivot_in_progress(&self, _cluster_name: &str) -> bool {
-                self.pivot_in_progress
-            }
-
-            fn is_pivot_complete(&self, _cluster_name: &str) -> bool {
-                self.pivot_complete
-            }
-
-            fn store_post_pivot_manifests(
-                &self,
-                cluster_name: &str,
-                crd_yaml: Option<String>,
-                cluster_yaml: Option<String>,
-            ) {
-                *self.stored_manifests.lock().unwrap() =
-                    Some((cluster_name.to_string(), crd_yaml, cluster_yaml));
-            }
-
-            fn is_proxy_available(&self, _cluster_name: &str) -> bool {
-                // For tests, proxy is available when pivot is in progress
-                self.pivot_in_progress
-            }
-
-            async fn execute_clusterctl_move(
-                &self,
-                _cluster_name: &str,
-                _namespace: &str,
-            ) -> Result<(), Error> {
-                // Test implementation - always succeeds
-                Ok(())
-            }
-        }
-
-        /// Captured status for verification
-        #[derive(Clone)]
-        struct StatusCapture {
-            updates: StdArc<Mutex<Vec<LatticeClusterStatus>>>,
-        }
-
-        impl StatusCapture {
-            fn new() -> Self {
-                Self {
-                    updates: StdArc::new(Mutex::new(Vec::new())),
-                }
-            }
-
-            fn record(&self, status: LatticeClusterStatus) {
-                self.updates.lock().unwrap().push(status);
-            }
-
-            fn last_phase(&self) -> Option<ClusterPhase> {
-                self.updates.lock().unwrap().last().map(|s| s.phase.clone())
-            }
-        }
-
-        fn mock_context_with_pivot_ops(
-            pivot_ops: Arc<dyn PivotOperations>,
-        ) -> (Arc<Context>, StatusCapture) {
-            use crate::agent::connection::AgentRegistry;
-
-            let capture = StatusCapture::new();
-            let capture_clone = capture.clone();
-
-            let mut mock = MockKubeClient::new();
-            mock.expect_patch_status().returning(move |_, status| {
-                capture_clone.record(status.clone());
-                Ok(())
-            });
-            // Webhook is ready in tests
-            mock.expect_is_webhook_config_ready().returning(|| Ok(true));
-
-            let capi_mock = MockCAPIClient::new();
-
-            let installer = MockCapiInstaller::new();
-
-            // Create full cell capabilities - this is a real cell configuration
-            let bootstrap: Arc<dyn ClusterBootstrap> = Arc::new(StubClusterBootstrap);
-            let agent_registry = Arc::new(AgentRegistry::new());
-            let cell = ParentCapabilities::new(bootstrap, agent_registry, pivot_ops);
-
-            let ctx = Context::for_testing_with_parent(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                Arc::new(installer),
-                cell,
-            );
-
-            (Arc::new(ctx), capture)
-        }
-
-        /// Story: When pivot is already complete (agent in Ready state),
-        /// the controller should transition to Ready phase.
-        #[tokio::test]
-        async fn story_pivot_complete_transitions_to_ready() {
-            let cluster = Arc::new(cluster_with_phase("pivot-done", ClusterPhase::Pivoting));
-            let pivot_ops = Arc::new(TestPivotOps::pivot_already_complete());
-            let (ctx, capture) = mock_context_with_pivot_ops(pivot_ops);
-
-            let action = reconcile(cluster, ctx)
-                .await
-                .expect("reconcile should succeed");
-
-            // Should transition to Ready
-            assert_eq!(capture.last_phase(), Some(ClusterPhase::Ready));
-            assert_eq!(action, Action::requeue(Duration::from_secs(60)));
-        }
-
-        /// Story: When agent is ready for pivot, controller should store
-        /// post-pivot manifests and trigger the pivot operation.
-        #[tokio::test]
-        async fn story_agent_ready_triggers_pivot() {
-            let cluster = Arc::new(workload_cluster_with_phase(
-                "pivot-ready",
-                ClusterPhase::Pivoting,
-            ));
-            let pivot_ops = Arc::new(TestPivotOps::agent_ready());
-            let (ctx, _capture) = mock_context_with_pivot_ops(pivot_ops.clone());
-
-            let action = reconcile(cluster, ctx)
-                .await
-                .expect("reconcile should succeed");
-
-            // Manifests should be stored before pivot
-            assert!(pivot_ops.manifests_were_stored());
-            // Should requeue to check pivot progress (5s after triggering pivot)
-            assert_eq!(action, Action::requeue(Duration::from_secs(5)));
-        }
-
-        /// Story: When agent is not yet connected, controller should wait
-        /// and requeue without triggering pivot.
-        #[tokio::test]
-        async fn story_agent_not_ready_waits() {
-            let cluster = Arc::new(workload_cluster_with_phase(
-                "waiting-agent",
-                ClusterPhase::Pivoting,
-            ));
-            let pivot_ops = Arc::new(TestPivotOps::agent_not_ready());
-            let (ctx, _capture) = mock_context_with_pivot_ops(pivot_ops.clone());
-
-            let action = reconcile(cluster, ctx)
-                .await
-                .expect("reconcile should succeed");
-
-            // Manifests should NOT be stored (agent not ready)
-            assert!(!pivot_ops.manifests_were_stored());
-            // Should requeue to check again
-            assert_eq!(action, Action::requeue(Duration::from_secs(10)));
-        }
-
-        /// Story: When pivot trigger fails, controller should continue and retry
-        /// (error is logged but doesn't fail reconcile).
-        #[tokio::test]
-        async fn story_pivot_trigger_failure_continues() {
-            let cluster = Arc::new(workload_cluster_with_phase(
-                "trigger-fail",
-                ClusterPhase::Pivoting,
-            ));
-            let pivot_ops = Arc::new(TestPivotOps::pivot_trigger_fails());
-            let (ctx, _capture) = mock_context_with_pivot_ops(pivot_ops);
-
-            let action = reconcile(cluster, ctx)
-                .await
-                .expect("reconcile should succeed");
-
-            // Should still requeue to retry (5s after triggering pivot)
-            assert_eq!(action, Action::requeue(Duration::from_secs(5)));
-        }
-
-        /// Story: When no pivot_ops is configured (non-cell mode),
-        /// Pivoting phase should immediately transition to Ready.
-        #[tokio::test]
-        async fn story_no_pivot_ops_skips_to_ready() {
-            let cluster = Arc::new(cluster_with_phase("non-cell", ClusterPhase::Pivoting));
-
-            let capture = StatusCapture::new();
-            let capture_clone = capture.clone();
-
-            let mut mock = MockKubeClient::new();
-            mock.expect_patch_status().returning(move |_, status| {
-                capture_clone.record(status.clone());
-                Ok(())
-            });
-            // Webhook is ready in tests
-            mock.expect_is_webhook_config_ready().returning(|| Ok(true));
-
-            let capi_mock = MockCAPIClient::new();
-            let installer = MockCapiInstaller::new();
-
-            // Context WITHOUT pivot_ops
-            let ctx = Arc::new(Context::for_testing(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                Arc::new(installer),
-            ));
-
-            let action = reconcile(cluster, ctx)
-                .await
-                .expect("reconcile should succeed");
-
-            // Should transition directly to Ready
-            assert_eq!(capture.last_phase(), Some(ClusterPhase::Ready));
-            assert_eq!(action, Action::requeue(Duration::from_secs(60)));
         }
     }
 
