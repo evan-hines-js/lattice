@@ -1000,7 +1000,7 @@ spec:
   networking:
     default:
       cidr: "172.18.255.10/32"
-  cell:
+  endpoints:
     host: 172.18.255.10
     grpcPort: 50051
     bootstrapPort: 8443

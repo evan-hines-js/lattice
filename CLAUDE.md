@@ -236,7 +236,7 @@ spec:
   networking:
     default:
       cidr: "172.18.255.1/32"
-  cell:  # Present if this is a control plane cluster
+  endpoints:  # If present, this cluster can have children
     host: 172.18.255.1
     service:
       type: LoadBalancer
