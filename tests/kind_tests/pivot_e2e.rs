@@ -734,7 +734,11 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<LatticeService> = Api::all(client);
 
-    // Deploy Layer 3 first (backend services) - no dependencies
+    // Deploy in "wrong" order (backends first) to test eventual consistency
+    // The controller should re-reconcile affected services when dependencies change
+    //
+    // Order: Layer 3 (backends) → Layer 2 (APIs) → Layer 1 (frontends)
+
     println!("  [Layer 3] Deploying backend services...");
 
     println!("    Deploying db-users...");
@@ -752,7 +756,6 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to create cache: {}", e))?;
 
-    // Deploy Layer 2 (API services) - depend on Layer 3
     println!("  [Layer 2] Deploying API services...");
 
     println!("    Deploying api-gateway...");
@@ -770,7 +773,6 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to create api-orders: {}", e))?;
 
-    // Deploy Layer 1 (frontend services - traffic generators)
     println!("  [Layer 1] Deploying frontend services (traffic generators)...");
 
     println!("    Deploying frontend-web...");
@@ -789,6 +791,9 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to create frontend-admin: {}", e))?;
 
     println!("  All {} services deployed!", TOTAL_SERVICES);
+    println!("  Waiting for eventual consistency (policies to reconcile)...");
+    sleep(Duration::from_secs(10)).await;
+
     Ok(())
 }
 
