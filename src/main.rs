@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
+use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher::Config as WatcherConfig;
 use kube::runtime::Controller;
 use kube::{Api, Client, CustomResourceExt};
@@ -652,7 +653,46 @@ async fn run_controller() -> anyhow::Result<()> {
             }
         });
 
-    let service_controller = Controller::new(services, WatcherConfig::default())
+    // Clone graph for the watch mapper closure
+    let graph_for_watch = service_ctx.graph.clone();
+
+    let service_controller = Controller::new(services.clone(), WatcherConfig::default())
+        // Watch all LatticeService changes and trigger re-reconciliation of dependent services
+        // This enables eventual consistency: when service B is created, services that
+        // depend on B get re-reconciled to update their egress policies. When service A
+        // is created with deps, services that A depends on get re-reconciled to update
+        // their ingress policies (if they allow A).
+        .watches(
+            services,
+            WatcherConfig::default(),
+            move |service| {
+                let graph = graph_for_watch.clone();
+                let env = &service.spec.environment;
+                let name = service.metadata.name.as_deref().unwrap_or_default();
+
+                // Get services that this service depends on (they need to update ingress)
+                let dependencies = graph.get_dependencies(env, name);
+                // Get services that depend on this service (they need to update egress)
+                let dependents = graph.get_dependents(env, name);
+
+                // Combine and deduplicate
+                let mut affected: Vec<String> = dependencies;
+                affected.extend(dependents);
+                affected.sort();
+                affected.dedup();
+
+                tracing::debug!(
+                    service = %name,
+                    env = %env,
+                    affected_count = affected.len(),
+                    "Service changed, triggering re-reconciliation of affected services"
+                );
+
+                affected.into_iter().map(|dep_name| {
+                    ObjectRef::<LatticeService>::new(&dep_name)
+                })
+            },
+        )
         .shutdown_on_signal()
         .run(service_reconcile, service_error_policy, service_ctx.clone())
         .for_each(|result| async move {

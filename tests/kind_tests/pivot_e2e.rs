@@ -791,8 +791,8 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to create frontend-admin: {}", e))?;
 
     println!("  All {} services deployed!", TOTAL_SERVICES);
-    println!("  Waiting for eventual consistency (policies to reconcile)...");
-    sleep(Duration::from_secs(10)).await;
+    println!("  Waiting for watch-triggered reconciliation (should be fast)...");
+    sleep(Duration::from_secs(5)).await;
 
     Ok(())
 }
