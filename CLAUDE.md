@@ -905,7 +905,7 @@ pub struct LatticeClusterSpec {
     pub provider: ProviderSpec,
     pub nodes: NodeSpec,
     pub networking: Option<NetworkingSpec>,
-    pub cell: Option<CellSpec>,
+    pub cell: Option<ParentSpec>,
 }
 ```
 

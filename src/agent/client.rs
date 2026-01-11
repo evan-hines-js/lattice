@@ -994,6 +994,10 @@ fn extract_domain(url: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::proto::{ApplyManifestsCommand, StartPivotCommand, StatusRequest};
+    use std::sync::Mutex;
+
+    // Mutex to serialize tests that modify environment variables
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_default_config() {
@@ -2600,6 +2604,8 @@ mod tests {
     /// the API server endpoint from standard environment variables.
     #[test]
     fn story_api_server_endpoint_from_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
         // Save original values
         let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
         let orig_port = std::env::var("KUBERNETES_SERVICE_PORT").ok();
@@ -2625,6 +2631,8 @@ mod tests {
     /// Story: API server endpoint uses default port when not specified
     #[test]
     fn story_api_server_endpoint_default_port() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
         // Save original values
         let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
         let orig_port = std::env::var("KUBERNETES_SERVICE_PORT").ok();
@@ -2649,8 +2657,9 @@ mod tests {
 
     /// Story: API server endpoint is empty when not in cluster
     #[test]
-    #[ignore = "flaky due to env var race conditions in parallel tests"]
     fn story_api_server_endpoint_empty_outside_cluster() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
         // Save original value
         let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
 

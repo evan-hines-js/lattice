@@ -11,7 +11,7 @@ use kube::{Api, Client, CustomResourceExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lattice::agent::client::{AgentClient, AgentClientConfig};
-use lattice::cell::{CellConfig, CellServers};
+use lattice::parent::{ParentConfig, ParentServers};
 use lattice::controller::{
     error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
     service_reconcile, Context, ServiceContext,
@@ -499,7 +499,7 @@ async fn apply_manifest(client: &Client, manifest: &str) -> anyhow::Result<()> {
 /// Run in controller mode - manages clusters
 ///
 /// Cell servers (gRPC + bootstrap HTTP) start automatically when needed.
-/// Cell endpoint configuration is read from the local LatticeCluster CRD's spec.cell.
+/// Cell endpoint configuration is read from the local LatticeCluster CRD's spec.parent.
 ///
 /// If this cluster has a cellRef (parent), the controller also connects as an agent
 /// to the parent cell for pivot coordination and health reporting.
@@ -523,20 +523,20 @@ async fn run_controller() -> anyhow::Result<()> {
 
     // Create cell servers (but don't start them yet - wait for LatticeCluster to get SANs)
     // The webhook is always needed for LatticeService → Deployment mutation
-    // External exposure (LoadBalancer) is configured per-cluster based on spec.cell
-    let cell_servers = Arc::new(
-        CellServers::new(CellConfig::default())
+    // External exposure (LoadBalancer) is configured per-cluster based on spec.parent
+    let parent_servers = Arc::new(
+        ParentServers::new(ParentConfig::default())
             .map_err(|e| anyhow::anyhow!("Failed to create cell servers: {}", e))?,
     );
 
     // Install MutatingWebhookConfiguration for Deployment injection
-    // CA is available immediately from cell_servers (created in CellServers::new)
-    ensure_webhook_config(&client, cell_servers.ca()).await?;
+    // CA is available immediately from parent_servers (created in ParentServers::new)
+    ensure_webhook_config(&client, parent_servers.ca()).await?;
 
     // Spawn background task to start cell servers once LatticeCluster is available
-    // This ensures TLS certificate has correct SANs (spec.cell.host) before serving manifests
-    // Controllers start immediately - they check cell_servers.is_running() before provisioning
-    let cell_servers_clone = cell_servers.clone();
+    // This ensures TLS certificate has correct SANs (spec.parent.host) before serving manifests
+    // Controllers start immediately - they check parent_servers.is_running() before provisioning
+    let parent_servers_clone = parent_servers.clone();
     let client_clone = client.clone();
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
     tokio::spawn(async move {
@@ -557,7 +557,7 @@ async fn run_controller() -> anyhow::Result<()> {
             loop {
                 match clusters.get(cluster_name).await {
                     Ok(cluster) => {
-                        if let Some(ref cell) = cluster.spec.cell {
+                        if let Some(ref cell) = cluster.spec.parent {
                             tracing::info!(host = %cell.host, "Adding cell host to server certificate SANs");
                             break vec![cell.host.clone()];
                         } else {
@@ -583,7 +583,7 @@ async fn run_controller() -> anyhow::Result<()> {
         };
 
         // Now start cell servers with correct SANs
-        if let Err(e) = cell_servers_clone
+        if let Err(e) = parent_servers_clone
             .ensure_running_with(manifest_generator, &extra_sans, client_clone)
             .await
         {
@@ -596,7 +596,7 @@ async fn run_controller() -> anyhow::Result<()> {
     // Create controller context with cell servers
     // LATTICE_CLUSTER_NAME tells the controller which cluster it's running on (to avoid self-provisioning)
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
-    let mut ctx_builder = Context::builder(client.clone()).cell_servers(cell_servers.clone());
+    let mut ctx_builder = Context::builder(client.clone()).parent_servers(parent_servers.clone());
     if let Some(ref name) = self_cluster_name {
         tracing::info!(cluster = %name, "Running as self-managed cluster");
         ctx_builder = ctx_builder.self_cluster_name(name.clone());
@@ -703,7 +703,7 @@ async fn run_controller() -> anyhow::Result<()> {
     }
 
     // Shutdown cell servers
-    cell_servers.shutdown().await;
+    parent_servers.shutdown().await;
 
     tracing::info!("Lattice controller shutting down");
     Ok(())

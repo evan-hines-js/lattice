@@ -7,7 +7,7 @@ mod cluster;
 mod service;
 
 pub use cluster::{
-    error_policy, reconcile, CellCapabilities, ClusterBootstrap, ClusterBootstrapImpl, Context,
+    error_policy, reconcile, ParentCapabilities, ClusterBootstrap, ClusterBootstrapImpl, Context,
     ContextBuilder, KubeClient, KubeClientImpl, PivotOperations, PivotOperationsImpl,
 };
 

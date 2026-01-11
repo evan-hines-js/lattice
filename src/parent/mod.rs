@@ -1,11 +1,10 @@
-//! Cell servers for on-demand gRPC and bootstrap HTTP servers
+//! Parent servers for on-demand gRPC and bootstrap HTTP servers
 //!
-//! When a cluster detects a Pending LatticeCluster CRD, it becomes a "cell"
-//! and needs to run:
-//! - gRPC server: for agent bidirectional streams
+//! When a cluster has parent configuration (can have children), it runs:
+//! - gRPC server: for child agent bidirectional streams
 //! - Bootstrap HTTP server: for kubeadm postKubeadmCommands webhook
 //!
-//! This module provides `CellServers` which starts these servers on-demand.
+//! This module provides `ParentServers` which starts these servers on-demand.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +28,7 @@ use crate::webhook::{webhook_router, WebhookState};
 
 /// Configuration for cell servers
 #[derive(Debug, Clone)]
-pub struct CellConfig {
+pub struct ParentConfig {
     /// Address for the bootstrap HTTPS server
     pub bootstrap_addr: SocketAddr,
     /// Address for the gRPC server
@@ -44,7 +43,7 @@ pub struct CellConfig {
     pub registry_credentials: Option<String>,
 }
 
-impl Default for CellConfig {
+impl Default for ParentConfig {
     fn default() -> Self {
         Self {
             bootstrap_addr: format!("0.0.0.0:{}", crate::DEFAULT_BOOTSTRAP_PORT)
@@ -74,11 +73,11 @@ impl Default for CellConfig {
 ///
 /// These servers are started on-demand when the controller detects a Pending
 /// LatticeCluster CRD, indicating this cluster should provision a child cluster.
-pub struct CellServers<G: ManifestGenerator + Send + Sync + 'static = DefaultManifestGenerator> {
+pub struct ParentServers<G: ManifestGenerator + Send + Sync + 'static = DefaultManifestGenerator> {
     /// Whether the servers have been started
     running: AtomicBool,
     /// Configuration
-    config: CellConfig,
+    config: ParentConfig,
     /// Certificate Authority for signing agent certificates
     ca: Arc<CertificateAuthority>,
     /// Bootstrap state for cluster registration
@@ -114,9 +113,9 @@ pub enum CellServerError {
     AlreadyRunning,
 }
 
-impl CellServers<DefaultManifestGenerator> {
-    /// Create a new CellServers instance with default manifest generator
-    pub fn new(config: CellConfig) -> Result<Self, CellServerError> {
+impl ParentServers<DefaultManifestGenerator> {
+    /// Create a new ParentServers instance with default manifest generator
+    pub fn new(config: ParentConfig) -> Result<Self, CellServerError> {
         let ca = Arc::new(
             CertificateAuthority::new("Lattice CA")
                 .map_err(|e| CellServerError::CaCreation(e.to_string()))?,
@@ -133,9 +132,9 @@ impl CellServers<DefaultManifestGenerator> {
     }
 }
 
-impl<G: ManifestGenerator + Send + Sync + 'static> CellServers<G> {
+impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// Create with a custom manifest generator
-    pub fn with_generator(config: CellConfig, ca: Arc<CertificateAuthority>) -> Self {
+    pub fn with_generator(config: ParentConfig, ca: Arc<CertificateAuthority>) -> Self {
         Self {
             running: AtomicBool::new(false),
             config,
@@ -317,17 +316,17 @@ mod tests {
         }
     }
 
-    fn test_cell_servers() -> CellServers<MockManifestGenerator> {
+    fn test_parent_servers() -> ParentServers<MockManifestGenerator> {
         // Install crypto provider (ok if already installed)
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-        let config = CellConfig {
+        let config = ParentConfig {
             bootstrap_addr: "127.0.0.1:0".parse().unwrap(),
             grpc_addr: "127.0.0.1:0".parse().unwrap(),
             ..Default::default()
         };
         let ca = Arc::new(CertificateAuthority::new("Test CA").unwrap());
-        CellServers::with_generator(config, ca)
+        ParentServers::with_generator(config, ca)
     }
 
     /// Try to get a Kubernetes client for testing
@@ -338,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let config = CellConfig::default();
+        let config = ParentConfig::default();
         assert_eq!(
             config.bootstrap_addr,
             format!("0.0.0.0:{}", crate::DEFAULT_BOOTSTRAP_PORT)
@@ -356,17 +355,17 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_servers_creation() {
-        let config = CellConfig::default();
-        let servers = CellServers::new(config);
+    fn test_parent_servers_creation() {
+        let config = ParentConfig::default();
+        let servers = ParentServers::new(config);
         assert!(servers.is_ok());
         let servers = servers.unwrap();
         assert!(!servers.is_running());
     }
 
     #[test]
-    fn test_cell_servers_not_running_initially() {
-        let servers = test_cell_servers();
+    fn test_parent_servers_not_running_initially() {
+        let servers = test_parent_servers();
         assert!(!servers.is_running());
     }
 
@@ -380,7 +379,7 @@ mod tests {
             return;
         };
 
-        let servers = test_cell_servers();
+        let servers = test_parent_servers();
 
         // Start servers
         let result = servers
@@ -404,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_idempotent() {
-        let servers = test_cell_servers();
+        let servers = test_parent_servers();
 
         // Shutdown without starting should be safe
         servers.shutdown().await;
@@ -435,7 +434,7 @@ mod tests {
             return;
         };
 
-        let servers = test_cell_servers();
+        let servers = test_parent_servers();
 
         // Before start, bootstrap state should be None
         assert!(servers.bootstrap_state().await.is_none());

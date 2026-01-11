@@ -1,21 +1,21 @@
 //! LatticeCluster Custom Resource Definition
 //!
 //! The LatticeCluster CRD represents a Kubernetes cluster managed by Lattice.
-//! It supports both management clusters (cells) and workload clusters.
+//! It supports both parent clusters (can have children) and leaf clusters.
 
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    CellSpec, ClusterPhase, Condition, NetworkingSpec, NodeSpec, ProviderSpec, WorkloadSpec,
+    ClusterPhase, Condition, NetworkingSpec, NodeSpec, ParentSpec, ProviderSpec, WorkloadSpec,
 };
 
 /// Specification for a LatticeCluster
 ///
 /// A LatticeCluster can be either:
-/// - A management cluster (cell) with the `cell` field set
-/// - A workload cluster (without `cell` field)
+/// - A parent cluster with the `parent` field set (can provision children)
+/// - A leaf cluster (without `parent` field)
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "lattice.dev",
@@ -42,9 +42,9 @@ pub struct LatticeClusterSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub networking: Option<NetworkingSpec>,
 
-    /// Cell configuration - if present, this cluster is a management cluster
+    /// Parent configuration - if present, this cluster can have children
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cell: Option<CellSpec>,
+    pub parent: Option<ParentSpec>,
 
     /// Environment identifier (e.g., prod, staging, dev)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,9 +60,9 @@ pub struct LatticeClusterSpec {
 }
 
 impl LatticeClusterSpec {
-    /// Returns true if this cluster is a cell (management cluster)
-    pub fn is_cell(&self) -> bool {
-        self.cell.is_some()
+    /// Returns true if this cluster can have children (has parent config)
+    pub fn is_parent(&self) -> bool {
+        self.parent.is_some()
     }
 
     /// Validate the cluster specification
@@ -178,8 +178,8 @@ mod tests {
         }
     }
 
-    fn cell_spec() -> CellSpec {
-        CellSpec {
+    fn parent_spec() -> ParentSpec {
+        ParentSpec {
             host: "172.18.255.1".to_string(),
             grpc_port: 50051,
             bootstrap_port: 8443,
@@ -193,46 +193,46 @@ mod tests {
     // Cluster Type Identification Stories
     // =========================================================================
     //
-    // Lattice supports two cluster types:
-    // - Cells: Management clusters that provision and monitor workload clusters
-    // - Workloads: Clusters that run user applications and reference a parent cell
+    // Lattice supports two cluster configurations:
+    // - Parent clusters: Can provision and manage child clusters (have `parent` field)
+    // - Leaf clusters: Run user applications, cannot provision children
 
-    /// Story: A cluster with cell configuration is recognized as a management cluster
+    /// Story: A cluster with parent configuration can have children
     ///
-    /// Cells are the management plane of Lattice. They have the cell config
-    /// (host, service) which enables them to accept connections from child clusters.
+    /// Parent clusters can provision and manage child clusters. They have the
+    /// parent config (host, service) for child clusters to connect back to.
     #[test]
-    fn story_cluster_with_cell_config_is_management_cluster() {
+    fn story_cluster_with_parent_config_can_have_children() {
         let spec = LatticeClusterSpec {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            cell: Some(cell_spec()),
+            parent: Some(parent_spec()),
             environment: None,
             region: None,
             workload: None,
         };
 
-        assert!(spec.is_cell(), "Should be recognized as a cell");
+        assert!(spec.is_parent(), "Should be recognized as a parent");
     }
 
-    /// Story: A cluster without cell configuration is a workload cluster
+    /// Story: A cluster without parent configuration is a leaf cluster
     ///
-    /// Workload clusters run user workloads and connect outbound to their
-    /// parent cell for management and monitoring.
+    /// Leaf clusters run user workloads and connect outbound to their
+    /// parent for management and monitoring.
     #[test]
-    fn story_cluster_without_cell_is_workload() {
+    fn story_cluster_without_parent_is_leaf() {
         let spec = LatticeClusterSpec {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            cell: None,
+            parent: None,
             environment: Some("prod".to_string()),
             region: Some("us-west".to_string()),
             workload: None,
         };
 
-        assert!(!spec.is_cell(), "Workload cluster is not a cell");
+        assert!(!spec.is_parent(), "Leaf cluster cannot have children");
     }
 
     // =========================================================================
@@ -241,16 +241,16 @@ mod tests {
     //
     // These tests ensure cluster specs are validated before provisioning.
 
-    /// Story: Valid cell configuration passes validation
+    /// Story: Valid parent cluster configuration passes validation
     ///
-    /// A management cluster needs cell config and valid node topology.
+    /// A parent cluster needs parent config and valid node topology.
     #[test]
-    fn story_valid_cell_passes_validation() {
+    fn story_valid_parent_passes_validation() {
         let spec = LatticeClusterSpec {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            cell: Some(cell_spec()),
+            parent: Some(parent_spec()),
             environment: None,
             region: None,
             workload: None,
@@ -258,7 +258,7 @@ mod tests {
 
         assert!(
             spec.validate().is_ok(),
-            "Valid cell spec should pass validation"
+            "Valid parent spec should pass validation"
         );
     }
 
@@ -271,7 +271,7 @@ mod tests {
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            cell: None,
+            parent: None,
             environment: None,
             region: None,
             workload: None,
@@ -295,7 +295,7 @@ mod tests {
                 workers: 2,
             },
             networking: None,
-            cell: None,
+            parent: None,
             environment: None,
             region: None,
             workload: None,
@@ -406,18 +406,18 @@ nodes:
 networking:
   default:
     cidr: "172.18.255.1/32"
-cell:
+parent:
   host: "172.18.255.1"
   service:
     type: LoadBalancer
 "#;
         let spec: LatticeClusterSpec = serde_yaml::from_str(yaml).unwrap();
 
-        assert!(spec.is_cell(), "Should be a cell");
+        assert!(spec.is_parent(), "Should be a parent cluster");
         assert_eq!(spec.nodes.control_plane, 1);
         assert_eq!(spec.nodes.workers, 2);
         assert_eq!(spec.provider.kubernetes.version, "1.35.0");
-        assert_eq!(spec.cell.as_ref().unwrap().host, "172.18.255.1");
+        assert_eq!(spec.parent.as_ref().unwrap().host, "172.18.255.1");
     }
 
     /// Story: User defines production workload cluster in YAML manifest
@@ -445,7 +445,7 @@ workload:
 "#;
         let spec: LatticeClusterSpec = serde_yaml::from_str(yaml).unwrap();
 
-        assert!(!spec.is_cell(), "Should be workload cluster");
+        assert!(!spec.is_parent(), "Should be workload cluster");
         assert_eq!(spec.environment.as_deref(), Some("prod"));
         assert_eq!(spec.region.as_deref(), Some("us-west"));
 
@@ -465,7 +465,7 @@ workload:
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
             networking: None,
-            cell: None,
+            parent: None,
             environment: Some("staging".to_string()),
             region: None,
             workload: None,

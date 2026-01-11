@@ -9,7 +9,7 @@ use kube::api::{Api, DeleteParams, PostParams};
 use kube::Client;
 
 use lattice::crd::{
-    BootstrapProvider, CellSpec, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec,
+    BootstrapProvider, ParentSpec, KubernetesSpec, LatticeCluster, LatticeClusterSpec, NodeSpec,
     ProviderSpec, ProviderType, ServiceSpec,
 };
 
@@ -20,7 +20,7 @@ use super::helpers::ensure_test_cluster;
 // =============================================================================
 
 /// Create a sample management cluster (cell) spec
-fn sample_cell_spec(name: &str) -> LatticeCluster {
+fn sample_parent_spec(name: &str) -> LatticeCluster {
     LatticeCluster {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
@@ -40,7 +40,7 @@ fn sample_cell_spec(name: &str) -> LatticeCluster {
                 workers: 2,
             },
             networking: None,
-            cell: Some(CellSpec {
+            parent: Some(ParentSpec {
                 host: "172.18.255.1".to_string(),
                 grpc_port: 50051,
                 bootstrap_port: 8443,
@@ -77,7 +77,7 @@ fn sample_workload_spec(name: &str) -> LatticeCluster {
                 workers: 3,
             },
             networking: None,
-            cell: None,
+            parent: None,
             environment: Some("prod".to_string()),
             region: Some("us-west".to_string()),
             workload: None,
@@ -122,7 +122,7 @@ async fn story_operator_creates_management_cluster() {
     cleanup_cluster(&client, name).await;
 
     // Act: Platform operator creates the management cluster
-    let cluster = sample_cell_spec(name);
+    let cluster = sample_parent_spec(name);
     let created = api
         .create(&PostParams::default(), &cluster)
         .await
@@ -131,7 +131,7 @@ async fn story_operator_creates_management_cluster() {
     // Assert: The cluster is created and recognized as a cell
     assert_eq!(created.metadata.name.as_deref(), Some(name));
     assert!(
-        created.spec.is_cell(),
+        created.spec.is_parent(),
         "Management cluster should be a cell"
     );
 
@@ -140,7 +140,7 @@ async fn story_operator_creates_management_cluster() {
     assert_eq!(fetched.spec.provider.type_, ProviderType::Docker);
     assert_eq!(fetched.spec.nodes.control_plane, 1);
     assert_eq!(fetched.spec.nodes.workers, 2);
-    assert_eq!(fetched.spec.cell.as_ref().unwrap().host, "172.18.255.1");
+    assert_eq!(fetched.spec.parent.as_ref().unwrap().host, "172.18.255.1");
 
     // Cleanup
     cleanup_cluster(&client, name).await;
@@ -185,7 +185,7 @@ async fn story_operator_creates_workload_cluster_for_production() {
     // Assert: The cluster is created as a workload cluster
     assert_eq!(created.metadata.name.as_deref(), Some(name));
     assert!(
-        !created.spec.is_cell(),
+        !created.spec.is_parent(),
         "Workload cluster should not be a cell"
     );
 
@@ -220,7 +220,7 @@ async fn story_operator_lists_all_managed_clusters() {
     cleanup_cluster(&client, "test-list-prod").await;
 
     // Act: Create a cell and a workload cluster
-    let cell = sample_cell_spec("test-list-mgmt");
+    let cell = sample_parent_spec("test-list-mgmt");
     let workload = sample_workload_spec("test-list-prod");
 
     api.create(&PostParams::default(), &cell)
@@ -281,7 +281,7 @@ async fn story_operator_scales_cluster_to_handle_increased_load() {
     cleanup_cluster(&client, name).await;
 
     // Setup: Create a cluster with 2 workers
-    let cluster = sample_cell_spec(name);
+    let cluster = sample_parent_spec(name);
     let created = api
         .create(&PostParams::default(), &cluster)
         .await
@@ -330,7 +330,7 @@ async fn story_operator_decommissions_unused_cluster() {
     let name = "test-decommission";
 
     // Setup: Create a cluster
-    let cluster = sample_cell_spec(name);
+    let cluster = sample_parent_spec(name);
     api.create(&PostParams::default(), &cluster)
         .await
         .expect("failed to create cluster");

@@ -298,7 +298,7 @@ impl Provider for DockerProvider {
 mod tests {
     use super::*;
     use crate::crd::{
-        BootstrapProvider, CellSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
+        BootstrapProvider, ParentSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
         ProviderType, ServiceSpec,
     };
     use crate::provider::{
@@ -329,7 +329,7 @@ mod tests {
                     workers,
                 },
                 networking: None,
-                cell: None,
+                parent: None,
                 environment: None,
                 region: None,
                 workload: None,
@@ -339,9 +339,9 @@ mod tests {
     }
 
     /// Helper to create a cell (management) cluster
-    fn sample_cell_cluster(name: &str) -> LatticeCluster {
+    fn sample_parent_cluster(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name, 2);
-        cluster.spec.cell = Some(CellSpec {
+        cluster.spec.parent = Some(ParentSpec {
             host: "172.18.255.1".to_string(),
             grpc_port: 50051,
             bootstrap_port: 8443,
@@ -941,7 +941,7 @@ mod tests {
         #[tokio::test]
         async fn cell_cluster_generates_complete_capi_stack() {
             let provider = DockerProvider::new();
-            let cluster = sample_cell_cluster("mgmt");
+            let cluster = sample_parent_cluster("mgmt");
             let bootstrap = BootstrapInfo::default();
 
             let manifests = provider
