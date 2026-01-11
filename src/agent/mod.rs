@@ -37,7 +37,7 @@ pub mod proxy;
 pub mod server;
 
 pub use client::AgentClient;
-pub use connection::{AgentConnection, AgentRegistry, PostPivotManifests};
+pub use connection::{AgentConnection, AgentRegistry, PostPivotManifests, ProxyChannels};
 pub use mtls::{ClientMtlsConfig, MtlsError, ServerMtlsConfig};
-pub use proxy::KubeProxy;
+pub use proxy::{generate_central_proxy_kubeconfig, start_central_proxy, CENTRAL_PROXY_PORT};
 pub use server::AgentServer;

@@ -25,6 +25,7 @@ use std::time::Duration;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, Patch, PatchParams};
+use kube::Client;
 use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{debug, info};
@@ -509,6 +510,128 @@ pub async fn patch_kubeconfig_for_self_management(
     );
     Ok(())
 }
+
+/// Patch a child cluster's kubeconfig to use the central proxy
+///
+/// Updates the server URL to point to the internal central proxy service
+/// with ?cluster= query parameter for routing. Includes CA cert for TLS.
+///
+/// # Arguments
+/// * `cluster_name` - Name of the child cluster
+/// * `namespace` - Namespace where the kubeconfig secret exists
+/// * `proxy_url` - URL of the central proxy (e.g., "https://lattice-proxy.lattice-system.svc:8081")
+/// * `ca_cert_pem` - CA certificate PEM for TLS verification
+pub async fn patch_kubeconfig_for_child_cluster(
+    cluster_name: &str,
+    namespace: &str,
+    proxy_url: &str,
+    ca_cert_pem: &str,
+) -> Result<(), PivotError> {
+    let client = Client::try_default()
+        .await
+        .map_err(|e| PivotError::Internal(format!("failed to create k8s client: {}", e)))?;
+
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let secret_name = format!("{}-kubeconfig", cluster_name);
+
+    info!(
+        cluster = %cluster_name,
+        namespace = %namespace,
+        secret = %secret_name,
+        "Patching kubeconfig for child cluster to use central proxy"
+    );
+
+    // Get the current kubeconfig secret
+    let secret = secrets.get(&secret_name).await.map_err(|e| {
+        PivotError::Internal(format!(
+            "failed to get kubeconfig secret '{}': {}",
+            secret_name, e
+        ))
+    })?;
+
+    let kubeconfig_bytes = secret
+        .data
+        .as_ref()
+        .and_then(|d| d.get("value"))
+        .ok_or_else(|| PivotError::Internal("kubeconfig secret missing 'value' key".to_string()))?;
+
+    let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
+        .map_err(|e| PivotError::Internal(format!("kubeconfig is not valid UTF-8: {}", e)))?;
+
+    let mut kubeconfig: serde_yaml::Value = serde_yaml::from_str(&kubeconfig_str)
+        .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
+
+    // Build the proxy URL with cluster query param
+    let proxy_server = format!("{}?cluster={}", proxy_url, cluster_name);
+
+    // Update ALL cluster server URLs to proxy endpoint
+    let mut updated_count = 0;
+    if let Some(clusters) = kubeconfig
+        .get_mut("clusters")
+        .and_then(|c| c.as_sequence_mut())
+    {
+        for cluster in clusters {
+            if let Some(cluster_config) = cluster.get_mut("cluster") {
+                if let Some(server) = cluster_config.get_mut("server") {
+                    let old_server = server.as_str().unwrap_or("unknown").to_string();
+                    // Only patch if not already using the proxy
+                    if !old_server.contains("?cluster=") {
+                        *server = serde_yaml::Value::String(proxy_server.clone());
+                        // Set certificate-authority-data to our CA cert for TLS
+                        let ca_cert_b64 = STANDARD.encode(ca_cert_pem.as_bytes());
+                        cluster_config["certificate-authority-data"] =
+                            serde_yaml::Value::String(ca_cert_b64);
+                        info!(
+                            cluster = %cluster_name,
+                            old_server = %old_server,
+                            new_server = %proxy_server,
+                            "Updated kubeconfig server URL to use central proxy"
+                        );
+                        updated_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if updated_count == 0 {
+        debug!(
+            cluster = %cluster_name,
+            "Kubeconfig already uses central proxy, skipping patch"
+        );
+        return Ok(());
+    }
+
+    let updated_kubeconfig = serde_yaml::to_string(&kubeconfig)
+        .map_err(|e| PivotError::Internal(format!("failed to serialize kubeconfig: {}", e)))?;
+
+    let encoded = STANDARD.encode(updated_kubeconfig.as_bytes());
+
+    let patch = serde_json::json!({
+        "data": {
+            "value": encoded
+        }
+    });
+
+    secrets
+        .patch(
+            &secret_name,
+            &PatchParams::apply("lattice"),
+            &Patch::Merge(&patch),
+        )
+        .await
+        .map_err(|e| PivotError::Internal(format!("failed to patch kubeconfig secret: {}", e)))?;
+
+    info!(
+        cluster = %cluster_name,
+        updated_servers = updated_count,
+        "Kubeconfig patched to use central proxy"
+    );
+    Ok(())
+}
+
+/// URL for the internal central proxy service (HTTPS)
+pub const CENTRAL_PROXY_SERVICE_URL: &str = "https://lattice-proxy.lattice-system.svc:8081";
 
 #[cfg(test)]
 mod tests {

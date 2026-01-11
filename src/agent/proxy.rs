@@ -34,8 +34,6 @@
 //! 5. Proxy runs until agent disconnects
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -43,182 +41,158 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
 use axum::routing::any;
 use axum::Router;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot, RwLock};
-use tracing::{debug, error, info, instrument, warn};
+use tokio::sync::{oneshot, RwLock};
+use tracing::{debug, error, info, warn};
 
 use crate::proto::{HttpHeader, KubeProxyRequest, KubeProxyResponse};
 
-/// Kubernetes API proxy that tunnels requests through gRPC
-pub struct KubeProxy {
-    /// Cluster name being proxied
-    cluster_name: String,
-    /// Channel to send requests to the agent
-    request_tx: mpsc::Sender<KubeProxyRequest>,
-    /// Pending responses waiting for agent reply
-    pending: Arc<RwLock<HashMap<String, oneshot::Sender<KubeProxyResponse>>>>,
-    /// Local address the proxy is listening on
-    local_addr: Option<SocketAddr>,
+/// Proxy errors
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyError {
+    /// Failed to bind to address
+    BindFailed(String),
+    /// Server failed
+    ServerFailed(String),
 }
 
-impl KubeProxy {
-    /// Create a new proxy for the given cluster
-    pub fn new(cluster_name: String, request_tx: mpsc::Sender<KubeProxyRequest>) -> Self {
-        Self {
-            cluster_name,
-            request_tx,
-            pending: Arc::new(RwLock::new(HashMap::new())),
-            local_addr: None,
+impl std::fmt::Display for ProxyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProxyError::BindFailed(e) => write!(f, "failed to bind: {}", e),
+            ProxyError::ServerFailed(e) => write!(f, "server failed: {}", e),
         }
     }
+}
 
-    /// Handle a response from the agent
-    pub async fn handle_response(&self, response: KubeProxyResponse) {
-        let request_id = response.request_id.clone();
+impl std::error::Error for ProxyError {}
 
-        let sender = {
-            let mut pending = self.pending.write().await;
-            pending.remove(&request_id)
-        };
+// =============================================================================
+// Central Proxy Server
+// =============================================================================
 
-        match sender {
-            Some(tx) => {
-                if tx.send(response).is_err() {
-                    warn!(request_id = %request_id, "Response receiver dropped");
-                }
-            }
-            None => {
-                warn!(request_id = %request_id, "No pending request for response");
-            }
-        }
-    }
+use super::connection::SharedAgentRegistry;
+use axum::extract::Query;
 
-    /// Start the proxy HTTP server
-    #[instrument(skip(self, response_rx))]
-    pub async fn start(
-        &mut self,
-        bind_addr: SocketAddr,
-        mut response_rx: mpsc::Receiver<KubeProxyResponse>,
-    ) -> Result<(), ProxyError> {
-        info!(addr = %bind_addr, cluster = %self.cluster_name, "Starting K8s API proxy");
+/// Default port for the central proxy service
+pub const CENTRAL_PROXY_PORT: u16 = 8081;
 
-        // Spawn response handler
-        let pending = self.pending.clone();
-        tokio::spawn(async move {
-            while let Some(response) = response_rx.recv().await {
-                let request_id = response.request_id.clone();
+/// Central proxy state shared across all handlers
+struct CentralProxyState {
+    registry: SharedAgentRegistry,
+}
 
-                let sender = {
-                    let mut pending = pending.write().await;
-                    pending.remove(&request_id)
-                };
+/// Query parameters for cluster routing
+#[derive(serde::Deserialize)]
+struct ClusterQuery {
+    cluster: String,
+}
 
-                if let Some(tx) = sender {
-                    let _ = tx.send(response);
-                }
-            }
-        });
+/// Start the central proxy server
+///
+/// Routes requests based on `?cluster=<name>` query parameter.
+/// Example: `https://lattice-proxy.lattice-system.svc:8081/api/v1/nodes?cluster=my-cluster`
+///
+/// # Arguments
+/// * `registry` - Agent registry for looking up proxy channels
+/// * `port` - Port to listen on (use 0 for random)
+/// * `cert_pem` - Server certificate PEM
+/// * `key_pem` - Server private key PEM
+///
+/// # Returns
+/// The port the server is listening on
+pub async fn start_central_proxy(
+    registry: SharedAgentRegistry,
+    port: u16,
+    cert_pem: String,
+    key_pem: String,
+) -> Result<u16, ProxyError> {
+    let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{}", port)
+        .parse()
+        .map_err(|e| ProxyError::BindFailed(format!("Invalid address: {}", e)))?;
 
-        // Create shared state for handlers
-        let state = ProxyState {
-            request_tx: self.request_tx.clone(),
-            pending: self.pending.clone(),
-            cluster_name: self.cluster_name.clone(),
-            request_counter: Arc::new(AtomicU64::new(0)),
-        };
+    let state = Arc::new(CentralProxyState { registry });
 
-        // Build router - catch all paths
-        // Note: axum 0.8 uses {*path} syntax for wildcards
-        let app = Router::new()
-            .route("/{*path}", any(proxy_handler))
-            .route("/", any(proxy_handler))
-            .with_state(Arc::new(state));
+    // Catch-all route - cluster identified by ?cluster= query param
+    let app = Router::new()
+        .route("/{*path}", any(central_proxy_handler))
+        .route("/", any(central_proxy_handler))
+        .with_state(state);
 
-        // Bind and serve
+    // Configure TLS
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
+        cert_pem.as_bytes().to_vec(),
+        key_pem.as_bytes().to_vec(),
+    )
+    .await
+    .map_err(|e| ProxyError::BindFailed(format!("TLS config failed: {}", e)))?;
+
+    let actual_port = if port == 0 {
+        // Bind to get an ephemeral port
         let listener = TcpListener::bind(bind_addr)
             .await
             .map_err(|e| ProxyError::BindFailed(e.to_string()))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| ProxyError::BindFailed(e.to_string()))?
+            .port();
+        drop(listener);
+        port
+    } else {
+        port
+    };
 
-        self.local_addr = Some(
-            listener
-                .local_addr()
-                .map_err(|e| ProxyError::BindFailed(e.to_string()))?,
-        );
+    let actual_addr: std::net::SocketAddr = format!("0.0.0.0:{}", actual_port)
+        .parse()
+        .map_err(|e| ProxyError::BindFailed(format!("Invalid address: {}", e)))?;
 
-        info!(addr = ?self.local_addr, "K8s API proxy listening");
+    info!(port = actual_port, "Central K8s API proxy (HTTPS) starting");
 
-        axum::serve(listener, app)
+    // Spawn server task
+    tokio::spawn(async move {
+        if let Err(e) = axum_server::bind_rustls(actual_addr, tls_config)
+            .serve(app.into_make_service())
             .await
-            .map_err(|e| ProxyError::ServerFailed(e.to_string()))?;
+        {
+            error!(error = %e, "Central proxy server failed");
+        }
+    });
 
-        Ok(())
-    }
-
-    /// Get the local address the proxy is listening on
-    pub fn local_addr(&self) -> Option<SocketAddr> {
-        self.local_addr
-    }
-
-    /// Generate a kubeconfig YAML for this proxy
-    pub fn generate_kubeconfig(&self) -> Option<String> {
-        let addr = self.local_addr?;
-
-        Some(format!(
-            r#"apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: http://{}
-    insecure-skip-tls-verify: true
-  name: {cluster}
-contexts:
-- context:
-    cluster: {cluster}
-    user: {cluster}-user
-  name: {cluster}
-current-context: {cluster}
-users:
-- name: {cluster}-user
-  user: {{}}
-"#,
-            addr,
-            cluster = self.cluster_name,
-        ))
-    }
+    Ok(actual_port)
 }
 
-/// Shared state for proxy handlers
-#[derive(Clone)]
-struct ProxyState {
-    request_tx: mpsc::Sender<KubeProxyRequest>,
-    pending: Arc<RwLock<HashMap<String, oneshot::Sender<KubeProxyResponse>>>>,
-    cluster_name: String,
-    request_counter: Arc<AtomicU64>,
-}
-
-impl ProxyState {
-    fn next_request_id(&self) -> String {
-        let id = self.request_counter.fetch_add(1, Ordering::SeqCst);
-        format!("{}-{}", self.cluster_name, id)
-    }
-}
-
-/// Handle proxied K8s API requests
-async fn proxy_handler(
-    State(state): State<Arc<ProxyState>>,
+/// Handle requests routed to a specific cluster via ?cluster= query param
+async fn central_proxy_handler(
+    State(state): State<Arc<CentralProxyState>>,
+    Query(query): Query<ClusterQuery>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response<Body>, StatusCode> {
-    let request_id = state.next_request_id();
-    let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let cluster_name = &query.cluster;
 
-    info!(
+    // Get proxy channels for this cluster
+    let channels = state
+        .registry
+        .get_proxy_channels(cluster_name)
+        .ok_or_else(|| {
+            warn!(cluster = %cluster_name, "No proxy channels for cluster");
+            StatusCode::NOT_FOUND
+        })?;
+
+    let request_id = channels.next_request_id(cluster_name);
+
+    // Use the path as-is (strip ?cluster= from query string for forwarding)
+    let api_path = strip_cluster_query(uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/"));
+
+    debug!(
         request_id = %request_id,
+        cluster = %cluster_name,
         method = %method,
-        path = %path,
-        "Proxying K8s API request"
+        path = %api_path,
+        "Central proxy request"
     );
 
     // Convert headers
@@ -241,28 +215,25 @@ async fn proxy_handler(
     let proxy_request = KubeProxyRequest {
         request_id: request_id.clone(),
         method: method.to_string(),
-        path: path.to_string(),
+        path: api_path,
         headers: proto_headers,
         body: body_bytes.to_vec(),
     };
 
     // Create response channel
-    let (response_tx, response_rx) = oneshot::channel();
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     // Register pending request
     {
-        let mut pending = state.pending.write().await;
+        let mut pending = channels.pending.write().await;
         pending.insert(request_id.clone(), response_tx);
     }
 
     // Send request to agent
-    if let Err(e) = state.request_tx.send(proxy_request).await {
-        error!(error = %e, "Failed to send proxy request");
-
-        // Clean up pending
-        let mut pending = state.pending.write().await;
+    if let Err(e) = channels.request_tx.send(proxy_request).await {
+        error!(error = %e, "Failed to send central proxy request");
+        let mut pending = channels.pending.write().await;
         pending.remove(&request_id);
-
         return Err(StatusCode::BAD_GATEWAY);
     }
 
@@ -270,7 +241,7 @@ async fn proxy_handler(
     let response = tokio::time::timeout(std::time::Duration::from_secs(30), response_rx)
         .await
         .map_err(|_| {
-            error!(request_id = %request_id, "Proxy request timeout");
+            error!(request_id = %request_id, "Central proxy request timeout");
             StatusCode::GATEWAY_TIMEOUT
         })?
         .map_err(|_| {
@@ -280,7 +251,7 @@ async fn proxy_handler(
 
     // Check for proxy error
     if !response.error.is_empty() {
-        error!(error = %response.error, "Proxy error");
+        error!(error = %response.error, "Central proxy error");
         return Err(StatusCode::BAD_GATEWAY);
     }
 
@@ -288,25 +259,20 @@ async fn proxy_handler(
     let body_len = response.body.len();
     let mut builder = Response::builder().status(response.status_code as u16);
 
-    // Add headers from the response, filtering out hop-by-hop headers that
-    // will be recalculated by our response (like Content-Length)
     for header in &response.headers {
         let key_lower = header.key.to_lowercase();
-        // Skip headers that we'll set ourselves or that don't apply to our response
         if key_lower == "content-length" || key_lower == "transfer-encoding" {
             continue;
         }
         builder = builder.header(&header.key, &header.value);
     }
 
-    // Explicitly set Content-Length based on actual body size
     builder = builder.header("content-length", body_len.to_string());
 
-    info!(
+    debug!(
         request_id = %request_id,
         status = response.status_code,
-        body_len = body_len,
-        "Sending proxy response"
+        "Central proxy response"
     );
 
     builder
@@ -314,149 +280,41 @@ async fn proxy_handler(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// Proxy errors
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProxyError {
-    /// Failed to bind to address
-    BindFailed(String),
-    /// Server failed
-    ServerFailed(String),
-}
-
-impl std::fmt::Display for ProxyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProxyError::BindFailed(e) => write!(f, "failed to bind: {}", e),
-            ProxyError::ServerFailed(e) => write!(f, "server failed: {}", e),
+/// Strip the ?cluster= query param from a path, keeping other params
+fn strip_cluster_query(path_and_query: &str) -> String {
+    if let Some((path, query)) = path_and_query.split_once('?') {
+        // Filter out cluster= from query params
+        let filtered: Vec<&str> = query
+            .split('&')
+            .filter(|param| !param.starts_with("cluster="))
+            .collect();
+        if filtered.is_empty() {
+            path.to_string()
+        } else {
+            format!("{}?{}", path, filtered.join("&"))
         }
+    } else {
+        path_and_query.to_string()
     }
 }
 
-impl std::error::Error for ProxyError {}
-
-/// Start a persistent proxy server that runs until the channels close
+/// Generate kubeconfig YAML for central proxy
 ///
-/// This is the main entry point for starting a proxy when an agent connects.
-/// The proxy runs in a spawned task and stays running for the agent's lifetime.
-///
-/// # Arguments
-/// * `cluster_name` - Name of the cluster being proxied
-/// * `request_tx` - Channel to send requests to the agent
-/// * `response_rx` - Channel to receive responses from the agent
-///
-/// # Returns
-/// The port number the proxy is listening on, or an error if binding fails.
-///
-/// # Example
-/// ```text
-/// let port = start_persistent_proxy(
-///     "workload-cluster".to_string(),
-///     request_tx,
-///     response_rx,
-/// ).await?;
-/// // Proxy is now running at 127.0.0.1:{port}
-/// ```
-pub async fn start_persistent_proxy(
-    cluster_name: String,
-    request_tx: mpsc::Sender<KubeProxyRequest>,
-    response_rx: mpsc::Receiver<KubeProxyResponse>,
-) -> Result<u16, ProxyError> {
-    // Bind to random available port
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| ProxyError::BindFailed(e.to_string()))?;
-
-    let local_addr = listener
-        .local_addr()
-        .map_err(|e| ProxyError::BindFailed(e.to_string()))?;
-
-    let port = local_addr.port();
-
-    info!(
-        cluster = %cluster_name,
-        port = port,
-        "Starting persistent K8s API proxy"
-    );
-
-    // Create shared pending map for request/response correlation
-    let pending: Arc<RwLock<HashMap<String, oneshot::Sender<KubeProxyResponse>>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-
-    // Clone cluster_name for the spawned tasks
-    let cluster_for_response_handler = cluster_name.clone();
-    let cluster_for_state = cluster_name.clone();
-    let cluster_for_server = cluster_name;
-
-    // Spawn response handler task - routes responses to waiting requests
-    let pending_for_responses = pending.clone();
-    tokio::spawn(async move {
-        let mut response_rx = response_rx;
-        while let Some(response) = response_rx.recv().await {
-            let request_id = response.request_id.clone();
-
-            // Skip handshake responses
-            if request_id.ends_with(":handshake") {
-                debug!(request_id = %request_id, "Received handshake response, skipping");
-                continue;
-            }
-
-            let sender = {
-                let mut pending = pending_for_responses.write().await;
-                pending.remove(&request_id)
-            };
-
-            match sender {
-                Some(tx) => {
-                    if tx.send(response).is_err() {
-                        warn!(request_id = %request_id, "Response receiver dropped");
-                    }
-                }
-                None => {
-                    warn!(request_id = %request_id, "No pending request for response");
-                }
-            }
-        }
-        debug!(cluster = %cluster_for_response_handler, "Response handler task ended");
-    });
-
-    // Create shared state for HTTP handlers
-    let state = ProxyState {
-        request_tx,
-        pending,
-        cluster_name: cluster_for_state,
-        request_counter: Arc::new(AtomicU64::new(0)),
-    };
-
-    // Build router
-    let app = Router::new()
-        .route("/{*path}", any(proxy_handler))
-        .route("/", any(proxy_handler))
-        .with_state(Arc::new(state));
-
-    // Spawn HTTP server task - runs until listener closes
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            error!(
-                cluster = %cluster_for_server,
-                error = %e,
-                "Proxy server failed"
-            );
-        }
-        info!(cluster = %cluster_for_server, "Proxy server stopped");
-    });
-
-    Ok(port)
-}
-
-/// Generate a kubeconfig YAML pointing to a proxy at the given port
-pub fn generate_proxy_kubeconfig(cluster_name: &str, port: u16) -> String {
+/// Points to the central proxy service with ?cluster= query param.
+/// Includes CA cert for TLS verification.
+pub fn generate_central_proxy_kubeconfig(
+    cluster_name: &str,
+    service_url: &str,
+    ca_cert_pem: &str,
+) -> String {
+    let ca_cert_b64 = STANDARD.encode(ca_cert_pem.as_bytes());
     format!(
         r#"apiVersion: v1
 kind: Config
 clusters:
 - cluster:
-    server: http://127.0.0.1:{port}
-    insecure-skip-tls-verify: true
+    server: {service_url}?cluster={cluster}
+    certificate-authority-data: {ca_cert}
   name: {cluster}
 contexts:
 - context:
@@ -468,196 +326,15 @@ users:
 - name: {cluster}-user
   user: {{}}
 "#,
-        port = port,
+        service_url = service_url,
         cluster = cluster_name,
+        ca_cert = ca_cert_b64,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_kubeconfig_generation() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut proxy = KubeProxy::new("my-cluster".to_string(), tx);
-
-        // No address yet
-        assert!(proxy.generate_kubeconfig().is_none());
-
-        // Set address manually for testing
-        proxy.local_addr = Some("127.0.0.1:8080".parse().unwrap());
-
-        let kubeconfig = proxy.generate_kubeconfig().unwrap();
-        assert!(kubeconfig.contains("my-cluster"));
-        assert!(kubeconfig.contains("127.0.0.1:8080"));
-        assert!(kubeconfig.contains("insecure-skip-tls-verify: true"));
-        assert!(kubeconfig.contains("current-context: my-cluster"));
-    }
-
-    #[test]
-    fn test_kubeconfig_yaml_structure() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut proxy = KubeProxy::new("test-cluster".to_string(), tx);
-        proxy.local_addr = Some("10.0.0.1:6443".parse().unwrap());
-
-        let kubeconfig = proxy.generate_kubeconfig().unwrap();
-
-        // Verify it's valid YAML by checking key sections
-        assert!(kubeconfig.contains("apiVersion: v1"));
-        assert!(kubeconfig.contains("kind: Config"));
-        assert!(kubeconfig.contains("clusters:"));
-        assert!(kubeconfig.contains("contexts:"));
-        assert!(kubeconfig.contains("users:"));
-        assert!(kubeconfig.contains("server: http://10.0.0.1:6443"));
-    }
-
-    #[test]
-    fn test_local_addr_initially_none() {
-        let (tx, _rx) = mpsc::channel(1);
-        let proxy = KubeProxy::new("test".to_string(), tx);
-        assert!(proxy.local_addr().is_none());
-    }
-
-    #[test]
-    fn test_local_addr_after_setting() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut proxy = KubeProxy::new("test".to_string(), tx);
-        let addr: SocketAddr = "192.168.1.100:8443".parse().unwrap();
-        proxy.local_addr = Some(addr);
-        assert_eq!(proxy.local_addr(), Some(addr));
-    }
-
-    #[tokio::test]
-    async fn test_handle_response() {
-        let (tx, _rx) = mpsc::channel(1);
-        let proxy = KubeProxy::new("test".to_string(), tx);
-
-        // Register a pending request
-        let (response_tx, response_rx) = oneshot::channel();
-        {
-            let mut pending = proxy.pending.write().await;
-            pending.insert("req-1".to_string(), response_tx);
-        }
-
-        // Handle response
-        let response = KubeProxyResponse {
-            request_id: "req-1".to_string(),
-            status_code: 200,
-            headers: vec![],
-            body: b"test".to_vec(),
-            error: String::new(),
-        };
-
-        proxy.handle_response(response).await;
-
-        // Verify response was received
-        let received = response_rx.await.unwrap();
-        assert_eq!(received.status_code, 200);
-        assert_eq!(received.body, b"test");
-    }
-
-    #[tokio::test]
-    async fn test_handle_response_no_pending_request() {
-        let (tx, _rx) = mpsc::channel(1);
-        let proxy = KubeProxy::new("test".to_string(), tx);
-
-        // Handle response for non-existent request (should not panic)
-        let response = KubeProxyResponse {
-            request_id: "non-existent".to_string(),
-            status_code: 200,
-            headers: vec![],
-            body: vec![],
-            error: String::new(),
-        };
-
-        proxy.handle_response(response).await;
-        // Test passes if no panic
-    }
-
-    #[tokio::test]
-    async fn test_handle_response_receiver_dropped() {
-        let (tx, _rx) = mpsc::channel(1);
-        let proxy = KubeProxy::new("test".to_string(), tx);
-
-        // Register a pending request and immediately drop the receiver
-        let (response_tx, response_rx) = oneshot::channel();
-        {
-            let mut pending = proxy.pending.write().await;
-            pending.insert("req-drop".to_string(), response_tx);
-        }
-        drop(response_rx);
-
-        // Handle response - should log warning but not panic
-        let response = KubeProxyResponse {
-            request_id: "req-drop".to_string(),
-            status_code: 200,
-            headers: vec![],
-            body: vec![],
-            error: String::new(),
-        };
-
-        proxy.handle_response(response).await;
-        // Test passes if no panic
-    }
-
-    #[tokio::test]
-    async fn test_handle_multiple_responses() {
-        let (tx, _rx) = mpsc::channel(1);
-        let proxy = KubeProxy::new("test".to_string(), tx);
-
-        // Register multiple pending requests
-        let (tx1, rx1) = oneshot::channel();
-        let (tx2, rx2) = oneshot::channel();
-        let (tx3, rx3) = oneshot::channel();
-
-        {
-            let mut pending = proxy.pending.write().await;
-            pending.insert("req-1".to_string(), tx1);
-            pending.insert("req-2".to_string(), tx2);
-            pending.insert("req-3".to_string(), tx3);
-        }
-
-        // Handle responses out of order
-        proxy
-            .handle_response(KubeProxyResponse {
-                request_id: "req-2".to_string(),
-                status_code: 201,
-                headers: vec![],
-                body: b"second".to_vec(),
-                error: String::new(),
-            })
-            .await;
-
-        proxy
-            .handle_response(KubeProxyResponse {
-                request_id: "req-1".to_string(),
-                status_code: 200,
-                headers: vec![],
-                body: b"first".to_vec(),
-                error: String::new(),
-            })
-            .await;
-
-        proxy
-            .handle_response(KubeProxyResponse {
-                request_id: "req-3".to_string(),
-                status_code: 404,
-                headers: vec![],
-                body: b"not found".to_vec(),
-                error: String::new(),
-            })
-            .await;
-
-        // Verify all responses received correctly
-        let r1 = rx1.await.unwrap();
-        let r2 = rx2.await.unwrap();
-        let r3 = rx3.await.unwrap();
-
-        assert_eq!(r1.status_code, 200);
-        assert_eq!(r2.status_code, 201);
-        assert_eq!(r3.status_code, 404);
-    }
 
     // Test ProxyError display implementations
     #[test]
@@ -703,455 +380,55 @@ mod tests {
         assert!(err.to_string().contains("failed to bind"));
     }
 
-    // Test ProxyState
+    // ==========================================================================
+    // Central Proxy Tests
+    // ==========================================================================
+
     #[test]
-    fn test_proxy_state_request_id_generation() {
-        let (tx, _rx) = mpsc::channel(1);
-        let state = ProxyState {
-            request_tx: tx,
-            pending: Arc::new(RwLock::new(HashMap::new())),
-            cluster_name: "state-test".to_string(),
-            request_counter: Arc::new(AtomicU64::new(0)),
-        };
-
-        let id1 = state.next_request_id();
-        let id2 = state.next_request_id();
-
-        assert_eq!(id1, "state-test-0");
-        assert_eq!(id2, "state-test-1");
+    fn test_strip_cluster_query_removes_cluster_param() {
+        assert_eq!(
+            strip_cluster_query("/api/v1/nodes?cluster=my-cluster"),
+            "/api/v1/nodes"
+        );
     }
 
     #[test]
-    fn test_proxy_state_clone() {
-        let (tx, _rx) = mpsc::channel(1);
-        let state = ProxyState {
-            request_tx: tx,
-            pending: Arc::new(RwLock::new(HashMap::new())),
-            cluster_name: "clone-test".to_string(),
-            request_counter: Arc::new(AtomicU64::new(5)),
-        };
-
-        let cloned = state.clone();
-        assert_eq!(cloned.cluster_name, "clone-test");
-
-        // Counter should be shared
-        let _ = state.next_request_id();
-        let id = cloned.next_request_id();
-        assert_eq!(id, "clone-test-6");
+    fn test_strip_cluster_query_preserves_other_params() {
+        assert_eq!(
+            strip_cluster_query("/api/v1/pods?cluster=my-cluster&watch=true"),
+            "/api/v1/pods?watch=true"
+        );
     }
 
-    // Test KubeProxy creation
     #[test]
-    fn test_kube_proxy_creation() {
-        let (tx, _rx) = mpsc::channel(10);
-        let proxy = KubeProxy::new("production-cluster".to_string(), tx);
-
-        assert_eq!(proxy.cluster_name, "production-cluster");
-        assert!(proxy.local_addr.is_none());
+    fn test_strip_cluster_query_handles_no_query() {
+        assert_eq!(strip_cluster_query("/api/v1/nodes"), "/api/v1/nodes");
     }
 
-    #[tokio::test]
-    async fn test_kube_proxy_pending_map_operations() {
-        let (tx, _rx) = mpsc::channel(1);
-        let proxy = KubeProxy::new("test".to_string(), tx);
-
-        // Initially empty
-        assert!(proxy.pending.read().await.is_empty());
-
-        // Add a pending request
-        let (response_tx, _response_rx) = oneshot::channel();
-        {
-            let mut pending = proxy.pending.write().await;
-            pending.insert("req-1".to_string(), response_tx);
-        }
-
-        assert_eq!(proxy.pending.read().await.len(), 1);
-
-        // Remove the pending request
-        {
-            let mut pending = proxy.pending.write().await;
-            pending.remove("req-1");
-        }
-
-        assert!(proxy.pending.read().await.is_empty());
-    }
-
-    // ==========================================================================
-    // Integration Tests: Real HTTP Server
-    // ==========================================================================
-
-    /// Integration test: Start proxy server and make real HTTP request
-    #[tokio::test]
-    async fn integration_proxy_handles_http_request() {
-        use tokio::time::Duration;
-
-        let (request_tx, mut request_rx) = mpsc::channel::<KubeProxyRequest>(32);
-        let (response_tx, response_rx) = mpsc::channel::<KubeProxyResponse>(32);
-
-        let mut proxy = KubeProxy::new("integration-test".to_string(), request_tx);
-
-        // Start proxy server in background
-        let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let proxy_handle = tokio::spawn(async move { proxy.start(bind_addr, response_rx).await });
-
-        // Give server time to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Simulate agent responding to requests
-        let response_tx_clone = response_tx.clone();
-        let agent_handle = tokio::spawn(async move {
-            while let Some(request) = request_rx.recv().await {
-                // Echo back request info in response
-                let response = KubeProxyResponse {
-                    request_id: request.request_id,
-                    status_code: 200,
-                    headers: vec![HttpHeader {
-                        key: "content-type".to_string(),
-                        value: "application/json".to_string(),
-                    }],
-                    body: format!(
-                        r#"{{"method":"{}","path":"{}"}}"#,
-                        request.method, request.path
-                    )
-                    .into_bytes(),
-                    error: String::new(),
-                };
-                let _ = response_tx_clone.send(response).await;
-            }
-        });
-
-        // Make HTTP request to the proxy
-        // Note: We can't easily get the bound address from here, so we'll test the handler directly
-
-        // Clean up
-        proxy_handle.abort();
-        agent_handle.abort();
-    }
-
-    /// Integration test: proxy_handler processes requests correctly
-    #[tokio::test]
-    async fn integration_proxy_handler_success() {
-        let (request_tx, mut request_rx) = mpsc::channel::<KubeProxyRequest>(32);
-        let pending = Arc::new(RwLock::new(HashMap::new()));
-
-        let state = Arc::new(ProxyState {
-            request_tx,
-            pending: pending.clone(),
-            cluster_name: "handler-test".to_string(),
-            request_counter: Arc::new(AtomicU64::new(0)),
-        });
-
-        // Spawn task to handle the request and send response
-        let pending_clone = pending.clone();
-        tokio::spawn(async move {
-            if let Some(request) = request_rx.recv().await {
-                // Find the pending sender and send response
-                let sender = {
-                    let mut p = pending_clone.write().await;
-                    p.remove(&request.request_id)
-                };
-                if let Some(tx) = sender {
-                    let response = KubeProxyResponse {
-                        request_id: request.request_id,
-                        status_code: 200,
-                        headers: vec![],
-                        body: b"success".to_vec(),
-                        error: String::new(),
-                    };
-                    let _ = tx.send(response);
-                }
-            }
-        });
-
-        // Call the handler
-        let result = proxy_handler(
-            State(state),
-            Method::GET,
-            "/api/v1/namespaces".parse().unwrap(),
-            HeaderMap::new(),
-            Body::empty(),
-        )
-        .await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert_eq!(response.status(), 200);
-    }
-
-    /// Integration test: proxy_handler handles timeout
-    #[tokio::test]
-    async fn integration_proxy_handler_timeout() {
-        let (request_tx, _request_rx) = mpsc::channel::<KubeProxyRequest>(32);
-        // Don't spawn anything to handle requests - they will timeout
-
-        let state = Arc::new(ProxyState {
-            request_tx,
-            pending: Arc::new(RwLock::new(HashMap::new())),
-            cluster_name: "timeout-test".to_string(),
-            request_counter: Arc::new(AtomicU64::new(0)),
-        });
-
-        // Override the timeout for testing (we can't easily do this, so this test
-        // would take 30 seconds - skip for now by dropping the receiver)
-        drop(_request_rx);
-
-        let result = proxy_handler(
-            State(state),
-            Method::GET,
-            "/api/v1/pods".parse().unwrap(),
-            HeaderMap::new(),
-            Body::empty(),
-        )
-        .await;
-
-        // Should fail because channel is closed
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), StatusCode::BAD_GATEWAY);
-    }
-
-    /// Integration test: proxy_handler handles error response
-    #[tokio::test]
-    async fn integration_proxy_handler_error_response() {
-        let (request_tx, mut request_rx) = mpsc::channel::<KubeProxyRequest>(32);
-        let pending = Arc::new(RwLock::new(HashMap::new()));
-
-        let state = Arc::new(ProxyState {
-            request_tx,
-            pending: pending.clone(),
-            cluster_name: "error-test".to_string(),
-            request_counter: Arc::new(AtomicU64::new(0)),
-        });
-
-        // Spawn task to send error response
-        let pending_clone = pending.clone();
-        tokio::spawn(async move {
-            if let Some(request) = request_rx.recv().await {
-                let sender = {
-                    let mut p = pending_clone.write().await;
-                    p.remove(&request.request_id)
-                };
-                if let Some(tx) = sender {
-                    let response = KubeProxyResponse {
-                        request_id: request.request_id,
-                        status_code: 500,
-                        headers: vec![],
-                        body: vec![],
-                        error: "internal server error".to_string(),
-                    };
-                    let _ = tx.send(response);
-                }
-            }
-        });
-
-        let result = proxy_handler(
-            State(state),
-            Method::POST,
-            "/api/v1/namespaces".parse().unwrap(),
-            HeaderMap::new(),
-            Body::empty(),
-        )
-        .await;
-
-        // Should return BAD_GATEWAY because of error in response
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), StatusCode::BAD_GATEWAY);
-    }
-
-    /// Integration test: proxy_handler with headers
-    #[tokio::test]
-    async fn integration_proxy_handler_with_headers() {
-        let (request_tx, mut request_rx) = mpsc::channel::<KubeProxyRequest>(32);
-        let pending = Arc::new(RwLock::new(HashMap::new()));
-
-        let state = Arc::new(ProxyState {
-            request_tx,
-            pending: pending.clone(),
-            cluster_name: "headers-test".to_string(),
-            request_counter: Arc::new(AtomicU64::new(0)),
-        });
-
-        // Spawn task to verify headers are passed
-        let pending_clone = pending.clone();
-        tokio::spawn(async move {
-            if let Some(request) = request_rx.recv().await {
-                // Verify headers were passed
-                let has_auth = request.headers.iter().any(|h| h.key == "authorization");
-
-                let sender = {
-                    let mut p = pending_clone.write().await;
-                    p.remove(&request.request_id)
-                };
-                if let Some(tx) = sender {
-                    let response = KubeProxyResponse {
-                        request_id: request.request_id,
-                        status_code: if has_auth { 200 } else { 401 },
-                        headers: vec![HttpHeader {
-                            key: "x-custom".to_string(),
-                            value: "header-value".to_string(),
-                        }],
-                        body: vec![],
-                        error: String::new(),
-                    };
-                    let _ = tx.send(response);
-                }
-            }
-        });
-
-        // Create headers
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", "Bearer token".parse().unwrap());
-        headers.insert("content-type", "application/json".parse().unwrap());
-
-        let result = proxy_handler(
-            State(state),
-            Method::GET,
-            "/api/v1/secrets".parse().unwrap(),
-            headers,
-            Body::empty(),
-        )
-        .await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert_eq!(response.status(), 200);
-        assert!(response.headers().contains_key("x-custom"));
-    }
-
-    /// Integration test: proxy_handler with body
-    #[tokio::test]
-    async fn integration_proxy_handler_with_body() {
-        let (request_tx, mut request_rx) = mpsc::channel::<KubeProxyRequest>(32);
-        let pending = Arc::new(RwLock::new(HashMap::new()));
-
-        let state = Arc::new(ProxyState {
-            request_tx,
-            pending: pending.clone(),
-            cluster_name: "body-test".to_string(),
-            request_counter: Arc::new(AtomicU64::new(0)),
-        });
-
-        // Spawn task to echo body back
-        let pending_clone = pending.clone();
-        tokio::spawn(async move {
-            if let Some(request) = request_rx.recv().await {
-                let sender = {
-                    let mut p = pending_clone.write().await;
-                    p.remove(&request.request_id)
-                };
-                if let Some(tx) = sender {
-                    let response = KubeProxyResponse {
-                        request_id: request.request_id,
-                        status_code: 201,
-                        headers: vec![],
-                        body: request.body, // Echo body back
-                        error: String::new(),
-                    };
-                    let _ = tx.send(response);
-                }
-            }
-        });
-
-        let body_content = r#"{"name":"test-namespace"}"#;
-        let result = proxy_handler(
-            State(state),
-            Method::POST,
-            "/api/v1/namespaces".parse().unwrap(),
-            HeaderMap::new(),
-            Body::from(body_content),
-        )
-        .await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert_eq!(response.status(), 201);
-
-        // Read response body
-        let body_bytes = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        assert_eq!(body_bytes.as_ref(), body_content.as_bytes());
-    }
-
-    // ==========================================================================
-    // Persistent Proxy Tests
-    // ==========================================================================
-
-    /// Test the standalone generate_proxy_kubeconfig function
     #[test]
-    fn test_generate_proxy_kubeconfig_function() {
-        let kubeconfig = generate_proxy_kubeconfig("my-cluster", 18080);
+    fn test_strip_cluster_query_handles_multiple_params() {
+        assert_eq!(
+            strip_cluster_query("/api/v1/pods?limit=10&cluster=test&watch=false"),
+            "/api/v1/pods?limit=10&watch=false"
+        );
+    }
 
-        assert!(kubeconfig.contains("apiVersion: v1"));
-        assert!(kubeconfig.contains("kind: Config"));
-        assert!(kubeconfig.contains("server: http://127.0.0.1:18080"));
-        assert!(kubeconfig.contains("insecure-skip-tls-verify: true"));
+    #[test]
+    fn test_strip_cluster_query_handles_cluster_only() {
+        assert_eq!(strip_cluster_query("/?cluster=test"), "/");
+    }
+
+    #[test]
+    fn test_generate_central_proxy_kubeconfig() {
+        let ca_cert = "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----";
+        let kubeconfig =
+            generate_central_proxy_kubeconfig("my-cluster", "https://proxy.svc:8081", ca_cert);
+
+        assert!(kubeconfig.contains("server: https://proxy.svc:8081?cluster=my-cluster"));
+        assert!(kubeconfig.contains("certificate-authority-data:"));
         assert!(kubeconfig.contains("name: my-cluster"));
         assert!(kubeconfig.contains("current-context: my-cluster"));
-    }
-
-    /// Test generate_proxy_kubeconfig with different ports
-    #[test]
-    fn test_generate_proxy_kubeconfig_various_ports() {
-        let kc1 = generate_proxy_kubeconfig("cluster-a", 8080);
-        let kc2 = generate_proxy_kubeconfig("cluster-b", 65535);
-        let kc3 = generate_proxy_kubeconfig("cluster-c", 1);
-
-        assert!(kc1.contains("server: http://127.0.0.1:8080"));
-        assert!(kc2.contains("server: http://127.0.0.1:65535"));
-        assert!(kc3.contains("server: http://127.0.0.1:1"));
-    }
-
-    /// Integration test: start_persistent_proxy binds to a port and returns it
-    #[tokio::test]
-    async fn integration_start_persistent_proxy_returns_port() {
-        let (request_tx, _request_rx) = mpsc::channel::<KubeProxyRequest>(32);
-        let (_response_tx, response_rx) = mpsc::channel::<KubeProxyResponse>(32);
-
-        let result =
-            start_persistent_proxy("test-persistent".to_string(), request_tx, response_rx).await;
-
-        assert!(result.is_ok());
-        let port = result.unwrap();
-        assert!(port > 0);
-    }
-
-    /// Integration test: start_persistent_proxy creates working HTTP server
-    #[tokio::test]
-    async fn integration_persistent_proxy_accepts_http() {
-        let (request_tx, mut request_rx) = mpsc::channel::<KubeProxyRequest>(32);
-        let (response_tx, response_rx) = mpsc::channel::<KubeProxyResponse>(32);
-
-        let port = start_persistent_proxy("http-test".to_string(), request_tx, response_rx)
-            .await
-            .expect("should bind");
-
-        // Spawn task to handle requests
-        tokio::spawn(async move {
-            if let Some(request) = request_rx.recv().await {
-                let _ = response_tx
-                    .send(KubeProxyResponse {
-                        request_id: request.request_id,
-                        status_code: 200,
-                        headers: vec![],
-                        body: b"ok".to_vec(),
-                        error: String::new(),
-                    })
-                    .await;
-            }
-        });
-
-        // Give server time to start
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Make HTTP request
-        let client = reqwest::Client::new();
-        let response = client
-            .get(format!("http://127.0.0.1:{}/api/v1/namespaces", port))
-            .send()
-            .await;
-
-        assert!(response.is_ok());
-        let resp = response.unwrap();
-        assert_eq!(resp.status(), 200);
+        assert!(kubeconfig.contains("apiVersion: v1"));
+        assert!(kubeconfig.contains("kind: Config"));
     }
 }
