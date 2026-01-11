@@ -59,6 +59,8 @@ impl Default for ParentConfig {
                 "host.containers.internal".to_string(),
                 "172.17.0.1".to_string(),
                 "127.0.0.1".to_string(),
+                // Webhook service DNS name for in-cluster webhook calls
+                "lattice-webhook.lattice-system.svc".to_string(),
             ],
             image: std::env::var("LATTICE_IMAGE")
                 .unwrap_or_else(|_| "ghcr.io/evan-hines-js/lattice:latest".to_string()),

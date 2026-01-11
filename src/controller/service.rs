@@ -285,8 +285,6 @@ pub struct ServiceContext {
     pub kube: Arc<dyn ServiceKubeClient>,
     /// Service dependency graph (shared across all reconciliations)
     pub graph: Arc<ServiceGraph>,
-    /// Default environment name for services without explicit environment
-    pub default_env: String,
     /// SPIFFE trust domain for policy generation
     pub trust_domain: String,
 }
@@ -296,13 +294,11 @@ impl ServiceContext {
     pub fn new(
         kube: Arc<dyn ServiceKubeClient>,
         graph: Arc<ServiceGraph>,
-        default_env: impl Into<String>,
         trust_domain: impl Into<String>,
     ) -> Self {
         Self {
             kube,
             graph,
-            default_env: default_env.into(),
             trust_domain: trust_domain.into(),
         }
     }
@@ -315,7 +311,6 @@ impl ServiceContext {
         Self {
             kube: Arc::new(ServiceKubeClientImpl::new(client)),
             graph: Arc::new(ServiceGraph::new()),
-            default_env: "default".to_string(),
             trust_domain: trust_domain.into(),
         }
     }
@@ -326,7 +321,6 @@ impl ServiceContext {
         Self {
             kube,
             graph: Arc::new(ServiceGraph::new()),
-            default_env: "test".to_string(),
             trust_domain: "test.local".to_string(),
         }
     }
@@ -374,14 +368,8 @@ pub async fn reconcile(
 
     debug!(?current_phase, "current service phase");
 
-    // Get environment from labels or use default
-    let env = service
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get("lattice.dev/environment"))
-        .map(|s| s.as_str())
-        .unwrap_or(&ctx.default_env);
+    // Get environment from spec (determines namespace)
+    let env = &service.spec.environment;
 
     // State machine: transition based on current phase
     match current_phase {
@@ -418,8 +406,8 @@ pub async fn reconcile(
             let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain);
             let compiled = compiler.compile(&service);
 
-            // Get namespace from service metadata or default
-            let namespace = service.metadata.namespace.as_deref().unwrap_or("default");
+            // Use environment as namespace (LatticeService is cluster-scoped, so metadata.namespace is always None)
+            let namespace = env;
 
             // Apply compiled resources to the cluster
             info!(
@@ -534,14 +522,8 @@ pub async fn reconcile_external(
         return Ok(Action::await_change());
     }
 
-    // Get environment from labels or use default
-    let env = external
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get("lattice.dev/environment"))
-        .map(|s| s.as_str())
-        .unwrap_or(&ctx.default_env);
+    // Get environment from spec
+    let env = &external.spec.environment;
 
     // Update graph with this external service
     info!(env = %env, "adding external service to graph");
@@ -586,13 +568,7 @@ pub fn error_policy_external(
 /// and cleans up edges.
 pub fn cleanup_service(service: &LatticeService, ctx: &ServiceContext) {
     let name = service.name_any();
-    let env = service
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get("lattice.dev/environment"))
-        .map(|s| s.as_str())
-        .unwrap_or(&ctx.default_env);
+    let env = &service.spec.environment;
 
     info!(service = %name, env = %env, "removing service from graph");
     ctx.graph.delete_service(env, &name);
@@ -601,13 +577,7 @@ pub fn cleanup_service(service: &LatticeService, ctx: &ServiceContext) {
 /// Handle external service deletion by removing from the graph
 pub fn cleanup_external_service(external: &LatticeExternalService, ctx: &ServiceContext) {
     let name = external.name_any();
-    let env = external
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get("lattice.dev/environment"))
-        .map(|s| s.as_str())
-        .unwrap_or(&ctx.default_env);
+    let env = &external.spec.environment;
 
     info!(external_service = %name, env = %env, "removing external service from graph");
     ctx.graph.delete_service(env, &name);
@@ -746,6 +716,7 @@ mod tests {
         containers.insert("main".to_string(), simple_container());
 
         LatticeServiceSpec {
+            environment: "test".to_string(),
             containers,
             resources: BTreeMap::new(),
             service: None,
@@ -825,6 +796,7 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeExternalServiceSpec {
+                environment: "test".to_string(),
                 endpoints,
                 allowed_requesters: vec!["*".to_string()],
                 resolution: Resolution::Dns,
@@ -1095,8 +1067,8 @@ mod tests {
         let mock_kube2 = Arc::new(mock_kube_success());
         let shared_graph = Arc::new(ServiceGraph::new());
 
-        let ctx1 = ServiceContext::new(mock_kube1, Arc::clone(&shared_graph), "env1", "test.local");
-        let ctx2 = ServiceContext::new(mock_kube2, Arc::clone(&shared_graph), "env2", "test.local");
+        let ctx1 = ServiceContext::new(mock_kube1, Arc::clone(&shared_graph), "test.local");
+        let ctx2 = ServiceContext::new(mock_kube2, Arc::clone(&shared_graph), "test.local");
 
         // Add service via ctx1
         ctx1.graph

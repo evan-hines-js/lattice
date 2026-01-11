@@ -563,6 +563,7 @@ mod tests {
         );
 
         LatticeServiceSpec {
+            environment: "test".to_string(),
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
@@ -575,6 +576,7 @@ mod tests {
         use crate::crd::Resolution;
 
         LatticeExternalServiceSpec {
+            environment: "test".to_string(),
             endpoints: BTreeMap::from([("api".to_string(), "https://api.example.com".to_string())]),
             allowed_requesters: allowed.into_iter().map(String::from).collect(),
             resolution: Resolution::Dns,

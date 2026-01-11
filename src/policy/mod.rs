@@ -457,6 +457,11 @@ impl<'a> PolicyCompiler<'a> {
 
         let ports: Vec<String> = service.ports.values().map(|p| p.to_string()).collect();
 
+        // Don't generate policy if service has no ports - no traffic to authorize
+        if ports.is_empty() {
+            return None;
+        }
+
         Some(AuthorizationPolicy {
             api_version: "security.istio.io/v1beta1".to_string(),
             kind: "AuthorizationPolicy".to_string(),
@@ -473,16 +478,12 @@ impl<'a> PolicyCompiler<'a> {
                     from: vec![AuthorizationSource {
                         source: SourceSpec { principals },
                     }],
-                    to: if ports.is_empty() {
-                        vec![]
-                    } else {
-                        vec![AuthorizationOperation {
-                            operation: OperationSpec {
-                                ports,
-                                hosts: vec![],
-                            },
-                        }]
-                    },
+                    to: vec![AuthorizationOperation {
+                        operation: OperationSpec {
+                            ports,
+                            hosts: vec![],
+                        },
+                    }],
                 }],
             },
         })
@@ -798,6 +799,7 @@ mod tests {
 
     fn make_external_spec(allowed: Vec<&str>) -> LatticeExternalServiceSpec {
         LatticeExternalServiceSpec {
+            environment: "test".to_string(),
             endpoints: BTreeMap::from([(
                 "api".to_string(),
                 "https://api.stripe.com:443".to_string(),
@@ -862,6 +864,7 @@ mod tests {
         );
 
         crate::crd::LatticeServiceSpec {
+            environment: "test".to_string(),
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),

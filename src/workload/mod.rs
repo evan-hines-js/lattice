@@ -565,9 +565,12 @@ pub struct WorkloadCompiler;
 
 impl WorkloadCompiler {
     /// Compile a LatticeService into workload resources
-    pub fn compile(service: &LatticeService) -> GeneratedWorkloads {
+    ///
+    /// # Arguments
+    /// * `service` - The LatticeService to compile
+    /// * `namespace` - Target namespace (from environment label, since LatticeService is cluster-scoped)
+    pub fn compile(service: &LatticeService, namespace: &str) -> GeneratedWorkloads {
         let name = service.metadata.name.as_deref().unwrap_or("unknown");
-        let namespace = service.metadata.namespace.as_deref().unwrap_or("default");
 
         let mut output = GeneratedWorkloads::new();
 
@@ -744,7 +747,9 @@ impl WorkloadCompiler {
         Deployment {
             api_version: "apps/v1".to_string(),
             kind: "Deployment".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
+            // Deployment metadata must have lattice.dev/service label for webhook objectSelector
+            metadata: ObjectMeta::new(name, namespace)
+                .with_label(LATTICE_SERVICE_LABEL, name),
             spec: DeploymentSpec {
                 replicas: spec.replicas.min,
                 selector: LabelSelector {
@@ -874,10 +879,10 @@ mod tests {
         LatticeService {
             metadata: kube::api::ObjectMeta {
                 name: Some(name.to_string()),
-                namespace: Some(namespace.to_string()),
                 ..Default::default()
             },
             spec: crate::crd::LatticeServiceSpec {
+                environment: namespace.to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: Some(ServicePortsSpec { ports }),
@@ -895,7 +900,7 @@ mod tests {
     #[test]
     fn story_always_generates_service_account() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
         let sa = output.service_account.expect("should have service account");
         assert_eq!(sa.metadata.name, "my-app");
@@ -911,7 +916,7 @@ mod tests {
     #[test]
     fn story_always_generates_deployment() {
         let service = make_service("my-app", "prod");
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
         let deployment = output.deployment.expect("should have deployment");
         assert_eq!(deployment.metadata.name, "my-app");
@@ -924,7 +929,7 @@ mod tests {
     #[test]
     fn story_deployment_has_correct_labels() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
         let deployment = output.deployment.unwrap();
         assert_eq!(
@@ -951,7 +956,7 @@ mod tests {
         use crate::webhook::deployment::LATTICE_SERVICE_LABEL;
 
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
         let deployment = output.deployment.unwrap();
 
@@ -976,7 +981,7 @@ mod tests {
     #[test]
     fn story_generates_service_with_ports() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
         let svc = output.service.expect("should have service");
         assert_eq!(svc.metadata.name, "my-app");
@@ -990,7 +995,7 @@ mod tests {
         let mut service = make_service("my-app", "default");
         service.spec.service = None;
 
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
         assert!(output.service.is_none());
     }
 
@@ -1006,7 +1011,7 @@ mod tests {
             max: Some(10),
         };
 
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
         let hpa = output.hpa.expect("should have HPA");
         assert_eq!(hpa.metadata.name, "my-app");
@@ -1020,7 +1025,7 @@ mod tests {
     #[test]
     fn story_no_hpa_without_max_replicas() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
         assert!(output.hpa.is_none());
     }
 
@@ -1031,7 +1036,7 @@ mod tests {
     #[test]
     fn story_rolling_strategy() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
         let strategy = output.deployment.unwrap().spec.strategy.unwrap();
         assert_eq!(strategy.type_, "RollingUpdate");
@@ -1045,7 +1050,7 @@ mod tests {
         let mut service = make_service("my-app", "default");
         service.spec.deploy.strategy = DeployStrategy::Canary;
 
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
 
         let strategy = output.deployment.unwrap().spec.strategy.unwrap();
         assert_eq!(strategy.type_, "RollingUpdate");
@@ -1106,7 +1111,7 @@ mod tests {
         assert!(empty.is_empty());
 
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service);
+        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
         assert!(!output.is_empty());
     }
 }

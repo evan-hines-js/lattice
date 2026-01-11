@@ -327,16 +327,17 @@ impl AgentClient {
 
         let mut inbound = response.into_inner();
 
-        // Start the K8s API proxy stream
-        // This allows the cell to run clusterctl move through the gRPC tunnel
-        let cluster_name = self.config.cluster_name.clone();
-        Self::start_proxy_stream(channel, cluster_name).await;
-
         *self.state.write().await = ClientState::Connected;
         info!("Connected to cell");
 
         // Send ready message first to establish connection
+        // This registers the agent on the server side
         self.send_ready().await?;
+
+        // Start the K8s API proxy stream AFTER agent is registered
+        // This ensures set_proxy_port finds the agent in the registry
+        let cluster_name = self.config.cluster_name.clone();
+        Self::start_proxy_stream(channel, cluster_name).await;
 
         // Install CAPI on this cluster - required for clusterctl move during pivot
         info!("Installing CAPI on local cluster");
