@@ -1419,20 +1419,21 @@ async fn generate_capi_manifests(
         .ok_or_else(|| Error::validation("cluster must have a name"))?;
     let capi_namespace = format!("capi-{}", cluster_name);
 
-    // Build bootstrap info for workload clusters using parent_servers
-    let bootstrap = if let Some(ref parent_servers) = ctx.parent_servers {
+    // Build bootstrap info - if parent_servers is running, we're a cell provisioning a cluster
+    // that needs to connect back to us. During root install, LATTICE_ROOT_INSTALL=true skips this.
+    let is_root_install = std::env::var("LATTICE_ROOT_INSTALL").is_ok();
+    let bootstrap = if !is_root_install && ctx.parent_servers.as_ref().is_some_and(|s| s.is_running()) {
+        let parent_servers = ctx.parent_servers.as_ref().unwrap();
         let self_cluster_name = ctx.self_cluster_name.as_ref().ok_or_else(|| {
             Error::validation("self_cluster_name required when parent_servers is configured")
         })?;
-
-        // Get the self-cluster's LatticeCluster to read its spec.endpoints
         let self_cluster = ctx
             .kube
             .get_cluster(self_cluster_name)
             .await?
             .ok_or_else(|| Error::Bootstrap("self-cluster LatticeCluster not found".into()))?;
         let endpoints = self_cluster.spec.endpoints.as_ref().ok_or_else(|| {
-            Error::validation("self-cluster must have spec.endpoints to provision workload clusters")
+            Error::validation("self-cluster must have spec.endpoints to provision clusters")
         })?;
 
         // Get bootstrap state from parent_servers

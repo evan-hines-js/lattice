@@ -374,23 +374,23 @@ nodes:
 
         // Generate all manifests but only use operator ones (JSON format)
         // Bootstrap kind cluster already has its own CNI, we don't need Cilium
-        // Cluster name is required so operator knows which cluster it's managing
+        // Set cluster_name to "lattice-installer" - this is the bootstrap cluster, not the mgmt cluster
         let all_manifests = generator.generate(
             &self.config.image,
             self.config.registry_credentials.as_deref(),
-            Some(&self.cluster_name()),
+            Some("lattice-installer"),
             None,
         );
         let operator_manifests: Vec<String> = all_manifests
             .iter()
             .filter(|m| m.starts_with("{"))
             .map(|s| {
-                // For bootstrap cluster: relax FIPS to fips140=on (not =only)
-                // This allows talking to non-FIPS kind API server
-                // Production clusters use container default (fips140=only)
-                // Uses shared FIPS utility function
                 if crate::fips::is_deployment(s) {
-                    crate::fips::add_fips_relax_env(s)
+                    // For bootstrap cluster:
+                    // 1. Relax FIPS to fips140=on (not =only) for non-FIPS kind API server
+                    // 2. Set LATTICE_ROOT_INSTALL=true to skip bootstrap script generation
+                    let with_fips = crate::fips::add_fips_relax_env(s);
+                    crate::fips::add_root_install_env(&with_fips)
                 } else {
                     s.clone()
                 }
