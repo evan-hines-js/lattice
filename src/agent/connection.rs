@@ -230,6 +230,43 @@ impl AgentRegistry {
         }
     }
 
+    /// Set proxy port for an agent, waiting for registration if needed
+    ///
+    /// This handles the race condition where the proxy stream may start
+    /// before the agent's main stream has registered. Waits up to the
+    /// specified timeout for the agent to appear in the registry.
+    pub async fn set_proxy_port_with_retry(
+        &self,
+        cluster_name: &str,
+        port: u16,
+        timeout: std::time::Duration,
+    ) -> bool {
+        use tokio::time::{sleep, Instant};
+
+        let start = Instant::now();
+        let poll_interval = std::time::Duration::from_millis(50);
+
+        loop {
+            if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+                debug!(cluster = %cluster_name, port = port, "K8s API proxy port set");
+                agent.proxy_port = Some(port);
+                return true;
+            }
+
+            if start.elapsed() >= timeout {
+                warn!(
+                    cluster = %cluster_name,
+                    port = port,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "Timeout waiting for agent registration to set proxy port"
+                );
+                return false;
+            }
+
+            sleep(poll_interval).await;
+        }
+    }
+
     /// Get proxy port for an agent
     pub fn get_proxy_port(&self, cluster_name: &str) -> Option<u16> {
         self.agents.get(cluster_name).and_then(|a| a.proxy_port)
@@ -726,5 +763,68 @@ mod tests {
     fn test_registry_default() {
         let registry = AgentRegistry::default();
         assert!(registry.is_empty());
+    }
+
+    // Story: Proxy port set with retry handles race with agent registration
+    //
+    // The proxy stream may start before the agent's main stream registers.
+    // set_proxy_port_with_retry waits for the agent to appear.
+    #[tokio::test]
+    async fn story_set_proxy_port_with_retry_handles_race() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let registry = Arc::new(AgentRegistry::new());
+        let registry_clone = registry.clone();
+
+        // Start trying to set proxy port before agent is registered
+        let set_task = tokio::spawn(async move {
+            registry_clone
+                .set_proxy_port_with_retry("delayed-cluster", 18080, Duration::from_secs(2))
+                .await
+        });
+
+        // Simulate delayed agent registration (100ms later)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (conn, _rx) = create_test_connection("delayed-cluster");
+        registry.register(conn);
+
+        // The retry should succeed
+        let result = set_task.await.unwrap();
+        assert!(result, "set_proxy_port_with_retry should succeed after agent registers");
+
+        // Verify port was set
+        assert_eq!(registry.get_proxy_port("delayed-cluster"), Some(18080));
+    }
+
+    #[tokio::test]
+    async fn test_set_proxy_port_with_retry_timeout() {
+        use std::time::Duration;
+
+        let registry = AgentRegistry::new();
+
+        // Try to set port for non-existent agent with short timeout
+        let result = registry
+            .set_proxy_port_with_retry("nonexistent", 18080, Duration::from_millis(100))
+            .await;
+
+        assert!(!result, "should timeout when agent never registers");
+    }
+
+    #[tokio::test]
+    async fn test_set_proxy_port_with_retry_immediate() {
+        use std::time::Duration;
+
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("immediate-cluster");
+        registry.register(conn);
+
+        // Agent already registered - should succeed immediately
+        let result = registry
+            .set_proxy_port_with_retry("immediate-cluster", 18080, Duration::from_secs(1))
+            .await;
+
+        assert!(result, "should succeed immediately when agent already registered");
+        assert_eq!(registry.get_proxy_port("immediate-cluster"), Some(18080));
     }
 }

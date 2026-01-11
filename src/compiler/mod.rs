@@ -34,12 +34,6 @@ use crate::workload::{GeneratedWorkloads, WorkloadCompiler};
 pub use crate::policy::{CiliumNetworkPolicy, ServiceEntry};
 pub use crate::workload::{Deployment, HorizontalPodAutoscaler, Service, ServiceAccount};
 
-/// Environment label on LatticeService
-const ENV_LABEL: &str = "lattice.dev/environment";
-
-/// Default environment when not specified
-const DEFAULT_ENV: &str = "default";
-
 /// Combined output from compiling a LatticeService
 #[derive(Clone, Debug, Default)]
 pub struct CompiledService {
@@ -106,17 +100,18 @@ impl<'a> ServiceCompiler<'a> {
     /// - Workloads: Deployment, Service, ServiceAccount, HPA
     /// - Policies: AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry
     ///
-    /// The namespace is derived from the service's metadata.namespace (or "default").
-    /// The environment is derived from the `lattice.dev/environment` label (or namespace).
+    /// The environment (and namespace) comes from `spec.environment`, since
+    /// LatticeService is cluster-scoped.
     pub fn compile(&self, service: &LatticeService) -> CompiledService {
         let name = service.metadata.name.as_deref().unwrap_or("unknown");
-        let namespace = service.metadata.namespace.as_deref().unwrap_or("default");
-        let env = self.get_environment(service);
+        // Environment is in spec, determines namespace for workloads
+        let env = &service.spec.environment;
+        let namespace = env; // Environment determines namespace
 
         // Delegate to specialized compilers
-        let workloads = WorkloadCompiler::compile(service);
+        let workloads = WorkloadCompiler::compile(service, namespace);
         let policies =
-            PolicyCompiler::new(self.graph, &self.trust_domain).compile(name, namespace, &env);
+            PolicyCompiler::new(self.graph, &self.trust_domain).compile(name, namespace, env);
 
         CompiledService {
             workloads,
@@ -129,23 +124,6 @@ impl<'a> ServiceCompiler<'a> {
     /// This should be applied once per cluster in istio-system namespace.
     pub fn compile_mesh_default_deny(&self) -> AuthorizationPolicy {
         PolicyCompiler::compile_mesh_default_deny()
-    }
-
-    /// Get environment from service metadata
-    fn get_environment(&self, service: &LatticeService) -> String {
-        service
-            .metadata
-            .labels
-            .as_ref()
-            .and_then(|labels| labels.get(ENV_LABEL))
-            .cloned()
-            .unwrap_or_else(|| {
-                service
-                    .metadata
-                    .namespace
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_ENV.to_string())
-            })
     }
 }
 
@@ -162,12 +140,7 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    fn make_service(name: &str, namespace: &str, env: Option<&str>) -> LatticeService {
-        let mut labels = BTreeMap::new();
-        if let Some(e) = env {
-            labels.insert(ENV_LABEL.to_string(), e.to_string());
-        }
-
+    fn make_service(name: &str, env: &str) -> LatticeService {
         let mut containers = BTreeMap::new();
         containers.insert(
             "main".to_string(),
@@ -197,11 +170,10 @@ mod tests {
         LatticeService {
             metadata: kube::api::ObjectMeta {
                 name: Some(name.to_string()),
-                namespace: Some(namespace.to_string()),
-                labels: Some(labels),
                 ..Default::default()
             },
             spec: crate::crd::LatticeServiceSpec {
+                environment: env.to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: Some(ServicePortsSpec { ports }),
@@ -213,6 +185,7 @@ mod tests {
     }
 
     fn make_service_spec_for_graph(
+        env: &str,
         deps: Vec<&str>,
         callers: Vec<&str>,
     ) -> crate::crd::LatticeServiceSpec {
@@ -269,6 +242,7 @@ mod tests {
         );
 
         crate::crd::LatticeServiceSpec {
+            environment: env.to_string(),
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
@@ -287,15 +261,15 @@ mod tests {
         let env = "prod";
 
         // api allows gateway
-        let api_spec = make_service_spec_for_graph(vec![], vec!["gateway"]);
+        let api_spec = make_service_spec_for_graph("prod", vec![], vec!["gateway"]);
         graph.put_service(env, "api", &api_spec);
 
         // gateway calls api
-        let gateway_spec = make_service_spec_for_graph(vec!["api"], vec![]);
+        let gateway_spec = make_service_spec_for_graph("prod", vec!["api"], vec![]);
         graph.put_service(env, "gateway", &gateway_spec);
 
         // Create LatticeService for api
-        let service = make_service("api", "prod-ns", Some("prod"));
+        let service = make_service("api", "prod");
 
         let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
         let output = compiler.compile(&service);
@@ -319,11 +293,11 @@ mod tests {
         let graph = ServiceGraph::new();
 
         // Put service in "staging" environment
-        let spec = make_service_spec_for_graph(vec![], vec![]);
+        let spec = make_service_spec_for_graph("default", vec![], vec![]);
         graph.put_service("staging", "my-app", &spec);
 
         // Create LatticeService with staging label
-        let service = make_service("my-app", "default", Some("staging"));
+        let service = make_service("my-app", "staging");
 
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
         let output = compiler.compile(&service);
@@ -337,11 +311,11 @@ mod tests {
         let graph = ServiceGraph::new();
 
         // Put service in "prod-ns" environment (same as namespace)
-        let spec = make_service_spec_for_graph(vec![], vec![]);
+        let spec = make_service_spec_for_graph("default", vec![], vec![]);
         graph.put_service("prod-ns", "my-app", &spec);
 
         // Create LatticeService without env label
-        let service = make_service("my-app", "prod-ns", None);
+        let service = make_service("my-app", "prod-ns");
 
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
         let output = compiler.compile(&service);
@@ -359,7 +333,7 @@ mod tests {
         let graph = ServiceGraph::new();
         // Don't add service to graph
 
-        let service = make_service("my-app", "default", None);
+        let service = make_service("my-app", "default");
 
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
         let output = compiler.compile(&service);
@@ -379,10 +353,10 @@ mod tests {
     #[test]
     fn story_resource_count() {
         let graph = ServiceGraph::new();
-        let spec = make_service_spec_for_graph(vec![], vec![]);
+        let spec = make_service_spec_for_graph("default", vec![], vec![]);
         graph.put_service("default", "my-app", &spec);
 
-        let service = make_service("my-app", "default", None);
+        let service = make_service("my-app", "default");
 
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
         let output = compiler.compile(&service);
@@ -416,7 +390,7 @@ mod tests {
         assert!(empty.is_empty());
 
         let graph = ServiceGraph::new();
-        let service = make_service("my-app", "default", None);
+        let service = make_service("my-app", "default");
 
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
         let output = compiler.compile(&service);

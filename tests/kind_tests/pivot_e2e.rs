@@ -390,6 +390,7 @@ done
             ..Default::default()
         },
         spec: LatticeServiceSpec {
+            environment: TEST_SERVICES_NAMESPACE.to_string(),
             containers,
             resources,
             service: None, // No port needed - just runs curl tests
@@ -455,6 +456,7 @@ fn create_service_b() -> LatticeService {
             ..Default::default()
         },
         spec: LatticeServiceSpec {
+            environment: TEST_SERVICES_NAMESPACE.to_string(),
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
@@ -510,6 +512,7 @@ fn create_service_c() -> LatticeService {
             ..Default::default()
         },
         spec: LatticeServiceSpec {
+            environment: TEST_SERVICES_NAMESPACE.to_string(),
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
@@ -565,6 +568,7 @@ fn create_service_d() -> LatticeService {
             ..Default::default()
         },
         spec: LatticeServiceSpec {
+            environment: TEST_SERVICES_NAMESPACE.to_string(),
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),

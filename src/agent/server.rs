@@ -355,8 +355,18 @@ impl LatticeAgent for AgentServer {
                                     "Persistent K8s API proxy started"
                                 );
                                 // Register proxy port with agent connection
-                                registry.set_proxy_port(name, port);
-                                (Some(name.to_string()), true)
+                                // Use retry to handle race with agent registration
+                                let timeout = std::time::Duration::from_secs(5);
+                                let success = registry
+                                    .set_proxy_port_with_retry(name, port, timeout)
+                                    .await;
+                                if !success {
+                                    error!(
+                                        cluster = %name,
+                                        "Failed to set proxy port - agent never registered"
+                                    );
+                                }
+                                (Some(name.to_string()), success)
                             }
                             Err(e) => {
                                 error!(

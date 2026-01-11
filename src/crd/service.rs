@@ -385,6 +385,12 @@ impl std::fmt::Display for ServicePhase {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeServiceSpec {
+    /// Environment name - determines the namespace where workloads deploy
+    ///
+    /// This is required since LatticeService is cluster-scoped. The environment
+    /// maps to a Kubernetes namespace where the Deployment, Service, etc. are created.
+    pub environment: String,
+
     /// Named container specifications (Score-compatible)
     pub containers: BTreeMap<String, ContainerSpec>,
 
@@ -792,6 +798,7 @@ mod tests {
         containers.insert("main".to_string(), simple_container());
 
         LatticeServiceSpec {
+            environment: "test".to_string(),
             containers,
             resources: BTreeMap::new(),
             service: None,
@@ -970,6 +977,7 @@ mod tests {
     #[test]
     fn story_service_without_containers_fails() {
         let spec = LatticeServiceSpec {
+            environment: "test".to_string(),
             containers: BTreeMap::new(),
             resources: BTreeMap::new(),
             service: None,
@@ -1007,6 +1015,7 @@ mod tests {
     #[test]
     fn story_yaml_simple_service() {
         let yaml = r#"
+environment: test
 containers:
   main:
     image: nginx:latest
@@ -1033,6 +1042,7 @@ replicas:
     #[test]
     fn story_yaml_service_with_dependencies() {
         let yaml = r#"
+environment: test
 containers:
   main:
     image: my-api:v1.0
@@ -1076,6 +1086,7 @@ service:
     #[test]
     fn story_yaml_canary_deployment() {
         let yaml = r#"
+environment: test
 containers:
   main:
     image: app:v2.0
@@ -1148,6 +1159,7 @@ deploy:
         containers.insert("worker".to_string(), simple_container());
 
         let spec = LatticeServiceSpec {
+            environment: "test".to_string(),
             containers,
             resources: BTreeMap::new(),
             service: None,

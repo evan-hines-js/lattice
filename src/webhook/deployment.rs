@@ -11,7 +11,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use k8s_openapi::api::apps::v1::Deployment;
 use kube::{
     api::{Api, DynamicObject},
     core::admission::{AdmissionRequest, AdmissionResponse, AdmissionReview},
@@ -66,26 +65,30 @@ impl IntoResponse for WebhookError {
 /// 5. Returns the mutated admission response
 pub async fn mutate_handler(
     State(state): State<Arc<WebhookState>>,
-    Json(review): Json<AdmissionReview<Deployment>>,
-) -> Result<Json<AdmissionReview<DynamicObject>>, WebhookError> {
-    let request = review
-        .request
-        .ok_or_else(|| WebhookError::InvalidReview("missing request".to_string()))?;
+    Json(body): Json<AdmissionReview<DynamicObject>>,
+) -> Json<AdmissionReview<DynamicObject>> {
+    // Convert review to request
+    let req: AdmissionRequest<DynamicObject> = match body.try_into() {
+        Ok(req) => req,
+        Err(e) => {
+            error!(error = %e, "Failed to parse admission request");
+            return Json(AdmissionResponse::invalid(e.to_string()).into_review());
+        }
+    };
 
-    let response = mutate_deployment(&state, &request).await;
-
-    Ok(Json(response.into_review()))
+    let response = mutate_deployment(&state, &req).await;
+    Json(response.into_review())
 }
 
 /// Process a single deployment mutation request
 async fn mutate_deployment(
     state: &WebhookState,
-    request: &AdmissionRequest<Deployment>,
+    request: &AdmissionRequest<DynamicObject>,
 ) -> AdmissionResponse {
     let uid = request.uid.clone();
 
     // Get the deployment object
-    let deployment = match &request.object {
+    let obj = match &request.object {
         Some(d) => d,
         None => {
             debug!(uid = %uid, "No deployment object in request, allowing unchanged");
@@ -94,13 +97,13 @@ async fn mutate_deployment(
     };
 
     // Check for lattice service label
-    let labels = deployment.metadata.labels.as_ref();
+    let labels = obj.metadata.labels.as_ref();
     let service_name = match labels.and_then(|l| l.get(LATTICE_SERVICE_LABEL)) {
         Some(name) => name.clone(),
         None => {
             debug!(
                 uid = %uid,
-                deployment = ?deployment.metadata.name,
+                deployment = ?obj.metadata.name,
                 "No lattice.dev/service label, allowing unchanged"
             );
             return AdmissionResponse::from(&request.clone());
@@ -110,7 +113,7 @@ async fn mutate_deployment(
     info!(
         uid = %uid,
         service = %service_name,
-        deployment = ?deployment.metadata.name,
+        deployment = ?obj.metadata.name,
         "Mutating deployment for LatticeService"
     );
 
