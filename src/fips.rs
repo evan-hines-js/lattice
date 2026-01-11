@@ -76,6 +76,49 @@ pub fn add_fips_relax_env(deployment_json: &str) -> String {
     }
 }
 
+/// Add LATTICE_ROOT_INSTALL=true environment variable to a Kubernetes Deployment JSON
+///
+/// This marks the deployment as running during root cluster installation,
+/// which skips bootstrap script generation (root clusters don't connect to a parent).
+pub fn add_root_install_env(deployment_json: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) {
+        if let Some(containers) = value
+            .pointer_mut("/spec/template/spec/containers")
+            .and_then(|c| c.as_array_mut())
+        {
+            for container in containers {
+                let container_obj = match container.as_object_mut() {
+                    Some(obj) => obj,
+                    None => continue,
+                };
+
+                let env = container_obj
+                    .entry("env")
+                    .or_insert_with(|| serde_json::json!([]))
+                    .as_array_mut();
+
+                if let Some(env) = env {
+                    let has_root_install = env.iter().any(|e| {
+                        e.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|n| n == "LATTICE_ROOT_INSTALL")
+                            .unwrap_or(false)
+                    });
+                    if !has_root_install {
+                        env.push(serde_json::json!({
+                            "name": "LATTICE_ROOT_INSTALL",
+                            "value": "true"
+                        }));
+                    }
+                }
+            }
+        }
+        serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
+    } else {
+        deployment_json.to_string()
+    }
+}
+
 /// Check if a manifest is a Kubernetes Deployment
 pub fn is_deployment(manifest: &str) -> bool {
     // Handle different JSON formatting (with or without spaces after colons)
