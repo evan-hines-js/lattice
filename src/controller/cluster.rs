@@ -21,7 +21,7 @@ use mockall::automock;
 use crate::agent::connection::SharedAgentRegistry;
 use crate::bootstrap::DefaultManifestGenerator;
 use crate::capi::{ensure_capi_installed_with, CapiInstaller};
-use crate::cell::CellServers;
+use crate::parent::ParentServers;
 use crate::crd::{ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus};
 use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
 use crate::provider::{create_provider, CAPIManifest};
@@ -919,7 +919,7 @@ pub trait PivotOperations: Send + Sync {
 /// These components are only needed when running as a cell (management cluster).
 /// Bundling them together makes it clear they go together and reduces
 /// the number of optional fields in Context.
-pub struct CellCapabilities {
+pub struct ParentCapabilities {
     /// Bootstrap registration for workload clusters
     pub bootstrap: Arc<dyn ClusterBootstrap>,
     /// Agent registry for connected agents
@@ -928,7 +928,7 @@ pub struct CellCapabilities {
     pub pivot_ops: Arc<dyn PivotOperations>,
 }
 
-impl CellCapabilities {
+impl ParentCapabilities {
     /// Create new cell capabilities
     pub fn new(
         bootstrap: Arc<dyn ClusterBootstrap>,
@@ -966,9 +966,9 @@ pub struct Context {
     /// CAPI installer for installing CAPI and providers
     pub capi_installer: Arc<dyn CapiInstaller>,
     /// Cell capabilities (present only when running as a cell)
-    pub cell: Option<CellCapabilities>,
+    pub parent: Option<ParentCapabilities>,
     /// Cell servers (started at application startup)
-    pub cell_servers: Option<Arc<CellServers<DefaultManifestGenerator>>>,
+    pub parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     /// Name of the cluster this controller is running on (from LATTICE_CLUSTER_NAME env var)
     /// When reconciling this cluster, we skip provisioning since we ARE this cluster
     pub self_cluster_name: Option<String>,
@@ -990,32 +990,32 @@ impl Context {
     /// Create a new controller context with cell servers for dynamic startup
     ///
     /// Cell servers will start automatically when Pending LatticeCluster CRDs are detected.
-    /// Cell endpoint configuration is read from the LatticeCluster CRD's spec.cell.
+    /// Cell endpoint configuration is read from the LatticeCluster CRD's spec.parent.
     pub fn new_with_cell(
         client: Client,
-        cell_servers: Arc<CellServers<DefaultManifestGenerator>>,
+        parent_servers: Arc<ParentServers<DefaultManifestGenerator>>,
     ) -> Self {
-        Self::builder(client).cell_servers(cell_servers).build()
+        Self::builder(client).parent_servers(parent_servers).build()
     }
 
     /// Access bootstrap registration (convenience accessor)
     pub fn bootstrap(&self) -> Option<&Arc<dyn ClusterBootstrap>> {
-        self.cell.as_ref().map(|c| &c.bootstrap)
+        self.parent.as_ref().map(|c| &c.bootstrap)
     }
 
     /// Access agent registry (convenience accessor)
     pub fn agent_registry(&self) -> Option<&SharedAgentRegistry> {
-        self.cell.as_ref().map(|c| &c.agent_registry)
+        self.parent.as_ref().map(|c| &c.agent_registry)
     }
 
     /// Access pivot operations (convenience accessor)
     pub fn pivot_ops(&self) -> Option<&Arc<dyn PivotOperations>> {
-        self.cell.as_ref().map(|c| &c.pivot_ops)
+        self.parent.as_ref().map(|c| &c.pivot_ops)
     }
 
     /// Check if this context has cell capabilities
     pub fn is_cell(&self) -> bool {
-        self.cell.is_some()
+        self.parent.is_some()
     }
 
     /// Create a context for testing with custom mock clients
@@ -1032,29 +1032,29 @@ impl Context {
             kube,
             capi,
             capi_installer,
-            cell: None,
-            cell_servers: None,
+            parent: None,
+            parent_servers: None,
             self_cluster_name: None,
         }
     }
 
-    /// Create a context for testing with cell capabilities
+    /// Create a context for testing with parent capabilities
     ///
     /// This method is primarily for unit tests where a real Kubernetes
-    /// client is not available but cell capabilities are needed.
+    /// client is not available but parent capabilities are needed.
     #[cfg(test)]
-    pub fn for_testing_with_cell(
+    pub fn for_testing_with_parent(
         kube: Arc<dyn KubeClient>,
         capi: Arc<dyn CAPIClient>,
         capi_installer: Arc<dyn CapiInstaller>,
-        cell: CellCapabilities,
+        parent: ParentCapabilities,
     ) -> Self {
         Self {
             kube,
             capi,
             capi_installer,
-            cell: Some(cell),
-            cell_servers: None,
+            parent: Some(parent),
+            parent_servers: None,
             self_cluster_name: None,
         }
     }
@@ -1072,7 +1072,7 @@ impl Context {
 /// Full cell context:
 /// ```text
 /// let ctx = Context::builder(client)
-///     .cell_capabilities(CellCapabilities::new(bootstrap, registry, pivot_ops))
+///     .cell_capabilities(ParentCapabilities::new(bootstrap, registry, pivot_ops))
 ///     .build();
 /// ```
 ///
@@ -1088,8 +1088,8 @@ pub struct ContextBuilder {
     kube: Option<Arc<dyn KubeClient>>,
     capi: Option<Arc<dyn CAPIClient>>,
     capi_installer: Option<Arc<dyn CapiInstaller>>,
-    cell: Option<CellCapabilities>,
-    cell_servers: Option<Arc<CellServers<DefaultManifestGenerator>>>,
+    parent: Option<ParentCapabilities>,
+    parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     self_cluster_name: Option<String>,
 }
 
@@ -1101,8 +1101,8 @@ impl ContextBuilder {
             kube: None,
             capi: None,
             capi_installer: None,
-            cell: None,
-            cell_servers: None,
+            parent: None,
+            parent_servers: None,
             self_cluster_name: None,
         }
     }
@@ -1114,8 +1114,8 @@ impl ContextBuilder {
     }
 
     /// Set cell capabilities for running as a management cluster
-    pub fn cell_capabilities(mut self, cell: CellCapabilities) -> Self {
-        self.cell = Some(cell);
+    pub fn parent_capabilities(mut self, parent: ParentCapabilities) -> Self {
+        self.parent = Some(parent);
         self
     }
 
@@ -1138,8 +1138,8 @@ impl ContextBuilder {
     }
 
     /// Set cell servers for on-demand startup
-    pub fn cell_servers(mut self, servers: Arc<CellServers<DefaultManifestGenerator>>) -> Self {
-        self.cell_servers = Some(servers);
+    pub fn parent_servers(mut self, servers: Arc<ParentServers<DefaultManifestGenerator>>) -> Self {
+        self.parent_servers = Some(servers);
         self
     }
 
@@ -1157,8 +1157,8 @@ impl ContextBuilder {
             capi_installer: self
                 .capi_installer
                 .unwrap_or_else(|| Arc::new(ClusterctlInstaller::new())),
-            cell: self.cell,
-            cell_servers: self.cell_servers,
+            parent: self.parent,
+            parent_servers: self.parent_servers,
             self_cluster_name: self.self_cluster_name,
         }
     }
@@ -1217,7 +1217,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Create LoadBalancer Service if this cluster has a cell spec
             // This exposes cell servers for workload clusters to reach bootstrap + gRPC endpoints
             // Note: Cell servers are started at application startup, not on-demand
-            if let Some(ref cell_spec) = cluster.spec.cell {
+            if let Some(ref cell_spec) = cluster.spec.parent {
                 info!(host = %cell_spec.host, "ensuring LoadBalancer Service for cell servers");
                 ctx.kube
                     .ensure_cell_service(
@@ -1324,14 +1324,14 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             }
 
             // We're the parent cell, orchestrating pivot for a child cluster
-            // Get pivot operations - either from pre-configured cell or dynamically from cell_servers
+            // Get pivot operations - either from pre-configured cell or dynamically from parent_servers
             let pivot_ops: Option<Arc<dyn PivotOperations>> = if let Some(ops) = ctx.pivot_ops() {
                 Some(ops.clone())
-            } else if let Some(ref cell_servers) = ctx.cell_servers {
-                // Create PivotOperationsImpl dynamically from cell_servers
-                if cell_servers.is_running() {
+            } else if let Some(ref parent_servers) = ctx.parent_servers {
+                // Create PivotOperationsImpl dynamically from parent_servers
+                if parent_servers.is_running() {
                     Some(Arc::new(PivotOperationsImpl::new(
-                        cell_servers.agent_registry(),
+                        parent_servers.agent_registry(),
                     )))
                 } else {
                     None
@@ -1535,9 +1535,9 @@ async fn try_transition_to_ready(
     set_pivot_complete: bool,
 ) -> Result<Action, Error> {
     // Check cell servers are running (only if configured)
-    // If cell_servers is None, we're in test mode or special configuration - skip check
-    if let Some(ref cell_servers) = ctx.cell_servers {
-        if !cell_servers.is_running() {
+    // If parent_servers is None, we're in test mode or special configuration - skip check
+    if let Some(ref parent_servers) = ctx.parent_servers {
+        if !parent_servers.is_running() {
             debug!("cell servers not running yet, waiting before Ready");
             return Ok(Action::requeue(Duration::from_secs(5)));
         }
@@ -1580,7 +1580,7 @@ async fn generate_capi_manifests(
     let capi_namespace = format!("capi-{}", cluster_name);
 
     // Build bootstrap info for workload clusters
-    // Priority: 1) ctx.bootstrap() (pre-configured), 2) cell_servers (dynamic)
+    // Priority: 1) ctx.bootstrap() (pre-configured), 2) parent_servers (dynamic)
     let bootstrap = if let Some(bootstrap_ctx) = ctx.bootstrap() {
         let ca_cert = bootstrap_ctx.ca_cert_pem().to_string();
         // cell_endpoint() returns "host:http_port:grpc_port" format
@@ -1899,7 +1899,7 @@ impl PivotOperations for PivotOperationsImpl {
 mod tests {
     use super::*;
     use crate::crd::{
-        BootstrapProvider, CellSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
+        BootstrapProvider, ParentSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderSpec,
         ProviderType, ServiceSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -1925,7 +1925,7 @@ mod tests {
                     workers: 2,
                 },
                 networking: None,
-                cell: None,
+                parent: None,
                 environment: None,
                 region: None,
                 workload: None,
@@ -1935,9 +1935,9 @@ mod tests {
     }
 
     /// Create a sample cell (management cluster) for testing
-    fn sample_cell(name: &str) -> LatticeCluster {
+    fn sample_parent(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name);
-        cluster.spec.cell = Some(CellSpec {
+        cluster.spec.parent = Some(ParentSpec {
             host: "172.18.255.1".to_string(),
             grpc_port: 50051,
             bootstrap_port: 8443,
@@ -1955,10 +1955,10 @@ mod tests {
         cluster
     }
 
-    /// Create a workload cluster (no spec.cell) with a specific status phase
+    /// Create a workload cluster (no spec.parent) with a specific status phase
     /// Used for testing agent-based pivot flow
     fn workload_cluster_with_phase(name: &str, phase: ClusterPhase) -> LatticeCluster {
-        // sample_cluster() already creates a workload cluster (no spec.cell)
+        // sample_cluster() already creates a workload cluster (no spec.parent)
         cluster_with_phase(name, phase)
     }
 
@@ -1986,9 +1986,9 @@ mod tests {
 
         #[test]
         fn test_cell_cluster_validation() {
-            let cluster = sample_cell("mgmt");
+            let cluster = sample_parent("mgmt");
             assert!(cluster.spec.validate().is_ok());
-            assert!(cluster.spec.is_cell());
+            assert!(cluster.spec.is_parent());
         }
     }
 
@@ -2494,7 +2494,7 @@ mod tests {
                         workers: 2,
                     },
                     networking: None,
-                    cell: None,
+                    parent: None,
                     environment: None,
                     region: None,
                     workload: None,
@@ -2649,9 +2649,9 @@ mod tests {
             // Create mock pivot operations (no-op for bootstrap tests)
             let pivot_ops: Arc<dyn PivotOperations> = Arc::new(MockPivotOperations::new());
             let agent_registry = Arc::new(AgentRegistry::new());
-            let cell = CellCapabilities::new(bootstrap, agent_registry, pivot_ops);
+            let cell = ParentCapabilities::new(bootstrap, agent_registry, pivot_ops);
 
-            Context::for_testing_with_cell(
+            Context::for_testing_with_parent(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(installer),
@@ -3449,9 +3449,9 @@ mod tests {
             // Create full cell capabilities - this is a real cell configuration
             let bootstrap: Arc<dyn ClusterBootstrap> = Arc::new(StubClusterBootstrap);
             let agent_registry = Arc::new(AgentRegistry::new());
-            let cell = CellCapabilities::new(bootstrap, agent_registry, pivot_ops);
+            let cell = ParentCapabilities::new(bootstrap, agent_registry, pivot_ops);
 
-            let ctx = Context::for_testing_with_cell(
+            let ctx = Context::for_testing_with_parent(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(installer),

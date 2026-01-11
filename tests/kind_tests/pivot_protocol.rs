@@ -123,7 +123,7 @@ fn workload_cluster_spec(name: &str) -> LatticeCluster {
                 workers: 1,
             },
             networking: None,
-            cell: None, // This is a workload cluster, not a cell
+            parent: None, // This is a workload cluster, not a cell
             environment: Some("test".to_string()),
             region: Some("local".to_string()),
             workload: None,

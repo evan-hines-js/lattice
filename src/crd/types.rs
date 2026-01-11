@@ -176,10 +176,13 @@ pub struct NetworkPool {
     pub cidr: String,
 }
 
-/// Cell (management cluster) specification
+/// Parent cluster configuration
+///
+/// When present, this cluster can have children (provision and manage other clusters).
+/// Contains the endpoint configuration for child clusters to connect back.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct CellSpec {
-    /// Host address for agent connections
+pub struct ParentSpec {
+    /// Host address for child agent connections
     pub host: String,
 
     /// gRPC port for agent connections (default: 50051)
@@ -202,11 +205,11 @@ fn default_bootstrap_port() -> u16 {
     crate::DEFAULT_BOOTSTRAP_PORT
 }
 
-impl CellSpec {
-    /// Get the combined cell endpoint in format "host:http_port:grpc_port"
+impl ParentSpec {
+    /// Get the combined parent endpoint in format "host:http_port:grpc_port"
     ///
     /// This format is used by bootstrap to pass all connection info in a single string.
-    pub fn cell_endpoint(&self) -> String {
+    pub fn endpoint(&self) -> String {
         format!("{}:{}:{}", self.host, self.bootstrap_port, self.grpc_port)
     }
 
@@ -711,7 +714,7 @@ mod tests {
 
         #[test]
         fn test_cell_spec_roundtrip() {
-            let spec = CellSpec {
+            let spec = ParentSpec {
                 host: "cell.example.com".to_string(),
                 grpc_port: 50051,
                 bootstrap_port: 8443,
@@ -720,13 +723,13 @@ mod tests {
                 },
             };
             let json = serde_json::to_string(&spec).unwrap();
-            let parsed: CellSpec = serde_json::from_str(&json).unwrap();
+            let parsed: ParentSpec = serde_json::from_str(&json).unwrap();
             assert_eq!(spec, parsed);
         }
 
         #[test]
         fn test_cell_spec_endpoints() {
-            let spec = CellSpec {
+            let spec = ParentSpec {
                 host: "172.18.255.1".to_string(),
                 grpc_port: 50051,
                 bootstrap_port: 8443,
@@ -742,7 +745,7 @@ mod tests {
         fn test_cell_spec_default_ports() {
             // Ports should default when not specified in JSON
             let json = r#"{"host":"example.com","service":{"type":"LoadBalancer"}}"#;
-            let spec: CellSpec = serde_json::from_str(json).unwrap();
+            let spec: ParentSpec = serde_json::from_str(json).unwrap();
             assert_eq!(spec.grpc_port, 50051);
             assert_eq!(spec.bootstrap_port, 8443);
         }

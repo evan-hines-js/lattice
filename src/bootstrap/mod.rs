@@ -504,8 +504,8 @@ impl ManifestGenerator for DefaultManifestGenerator {
 
         // Then operator manifests - same deployment for all clusters
         // Controller reads LatticeCluster CRD to determine behavior:
-        // - spec.cell present → starts cell servers, can provision clusters
-        // - spec.cellRef present → connects to parent
+        // - spec.parent present → starts cell servers, can provision clusters
+        // - spec.parentRef present → connects to parent
         //
         // Note: generate_operator_manifests returns Result, but serialization of
         // well-known k8s types should never fail. If it does, it indicates a
