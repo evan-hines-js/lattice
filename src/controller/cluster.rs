@@ -1240,6 +1240,32 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Each cluster gets its own CAPI namespace
             let capi_namespace = format!("capi-{}", name);
 
+            // For child clusters, patch kubeconfig to use central proxy when agent connects
+            // This allows CAPI to reach the workload cluster's API server
+            if !is_self {
+                if let Some(ref parent_servers) = ctx.parent_servers {
+                    if parent_servers.is_running()
+                        && parent_servers
+                            .agent_registry()
+                            .get_proxy_channels(&name)
+                            .is_some()
+                    {
+                        // Proxy channels registered = agent connected, patch kubeconfig
+                        let ca_cert_pem = parent_servers.ca().ca_cert_pem();
+                        if let Err(e) = crate::pivot::patch_kubeconfig_for_child_cluster(
+                            &name,
+                            &capi_namespace,
+                            crate::pivot::CENTRAL_PROXY_SERVICE_URL,
+                            ca_cert_pem,
+                        )
+                        .await
+                        {
+                            debug!(error = %e, "Failed to patch kubeconfig for child cluster (may already be patched)");
+                        }
+                    }
+                }
+            }
+
             let is_ready = ctx
                 .capi
                 .is_infrastructure_ready(&name, &capi_namespace)
@@ -1286,6 +1312,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     if parent_servers.is_running() {
                         Some(Arc::new(PivotOperationsImpl::new(
                             parent_servers.agent_registry(),
+                            parent_servers.ca().ca_cert_pem().to_string(),
                         )))
                     } else {
                         None
@@ -1695,15 +1722,18 @@ async fn update_cluster_status(
 pub struct PivotOperationsImpl {
     /// Agent registry for sending commands
     agent_registry: SharedAgentRegistry,
+    /// CA certificate PEM for central proxy TLS
+    ca_cert_pem: String,
     /// Set of clusters where pivot has been triggered (to avoid double-triggering)
     pivot_in_progress: dashmap::DashSet<String>,
 }
 
 impl PivotOperationsImpl {
     /// Create a new PivotOperationsImpl
-    pub fn new(agent_registry: SharedAgentRegistry) -> Self {
+    pub fn new(agent_registry: SharedAgentRegistry, ca_cert_pem: String) -> Self {
         Self {
             agent_registry,
+            ca_cert_pem,
             pivot_in_progress: dashmap::DashSet::new(),
         }
     }
@@ -1813,21 +1843,17 @@ impl PivotOperations for PivotOperationsImpl {
         cluster_name: &str,
         namespace: &str,
     ) -> Result<(), Error> {
-        use crate::agent::proxy::generate_proxy_kubeconfig;
+        use crate::agent::generate_central_proxy_kubeconfig;
+        use crate::pivot::CENTRAL_PROXY_SERVICE_URL;
 
-        info!(cluster = %cluster_name, namespace = %namespace, "Executing clusterctl move via proxy");
+        info!(cluster = %cluster_name, namespace = %namespace, "Executing clusterctl move via central proxy");
 
-        // Get the proxy port from the agent connection
-        // The proxy is already running (started when agent connected)
-        let port = self
-            .agent_registry
-            .get_proxy_port(cluster_name)
-            .ok_or_else(|| Error::pivot(format!("proxy not available for: {}", cluster_name)))?;
-
-        info!(cluster = %cluster_name, port = port, "Using persistent proxy");
-
-        // Generate kubeconfig pointing to the already-running proxy
-        let kubeconfig_content = generate_proxy_kubeconfig(cluster_name, port);
+        // Generate kubeconfig pointing to central proxy with ?cluster= routing
+        let kubeconfig_content = generate_central_proxy_kubeconfig(
+            cluster_name,
+            CENTRAL_PROXY_SERVICE_URL,
+            &self.ca_cert_pem,
+        );
 
         // Write kubeconfig to temp file
         let kubeconfig_path = format!("/tmp/lattice-pivot-{}.kubeconfig", cluster_name);
@@ -1851,9 +1877,6 @@ impl PivotOperations for PivotOperationsImpl {
 
         // Clean up kubeconfig
         let _ = tokio::fs::remove_file(&kubeconfig_path).await;
-
-        // Proxy stays running - it's persistent for the agent's lifetime
-        // If clusterctl fails, we can retry without the agent reconnecting
 
         if output.status.success() {
             info!(cluster = %cluster_name, "clusterctl move completed successfully");
@@ -3044,7 +3067,7 @@ mod tests {
         #[test]
         fn story_create_pivot_operations() {
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry);
+            let ops = PivotOperationsImpl::new(registry, "test-ca-cert".to_string());
             // Just verify it can be created
             assert!(!ops.is_agent_ready("nonexistent-cluster"));
         }
@@ -3053,7 +3076,7 @@ mod tests {
         #[test]
         fn story_agent_not_ready_when_not_connected() {
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry);
+            let ops = PivotOperationsImpl::new(registry, "test-ca-cert".to_string());
 
             assert!(!ops.is_agent_ready("test-cluster"));
         }
@@ -3062,7 +3085,7 @@ mod tests {
         #[test]
         fn story_pivot_not_complete_when_not_connected() {
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry);
+            let ops = PivotOperationsImpl::new(registry, "test-ca-cert".to_string());
 
             assert!(!ops.is_pivot_complete("test-cluster"));
         }
@@ -3071,7 +3094,7 @@ mod tests {
         #[tokio::test]
         async fn story_trigger_pivot_fails_when_no_agent() {
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry);
+            let ops = PivotOperationsImpl::new(registry, "test-ca-cert".to_string());
 
             let result = ops
                 .trigger_pivot("test-cluster", "default", "default")
@@ -3090,7 +3113,7 @@ mod tests {
         #[tokio::test]
         async fn story_double_trigger_is_idempotent() {
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry);
+            let ops = PivotOperationsImpl::new(registry, "test-ca-cert".to_string());
 
             // First trigger fails (no agent)
             let _ = ops

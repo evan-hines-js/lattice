@@ -2,13 +2,15 @@
 //!
 //! Manages the registry of connected agents and their state.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, info, warn};
 
-use crate::proto::{AgentState, CellCommand};
+use crate::proto::{AgentState, CellCommand, KubeProxyRequest, KubeProxyResponse};
 
 /// Represents a connected agent
 pub struct AgentConnection {
@@ -129,6 +131,47 @@ pub struct PostPivotManifests {
     pub cluster_yaml: Option<String>,
 }
 
+/// Proxy channel state for a single cluster
+///
+/// Holds the channels needed to proxy K8s API requests to an agent.
+pub struct ProxyChannels {
+    /// Channel to send proxy requests to the agent
+    pub request_tx: mpsc::Sender<KubeProxyRequest>,
+    /// Pending responses keyed by request ID
+    pub pending: Arc<RwLock<HashMap<String, oneshot::Sender<KubeProxyResponse>>>>,
+    /// Counter for generating unique request IDs
+    request_counter: AtomicU64,
+}
+
+impl ProxyChannels {
+    /// Create new proxy channels
+    pub fn new(request_tx: mpsc::Sender<KubeProxyRequest>) -> Self {
+        Self {
+            request_tx,
+            pending: Arc::new(RwLock::new(HashMap::new())),
+            request_counter: AtomicU64::new(0),
+        }
+    }
+
+    /// Generate a unique request ID for this cluster
+    pub fn next_request_id(&self, cluster_name: &str) -> String {
+        let id = self.request_counter.fetch_add(1, Ordering::SeqCst);
+        format!("{}-central-{}", cluster_name, id)
+    }
+
+    /// Handle a response from the agent
+    pub async fn handle_response(&self, response: KubeProxyResponse) {
+        let request_id = response.request_id.clone();
+        let sender = {
+            let mut pending = self.pending.write().await;
+            pending.remove(&request_id)
+        };
+        if let Some(tx) = sender {
+            let _ = tx.send(response);
+        }
+    }
+}
+
 /// Registry of connected agents
 ///
 /// Thread-safe registry using DashMap for concurrent access from
@@ -138,6 +181,8 @@ pub struct AgentRegistry {
     agents: DashMap<String, AgentConnection>,
     /// Manifests to send to agents after PivotComplete
     post_pivot_manifests: DashMap<String, PostPivotManifests>,
+    /// Proxy channels for each cluster (for central proxy)
+    proxy_channels: DashMap<String, Arc<ProxyChannels>>,
 }
 
 impl AgentRegistry {
@@ -146,6 +191,29 @@ impl AgentRegistry {
         Self {
             agents: DashMap::new(),
             post_pivot_manifests: DashMap::new(),
+            proxy_channels: DashMap::new(),
+        }
+    }
+
+    /// Register proxy channels for a cluster
+    ///
+    /// Called when an agent's proxy stream connects to store the channels
+    /// needed for the central proxy to route requests.
+    pub fn register_proxy_channels(&self, cluster_name: &str, channels: Arc<ProxyChannels>) {
+        info!(cluster = %cluster_name, "Proxy channels registered");
+        self.proxy_channels
+            .insert(cluster_name.to_string(), channels);
+    }
+
+    /// Get proxy channels for a cluster
+    pub fn get_proxy_channels(&self, cluster_name: &str) -> Option<Arc<ProxyChannels>> {
+        self.proxy_channels.get(cluster_name).map(|r| r.clone())
+    }
+
+    /// Remove proxy channels for a cluster
+    pub fn remove_proxy_channels(&self, cluster_name: &str) {
+        if self.proxy_channels.remove(cluster_name).is_some() {
+            info!(cluster = %cluster_name, "Proxy channels removed");
         }
     }
 
@@ -837,5 +905,119 @@ mod tests {
             "should succeed immediately when agent already registered"
         );
         assert_eq!(registry.get_proxy_port("immediate-cluster"), Some(18080));
+    }
+
+    // ==========================================================================
+    // ProxyChannels Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_proxy_channels_creation() {
+        let (tx, _rx) = mpsc::channel(32);
+        let channels = ProxyChannels::new(tx);
+        assert!(channels.pending.try_read().is_ok());
+    }
+
+    #[test]
+    fn test_proxy_channels_next_request_id() {
+        let (tx, _rx) = mpsc::channel(32);
+        let channels = ProxyChannels::new(tx);
+
+        let id1 = channels.next_request_id("my-cluster");
+        let id2 = channels.next_request_id("my-cluster");
+        let id3 = channels.next_request_id("my-cluster");
+
+        assert!(id1.contains("my-cluster"));
+        assert!(id1.contains("-central-"));
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+    }
+
+    #[test]
+    fn test_proxy_channels_request_id_format() {
+        let (tx, _rx) = mpsc::channel(32);
+        let channels = ProxyChannels::new(tx);
+
+        let id = channels.next_request_id("test-cluster");
+        // Format: "{cluster_name}-central-{counter}"
+        assert!(id.starts_with("test-cluster-central-"));
+    }
+
+    #[tokio::test]
+    async fn test_proxy_channels_handle_response() {
+        use crate::proto::KubeProxyResponse;
+
+        let (tx, _rx) = mpsc::channel(32);
+        let channels = ProxyChannels::new(tx);
+
+        // Create a pending request
+        let request_id = channels.next_request_id("test");
+        let (response_tx, response_rx) = oneshot::channel();
+
+        {
+            let mut pending = channels.pending.write().await;
+            pending.insert(request_id.clone(), response_tx);
+        }
+
+        // Handle the response
+        channels
+            .handle_response(KubeProxyResponse {
+                request_id: request_id.clone(),
+                status_code: 200,
+                headers: vec![],
+                body: b"test".to_vec(),
+                error: String::new(),
+            })
+            .await;
+
+        // Response should be received
+        let response = response_rx.await.expect("should receive response");
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body, b"test");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_channels_handle_response_unknown_id() {
+        use crate::proto::KubeProxyResponse;
+
+        let (tx, _rx) = mpsc::channel(32);
+        let channels = ProxyChannels::new(tx);
+
+        // Handle response for unknown request - should not panic
+        channels
+            .handle_response(KubeProxyResponse {
+                request_id: "unknown-id".to_string(),
+                status_code: 200,
+                headers: vec![],
+                body: vec![],
+                error: String::new(),
+            })
+            .await;
+        // No assertion needed - just verify it doesn't panic
+    }
+
+    #[test]
+    fn test_registry_proxy_channels() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+        let channels = std::sync::Arc::new(ProxyChannels::new(tx));
+
+        // Initially no channels
+        assert!(registry.get_proxy_channels("my-cluster").is_none());
+
+        // Register channels
+        registry.register_proxy_channels("my-cluster", channels.clone());
+        assert!(registry.get_proxy_channels("my-cluster").is_some());
+
+        // Remove channels
+        registry.remove_proxy_channels("my-cluster");
+        assert!(registry.get_proxy_channels("my-cluster").is_none());
+    }
+
+    #[test]
+    fn test_registry_remove_nonexistent_proxy_channels() {
+        let registry = AgentRegistry::new();
+        // Should not panic
+        registry.remove_proxy_channels("nonexistent");
     }
 }

@@ -313,8 +313,6 @@ impl LatticeAgent for AgentServer {
         &self,
         request: Request<Streaming<KubeProxyResponse>>,
     ) -> Result<Response<Self::ProxyKubernetesAPIStream>, Status> {
-        use super::proxy::start_persistent_proxy;
-
         let remote_addr = request.remote_addr();
         info!(?remote_addr, "New K8s API proxy connection");
 
@@ -323,88 +321,51 @@ impl LatticeAgent for AgentServer {
         // Channel for sending proxy requests to the agent (cell -> agent)
         let (request_tx, request_rx) = mpsc::channel::<KubeProxyRequest>(32);
 
-        // Channel for receiving proxy responses from the agent (agent -> cell)
-        // This channel is used by the persistent proxy server
-        let (response_tx, response_rx) = mpsc::channel::<KubeProxyResponse>(32);
-
         let registry = self.registry.clone();
 
         // Spawn task to:
         // 1. Wait for handshake to identify cluster
-        // 2. Start persistent proxy server
-        // 3. Forward responses from agent to proxy server
+        // 2. Register proxy channels for central proxy
+        // 3. Forward responses from agent to central proxy
         tokio::spawn(async move {
             // Wait for first response (handshake) to identify the cluster
             let first_result = inbound.next().await;
-            let (cluster_name, proxy_started) = match first_result {
+            let cluster_name = match first_result {
                 Some(Ok(response)) if !response.request_id.is_empty() => {
                     // Request ID format: "{cluster_name}:handshake"
                     if let Some(name) = response.request_id.split(':').next() {
-                        // Start persistent proxy server
-                        match start_persistent_proxy(
-                            name.to_string(),
+                        // Register proxy channels for central proxy
+                        let channels = std::sync::Arc::new(super::connection::ProxyChannels::new(
                             request_tx.clone(),
-                            response_rx,
-                        )
-                        .await
-                        {
-                            Ok(port) => {
-                                info!(
-                                    cluster = %name,
-                                    port = port,
-                                    "Persistent K8s API proxy started"
-                                );
-                                // Register proxy port with agent connection
-                                // Use retry to handle race with agent registration
-                                let timeout = std::time::Duration::from_secs(5);
-                                let success = registry
-                                    .set_proxy_port_with_retry(name, port, timeout)
-                                    .await;
-                                if !success {
-                                    error!(
-                                        cluster = %name,
-                                        "Failed to set proxy port - agent never registered"
-                                    );
-                                }
-                                (Some(name.to_string()), success)
-                            }
-                            Err(e) => {
-                                error!(
-                                    cluster = %name,
-                                    error = %e,
-                                    "Failed to start persistent proxy"
-                                );
-                                (Some(name.to_string()), false)
-                            }
-                        }
+                        ));
+                        registry.register_proxy_channels(name, channels);
+                        info!(cluster = %name, "K8s API proxy channels registered");
+                        Some(name.to_string())
                     } else {
                         error!("Invalid handshake: could not extract cluster name");
-                        (None, false)
+                        None
                     }
                 }
                 Some(Ok(_)) => {
                     error!("Invalid handshake: empty request_id");
-                    (None, false)
+                    None
                 }
                 Some(Err(e)) => {
                     error!(error = %e, "Error receiving handshake");
-                    (None, false)
+                    None
                 }
                 None => {
                     debug!("Proxy stream closed before handshake");
-                    (None, false)
+                    None
                 }
             };
 
-            // If proxy didn't start, cleanup and exit
-            if !proxy_started {
-                if let Some(ref name) = cluster_name {
-                    registry.clear_proxy_port(name);
-                }
+            // If handshake failed, exit
+            let Some(ref name) = cluster_name else {
                 return;
-            }
+            };
 
-            // Continue forwarding responses from agent to proxy server
+            // Forward responses from agent to central proxy
             while let Some(result) = inbound.next().await {
                 match result {
                     Ok(response) => {
@@ -423,10 +384,14 @@ impl LatticeAgent for AgentServer {
                             "Proxy response received"
                         );
 
-                        // Forward response to the proxy server
-                        if let Err(e) = response_tx.send(response).await {
-                            error!(error = %e, "Failed to forward proxy response");
-                            break;
+                        // Forward to central proxy via registry
+                        if let Some(channels) = registry.get_proxy_channels(name) {
+                            channels.handle_response(response).await;
+                        } else {
+                            warn!(
+                                request_id = %response.request_id,
+                                "No proxy channels for response"
+                            );
                         }
                     }
                     Err(e) => {
@@ -436,11 +401,9 @@ impl LatticeAgent for AgentServer {
                 }
             }
 
-            // Cleanup proxy port on disconnect
-            if let Some(name) = cluster_name {
-                info!(cluster = %name, "K8s API proxy disconnected");
-                registry.clear_proxy_port(&name);
-            }
+            // Cleanup on disconnect
+            info!(cluster = %name, "K8s API proxy disconnected");
+            registry.remove_proxy_channels(name);
         });
 
         // Return stream of requests to send to agent
