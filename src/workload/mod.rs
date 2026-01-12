@@ -613,12 +613,15 @@ impl WorkloadCompiler {
         spec.containers
             .iter()
             .map(|(container_name, container_spec)| {
+                // NOTE: Template rendering happens before this stage.
+                // At compile time, variables still contain unrendered templates.
+                // The workload compiler should render these before generating K8s resources.
                 let env: Vec<EnvVar> = container_spec
                     .variables
                     .iter()
                     .map(|(k, v)| EnvVar {
                         name: k.clone(),
-                        value: v.clone(),
+                        value: v.to_string(),
                     })
                     .collect();
 
@@ -847,6 +850,7 @@ impl WorkloadCompiler {
 mod tests {
     use super::*;
     use crate::crd::{ContainerSpec, DeploySpec, PortSpec, ReplicaSpec, ServicePortsSpec};
+    use crate::template::TemplateString;
 
     fn make_service(name: &str, namespace: &str) -> LatticeService {
         let mut containers = BTreeMap::new();
@@ -1073,7 +1077,7 @@ mod tests {
         let container = service.spec.containers.get_mut("main").unwrap();
         container
             .variables
-            .insert("LOG_LEVEL".to_string(), "debug".to_string());
+            .insert("LOG_LEVEL".to_string(), TemplateString::from("debug"));
 
         // Use compile_pod_spec which generates container specs for webhook
         let pod_spec = WorkloadCompiler::compile_pod_spec(&service);

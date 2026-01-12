@@ -3,6 +3,17 @@
 //! The LatticeService CRD represents a workload deployed by Lattice.
 //! Services declare their dependencies and allowed callers for automatic
 //! network policy generation.
+//!
+//! ## Score-Compatible Templating
+//!
+//! The following fields support `${...}` placeholder syntax per the Score spec:
+//! - `containers.*.variables.*` - Environment variable values
+//! - `containers.*.files.*.content` - Inline file content
+//! - `containers.*.files.*.source` - File source path
+//! - `containers.*.volumes.*.source` - Volume source reference
+//! - `resources.*.params.*` - Resource parameters
+//!
+//! Use `$${...}` to escape and produce literal `${...}` in output.
 
 use std::collections::BTreeMap;
 
@@ -12,6 +23,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::Condition;
+use crate::template::TemplateString;
 
 /// Generate a schema for arbitrary JSON objects
 ///
@@ -180,17 +192,17 @@ pub struct Probe {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileMount {
-    /// Inline file content (UTF-8)
+    /// Inline file content (UTF-8, supports `${...}` placeholders)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<TemplateString>,
 
     /// Base64-encoded binary content
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_content: Option<String>,
 
-    /// Path to content file
+    /// Path to content file (supports `${...}` placeholders)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
+    pub source: Option<TemplateString>,
 
     /// File mode in octal
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,8 +217,8 @@ pub struct FileMount {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeMount {
-    /// External volume reference
-    pub source: String,
+    /// External volume reference (supports `${...}` placeholders)
+    pub source: TemplateString,
 
     /// Sub path in the volume
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -232,9 +244,9 @@ pub struct ContainerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
 
-    /// Environment variables
+    /// Environment variables (values support `${...}` placeholders)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub variables: BTreeMap<String, String>,
+    pub variables: BTreeMap<String, TemplateString>,
 
     /// Resource requirements
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -567,7 +579,8 @@ impl FileMount {
         }
 
         // Ensure at least one content source is specified
-        if self.content.is_none() && self.binary_content.is_none() && self.source.is_none() {
+        let has_content = self.content.is_some() || self.binary_content.is_some() || self.source.is_some();
+        if !has_content {
             return Err(crate::Error::validation(format!(
                 "container '{}' file '{}': must specify content, binary_content, or source",
                 container_name, path
@@ -1079,8 +1092,8 @@ service:
 
         // Check variables
         assert_eq!(
-            spec.containers["main"].variables.get("LOG_LEVEL"),
-            Some(&"info".to_string())
+            spec.containers["main"].variables.get("LOG_LEVEL").map(|v| v.as_str()),
+            Some("info")
         );
     }
 
@@ -1316,12 +1329,76 @@ deploy:
 
         // With content, it passes
         let file_with_content = FileMount {
-            content: Some("data".to_string()),
+            content: Some(TemplateString::from("data")),
             binary_content: None,
             source: None,
             mode: None,
             no_expand: None,
         };
         assert!(file_with_content.validate("main", "/etc/config").is_ok());
+    }
+
+    // =========================================================================
+    // Template String Tests
+    // =========================================================================
+
+    /// Story: Environment variables support Score placeholders
+    #[test]
+    fn test_variables_support_templates() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+    variables:
+      DB_HOST: "${resources.postgres.host}"
+      DB_PORT: "${resources.postgres.port}"
+      STATIC: "plain-value"
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let vars = &spec.containers["main"].variables;
+
+        assert!(vars["DB_HOST"].has_placeholders());
+        assert!(vars["DB_PORT"].has_placeholders());
+        assert!(!vars["STATIC"].has_placeholders());
+    }
+
+    /// Story: File content supports Score placeholders
+    #[test]
+    fn test_file_content_supports_templates() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+    files:
+      /etc/config.yaml:
+        content: |
+          database:
+            host: ${resources.db.host}
+            port: ${resources.db.port}
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let file = &spec.containers["main"].files["/etc/config.yaml"];
+
+        assert!(file.content.as_ref().unwrap().has_placeholders());
+    }
+
+    /// Story: Volume source supports Score placeholders
+    #[test]
+    fn test_volume_source_supports_templates() {
+        let yaml = r#"
+environment: test
+containers:
+  main:
+    image: app:latest
+    volumes:
+      /data:
+        source: "${resources.volume.name}"
+"#;
+        let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
+        let volume = &spec.containers["main"].volumes["/data"];
+
+        assert!(volume.source.has_placeholders());
     }
 }
