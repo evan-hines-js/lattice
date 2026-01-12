@@ -1930,15 +1930,15 @@ struct RandomMeshConfig {
 impl Default for RandomMeshConfig {
     fn default() -> Self {
         Self {
-            min_services: 20,
-            max_services: 50,
-            num_layers: 4,
-            outbound_probability: 0.2, // ~20% chance of connecting to each lower-layer service
+            min_services: 50,
+            max_services: 100,
+            num_layers: 5,
+            outbound_probability: 0.3, // ~20% chance of connecting to each lower-layer service
             bilateral_probability: 0.6, // ~60% of declared outbounds get bilateral agreement
             seed: None,
-            num_external_services: 5,           // Create 5 external services
+            num_external_services: 10, // Create 5 external services
             external_outbound_probability: 0.3, // 30% chance of depending on each external service
-            external_allow_probability: 0.6,    // 60% of external deps get allowed
+            external_allow_probability: 0.6, // 60% of external deps get allowed
         }
     }
 }

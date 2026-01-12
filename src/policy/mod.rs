@@ -1291,10 +1291,8 @@ mod tests {
 
         // cloudflare is external with IP address endpoint
         let mut ext_spec = make_external_spec(vec!["api"]);
-        ext_spec.endpoints = BTreeMap::from([(
-            "default".to_string(),
-            "https://1.1.1.1".to_string(),
-        )]);
+        ext_spec.endpoints =
+            BTreeMap::from([("default".to_string(), "https://1.1.1.1".to_string())]);
         graph.put_external_service(env, "cloudflare", &ext_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
@@ -1389,14 +1387,18 @@ mod tests {
         let cnp = &output.cilium_policies[0];
 
         // Should have CIDR rule for IP
-        let has_cidr = cnp.spec.egress.iter().any(|e| {
-            e.to_cidr.contains(&"10.0.0.1/32".to_string())
-        });
+        let has_cidr = cnp
+            .spec
+            .egress
+            .iter()
+            .any(|e| e.to_cidr.contains(&"10.0.0.1/32".to_string()));
         assert!(has_cidr, "Should have CIDR rule for IP address endpoint");
 
         // Should have FQDN rule for domain
         let has_fqdn = cnp.spec.egress.iter().any(|e| {
-            e.to_fqdns.iter().any(|f| f.match_name.as_deref() == Some("api.example.com"))
+            e.to_fqdns
+                .iter()
+                .any(|f| f.match_name.as_deref() == Some("api.example.com"))
         });
         assert!(has_fqdn, "Should have FQDN rule for domain endpoint");
     }
@@ -1404,15 +1406,42 @@ mod tests {
     #[test]
     fn story_is_ip_address_detection() {
         // Test the IP address detection helper function
-        assert!(PolicyCompiler::is_ip_address("1.1.1.1"), "IPv4 should be detected");
-        assert!(PolicyCompiler::is_ip_address("10.0.0.1"), "IPv4 should be detected");
-        assert!(PolicyCompiler::is_ip_address("192.168.1.1"), "IPv4 should be detected");
-        assert!(PolicyCompiler::is_ip_address("::1"), "IPv6 localhost should be detected");
-        assert!(PolicyCompiler::is_ip_address("2001:db8::1"), "IPv6 should be detected");
+        assert!(
+            PolicyCompiler::is_ip_address("1.1.1.1"),
+            "IPv4 should be detected"
+        );
+        assert!(
+            PolicyCompiler::is_ip_address("10.0.0.1"),
+            "IPv4 should be detected"
+        );
+        assert!(
+            PolicyCompiler::is_ip_address("192.168.1.1"),
+            "IPv4 should be detected"
+        );
+        assert!(
+            PolicyCompiler::is_ip_address("::1"),
+            "IPv6 localhost should be detected"
+        );
+        assert!(
+            PolicyCompiler::is_ip_address("2001:db8::1"),
+            "IPv6 should be detected"
+        );
 
-        assert!(!PolicyCompiler::is_ip_address("example.com"), "Domain should not be IP");
-        assert!(!PolicyCompiler::is_ip_address("api.stripe.com"), "Domain should not be IP");
-        assert!(!PolicyCompiler::is_ip_address("api.example.stripe.com"), "Multi-dot domain should not be IP");
-        assert!(!PolicyCompiler::is_ip_address("localhost"), "Hostname should not be IP");
+        assert!(
+            !PolicyCompiler::is_ip_address("example.com"),
+            "Domain should not be IP"
+        );
+        assert!(
+            !PolicyCompiler::is_ip_address("api.stripe.com"),
+            "Domain should not be IP"
+        );
+        assert!(
+            !PolicyCompiler::is_ip_address("api.example.stripe.com"),
+            "Multi-dot domain should not be IP"
+        );
+        assert!(
+            !PolicyCompiler::is_ip_address("localhost"),
+            "Hostname should not be IP"
+        );
     }
 }
