@@ -28,6 +28,7 @@
 //! - [`webhook`] - Mutating admission webhook for Deployment injection
 //! - [`install`] - Installer for bootstrapping management clusters
 //! - [`error`] - Error types for the operator
+//! - [`template`] - Score-compatible templating engine
 
 #![deny(missing_docs)]
 
@@ -50,6 +51,7 @@ pub mod policy;
 pub mod proto;
 pub mod provider;
 pub mod retry;
+pub mod template;
 pub mod webhook;
 pub mod workload;
 
