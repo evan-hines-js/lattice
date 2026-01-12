@@ -24,11 +24,16 @@ mod context;
 mod engine;
 mod error;
 mod filters;
+mod provisioner;
 mod types;
 
 pub use context::{MetadataContext, ResourceOutputs, TemplateContext};
 pub use engine::TemplateEngine;
 pub use error::TemplateError;
+pub use provisioner::{
+    ExternalServiceProvisioner, ProvisionerContext, ProvisionerRegistry, ResourceProvisioner,
+    ServiceProvisioner,
+};
 pub use types::{StaticString, TemplateString};
 
 #[cfg(test)]
