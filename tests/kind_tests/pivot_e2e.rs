@@ -44,8 +44,9 @@ use tokio::time::sleep;
 
 use lattice::crd::{
     ClusterPhase, ContainerSpec, DependencyDirection, DeploySpec, KubernetesSpec, LatticeCluster,
-    LatticeClusterSpec, LatticeService, LatticeServiceSpec, NodeSpec, PortSpec, ProviderSpec,
-    ProviderType, ReplicaSpec, ResourceSpec, ResourceType, ServicePortsSpec,
+    LatticeClusterSpec, LatticeExternalService, LatticeExternalServiceSpec, LatticeService,
+    LatticeServiceSpec, NodeSpec, PortSpec, ProviderSpec, ProviderType, ReplicaSpec, Resolution,
+    ResourceSpec, ResourceType, ServicePortsSpec,
 };
 use lattice::install::{InstallConfig, Installer};
 use std::collections::BTreeMap;
@@ -1914,6 +1915,12 @@ struct RandomMeshConfig {
     bilateral_probability: f64,
     /// Random seed for reproducibility (None = random)
     seed: Option<u64>,
+    /// Number of external services to create
+    num_external_services: usize,
+    /// Probability that a traffic generator depends on an external service (0.0-1.0)
+    external_outbound_probability: f64,
+    /// Probability that an external service allows a requesting service (0.0-1.0)
+    external_allow_probability: f64,
 }
 
 impl Default for RandomMeshConfig {
@@ -1925,8 +1932,22 @@ impl Default for RandomMeshConfig {
             outbound_probability: 0.15, // ~15% chance of connecting to each lower-layer service
             bilateral_probability: 0.6, // ~60% of declared outbounds get bilateral agreement
             seed: None,
+            num_external_services: 5,        // Create 5 external services
+            external_outbound_probability: 0.4, // 40% chance of depending on each external service
+            external_allow_probability: 0.6, // 60% of external deps get allowed
         }
     }
+}
+
+/// An external service in the randomized mesh
+#[derive(Debug, Clone)]
+struct RandomExternalService {
+    /// Unique name for this external service
+    name: String,
+    /// URL endpoint to test connectivity
+    url: String,
+    /// Services allowed to access this external service
+    allowed_requesters: HashSet<String>,
 }
 
 /// A service in the randomized mesh
@@ -1939,6 +1960,8 @@ struct RandomService {
     layer: usize,
     /// Services this service wants to connect to (outbound dependencies)
     outbound: HashSet<String>,
+    /// External services this service wants to connect to
+    external_outbound: HashSet<String>,
     /// Services this service allows inbound connections from
     inbound: HashSet<String>,
     /// Is this a traffic generator (top layer services)
@@ -1952,8 +1975,10 @@ struct RandomMesh {
     services: BTreeMap<String, RandomService>,
     /// Services organized by layer
     layers: Vec<Vec<String>>,
-    /// Expected test results: (source, target, should_be_allowed)
-    expected_connections: Vec<(String, String, bool)>,
+    /// External services
+    external_services: BTreeMap<String, RandomExternalService>,
+    /// Expected test results: (source, target, should_be_allowed, is_external)
+    expected_connections: Vec<(String, String, bool, bool)>,
 }
 
 impl RandomMesh {
@@ -2013,6 +2038,7 @@ impl RandomMesh {
                         name,
                         layer: layer_idx,
                         outbound: HashSet::new(),
+                        external_outbound: HashSet::new(),
                         inbound: HashSet::new(),
                         is_traffic_generator: layer_idx == 0, // Top layer generates traffic
                     },
@@ -2055,6 +2081,7 @@ impl RandomMesh {
                                     source_name.clone(),
                                     target_name.clone(),
                                     is_bilateral,
+                                    false, // not external
                                 ));
                             }
                         }
@@ -2082,6 +2109,7 @@ impl RandomMesh {
                                 source_name.clone(),
                                 (*target_name).clone(),
                                 false, // Should always be blocked (no outbound declared)
+                                false, // not external
                             ));
                         }
                     }
@@ -2103,14 +2131,100 @@ impl RandomMesh {
                 // Pick a random peer in the same layer
                 let peers: Vec<_> = layer.iter().filter(|s| *s != *source).collect();
                 if let Some(peer) = peers.choose(&mut rng) {
-                    expected_connections.push(((*source).clone(), (*peer).clone(), false));
+                    expected_connections.push(((*source).clone(), (*peer).clone(), false, false));
                 }
+            }
+        }
+
+        // Generate external services with real, reachable URLs
+        let external_urls = [
+            ("httpbin", "https://httpbin.org/status/200"),
+            ("example", "https://example.com"),
+            ("google", "https://www.google.com"),
+            ("cloudflare", "https://1.1.1.1"),
+            ("github", "https://github.com"),
+        ];
+
+        let mut external_services = BTreeMap::new();
+        let num_external = config.num_external_services.min(external_urls.len());
+
+        for i in 0..num_external {
+            let (name, url) = external_urls[i];
+            external_services.insert(
+                name.to_string(),
+                RandomExternalService {
+                    name: name.to_string(),
+                    url: url.to_string(),
+                    allowed_requesters: HashSet::new(),
+                },
+            );
+        }
+
+        // Generate external service dependencies for traffic generators
+        let traffic_generators: Vec<String> = services
+            .values()
+            .filter(|s| s.is_traffic_generator)
+            .map(|s| s.name.clone())
+            .collect();
+
+        let ext_names: Vec<String> = external_services.keys().cloned().collect();
+
+        for source_name in &traffic_generators {
+            for ext_name in &ext_names {
+                // Random chance to depend on this external service
+                if rng.gen::<f64>() < config.external_outbound_probability {
+                    // Source declares outbound dependency on external service
+                    services
+                        .get_mut(source_name)
+                        .unwrap()
+                        .external_outbound
+                        .insert(ext_name.clone());
+
+                    // Random chance for external service to allow this requester
+                    let is_allowed = rng.gen::<f64>() < config.external_allow_probability;
+                    if is_allowed {
+                        external_services
+                            .get_mut(ext_name)
+                            .unwrap()
+                            .allowed_requesters
+                            .insert(source_name.clone());
+                    }
+
+                    // Track expected result
+                    expected_connections.push((
+                        source_name.clone(),
+                        ext_name.clone(),
+                        is_allowed,
+                        true, // is external
+                    ));
+                }
+            }
+
+            // Also test some external services that the source didn't declare as dependencies
+            let not_dependent: Vec<_> = ext_names
+                .iter()
+                .filter(|e| !services[source_name].external_outbound.contains(*e))
+                .cloned()
+                .collect();
+
+            // Test up to 2 random non-dependencies
+            let sample_size = not_dependent.len().min(2);
+            let sampled: Vec<_> = not_dependent.choose_multiple(&mut rng, sample_size).cloned().collect();
+
+            for ext_name in sampled {
+                expected_connections.push((
+                    source_name.clone(),
+                    ext_name,
+                    false, // Should always be blocked (no outbound declared)
+                    true,  // is external
+                ));
             }
         }
 
         Self {
             services,
             layers,
+            external_services,
             expected_connections,
         }
     }
@@ -2122,12 +2236,22 @@ impl RandomMesh {
         let expected_allowed = self
             .expected_connections
             .iter()
-            .filter(|(_, _, allowed)| *allowed)
+            .filter(|(_, _, allowed, _)| *allowed)
             .count();
         let expected_blocked = total_tests - expected_allowed;
 
         let total_outbound: usize = self.services.values().map(|s| s.outbound.len()).sum();
         let total_inbound: usize = self.services.values().map(|s| s.inbound.len()).sum();
+        let total_external_outbound: usize = self
+            .services
+            .values()
+            .map(|s| s.external_outbound.len())
+            .sum();
+        let total_external_tests = self
+            .expected_connections
+            .iter()
+            .filter(|(_, _, _, is_external)| *is_external)
+            .count();
 
         MeshStats {
             total_services,
@@ -2137,6 +2261,9 @@ impl RandomMesh {
             total_tests,
             expected_allowed,
             expected_blocked,
+            total_external_services: self.external_services.len(),
+            total_external_outbound_deps: total_external_outbound,
+            total_external_tests,
         }
     }
 
@@ -2145,22 +2272,24 @@ impl RandomMesh {
         let allowed: Vec<_> = self
             .expected_connections
             .iter()
-            .filter(|(_, _, a)| *a)
+            .filter(|(_, _, a, _)| *a)
             .collect();
         let blocked: Vec<_> = self
             .expected_connections
             .iter()
-            .filter(|(_, _, a)| !*a)
+            .filter(|(_, _, a, _)| !*a)
             .collect();
 
         println!("\n  === EXPECTED ALLOWED ({}) ===", allowed.len());
-        for (src, tgt, _) in &allowed {
-            println!("    {} -> {}", src, tgt);
+        for (src, tgt, _, is_external) in &allowed {
+            let marker = if *is_external { " [EXT]" } else { "" };
+            println!("    {} -> {}{}", src, tgt, marker);
         }
 
         println!("\n  === EXPECTED BLOCKED ({}) ===", blocked.len());
-        for (src, tgt, _) in &blocked {
-            println!("    {} -> {}", src, tgt);
+        for (src, tgt, _, is_external) in &blocked {
+            let marker = if *is_external { " [EXT]" } else { "" };
+            println!("    {} -> {}{}", src, tgt, marker);
         }
         println!();
     }
@@ -2194,6 +2323,20 @@ impl RandomMesh {
                 ResourceSpec {
                     type_: ResourceType::Service,
                     direction: DependencyDirection::Inbound,
+                    id: None,
+                    params: None,
+                    class: None,
+                },
+            );
+        }
+
+        // Add external service dependencies
+        for ext_name in &svc.external_outbound {
+            resources.insert(
+                ext_name.clone(),
+                ResourceSpec {
+                    type_: ResourceType::ExternalService,
+                    direction: DependencyDirection::Outbound,
                     id: None,
                     params: None,
                     class: None,
@@ -2272,6 +2415,30 @@ impl RandomMesh {
         }
     }
 
+    /// Create a LatticeExternalService CRD for an external service in the mesh
+    fn create_external_service(&self, name: &str, namespace: &str) -> LatticeExternalService {
+        let ext_svc = &self.external_services[name];
+
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert("default".to_string(), ext_svc.url.clone());
+
+        LatticeExternalService {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                // LatticeExternalService is cluster-scoped, no namespace
+                ..Default::default()
+            },
+            spec: LatticeExternalServiceSpec {
+                environment: namespace.to_string(),
+                endpoints,
+                allowed_requesters: ext_svc.allowed_requesters.iter().cloned().collect(),
+                resolution: Resolution::Dns,
+                description: Some(format!("External service: {}", ext_svc.url)),
+            },
+            status: None,
+        }
+    }
+
     /// Generate test script for a traffic generator service
     fn generate_test_script(&self, source_name: &str, namespace: &str) -> String {
         let mut script = format!(
@@ -2287,10 +2454,10 @@ sleep 10  # Wait for network policies
         let tests: Vec<_> = self
             .expected_connections
             .iter()
-            .filter(|(src, _, _)| src == source_name)
+            .filter(|(src, _, _, _)| src == source_name)
             .collect();
 
-        for (_, target, expected_allowed) in &tests {
+        for (_, target, expected_allowed, is_external) in &tests {
             let (success_msg, fail_msg) = if *expected_allowed {
                 (
                     format!("{}->{}:ALLOWED", source_name, target),
@@ -2303,18 +2470,35 @@ sleep 10  # Wait for network policies
                 )
             };
 
-            script.push_str(&format!(
-                r#"if curl -s --connect-timeout 3 http://{target}.{ns}.svc.cluster.local/ >/dev/null 2>&1; then
+            if *is_external {
+                // External service - use the actual URL
+                let url = &self.external_services[target].url;
+                script.push_str(&format!(
+                    r#"if curl -s --connect-timeout 5 {url} >/dev/null 2>&1; then
   echo "{success_msg}"
 else
   echo "{fail_msg}"
 fi
 "#,
-                target = target,
-                ns = namespace,
-                success_msg = success_msg,
-                fail_msg = fail_msg,
-            ));
+                    url = url,
+                    success_msg = success_msg,
+                    fail_msg = fail_msg,
+                ));
+            } else {
+                // Internal service - use cluster DNS
+                script.push_str(&format!(
+                    r#"if curl -s --connect-timeout 2 http://{target}.{ns}.svc.cluster.local/ >/dev/null 2>&1; then
+  echo "{success_msg}"
+else
+  echo "{fail_msg}"
+fi
+"#,
+                    target = target,
+                    ns = namespace,
+                    success_msg = success_msg,
+                    fail_msg = fail_msg,
+                ));
+            }
         }
 
         script.push_str(&format!(
@@ -2340,6 +2524,9 @@ struct MeshStats {
     total_tests: usize,
     expected_allowed: usize,
     expected_blocked: usize,
+    total_external_services: usize,
+    total_external_outbound_deps: usize,
+    total_external_tests: usize,
 }
 
 impl std::fmt::Display for MeshStats {
@@ -2352,7 +2539,13 @@ impl std::fmt::Display for MeshStats {
         )?;
         writeln!(f, "  Total outbound dependencies: {}", self.total_outbound_deps)?;
         writeln!(f, "  Total inbound allowances: {}", self.total_inbound_allows)?;
-        writeln!(f, "  Total connection tests: {}", self.total_tests)?;
+        writeln!(f, "  External services: {}", self.total_external_services)?;
+        writeln!(f, "  External outbound dependencies: {}", self.total_external_outbound_deps)?;
+        writeln!(f, "  Total connection tests: {} ({} internal, {} external)",
+            self.total_tests,
+            self.total_tests - self.total_external_tests,
+            self.total_external_tests
+        )?;
         writeln!(
             f,
             "  Expected ALLOWED: {} ({:.1}%)",
@@ -2389,6 +2582,24 @@ async fn deploy_random_mesh(
     );
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
+
+    // Deploy external services first (cluster-scoped)
+    if !mesh.external_services.is_empty() {
+        println!(
+            "  Deploying {} external services...",
+            mesh.external_services.len()
+        );
+        let ext_api: Api<LatticeExternalService> = Api::all(client.clone());
+
+        for name in mesh.external_services.keys() {
+            let ext_svc = mesh.create_external_service(name, RANDOM_MESH_NAMESPACE);
+            ext_api
+                .create(&PostParams::default(), &ext_svc)
+                .await
+                .map_err(|e| format!("Failed to create external service {}: {}", name, e))?;
+        }
+    }
+
     let api: Api<LatticeService> = Api::all(client);
 
     // Deploy from bottom layer up (backends first, then APIs, then frontends)
@@ -2410,7 +2621,11 @@ async fn deploy_random_mesh(
         sleep(Duration::from_secs(2)).await;
     }
 
-    println!("  All {} services deployed!", mesh.services.len());
+    println!(
+        "  All {} services + {} external services deployed!",
+        mesh.services.len(),
+        mesh.external_services.len()
+    );
     Ok(())
 }
 
@@ -2463,13 +2678,16 @@ async fn verify_random_mesh_traffic(
     mesh: &RandomMesh,
     kubeconfig_path: &str,
 ) -> Result<(), String> {
-    println!("  Waiting for traffic tests to run (60 seconds)...");
-    sleep(Duration::from_secs(60)).await;
+    // Wait long enough for at least one full iteration of traffic tests.
+    // Each iteration: sleep 10 + curl tests (up to 25 tests × 3s timeout) = 85+ seconds.
+    println!("  Waiting for traffic tests to run (120 seconds)...");
+    sleep(Duration::from_secs(120)).await;
 
     // Build a map of expected results for exact matching
-    let mut results: BTreeMap<(String, String), (bool, Option<bool>)> = BTreeMap::new();
-    for (src, tgt, expected) in &mesh.expected_connections {
-        results.insert((src.clone(), tgt.clone()), (*expected, None));
+    // Key: (source, target), Value: (expected_allowed, is_external, actual_result)
+    let mut results: BTreeMap<(String, String), (bool, bool, Option<bool>)> = BTreeMap::new();
+    for (src, tgt, expected, is_external) in &mesh.expected_connections {
+        results.insert((src.clone(), tgt.clone()), (*expected, *is_external, None));
     }
 
     // Get all traffic generator names
@@ -2504,7 +2722,7 @@ async fn verify_random_mesh_traffic(
         .unwrap_or_default();
 
         // Check each expected connection from this source
-        for ((src, tgt), (_, actual)) in results.iter_mut() {
+        for ((src, tgt), (_, _, actual)) in results.iter_mut() {
             if src != source {
                 continue;
             }
@@ -2527,17 +2745,19 @@ async fn verify_random_mesh_traffic(
     let mut mismatches: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
 
-    for ((src, tgt), (expected, actual)) in &results {
+    for ((src, tgt), (expected, is_external, actual)) in &results {
+        let marker = if *is_external { " [EXT]" } else { "" };
         match actual {
             None => {
-                missing.push(format!("{} -> {}", src, tgt));
+                missing.push(format!("{} -> {}{}", src, tgt, marker));
             }
             Some(got) => {
                 if got != expected {
                     mismatches.push(format!(
-                        "{} -> {}: expected {}, got {}",
+                        "{} -> {}{}: expected {}, got {}",
                         src,
                         tgt,
+                        marker,
                         if *expected { "ALLOWED" } else { "BLOCKED" },
                         if *got { "ALLOWED" } else { "BLOCKED" }
                     ));
