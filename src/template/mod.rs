@@ -25,6 +25,7 @@ mod engine;
 mod error;
 mod filters;
 mod provisioner;
+mod renderer;
 mod types;
 
 pub use context::{MetadataContext, ResourceOutputs, TemplateContext};
@@ -34,6 +35,7 @@ pub use provisioner::{
     ExternalServiceProvisioner, ProvisionerContext, ProvisionerRegistry, ResourceProvisioner,
     ServiceProvisioner,
 };
+pub use renderer::{RenderConfig, RenderedContainer, RenderedFile, RenderedVolume, TemplateRenderer};
 pub use types::{StaticString, TemplateString};
 
 #[cfg(test)]
