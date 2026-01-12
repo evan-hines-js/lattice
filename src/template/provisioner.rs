@@ -308,13 +308,17 @@ mod tests {
             type_: ResourceType::Service,
             direction: DependencyDirection::Outbound,
             id: None,
-            params: None,
             class: None,
+            metadata: None,
+            params: None,
         };
 
         let outputs = provisioner.resolve("api", &resource, &ctx).unwrap();
 
-        assert_eq!(outputs.host, Some("api.prod-ns.svc.cluster.local".to_string()));
+        assert_eq!(
+            outputs.host,
+            Some("api.prod-ns.svc.cluster.local".to_string())
+        );
         assert_eq!(outputs.port, Some(8080));
         assert!(outputs.url.as_ref().unwrap().contains("8080"));
     }
@@ -329,8 +333,9 @@ mod tests {
             type_: ResourceType::Service,
             direction: DependencyDirection::Outbound,
             id: None,
-            params: None,
             class: None,
+            metadata: None,
+            params: None,
         };
 
         let result = provisioner.resolve("missing", &resource, &ctx);
@@ -352,8 +357,9 @@ mod tests {
             type_: ResourceType::ExternalService,
             direction: DependencyDirection::Outbound,
             id: None,
-            params: None,
             class: None,
+            metadata: None,
+            params: None,
         };
 
         let outputs = provisioner.resolve("stripe", &resource, &ctx).unwrap();
@@ -372,8 +378,9 @@ mod tests {
             type_: ResourceType::ExternalService,
             direction: DependencyDirection::Outbound,
             id: None,
-            params: None,
             class: None,
+            metadata: None,
+            params: None,
         };
 
         let result = provisioner.resolve("missing", &resource, &ctx);
@@ -404,8 +411,9 @@ mod tests {
                 type_: ResourceType::Service,
                 direction: DependencyDirection::Outbound,
                 id: Some("postgres".to_string()),
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
 

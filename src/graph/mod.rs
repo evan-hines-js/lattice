@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::crd::{LatticeExternalServiceSpec, LatticeServiceSpec, ParsedEndpoint};
+use crate::crd::{LatticeExternalServiceSpec, LatticeServiceSpec, ParsedEndpoint, Resolution};
 
 /// Type of service node in the graph
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +45,8 @@ pub struct ServiceNode {
     pub ports: BTreeMap<String, u16>,
     /// Parsed endpoints (for external services)
     pub endpoints: BTreeMap<String, ParsedEndpoint>,
+    /// Resolution strategy (for external services)
+    pub resolution: Option<Resolution>,
 }
 
 impl ServiceNode {
@@ -66,6 +68,7 @@ impl ServiceNode {
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
             endpoints: BTreeMap::new(),
+            resolution: None,
         }
     }
 
@@ -79,6 +82,7 @@ impl ServiceNode {
             image: None,
             ports: BTreeMap::new(),
             endpoints: spec.valid_endpoints(),
+            resolution: Some(spec.resolution.clone()),
         }
     }
 
@@ -92,6 +96,7 @@ impl ServiceNode {
             image: None,
             ports: BTreeMap::new(),
             endpoints: BTreeMap::new(),
+            resolution: None,
         }
     }
 
@@ -534,8 +539,9 @@ mod tests {
                     type_: ResourceType::Service,
                     direction: DependencyDirection::Outbound,
                     id: None,
-                    params: None,
                     class: None,
+                    metadata: None,
+                    params: None,
                 },
             );
         }
@@ -546,8 +552,9 @@ mod tests {
                     type_: ResourceType::Service,
                     direction: DependencyDirection::Inbound,
                     id: None,
-                    params: None,
                     class: None,
+                    metadata: None,
+                    params: None,
                 },
             );
         }
@@ -1295,6 +1302,7 @@ mod tests {
             image: None,
             ports: BTreeMap::new(),
             endpoints: BTreeMap::new(),
+            resolution: None,
         };
 
         assert!(node.allows("any-service"));
@@ -1311,6 +1319,7 @@ mod tests {
             image: None,
             ports: BTreeMap::new(),
             endpoints: BTreeMap::new(),
+            resolution: None,
         };
 
         assert!(node.allows("allowed"));
@@ -1327,6 +1336,7 @@ mod tests {
             image: None,
             ports: BTreeMap::new(),
             endpoints: BTreeMap::new(),
+            resolution: None,
         };
 
         assert!(!node.allows("any-service"));

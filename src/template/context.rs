@@ -309,7 +309,10 @@ mod tests {
     fn test_to_value() {
         let ctx = TemplateContext::builder()
             .metadata("api", HashMap::new())
-            .resource("db", ResourceOutputs::builder().host("db.svc").port(5432).build())
+            .resource(
+                "db",
+                ResourceOutputs::builder().host("db.svc").port(5432).build(),
+            )
             .build();
 
         let value = ctx.to_value();

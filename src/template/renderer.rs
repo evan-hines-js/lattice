@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::crd::{ContainerSpec, FileMount, LatticeService, LatticeServiceSpec, VolumeMount};
 use crate::graph::ServiceGraph;
 
-use super::context::{MetadataContext, ResourceOutputs, TemplateContext};
+use super::context::TemplateContext;
 use super::engine::TemplateEngine;
 use super::error::TemplateError;
 use super::provisioner::{ProvisionerContext, ProvisionerRegistry};
@@ -34,11 +34,7 @@ pub struct RenderConfig<'a> {
 
 impl<'a> RenderConfig<'a> {
     /// Create a new render config with defaults
-    pub fn new(
-        graph: &'a ServiceGraph,
-        environment: &'a str,
-        namespace: &'a str,
-    ) -> Self {
+    pub fn new(graph: &'a ServiceGraph, environment: &'a str, namespace: &'a str) -> Self {
         Self {
             graph,
             environment,
@@ -145,11 +141,7 @@ impl TemplateRenderer {
         service: &LatticeService,
         config: &RenderConfig<'_>,
     ) -> Result<TemplateContext, TemplateError> {
-        let name = service
-            .metadata
-            .name
-            .as_deref()
-            .unwrap_or("unknown");
+        let name = service.metadata.name.as_deref().unwrap_or("unknown");
 
         // Build metadata context (convert BTreeMap to HashMap)
         let annotations: HashMap<String, String> = service
@@ -170,8 +162,7 @@ impl TemplateRenderer {
         let resources = self.registry.resolve_all(&service.spec, &prov_ctx)?;
 
         // Build the full context
-        let mut builder = TemplateContext::builder()
-            .metadata(name, annotations);
+        let mut builder = TemplateContext::builder().metadata(name, annotations);
 
         // Add resources
         for (name, outputs) in resources {
@@ -422,8 +413,9 @@ mod tests {
                 type_: ResourceType::Service,
                 direction: DependencyDirection::Outbound,
                 id: Some("postgres".to_string()),
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
 
@@ -454,8 +446,7 @@ mod tests {
         let service = make_service_with_templates();
 
         let renderer = TemplateRenderer::new();
-        let config = RenderConfig::new(&graph, "prod", "prod-ns")
-            .with_config("log_level", "debug");
+        let config = RenderConfig::new(&graph, "prod", "prod-ns").with_config("log_level", "debug");
 
         let ctx = renderer.build_context(&service, &config).unwrap();
         let rendered = renderer
@@ -479,8 +470,7 @@ mod tests {
         let service = make_service_with_templates();
 
         let renderer = TemplateRenderer::new();
-        let config = RenderConfig::new(&graph, "prod", "prod-ns")
-            .with_config("log_level", "info"); // Required by the test fixture
+        let config = RenderConfig::new(&graph, "prod", "prod-ns").with_config("log_level", "info"); // Required by the test fixture
 
         let ctx = renderer.build_context(&service, &config).unwrap();
         let rendered = renderer
@@ -563,8 +553,7 @@ mod tests {
         let service = make_service_with_templates();
 
         let renderer = TemplateRenderer::new();
-        let config = RenderConfig::new(&graph, "prod", "prod-ns")
-            .with_config("log_level", "info");
+        let config = RenderConfig::new(&graph, "prod", "prod-ns").with_config("log_level", "info");
 
         let ctx = renderer.build_context(&service, &config).unwrap();
         let rendered = renderer.render_all_containers(&service.spec, &ctx).unwrap();

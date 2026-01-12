@@ -197,8 +197,9 @@ mod tests {
                     type_: ResourceType::Service,
                     direction: DependencyDirection::Outbound,
                     id: None,
-                    params: None,
                     class: None,
+                    metadata: None,
+                    params: None,
                 },
             );
         }
@@ -209,8 +210,9 @@ mod tests {
                     type_: ResourceType::Service,
                     direction: DependencyDirection::Inbound,
                     id: None,
-                    params: None,
                     class: None,
+                    metadata: None,
+                    params: None,
                 },
             );
         }

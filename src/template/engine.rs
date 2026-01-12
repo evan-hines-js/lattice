@@ -133,9 +133,7 @@ mod tests {
         let engine = TemplateEngine::new();
         let ctx = basic_context();
 
-        let result = engine
-            .render("Hello ${metadata.name}!", &ctx)
-            .unwrap();
+        let result = engine.render("Hello ${metadata.name}!", &ctx).unwrap();
         assert_eq!(result, "Hello test-service!");
     }
 
@@ -169,7 +167,10 @@ mod tests {
             .build();
 
         let result = engine
-            .render("${resources.postgres.host}:${resources.postgres.port}", &ctx)
+            .render(
+                "${resources.postgres.host}:${resources.postgres.port}",
+                &ctx,
+            )
             .unwrap();
         assert_eq!(result, "pg.svc.cluster.local:5432");
     }
@@ -299,9 +300,7 @@ mod tests {
         let ctx = basic_context();
 
         // Multiple escapes in same template
-        let result = engine
-            .render("$${FOO} and $${BAR}", &ctx)
-            .unwrap();
+        let result = engine.render("$${FOO} and $${BAR}", &ctx).unwrap();
         assert_eq!(result, "${FOO} and ${BAR}");
     }
 
@@ -338,9 +337,7 @@ mod tests {
             .build();
 
         assert_eq!(
-            engine
-                .render("${metadata.annotations.team}", &ctx)
-                .unwrap(),
+            engine.render("${metadata.annotations.team}", &ctx).unwrap(),
             "platform"
         );
     }

@@ -22,6 +22,16 @@ pub enum Resolution {
     Static,
 }
 
+impl Resolution {
+    /// Convert to Istio ServiceEntry resolution format (uppercase)
+    pub fn to_istio_format(&self) -> &'static str {
+        match self {
+            Self::Dns => "DNS",
+            Self::Static => "STATIC",
+        }
+    }
+}
+
 /// External service lifecycle phase
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[non_exhaustive]

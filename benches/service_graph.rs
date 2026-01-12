@@ -46,8 +46,9 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
                 type_: ResourceType::Service,
                 direction: DependencyDirection::Outbound,
                 id: None,
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
     }
@@ -58,8 +59,9 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
                 type_: ResourceType::Service,
                 direction: DependencyDirection::Inbound,
                 id: None,
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
     }
