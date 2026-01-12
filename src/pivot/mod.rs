@@ -476,13 +476,13 @@ pub async fn patch_kubeconfig_for_self_management(
 
                         // Also update the CA certificate to the in-cluster CA
                         // Remove certificate-authority if present and use certificate-authority-data
-                        cluster_config.as_mapping_mut().map(|m| {
+                        if let Some(m) = cluster_config.as_mapping_mut() {
                             m.remove("certificate-authority");
                             m.insert(
                                 serde_yaml::Value::String("certificate-authority-data".to_string()),
                                 serde_yaml::Value::String(in_cluster_ca_b64.clone()),
                             );
-                        });
+                        }
 
                         info!(
                             cluster = %cluster_name,

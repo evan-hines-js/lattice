@@ -33,7 +33,12 @@ pub fn base64_encode(value: &str) -> String {
 pub fn base64_decode(value: &str) -> Result<String, Error> {
     STANDARD
         .decode(value)
-        .map_err(|e| Error::new(ErrorKind::InvalidOperation, format!("base64 decode error: {}", e)))
+        .map_err(|e| {
+            Error::new(
+                ErrorKind::InvalidOperation,
+                format!("base64 decode error: {}", e),
+            )
+        })
         .and_then(|bytes| {
             String::from_utf8(bytes).map_err(|e| {
                 Error::new(

@@ -35,7 +35,9 @@ pub use provisioner::{
     ExternalServiceProvisioner, ProvisionerContext, ProvisionerRegistry, ResourceProvisioner,
     ServiceProvisioner,
 };
-pub use renderer::{RenderConfig, RenderedContainer, RenderedFile, RenderedVolume, TemplateRenderer};
+pub use renderer::{
+    RenderConfig, RenderedContainer, RenderedFile, RenderedVolume, TemplateRenderer,
+};
 pub use types::{StaticString, TemplateString};
 
 #[cfg(test)]
@@ -71,7 +73,9 @@ mod tests {
             .build();
 
         assert_eq!(
-            engine.render("${metadata.annotations.version}", &ctx).unwrap(),
+            engine
+                .render("${metadata.annotations.version}", &ctx)
+                .unwrap(),
             "1.2.3"
         );
     }
@@ -290,7 +294,10 @@ mod tests {
 
         assert_eq!(outputs.host, Some("db.svc.cluster.local".to_string()));
         assert_eq!(outputs.port, Some(5432));
-        assert_eq!(outputs.url, Some("postgres://db.svc.cluster.local:5432".to_string()));
+        assert_eq!(
+            outputs.url,
+            Some("postgres://db.svc.cluster.local:5432".to_string())
+        );
     }
 
     // =========================================================================
@@ -304,10 +311,7 @@ mod tests {
             .metadata("api", HashMap::new())
             .resource(
                 "postgres",
-                ResourceOutputs::builder()
-                    .host("pg.svc")
-                    .port(5432)
-                    .build(),
+                ResourceOutputs::builder().host("pg.svc").port(5432).build(),
             )
             .resource(
                 "redis",
@@ -326,8 +330,7 @@ mod tests {
             "gcr.io/myproject/api:1.0.0"
         );
 
-        let conn_template =
-            "postgres://${resources.postgres.host}:${resources.postgres.port}/mydb";
+        let conn_template = "postgres://${resources.postgres.host}:${resources.postgres.port}/mydb";
         assert_eq!(
             engine.render(conn_template, &ctx).unwrap(),
             "postgres://pg.svc:5432/mydb"
@@ -346,10 +349,7 @@ mod tests {
             .build();
 
         // Score spec: $${...} renders as literal ${...}
-        assert_eq!(
-            engine.render("$${literal}", &ctx).unwrap(),
-            "${literal}"
-        );
+        assert_eq!(engine.render("$${literal}", &ctx).unwrap(), "${literal}");
     }
 
     #[test]

@@ -86,6 +86,14 @@ pub enum ResourceType {
     Redis,
 }
 
+/// Resource metadata (Score-compatible)
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct ResourceMetadata {
+    /// Annotations for the resource
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+}
+
 /// Resource dependency specification
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -94,7 +102,7 @@ pub struct ResourceSpec {
     #[serde(rename = "type")]
     pub type_: ResourceType,
 
-    /// Direction of the dependency
+    /// Direction of the dependency (Lattice extension)
     #[serde(default)]
     pub direction: DependencyDirection,
 
@@ -102,14 +110,18 @@ pub struct ResourceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
+    /// Optional specialization class
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+
+    /// Resource metadata (Score-compatible)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<ResourceMetadata>,
+
     /// Resource-specific parameters (arbitrary JSON object)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "arbitrary_json_object")]
     pub params: Option<serde_json::Value>,
-
-    /// Optional specialization class
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub class: Option<String>,
 }
 
 /// Container resource limits and requests
@@ -579,7 +591,8 @@ impl FileMount {
         }
 
         // Ensure at least one content source is specified
-        let has_content = self.content.is_some() || self.binary_content.is_some() || self.source.is_some();
+        let has_content =
+            self.content.is_some() || self.binary_content.is_some() || self.source.is_some();
         if !has_content {
             return Err(crate::Error::validation(format!(
                 "container '{}' file '{}': must specify content, binary_content, or source",
@@ -861,8 +874,9 @@ mod tests {
                 type_: ResourceType::ExternalService,
                 direction: DependencyDirection::Outbound,
                 id: None,
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
         resources.insert(
@@ -871,8 +885,9 @@ mod tests {
                 type_: ResourceType::Service,
                 direction: DependencyDirection::Outbound,
                 id: None,
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
 
@@ -895,8 +910,9 @@ mod tests {
                 type_: ResourceType::Service,
                 direction: DependencyDirection::Inbound,
                 id: None,
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
         resources.insert(
@@ -905,8 +921,9 @@ mod tests {
                 type_: ResourceType::Service,
                 direction: DependencyDirection::Inbound,
                 id: None,
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
 
@@ -929,8 +946,9 @@ mod tests {
                 type_: ResourceType::Service,
                 direction: DependencyDirection::Both,
                 id: None,
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
 
@@ -952,8 +970,9 @@ mod tests {
                 type_: ResourceType::ExternalService,
                 direction: DependencyDirection::Outbound,
                 id: None,
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
         resources.insert(
@@ -962,8 +981,9 @@ mod tests {
                 type_: ResourceType::Service,
                 direction: DependencyDirection::Outbound,
                 id: None,
-                params: None,
                 class: None,
+                metadata: None,
+                params: None,
             },
         );
 
@@ -1092,7 +1112,10 @@ service:
 
         // Check variables
         assert_eq!(
-            spec.containers["main"].variables.get("LOG_LEVEL").map(|v| v.as_str()),
+            spec.containers["main"]
+                .variables
+                .get("LOG_LEVEL")
+                .map(|v| v.as_str()),
             Some("info")
         );
     }

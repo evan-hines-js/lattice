@@ -474,8 +474,9 @@ fn outbound_dep(name: &str) -> (String, ResourceSpec) {
             type_: ResourceType::Service,
             direction: DependencyDirection::Outbound,
             id: None,
-            params: None,
             class: None,
+            metadata: None,
+            params: None,
         },
     )
 }
@@ -488,8 +489,9 @@ fn inbound_allow(name: &str) -> (String, ResourceSpec) {
             type_: ResourceType::Service,
             direction: DependencyDirection::Inbound,
             id: None,
-            params: None,
             class: None,
+            metadata: None,
+            params: None,
         },
     )
 }
@@ -1254,7 +1256,7 @@ async fn watch_worker_scaling(
             ));
         }
 
-        // Count ready worker nodes (nodes without control-plane role)
+        // Count ready worker nodes using label selector to exclude control-plane
         let nodes_output = run_cmd_allow_fail(
             "kubectl",
             &[
@@ -1262,24 +1264,15 @@ async fn watch_worker_scaling(
                 kubeconfig_path,
                 "get",
                 "nodes",
+                "-l",
+                "!node-role.kubernetes.io/control-plane",
                 "-o",
-                "jsonpath={range .items[*]}{.metadata.name},{.status.conditions[?(@.type=='Ready')].status},{.metadata.labels.node-role\\.kubernetes\\.io/control-plane}{\"\\n\"}{end}",
+                "jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
             ],
         );
 
-        // Parse output to count ready workers
-        let mut ready_workers = 0u32;
-        for line in nodes_output.lines() {
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() >= 2 {
-                let is_ready = parts.get(1).map(|s| *s == "True").unwrap_or(false);
-                let is_control_plane = parts.get(2).map(|s| !s.is_empty()).unwrap_or(false);
-
-                if is_ready && !is_control_plane {
-                    ready_workers += 1;
-                }
-            }
-        }
+        // Count ready workers (only worker nodes returned due to label selector)
+        let ready_workers = nodes_output.lines().filter(|line| *line == "True").count() as u32;
 
         if last_count != Some(ready_workers) {
             println!(
@@ -1947,11 +1940,14 @@ impl Default for RandomMeshConfig {
 #[derive(Debug, Clone)]
 struct RandomExternalService {
     /// Unique name for this external service
+    #[allow(dead_code)]
     name: String,
     /// URL endpoint to test connectivity
     url: String,
     /// Services allowed to access this external service
     allowed_requesters: HashSet<String>,
+    /// Resolution strategy (DNS or Static for IP-based endpoints)
+    resolution: Resolution,
 }
 
 /// A service in the randomized mesh
@@ -2152,12 +2148,19 @@ impl RandomMesh {
 
         for i in 0..num_external {
             let (name, url) = external_urls[i];
+            // Detect IP-based URLs and set resolution accordingly
+            let resolution = if Self::is_ip_based_url(url) {
+                Resolution::Static
+            } else {
+                Resolution::Dns
+            };
             external_services.insert(
                 name.to_string(),
                 RandomExternalService {
                     name: name.to_string(),
                     url: url.to_string(),
                     allowed_requesters: HashSet::new(),
+                    resolution,
                 },
             );
         }
@@ -2232,6 +2235,28 @@ impl RandomMesh {
             external_services,
             expected_connections,
         }
+    }
+
+    /// Check if a URL contains an IP address (IPv4 or IPv6) instead of a hostname
+    fn is_ip_based_url(url: &str) -> bool {
+        use std::net::IpAddr;
+
+        // Extract host from URL (skip protocol)
+        let host = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .or_else(|| url.strip_prefix("tcp://"))
+            .or_else(|| url.strip_prefix("grpc://"))
+            .unwrap_or(url);
+
+        // Remove port and path
+        let host = host.split(':').next().unwrap_or(host);
+        let host = host.split('/').next().unwrap_or(host);
+
+        // Handle IPv6 bracket notation [::1]
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+
+        host.parse::<IpAddr>().is_ok()
     }
 
     /// Get summary statistics
@@ -2314,8 +2339,9 @@ impl RandomMesh {
                     type_: ResourceType::Service,
                     direction: DependencyDirection::Outbound,
                     id: None,
-                    params: None,
                     class: None,
+                    metadata: None,
+                    params: None,
                 },
             );
         }
@@ -2329,8 +2355,9 @@ impl RandomMesh {
                     type_: ResourceType::Service,
                     direction: DependencyDirection::Inbound,
                     id: None,
-                    params: None,
                     class: None,
+                    metadata: None,
+                    params: None,
                 },
             );
         }
@@ -2343,8 +2370,9 @@ impl RandomMesh {
                     type_: ResourceType::ExternalService,
                     direction: DependencyDirection::Outbound,
                     id: None,
-                    params: None,
                     class: None,
+                    metadata: None,
+                    params: None,
                 },
             );
         }
@@ -2437,7 +2465,7 @@ impl RandomMesh {
                 environment: namespace.to_string(),
                 endpoints,
                 allowed_requesters: ext_svc.allowed_requesters.iter().cloned().collect(),
-                resolution: Resolution::Dns,
+                resolution: ext_svc.resolution.clone(),
                 description: Some(format!("External service: {}", ext_svc.url)),
             },
             status: None,
@@ -2449,7 +2477,7 @@ impl RandomMesh {
         let mut script = format!(
             r#"
 echo "=== {} Traffic Tests ==="
-sleep 30  # Wait for AuthorizationPolicies to propagate
+sleep 5  # Brief wait for AuthorizationPolicies
 
 "#,
             source_name
@@ -2509,7 +2537,7 @@ fi
         script.push_str(&format!(
             r#"
 echo "=== End {} Tests ==="
-sleep 60
+sleep 10
 "#,
             source_name
         ));
@@ -2687,10 +2715,9 @@ async fn verify_random_mesh_traffic(
     mesh: &RandomMesh,
     kubeconfig_path: &str,
 ) -> Result<(), String> {
-    // Wait long enough for at least one full iteration of traffic tests.
-    // Each iteration: sleep 10 + curl tests (up to 25 tests × 3s timeout) = 85+ seconds.
-    println!("  Waiting for traffic tests to run (120 seconds)...");
-    sleep(Duration::from_secs(120)).await;
+    // Wait for traffic tests to complete at least one iteration
+    println!("  Waiting for traffic tests to run (90 seconds)...");
+    sleep(Duration::from_secs(90)).await;
 
     // Build a map of expected results for exact matching
     // Key: (source, target), Value: (expected_allowed, is_external, actual_result)

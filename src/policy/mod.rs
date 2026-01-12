@@ -825,6 +825,13 @@ impl<'a> PolicyCompiler<'a> {
             format!("{}-waypoint", namespace),
         );
 
+        let resolution = service
+            .resolution
+            .as_ref()
+            .map(|r| r.to_istio_format())
+            .unwrap_or("DNS")
+            .to_string();
+
         Some(ServiceEntry {
             api_version: "networking.istio.io/v1beta1".to_string(),
             kind: "ServiceEntry".to_string(),
@@ -833,7 +840,7 @@ impl<'a> PolicyCompiler<'a> {
                 hosts,
                 ports,
                 location: "MESH_EXTERNAL".to_string(),
-                resolution: "DNS".to_string(),
+                resolution,
             },
         })
     }
@@ -874,8 +881,9 @@ mod tests {
                     type_: ResourceType::Service,
                     direction: DependencyDirection::Outbound,
                     id: None,
-                    params: None,
                     class: None,
+                    metadata: None,
+                    params: None,
                 },
             );
         }
@@ -886,8 +894,9 @@ mod tests {
                     type_: ResourceType::Service,
                     direction: DependencyDirection::Inbound,
                     id: None,
-                    params: None,
                     class: None,
+                    metadata: None,
+                    params: None,
                 },
             );
         }
@@ -1075,6 +1084,62 @@ mod tests {
         assert_eq!(entry.metadata.name, "stripe-api");
         assert!(entry.spec.hosts.contains(&"api.stripe.com".to_string()));
         assert_eq!(entry.spec.location, "MESH_EXTERNAL");
+    }
+
+    #[test]
+    fn story_external_service_respects_dns_resolution() {
+        let graph = ServiceGraph::new();
+        let env = "prod";
+
+        let api_spec = make_service_spec(vec!["stripe-api"], vec![]);
+        graph.put_service(env, "api", &api_spec);
+
+        // External service with DNS resolution (hostname-based)
+        let ext_spec = LatticeExternalServiceSpec {
+            environment: "test".to_string(),
+            endpoints: BTreeMap::from([(
+                "api".to_string(),
+                "https://api.stripe.com:443".to_string(),
+            )]),
+            allowed_requesters: vec!["api".to_string()],
+            resolution: Resolution::Dns,
+            description: None,
+        };
+        graph.put_external_service(env, "stripe-api", &ext_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile("api", "prod-ns", env);
+
+        assert_eq!(output.service_entries.len(), 1);
+        let entry = &output.service_entries[0];
+        assert_eq!(entry.spec.resolution, "DNS");
+    }
+
+    #[test]
+    fn story_external_service_respects_static_resolution() {
+        let graph = ServiceGraph::new();
+        let env = "prod";
+
+        let api_spec = make_service_spec(vec!["cloudflare"], vec![]);
+        graph.put_service(env, "api", &api_spec);
+
+        // External service with STATIC resolution (IP-based)
+        let ext_spec = LatticeExternalServiceSpec {
+            environment: "test".to_string(),
+            endpoints: BTreeMap::from([("dns".to_string(), "https://1.1.1.1:443".to_string())]),
+            allowed_requesters: vec!["api".to_string()],
+            resolution: Resolution::Static,
+            description: None,
+        };
+        graph.put_external_service(env, "cloudflare", &ext_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile("api", "prod-ns", env);
+
+        assert_eq!(output.service_entries.len(), 1);
+        let entry = &output.service_entries[0];
+        assert_eq!(entry.spec.resolution, "STATIC");
+        assert!(entry.spec.hosts.contains(&"1.1.1.1".to_string()));
     }
 
     // =========================================================================

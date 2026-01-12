@@ -309,11 +309,11 @@ async fn central_proxy_handler(
         let request_id_clone = request_id.clone();
         tokio::spawn(async move {
             while let Some(chunk) = response_rx.recv().await {
-                if !chunk.body.is_empty() {
-                    if body_tx.send(Ok(Bytes::from(chunk.body))).await.is_err() {
-                        debug!(request_id = %request_id_clone, "Body channel closed");
-                        break;
-                    }
+                if !chunk.body.is_empty()
+                    && body_tx.send(Ok(Bytes::from(chunk.body))).await.is_err()
+                {
+                    debug!(request_id = %request_id_clone, "Body channel closed");
+                    break;
                 }
                 if chunk.is_final {
                     debug!(request_id = %request_id_clone, "Stream complete");
