@@ -207,10 +207,12 @@ pub struct CiliumEgressRule {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to_endpoints: Vec<EndpointSelector>,
     /// To FQDNs (external DNS names)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Note: Cilium uses uppercase "FQDNs" not camelCase "Fqdns"
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "toFQDNs")]
     pub to_fqdns: Vec<FqdnSelector>,
     /// To CIDRs (IP ranges)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Note: Cilium uses uppercase "CIDR" not camelCase "Cidr"
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "toCIDR")]
     pub to_cidr: Vec<String>,
     /// To ports
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -450,6 +452,12 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![],
             },
         }
+    }
+
+    /// Check if a string is an IP address (IPv4 or IPv6)
+    fn is_ip_address(host: &str) -> bool {
+        use std::net::IpAddr;
+        host.parse::<IpAddr>().is_ok()
     }
 
     fn spiffe_principal(&self, namespace: &str, service_name: &str) -> String {
@@ -715,14 +723,22 @@ impl<'a> PolicyCompiler<'a> {
                         });
                     }
                     ServiceType::External => {
-                        let fqdns: Vec<FqdnSelector> = callee
-                            .endpoints
-                            .values()
-                            .map(|ep| FqdnSelector {
-                                match_name: Some(ep.host.clone()),
-                                match_pattern: None,
-                            })
-                            .collect();
+                        // Separate IP addresses from domain names
+                        // Cilium requires toCIDR for IPs, toFQDNs for DNS names
+                        let mut fqdns: Vec<FqdnSelector> = Vec::new();
+                        let mut cidrs: Vec<String> = Vec::new();
+
+                        for ep in callee.endpoints.values() {
+                            if Self::is_ip_address(&ep.host) {
+                                // Use /32 for single IP addresses
+                                cidrs.push(format!("{}/32", ep.host));
+                            } else {
+                                fqdns.push(FqdnSelector {
+                                    match_name: Some(ep.host.clone()),
+                                    match_pattern: None,
+                                });
+                            }
+                        }
 
                         let ports: Vec<CiliumPort> = callee
                             .endpoints
@@ -733,16 +749,29 @@ impl<'a> PolicyCompiler<'a> {
                             })
                             .collect();
 
+                        let to_ports = if ports.is_empty() {
+                            vec![]
+                        } else {
+                            vec![CiliumPortRule { ports }]
+                        };
+
+                        // Create egress rule for FQDNs if any
                         if !fqdns.is_empty() {
                             egress_rules.push(CiliumEgressRule {
                                 to_endpoints: vec![],
                                 to_fqdns: fqdns,
                                 to_cidr: vec![],
-                                to_ports: if ports.is_empty() {
-                                    vec![]
-                                } else {
-                                    vec![CiliumPortRule { ports }]
-                                },
+                                to_ports: to_ports.clone(),
+                            });
+                        }
+
+                        // Create egress rule for CIDRs (IP addresses) if any
+                        if !cidrs.is_empty() {
+                            egress_rules.push(CiliumEgressRule {
+                                to_endpoints: vec![],
+                                to_fqdns: vec![],
+                                to_cidr: cidrs,
+                                to_ports,
                             });
                         }
                     }
@@ -1208,5 +1237,182 @@ mod tests {
             .ports
             .iter()
             .any(|p| p.port == "8080"));
+    }
+
+    // =========================================================================
+    // Story: Cilium Field Naming
+    // =========================================================================
+
+    #[test]
+    fn story_cilium_fqdn_field_serializes_correctly() {
+        // Cilium uses uppercase "FQDNs" and "CIDR" in its CRD schema
+        // This test verifies our serde serialization matches Cilium's expectations
+        let rule = CiliumEgressRule {
+            to_endpoints: vec![],
+            to_fqdns: vec![FqdnSelector {
+                match_name: Some("api.example.com".to_string()),
+                match_pattern: None,
+            }],
+            to_cidr: vec!["10.0.0.0/8".to_string()],
+            to_ports: vec![],
+        };
+
+        let json = serde_json::to_string(&rule).unwrap();
+
+        // Must use "toFQDNs" (uppercase) not "toFqdns" (camelCase)
+        assert!(
+            json.contains("\"toFQDNs\""),
+            "Expected 'toFQDNs' but got: {}",
+            json
+        );
+
+        // Must use "toCIDR" (uppercase) not "toCidr" (camelCase)
+        assert!(
+            json.contains("\"toCIDR\""),
+            "Expected 'toCIDR' but got: {}",
+            json
+        );
+    }
+
+    // =========================================================================
+    // Story: External Services with IP Addresses
+    // =========================================================================
+
+    #[test]
+    fn story_external_ip_address_uses_cidr() {
+        // When external service uses an IP address (e.g., 1.1.1.1), Cilium needs
+        // toCIDR rules, not toFQDNs (which only works for DNS names)
+        let graph = ServiceGraph::new();
+        let env = "prod";
+
+        // api depends on cloudflare (an IP-based external service)
+        let api_spec = make_service_spec(vec!["cloudflare"], vec![]);
+        graph.put_service(env, "api", &api_spec);
+
+        // cloudflare is external with IP address endpoint
+        let mut ext_spec = make_external_spec(vec!["api"]);
+        ext_spec.endpoints = BTreeMap::from([(
+            "default".to_string(),
+            "https://1.1.1.1".to_string(),
+        )]);
+        graph.put_external_service(env, "cloudflare", &ext_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile("api", "prod-ns", env);
+
+        // Find the Cilium policy
+        let cnp = &output.cilium_policies[0];
+
+        // Should have egress rule with toCIDR for IP address
+        let ip_egress = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| !e.to_cidr.is_empty())
+            .expect("Should have CIDR egress rule for IP-based external service");
+
+        assert!(
+            ip_egress.to_cidr.contains(&"1.1.1.1/32".to_string()),
+            "Should have 1.1.1.1/32 in toCIDR, got: {:?}",
+            ip_egress.to_cidr
+        );
+
+        // Should NOT have toFQDNs for the IP address
+        assert!(
+            ip_egress.to_fqdns.is_empty(),
+            "IP addresses should not use toFQDNs"
+        );
+    }
+
+    #[test]
+    fn story_external_domain_uses_fqdn() {
+        // When external service uses a domain name, Cilium needs toFQDNs rules
+        let graph = ServiceGraph::new();
+        let env = "prod";
+
+        // api depends on stripe (domain-based external service)
+        let api_spec = make_service_spec(vec!["stripe-api"], vec![]);
+        graph.put_service(env, "api", &api_spec);
+
+        // stripe is external with domain name endpoint
+        graph.put_external_service(env, "stripe-api", &make_external_spec(vec!["api"]));
+
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile("api", "prod-ns", env);
+
+        let cnp = &output.cilium_policies[0];
+
+        // Should have egress rule with toFQDNs for domain name
+        let fqdn_egress = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| !e.to_fqdns.is_empty())
+            .expect("Should have FQDN egress rule for domain-based external service");
+
+        assert!(
+            fqdn_egress
+                .to_fqdns
+                .iter()
+                .any(|f| f.match_name.as_deref() == Some("api.stripe.com")),
+            "Should have api.stripe.com in toFQDNs"
+        );
+
+        // Should NOT have toCIDR for domain
+        assert!(
+            fqdn_egress.to_cidr.is_empty(),
+            "Domain names should not use toCIDR"
+        );
+    }
+
+    #[test]
+    fn story_external_mixed_ip_and_domain() {
+        // External service with both IP and domain endpoints should generate
+        // separate egress rules for each type
+        let graph = ServiceGraph::new();
+        let env = "prod";
+
+        let api_spec = make_service_spec(vec!["mixed-external"], vec![]);
+        graph.put_service(env, "api", &api_spec);
+
+        // External service with both IP and domain endpoints
+        let mut ext_spec = make_external_spec(vec!["api"]);
+        ext_spec.endpoints = BTreeMap::from([
+            ("ip".to_string(), "https://10.0.0.1:443".to_string()),
+            ("domain".to_string(), "https://api.example.com".to_string()),
+        ]);
+        graph.put_external_service(env, "mixed-external", &ext_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
+        let output = compiler.compile("api", "prod-ns", env);
+
+        let cnp = &output.cilium_policies[0];
+
+        // Should have CIDR rule for IP
+        let has_cidr = cnp.spec.egress.iter().any(|e| {
+            e.to_cidr.contains(&"10.0.0.1/32".to_string())
+        });
+        assert!(has_cidr, "Should have CIDR rule for IP address endpoint");
+
+        // Should have FQDN rule for domain
+        let has_fqdn = cnp.spec.egress.iter().any(|e| {
+            e.to_fqdns.iter().any(|f| f.match_name.as_deref() == Some("api.example.com"))
+        });
+        assert!(has_fqdn, "Should have FQDN rule for domain endpoint");
+    }
+
+    #[test]
+    fn story_is_ip_address_detection() {
+        // Test the IP address detection helper function
+        assert!(PolicyCompiler::is_ip_address("1.1.1.1"), "IPv4 should be detected");
+        assert!(PolicyCompiler::is_ip_address("10.0.0.1"), "IPv4 should be detected");
+        assert!(PolicyCompiler::is_ip_address("192.168.1.1"), "IPv4 should be detected");
+        assert!(PolicyCompiler::is_ip_address("::1"), "IPv6 localhost should be detected");
+        assert!(PolicyCompiler::is_ip_address("2001:db8::1"), "IPv6 should be detected");
+
+        assert!(!PolicyCompiler::is_ip_address("example.com"), "Domain should not be IP");
+        assert!(!PolicyCompiler::is_ip_address("api.stripe.com"), "Domain should not be IP");
+        assert!(!PolicyCompiler::is_ip_address("api.example.stripe.com"), "Multi-dot domain should not be IP");
+        assert!(!PolicyCompiler::is_ip_address("localhost"), "Hostname should not be IP");
     }
 }
