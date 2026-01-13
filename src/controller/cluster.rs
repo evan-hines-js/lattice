@@ -2174,7 +2174,7 @@ mod tests {
         /// Creates mock installer for CAPI (always succeeds)
         fn mock_capi_installer() -> Arc<MockCapiInstaller> {
             let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
+            installer.expect_ensure().returning(|_| Ok(()));
             Arc::new(installer)
         }
 
@@ -2452,7 +2452,7 @@ mod tests {
             let mock = MockKubeClient::new();
             let capi_mock = MockCAPIClient::new();
             let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
+            installer.expect_ensure().returning(|_| Ok(()));
             Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
@@ -2496,7 +2496,7 @@ mod tests {
 
             let capi_mock = MockCAPIClient::new();
             let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
+            installer.expect_ensure().returning(|_| Ok(()));
             let ctx =
                 Context::for_testing(Arc::new(mock), Arc::new(capi_mock), Arc::new(installer));
 
@@ -2612,7 +2612,7 @@ mod tests {
             let mock = MockKubeClient::new();
             let capi_mock = MockCAPIClient::new();
             let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
+            installer.expect_ensure().returning(|_| Ok(()));
             Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
@@ -2802,7 +2802,7 @@ mod tests {
                 .returning(|_, _, _| Ok(false));
 
             let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
+            installer.expect_ensure().returning(|_| Ok(()));
 
             let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
@@ -2846,7 +2846,7 @@ mod tests {
                 .returning(|_, _, _| Ok(true));
 
             let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
+            installer.expect_ensure().returning(|_| Ok(()));
 
             let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
@@ -2883,7 +2883,7 @@ mod tests {
                 .returning(|_, _, _| Err(Error::provider("CAPI API unavailable".to_string())));
 
             let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
+            installer.expect_ensure().returning(|_| Ok(()));
 
             let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
@@ -2932,7 +2932,7 @@ mod tests {
 
             let mut installer = MockCapiInstaller::new();
             // Installer should always be called (idempotent)
-            installer.expect_install().times(1).returning(|_| Ok(()));
+            installer.expect_ensure().times(1).returning(|_| Ok(()));
 
             let ctx = Arc::new(Context::for_testing(
                 Arc::new(mock),
@@ -2960,7 +2960,7 @@ mod tests {
             let mut installer = MockCapiInstaller::new();
             // Installation fails
             installer
-                .expect_install()
+                .expect_ensure()
                 .returning(|_| Err(Error::capi_installation("clusterctl not found".to_string())));
 
             let ctx = Arc::new(Context::for_testing(
@@ -3002,7 +3002,7 @@ mod tests {
             });
 
             let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
+            installer.expect_ensure().returning(|_| Ok(()));
             let ctx = Context::for_testing(
                 Arc::new(mock),
                 Arc::new(MockCAPIClient::new()),
@@ -3040,7 +3040,7 @@ mod tests {
             });
 
             let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
+            installer.expect_ensure().returning(|_| Ok(()));
             let ctx = Context::for_testing(
                 Arc::new(mock),
                 Arc::new(MockCAPIClient::new()),
@@ -3077,7 +3077,7 @@ mod tests {
             });
 
             let mut installer = MockCapiInstaller::new();
-            installer.expect_install().returning(|_| Ok(()));
+            installer.expect_ensure().returning(|_| Ok(()));
             let ctx = Context::for_testing(
                 Arc::new(mock),
                 Arc::new(MockCAPIClient::new()),
