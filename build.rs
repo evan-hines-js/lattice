@@ -98,6 +98,7 @@ fn download_helm_charts(versions: &Versions) -> Result<(), Box<dyn std::error::E
     println!("cargo:rustc-env=CILIUM_VERSION={}", versions.cilium);
     println!("cargo:rustc-env=ISTIO_VERSION={}", versions.istio);
     println!("cargo:rustc-env=CAPI_VERSION={}", versions.capi);
+    println!("cargo:rustc-env=RKE2_VERSION={}", versions.rke2);
 
     if cilium_chart.exists()
         && base_chart.exists()
