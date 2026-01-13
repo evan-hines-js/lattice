@@ -219,6 +219,7 @@ mod tests {
             command: None,
             args: None,
             env: vec![],
+            env_from: vec![],
             ports: vec![],
             resources: None,
             liveness_probe: None,
@@ -422,6 +423,7 @@ mod tests {
                 name: "DEBUG".to_string(),
                 value: "true".to_string(),
             }],
+            env_from: vec![],
             ports: vec![ContainerPort {
                 name: None,
                 container_port: 8080,

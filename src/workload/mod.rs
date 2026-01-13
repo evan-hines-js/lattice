@@ -5,12 +5,84 @@
 //! - Service: Network exposure
 //! - ServiceAccount: SPIFFE identity for mTLS
 //! - HorizontalPodAutoscaler: Auto-scaling
+//! - ConfigMap/Secret: Configuration and secrets
 //!
 //! For workload generation, use [`crate::compiler::ServiceCompiler`].
 
+pub mod env;
+pub mod error;
+pub mod files;
+
+pub use error::CompilationError;
+
 use std::collections::BTreeMap;
 
+use aws_lc_rs::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
+
+/// Compute a config hash from ConfigMap and Secret data
+///
+/// This hash is added as a pod annotation to trigger rollouts when config changes.
+/// Uses SHA-256 for FIPS compliance.
+pub fn compute_config_hash(
+    config_map: Option<&ConfigMap>,
+    secret: Option<&Secret>,
+    files_cm: Option<&ConfigMap>,
+    files_secret: Option<&Secret>,
+) -> String {
+    let mut data = String::new();
+
+    // Hash ConfigMap data
+    if let Some(cm) = config_map {
+        for (k, v) in &cm.data {
+            data.push_str(k);
+            data.push('=');
+            data.push_str(v);
+            data.push('\n');
+        }
+    }
+
+    // Hash Secret data
+    if let Some(s) = secret {
+        for (k, v) in &s.string_data {
+            data.push_str(k);
+            data.push('=');
+            data.push_str(v);
+            data.push('\n');
+        }
+    }
+
+    // Hash files ConfigMap
+    if let Some(cm) = files_cm {
+        for (k, v) in &cm.data {
+            data.push_str("file:");
+            data.push_str(k);
+            data.push('=');
+            data.push_str(v);
+            data.push('\n');
+        }
+    }
+
+    // Hash files Secret
+    if let Some(s) = files_secret {
+        for (k, v) in &s.string_data {
+            data.push_str("file:");
+            data.push_str(k);
+            data.push('=');
+            data.push_str(v);
+            data.push('\n');
+        }
+    }
+
+    // Compute SHA-256 hash
+    let hash = digest(&SHA256, data.as_bytes());
+    // Return first 16 hex chars (64 bits) for readability
+    hash.as_ref()
+        .iter()
+        .take(8)
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
 
 // =============================================================================
 // Kubernetes Resource Types
@@ -61,6 +133,110 @@ impl ObjectMeta {
         self.annotations.insert(key.into(), value.into());
         self
     }
+}
+
+// =============================================================================
+// ConfigMap and Secret
+// =============================================================================
+
+/// Kubernetes ConfigMap for non-sensitive configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigMap {
+    /// API version
+    pub api_version: String,
+    /// Kind
+    pub kind: String,
+    /// Metadata
+    pub metadata: ObjectMeta,
+    /// String data
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub data: BTreeMap<String, String>,
+}
+
+impl ConfigMap {
+    /// Create a new ConfigMap
+    pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
+        Self {
+            api_version: "v1".to_string(),
+            kind: "ConfigMap".to_string(),
+            metadata: ObjectMeta::new(name, namespace),
+            data: BTreeMap::new(),
+        }
+    }
+
+    /// Add a data entry
+    pub fn with_data(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.data.insert(key.into(), value.into());
+        self
+    }
+}
+
+/// Kubernetes Secret for sensitive configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Secret {
+    /// API version
+    pub api_version: String,
+    /// Kind
+    pub kind: String,
+    /// Metadata
+    pub metadata: ObjectMeta,
+    /// String data (auto-encoded to base64 by K8s)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub string_data: BTreeMap<String, String>,
+    /// Secret type
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub type_: Option<String>,
+}
+
+impl Secret {
+    /// Create a new Secret
+    pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
+        Self {
+            api_version: "v1".to_string(),
+            kind: "Secret".to_string(),
+            metadata: ObjectMeta::new(name, namespace),
+            string_data: BTreeMap::new(),
+            type_: Some("Opaque".to_string()),
+        }
+    }
+
+    /// Add a data entry
+    pub fn with_data(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.string_data.insert(key.into(), value.into());
+        self
+    }
+}
+
+// =============================================================================
+// EnvFrom sources for referencing ConfigMap/Secret in containers
+// =============================================================================
+
+/// Reference to a ConfigMap or Secret for loading env vars
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvFromSource {
+    /// ConfigMap reference
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_map_ref: Option<ConfigMapEnvSource>,
+    /// Secret reference
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<SecretEnvSource>,
+}
+
+/// Reference to a ConfigMap for env vars
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ConfigMapEnvSource {
+    /// ConfigMap name
+    pub name: String,
+}
+
+/// Reference to a Secret for env vars
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SecretEnvSource {
+    /// Secret name
+    pub name: String,
 }
 
 // =============================================================================
@@ -179,6 +355,9 @@ pub struct Container {
     /// Environment variables
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<EnvVar>,
+    /// Environment from ConfigMap/Secret references
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_from: Vec<EnvFromSource>,
     /// Ports
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<ContainerPort>,
@@ -329,6 +508,9 @@ pub struct VolumeMount {
     pub name: String,
     /// Mount path
     pub mount_path: String,
+    /// Sub path within the volume
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_path: Option<String>,
     /// Read only
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
@@ -492,6 +674,14 @@ pub struct GeneratedWorkloads {
     pub service_account: Option<ServiceAccount>,
     /// Kubernetes HorizontalPodAutoscaler
     pub hpa: Option<HorizontalPodAutoscaler>,
+    /// ConfigMap for non-sensitive env vars
+    pub env_config_map: Option<ConfigMap>,
+    /// Secret for sensitive env vars
+    pub env_secret: Option<Secret>,
+    /// ConfigMap for file mounts (text content)
+    pub files_config_map: Option<ConfigMap>,
+    /// Secret for file mounts (binary content)
+    pub files_secret: Option<Secret>,
 }
 
 impl GeneratedWorkloads {
@@ -506,6 +696,10 @@ impl GeneratedWorkloads {
             && self.service.is_none()
             && self.service_account.is_none()
             && self.hpa.is_none()
+            && self.env_config_map.is_none()
+            && self.env_secret.is_none()
+            && self.files_config_map.is_none()
+            && self.files_secret.is_none()
     }
 }
 
@@ -579,6 +773,175 @@ impl WorkloadCompiler {
 
         // Always generate Deployment
         output.deployment = Some(Self::compile_deployment(name, namespace, &service.spec));
+
+        // Generate Service if ports are defined
+        if service.spec.service.is_some() {
+            output.service = Some(Self::compile_service(name, namespace, &service.spec));
+        }
+
+        // Generate HPA if max replicas is set
+        if service.spec.replicas.max.is_some() {
+            output.hpa = Some(Self::compile_hpa(name, namespace, &service.spec));
+        }
+
+        output
+    }
+
+    /// Compile a LatticeService with pre-rendered containers
+    ///
+    /// This is the full compilation path that:
+    /// 1. Routes env vars to ConfigMap (non-sensitive) or Secret (sensitive)
+    /// 2. Routes file mounts to ConfigMap (text) or Secret (binary)
+    /// 3. Wires up envFrom and volumeMounts in containers
+    ///
+    /// # Arguments
+    /// * `service` - The LatticeService to compile
+    /// * `namespace` - Target namespace
+    /// * `rendered` - Pre-rendered containers from TemplateRenderer
+    pub fn compile_rendered(
+        service: &LatticeService,
+        namespace: &str,
+        rendered: &std::collections::BTreeMap<String, crate::template::RenderedContainer>,
+    ) -> GeneratedWorkloads {
+        let name = service.metadata.name.as_deref().unwrap_or("unknown");
+
+        let mut output = GeneratedWorkloads::new();
+
+        // Always generate ServiceAccount for SPIFFE identity
+        output.service_account = Some(Self::compile_service_account(name, namespace));
+
+        // Compile env vars and files for each container, aggregate into single ConfigMap/Secret
+        let mut all_env_vars = std::collections::BTreeMap::new();
+        let mut all_files = std::collections::BTreeMap::new();
+
+        for (container_name, container) in rendered {
+            // Prefix env vars with container name to avoid collisions
+            for (key, var) in &container.variables {
+                let prefixed_key = if rendered.len() > 1 {
+                    format!(
+                        "{}_{}",
+                        container_name.to_uppercase().replace('-', "_"),
+                        key
+                    )
+                } else {
+                    key.clone()
+                };
+                all_env_vars.insert(prefixed_key, var.clone());
+            }
+
+            // Aggregate files (paths are unique across containers)
+            for (path, file) in &container.files {
+                all_files.insert(path.clone(), file.clone());
+            }
+        }
+
+        // Compile env vars to ConfigMap/Secret
+        let compiled_env = env::compile(name, namespace, &all_env_vars);
+        output.env_config_map = compiled_env.config_map;
+        output.env_secret = compiled_env.secret;
+
+        // Compile files to ConfigMap/Secret
+        let compiled_files = files::compile(name, namespace, &all_files);
+        output.files_config_map = compiled_files.config_map;
+        output.files_secret = compiled_files.secret;
+
+        // Compute config hash for rollout triggers
+        let config_hash = compute_config_hash(
+            output.env_config_map.as_ref(),
+            output.env_secret.as_ref(),
+            output.files_config_map.as_ref(),
+            output.files_secret.as_ref(),
+        );
+
+        // Build containers with envFrom and volumeMounts
+        let containers: Vec<Container> = rendered
+            .iter()
+            .map(|(container_name, rc)| {
+                let container_spec = service.spec.containers.get(container_name);
+
+                // Build ports from service spec
+                let ports: Vec<ContainerPort> = if let Some(svc) = &service.spec.service {
+                    svc.ports
+                        .iter()
+                        .map(|(port_name, port_spec)| ContainerPort {
+                            name: Some(port_name.clone()),
+                            container_port: port_spec.target_port.unwrap_or(port_spec.port),
+                            protocol: port_spec.protocol.clone(),
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                // Build resource requirements
+                let resources = container_spec
+                    .and_then(|cs| cs.resources.as_ref())
+                    .map(|r| ResourceRequirements {
+                        requests: r.requests.as_ref().map(|req| ResourceQuantity {
+                            cpu: req.cpu.clone(),
+                            memory: req.memory.clone(),
+                        }),
+                        limits: r.limits.as_ref().map(|lim| ResourceQuantity {
+                            cpu: lim.cpu.clone(),
+                            memory: lim.memory.clone(),
+                        }),
+                    });
+
+                Container {
+                    name: container_name.clone(),
+                    image: rc.image.clone(),
+                    command: rc.command.clone(),
+                    args: rc.args.clone(),
+                    env: vec![], // Using envFrom instead
+                    env_from: compiled_env.env_from.clone(),
+                    ports,
+                    resources,
+                    liveness_probe: None,  // TODO: from container_spec
+                    readiness_probe: None, // TODO: from container_spec
+                    volume_mounts: compiled_files.volume_mounts.clone(),
+                }
+            })
+            .collect();
+
+        // Build deployment with compiled containers
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
+
+        // Add config hash as pod annotation to trigger rollouts on config changes
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert("lattice.dev/config-hash".to_string(), config_hash);
+
+        let strategy = Self::compile_strategy(&service.spec);
+
+        let replicas = if service.spec.replicas.min == 0 {
+            1
+        } else {
+            service.spec.replicas.min
+        };
+
+        output.deployment = Some(Deployment {
+            api_version: "apps/v1".to_string(),
+            kind: "Deployment".to_string(),
+            metadata: ObjectMeta::new(name, namespace),
+            spec: DeploymentSpec {
+                replicas,
+                selector: LabelSelector {
+                    match_labels: labels.clone(),
+                },
+                template: PodTemplateSpec {
+                    metadata: PodMeta {
+                        labels,
+                        annotations,
+                    },
+                    spec: PodSpec {
+                        service_account_name: name.to_string(),
+                        containers,
+                        volumes: compiled_files.volumes,
+                    },
+                },
+                strategy,
+            },
+        });
 
         // Generate Service if ports are defined
         if service.spec.service.is_some() {
@@ -689,6 +1052,7 @@ impl WorkloadCompiler {
                     command: container_spec.command.clone(),
                     args: container_spec.args.clone(),
                     env,
+                    env_from: vec![],
                     ports,
                     resources,
                     liveness_probe,
@@ -1121,5 +1485,369 @@ mod tests {
         let service = make_service("my-app", "default");
         let output = WorkloadCompiler::compile(&service, &service.spec.environment);
         assert!(!output.is_empty());
+    }
+
+    // =========================================================================
+    // Story: Config Hash for Rollouts
+    // =========================================================================
+
+    #[test]
+    fn test_config_hash_empty() {
+        let hash = compute_config_hash(None, None, None, None);
+        // Empty data still produces a hash
+        assert_eq!(hash.len(), 16); // 8 bytes = 16 hex chars
+    }
+
+    #[test]
+    fn test_config_hash_with_configmap() {
+        let mut cm = ConfigMap::new("test", "default");
+        cm.data.insert("KEY".to_string(), "value".to_string());
+
+        let hash1 = compute_config_hash(Some(&cm), None, None, None);
+        assert_eq!(hash1.len(), 16);
+
+        // Different value produces different hash
+        cm.data.insert("KEY".to_string(), "different".to_string());
+        let hash2 = compute_config_hash(Some(&cm), None, None, None);
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_config_hash_with_secret() {
+        let mut secret = Secret::new("test", "default");
+        secret
+            .string_data
+            .insert("PASSWORD".to_string(), "secret123".to_string());
+
+        let hash = compute_config_hash(None, Some(&secret), None, None);
+        assert_eq!(hash.len(), 16);
+    }
+
+    #[test]
+    fn test_config_hash_deterministic() {
+        let mut cm = ConfigMap::new("test", "default");
+        cm.data.insert("KEY".to_string(), "value".to_string());
+
+        // Same input produces same hash
+        let hash1 = compute_config_hash(Some(&cm), None, None, None);
+        let hash2 = compute_config_hash(Some(&cm), None, None, None);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_config_hash_combines_all_sources() {
+        let mut env_cm = ConfigMap::new("env", "default");
+        env_cm
+            .data
+            .insert("HOST".to_string(), "localhost".to_string());
+
+        let mut env_secret = Secret::new("env", "default");
+        env_secret
+            .string_data
+            .insert("PASSWORD".to_string(), "secret".to_string());
+
+        let mut files_cm = ConfigMap::new("files", "default");
+        files_cm
+            .data
+            .insert("config-yaml".to_string(), "key: value".to_string());
+
+        let mut files_secret = Secret::new("files", "default");
+        files_secret
+            .string_data
+            .insert("cert-pem".to_string(), "binary".to_string());
+
+        // All four produce a combined hash
+        let hash_all = compute_config_hash(
+            Some(&env_cm),
+            Some(&env_secret),
+            Some(&files_cm),
+            Some(&files_secret),
+        );
+
+        // Subset produces different hash
+        let hash_partial = compute_config_hash(Some(&env_cm), Some(&env_secret), None, None);
+
+        assert_ne!(hash_all, hash_partial);
+    }
+
+    // =========================================================================
+    // Story: Full Compilation Pipeline (compile_rendered)
+    // =========================================================================
+
+    #[test]
+    fn test_compile_rendered_routes_env_to_configmap() {
+        use crate::template::{RenderedContainer, RenderedVariable};
+
+        let service = make_service("api", "prod");
+
+        let mut rendered = BTreeMap::new();
+        let mut vars = BTreeMap::new();
+        vars.insert("HOST".to_string(), RenderedVariable::plain("localhost"));
+        vars.insert("PORT".to_string(), RenderedVariable::plain("8080"));
+
+        rendered.insert(
+            "main".to_string(),
+            RenderedContainer {
+                name: "main".to_string(),
+                image: "nginx:latest".to_string(),
+                command: None,
+                args: None,
+                variables: vars,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+            },
+        );
+
+        let output = WorkloadCompiler::compile_rendered(&service, "prod", &rendered);
+
+        // Should create ConfigMap for non-sensitive vars
+        let cm = output.env_config_map.expect("should have env ConfigMap");
+        assert_eq!(cm.metadata.name, "api-env");
+        assert_eq!(cm.data.get("HOST"), Some(&"localhost".to_string()));
+        assert_eq!(cm.data.get("PORT"), Some(&"8080".to_string()));
+
+        // Should NOT create Secret (no sensitive vars)
+        assert!(output.env_secret.is_none());
+    }
+
+    #[test]
+    fn test_compile_rendered_routes_sensitive_to_secret() {
+        use crate::template::{RenderedContainer, RenderedVariable};
+
+        let service = make_service("api", "prod");
+
+        let mut rendered = BTreeMap::new();
+        let mut vars = BTreeMap::new();
+        vars.insert("HOST".to_string(), RenderedVariable::plain("localhost"));
+        vars.insert(
+            "DB_PASSWORD".to_string(),
+            RenderedVariable::secret("supersecret"),
+        );
+
+        rendered.insert(
+            "main".to_string(),
+            RenderedContainer {
+                name: "main".to_string(),
+                image: "nginx:latest".to_string(),
+                command: None,
+                args: None,
+                variables: vars,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+            },
+        );
+
+        let output = WorkloadCompiler::compile_rendered(&service, "prod", &rendered);
+
+        // Non-sensitive goes to ConfigMap
+        let cm = output.env_config_map.expect("should have env ConfigMap");
+        assert_eq!(cm.data.get("HOST"), Some(&"localhost".to_string()));
+        assert!(cm.data.get("DB_PASSWORD").is_none());
+
+        // Sensitive goes to Secret
+        let secret = output.env_secret.expect("should have env Secret");
+        assert_eq!(
+            secret.string_data.get("DB_PASSWORD"),
+            Some(&"supersecret".to_string())
+        );
+        assert!(secret.string_data.get("HOST").is_none());
+    }
+
+    #[test]
+    fn test_compile_rendered_adds_config_hash_annotation() {
+        use crate::template::{RenderedContainer, RenderedVariable};
+
+        let service = make_service("api", "prod");
+
+        let mut rendered = BTreeMap::new();
+        let mut vars = BTreeMap::new();
+        vars.insert("KEY".to_string(), RenderedVariable::plain("value"));
+
+        rendered.insert(
+            "main".to_string(),
+            RenderedContainer {
+                name: "main".to_string(),
+                image: "nginx:latest".to_string(),
+                command: None,
+                args: None,
+                variables: vars,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+            },
+        );
+
+        let output = WorkloadCompiler::compile_rendered(&service, "prod", &rendered);
+
+        let deployment = output.deployment.expect("should have deployment");
+        let annotations = &deployment.spec.template.metadata.annotations;
+
+        // Should have config hash annotation
+        let hash = annotations
+            .get("lattice.dev/config-hash")
+            .expect("should have config hash");
+        assert_eq!(hash.len(), 16); // 8 bytes = 16 hex chars
+    }
+
+    #[test]
+    fn test_compile_rendered_config_hash_changes_with_data() {
+        use crate::template::{RenderedContainer, RenderedVariable};
+
+        let service = make_service("api", "prod");
+
+        // First compilation
+        let mut rendered1 = BTreeMap::new();
+        let mut vars1 = BTreeMap::new();
+        vars1.insert("KEY".to_string(), RenderedVariable::plain("value1"));
+        rendered1.insert(
+            "main".to_string(),
+            RenderedContainer {
+                name: "main".to_string(),
+                image: "nginx:latest".to_string(),
+                command: None,
+                args: None,
+                variables: vars1,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+            },
+        );
+
+        let output1 = WorkloadCompiler::compile_rendered(&service, "prod", &rendered1);
+        let hash1 = output1
+            .deployment
+            .unwrap()
+            .spec
+            .template
+            .metadata
+            .annotations
+            .get("lattice.dev/config-hash")
+            .unwrap()
+            .clone();
+
+        // Second compilation with different value
+        let mut rendered2 = BTreeMap::new();
+        let mut vars2 = BTreeMap::new();
+        vars2.insert("KEY".to_string(), RenderedVariable::plain("value2"));
+        rendered2.insert(
+            "main".to_string(),
+            RenderedContainer {
+                name: "main".to_string(),
+                image: "nginx:latest".to_string(),
+                command: None,
+                args: None,
+                variables: vars2,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+            },
+        );
+
+        let output2 = WorkloadCompiler::compile_rendered(&service, "prod", &rendered2);
+        let hash2 = output2
+            .deployment
+            .unwrap()
+            .spec
+            .template
+            .metadata
+            .annotations
+            .get("lattice.dev/config-hash")
+            .unwrap()
+            .clone();
+
+        // Hashes should differ when config changes
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compile_rendered_wires_envfrom() {
+        use crate::template::{RenderedContainer, RenderedVariable};
+
+        let service = make_service("api", "prod");
+
+        let mut rendered = BTreeMap::new();
+        let mut vars = BTreeMap::new();
+        vars.insert("HOST".to_string(), RenderedVariable::plain("localhost"));
+        vars.insert("PASSWORD".to_string(), RenderedVariable::secret("secret"));
+
+        rendered.insert(
+            "main".to_string(),
+            RenderedContainer {
+                name: "main".to_string(),
+                image: "nginx:latest".to_string(),
+                command: None,
+                args: None,
+                variables: vars,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+            },
+        );
+
+        let output = WorkloadCompiler::compile_rendered(&service, "prod", &rendered);
+
+        let deployment = output.deployment.expect("should have deployment");
+        let container = &deployment.spec.template.spec.containers[0];
+
+        // Should have envFrom references
+        assert_eq!(container.env_from.len(), 2);
+
+        // One for ConfigMap
+        assert!(container
+            .env_from
+            .iter()
+            .any(|ef| ef.config_map_ref.is_some()));
+
+        // One for Secret
+        assert!(container.env_from.iter().any(|ef| ef.secret_ref.is_some()));
+    }
+
+    #[test]
+    fn test_compile_rendered_with_files() {
+        use crate::template::{RenderedContainer, RenderedFile};
+
+        let service = make_service("api", "prod");
+
+        let mut rendered = BTreeMap::new();
+        let mut files = BTreeMap::new();
+        files.insert(
+            "/etc/app/config.yaml".to_string(),
+            RenderedFile {
+                content: Some("key: value".to_string()),
+                binary_content: None,
+                source: None,
+                mode: Some("0644".to_string()),
+            },
+        );
+
+        rendered.insert(
+            "main".to_string(),
+            RenderedContainer {
+                name: "main".to_string(),
+                image: "nginx:latest".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                files,
+                volumes: BTreeMap::new(),
+            },
+        );
+
+        let output = WorkloadCompiler::compile_rendered(&service, "prod", &rendered);
+
+        // Should create files ConfigMap
+        let files_cm = output
+            .files_config_map
+            .expect("should have files ConfigMap");
+        assert_eq!(files_cm.metadata.name, "api-files");
+        assert!(!files_cm.data.is_empty());
+
+        // Deployment should have volume
+        let deployment = output.deployment.expect("should have deployment");
+        assert!(!deployment.spec.template.spec.volumes.is_empty());
+
+        // Container should have volume mount
+        let container = &deployment.spec.template.spec.containers[0];
+        assert!(!container.volume_mounts.is_empty());
+        assert!(container
+            .volume_mounts
+            .iter()
+            .any(|vm| vm.mount_path == "/etc/app/config.yaml"));
     }
 }

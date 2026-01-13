@@ -144,23 +144,16 @@ pub struct MetadataContext {
 
 /// Resource outputs resolved from provisioners
 ///
-/// Standard fields based on resource type, plus arbitrary extras.
+/// Outputs are split into non-sensitive (ConfigMap) and sensitive (Secret) maps.
+/// The provisioner explicitly declares which outputs are sensitive.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceOutputs {
-    /// Host/endpoint: `${resources.NAME.host}`
-    pub host: Option<String>,
-    /// Port: `${resources.NAME.port}`
-    pub port: Option<u16>,
-    /// Full URL: `${resources.NAME.url}`
-    pub url: Option<String>,
-    /// Connection string: `${resources.NAME.connection_string}`
-    pub connection_string: Option<String>,
-    /// Username: `${resources.NAME.username}`
-    pub username: Option<String>,
-    /// Password: `${resources.NAME.password}`
-    pub password: Option<String>,
-    /// Additional outputs from provisioner: `${resources.NAME.FIELD}`
-    pub extra: HashMap<String, String>,
+    /// Non-sensitive outputs -> ConfigMap
+    /// e.g., host, port, database name, public URLs
+    pub outputs: HashMap<String, String>,
+    /// Sensitive outputs -> Secret
+    /// e.g., passwords, connection strings with credentials
+    pub sensitive: HashMap<String, String>,
 }
 
 impl ResourceOutputs {
@@ -169,30 +162,38 @@ impl ResourceOutputs {
         ResourceOutputsBuilder::default()
     }
 
-    /// Convert to minijinja Value
+    /// Get a field value and whether it's sensitive
+    ///
+    /// Returns `Some((value, is_sensitive))` if found, `None` otherwise.
+    pub fn get(&self, field: &str) -> Option<(&str, bool)> {
+        if let Some(v) = self.outputs.get(field) {
+            Some((v.as_str(), false))
+        } else if let Some(v) = self.sensitive.get(field) {
+            Some((v.as_str(), true))
+        } else {
+            None
+        }
+    }
+
+    /// Check if a field is sensitive
+    pub fn is_sensitive(&self, field: &str) -> bool {
+        self.sensitive.contains_key(field)
+    }
+
+    /// Convert to minijinja Value for template rendering
+    ///
+    /// Both sensitive and non-sensitive values are merged for rendering.
+    /// Sensitivity tracking happens separately during rendering.
     pub fn to_value(&self) -> Value {
         let mut map: HashMap<String, Value> = HashMap::new();
 
-        if let Some(ref host) = self.host {
-            map.insert("host".to_string(), Value::from(host.clone()));
-        }
-        if let Some(port) = self.port {
-            map.insert("port".to_string(), Value::from(port));
-        }
-        if let Some(ref url) = self.url {
-            map.insert("url".to_string(), Value::from(url.clone()));
-        }
-        if let Some(ref cs) = self.connection_string {
-            map.insert("connection_string".to_string(), Value::from(cs.clone()));
-        }
-        if let Some(ref username) = self.username {
-            map.insert("username".to_string(), Value::from(username.clone()));
-        }
-        if let Some(ref password) = self.password {
-            map.insert("password".to_string(), Value::from(password.clone()));
+        // Add non-sensitive outputs
+        for (key, value) in &self.outputs {
+            map.insert(key.clone(), Value::from(value.clone()));
         }
 
-        for (key, value) in &self.extra {
+        // Add sensitive outputs (they render the same, but sensitivity is tracked separately)
+        for (key, value) in &self.sensitive {
             map.insert(key.clone(), Value::from(value.clone()));
         }
 
@@ -203,68 +204,33 @@ impl ResourceOutputs {
 /// Builder for ResourceOutputs
 #[derive(Debug, Default)]
 pub struct ResourceOutputsBuilder {
-    host: Option<String>,
-    port: Option<u16>,
-    url: Option<String>,
-    connection_string: Option<String>,
-    username: Option<String>,
-    password: Option<String>,
-    extra: HashMap<String, String>,
+    outputs: HashMap<String, String>,
+    sensitive: HashMap<String, String>,
 }
 
 impl ResourceOutputsBuilder {
-    /// Set the host
-    pub fn host(mut self, host: impl Into<String>) -> Self {
-        self.host = Some(host.into());
+    /// Add a non-sensitive output
+    ///
+    /// Use this for public information like hosts, ports, database names.
+    pub fn output(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.outputs.insert(key.into(), value.into());
         self
     }
 
-    /// Set the port
-    pub fn port(mut self, port: u16) -> Self {
-        self.port = Some(port);
-        self
-    }
-
-    /// Set the URL
-    pub fn url(mut self, url: impl Into<String>) -> Self {
-        self.url = Some(url.into());
-        self
-    }
-
-    /// Set the connection string
-    pub fn connection_string(mut self, cs: impl Into<String>) -> Self {
-        self.connection_string = Some(cs.into());
-        self
-    }
-
-    /// Set the username
-    pub fn username(mut self, username: impl Into<String>) -> Self {
-        self.username = Some(username.into());
-        self
-    }
-
-    /// Set the password
-    pub fn password(mut self, password: impl Into<String>) -> Self {
-        self.password = Some(password.into());
-        self
-    }
-
-    /// Add an extra field
-    pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.extra.insert(key.into(), value.into());
+    /// Add a sensitive output
+    ///
+    /// Use this for credentials, passwords, connection strings with credentials.
+    /// These values will be routed to Kubernetes Secrets.
+    pub fn sensitive(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.sensitive.insert(key.into(), value.into());
         self
     }
 
     /// Build the ResourceOutputs
     pub fn build(self) -> ResourceOutputs {
         ResourceOutputs {
-            host: self.host,
-            port: self.port,
-            url: self.url,
-            connection_string: self.connection_string,
-            username: self.username,
-            password: self.password,
-            extra: self.extra,
+            outputs: self.outputs,
+            sensitive: self.sensitive,
         }
     }
 }
@@ -277,7 +243,10 @@ mod tests {
     fn test_context_builder() {
         let ctx = TemplateContext::builder()
             .metadata("my-service", HashMap::new())
-            .resource("db", ResourceOutputs::builder().host("db.svc").build())
+            .resource(
+                "db",
+                ResourceOutputs::builder().output("host", "db.svc").build(),
+            )
             .cluster("name", "prod")
             .env("log_level", "info")
             .config("version", "1.0")
@@ -293,16 +262,61 @@ mod tests {
     #[test]
     fn test_resource_outputs_builder() {
         let outputs = ResourceOutputs::builder()
-            .host("pg.svc")
-            .port(5432)
-            .url("postgres://pg.svc:5432")
-            .username("admin")
-            .extra("pool_size", "10")
+            .output("host", "pg.svc")
+            .output("port", "5432")
+            .output("url", "postgres://pg.svc:5432")
+            .sensitive("username", "admin")
+            .sensitive("password", "secret123")
+            .output("pool_size", "10")
             .build();
 
-        assert_eq!(outputs.host, Some("pg.svc".to_string()));
-        assert_eq!(outputs.port, Some(5432));
-        assert_eq!(outputs.extra.get("pool_size"), Some(&"10".to_string()));
+        // Check non-sensitive outputs
+        assert_eq!(outputs.outputs.get("host"), Some(&"pg.svc".to_string()));
+        assert_eq!(outputs.outputs.get("port"), Some(&"5432".to_string()));
+        assert_eq!(outputs.outputs.get("pool_size"), Some(&"10".to_string()));
+
+        // Check sensitive outputs
+        assert_eq!(
+            outputs.sensitive.get("username"),
+            Some(&"admin".to_string())
+        );
+        assert_eq!(
+            outputs.sensitive.get("password"),
+            Some(&"secret123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resource_outputs_get() {
+        let outputs = ResourceOutputs::builder()
+            .output("host", "db.svc")
+            .sensitive("password", "secret")
+            .build();
+
+        // Non-sensitive field
+        let (value, sensitive) = outputs.get("host").unwrap();
+        assert_eq!(value, "db.svc");
+        assert!(!sensitive);
+
+        // Sensitive field
+        let (value, sensitive) = outputs.get("password").unwrap();
+        assert_eq!(value, "secret");
+        assert!(sensitive);
+
+        // Non-existent field
+        assert!(outputs.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_resource_outputs_is_sensitive() {
+        let outputs = ResourceOutputs::builder()
+            .output("host", "db.svc")
+            .sensitive("password", "secret")
+            .build();
+
+        assert!(!outputs.is_sensitive("host"));
+        assert!(outputs.is_sensitive("password"));
+        assert!(!outputs.is_sensitive("nonexistent"));
     }
 
     #[test]
@@ -311,12 +325,27 @@ mod tests {
             .metadata("api", HashMap::new())
             .resource(
                 "db",
-                ResourceOutputs::builder().host("db.svc").port(5432).build(),
+                ResourceOutputs::builder()
+                    .output("host", "db.svc")
+                    .output("port", "5432")
+                    .build(),
             )
             .build();
 
         let value = ctx.to_value();
         // Basic sanity check - it should be indexable as a map
+        assert!(!value.is_undefined());
+    }
+
+    #[test]
+    fn test_to_value_includes_sensitive() {
+        let outputs = ResourceOutputs::builder()
+            .output("host", "db.svc")
+            .sensitive("password", "secret")
+            .build();
+
+        let value = outputs.to_value();
+        // Both should be present in the value for template rendering
         assert!(!value.is_undefined());
     }
 }

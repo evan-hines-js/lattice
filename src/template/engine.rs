@@ -160,8 +160,8 @@ mod tests {
             .resource(
                 "postgres",
                 ResourceOutputs::builder()
-                    .host("pg.svc.cluster.local")
-                    .port(5432)
+                    .output("host", "pg.svc.cluster.local")
+                    .output("port", "5432")
                     .build(),
             )
             .build();

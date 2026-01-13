@@ -231,21 +231,13 @@ impl ClusterctlInstaller {
                 "kubeadm",
                 CapiProviderType::ControlPlane,
             ),
-            (
-                "rke2-bootstrap-system",
-                "rke2",
-                CapiProviderType::Bootstrap,
-            ),
+            ("rke2-bootstrap-system", "rke2", CapiProviderType::Bootstrap),
             (
                 "rke2-control-plane-system",
                 "rke2",
                 CapiProviderType::ControlPlane,
             ),
-            (
-                "capd-system",
-                "docker",
-                CapiProviderType::Infrastructure,
-            ),
+            ("capd-system", "docker", CapiProviderType::Infrastructure),
             ("capa-system", "aws", CapiProviderType::Infrastructure),
             ("capg-system", "gcp", CapiProviderType::Infrastructure),
             ("capz-system", "azure", CapiProviderType::Infrastructure),
@@ -339,7 +331,10 @@ impl ClusterctlInstaller {
                 desired_provider.name.clone(),
                 desired_provider.provider_type,
             );
-            let action_key = format!("{}:{:?}", desired_provider.name, desired_provider.provider_type);
+            let action_key = format!(
+                "{}:{:?}",
+                desired_provider.name, desired_provider.provider_type
+            );
 
             if let Some(installed_provider) = installed_map.get(&key) {
                 // Provider exists - check version
@@ -595,7 +590,9 @@ impl ClusterctlInstaller {
         };
 
         // Check if any providers need upgrading
-        let needs_upgrade = actions.values().any(|a| matches!(a, ProviderAction::Upgrade { .. }));
+        let needs_upgrade = actions
+            .values()
+            .any(|a| matches!(a, ProviderAction::Upgrade { .. }));
         if !needs_upgrade {
             return None;
         }
@@ -774,12 +771,12 @@ mod tests {
             .any(|p| p.name == "cluster-api" && p.provider_type == CapiProviderType::Core));
 
         // Check kubeadm
-        assert!(providers.iter().any(
-            |p| p.name == "kubeadm" && p.provider_type == CapiProviderType::Bootstrap
-        ));
-        assert!(providers.iter().any(
-            |p| p.name == "kubeadm" && p.provider_type == CapiProviderType::ControlPlane
-        ));
+        assert!(providers
+            .iter()
+            .any(|p| p.name == "kubeadm" && p.provider_type == CapiProviderType::Bootstrap));
+        assert!(providers
+            .iter()
+            .any(|p| p.name == "kubeadm" && p.provider_type == CapiProviderType::ControlPlane));
 
         // Check rke2
         assert!(providers
@@ -790,9 +787,9 @@ mod tests {
             .any(|p| p.name == "rke2" && p.provider_type == CapiProviderType::ControlPlane));
 
         // Check infrastructure
-        assert!(providers.iter().any(
-            |p| p.name == "docker" && p.provider_type == CapiProviderType::Infrastructure
-        ));
+        assert!(providers
+            .iter()
+            .any(|p| p.name == "docker" && p.provider_type == CapiProviderType::Infrastructure));
     }
 
     #[test]
@@ -884,12 +881,18 @@ mod tests {
             (ProviderType::Gcp, "gcp"),
             (ProviderType::Azure, "azure"),
         ] {
-            let config =
-                CapiProviderConfig::with_versions(provider, "1.12.1".to_string(), "0.11.0".to_string());
+            let config = CapiProviderConfig::with_versions(
+                provider,
+                "1.12.1".to_string(),
+                "0.11.0".to_string(),
+            );
             let providers = config.desired_providers();
-            assert!(providers.iter().any(
-                |p| p.name == expected && p.provider_type == CapiProviderType::Infrastructure
-            ));
+            assert!(
+                providers
+                    .iter()
+                    .any(|p| p.name == expected
+                        && p.provider_type == CapiProviderType::Infrastructure)
+            );
         }
     }
 
