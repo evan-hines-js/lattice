@@ -18,6 +18,23 @@ use rcgen::{
 use thiserror::Error;
 use x509_parser::prelude::*;
 
+/// Default validity period for CA certificates (10 years)
+pub const CA_VALIDITY_YEARS: i64 = 10;
+
+/// Default validity period for server/agent certificates (5 years)
+pub const CERT_VALIDITY_YEARS: i64 = 5;
+
+/// Compute certificate validity period from now
+///
+/// Returns (not_before, not_after) timestamps for certificate generation.
+/// The not_before is set to current time, and not_after is set to the
+/// specified number of years from now.
+fn compute_validity(years: i64) -> (::time::OffsetDateTime, ::time::OffsetDateTime) {
+    let now = ::time::OffsetDateTime::now_utc();
+    let not_after = now + ::time::Duration::days(years * 365);
+    (now, not_after)
+}
+
 /// PKI errors
 #[derive(Debug, Error)]
 pub enum PkiError {
@@ -89,9 +106,10 @@ impl CertificateAuthority {
             KeyUsagePurpose::DigitalSignature,
         ];
 
-        // 10 year validity
-        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2034, 1, 1);
+        // 10 year validity from current time
+        let (not_before, not_after) = compute_validity(CA_VALIDITY_YEARS);
+        params.not_before = not_before;
+        params.not_after = not_after;
 
         // Generate key pair
         let key_pair = KeyPair::generate().map_err(|e| {
@@ -172,9 +190,10 @@ impl CertificateAuthority {
         // Extended key usage for TLS server
         params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
 
-        // 5 year validity
-        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2029, 1, 1);
+        // 5 year validity from current time
+        let (not_before, not_after) = compute_validity(CERT_VALIDITY_YEARS);
+        params.not_before = not_before;
+        params.not_after = not_after;
 
         // Add SANs
         params.subject_alt_names = sans
@@ -254,9 +273,10 @@ impl CertificateAuthority {
             rcgen::ExtendedKeyUsagePurpose::ServerAuth,
         ];
 
-        // 5 year validity
-        csr_params.params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        csr_params.params.not_after = rcgen::date_time_ymd(2029, 1, 1);
+        // 5 year validity from current time
+        let (not_before, not_after) = compute_validity(CERT_VALIDITY_YEARS);
+        csr_params.params.not_before = not_before;
+        csr_params.params.not_after = not_after;
 
         // Add SANs for the agent
         // These are well-known DNS name patterns that should always be valid.
@@ -906,12 +926,11 @@ mod tests {
             .expect("system clock is after 1970")
             .as_secs() as i64;
 
-        // The cert we generate has notBefore in 2024, so it should be valid now
-        // This test documents the code path exists; a true "not yet valid" cert
-        // would require generating certs with future dates
+        // The cert we generate has notBefore set to current time, so it should be valid now.
+        // Allow a small tolerance (60 seconds) for test execution time.
         assert!(
-            now >= not_before,
-            "cert notBefore is in the past as expected"
+            now >= not_before - 60,
+            "cert notBefore should be at or before current time"
         );
 
         // Verify normal path works
@@ -931,20 +950,51 @@ mod tests {
 
         // Parse to verify the notAfter check logic is reachable
         let (_, cert) = X509Certificate::from_der(&cert_der).unwrap();
+        let not_before = cert.validity().not_before.timestamp();
         let not_after = cert.validity().not_after.timestamp();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock is after 1970")
             .as_secs() as i64;
 
-        // The cert we generate has notAfter in 2029, so it should be valid now
+        // Verify certificate has proper validity period (approximately CERT_VALIDITY_YEARS)
+        let validity_days = (not_after - not_before) / (24 * 60 * 60);
+        let expected_days = CERT_VALIDITY_YEARS * 365;
         assert!(
-            now < not_after,
-            "cert notAfter is in the future as expected"
+            (validity_days - expected_days).abs() <= 1,
+            "cert should have {} year validity, got {} days",
+            CERT_VALIDITY_YEARS,
+            validity_days
         );
+
+        // The cert we generate has notAfter set to CERT_VALIDITY_YEARS from now
+        assert!(now < not_after, "cert notAfter should be in the future");
 
         // Verify normal path works
         let result = verify_client_cert(&cert_der, ca.ca_cert_pem()).unwrap();
         assert!(result.valid);
+    }
+
+    /// Test CA certificate has correct validity period
+    #[test]
+    fn test_ca_certificate_validity_period() {
+        use x509_parser::prelude::*;
+
+        let ca = CertificateAuthority::new("Test CA").unwrap();
+        let cert_der = parse_pem(ca.ca_cert_pem()).unwrap();
+        let (_, cert) = X509Certificate::from_der(&cert_der).unwrap();
+
+        let not_before = cert.validity().not_before.timestamp();
+        let not_after = cert.validity().not_after.timestamp();
+
+        // Verify CA certificate has proper validity period (approximately CA_VALIDITY_YEARS)
+        let validity_days = (not_after - not_before) / (24 * 60 * 60);
+        let expected_days = CA_VALIDITY_YEARS * 365;
+        assert!(
+            (validity_days - expected_days).abs() <= 1,
+            "CA cert should have {} year validity, got {} days",
+            CA_VALIDITY_YEARS,
+            validity_days
+        );
     }
 }

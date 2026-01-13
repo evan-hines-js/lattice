@@ -40,6 +40,9 @@ minijinja = { version = "2", features = ["custom_syntax"] }
 thiserror = "2.0"
 anyhow = "1.0"
 
+# Time/date handling
+time = "0.3"
+
 # Logging/tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

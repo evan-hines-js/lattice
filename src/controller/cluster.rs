@@ -530,7 +530,8 @@ impl CAPIClient for CAPIClientImpl {
                 .await?;
 
             // Create dynamic object from manifest
-            let obj: DynamicObject = serde_json::from_value(serde_json::json!({
+            // ConfigMaps use 'data' instead of 'spec'
+            let mut obj_value = serde_json::json!({
                 "apiVersion": manifest.api_version,
                 "kind": manifest.kind,
                 "metadata": {
@@ -538,9 +539,18 @@ impl CAPIClient for CAPIClientImpl {
                     "namespace": namespace,
                     "labels": manifest.metadata.labels,
                 },
-                "spec": manifest.spec,
-            }))
-            .map_err(|e| Error::serialization(e.to_string()))?;
+            });
+
+            // Add spec or data depending on what the manifest has
+            if let Some(ref data) = manifest.data {
+                obj_value["data"] = data.clone();
+            }
+            if let Some(ref spec) = manifest.spec {
+                obj_value["spec"] = spec.clone();
+            }
+
+            let obj: DynamicObject = serde_json::from_value(obj_value)
+                .map_err(|e| Error::serialization(e.to_string()))?;
 
             // Apply using server-side apply
             let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);

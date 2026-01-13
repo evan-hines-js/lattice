@@ -71,6 +71,33 @@ impl<'a> RenderConfig<'a> {
     }
 }
 
+/// A rendered variable with sensitivity tracking
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderedVariable {
+    /// The rendered value
+    pub value: String,
+    /// Whether this variable contains sensitive data (should go to Secret)
+    pub sensitive: bool,
+}
+
+impl RenderedVariable {
+    /// Create a non-sensitive variable
+    pub fn plain(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            sensitive: false,
+        }
+    }
+
+    /// Create a sensitive variable
+    pub fn secret(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            sensitive: true,
+        }
+    }
+}
+
 /// Rendered container spec with all templates resolved
 #[derive(Clone, Debug)]
 pub struct RenderedContainer {
@@ -82,8 +109,8 @@ pub struct RenderedContainer {
     pub command: Option<Vec<String>>,
     /// Args (unchanged)
     pub args: Option<Vec<String>>,
-    /// Rendered environment variables
-    pub variables: BTreeMap<String, String>,
+    /// Rendered environment variables with sensitivity tracking
+    pub variables: BTreeMap<String, RenderedVariable>,
     /// Rendered file mounts
     pub files: BTreeMap<String, RenderedFile>,
     /// Rendered volume mounts
@@ -187,6 +214,35 @@ impl TemplateRenderer {
         Ok(builder.build())
     }
 
+    /// Check if a template string references any sensitive fields
+    ///
+    /// Parses ${resources.NAME.FIELD} patterns and checks if any FIELD
+    /// is marked as sensitive in the resource outputs.
+    fn is_template_sensitive(&self, template: &str, ctx: &TemplateContext) -> bool {
+        // Simple regex-free parsing of ${resources.NAME.FIELD} patterns
+        let mut remaining = template;
+        while let Some(start) = remaining.find("${resources.") {
+            remaining = &remaining[start + 12..]; // Skip "${resources."
+                                                  // Find the resource name (up to first .)
+            if let Some(dot_pos) = remaining.find('.') {
+                let resource_name = &remaining[..dot_pos];
+                remaining = &remaining[dot_pos + 1..];
+                // Find the field name (up to })
+                if let Some(end_pos) = remaining.find('}') {
+                    let field = &remaining[..end_pos];
+                    // Check if this field is sensitive
+                    if let Some(outputs) = ctx.resources.get(resource_name) {
+                        if outputs.is_sensitive(field) {
+                            return true;
+                        }
+                    }
+                    remaining = &remaining[end_pos + 1..];
+                }
+            }
+        }
+        false
+    }
+
     /// Render all templates in a container spec
     pub fn render_container(
         &self,
@@ -194,11 +250,19 @@ impl TemplateRenderer {
         container: &ContainerSpec,
         ctx: &TemplateContext,
     ) -> Result<RenderedContainer, TemplateError> {
-        // Render environment variables
+        // Render environment variables with sensitivity tracking
         let mut variables = BTreeMap::new();
         for (k, v) in &container.variables {
-            let rendered = self.engine.render(v.as_str(), ctx)?;
-            variables.insert(k.clone(), rendered);
+            let template_str = v.as_str();
+            let rendered = self.engine.render(template_str, ctx)?;
+            let sensitive = self.is_template_sensitive(template_str, ctx);
+            variables.insert(
+                k.clone(),
+                RenderedVariable {
+                    value: rendered,
+                    sensitive,
+                },
+            );
         }
 
         // Render files
@@ -454,14 +518,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            rendered.variables.get("DB_HOST"),
+            rendered.variables.get("DB_HOST").map(|v| &v.value),
             Some(&"postgres.prod-ns.svc.cluster.local".to_string())
         );
-        assert_eq!(rendered.variables.get("DB_PORT"), Some(&"5432".to_string()));
         assert_eq!(
-            rendered.variables.get("LOG_LEVEL"),
+            rendered.variables.get("DB_PORT").map(|v| &v.value),
+            Some(&"5432".to_string())
+        );
+        assert_eq!(
+            rendered.variables.get("LOG_LEVEL").map(|v| &v.value),
             Some(&"debug".to_string())
         );
+        // DB_HOST and DB_PORT reference service outputs which are not sensitive
+        assert!(!rendered.variables.get("DB_HOST").unwrap().sensitive);
+        assert!(!rendered.variables.get("DB_PORT").unwrap().sensitive);
     }
 
     #[test]
@@ -560,7 +630,10 @@ mod tests {
 
         assert!(rendered.contains_key("main"));
         assert_eq!(
-            rendered["main"].variables.get("LOG_LEVEL"),
+            rendered["main"]
+                .variables
+                .get("LOG_LEVEL")
+                .map(|v| &v.value),
             Some(&"info".to_string())
         );
     }
@@ -617,7 +690,7 @@ mod tests {
 
         // $${HOME} should become ${HOME}
         assert_eq!(
-            rendered.variables.get("SHELL_VAR"),
+            rendered.variables.get("SHELL_VAR").map(|v| &v.value),
             Some(&"${HOME}/app".to_string())
         );
     }
@@ -675,8 +748,74 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            rendered.variables.get("IMAGE"),
+            rendered.variables.get("IMAGE").map(|v| &v.value),
             Some(&"gcr.io/myproject/app:1.2.3".to_string())
         );
+    }
+
+    #[test]
+    fn test_sensitivity_tracking() {
+        // Create a context with a resource that has sensitive fields
+        let ctx = TemplateContext::builder()
+            .metadata("api", HashMap::new())
+            .resource(
+                "db",
+                crate::template::context::ResourceOutputs::builder()
+                    .output("host", "db.svc")
+                    .output("port", "5432")
+                    .sensitive("password", "secret123")
+                    .sensitive("connection_string", "postgres://user:secret123@db.svc:5432")
+                    .build(),
+            )
+            .build();
+
+        let mut variables = BTreeMap::new();
+        // Non-sensitive: only references host
+        variables.insert(
+            "DB_HOST".to_string(),
+            TemplateString::from("${resources.db.host}"),
+        );
+        // Sensitive: references password
+        variables.insert(
+            "DB_PASSWORD".to_string(),
+            TemplateString::from("${resources.db.password}"),
+        );
+        // Sensitive: references connection_string
+        variables.insert(
+            "DB_URL".to_string(),
+            TemplateString::from("${resources.db.connection_string}"),
+        );
+        // Mixed: references both sensitive and non-sensitive (should be sensitive)
+        variables.insert(
+            "MIXED".to_string(),
+            TemplateString::from("host=${resources.db.host} pass=${resources.db.password}"),
+        );
+
+        let container = ContainerSpec {
+            image: "app:latest".to_string(),
+            command: None,
+            args: None,
+            variables,
+            files: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            resources: None,
+            liveness_probe: None,
+            readiness_probe: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let rendered = renderer.render_container("main", &container, &ctx).unwrap();
+
+        // DB_HOST only references non-sensitive field
+        assert!(!rendered.variables.get("DB_HOST").unwrap().sensitive);
+
+        // DB_PASSWORD references sensitive field
+        assert!(rendered.variables.get("DB_PASSWORD").unwrap().sensitive);
+
+        // DB_URL references sensitive field
+        assert!(rendered.variables.get("DB_URL").unwrap().sensitive);
+
+        // MIXED references both - should be marked sensitive
+        assert!(rendered.variables.get("MIXED").unwrap().sensitive);
     }
 }

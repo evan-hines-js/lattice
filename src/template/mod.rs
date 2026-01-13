@@ -36,7 +36,8 @@ pub use provisioner::{
     ServiceProvisioner,
 };
 pub use renderer::{
-    RenderConfig, RenderedContainer, RenderedFile, RenderedVolume, TemplateRenderer,
+    RenderConfig, RenderedContainer, RenderedFile, RenderedVariable, RenderedVolume,
+    TemplateRenderer,
 };
 pub use types::{StaticString, TemplateString};
 
@@ -88,8 +89,8 @@ mod tests {
             .resource(
                 "db",
                 ResourceOutputs::builder()
-                    .host("postgres.svc")
-                    .port(5432)
+                    .output("host", "postgres.svc")
+                    .output("port", "5432")
                     .build(),
             )
             .build();
@@ -285,19 +286,27 @@ mod tests {
     #[test]
     fn test_resource_outputs_builder() {
         let outputs = ResourceOutputs::builder()
-            .host("db.svc.cluster.local")
-            .port(5432)
-            .url("postgres://db.svc.cluster.local:5432")
-            .connection_string("postgres://user:pass@db.svc.cluster.local:5432/mydb")
-            .extra("pool_size", "10")
+            .output("host", "db.svc.cluster.local")
+            .output("port", "5432")
+            .output("url", "postgres://db.svc.cluster.local:5432")
+            .sensitive(
+                "connection_string",
+                "postgres://user:pass@db.svc.cluster.local:5432/mydb",
+            )
+            .output("pool_size", "10")
             .build();
 
-        assert_eq!(outputs.host, Some("db.svc.cluster.local".to_string()));
-        assert_eq!(outputs.port, Some(5432));
         assert_eq!(
-            outputs.url,
-            Some("postgres://db.svc.cluster.local:5432".to_string())
+            outputs.outputs.get("host"),
+            Some(&"db.svc.cluster.local".to_string())
         );
+        assert_eq!(outputs.outputs.get("port"), Some(&"5432".to_string()));
+        assert_eq!(
+            outputs.outputs.get("url"),
+            Some(&"postgres://db.svc.cluster.local:5432".to_string())
+        );
+        // connection_string is in sensitive, not outputs
+        assert!(outputs.sensitive.contains_key("connection_string"));
     }
 
     // =========================================================================
@@ -311,13 +320,16 @@ mod tests {
             .metadata("api", HashMap::new())
             .resource(
                 "postgres",
-                ResourceOutputs::builder().host("pg.svc").port(5432).build(),
+                ResourceOutputs::builder()
+                    .output("host", "pg.svc")
+                    .output("port", "5432")
+                    .build(),
             )
             .resource(
                 "redis",
                 ResourceOutputs::builder()
-                    .host("redis.svc")
-                    .port(6379)
+                    .output("host", "redis.svc")
+                    .output("port", "6379")
                     .build(),
             )
             .cluster("registry", "gcr.io/myproject")

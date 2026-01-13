@@ -32,17 +32,21 @@ use super::{
     generate_control_plane, generate_machine_deployment, CAPIManifest, ClusterConfig,
     ControlPlaneConfig, InfrastructureRef, Provider,
 };
-use crate::crd::{LatticeCluster, ProviderSpec, ProviderType};
+use crate::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
 use crate::Result;
 
 /// Default namespace for CAPI resources
 const DEFAULT_NAMESPACE: &str = "default";
 
-/// Docker infrastructure API group (used in v1beta2 refs)
+/// Docker infrastructure API group (used in refs)
 const DOCKER_INFRASTRUCTURE_API_GROUP: &str = "infrastructure.cluster.x-k8s.io";
 
-/// Docker infrastructure API version (for resource apiVersion field)
-const DOCKER_INFRASTRUCTURE_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta2";
+/// Docker infrastructure API version for kubeadm (v1beta2 - latest CAPI)
+const DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2: &str = "infrastructure.cluster.x-k8s.io/v1beta2";
+
+/// Docker infrastructure API version for RKE2 (v1beta1 - required by CAPRKE2)
+/// See: https://github.com/rancher/cluster-api-provider-rke2/issues/789
+const DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA1: &str = "infrastructure.cluster.x-k8s.io/v1beta1";
 
 /// Docker/Kind infrastructure provider
 ///
@@ -101,23 +105,126 @@ impl DockerProvider {
         labels
     }
 
+    /// Get the Docker infrastructure API version based on bootstrap provider
+    ///
+    /// CAPRKE2 requires v1beta1 for compatibility, while kubeadm works with v1beta2.
+    /// See: https://github.com/rancher/cluster-api-provider-rke2/issues/789
+    fn get_infra_api_version(bootstrap: &BootstrapProvider) -> &'static str {
+        match bootstrap {
+            BootstrapProvider::Rke2 => DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA1,
+            BootstrapProvider::Kubeadm => DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2,
+        }
+    }
+
     /// Generate the DockerCluster resource (Docker-specific)
     fn generate_docker_cluster(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
         let name = Self::get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
         let labels = Self::create_labels(name);
+        let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
 
-        // DockerCluster has minimal spec - most config is in the Cluster resource
-        let spec = json!({});
+        // For RKE2, we need a custom HAProxy config that uses HTTP health checks
+        // and disables SSL verification. The field is nested under spec.loadBalancer
+        let spec = match cluster.spec.provider.kubernetes.bootstrap {
+            BootstrapProvider::Rke2 => {
+                json!({
+                    "loadBalancer": {
+                        "customHAProxyConfigTemplateRef": {
+                            "name": format!("{}-lb-config", name)
+                        }
+                    }
+                })
+            }
+            _ => json!({}),
+        };
 
         Ok(CAPIManifest::new(
-            DOCKER_INFRASTRUCTURE_API_VERSION,
+            api_version,
             "DockerCluster",
             name,
             &namespace,
         )
         .with_labels(labels)
         .with_spec(spec))
+    }
+
+    /// Generate HAProxy ConfigMap for RKE2 clusters
+    ///
+    /// RKE2 requires a custom HAProxy configuration because:
+    /// 1. Health checks must use HTTP GET /healthz instead of TCP
+    /// 2. SSL verification must be disabled for backend connections
+    /// 3. An additional frontend on port 9345 is needed for RKE2 supervisor/join
+    fn generate_haproxy_configmap(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
+        let name = Self::get_cluster_name(cluster)?;
+        let namespace = self.get_namespace(cluster);
+        let labels = Self::create_labels(name);
+        let configmap_name = format!("{}-lb-config", name);
+
+        // HAProxy config template for RKE2 - uses Go template syntax for CAPD
+        let haproxy_config = r#"# HAProxy config for RKE2 with CAPD
+global
+  log /dev/log local0
+  log /dev/log local1 notice
+  daemon
+  maxconn 4096
+
+resolvers docker
+  nameserver dns 127.0.0.11:53
+
+defaults
+  log global
+  mode tcp
+  option dontlognull
+  timeout connect 5s
+  timeout client 1m
+  timeout server 1m
+  default-server init-addr none
+
+frontend stats
+  mode http
+  bind *:8404
+  stats enable
+  stats uri /stats
+  stats refresh 10s
+  stats admin if TRUE
+
+frontend control-plane
+  bind *:{{ .FrontendControlPlanePort }}
+  {{ if .IPv6 -}}
+  bind :::{{ .FrontendControlPlanePort }};
+  {{- end }}
+  default_backend kube-apiservers
+
+backend kube-apiservers
+  option httpchk GET /healthz
+  http-check expect status 200
+  {{range $server, $backend := .BackendServers}}
+  server {{ $server }} {{ JoinHostPort $backend.Address $.BackendControlPlanePort }} check check-ssl verify none resolvers docker resolve-prefer {{ if $.IPv6 -}} ipv6 {{- else -}} ipv4 {{- end }}
+  {{- end}}
+
+frontend rke2-join
+  bind *:9345
+  {{ if .IPv6 -}}
+  bind :::9345;
+  {{- end }}
+  default_backend rke2-servers
+
+backend rke2-servers
+  option httpchk GET /v1-rke2/readyz
+  http-check expect status 403
+  {{range $server, $backend := .BackendServers}}
+  server {{ $server }} {{ $backend.Address }}:9345 check check-ssl verify none resolvers docker resolve-prefer {{ if $.IPv6 -}} ipv6 {{- else -}} ipv4 {{- end }}
+  {{- end}}
+"#;
+
+        // Build ConfigMap manifest with data field
+        Ok(
+            CAPIManifest::new("v1", "ConfigMap", &configmap_name, &namespace)
+                .with_labels(labels)
+                .with_data(json!({
+                    "value": haproxy_config
+                })),
+        )
     }
 
     /// Generate the DockerMachineTemplate for control plane nodes (Docker-specific)
@@ -129,6 +236,7 @@ impl DockerProvider {
         let namespace = self.get_namespace(cluster);
         let labels = Self::create_labels(name);
         let template_name = format!("{}-control-plane", name);
+        let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
 
         let spec = json!({
             "template": {
@@ -142,7 +250,7 @@ impl DockerProvider {
         });
 
         Ok(CAPIManifest::new(
-            DOCKER_INFRASTRUCTURE_API_VERSION,
+            api_version,
             "DockerMachineTemplate",
             &template_name,
             &namespace,
@@ -157,6 +265,7 @@ impl DockerProvider {
         let namespace = self.get_namespace(cluster);
         let labels = Self::create_labels(name);
         let template_name = format!("{}-md-0", name);
+        let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
 
         let spec = json!({
             "template": {
@@ -170,7 +279,7 @@ impl DockerProvider {
         });
 
         Ok(CAPIManifest::new(
-            DOCKER_INFRASTRUCTURE_API_VERSION,
+            api_version,
             "DockerMachineTemplate",
             &template_name,
             &namespace,
@@ -220,9 +329,11 @@ impl Provider for DockerProvider {
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
         };
 
+        let infra_api_version =
+            Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
         let infra = InfrastructureRef {
             api_group: DOCKER_INFRASTRUCTURE_API_GROUP,
-            api_version: DOCKER_INFRASTRUCTURE_API_VERSION,
+            api_version: infra_api_version,
             cluster_kind: "DockerCluster",
             machine_template_kind: "DockerMachineTemplate",
         };
@@ -234,12 +345,16 @@ impl Provider for DockerProvider {
         };
 
         // Use shared functions for provider-agnostic resources
-        let mut manifests = vec![
-            generate_cluster(&config, &infra),
-            self.generate_docker_cluster(cluster)?,
-            generate_control_plane(&config, &infra, &cp_config),
-            self.generate_control_plane_machine_template(cluster)?,
-        ];
+        let mut manifests = vec![generate_cluster(&config, &infra)];
+
+        // For RKE2, add the HAProxy ConfigMap BEFORE DockerCluster (which references it)
+        if cluster.spec.provider.kubernetes.bootstrap == BootstrapProvider::Rke2 {
+            manifests.push(self.generate_haproxy_configmap(cluster)?);
+        }
+
+        manifests.push(self.generate_docker_cluster(cluster)?);
+        manifests.push(generate_control_plane(&config, &infra, &cp_config));
+        manifests.push(self.generate_control_plane_machine_template(cluster)?);
 
         // Worker resources - use shared functions (replicas=0, scaling after pivot)
         manifests.push(generate_machine_deployment(&config, &infra));
@@ -516,7 +631,7 @@ mod tests {
 
             assert_eq!(
                 docker_cluster.api_version,
-                DOCKER_INFRASTRUCTURE_API_VERSION
+                DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2
             );
             assert_eq!(docker_cluster.metadata.name, "my-cluster");
         }
@@ -602,7 +717,7 @@ mod tests {
                 .iter()
                 .find(|m| m.metadata.name == "my-cluster-control-plane")
                 .expect("should have control plane template");
-            assert_eq!(cp_template.api_version, DOCKER_INFRASTRUCTURE_API_VERSION);
+            assert_eq!(cp_template.api_version, DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2);
 
             let worker_template = machine_templates
                 .iter()
@@ -610,7 +725,7 @@ mod tests {
                 .expect("should have worker template");
             assert_eq!(
                 worker_template.api_version,
-                DOCKER_INFRASTRUCTURE_API_VERSION
+                DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2
             );
         }
 
@@ -1016,6 +1131,128 @@ mod tests {
 
             let spec = control_plane.spec.as_ref().unwrap();
             assert_eq!(spec.get("replicas").unwrap(), 3);
+        }
+    }
+
+    /// RKE2 Bootstrap Provider Tests
+    ///
+    /// These tests verify that RKE2 clusters generate the correct manifests,
+    /// including the custom HAProxy ConfigMap required for CAPD.
+    mod rke2_support {
+        use super::*;
+        use crate::provider::BootstrapInfo;
+
+        /// Helper to create an RKE2 cluster
+        fn sample_rke2_cluster(name: &str, workers: u32) -> LatticeCluster {
+            let mut cluster = sample_cluster(name, workers);
+            cluster.spec.provider.kubernetes.bootstrap = BootstrapProvider::Rke2;
+            cluster
+        }
+
+        /// Story: RKE2 clusters need 8 manifests: 7 standard + HAProxy ConfigMap
+        #[tokio::test]
+        async fn rke2_cluster_generates_eight_manifests() {
+            let provider = DockerProvider::new();
+            let cluster = sample_rke2_cluster("rke2-test", 2);
+            let bootstrap = BootstrapInfo::default();
+
+            let manifests = provider
+                .generate_capi_manifests(&cluster, &bootstrap)
+                .await
+                .unwrap();
+
+            // 8 manifests: Cluster, ConfigMap, DockerCluster, RKE2ControlPlane,
+            // DockerMachineTemplate (CP), MachineDeployment, DockerMachineTemplate (workers),
+            // RKE2ConfigTemplate
+            assert_eq!(manifests.len(), 8);
+        }
+
+        /// Story: RKE2 clusters must include a ConfigMap with HAProxy configuration
+        #[tokio::test]
+        async fn rke2_generates_haproxy_configmap() {
+            let provider = DockerProvider::new();
+            let cluster = sample_rke2_cluster("rke2-test", 2);
+            let bootstrap = BootstrapInfo::default();
+
+            let manifests = provider
+                .generate_capi_manifests(&cluster, &bootstrap)
+                .await
+                .unwrap();
+
+            let configmap = manifests
+                .iter()
+                .find(|m| m.kind == "ConfigMap")
+                .expect("RKE2 should generate a ConfigMap");
+
+            assert_eq!(configmap.api_version, "v1");
+            assert_eq!(configmap.metadata.name, "rke2-test-lb-config");
+
+            // Verify the data contains the HAProxy config
+            let data = configmap.data.as_ref().expect("ConfigMap should have data");
+            let value = data.get("value").expect("should have value key");
+            let config = value.as_str().expect("value should be a string");
+
+            // Key features of the RKE2 HAProxy config
+            assert!(config.contains("option httpchk GET /healthz"));
+            assert!(config.contains("check-ssl verify none"));
+            assert!(config.contains("frontend rke2-join"));
+            assert!(config.contains("bind *:9345"));
+            assert!(config.contains("/v1-rke2/readyz"));
+        }
+
+        /// Story: RKE2 DockerCluster must reference the custom HAProxy ConfigMap
+        #[tokio::test]
+        async fn rke2_docker_cluster_references_haproxy_configmap() {
+            let provider = DockerProvider::new();
+            let cluster = sample_rke2_cluster("rke2-test", 2);
+            let bootstrap = BootstrapInfo::default();
+
+            let manifests = provider
+                .generate_capi_manifests(&cluster, &bootstrap)
+                .await
+                .unwrap();
+
+            let docker_cluster = manifests
+                .iter()
+                .find(|m| m.kind == "DockerCluster")
+                .expect("should have DockerCluster");
+
+            let spec = docker_cluster.spec.as_ref().expect("should have spec");
+            let lb = spec.get("loadBalancer").expect("should have loadBalancer");
+            let haproxy_ref = lb
+                .get("customHAProxyConfigTemplateRef")
+                .expect("should have customHAProxyConfigTemplateRef");
+            let ref_name = haproxy_ref.get("name").expect("should have name");
+
+            assert_eq!(ref_name, "rke2-test-lb-config");
+        }
+
+        /// Story: Kubeadm clusters should NOT have the HAProxy ConfigMap
+        #[tokio::test]
+        async fn kubeadm_cluster_has_no_haproxy_configmap() {
+            let provider = DockerProvider::new();
+            let cluster = sample_cluster("kubeadm-test", 2); // Uses default kubeadm
+            let bootstrap = BootstrapInfo::default();
+
+            let manifests = provider
+                .generate_capi_manifests(&cluster, &bootstrap)
+                .await
+                .unwrap();
+
+            // Should be 7 manifests (no ConfigMap)
+            assert_eq!(manifests.len(), 7);
+
+            // No ConfigMap
+            let configmap = manifests.iter().find(|m| m.kind == "ConfigMap");
+            assert!(configmap.is_none());
+
+            // DockerCluster should have empty spec
+            let docker_cluster = manifests
+                .iter()
+                .find(|m| m.kind == "DockerCluster")
+                .expect("should have DockerCluster");
+            let spec = docker_cluster.spec.as_ref().expect("should have spec");
+            assert!(spec.get("loadBalancer").is_none());
         }
     }
 }

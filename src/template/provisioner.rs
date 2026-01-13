@@ -112,10 +112,11 @@ impl ResourceProvisioner for ServiceProvisioner {
 
         let url = port.map(|p| format!("http://{}:{}", host, p));
 
+        // All outputs are non-sensitive for internal services
         Ok(ResourceOutputs::builder()
-            .host(host)
-            .port(port.unwrap_or(80))
-            .url(url.unwrap_or_default())
+            .output("host", host)
+            .output("port", port.unwrap_or(80).to_string())
+            .output("url", url.unwrap_or_default())
             .build())
     }
 }
@@ -163,10 +164,12 @@ impl ResourceProvisioner for ExternalServiceProvisioner {
                 ))
             })?;
 
+        // All outputs are non-sensitive for external services
+        // (if auth is needed, user should use ${secrets.*} namespace)
         Ok(ResourceOutputs::builder()
-            .host(&endpoint.host)
-            .port(endpoint.port)
-            .url(&endpoint.url)
+            .output("host", &endpoint.host)
+            .output("port", endpoint.port.to_string())
+            .output("url", &endpoint.url)
             .build())
     }
 }
@@ -316,11 +319,13 @@ mod tests {
         let outputs = provisioner.resolve("api", &resource, &ctx).unwrap();
 
         assert_eq!(
-            outputs.host,
-            Some("api.prod-ns.svc.cluster.local".to_string())
+            outputs.outputs.get("host"),
+            Some(&"api.prod-ns.svc.cluster.local".to_string())
         );
-        assert_eq!(outputs.port, Some(8080));
-        assert!(outputs.url.as_ref().unwrap().contains("8080"));
+        assert_eq!(outputs.outputs.get("port"), Some(&"8080".to_string()));
+        assert!(outputs.outputs.get("url").unwrap().contains("8080"));
+        // Service outputs are never sensitive
+        assert!(outputs.sensitive.is_empty());
     }
 
     #[test]
@@ -364,8 +369,13 @@ mod tests {
 
         let outputs = provisioner.resolve("stripe", &resource, &ctx).unwrap();
 
-        assert_eq!(outputs.host, Some("api.stripe.com".to_string()));
-        assert_eq!(outputs.port, Some(443));
+        assert_eq!(
+            outputs.outputs.get("host"),
+            Some(&"api.stripe.com".to_string())
+        );
+        assert_eq!(outputs.outputs.get("port"), Some(&"443".to_string()));
+        // External service outputs are never sensitive
+        assert!(outputs.sensitive.is_empty());
     }
 
     #[test]
@@ -446,8 +456,8 @@ mod tests {
         assert!(outputs.contains_key("db"));
         // The host uses the resource's id ("postgres"), not the resource name ("db")
         assert_eq!(
-            outputs["db"].host,
-            Some("postgres.prod-ns.svc.cluster.local".to_string())
+            outputs["db"].outputs.get("host"),
+            Some(&"postgres.prod-ns.svc.cluster.local".to_string())
         );
     }
 

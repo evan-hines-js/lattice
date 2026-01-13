@@ -39,9 +39,12 @@ pub struct CAPIManifest {
     pub kind: String,
     /// Resource metadata
     pub metadata: ManifestMetadata,
-    /// Resource spec (untyped)
+    /// Resource spec (untyped) - used for most Kubernetes resources
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<serde_json::Value>,
+    /// Resource data - used for ConfigMaps and Secrets
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 impl CAPIManifest {
@@ -62,12 +65,19 @@ impl CAPIManifest {
                 annotations: None,
             },
             spec: None,
+            data: None,
         }
     }
 
     /// Set the spec for this manifest
     pub fn with_spec(mut self, spec: serde_json::Value) -> Self {
         self.spec = Some(spec);
+        self
+    }
+
+    /// Set the data for this manifest (for ConfigMaps/Secrets)
+    pub fn with_data(mut self, data: serde_json::Value) -> Self {
+        self.data = Some(data);
         self
     }
 
