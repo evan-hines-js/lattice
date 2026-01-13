@@ -203,10 +203,16 @@ pub fn generate_machine_deployment(
 
     let deployment_name = format!("{}-md-0", config.name);
 
-    // Bootstrap config template kind depends on bootstrap provider
-    let bootstrap_config_kind = match config.bootstrap {
-        BootstrapProvider::Kubeadm => "KubeadmConfigTemplate",
-        BootstrapProvider::Rke2 => "RKE2ConfigTemplate",
+    // Bootstrap config template kind and version suffix depend on bootstrap provider
+    let (bootstrap_config_kind, version) = match config.bootstrap {
+        BootstrapProvider::Kubeadm => (
+            "KubeadmConfigTemplate",
+            format!("v{}", config.k8s_version.trim_start_matches('v')),
+        ),
+        BootstrapProvider::Rke2 => (
+            "RKE2ConfigTemplate",
+            format!("v{}+rke2r1", config.k8s_version.trim_start_matches('v')),
+        ),
     };
 
     let spec = serde_json::json!({
@@ -218,7 +224,7 @@ pub fn generate_machine_deployment(
         "template": {
             "spec": {
                 "clusterName": config.name,
-                "version": format!("v{}", config.k8s_version.trim_start_matches('v')),
+                "version": version,
                 "bootstrap": {
                     "configRef": {
                         "apiGroup": "bootstrap.cluster.x-k8s.io",
@@ -502,8 +508,10 @@ fn generate_rke2_control_plane(
             },
             // Force FIPS-compliant TLS ciphers - RKE2's BoringCrypto allows X25519
             // but our GOFIPS140 kubectl rejects it
+            // Enable anonymous auth so HAProxy can health-check /healthz without credentials
             "kubeAPIServer": {
                 "extraArgs": [
+                    "anonymous-auth=true",
                     "tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
                 ]
             }
