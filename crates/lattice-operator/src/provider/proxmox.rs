@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use super::{
     build_post_kubeadm_commands, generate_bootstrap_config_template, generate_cluster,
     generate_control_plane, generate_machine_deployment, BootstrapInfo, CAPIManifest,
-    ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider,
+    ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, VipConfig,
 };
 use crate::crd::{LatticeCluster, ProviderSpec, ProxmoxConfig};
 use crate::Result;
@@ -62,14 +62,15 @@ impl ProxmoxProvider {
 
         let proxmox_config = Self::get_proxmox_config(cluster);
 
-        // Get endpoint IP (if any) - must be excluded from addresses pool per CAPMOX validation
+        // Get endpoint IP (VIP) - must be excluded from addresses pool
+        // kube-vip will manage the VIP on CP nodes
         let endpoint_ip = cluster
             .spec
             .endpoints
             .as_ref()
             .map(|e| e.host.as_str());
 
-        // Build IPv4 config - addresses come from pool or config, excluding endpoint IP
+        // Build IPv4 config - addresses come from pool, excluding VIP
         let ipv4_config = if let Some(cfg) = proxmox_config {
             let addresses: Vec<String> = cfg
                 .ipv4_addresses
@@ -144,8 +145,12 @@ impl ProxmoxProvider {
             "dnsServers": dns_servers,
             "allowedNodes": allowed_nodes,
             "credentialsRef": {
-                "name": "capmox-manager-credentials",
-                "namespace": "capmox-system"
+                "name": proxmox_config
+                    .and_then(|c| c.credentials_secret_name.clone())
+                    .unwrap_or_else(|| "capmox-manager-credentials".to_string()),
+                "namespace": proxmox_config
+                    .and_then(|c| c.credentials_secret_namespace.clone())
+                    .unwrap_or_else(|| "capmox-system".to_string())
             }
         });
 
@@ -505,10 +510,21 @@ impl Provider for ProxmoxProvider {
             .clone()
             .unwrap_or_default();
 
+        // Configure kube-vip for management clusters (those with endpoints)
+        let vip = cluster.spec.endpoints.as_ref().map(|e| {
+            let proxmox_cfg = Self::get_proxmox_config(cluster);
+            VipConfig::new(
+                e.host.clone(),
+                proxmox_cfg.and_then(|c| c.virtual_ip_network_interface.clone()),
+                proxmox_cfg.and_then(|c| c.kube_vip_image.clone()),
+            )
+        });
+
         let cp_config = ControlPlaneConfig {
             replicas: spec.nodes.control_plane,
             cert_sans,
             post_kubeadm_commands: post_commands,
+            vip,
         };
 
         // Generate manifests - extract fallible operations first

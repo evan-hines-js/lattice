@@ -194,6 +194,92 @@ pub struct ControlPlaneConfig {
     pub cert_sans: Vec<String>,
     /// Commands to run after kubeadm completes
     pub post_kubeadm_commands: Vec<String>,
+    /// VIP configuration for kube-vip (required for bare-metal/Proxmox)
+    pub vip: Option<VipConfig>,
+}
+
+/// Virtual IP configuration for kube-vip
+#[derive(Clone, Debug)]
+pub struct VipConfig {
+    /// VIP address (e.g., "10.0.0.100")
+    pub address: String,
+    /// Network interface (e.g., "eth0")
+    pub interface: String,
+    /// kube-vip image (e.g., "ghcr.io/kube-vip/kube-vip:v0.8.0")
+    pub image: String,
+}
+
+/// Default kube-vip image
+const DEFAULT_KUBE_VIP_IMAGE: &str = "ghcr.io/kube-vip/kube-vip:v0.8.0";
+
+impl VipConfig {
+    /// Create a new VipConfig with defaults
+    pub fn new(address: String, interface: Option<String>, image: Option<String>) -> Self {
+        Self {
+            address,
+            interface: interface.unwrap_or_else(|| "eth0".to_string()),
+            image: image.unwrap_or_else(|| DEFAULT_KUBE_VIP_IMAGE.to_string()),
+        }
+    }
+}
+
+/// Generate kube-vip static pod manifest
+fn generate_kube_vip_manifest(vip: &VipConfig) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-vip
+  namespace: kube-system
+spec:
+  containers:
+  - name: kube-vip
+    image: {image}
+    imagePullPolicy: IfNotPresent
+    args:
+    - manager
+    env:
+    - name: cp_enable
+      value: "true"
+    - name: vip_interface
+      value: "{interface}"
+    - name: address
+      value: "{address}"
+    - name: port
+      value: "6443"
+    - name: vip_arp
+      value: "true"
+    - name: vip_leaderelection
+      value: "true"
+    - name: vip_leaseduration
+      value: "15"
+    - name: vip_renewdeadline
+      value: "10"
+    - name: vip_retryperiod
+      value: "2"
+    securityContext:
+      capabilities:
+        add:
+        - NET_ADMIN
+        - NET_RAW
+    volumeMounts:
+    - mountPath: /etc/kubernetes/admin.conf
+      name: kubeconfig
+  hostAliases:
+  - hostnames:
+    - kubernetes
+    ip: 127.0.0.1
+  hostNetwork: true
+  volumes:
+  - hostPath:
+      path: /etc/kubernetes/admin.conf
+      type: FileOrCreate
+    name: kubeconfig
+"#,
+        image = vip.image,
+        interface = vip.interface,
+        address = vip.address,
+    )
 }
 
 /// Generate a MachineDeployment manifest
@@ -442,6 +528,18 @@ fn generate_kubeadm_control_plane(
     if !cp_config.post_kubeadm_commands.is_empty() {
         kubeadm_config_spec["postKubeadmCommands"] =
             serde_json::json!(cp_config.post_kubeadm_commands);
+    }
+
+    // Add kube-vip static pod if VIP is configured
+    if let Some(ref vip) = cp_config.vip {
+        kubeadm_config_spec["files"] = serde_json::json!([
+            {
+                "content": generate_kube_vip_manifest(vip),
+                "owner": "root:root",
+                "path": "/etc/kubernetes/manifests/kube-vip.yaml",
+                "permissions": "0644"
+            }
+        ]);
     }
 
     // In CAPI v1beta2, infrastructureRef is nested under machineTemplate.spec
@@ -876,6 +974,7 @@ mod tests {
                 replicas: 1,
                 cert_sans: vec!["localhost".to_string()],
                 post_kubeadm_commands: vec![],
+                vip: None,
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config);
@@ -892,6 +991,7 @@ mod tests {
                 replicas: 1,
                 cert_sans: vec!["localhost".to_string()],
                 post_kubeadm_commands: vec![],
+                vip: None,
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config);
@@ -992,6 +1092,7 @@ mod tests {
                 replicas: 1,
                 cert_sans: vec![],
                 post_kubeadm_commands: vec![],
+                vip: None,
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config);
@@ -1020,6 +1121,7 @@ mod tests {
                 replicas: 1,
                 cert_sans: vec![],
                 post_kubeadm_commands: vec![],
+                vip: None,
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config);
@@ -1031,6 +1133,55 @@ mod tests {
                 .expect("should have serverConfig.cni");
 
             assert_eq!(cni, "none", "RKE2 should have cni=none (we use Cilium)");
+        }
+
+        #[test]
+        fn kubeadm_control_plane_includes_kube_vip_when_vip_configured() {
+            let config = test_config(BootstrapProvider::Kubeadm);
+            let infra = test_infra();
+            let cp_config = ControlPlaneConfig {
+                replicas: 3,
+                cert_sans: vec!["10.0.0.100".to_string()],
+                post_kubeadm_commands: vec![],
+                vip: Some(VipConfig::new("10.0.0.100".to_string(), None, None)),
+            };
+
+            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let spec = manifest.spec.expect("should have spec");
+
+            let files = spec
+                .pointer("/kubeadmConfigSpec/files")
+                .expect("should have files when VIP configured");
+
+            let file = files.as_array().expect("files should be array").first().unwrap();
+            let path = file.get("path").unwrap().as_str().unwrap();
+            let content = file.get("content").unwrap().as_str().unwrap();
+
+            assert_eq!(path, "/etc/kubernetes/manifests/kube-vip.yaml");
+            assert!(content.contains("kube-vip"));
+            assert!(content.contains("10.0.0.100"));
+            assert!(content.contains("eth0"));
+            assert!(content.contains(DEFAULT_KUBE_VIP_IMAGE));
+        }
+
+        #[test]
+        fn kubeadm_control_plane_no_files_without_vip() {
+            let config = test_config(BootstrapProvider::Kubeadm);
+            let infra = test_infra();
+            let cp_config = ControlPlaneConfig {
+                replicas: 1,
+                cert_sans: vec![],
+                post_kubeadm_commands: vec![],
+                vip: None,
+            };
+
+            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let spec = manifest.spec.expect("should have spec");
+
+            assert!(
+                spec.pointer("/kubeadmConfigSpec/files").is_none(),
+                "should not have files when VIP not configured"
+            );
         }
     }
 }

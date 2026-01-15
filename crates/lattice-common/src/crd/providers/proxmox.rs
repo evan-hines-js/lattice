@@ -90,6 +90,22 @@ pub struct ProxmoxConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtual_ip_network_interface: Option<String>,
 
+    /// kube-vip image (default: ghcr.io/kube-vip/kube-vip:v0.8.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kube_vip_image: Option<String>,
+
+    // ==========================================================================
+    // CAPMOX Credentials
+    // ==========================================================================
+
+    /// CAPMOX credentials secret name (default: capmox-manager-credentials)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_secret_name: Option<String>,
+
+    /// CAPMOX credentials secret namespace (default: capmox-system)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_secret_namespace: Option<String>,
+
     // ==========================================================================
     // IPv4 Configuration
     // ==========================================================================
