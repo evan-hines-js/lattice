@@ -264,35 +264,16 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
     manifests
 }
 
-/// Default manifest generator that creates agent and CNI manifests
+/// Default manifest generator that creates CNI and operator manifests
 ///
-/// Uses the shared CiliumReconciler from infra module to ensure bootstrap
-/// and day-2 reconciliation use the same manifest generation.
-pub struct DefaultManifestGenerator {
-    /// Cilium reconciler (shared with agent for consistent manifests)
-    cilium: crate::infra::CiliumReconciler,
-}
+/// Generates Cilium manifests on-demand based on provider, then adds operator deployment.
+#[derive(Clone, Default)]
+pub struct DefaultManifestGenerator;
 
 impl DefaultManifestGenerator {
-    /// Create a new generator, pre-rendering Cilium manifests via helm template
-    pub fn new() -> Result<Self, BootstrapError> {
-        let cilium = crate::infra::CiliumReconciler::new().map_err(|e| {
-            BootstrapError::Internal(format!("failed to create Cilium reconciler: {}", e))
-        })?;
-        Ok(Self { cilium })
-    }
-
-    /// Create with custom Cilium configuration
-    pub fn with_cilium_config(config: crate::infra::CiliumConfig) -> Result<Self, BootstrapError> {
-        let cilium = crate::infra::CiliumReconciler::with_config(config).map_err(|e| {
-            BootstrapError::Internal(format!("failed to create Cilium reconciler: {}", e))
-        })?;
-        Ok(Self { cilium })
-    }
-
-    /// Get the Cilium reconciler (for shared use with agent)
-    pub fn cilium(&self) -> &crate::infra::CiliumReconciler {
-        &self.cilium
+    /// Create a new manifest generator
+    pub fn new() -> Self {
+        Self
     }
 
     /// Generate the Lattice operator manifests (non-Cilium)
@@ -517,18 +498,15 @@ impl ManifestGenerator for DefaultManifestGenerator {
     ) -> Vec<String> {
         let mut manifests = Vec::new();
 
-        // CNI manifests first (Cilium) - must be applied before other pods can run
-        // Uses the same generator as agent reconciliation to prevent drift
-        manifests.extend(self.cilium.manifests().iter().cloned());
+        // CNI manifests first (Cilium) - rendered on-demand based on provider
+        match crate::infra::generate_cilium_manifests(provider) {
+            Ok(cilium_manifests) => manifests.extend(cilium_manifests),
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to generate Cilium manifests");
+            }
+        }
 
-        // Then operator manifests - same deployment for all clusters
-        // Controller reads LatticeCluster CRD to determine behavior:
-        // - spec.endpoints present → starts cell servers, can provision clusters
-        // - spec.endpointsRef present → connects to parent
-        //
-        // Note: generate_operator_manifests returns Result, but serialization of
-        // well-known k8s types should never fail. If it does, it indicates a
-        // serious bug in the struct definitions.
+        // Then operator manifests
         manifests.extend(
             self.generate_operator_manifests(
                 image,
@@ -539,18 +517,11 @@ impl ManifestGenerator for DefaultManifestGenerator {
             )
             .unwrap_or_else(|e| {
                 panic!(
-                    "BUG: failed to serialize operator manifests to JSON: {}. \
-                         This indicates a bug in the Kubernetes resource definitions.",
+                    "BUG: failed to serialize operator manifests to JSON: {}",
                     e
                 )
             }),
         );
-
-        // Note: CiliumNetworkPolicy is added by generate_all_manifests()
-        // based on whether parent_host is provided.
-
-        // Note: LatticeCluster CRD and resource are sent post-pivot via ApplyManifestsCommand
-        // to avoid the local controller fighting with the pivot process
 
         manifests
     }
@@ -1243,7 +1214,7 @@ mod tests {
 
     #[test]
     fn default_generator_creates_namespace() {
-        let generator = DefaultManifestGenerator::new().unwrap();
+        let generator = DefaultManifestGenerator::new();
         let manifests = generator.generate("test:latest", None, None, None, None);
 
         // Operator manifests are JSON, check for JSON format
@@ -1255,7 +1226,7 @@ mod tests {
 
     #[test]
     fn default_generator_creates_operator_deployment() {
-        let generator = DefaultManifestGenerator::new().unwrap();
+        let generator = DefaultManifestGenerator::new();
         let manifests = generator.generate("test:latest", None, None, None, None);
 
         // Operator manifests are JSON, check for JSON format
@@ -1267,7 +1238,7 @@ mod tests {
 
     #[test]
     fn default_generator_creates_service_account() {
-        let generator = DefaultManifestGenerator::new().unwrap();
+        let generator = DefaultManifestGenerator::new();
         let manifests = generator.generate("test:latest", None, None, None, None);
 
         // Should have ServiceAccount for operator
@@ -1279,7 +1250,7 @@ mod tests {
 
     #[test]
     fn default_generator_creates_cilium_cni() {
-        let generator = DefaultManifestGenerator::new().unwrap();
+        let generator = DefaultManifestGenerator::new();
         let manifests = generator.generate("test:latest", None, None, None, None);
 
         // Should include Cilium DaemonSet (rendered from helm template)
@@ -1550,7 +1521,7 @@ mod tests {
     /// deployment - the controller reads LatticeCluster CRD to determine behavior.
     #[test]
     fn story_manifest_generation() {
-        let generator = DefaultManifestGenerator::new().unwrap();
+        let generator = DefaultManifestGenerator::new();
         let manifests = generator.generate("test:latest", None, None, None, None);
 
         // Manifests create the lattice-system namespace (JSON format)
@@ -1996,7 +1967,7 @@ mod tests {
     fn story_kubeadm_clusters_get_fips_relaxation() {
         // Use real DefaultManifestGenerator to get actual Deployment
         let state = BootstrapState::new(
-            DefaultManifestGenerator::new().unwrap(),
+            DefaultManifestGenerator::new(),
             Duration::from_secs(3600),
             test_ca(),
             "test:latest".to_string(),
@@ -2042,7 +2013,7 @@ mod tests {
     fn story_rke2_clusters_no_fips_relaxation() {
         // Use real DefaultManifestGenerator to get actual Deployment
         let state = BootstrapState::new(
-            DefaultManifestGenerator::new().unwrap(),
+            DefaultManifestGenerator::new(),
             Duration::from_secs(3600),
             test_ca(),
             "test:latest".to_string(),

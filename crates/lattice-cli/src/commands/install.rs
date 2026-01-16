@@ -325,9 +325,7 @@ nodes:
     }
 
     async fn deploy_lattice_operator(&self) -> Result<()> {
-        let generator =
-            DefaultManifestGenerator::new().map_err(|e| Error::command_failed(e.to_string()))?;
-
+        let generator = DefaultManifestGenerator::new();
         let all_manifests = generator.generate(
             &self.config.image,
             self.config.registry_credentials.as_deref(),
@@ -358,9 +356,7 @@ nodes:
     }
 
     async fn create_bootstrap_crs(&self) -> Result<()> {
-        let generator =
-            DefaultManifestGenerator::new().map_err(|e| Error::command_failed(e.to_string()))?;
-
+        let generator = DefaultManifestGenerator::new();
         let cluster_name = self.cluster.metadata.name.as_deref();
         let provider_str = self.cluster.spec.provider.provider_type().to_string();
         let bootstrap_str = self.cluster.spec.provider.kubernetes.bootstrap.to_string();
@@ -961,15 +957,20 @@ stringData:
         timeout: Duration,
     ) -> Result<()> {
         let start = Instant::now();
+        let mut last_error = String::new();
         loop {
             if start.elapsed() > timeout {
-                return Err(Error::command_failed("Timeout waiting for CRD"));
+                return Err(Error::command_failed(format!(
+                    "Timeout waiting for kubectl apply: {}",
+                    last_error
+                )));
             }
 
             match self.kubectl_apply(manifest, kubeconfig).await {
                 Ok(()) => return Ok(()),
-                Err(_) => {
-                    info!("Waiting for CRD to be established...");
+                Err(e) => {
+                    last_error = e.to_string();
+                    info!("kubectl apply failed (retrying): {}", last_error);
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }

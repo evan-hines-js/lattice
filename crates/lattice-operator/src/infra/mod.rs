@@ -23,8 +23,8 @@ pub mod flux;
 pub mod istio;
 
 pub use cilium::{
-    generate_default_deny, generate_operator_network_policy, generate_ztunnel_allowlist,
-    CiliumConfig, CiliumReconciler,
+    cilium_version, generate_cilium_manifests, generate_default_deny,
+    generate_operator_network_policy, generate_ztunnel_allowlist,
 };
 pub use flux::{generate_gitops_resources, FluxConfig, FluxReconciler, ResolvedGitCredentials};
 pub use istio::{IstioConfig, IstioReconciler};

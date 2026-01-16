@@ -436,7 +436,8 @@ impl Provider for OpenstackProvider {
             replicas: spec.nodes.control_plane,
             cert_sans,
             post_kubeadm_commands: post_commands,
-            vip: None, // OpenStack uses Octavia LB
+            vip: None,
+            ssh_authorized_keys: vec![],
         };
 
         // Generate manifests - extract fallible operations first

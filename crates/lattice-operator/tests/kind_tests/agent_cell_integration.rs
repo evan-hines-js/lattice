@@ -36,7 +36,7 @@ async fn integration_bootstrap_http_full_flow() {
 
     let ca = Arc::new(CertificateAuthority::new("Integration Test CA").unwrap());
     let state = Arc::new(BootstrapState::new(
-        DefaultManifestGenerator::new().unwrap(),
+        DefaultManifestGenerator::new(),
         Duration::from_secs(3600),
         ca.clone(),
         "test:latest".to_string(),
@@ -114,7 +114,7 @@ async fn integration_bootstrap_token_replay_blocked() {
 
     let ca = Arc::new(CertificateAuthority::new("Replay Test CA").unwrap());
     let state = Arc::new(BootstrapState::new(
-        DefaultManifestGenerator::new().unwrap(),
+        DefaultManifestGenerator::new(),
         Duration::from_secs(3600),
         ca.clone(),
         "test:latest".to_string(),
@@ -171,7 +171,7 @@ async fn integration_full_stack_bootstrap_to_ready() {
     // Step 1: Setup bootstrap server
     let ca = Arc::new(CertificateAuthority::new("Full Stack CA").unwrap());
     let bootstrap_state = Arc::new(BootstrapState::new(
-        DefaultManifestGenerator::new().unwrap(),
+        DefaultManifestGenerator::new(),
         Duration::from_secs(3600),
         ca.clone(),
         "test:latest".to_string(),

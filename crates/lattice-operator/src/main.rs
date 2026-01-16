@@ -675,8 +675,7 @@ async fn run_controller() -> anyhow::Result<()> {
     // This ensures TLS certificate has correct SANs (spec.endpoints.host) before serving
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
     {
-        let manifest_generator = lattice_operator::bootstrap::DefaultManifestGenerator::new()
-            .map_err(|e| anyhow::anyhow!("Failed to create manifest generator: {}", e))?;
+        let manifest_generator = lattice_operator::bootstrap::DefaultManifestGenerator::new();
 
         // Get extra SANs from LatticeCluster - MUST wait for it to exist with endpoints
         // The server certificate needs the correct SANs for workload clusters to connect
