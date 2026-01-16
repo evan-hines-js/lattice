@@ -28,119 +28,82 @@ fn get_charts_dir() -> String {
     DEFAULT_CHARTS_DIR.to_string()
 }
 
-/// Cilium configuration
-#[derive(Debug, Clone)]
-pub struct CiliumConfig {
-    /// Chart version (pinned to Lattice release)
-    pub version: &'static str,
-}
-
-impl Default for CiliumConfig {
-    fn default() -> Self {
-        Self {
-            version: env!("CILIUM_VERSION"),
-        }
-    }
-}
-
-/// Cilium manifest generator
+/// Generate Cilium manifests for a cluster
 ///
-/// Renders Cilium manifests via helm template. Manifests are cached
-/// for reuse by both bootstrap and controller reconciliation.
-pub struct CiliumReconciler {
-    config: CiliumConfig,
-    manifests: Vec<String>,
+/// Renders via `helm template` on-demand. Provider is passed for future
+/// provider-specific configuration if needed.
+pub fn generate_cilium_manifests(provider: Option<&str>) -> Result<Vec<String>, String> {
+    let charts_dir = get_charts_dir();
+    let version = env!("CILIUM_VERSION");
+    let chart_path = format!("{}/cilium-{}.tgz", charts_dir, version);
+
+    let values = vec![
+        "--set",
+        "hubble.enabled=false",
+        "--set",
+        "hubble.relay.enabled=false",
+        "--set",
+        "hubble.ui.enabled=false",
+        "--set",
+        "prometheus.enabled=false",
+        "--set",
+        "operator.prometheus.enabled=false",
+        "--set",
+        "cni.exclusive=false",
+        "--set",
+        "kubeProxyReplacement=false",
+        "--set",
+        "l2announcements.enabled=true",
+        "--set",
+        "externalIPs.enabled=true",
+        // Disable host firewall to prevent blocking host/bridge traffic
+        "--set",
+        "hostFirewall.enabled=false",
+        // Use native routing instead of VXLAN overlay (avoids MTU issues, simpler for VMs)
+        "--set",
+        "routingMode=native",
+        "--set",
+        "autoDirectNodeRoutes=true",
+        // Must match pod CIDR (192.168.0.0/16) - NOT the LAN CIDR
+        "--set",
+        "ipv4NativeRoutingCIDR=192.168.0.0/16",
+    ];
+
+    info!(provider = ?provider, "Rendering Cilium manifests");
+
+    let output = Command::new("helm")
+        .args(["template", "cilium", &chart_path, "--namespace", "kube-system"])
+        .args(&values)
+        .output()
+        .map_err(|e| format!("failed to run helm: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("helm template failed: {}", stderr));
+    }
+
+    let yaml_str = String::from_utf8_lossy(&output.stdout);
+
+    let manifests: Vec<String> = yaml_str
+        .split("\n---")
+        .map(|doc| doc.trim())
+        .filter(|doc| !doc.is_empty() && doc.contains("kind:"))
+        .map(|doc| {
+            if doc.starts_with("---") {
+                doc.to_string()
+            } else {
+                format!("---\n{}", doc)
+            }
+        })
+        .collect();
+
+    info!(count = manifests.len(), version, "Rendered Cilium manifests");
+    Ok(manifests)
 }
 
-impl CiliumReconciler {
-    /// Create with default config
-    pub fn new() -> Result<Self, String> {
-        Self::with_config(CiliumConfig::default())
-    }
-
-    /// Create with custom config
-    pub fn with_config(config: CiliumConfig) -> Result<Self, String> {
-        let manifests = Self::render_manifests(&config)?;
-        Ok(Self { config, manifests })
-    }
-
-    /// Get the pre-rendered manifests
-    pub fn manifests(&self) -> &[String] {
-        &self.manifests
-    }
-
-    /// Get the expected version
-    pub fn version(&self) -> &str {
-        self.config.version
-    }
-
-    /// Render Cilium manifests using helm template
-    fn render_manifests(config: &CiliumConfig) -> Result<Vec<String>, String> {
-        // Use local chart tarball (pulled at Docker build time or by build.rs)
-        let charts_dir = get_charts_dir();
-        let chart_path = format!("{}/cilium-{}.tgz", charts_dir, config.version);
-
-        // Cilium helm values for Istio compatibility
-        let values = [
-            "--set",
-            "hubble.enabled=false",
-            "--set",
-            "hubble.relay.enabled=false",
-            "--set",
-            "hubble.ui.enabled=false",
-            "--set",
-            "prometheus.enabled=false",
-            "--set",
-            "operator.prometheus.enabled=false",
-            "--set",
-            "cni.exclusive=false",
-            "--set",
-            "kubeProxyReplacement=false",
-            "--set",
-            "l2announcements.enabled=true",
-            "--set",
-            "externalIPs.enabled=true",
-        ];
-
-        let output = Command::new("helm")
-            .args([
-                "template",
-                "cilium",
-                &chart_path,
-                "--namespace",
-                "kube-system",
-            ])
-            .args(values)
-            .output()
-            .map_err(|e| format!("failed to run helm: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("helm template failed: {}", stderr));
-        }
-
-        let yaml_str = String::from_utf8_lossy(&output.stdout);
-
-        let manifests: Vec<String> = yaml_str
-            .split("\n---")
-            .map(|doc| doc.trim())
-            .filter(|doc| !doc.is_empty() && doc.contains("kind:"))
-            .map(|doc| {
-                if doc.starts_with("---") {
-                    doc.to_string()
-                } else {
-                    format!("---\n{}", doc)
-                }
-            })
-            .collect();
-
-        info!(
-            count = manifests.len(),
-            version = config.version,
-            "Rendered Cilium manifests"
-        );
-        Ok(manifests)
-    }
+/// Get Cilium version
+pub fn cilium_version() -> &'static str {
+    env!("CILIUM_VERSION")
 }
 
 /// Generate a CiliumClusterwideNetworkPolicy to allow ztunnel/ambient traffic.
@@ -334,18 +297,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
-        let config = CiliumConfig::default();
-        assert_eq!(config.version, env!("CILIUM_VERSION"));
+    fn test_cilium_manifests() {
+        // Only runs if helm is available
+        if let Ok(manifests) = generate_cilium_manifests(Some("docker")) {
+            assert!(!manifests.is_empty());
+            let combined = manifests.join("\n");
+            assert!(combined.contains("l2announcements"));
+        }
     }
 
     #[test]
-    fn test_reconciler_creation() {
-        // Only runs if helm is available
-        if let Ok(reconciler) = CiliumReconciler::new() {
-            assert_eq!(reconciler.version(), env!("CILIUM_VERSION"));
-            assert!(!reconciler.manifests().is_empty());
-        }
+    fn test_cilium_version() {
+        assert_eq!(cilium_version(), env!("CILIUM_VERSION"));
     }
 
     #[test]

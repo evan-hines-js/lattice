@@ -504,7 +504,8 @@ impl Provider for AwsProvider {
             replicas: spec.nodes.control_plane,
             cert_sans,
             post_kubeadm_commands: post_commands,
-            vip: None, // AWS uses ELB
+            vip: None,
+            ssh_authorized_keys: vec![],
         };
 
         // Generate manifests - extract fallible operations first

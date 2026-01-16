@@ -339,7 +339,8 @@ impl Provider for DockerProvider {
             replicas: cluster.spec.nodes.control_plane,
             cert_sans,
             post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap),
-            vip: None, // CAPD uses its own load balancer
+            vip: None,
+            ssh_authorized_keys: vec![],
         };
 
         // Use shared functions for provider-agnostic resources

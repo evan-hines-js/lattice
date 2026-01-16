@@ -69,46 +69,19 @@ Every cluster provisioned by Lattice becomes **fully autonomous**. After pivotin
 
 Workload clusters never accept inbound connections. All communication flows **outbound** via persistent gRPC streams. Works behind NAT, corporate firewalls, and in air-gapped environments.
 
-### Declarative Everything
+### Zero-Trust Service Mesh
 
-Define your entire multi-cluster topology with CRDs:
+Defense-in-depth with **bilateral agreements**. Traffic only flows when both caller and callee explicitly agree:
 
-```yaml
-apiVersion: lattice.dev/v1alpha1
-kind: LatticeCluster
-metadata:
-  name: prod-us-west
-spec:
-  provider:
-    type: aws
-    kubernetes:
-      version: "1.32.0"
-  nodes:
-    controlPlane: 3
-    workers: 10
-  cellRef: management
-```
+| Layer | Technology | Enforcement |
+|-------|------------|-------------|
+| L7 | Istio AuthorizationPolicy | mTLS identity-based (SPIFFE) |
+| L4 | CiliumNetworkPolicy | eBPF kernel-level |
+| Baseline | Default-Deny | Implicit deny-all at both layers |
 
-### Service Mesh Integration
+### GitOps Native
 
-First-class support for **Cilium** and **Istio**. Declare service dependencies and Lattice generates network policies automatically:
-
-```yaml
-apiVersion: lattice.dev/v1alpha1
-kind: LatticeService
-metadata:
-  name: api-gateway
-spec:
-  image: myregistry/api-gateway:v2
-  replicas: 3
-  dependencies:
-    - name: auth-service
-      ports: [8080]
-    - name: user-service
-      ports: [8080]
-  allowedCallers:
-    - ingress-controller
-```
+Built-in Flux integration for declarative cluster and service management. Define your infrastructure in git, and Lattice keeps clusters in sync.
 
 ### FIPS 140-3 Compliance
 
@@ -126,10 +99,11 @@ All cryptographic operations use **FIPS-validated** implementations via AWS-LC. 
                          │  │  • Operator (watch CRDs)        │   │
                          │  │  • gRPC Server (agent streams)  │   │
                          │  │  • Webhook (kubeadm callbacks)  │   │
+                         │  │  • K8s API Proxy                │   │
                          │  └─────────────────────────────────┘   │
-                         │  ┌─────────┐  ┌─────────┐             │
-                         │  │  CAPI   │  │ Cilium  │             │
-                         │  └─────────┘  └─────────┘             │
+                         │  ┌─────────┐  ┌─────────┐ ┌──────┐    │
+                         │  │  CAPI   │  │ Cilium  │ │ Flux │    │
+                         │  └─────────┘  └─────────┘ └──────┘    │
                          └──────────────────┬──────────────────────┘
                                             │
               ┌─────────────────────────────┼─────────────────────────────┐
@@ -137,7 +111,7 @@ All cryptographic operations use **FIPS-validated** implementations via AWS-LC. 
               ▼                             ▼                             ▼
 ┌─────────────────────────┐   ┌─────────────────────────┐   ┌─────────────────────────┐
 │    Workload Cluster     │   │    Workload Cluster     │   │    Workload Cluster     │
-│         (AWS)           │   │         (GCP)           │   │        (Azure)          │
+│         (AWS)           │   │      (Proxmox)          │   │      (OpenStack)        │
 │  ┌───────────────────┐  │   │  ┌───────────────────┐  │   │  ┌───────────────────┐  │
 │  │      Lattice      │  │   │  │      Lattice      │  │   │  │      Lattice      │  │
 │  │  Agent ──────────────────────────────────────────────────────▶ gRPC Stream   │  │
@@ -165,11 +139,11 @@ All cryptographic operations use **FIPS-validated** implementations via AWS-LC. 
 ### Installation
 
 ```bash
-# Install the Lattice CLI
-curl -sSL https://get.lattice.dev | bash
+# Build the CLI and operator
+cargo build --release
 
 # Bootstrap a management cluster (uses kind for local development)
-lattice install --provider docker --name mgmt
+lattice install --config management.yaml
 
 # The installer will:
 # 1. Create a temporary bootstrap cluster
@@ -178,55 +152,489 @@ lattice install --provider docker --name mgmt
 # 4. Clean up the bootstrap cluster
 ```
 
+### Create a Management Cluster Configuration
+
+```yaml
+apiVersion: lattice.io/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: management
+  namespace: lattice-system
+spec:
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap_provider: kubeadm  # or rke2 for FIPS
+    config:
+      docker: {}  # For local development
+  nodes:
+    control_plane: 1
+    workers: 2
+  endpoints:  # Makes this cluster a "cell" that can provision children
+    host: "localhost"
+    grpc_port: 50051
+    bootstrap_port: 8443
+    service:
+      type: LoadBalancer
+    gitops:
+      url: "git@github.com:myorg/clusters.git"
+      branch: main
+      base_path: clusters
+```
+
 ### Create Your First Workload Cluster
 
 ```bash
 # Apply a cluster definition
 kubectl apply -f - <<EOF
-apiVersion: lattice.dev/v1alpha1
+apiVersion: lattice.io/v1alpha1
 kind: LatticeCluster
 metadata:
-  name: dev-cluster
+  name: workload-1
+  namespace: lattice-system
 spec:
   provider:
-    type: docker
     kubernetes:
       version: "1.32.0"
+    config:
+      docker: {}
   nodes:
-    controlPlane: 1
-    workers: 2
-  cellRef: mgmt
+    control_plane: 1
+    workers: 3
 EOF
 
 # Watch the provisioning progress
 kubectl get latticeclusters -w
 
+# Phases: Pending → Provisioning → Pivoting → Ready
 # Once Ready, the cluster is self-managing!
+```
+
+---
+
+## CLI Reference
+
+### Cluster Management
+
+```bash
+# List all clusters
+lattice cluster list
+
+# Show cluster hierarchy as tree
+lattice cluster tree
+
+# Add a new workload cluster
+lattice cluster add workload.yaml --parent management
+
+# Scale worker nodes
+lattice cluster scale my-cluster --workers 5
+
+# Upgrade Kubernetes version
+lattice cluster upgrade my-cluster --k8s-version 1.33.0
+
+# Delete a cluster
+lattice cluster delete my-cluster --yes
+```
+
+### Service Management
+
+```bash
+# Register a service from git
+lattice service register api \
+  --git-url https://github.com/myorg/api-service \
+  --git-path manifests \
+  --branch main \
+  --default-replicas 2
+
+# List registered services
+lattice service list
+
+# Deploy service to a cluster
+lattice placement create api \
+  --cluster workload-1 \
+  --replicas 3 \
+  --env DATABASE_URL=postgres://...
+
+# Scale a deployment
+lattice placement scale api --cluster workload-1 --replicas 5
+```
+
+### GitOps (Flux)
+
+```bash
+# Set Flux version globally
+lattice flux set-version v2.4.0
+
+# Suspend GitOps on a cluster
+lattice flux suspend workload-1
+
+# Resume GitOps
+lattice flux resume workload-1
+```
+
+### Validation
+
+```bash
+# Validate entire repository structure
+lattice validate
+
+# Validate specific file
+lattice validate cluster.yaml
 ```
 
 ---
 
 ## Custom Resource Definitions
 
-| CRD | Description | Status |
-|-----|-------------|--------|
-| `LatticeCluster` | Kubernetes cluster lifecycle | Stable |
-| `LatticeService` | Workload deployment with dependency graph | Beta |
-| `LatticeExternalService` | External service registration | Beta |
-| `LatticeEnvironment` | Environment definitions | Alpha |
-| `LatticeServiceConfig` | Configuration injection | Planned |
+### LatticeCluster
+
+Defines a Kubernetes cluster managed by Lattice:
+
+```yaml
+apiVersion: lattice.io/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: production
+  namespace: lattice-system
+spec:
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap_provider: kubeadm  # or rke2 for FIPS
+      cert_sans:
+        - "api.prod.example.com"
+    config:
+      aws:
+        region: us-east-1
+        vpc_id: vpc-abc123
+        control_plane:
+          instance_type: m5.xlarge
+          root_volume:
+            size: 100
+            type: gp3
+        worker:
+          instance_type: m5.2xlarge
+  nodes:
+    control_plane: 3
+    workers: 10
+  networking:
+    default:
+      cidr: "10.96.0.0/12"
+  environment: production
+  region: us-east-1
+  # endpoints: present only on parent clusters (cells)
+  endpoints:
+    host: "api.lattice.example.com"
+    grpc_port: 50051
+    bootstrap_port: 8443
+    service:
+      type: LoadBalancer
+    gitops:
+      url: "git@github.com:myorg/clusters.git"
+      branch: main
+      base_path: clusters
+```
+
+**Status Fields:**
+- `phase`: Pending → Provisioning → Pivoting → Ready / Failed
+- `ready_control_plane`: Number of ready control plane nodes
+- `ready_workers`: Number of ready worker nodes
+- `pivot_complete`: Whether CAPI resources have been pivoted
+- `bootstrap_complete`: Whether bootstrap webhook was called
+- `endpoint`: Kubernetes API server endpoint
+
+### LatticeService
+
+Defines a workload with bilateral service mesh agreements:
+
+```yaml
+apiVersion: lattice.io/v1alpha1
+kind: LatticeService
+metadata:
+  name: api-gateway
+  namespace: production
+spec:
+  environment: production
+  containers:
+    api:
+      image: myorg/api-gateway:v1.2.3
+      command: ["/app/server"]
+      args: ["--port", "8080"]
+      variables:
+        LOG_LEVEL: info
+        DATABASE_URL: "${resources.db.url}"  # Score-style placeholders
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+      liveness_probe:
+        http_get:
+          path: /healthz
+          port: 8080
+        initial_delay_seconds: 10
+        period_seconds: 30
+      readiness_probe:
+        http_get:
+          path: /ready
+          port: 8080
+        period_seconds: 5
+
+  # Bilateral service agreements
+  resources:
+    # Outbound: This service calls auth-service
+    auth:
+      type: service
+      direction: outbound
+      id: auth-service
+
+    # Inbound: frontend is allowed to call this service
+    frontend-caller:
+      type: service
+      direction: inbound
+      id: frontend
+
+    # External dependency
+    stripe:
+      type: external_service
+      direction: outbound
+      id: stripe-api
+
+    # Database
+    db:
+      type: postgres
+      class: production
+
+  service:
+    ports:
+      http:
+        port: 80
+        target_port: 8080
+      grpc:
+        port: 9090
+        target_port: 9090
+        protocol: TCP
+
+  replicas:
+    min: 2
+    max: 10
+
+  deploy:
+    strategy: canary
+    canary:
+      step_weight: 10
+      max_weight: 50
+      interval: 1m
+      threshold: 5
+```
+
+### LatticeExternalService
+
+Defines external service endpoints:
+
+```yaml
+apiVersion: lattice.io/v1alpha1
+kind: LatticeExternalService
+metadata:
+  name: stripe-api
+  namespace: production
+spec:
+  environment: production
+  endpoints:
+    api: "https://api.stripe.com:443"
+    webhooks: "https://hooks.stripe.com:443"
+  allowed_requesters:
+    - api-gateway
+    - payment-processor
+    - "*"  # Wildcard to allow all (use sparingly)
+  resolution: dns  # or static
+  description: "Stripe payment processing API"
+```
 
 ---
 
 ## Providers
 
-| Provider | Status | Notes |
-|----------|--------|-------|
-| Docker (CAPD) | Stable | Local development and testing |
-| AWS (CAPA) | Beta | EKS and self-managed |
-| GCP (CAPG) | Alpha | GKE and self-managed |
-| Azure (CAPZ) | Alpha | AKS and self-managed |
-| vSphere (CAPV) | Planned | On-premises deployments |
+| Provider | Status | API Version | Notes |
+|----------|--------|-------------|-------|
+| Docker (CAPD) | Stable | v1beta2 | Local development and testing |
+| Proxmox (CAPMOX) | Stable | v1alpha1 | On-premises virtualization with kube-vip HA |
+| AWS (CAPA) | Stable | v1beta2 | Full EKS-like self-managed clusters |
+| OpenStack (CAPO) | Stable | v1beta1 | Private cloud (tested with OVH) |
+| GCP (CAPG) | Planned | - | Google Cloud Platform |
+| Azure (CAPZ) | Planned | - | Microsoft Azure |
+
+### Provider Configuration Examples
+
+#### Docker (Local Development)
+
+```yaml
+spec:
+  provider:
+    config:
+      docker: {}
+```
+
+#### Proxmox (On-Premises)
+
+```yaml
+spec:
+  provider:
+    config:
+      proxmox:
+        source_node: pve1
+        template_id: 9000
+        storage: local-lvm
+        format: raw
+        bridge: vmbr0
+        network_model: virtio
+        cp_sockets: 2
+        cp_cores: 2
+        cp_memory_mib: 8192
+        cp_disk_size_gb: 50
+        worker_sockets: 2
+        worker_cores: 4
+        worker_memory_mib: 16384
+        worker_disk_size_gb: 100
+        ipv4_config:
+          addresses: ["10.0.0.100/24"]
+          gateway: "10.0.0.1"
+        dns_servers: ["8.8.8.8", "8.8.4.4"]
+```
+
+#### AWS
+
+```yaml
+spec:
+  provider:
+    config:
+      aws:
+        region: us-east-1
+        partition: aws  # aws, aws-cn, or aws-us-gov
+        vpc_id: vpc-abc123
+        subnet_ids:
+          - subnet-123
+          - subnet-456
+        load_balancer:
+          scheme: internet-facing
+          type: nlb
+        control_plane:
+          instance_type: m5.xlarge
+          iam_instance_profile: control-plane-profile
+          root_volume:
+            size: 100
+            type: gp3
+            iops: 3000
+            throughput: 125
+            encrypted: true
+        worker:
+          instance_type: m5.2xlarge
+          root_volume:
+            size: 200
+            type: gp3
+        bastion:
+          enabled: true
+          instance_type: t3.micro
+        ssh_key_name: my-ssh-key
+        tags:
+          Environment: production
+```
+
+#### OpenStack
+
+```yaml
+spec:
+  provider:
+    config:
+      openstack:
+        cloud_name: mycloud
+        external_network: public
+        dns_nameservers:
+          - "8.8.8.8"
+        network:
+          id: network-uuid
+        subnet:
+          id: subnet-uuid
+        control_plane:
+          flavor: m1.large
+          image_filter:
+            name: "ubuntu-22.04-kube-v1.32"
+          root_volume:
+            size: 50
+            type: ssd
+        worker:
+          flavor: m1.xlarge
+        bastion:
+          enabled: true
+          flavor: m1.small
+        use_floating_ip: true
+        managed_security_groups: true
+```
+
+---
+
+## Security Model
+
+### Bilateral Service Agreements
+
+Traffic is only allowed when **both sides explicitly agree**:
+
+```yaml
+# api-gateway declares it calls auth-service
+resources:
+  auth:
+    type: service
+    direction: outbound
+    id: auth-service
+
+# auth-service declares api-gateway can call it
+resources:
+  api-gateway-caller:
+    type: service
+    direction: inbound
+    id: api-gateway
+```
+
+This generates:
+- **Istio AuthorizationPolicy**: SPIFFE principal-based rules (`spiffe://cluster/ns/namespace/sa/service`)
+- **CiliumNetworkPolicy**: Label and port-based rules
+
+If either side doesn't agree, traffic is blocked at both L4 and L7.
+
+### Default-Deny Baseline
+
+Both Cilium and Istio enforce default-deny policies:
+
+- **CiliumClusterwideNetworkPolicy**: Implicit deny-all ingress (excludes system namespaces)
+- **Istio AuthorizationPolicy**: Empty spec denies all traffic mesh-wide
+
+System namespaces excluded from default-deny:
+- `kube-system`
+- `cilium-system`
+- `istio-system`
+- `lattice-system`
+- `cert-manager`
+- `flux-system`
+- `capi-*`
+
+### FIPS Compliance
+
+All cryptographic operations use FIPS 140-3 validated implementations:
+
+- **TLS**: rustls with aws-lc-rs backend
+- **Hashing**: SHA-256/384/512 only (no MD5, no SHA-1)
+- **Signatures**: ECDSA P-256/P-384 or RSA 2048+
+
+Use RKE2 bootstrap provider for full FIPS compliance:
+
+```yaml
+spec:
+  provider:
+    kubernetes:
+      bootstrap_provider: rke2
+```
 
 ---
 
@@ -264,121 +672,210 @@ The pivot process transfers cluster ownership from parent to child:
 
 ---
 
-## Service Graph & Network Policies
+## Use Cases
 
-Lattice builds a **dependency graph** from your service declarations and generates least-privilege network policies:
+### 1. Enterprise Multi-Tenant Platform
+
+Deploy isolated workload clusters for different teams or customers:
+
+```
+Management Cluster
+├── Team A Cluster (production)
+├── Team A Cluster (staging)
+├── Team B Cluster (production)
+└── Team B Cluster (staging)
+```
+
+Each cluster is fully self-managing with its own CAPI resources, ensuring team isolation and independent lifecycle management.
+
+### 2. Hybrid Cloud Deployment
+
+Run management in AWS with workload clusters across providers:
+
+```
+AWS Management Cluster
+├── AWS Workload Cluster (us-east-1)
+├── AWS Workload Cluster (eu-west-1)
+├── Proxmox Cluster (on-premises datacenter)
+└── OpenStack Cluster (private cloud)
+```
+
+### 3. Edge Computing
+
+Deploy lightweight clusters at edge locations with central management:
+
+```
+Central Management Cluster (AWS)
+├── Edge Cluster (Store #1)
+├── Edge Cluster (Store #2)
+├── Edge Cluster (Store #3)
+└── ...
+```
+
+Edge clusters operate independently even if connectivity to the parent is lost.
+
+### 4. Disaster Recovery
+
+Self-managing clusters continue operating if the parent fails:
+
+- Parent provisions child cluster
+- Child receives CAPI resources via pivot
+- Parent can be deleted - child continues self-managing
+- Child can scale, upgrade, and manage nodes independently
+
+### 5. Secure Microservices Platform
+
+Deploy services with automatic zero-trust networking:
 
 ```yaml
-# Declare what your service needs
-apiVersion: lattice.dev/v1alpha1
+# Payment Service - only accessible by order-service
+apiVersion: lattice.io/v1alpha1
 kind: LatticeService
 metadata:
-  name: order-service
+  name: payment-service
 spec:
-  dependencies:
-    - name: inventory-db
-      type: external
-      ports: [5432]
-    - name: payment-service
-      ports: [443]
-  allowedCallers:
-    - api-gateway
-    - admin-dashboard
+  resources:
+    order-access:
+      type: service
+      direction: inbound
+      id: order-service
+    stripe:
+      type: external_service
+      direction: outbound
+      id: stripe-api
 ```
 
-Lattice automatically generates:
-- **CiliumNetworkPolicy** or **AuthorizationPolicy** (Istio)
-- Bilateral validation (both caller and callee must agree)
-- Automatic policy updates when dependencies change
+Lattice automatically generates Cilium and Istio policies ensuring payment-service is only reachable by order-service.
+
+### 6. Air-Gapped Environments
+
+Clusters operate independently post-pivot:
+
+1. Bootstrap management cluster with external connectivity
+2. Provision air-gapped workload clusters
+3. Pivot CAPI resources
+4. Disconnect from parent - clusters self-manage
+
+### 7. Home Lab / Media Server
+
+Run services with VPN integration for secure access:
+
+```yaml
+apiVersion: lattice.io/v1alpha1
+kind: LatticeService
+metadata:
+  name: jellyfin
+spec:
+  containers:
+    jellyfin:
+      image: jellyfin/jellyfin:latest
+  resources:
+    nas:
+      type: external_service
+      direction: outbound
+      id: home-nas
+
+---
+apiVersion: lattice.io/v1alpha1
+kind: LatticeExternalService
+metadata:
+  name: home-nas
+spec:
+  endpoints:
+    smb: "tcp://192.168.1.100:445"
+  allowed_requesters:
+    - jellyfin
+  resolution: static
+```
 
 ---
 
-## Configuration
+## GitOps Repository Structure
 
-### Operator Flags
+The CLI operates on a GitOps repository with this structure:
+
+```
+lattice-clusters/
+├── cluster.yaml                 # Root management cluster
+├── .lattice/
+│   └── config.yaml             # Global configuration
+├── registrations/
+│   ├── api-service.yaml        # Service registrations
+│   └── kustomization.yaml
+├── children/
+│   ├── production/
+│   │   ├── cluster.yaml
+│   │   ├── kustomization.yaml
+│   │   ├── placements/
+│   │   │   └── api-service.yaml
+│   │   └── children/           # Nested hierarchy
+│   └── staging/
+│       └── cluster.yaml
+└── docs/
+```
+
+---
+
+## Scripts
+
+### Build VM Template (Proxmox)
 
 ```bash
-lattice operator \
-  --metrics-addr=:8080 \
-  --health-addr=:8081 \
-  --leader-elect=true \
-  --cell-host=lattice.example.com \
-  --cell-port=9443
+export PROXMOX_URL="https://10.0.0.97:8006"
+export PROXMOX_TOKEN="root@pam!lattice"
+export PROXMOX_SECRET="your-secret"
+export PROXMOX_NODE="pve1"
+export KUBERNETES_VERSION="1.32.0"
+
+./scripts/proxmox-build-template.sh
 ```
 
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LATTICE_LOG_LEVEL` | Log verbosity (trace, debug, info, warn, error) | `info` |
-| `LATTICE_METRICS_PORT` | Prometheus metrics port | `8080` |
-| `LATTICE_CELL_HOST` | Cell gRPC endpoint hostname | Required for cells |
-| `LATTICE_TLS_CERT` | Path to TLS certificate | `/etc/lattice/tls/tls.crt` |
-| `LATTICE_TLS_KEY` | Path to TLS private key | `/etc/lattice/tls/tls.key` |
-
----
-
-## Observability
-
-### Metrics
-
-Lattice exposes Prometheus metrics at `/metrics`:
-
-```promql
-# Cluster provisioning duration
-lattice_cluster_provision_duration_seconds{cluster="prod-us-west"}
-
-# Active agent connections
-lattice_agent_connections_active{cell="mgmt"}
-
-# Pivot success rate
-rate(lattice_pivot_total{status="success"}[5m])
-```
-
-### Tracing
-
-OpenTelemetry traces are exported for:
-- Reconciliation loops
-- gRPC agent communication
-- CAPI operations
-- Pivot sequences
-
----
-
-## FIPS Compliance
-
-Lattice uses **aws-lc-rs** with FIPS 140-3 validated cryptography:
-
-- TLS 1.3 with FIPS-approved cipher suites
-- ECDSA P-256/P-384 for certificates
-- AES-256-GCM for encryption at rest
-- SHA-256/SHA-384 for hashing
-
-Build with FIPS mode:
+### Build Docker Image
 
 ```bash
-cargo build --release --features fips
+./scripts/docker-build.sh --tag ghcr.io/myorg/lattice:v1.0.0
+```
+
+### Run E2E Tests
+
+```bash
+./scripts/e2e-test.sh
 ```
 
 ---
 
-## Contributing
+## Development
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+### Build
 
 ```bash
-# Clone the repository
-git clone https://github.com/lattice-dev/lattice.git
-cd lattice
+cargo build --release
+```
 
-# Run tests
+### Test
+
+```bash
+# Unit tests
 cargo test
 
-# Run with coverage
-cargo llvm-cov --html
+# Integration tests
+cargo test --test '*'
 
-# Run E2E tests (requires Docker)
-cargo test --features e2e
+# E2E tests (requires kind)
+./scripts/e2e-test.sh
+```
+
+### Code Quality
+
+```bash
+# Format
+cargo fmt
+
+# Lint
+cargo clippy
+
+# Coverage
+cargo tarpaulin --out Html
 ```
 
 ---
@@ -387,13 +884,18 @@ cargo test --features e2e
 
 - [x] LatticeCluster provisioning and pivot
 - [x] Docker provider (CAPD)
+- [x] Proxmox provider (CAPMOX)
+- [x] AWS provider (CAPA)
+- [x] OpenStack provider (CAPO)
 - [x] Service graph and network policies
 - [x] Cilium integration
-- [ ] AWS provider (CAPA)
-- [ ] Hierarchical cells (nested management)
-- [ ] GitOps integration (Flux)
+- [x] Istio Ambient mode integration
+- [x] GitOps integration (Flux)
+- [x] Bilateral agreement security model
+- [ ] GCP provider (CAPG)
+- [ ] Azure provider (CAPZ)
 - [ ] Web UI dashboard
-- [ ] Multi-tenancy
+- [ ] Multi-tenancy RBAC
 
 ---
 
@@ -401,7 +903,6 @@ cargo test --features e2e
 
 - **GitHub Discussions**: [github.com/lattice-dev/lattice/discussions](https://github.com/lattice-dev/lattice/discussions)
 - **Slack**: [#lattice on Kubernetes Slack](https://kubernetes.slack.com/channels/lattice)
-- **Twitter**: [@lattaborhood](https://twitter.com/latticedev)
 
 ---
 
@@ -412,5 +913,5 @@ Lattice is licensed under the [Apache License 2.0](LICENSE).
 ---
 
 <p align="center">
-  <sub>Built with Rust, powered by Cluster API, secured by Cilium</sub>
+  <sub>Built with Rust, powered by Cluster API, secured by Cilium + Istio</sub>
 </p>

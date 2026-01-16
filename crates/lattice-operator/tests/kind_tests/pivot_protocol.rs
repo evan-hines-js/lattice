@@ -412,7 +412,7 @@ async fn setup_cell_infrastructure() -> Result<
 
     // Create bootstrap state
     let bootstrap_state = Arc::new(BootstrapState::new(
-        DefaultManifestGenerator::new().unwrap(),
+        DefaultManifestGenerator::new(),
         Duration::from_secs(3600),
         ca.clone(),
         "test:latest".to_string(),

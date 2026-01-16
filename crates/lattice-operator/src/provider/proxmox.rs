@@ -167,23 +167,6 @@ impl ProxmoxProvider {
                 });
             }
 
-            // Add cloneSpec for SSH keys and virtual IP interface
-            let mut clone_spec = serde_json::Map::new();
-            if let Some(ref keys) = cfg.ssh_authorized_keys {
-                clone_spec.insert(
-                    "sshAuthorizedKeys".to_string(),
-                    serde_json::json!(keys),
-                );
-            }
-            if let Some(ref iface) = cfg.virtual_ip_network_interface {
-                clone_spec.insert(
-                    "virtualIPNetworkInterface".to_string(),
-                    serde_json::json!(iface),
-                );
-            }
-            if !clone_spec.is_empty() {
-                spec_json["cloneSpec"] = serde_json::Value::Object(clone_spec);
-            }
         }
 
         Ok(
@@ -510,9 +493,10 @@ impl Provider for ProxmoxProvider {
             .clone()
             .unwrap_or_default();
 
+        let proxmox_cfg = Self::get_proxmox_config(cluster);
+
         // Configure kube-vip for management clusters (those with endpoints)
         let vip = cluster.spec.endpoints.as_ref().map(|e| {
-            let proxmox_cfg = Self::get_proxmox_config(cluster);
             VipConfig::new(
                 e.host.clone(),
                 proxmox_cfg.and_then(|c| c.virtual_ip_network_interface.clone()),
@@ -520,11 +504,17 @@ impl Provider for ProxmoxProvider {
             )
         });
 
+        // SSH authorized keys for node access
+        let ssh_authorized_keys = proxmox_cfg
+            .and_then(|c| c.ssh_authorized_keys.clone())
+            .unwrap_or_default();
+
         let cp_config = ControlPlaneConfig {
             replicas: spec.nodes.control_plane,
             cert_sans,
             post_kubeadm_commands: post_commands,
             vip,
+            ssh_authorized_keys,
         };
 
         // Generate manifests - extract fallible operations first
