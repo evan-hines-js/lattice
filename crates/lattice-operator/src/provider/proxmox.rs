@@ -128,13 +128,12 @@ impl ProxmoxProvider {
             .and_then(|c| c.allowed_nodes.clone())
             .unwrap_or_default();
 
-        // Control plane endpoint - use explicit config or fall back to endpoints.host
+        // Control plane endpoint is required in the CRD
         let control_plane_host = proxmox_config
             .and_then(|c| c.control_plane_endpoint.clone())
-            .or_else(|| cluster.spec.endpoints.as_ref().map(|e| e.host.clone()))
             .ok_or_else(|| {
                 Error::validation(
-                    "Proxmox clusters require either spec.provider.config.proxmox.controlPlaneEndpoint or spec.endpoints.host"
+                    "Proxmox clusters require spec.provider.config.proxmox.controlPlaneEndpoint"
                 )
             })?;
 
@@ -820,78 +819,7 @@ mod tests {
         let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("controlPlaneEndpoint") || err.contains("endpoints.host"));
-    }
-
-    #[tokio::test]
-    async fn test_uses_endpoints_host_as_control_plane_fallback() {
-        use crate::crd::{EndpointsSpec, ServiceSpec};
-
-        let provider = ProxmoxProvider::with_namespace("capi-system");
-        let bootstrap = BootstrapInfo::default();
-
-        // Config without control_plane_endpoint
-        let config = ProxmoxConfig {
-            control_plane_endpoint: None,
-            cp_cores: Some(4),
-            cp_memory_mib: Some(8192),
-            cp_disk_size_gb: Some(50),
-            worker_cores: Some(4),
-            worker_memory_mib: Some(8192),
-            worker_disk_size_gb: Some(100),
-            ..Default::default()
-        };
-
-        let cluster = LatticeCluster {
-            metadata: ObjectMeta {
-                name: Some("fallback-test".to_string()),
-                namespace: Some("default".to_string()),
-                ..Default::default()
-            },
-            spec: LatticeClusterSpec {
-                provider: ProviderSpec {
-                    kubernetes: KubernetesSpec {
-                        version: "1.32.0".to_string(),
-                        cert_sans: None,
-                        bootstrap: BootstrapProvider::Kubeadm,
-                    },
-                    config: ProviderConfig::proxmox(config),
-                },
-                nodes: NodeSpec {
-                    control_plane: 1,
-                    workers: 1,
-                },
-                // Provide endpoints.host as fallback
-                endpoints: Some(EndpointsSpec {
-                    host: "10.0.0.200".to_string(),
-                    grpc_port: 50051,
-                    bootstrap_port: 8443,
-                    service: ServiceSpec {
-                        type_: "LoadBalancer".to_string(),
-                    },
-                    gitops: None,
-                }),
-                networking: None,
-                environment: None,
-                region: None,
-                workload: None,
-            },
-            status: None,
-        };
-
-        let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
-        assert!(result.is_ok(), "Should use endpoints.host as fallback");
-
-        let manifests = result.unwrap();
-        let proxmox_cluster = manifests
-            .iter()
-            .find(|m| m.kind == "ProxmoxCluster")
-            .unwrap();
-
-        // Verify the control plane endpoint uses the fallback value
-        let spec = proxmox_cluster.spec.as_ref().unwrap();
-        let endpoint = &spec["controlPlaneEndpoint"];
-        assert_eq!(endpoint["host"], "10.0.0.200");
+        assert!(err.contains("controlPlaneEndpoint"));
     }
 
     #[tokio::test]

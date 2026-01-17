@@ -1,53 +1,50 @@
 //! Provider-configurable end-to-end test for Lattice installation and pivot flow
 //!
-//! This test allows configuring different infrastructure providers for management
-//! and workload clusters independently.
+//! This test validates the full Lattice lifecycle using LatticeCluster CRD files.
+//!
+//! # Design Philosophy
+//!
+//! All cluster configuration is defined in LatticeCluster CRD files. This ensures:
+//! - Complete, self-contained cluster definitions
+//! - Proper handling of secrets via secretRef
+//! - Same CRD can be deployed to any cluster
+//! - Consistent approach regardless of provider
 //!
 //! # Environment Variables
 //!
-//! ## Provider Selection
-//! - LATTICE_MGMT_PROVIDER: Provider for management cluster (aws|openstack|proxmox|docker)
-//! - LATTICE_WORKLOAD_PROVIDER: Provider for workload cluster (aws|openstack|proxmox|docker)
-//! - LATTICE_MGMT_BOOTSTRAP: Bootstrap provider for mgmt (kubeadm|rke2, default: rke2)
-//! - LATTICE_WORKLOAD_BOOTSTRAP: Bootstrap provider for workload (kubeadm|rke2, default: kubeadm)
+//! ## Cluster Configuration (required)
+//! - LATTICE_MGMT_CLUSTER_CONFIG: Path to LatticeCluster YAML for management cluster
+//! - LATTICE_WORKLOAD_CLUSTER_CONFIG: Path to LatticeCluster YAML for workload cluster
+//!
+//! ## Provider Hints (for test behavior, extracted from CRD)
+//! - LATTICE_MGMT_PROVIDER: Provider hint for test phases (docker|aws|openstack|proxmox)
+//! - LATTICE_WORKLOAD_PROVIDER: Provider hint for test phases (docker|aws|openstack|proxmox)
 //!
 //! ## Optional Test Phases
 //! - LATTICE_ENABLE_INDEPENDENCE_TEST=true: Enable Phase 7 (delete mgmt, verify workload self-manages)
-//! - LATTICE_ENABLE_MESH_TEST=true: Enable Phase 8-9 (9-service + 50-100 service mesh tests, run in parallel)
-//!
-//! ## AWS Configuration (when using aws provider)
-//! - AWS_REGION: AWS region (default: us-west-2)
-//! - AWS_SSH_KEY_NAME: EC2 key pair name (optional)
-//! - AWS_VPC_ID: VPC ID (optional, uses default VPC if not set)
-//! - AWS_AMI_ID: Custom AMI ID (optional)
-//!
-//! ## OpenStack Configuration (when using openstack provider)
-//! - OS_CLOUD_NAME: Cloud name from clouds.yaml (default: openstack)
-//! - OS_EXTERNAL_NETWORK: External network for floating IPs (default: Ext-Net)
-//! - OS_IMAGE_NAME: Image name (default: Ubuntu 22.04)
-//! - OS_CP_FLAVOR: Control plane flavor (default: m1.large)
-//! - OS_WORKER_FLAVOR: Worker flavor (default: m1.large)
-//! - OS_SSH_KEY_NAME: SSH key name (optional)
-//!
-//! ## Proxmox Configuration (when using proxmox provider)
-//! - PROXMOX_URL: Proxmox API URL
-//! - PROXMOX_TOKEN_ID: API token ID
-//! - PROXMOX_TOKEN_SECRET: API token secret
-//! - PROXMOX_NODE: Target node name
-//! - PROXMOX_TEMPLATE_ID: VM template ID
-//! - PROXMOX_STORAGE: Storage name (default: local-lvm)
+//! - LATTICE_ENABLE_MESH_TEST=true: Enable Phase 8-9 (service mesh validation tests)
 //!
 //! # Running
 //!
 //! ```bash
-//! # Docker mgmt → Docker workload
-//! LATTICE_MGMT_PROVIDER=docker LATTICE_WORKLOAD_PROVIDER=docker \
-//!   cargo test --features provider-e2e --test kind pivot_e2e -- --nocapture
+//! # Docker clusters
+//! LATTICE_MGMT_CLUSTER_CONFIG=tests/e2e/fixtures/docker-mgmt.yaml \
+//!   LATTICE_WORKLOAD_CLUSTER_CONFIG=tests/e2e/fixtures/docker-workload.yaml \
+//!   LATTICE_MGMT_PROVIDER=docker \
+//!   LATTICE_WORKLOAD_PROVIDER=docker \
+//!   cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
 //!
-//! # Docker mgmt → AWS workload
-//! LATTICE_MGMT_PROVIDER=docker LATTICE_WORKLOAD_PROVIDER=aws \
-//!   cargo test --features provider-e2e --test kind pivot_e2e -- --nocapture
+//! # Proxmox clusters
+//! LATTICE_MGMT_CLUSTER_CONFIG=./clusters/proxmox-mgmt.yaml \
+//!   LATTICE_WORKLOAD_CLUSTER_CONFIG=./clusters/proxmox-workload.yaml \
+//!   LATTICE_MGMT_PROVIDER=proxmox \
+//!   LATTICE_WORKLOAD_PROVIDER=proxmox \
+//!   cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
 //! ```
+//!
+//! # Example CRD Files
+//!
+//! See `tests/e2e/fixtures/` for example LatticeCluster CRD files for each provider.
 
 #![cfg(feature = "provider-e2e")]
 
@@ -68,7 +65,7 @@ use super::helpers::{
     verify_control_plane_taints, watch_cluster_phases, watch_worker_scaling,
 };
 use super::mesh_tests::{mesh_test_enabled, run_mesh_test, run_random_mesh_test};
-use super::providers::{generate_cluster_config, InfraProvider};
+use super::providers::InfraProvider;
 
 // =============================================================================
 // Test Configuration
@@ -176,6 +173,47 @@ async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
         .map_err(|e| format!("Failed to create kube config: {}", e))?;
 
     Client::try_from(config).map_err(|e| format!("Failed to create client: {}", e))
+}
+
+/// Load cluster configuration from a CRD file.
+///
+/// All cluster configuration is defined in LatticeCluster CRD files. This ensures:
+/// - Complete, self-contained cluster definitions
+/// - Proper handling of secrets via secretRef
+/// - Same CRD can be deployed to any cluster
+/// - Consistent approach regardless of provider
+///
+/// # Arguments
+/// * `env_var` - Environment variable name containing path to the CRD file
+///
+/// # Returns
+/// Tuple of (config_path, config_content)
+fn load_cluster_config(env_var: &str) -> Result<(PathBuf, String), String> {
+    let config_path = std::env::var(env_var).map_err(|_| {
+        format!(
+            "No cluster config provided. Set {} to a LatticeCluster YAML file.\n\
+             Example CRD files are in tests/e2e/fixtures/",
+            env_var
+        )
+    })?;
+
+    let path = PathBuf::from(&config_path);
+    if !path.exists() {
+        return Err(format!(
+            "Cluster config file not found: {} (specified via {})",
+            config_path, env_var
+        ));
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read cluster config {}: {}", config_path, e))?;
+
+    // Validate the YAML parses as a LatticeCluster
+    let _: LatticeCluster = serde_yaml::from_str(&content)
+        .map_err(|e| format!("Invalid LatticeCluster YAML in {}: {}", config_path, e))?;
+
+    println!("  Loaded cluster config from: {}", config_path);
+    Ok((path, content))
 }
 
 fn get_management_kubeconfig(provider: InfraProvider) -> Result<String, String> {
@@ -331,17 +369,9 @@ async fn run_provider_e2e(
         mgmt_provider, mgmt_bootstrap
     );
 
-    let cluster_config = generate_cluster_config(
-        MGMT_CLUSTER_NAME,
-        mgmt_provider,
-        mgmt_bootstrap.clone(),
-        true,
-    );
+    // Load cluster config from CRD file
+    let (config_path, cluster_config) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG")?;
     println!("  Cluster config:\n{}", cluster_config);
-
-    let config_path = PathBuf::from(format!("/tmp/{}-cluster-config.yaml", MGMT_CLUSTER_NAME));
-    std::fs::write(&config_path, &cluster_config)
-        .map_err(|e| format!("Failed to write cluster config: {}", e))?;
 
     let registry_credentials = load_registry_credentials();
     if registry_credentials.is_some() {
@@ -426,12 +456,10 @@ async fn run_provider_e2e(
         workload_provider, workload_bootstrap
     );
 
-    let workload_config = generate_cluster_config(
-        WORKLOAD_CLUSTER_NAME,
-        workload_provider,
-        workload_bootstrap.clone(),
-        false,
-    );
+    // Load workload cluster config from CRD file
+    let (_workload_config_path, workload_config) =
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG")?;
+    println!("  Workload cluster config:\n{}", workload_config);
 
     let workload_cluster: LatticeCluster = serde_yaml::from_str(&workload_config)
         .map_err(|e| format!("Failed to parse workload cluster config: {}", e))?;
