@@ -339,7 +339,11 @@ impl LatticeRepo {
     /// List placements for a specific cluster
     pub fn list_placements(&self, cluster_name: &str) -> Result<Vec<PlacementInfo>> {
         let cluster = self.get_cluster(cluster_name)?;
-        let placements_dir = cluster.path.parent().unwrap().join("placements");
+        let placements_dir = cluster
+            .path
+            .parent()
+            .ok_or_else(|| Error::validation("invalid cluster path"))?
+            .join("placements");
 
         if !placements_dir.exists() {
             return Ok(Vec::new());

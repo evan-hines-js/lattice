@@ -1465,7 +1465,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Ensure CAPI is installed before provisioning
             info!("ensuring CAPI is installed for provider");
-            let capi_config = CapiProviderConfig::new(cluster.spec.provider.provider_type());
+            let capi_config = CapiProviderConfig::new(cluster.spec.provider.provider_type())?;
             ensure_capi_installed(ctx.capi_installer.as_ref(), &capi_config).await?;
 
             // Generate and apply CAPI manifests, then transition to Provisioning

@@ -1,11 +1,13 @@
 //! Resource Provisioner Interface
 //!
 //! Defines how resource dependencies are resolved to template outputs.
-//! Each resource type (service, external-service, postgres, etc.) has a
-//! provisioner that knows how to resolve `${resources.NAME.*}` placeholders.
+//! Each resource type (service, external-service) has a provisioner that
+//! knows how to resolve `${resources.NAME.*}` placeholders.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use tracing::warn;
 
 use crate::crd::{LatticeServiceSpec, ResourceSpec, ResourceType};
 use crate::graph::ServiceGraph;
@@ -215,6 +217,7 @@ impl ProvisionerRegistry {
     /// Resolve all resources from a service spec
     ///
     /// Returns a map of resource name -> outputs for use in template rendering.
+    /// Emits a warning for any resource types that don't have a registered provisioner.
     pub fn resolve_all(
         &self,
         spec: &LatticeServiceSpec,
@@ -226,8 +229,13 @@ impl ProvisionerRegistry {
             if let Some(provisioner) = self.get(&resource.type_) {
                 let resource_outputs = provisioner.resolve(name, resource, ctx)?;
                 outputs.insert(name.clone(), resource_outputs);
+            } else {
+                warn!(
+                    resource_name = %name,
+                    resource_type = ?resource.type_,
+                    "No provisioner registered for resource type; resource outputs will be unavailable"
+                );
             }
-            // Skip unknown resource types - they may be handled externally
         }
 
         Ok(outputs)

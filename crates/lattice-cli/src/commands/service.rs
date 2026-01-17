@@ -68,7 +68,11 @@ fn register_service(repo_path: &Path, args: RegisterArgs) -> Result<()> {
 
     let registrations_dir = if let Some(ref at) = args.at {
         let cluster = repo.get_cluster(at)?;
-        cluster.path.parent().unwrap().join("registrations")
+        cluster
+            .path
+            .parent()
+            .ok_or_else(|| crate::Error::validation("invalid cluster path"))?
+            .join("registrations")
     } else {
         repo.root().join("registrations")
     };
@@ -121,7 +125,10 @@ fn remove_service(repo_path: &Path, name: &str) -> Result<()> {
 
     std::fs::remove_file(&reg.path)?;
 
-    let registrations_dir = reg.path.parent().unwrap();
+    let registrations_dir = reg
+        .path
+        .parent()
+        .ok_or_else(|| crate::Error::validation("invalid registration path"))?;
     remove_from_kustomization(
         &registrations_dir.join("kustomization.yaml"),
         &format!("{name}.yaml"),

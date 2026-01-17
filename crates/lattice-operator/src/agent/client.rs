@@ -613,7 +613,8 @@ impl AgentClient {
 
         info!(infrastructure = %provider_str, "Installing CAPI providers");
 
-        let config = CapiProviderConfig::new(infrastructure);
+        let config = CapiProviderConfig::new(infrastructure)
+            .map_err(|e| std::io::Error::other(format!("Failed to create CAPI config: {}", e)))?;
         ensure_capi_installed(&ClusterctlInstaller::new(), &config)
             .await
             .map_err(|e| std::io::Error::other(format!("CAPI installation failed: {}", e)))?;

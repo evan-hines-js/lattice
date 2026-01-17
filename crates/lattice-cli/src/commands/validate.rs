@@ -236,7 +236,9 @@ fn validate_kustomizations(repo_path: &Path, errors: &mut Vec<String>) -> Result
         .filter(|e| e.file_name() == "kustomization.yaml")
     {
         let path = entry.path();
-        let dir = path.parent().unwrap();
+        let Some(dir) = path.parent() else {
+            continue;
+        };
 
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {

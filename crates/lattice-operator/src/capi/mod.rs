@@ -113,19 +113,18 @@ pub struct InfraProviderInfo {
 impl InfraProviderInfo {
     /// Get provider info for a given infrastructure type
     ///
-    /// # Panics
-    /// Panics if called with an unsupported provider type (OpenStack, AWS, GCP, Azure).
-    /// These should be caught earlier in validation.
-    pub fn for_provider(provider: ProviderType, capi_version: &str) -> Self {
+    /// # Errors
+    /// Returns an error if called with an unsupported provider type (OpenStack, AWS, GCP, Azure).
+    pub fn for_provider(provider: ProviderType, capi_version: &str) -> Result<Self, Error> {
         match provider {
-            ProviderType::Docker => Self {
+            ProviderType::Docker => Ok(Self {
                 name: "docker",
                 version: capi_version.to_string(), // CAPD is part of CAPI
                 credentials_secret: None,
                 credentials_env_map: &[],
                 extra_init_args: &[],
-            },
-            ProviderType::Proxmox => Self {
+            }),
+            ProviderType::Proxmox => Ok(Self {
                 name: "proxmox",
                 version: env!("CAPMOX_VERSION").to_string(),
                 credentials_secret: Some(("capmox-system", "proxmox-credentials")),
@@ -135,9 +134,12 @@ impl InfraProviderInfo {
                     ("secret", "PROXMOX_SECRET"),
                 ],
                 extra_init_args: &["--ipam", "in-cluster"], // CAPMOX requires IPAM provider
-            },
+            }),
             ProviderType::OpenStack | ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => {
-                panic!("Provider {:?} is not yet implemented", provider)
+                Err(Error::capi_installation(format!(
+                    "Provider {:?} is not yet implemented",
+                    provider
+                )))
             }
         }
     }
@@ -158,47 +160,55 @@ pub struct CapiProviderConfig {
 
 impl CapiProviderConfig {
     /// Create a new CAPI provider configuration
-    pub fn new(infrastructure: ProviderType) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if the provider type is not yet implemented.
+    pub fn new(infrastructure: ProviderType) -> Result<Self, Error> {
         let capi_version = env!("CAPI_VERSION").to_string();
-        let infra_info = InfraProviderInfo::for_provider(infrastructure, &capi_version);
+        let infra_info = InfraProviderInfo::for_provider(infrastructure, &capi_version)?;
 
-        Self {
+        Ok(Self {
             infrastructure,
             capi_version,
             rke2_version: env!("RKE2_VERSION").to_string(),
             infra_info,
-        }
+        })
     }
 
     /// Create config with explicit versions (for testing)
     ///
-    /// # Panics
-    /// Panics if called with an unsupported provider type.
+    /// # Errors
+    /// Returns an error if the provider type is not yet implemented.
     pub fn with_versions(
         infrastructure: ProviderType,
         capi_version: String,
         rke2_version: String,
-    ) -> Self {
+    ) -> Result<Self, Error> {
+        let name = match infrastructure {
+            ProviderType::Docker => "docker",
+            ProviderType::Proxmox => "proxmox",
+            ProviderType::OpenStack | ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => {
+                return Err(Error::capi_installation(format!(
+                    "Provider {:?} is not yet implemented",
+                    infrastructure
+                )));
+            }
+        };
+
         let infra_info = InfraProviderInfo {
-            name: match infrastructure {
-                ProviderType::Docker => "docker",
-                ProviderType::Proxmox => "proxmox",
-                ProviderType::OpenStack | ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => {
-                    panic!("Provider {:?} is not yet implemented", infrastructure)
-                }
-            },
+            name,
             version: capi_version.clone(),
             credentials_secret: None,
             credentials_env_map: &[],
             extra_init_args: &[],
         };
 
-        Self {
+        Ok(Self {
             infrastructure,
             capi_version,
             rke2_version,
             infra_info,
-        }
+        })
     }
 
     /// Get the list of desired providers based on this config
@@ -907,7 +917,8 @@ mod tests {
             ProviderType::Docker,
             "1.12.1".to_string(),
             "0.11.0".to_string(),
-        );
+        )
+        .expect("Docker provider should be supported");
         let providers = config.desired_providers();
 
         // Should have 6 providers: core, kubeadm bootstrap, kubeadm cp, rke2 bootstrap, rke2 cp, docker infra
@@ -1031,7 +1042,8 @@ mod tests {
                 provider,
                 "1.12.1".to_string(),
                 "0.11.0".to_string(),
-            );
+            )
+            .expect("supported provider should succeed");
             let providers = config.desired_providers();
             assert!(
                 providers
@@ -1047,7 +1059,8 @@ mod tests {
         let mut installer = MockCapiInstaller::new();
         installer.expect_ensure().returning(|_| Ok(()));
 
-        let config = CapiProviderConfig::new(ProviderType::Docker);
+        let config =
+            CapiProviderConfig::new(ProviderType::Docker).expect("Docker provider should work");
         let result = ensure_capi_installed(&installer, &config).await;
         assert!(result.is_ok());
     }
@@ -1059,7 +1072,8 @@ mod tests {
             .expect_ensure()
             .returning(|_| Err(Error::capi_installation("test error".to_string())));
 
-        let config = CapiProviderConfig::new(ProviderType::Docker);
+        let config =
+            CapiProviderConfig::new(ProviderType::Docker).expect("Docker provider should work");
         let result = ensure_capi_installed(&installer, &config).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("test error"));
