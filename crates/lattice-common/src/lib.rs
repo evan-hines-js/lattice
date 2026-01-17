@@ -2,6 +2,7 @@
 
 #![deny(missing_docs)]
 
+pub mod clusterctl;
 pub mod crd;
 pub mod error;
 pub mod fips;

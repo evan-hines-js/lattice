@@ -13,6 +13,7 @@ use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams, Patch, PatchPa
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
+use lattice_common::clusterctl::{execute_move, ClusterctlMoveConfig};
 use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(test)]
@@ -88,6 +89,17 @@ pub trait KubeClient: Send + Sync {
 
     /// Check if the MutatingWebhookConfiguration for LatticeService deployments exists
     async fn is_webhook_config_ready(&self) -> Result<bool, Error>;
+
+    /// Copy a secret from one namespace to another
+    ///
+    /// If the secret already exists in the target namespace, this is a no-op.
+    /// Used to copy provider credentials to each cluster's CAPI namespace.
+    async fn copy_secret_to_namespace(
+        &self,
+        name: &str,
+        source_namespace: &str,
+        target_namespace: &str,
+    ) -> Result<(), Error>;
 }
 
 /// Trait abstracting CAPI resource operations
@@ -340,6 +352,72 @@ impl KubeClient for KubeClientImpl {
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn copy_secret_to_namespace(
+        &self,
+        name: &str,
+        source_namespace: &str,
+        target_namespace: &str,
+    ) -> Result<(), Error> {
+        use k8s_openapi::api::core::v1::Secret;
+
+        let target_api: Api<Secret> = Api::namespaced(self.client.clone(), target_namespace);
+
+        // Check if secret already exists in target namespace
+        match target_api.get(name).await {
+            Ok(_) => {
+                debug!(
+                    secret = %name,
+                    source = %source_namespace,
+                    target = %target_namespace,
+                    "secret already exists in target namespace"
+                );
+                return Ok(());
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                // Secret doesn't exist, will copy it
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        // Get the source secret
+        let source_secret = self
+            .get_secret(name, source_namespace)
+            .await?
+            .ok_or_else(|| {
+                Error::Bootstrap(format!(
+                    "source secret {}/{} not found",
+                    source_namespace, name
+                ))
+            })?;
+
+        // Create a copy in the target namespace (strip server-managed fields)
+        let target_secret = Secret {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(target_namespace.to_string()),
+                labels: source_secret.metadata.labels.clone(),
+                annotations: source_secret.metadata.annotations.clone(),
+                ..Default::default()
+            },
+            type_: source_secret.type_.clone(),
+            data: source_secret.data.clone(),
+            string_data: source_secret.string_data.clone(),
+            immutable: source_secret.immutable,
+        };
+
+        info!(
+            secret = %name,
+            source = %source_namespace,
+            target = %target_namespace,
+            "copying secret to target namespace"
+        );
+        target_api
+            .create(&PostParams::default(), &target_secret)
+            .await?;
+
+        Ok(())
     }
 
     async fn ensure_cell_service(
@@ -1369,6 +1447,15 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Ensure the namespace exists
             ctx.kube.ensure_namespace(&capi_namespace).await?;
 
+            // Copy provider credentials to cluster namespace
+            // This avoids race conditions when multiple clusters share credentials
+            let provider = create_provider(cluster.spec.provider.provider_type(), &capi_namespace)?;
+            for (secret_name, source_namespace) in provider.required_secrets(&cluster) {
+                ctx.kube
+                    .copy_secret_to_namespace(&secret_name, &source_namespace, &capi_namespace)
+                    .await?;
+            }
+
             // Get the appropriate provider based on cluster spec
             let manifests = generate_capi_manifests(&cluster, &ctx).await?;
 
@@ -2129,32 +2216,21 @@ impl PivotOperations for PivotOperationsImpl {
             .await
             .map_err(|e| Error::pivot(format!("failed to write kubeconfig: {}", e)))?;
 
-        // Execute clusterctl move
-        // We use per-cluster namespaces (capi-{cluster_name}) so no filter needed
-        let output = tokio::process::Command::new("clusterctl")
-            .args([
-                "move",
-                "--to-kubeconfig",
-                &kubeconfig_path,
-                "--namespace",
-                namespace,
-            ])
-            .output()
-            .await
-            .map_err(|e| Error::pivot(format!("failed to execute clusterctl: {}", e)))?;
+        // Execute clusterctl move with retry and automatic unpause
+        // No source kubeconfig - uses default context (parent cluster)
+        let result = execute_move(
+            None, // No source kubeconfig, uses default context
+            std::path::Path::new(&kubeconfig_path),
+            namespace,
+            cluster_name,
+            &ClusterctlMoveConfig::default(),
+        )
+        .await;
 
         // Clean up kubeconfig
         let _ = tokio::fs::remove_file(&kubeconfig_path).await;
 
-        if output.status.success() {
-            info!(cluster = %cluster_name, "clusterctl move completed successfully");
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            error!(cluster = %cluster_name, stderr = %stderr, stdout = %stdout, "clusterctl move failed");
-            Err(Error::pivot(format!("clusterctl move failed: {}", stderr)))
-        }
+        result.map_err(|e| Error::pivot(e.to_string()))
     }
 }
 

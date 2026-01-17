@@ -42,6 +42,7 @@ async fn integration_bootstrap_http_full_flow() {
         "test:latest".to_string(),
         None,
         None,
+        None,
     ));
 
     // Register a cluster
@@ -120,6 +121,7 @@ async fn integration_bootstrap_token_replay_blocked() {
         "test:latest".to_string(),
         None,
         None,
+        None,
     ));
 
     let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"replay-test"}}"#.to_string();
@@ -175,6 +177,7 @@ async fn integration_full_stack_bootstrap_to_ready() {
         Duration::from_secs(3600),
         ca.clone(),
         "test:latest".to_string(),
+        None,
         None,
         None,
     ));

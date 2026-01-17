@@ -257,6 +257,37 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
     manifests
 }
 
+/// CAPMOX namespace where credentials Secret is stored
+pub const CAPMOX_NAMESPACE: &str = "capmox-system";
+/// CAPMOX Secret name containing Proxmox API credentials
+pub const CAPMOX_SECRET_NAME: &str = "capmox-manager-credentials";
+
+/// Generate CAPMOX credentials manifests (namespace + secret)
+///
+/// Used by both CLI (for CRS) and webhook (for bootstrap response) to ensure
+/// consistent credential propagation through the cluster hierarchy.
+pub fn capmox_credentials_manifests(url: &str, token: &str, secret: &str) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {CAPMOX_NAMESPACE}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {CAPMOX_SECRET_NAME}
+  namespace: {CAPMOX_NAMESPACE}
+  labels:
+    platform.ionos.com/secret-type: proxmox-credentials
+type: Opaque
+stringData:
+  url: "{url}"
+  token: "{token}"
+  secret: "{secret}""#
+    )
+}
+
 /// Default manifest generator that creates CNI and operator manifests
 ///
 /// Generates Cilium manifests on-demand based on provider, then adds operator deployment.
@@ -565,6 +596,8 @@ pub struct BootstrapState<G: ManifestGenerator = DefaultManifestGenerator> {
     ca: Arc<CertificateAuthority>,
     /// Kubernetes client for updating CRD status (None in tests)
     kube_client: Option<Client>,
+    /// CAPMOX credentials (url, token, secret) for propagating to child clusters
+    capmox_credentials: Option<(String, String, String)>,
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
@@ -576,6 +609,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         image: String,
         registry_credentials: Option<String>,
         kube_client: Option<Client>,
+        capmox_credentials: Option<(String, String, String)>,
     ) -> Self {
         Self {
             clusters: DashMap::new(),
@@ -585,6 +619,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             token_ttl,
             ca,
             kube_client,
+            capmox_credentials,
         }
     }
 
@@ -774,6 +809,18 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             )
         }));
 
+        // Add CAPMOX credentials if provider is Proxmox and credentials are available
+        if info.provider.to_lowercase() == "proxmox" {
+            if let Some((url, token, secret)) = &self.capmox_credentials {
+                manifests.push(capmox_credentials_manifests(url, token, secret));
+            } else {
+                warn!(
+                    cluster_id = %info.cluster_id,
+                    "Proxmox provider requested but no CAPMOX credentials available"
+                );
+            }
+        }
+
         BootstrapResponse {
             cluster_id: info.cluster_id.clone(),
             cell_endpoint: info.cell_endpoint.clone(),
@@ -946,6 +993,7 @@ mod tests {
             "test:latest".to_string(),
             None,
             None, // No kube client for tests
+            None, // No CAPMOX credentials for tests
         )
     }
 
@@ -957,6 +1005,7 @@ mod tests {
             "test:latest".to_string(),
             None,
             None, // No kube client for tests
+            None, // No CAPMOX credentials for tests
         )
     }
 
@@ -1976,6 +2025,7 @@ mod tests {
             "test:latest".to_string(),
             None,
             None,
+            None, // No CAPMOX credentials for tests
         );
 
         // Register cluster with kubeadm bootstrap
@@ -2022,6 +2072,7 @@ mod tests {
             "test:latest".to_string(),
             None,
             None,
+            None, // No CAPMOX credentials for tests
         );
 
         // Register cluster with RKE2 bootstrap

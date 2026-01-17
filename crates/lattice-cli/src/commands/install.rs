@@ -15,10 +15,12 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
+use lattice_common::clusterctl::{execute_move, ClusterctlMoveConfig};
 use lattice_operator::bootstrap::{
-    generate_all_manifests, DefaultManifestGenerator, ManifestConfig, ManifestGenerator,
+    capmox_credentials_manifests, generate_all_manifests, DefaultManifestGenerator, ManifestConfig,
+    ManifestGenerator,
 };
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 use lattice_operator::fips;
@@ -244,8 +246,7 @@ impl Installer {
         // The operator reads these during CAPI installation
         if self.provider() == ProviderType::Proxmox {
             info!("[Phase 1.5] Creating Proxmox credentials...");
-            self.create_capmox_credentials(Some(&self.bootstrap_kubeconfig_path()))
-                .await?;
+            self.create_capmox_credentials_on_bootstrap().await?;
         }
 
         info!("[Phase 2] Deploying Lattice operator...");
@@ -534,8 +535,53 @@ data:
             operator_data = operator_data_keys.trim_end()
         );
 
+        // Build CRS resources list - always include cilium and operator
+        let mut crs_resources = String::from(
+            r#"    - kind: ConfigMap
+      name: cilium-cni
+    - kind: ConfigMap
+      name: lattice-operator"#,
+        );
+
+        // Add CAPMOX credentials secret if Proxmox provider
+        // CRS installs credentials BEFORE pivot so the target cluster has them.
+        // clusterctl move will also try to copy them (since ProxmoxCluster refs them),
+        // but our move retry logic handles "already exists" gracefully.
+        let capmox_secret = if self.provider() == ProviderType::Proxmox {
+            let (url, token, secret) = Self::get_proxmox_credentials()?;
+
+            crs_resources.push_str(
+                r#"
+    - kind: Secret
+      name: capmox-credentials"#,
+            );
+
+            let capmox_manifests = capmox_credentials_manifests(&url, &token, &secret);
+
+            Some(format!(
+                r#"apiVersion: v1
+kind: Secret
+metadata:
+  name: capmox-credentials
+  namespace: {namespace}
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  capmox.yaml: |
+{capmox_data}
+"#,
+                namespace = namespace,
+                capmox_data = capmox_manifests
+                    .lines()
+                    .map(|l| format!("    {}", l))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ))
+        } else {
+            None
+        };
+
         let crs = format!(
-            r#"apiVersion: addons.cluster.x-k8s.io/v1beta1
+            r#"apiVersion: addons.cluster.x-k8s.io/v1beta2
 kind: ClusterResourceSet
 metadata:
   name: {cluster_name}-bootstrap
@@ -546,13 +592,11 @@ spec:
     matchLabels:
       cluster.x-k8s.io/cluster-name: {cluster_name}
   resources:
-    - kind: ConfigMap
-      name: cilium-cni
-    - kind: ConfigMap
-      name: lattice-operator
+{crs_resources}
 "#,
             namespace = namespace,
-            cluster_name = self.cluster_name()
+            cluster_name = self.cluster_name(),
+            crs_resources = crs_resources
         );
 
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
@@ -568,6 +612,10 @@ spec:
             .await?;
         self.kubectl_apply(&operator_configmap, Some(&bootstrap_kubeconfig))
             .await?;
+        if let Some(ref secret) = capmox_secret {
+            self.kubectl_apply(secret, Some(&bootstrap_kubeconfig))
+                .await?;
+        }
         self.kubectl_apply_with_retry(&crs, Some(&bootstrap_kubeconfig), Duration::from_secs(120))
             .await?;
 
@@ -725,7 +773,7 @@ spec:
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
 
-        // Wait for nodes to be ready
+        // Wait for nodes to be ready (requires CNI to be working)
         self.run_command_with_kubeconfig(
             "kubectl",
             &[
@@ -765,12 +813,6 @@ spec:
         )
         .await?;
 
-        // Create provider-specific credentials if needed
-        if self.provider() == ProviderType::Proxmox {
-            self.create_capmox_credentials(Some(&kubeconfig_path))
-                .await?;
-        }
-
         // Wait for Lattice operator
         self.run_command_with_kubeconfig(
             "kubectl",
@@ -797,14 +839,8 @@ spec:
         Ok(())
     }
 
-    /// Create CAPMOX credentials secret for Proxmox provider
-    ///
-    /// When kubeconfig is None, applies to current context (bootstrap cluster).
-    /// When kubeconfig is Some, applies to the specified cluster (management cluster).
-    async fn create_capmox_credentials(&self, kubeconfig: Option<&str>) -> Result<()> {
-        let target = kubeconfig.map_or("bootstrap", |_| "management");
-        info!("Creating CAPMOX credentials on {} cluster...", target);
-
+    /// Get Proxmox credentials from environment variables
+    fn get_proxmox_credentials() -> Result<(String, String, String)> {
         let url = std::env::var("PROXMOX_URL").map_err(|_| {
             Error::validation("PROXMOX_URL environment variable required for Proxmox provider")
         })?;
@@ -814,38 +850,19 @@ spec:
         let secret = std::env::var("PROXMOX_SECRET").map_err(|_| {
             Error::validation("PROXMOX_SECRET environment variable required for Proxmox provider")
         })?;
+        Ok((url, token, secret))
+    }
 
+    /// Create CAPMOX credentials on bootstrap cluster
+    async fn create_capmox_credentials_on_bootstrap(&self) -> Result<()> {
+        let (url, token, secret) = Self::get_proxmox_credentials()?;
         info!("  PROXMOX_URL: {}", url);
-        info!("  PROXMOX_TOKEN: {}", token);
 
-        let ns_manifest = r#"apiVersion: v1
-kind: Namespace
-metadata:
-  name: capmox-system"#;
+        let manifests = capmox_credentials_manifests(&url, &token, &secret);
+        let kubeconfig = self.bootstrap_kubeconfig_path();
 
-        self.kubectl_apply_with_retry(ns_manifest, kubeconfig, Duration::from_secs(30))
-            .await?;
-
-        let secret_manifest = format!(
-            r#"apiVersion: v1
-kind: Secret
-metadata:
-  name: capmox-manager-credentials
-  namespace: capmox-system
-  labels:
-    platform.ionos.com/secret-type: proxmox-credentials
-type: Opaque
-stringData:
-  url: "{url}"
-  token: "{token}"
-  secret: "{secret}""#
-        );
-
-        self.kubectl_apply_with_retry(&secret_manifest, kubeconfig, Duration::from_secs(30))
-            .await?;
-
-        info!("CAPMOX credentials created on {} cluster", target);
-        Ok(())
+        self.kubectl_apply_with_retry(&manifests, Some(&kubeconfig), Duration::from_secs(30))
+            .await
     }
 
     async fn pivot_capi_resources(&self) -> Result<()> {
@@ -918,48 +935,21 @@ stringData:
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
 
-        // Run clusterctl move with retries
-        // Must specify both source (--kubeconfig) and destination (--to-kubeconfig)
+        // Run clusterctl move with retries and automatic unpause on failure
         info!("Running clusterctl move from bootstrap to management cluster...");
-        let mut last_error = None;
-        for attempt in 1..=5 {
-            let result = Command::new("clusterctl")
-                .args([
-                    "move",
-                    "--kubeconfig",
-                    &bootstrap_kubeconfig,
-                    "--to-kubeconfig",
-                    &kubeconfig_path,
-                    "--namespace",
-                    &namespace,
-                ])
-                .output()
-                .await?;
+        let cluster_name = self.cluster_name();
+        let source_path = std::path::Path::new(&bootstrap_kubeconfig);
+        let target_path = std::path::Path::new(&kubeconfig_path);
 
-            if result.status.success() {
-                info!("clusterctl move completed successfully");
-                return Ok(());
-            }
-
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            last_error = Some(stderr.to_string());
-
-            if attempt < 5 {
-                let delay = Duration::from_secs(10 * attempt as u64);
-                warn!(
-                    "clusterctl move failed (attempt {}/5), retrying in {:?}: {}",
-                    attempt,
-                    delay,
-                    stderr.trim()
-                );
-                tokio::time::sleep(delay).await;
-            }
-        }
-
-        Err(Error::command_failed(format!(
-            "clusterctl move failed after 5 attempts: {}",
-            last_error.unwrap_or_default()
-        )))
+        execute_move(
+            Some(source_path),
+            target_path,
+            &namespace,
+            &cluster_name,
+            &ClusterctlMoveConfig::default(),
+        )
+        .await
+        .map_err(|e| Error::command_failed(e.to_string()))
     }
 
     async fn run_command(&self, cmd: &str, args: &[&str]) -> Result<String> {

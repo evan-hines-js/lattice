@@ -26,6 +26,7 @@ use crate::agent::proxy::start_central_proxy;
 use crate::agent::server::AgentServer;
 use crate::bootstrap::{
     bootstrap_router, BootstrapState, DefaultManifestGenerator, ManifestGenerator,
+    CAPMOX_NAMESPACE, CAPMOX_SECRET_NAME,
 };
 use crate::pki::CertificateAuthority;
 use crate::webhook::{webhook_router, WebhookState};
@@ -311,6 +312,12 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         info!("Starting cell servers...");
 
+        // Try to read CAPMOX credentials from Secret (if this cluster has them)
+        let capmox_credentials = Self::read_capmox_credentials(&kube_client).await;
+        if capmox_credentials.is_some() {
+            info!("CAPMOX credentials loaded, will propagate to Proxmox child clusters");
+        }
+
         // Create bootstrap state
         let bootstrap_state = Arc::new(BootstrapState::new(
             manifest_generator,
@@ -319,6 +326,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             self.config.image.clone(),
             self.config.registry_credentials.clone(),
             Some(kube_client.clone()),
+            capmox_credentials,
         ));
 
         // Store bootstrap state
@@ -420,6 +428,24 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         info!("Cell servers started successfully");
         Ok(true)
+    }
+
+    /// Read CAPMOX credentials from the local Secret if it exists
+    async fn read_capmox_credentials(client: &Client) -> Option<(String, String, String)> {
+        let secrets: Api<Secret> = Api::namespaced(client.clone(), CAPMOX_NAMESPACE);
+
+        match secrets.get(CAPMOX_SECRET_NAME).await {
+            Ok(secret) => {
+                let data = secret.data.as_ref()?;
+
+                let url = data.get("url").and_then(|b| String::from_utf8(b.0.clone()).ok())?;
+                let token = data.get("token").and_then(|b| String::from_utf8(b.0.clone()).ok())?;
+                let secret_val = data.get("secret").and_then(|b| String::from_utf8(b.0.clone()).ok())?;
+
+                Some((url, token, secret_val))
+            }
+            Err(_) => None,
+        }
     }
 
     /// Shutdown the servers
