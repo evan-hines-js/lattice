@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
 use lattice_operator::bootstrap::{
     generate_all_manifests, DefaultManifestGenerator, ManifestConfig, ManifestGenerator,
@@ -300,7 +300,7 @@ nodes:
                 "create",
                 "cluster",
                 "--name",
-                &BOOTSTRAP_CLUSTER_NAME,
+                BOOTSTRAP_CLUSTER_NAME,
                 "--config",
                 "-",
             ])
@@ -330,7 +330,7 @@ nodes:
                 "export",
                 "kubeconfig",
                 "--name",
-                &BOOTSTRAP_CLUSTER_NAME,
+                BOOTSTRAP_CLUSTER_NAME,
                 "--kubeconfig",
                 &bootstrap_kubeconfig,
             ])
@@ -363,7 +363,7 @@ nodes:
     async fn delete_kind_cluster(&self) -> Result<()> {
         self.run_command(
             "kind",
-            &["delete", "cluster", "--name", &BOOTSTRAP_CLUSTER_NAME],
+            &["delete", "cluster", "--name", BOOTSTRAP_CLUSTER_NAME],
         )
         .await?;
         Ok(())
@@ -941,8 +941,10 @@ stringData:
     async fn pivot_capi_resources(&self) -> Result<()> {
         let namespace = format!("capi-{}", self.cluster_name());
         let kubeconfig_path = format!("/tmp/{}-kubeconfig", self.cluster_name());
+        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
 
-        // Wait for CAPI CRDs
+        // Wait for CAPI CRDs on target cluster
+        info!("Waiting for CAPI CRDs on management cluster...");
         let start = Instant::now();
         loop {
             if start.elapsed() > Duration::from_secs(300) {
@@ -967,20 +969,84 @@ stringData:
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
 
-        // Run clusterctl move
-        self.run_command_with_output(
-            "clusterctl",
-            &[
-                "move",
-                "--to-kubeconfig",
-                &kubeconfig_path,
-                "--namespace",
-                &namespace,
-            ],
-        )
-        .await?;
+        // Wait for all machines to be provisioned before move
+        info!("Waiting for all machines to be provisioned...");
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(600) {
+                return Err(Error::command_failed(
+                    "Timeout waiting for machines to be provisioned",
+                ));
+            }
 
-        Ok(())
+            // Check if any machines are still provisioning
+            let result = Command::new("kubectl")
+                .args([
+                    "--kubeconfig",
+                    &bootstrap_kubeconfig,
+                    "get",
+                    "machines",
+                    "-n",
+                    &namespace,
+                    "-o",
+                    "jsonpath={.items[*].status.phase}",
+                ])
+                .output()
+                .await?;
+
+            if result.status.success() {
+                let phases = String::from_utf8_lossy(&result.stdout);
+                let all_running = !phases.is_empty()
+                    && phases.split_whitespace().all(|p| p == "Running");
+                if all_running {
+                    info!("All machines are Running");
+                    break;
+                }
+                info!("Machine phases: {}", phases.trim());
+            }
+
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+
+        // Run clusterctl move with retries
+        info!("Running clusterctl move...");
+        let mut last_error = None;
+        for attempt in 1..=5 {
+            let result = Command::new("clusterctl")
+                .args([
+                    "move",
+                    "--to-kubeconfig",
+                    &kubeconfig_path,
+                    "--namespace",
+                    &namespace,
+                ])
+                .output()
+                .await?;
+
+            if result.status.success() {
+                info!("clusterctl move completed successfully");
+                return Ok(());
+            }
+
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            last_error = Some(stderr.to_string());
+
+            if attempt < 5 {
+                let delay = Duration::from_secs(10 * attempt as u64);
+                warn!(
+                    "clusterctl move failed (attempt {}/5), retrying in {:?}: {}",
+                    attempt,
+                    delay,
+                    stderr.trim()
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+
+        Err(Error::command_failed(format!(
+            "clusterctl move failed after 5 attempts: {}",
+            last_error.unwrap_or_default()
+        )))
     }
 
     async fn run_command(&self, cmd: &str, args: &[&str]) -> Result<String> {
@@ -996,48 +1062,6 @@ stringData:
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    async fn run_command_with_output(&self, cmd: &str, args: &[&str]) -> Result<()> {
-        let mut child = Command::new(cmd)
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        let stderr_handle = child.stderr.take();
-
-        if let Some(stdout) = child.stdout.take() {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Some(line) = lines.next_line().await? {
-                info!("  {}", line);
-            }
-        }
-
-        let status = child.wait().await?;
-        if !status.success() {
-            let stderr_msg = if let Some(stderr) = stderr_handle {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                let mut output = Vec::new();
-                while let Some(line) = lines.next_line().await.ok().flatten() {
-                    output.push(line);
-                }
-                output.join("\n")
-            } else {
-                "command failed".to_string()
-            };
-
-            return Err(Error::command_failed(format!(
-                "{} {} failed: {}",
-                cmd,
-                args.join(" "),
-                stderr_msg
-            )));
-        }
-
-        Ok(())
     }
 
     async fn run_command_with_output_env(

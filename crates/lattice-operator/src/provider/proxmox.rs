@@ -497,12 +497,19 @@ impl Provider for ProxmoxProvider {
 
         // Build control plane config
         let post_commands = build_post_kubeadm_commands(name, bootstrap);
-        let cert_sans = spec
+        let mut cert_sans = spec
             .provider
             .kubernetes
             .cert_sans
             .clone()
             .unwrap_or_default();
+
+        // Auto-add endpoints.host to certSANs so users don't have to specify it twice
+        if let Some(ref endpoints) = cluster.spec.endpoints {
+            if !cert_sans.contains(&endpoints.host) {
+                cert_sans.push(endpoints.host.clone());
+            }
+        }
 
         let proxmox_cfg = Self::get_proxmox_config(cluster);
 
