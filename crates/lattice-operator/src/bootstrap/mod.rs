@@ -265,7 +265,7 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
 /// CAPMOX namespace where credentials Secret is stored
 pub const CAPMOX_NAMESPACE: &str = "capmox-system";
 /// CAPMOX Secret name containing Proxmox API credentials
-pub const CAPMOX_SECRET_NAME: &str = "capmox-manager-credentials";
+pub const CAPMOX_SECRET_NAME: &str = "proxmox-credentials";
 
 /// Generate CAPMOX credentials manifests (namespace + secret)
 ///

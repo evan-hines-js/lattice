@@ -89,7 +89,7 @@ export PROXMOX_TOKEN="root@pam!lattice"
 export PROXMOX_SECRET="2b3c8618-6a00-4848-8abf-d3af16cf2e83"
 
 # Create the secret in the CAPI provider namespace
-kubectl create secret generic capmox-manager-credentials \
+kubectl create secret generic proxmox-credentials \
   --namespace capmox-system \
   --from-literal=url="$PROXMOX_URL" \
   --from-literal=token="$PROXMOX_TOKEN" \
@@ -224,4 +224,4 @@ cargo test --package lattice-cli --features provider-e2e test_configurable_provi
 | API Token Format | `user@realm!tokenid` |
 | Template ID | `9000` (or your template) |
 | CAPI Provider | `infrastructure-proxmox` v0.7.5 |
-| Credentials Secret | `capmox-manager-credentials` |
+| Credentials Secret | `proxmox-credentials` |
