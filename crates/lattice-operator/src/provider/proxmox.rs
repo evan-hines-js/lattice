@@ -13,7 +13,7 @@ use super::{
     generate_control_plane, generate_machine_deployment, BootstrapInfo, CAPIManifest,
     ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, VipConfig,
 };
-use crate::crd::{LatticeCluster, ProviderSpec, ProxmoxConfig};
+use crate::crd::{LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig};
 use crate::Result;
 
 /// CAPMOX API version
@@ -147,13 +147,13 @@ impl ProxmoxProvider {
             "ipv4Config": ipv4_config,
             "dnsServers": dns_servers,
             "allowedNodes": allowed_nodes,
+            // Use local namespace for credentials - controller copies secret here
+            // This avoids race conditions when multiple clusters share credentials
             "credentialsRef": {
                 "name": proxmox_config
                     .and_then(|c| c.credentials_secret_name.clone())
                     .unwrap_or_else(|| "capmox-manager-credentials".to_string()),
-                "namespace": proxmox_config
-                    .and_then(|c| c.credentials_secret_namespace.clone())
-                    .unwrap_or_else(|| "capmox-system".to_string())
+                "namespace": &self.namespace
             }
         });
 
@@ -491,6 +491,7 @@ impl Provider for ProxmoxProvider {
             k8s_version,
             labels,
             bootstrap: bootstrap_provider.clone(),
+            provider_type: ProviderType::Proxmox,
         };
 
         let infra = self.infra_ref();
@@ -564,6 +565,18 @@ impl Provider for ProxmoxProvider {
         }
 
         Ok(())
+    }
+
+    fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
+        let proxmox_config = cluster.spec.provider.config.proxmox.as_ref();
+        let secret_name = proxmox_config
+            .and_then(|c| c.credentials_secret_name.clone())
+            .unwrap_or_else(|| "capmox-manager-credentials".to_string());
+        let source_namespace = proxmox_config
+            .and_then(|c| c.credentials_secret_namespace.clone())
+            .unwrap_or_else(|| "capmox-system".to_string());
+
+        vec![(secret_name, source_namespace)]
     }
 }
 

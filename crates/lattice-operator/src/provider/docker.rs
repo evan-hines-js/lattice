@@ -32,7 +32,7 @@ use super::{
     generate_control_plane, generate_machine_deployment, CAPIManifest, ClusterConfig,
     ControlPlaneConfig, InfrastructureRef, Provider,
 };
-use crate::crd::{BootstrapProvider, LatticeCluster, ProviderSpec};
+use crate::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
 use crate::Result;
 
 /// Default namespace for CAPI resources
@@ -330,6 +330,7 @@ impl Provider for DockerProvider {
             k8s_version,
             labels: Self::create_labels(name),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
+            provider_type: ProviderType::Docker,
         };
 
         let infra_api_version =

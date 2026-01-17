@@ -1,0 +1,223 @@
+//! Shared clusterctl move execution with retry and unpause logic
+//!
+//! This module provides a unified implementation for executing `clusterctl move`
+//! that is used by both the CLI (bootstrap → management) and the operator
+//! (management → workload cluster pivots).
+//!
+//! # Features
+//! - Configurable retry with exponential backoff
+//! - Automatic cluster unpause on failure (clusterctl pauses clusters during move)
+//! - Proper error handling and logging
+
+use std::path::Path;
+use std::time::Duration;
+
+use thiserror::Error;
+use tokio::process::Command;
+use tracing::{info, warn};
+
+/// Errors from clusterctl move operations
+#[derive(Debug, Error)]
+pub enum ClusterctlError {
+    /// clusterctl command failed
+    #[error("clusterctl move failed: {0}")]
+    MoveFailed(String),
+
+    /// Failed to execute command
+    #[error("failed to execute clusterctl: {0}")]
+    ExecutionFailed(String),
+
+    /// Failed to unpause cluster
+    #[error("failed to unpause cluster: {0}")]
+    UnpauseFailed(String),
+
+    /// All retries exhausted
+    #[error("clusterctl move failed after {attempts} attempts: {last_error}")]
+    RetriesExhausted {
+        /// Number of attempts made
+        attempts: u32,
+        /// Last error message
+        last_error: String,
+    },
+}
+
+/// Configuration for clusterctl move execution
+#[derive(Debug, Clone)]
+pub struct ClusterctlMoveConfig {
+    /// Maximum number of retry attempts
+    pub max_attempts: u32,
+    /// Initial delay between retries
+    pub initial_delay: Duration,
+    /// Maximum delay between retries
+    pub max_delay: Duration,
+    /// Multiplier for exponential backoff
+    pub backoff_multiplier: f64,
+}
+
+impl Default for ClusterctlMoveConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            initial_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(60),
+            backoff_multiplier: 1.5,
+        }
+    }
+}
+
+/// Execute clusterctl move with retry and automatic unpause on failure
+///
+/// # Arguments
+/// * `source_kubeconfig` - Optional path to source cluster kubeconfig (if None, uses default context)
+/// * `target_kubeconfig` - Path to target cluster kubeconfig
+/// * `namespace` - CAPI namespace containing resources to move
+/// * `cluster_name` - Name of the cluster being moved (for unpause)
+/// * `config` - Retry configuration
+///
+/// # Returns
+/// Ok(()) on success, or ClusterctlError on failure after all retries
+pub async fn execute_move(
+    source_kubeconfig: Option<&Path>,
+    target_kubeconfig: &Path,
+    namespace: &str,
+    cluster_name: &str,
+    config: &ClusterctlMoveConfig,
+) -> Result<(), ClusterctlError> {
+    let mut last_error = String::new();
+    let mut delay = config.initial_delay;
+
+    for attempt in 1..=config.max_attempts {
+        // Build clusterctl move command
+        let mut cmd = Command::new("clusterctl");
+        cmd.arg("move")
+            .arg("--to-kubeconfig")
+            .arg(target_kubeconfig)
+            .arg("--namespace")
+            .arg(namespace);
+
+        if let Some(source) = source_kubeconfig {
+            cmd.arg("--kubeconfig").arg(source);
+        }
+
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
+
+        if output.status.success() {
+            info!(
+                cluster = %cluster_name,
+                namespace = %namespace,
+                "clusterctl move completed successfully"
+            );
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        last_error = stderr.clone();
+
+        if attempt < config.max_attempts {
+            warn!(
+                cluster = %cluster_name,
+                attempt = attempt,
+                max_attempts = config.max_attempts,
+                delay_secs = delay.as_secs(),
+                error = %stderr.trim(),
+                "clusterctl move failed, will retry"
+            );
+
+            // Unpause the cluster before retrying - clusterctl pauses clusters during move
+            // and may leave them paused on failure
+            if let Err(e) = unpause_cluster(source_kubeconfig, namespace, cluster_name).await {
+                warn!(
+                    cluster = %cluster_name,
+                    error = %e,
+                    "Failed to unpause cluster (may already be unpaused)"
+                );
+            } else {
+                info!(cluster = %cluster_name, "Unpaused cluster for retry");
+            }
+
+            tokio::time::sleep(delay).await;
+            delay = Duration::from_secs_f64(
+                (delay.as_secs_f64() * config.backoff_multiplier).min(config.max_delay.as_secs_f64()),
+            );
+        }
+    }
+
+    Err(ClusterctlError::RetriesExhausted {
+        attempts: config.max_attempts,
+        last_error,
+    })
+}
+
+/// Unpause a CAPI cluster
+///
+/// clusterctl move pauses clusters during the move operation. If the move fails
+/// partway through, the cluster may be left in a paused state, preventing retries.
+async fn unpause_cluster(
+    kubeconfig: Option<&Path>,
+    namespace: &str,
+    cluster_name: &str,
+) -> Result<(), ClusterctlError> {
+    let mut cmd = Command::new("kubectl");
+
+    if let Some(kc) = kubeconfig {
+        cmd.arg("--kubeconfig").arg(kc);
+    }
+
+    cmd.args([
+        "patch",
+        "cluster",
+        cluster_name,
+        "-n",
+        namespace,
+        "--type=merge",
+        "-p",
+        r#"{"spec":{"paused":false}}"#,
+    ]);
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| ClusterctlError::UnpauseFailed(e.to_string()))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Don't fail if cluster doesn't exist or is already unpaused
+        if stderr.contains("not found") || stderr.contains("NotFound") {
+            Ok(())
+        } else {
+            Err(ClusterctlError::UnpauseFailed(stderr.to_string()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = ClusterctlMoveConfig::default();
+        assert_eq!(config.max_attempts, 5);
+        assert_eq!(config.initial_delay, Duration::from_secs(10));
+        assert_eq!(config.max_delay, Duration::from_secs(60));
+        assert!((config.backoff_multiplier - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_error_display() {
+        let err = ClusterctlError::MoveFailed("connection refused".to_string());
+        assert!(err.to_string().contains("connection refused"));
+
+        let err = ClusterctlError::RetriesExhausted {
+            attempts: 5,
+            last_error: "timeout".to_string(),
+        };
+        assert!(err.to_string().contains("5 attempts"));
+        assert!(err.to_string().contains("timeout"));
+    }
+}

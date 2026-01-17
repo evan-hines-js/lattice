@@ -18,8 +18,6 @@
 //! - Cell failure doesn't affect workload clusters
 //! - Enables air-gapped operation after provisioning
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -27,7 +25,6 @@ use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
 use thiserror::Error;
-use tokio::time::timeout;
 use tracing::{debug, info};
 
 // Re-export retry utilities for convenience
@@ -57,17 +54,6 @@ pub enum PivotError {
     Internal(String),
 }
 
-/// Result of a pivot operation
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PivotResult {
-    /// Whether pivot was successful
-    pub success: bool,
-    /// Number of resources moved
-    pub resources_moved: u32,
-    /// Error message if failed
-    pub error: Option<String>,
-}
-
 /// Command output for testability
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
@@ -79,28 +65,9 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
-impl From<Output> for CommandOutput {
-    fn from(output: Output) -> Self {
-        Self {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        }
-    }
-}
-
 /// Trait for executing external commands (allows mocking in tests)
 #[async_trait::async_trait]
 pub trait CommandRunner: Send + Sync {
-    /// Execute clusterctl move command
-    async fn run_clusterctl_move(
-        &self,
-        target_kubeconfig: &Path,
-        namespace: &str,
-        cluster_name: &str,
-        source_kubeconfig: Option<PathBuf>,
-    ) -> Result<CommandOutput, PivotError>;
-
     /// List CAPI resources of a given type
     async fn run_kubectl_get(
         &self,
@@ -115,44 +82,6 @@ pub struct RealCommandRunner;
 
 #[async_trait::async_trait]
 impl CommandRunner for RealCommandRunner {
-    async fn run_clusterctl_move(
-        &self,
-        target_kubeconfig: &Path,
-        namespace: &str,
-        cluster_name: &str,
-        source_kubeconfig: Option<PathBuf>,
-    ) -> Result<CommandOutput, PivotError> {
-        let target = target_kubeconfig.to_path_buf();
-        let ns = namespace.to_string();
-        let cluster = cluster_name.to_string();
-        let source = source_kubeconfig;
-
-        tokio::task::spawn_blocking(move || {
-            let mut cmd = Command::new("clusterctl");
-            cmd.arg("move")
-                .arg("--to-kubeconfig")
-                .arg(&target)
-                .arg("--namespace")
-                .arg(&ns)
-                .arg("--filter-cluster")
-                .arg(&cluster);
-
-            if let Some(ref source_path) = source {
-                cmd.arg("--kubeconfig").arg(source_path);
-            }
-
-            debug!(command = ?cmd, "Executing clusterctl move");
-
-            let output = cmd
-                .output()
-                .map_err(|e| PivotError::ClusterctlFailed(format!("failed to execute: {}", e)))?;
-
-            Ok(CommandOutput::from(output))
-        })
-        .await
-        .map_err(|e| PivotError::Internal(format!("spawn_blocking failed: {}", e)))?
-    }
-
     async fn run_kubectl_get(
         &self,
         resource_type: &str,
@@ -238,124 +167,9 @@ fn parse_capi_resource_type(resource_type: &str) -> Result<(String, String, Stri
     Ok((group, "v1beta1".to_string(), kind, plural))
 }
 
-/// Pivot orchestrator for the cell side
-pub struct PivotOrchestrator<R: CommandRunner = RealCommandRunner> {
-    /// Timeout for pivot operations
-    pivot_timeout: Duration,
-    /// CAPI namespace to move resources from
-    capi_namespace: String,
-    /// Command runner for executing external commands
-    runner: R,
-}
-
-impl PivotOrchestrator<RealCommandRunner> {
-    /// Create a new pivot orchestrator with the real command runner
-    pub fn new(pivot_timeout: Duration) -> Self {
-        Self {
-            pivot_timeout,
-            capi_namespace: "default".to_string(),
-            runner: RealCommandRunner,
-        }
-    }
-}
-
-impl<R: CommandRunner> PivotOrchestrator<R> {
-    /// Create a new pivot orchestrator with a custom command runner
-    pub fn with_runner(pivot_timeout: Duration, runner: R) -> Self {
-        Self {
-            pivot_timeout,
-            capi_namespace: "default".to_string(),
-            runner,
-        }
-    }
-
-    /// Set the CAPI namespace
-    pub fn with_capi_namespace(mut self, namespace: &str) -> Self {
-        self.capi_namespace = namespace.to_string();
-        self
-    }
-
-    /// Get the configured timeout
-    pub fn timeout(&self) -> Duration {
-        self.pivot_timeout
-    }
-
-    /// Get the configured namespace
-    pub fn namespace(&self) -> &str {
-        &self.capi_namespace
-    }
-
-    /// Execute pivot using clusterctl move
-    ///
-    /// # Arguments
-    /// * `cluster_name` - Name of the cluster to pivot
-    /// * `proxy_kubeconfig_path` - Path to kubeconfig pointing to the proxy
-    /// * `source_kubeconfig` - Path to kubeconfig for the cell (source)
-    pub async fn execute_pivot(
-        &self,
-        cluster_name: &str,
-        proxy_kubeconfig_path: &Path,
-        source_kubeconfig: Option<&Path>,
-    ) -> Result<PivotResult, PivotError> {
-        info!(
-            cluster = %cluster_name,
-            target_kubeconfig = ?proxy_kubeconfig_path,
-            "Starting pivot with clusterctl move"
-        );
-
-        let source = source_kubeconfig.map(|p| p.to_path_buf());
-
-        // Execute with timeout
-        let output = timeout(
-            self.pivot_timeout,
-            self.runner.run_clusterctl_move(
-                proxy_kubeconfig_path,
-                &self.capi_namespace,
-                cluster_name,
-                source,
-            ),
-        )
-        .await
-        .map_err(|_| PivotError::Timeout)??;
-
-        let result = if output.success {
-            let resources = extract_resource_count(&output.stdout);
-            PivotResult {
-                success: true,
-                resources_moved: resources,
-                error: None,
-            }
-        } else {
-            return Err(PivotError::ClusterctlFailed(output.stderr));
-        };
-
-        info!(
-            cluster = %cluster_name,
-            resources = result.resources_moved,
-            "Pivot complete"
-        );
-
-        Ok(result)
-    }
-
-    /// Generate a temporary proxy kubeconfig file
-    pub fn write_proxy_kubeconfig(kubeconfig_content: &str, path: &Path) -> Result<(), PivotError> {
-        std::fs::write(path, kubeconfig_content)
-            .map_err(|e| PivotError::KubeconfigFailed(e.to_string()))?;
-        Ok(())
-    }
-}
-
-/// Extract resource count from clusterctl output
-pub fn extract_resource_count(output: &str) -> u32 {
-    // clusterctl outputs lines like "Moving cluster.x-k8s.io/v1beta1, Kind=Cluster"
-    output
-        .lines()
-        .filter(|line| line.contains("Moving") || line.contains("Creating"))
-        .count() as u32
-}
-
 /// Pivot handler for the agent side
+///
+/// Used by the agent to detect when CAPI resources have been imported after pivot.
 pub struct AgentPivotHandler<R: CommandRunner = RealCommandRunner> {
     /// CAPI namespace to watch
     capi_namespace: String,
@@ -374,7 +188,7 @@ impl AgentPivotHandler<RealCommandRunner> {
 }
 
 impl<R: CommandRunner> AgentPivotHandler<R> {
-    /// Create with a custom runner
+    /// Create with a custom runner (for testing)
     pub fn with_runner(runner: R) -> Self {
         Self {
             capi_namespace: "default".to_string(),
@@ -481,13 +295,6 @@ impl Default for AgentPivotHandler<RealCommandRunner> {
 ///
 /// This function patches ALL cluster entries in the kubeconfig, not just the first one,
 /// to handle multi-cluster kubeconfigs correctly.
-///
-/// # Arguments
-/// * `cluster_name` - Name of the cluster (used to find the secret `{cluster_name}-kubeconfig`)
-/// * `namespace` - Namespace where the kubeconfig secret resides
-///
-/// # Errors
-/// Returns an error if the secret cannot be found, parsed, or patched.
 pub async fn patch_kubeconfig_for_self_management(
     cluster_name: &str,
     namespace: &str,
@@ -495,7 +302,6 @@ pub async fn patch_kubeconfig_for_self_management(
     info!(cluster = %cluster_name, namespace = %namespace, "Patching kubeconfig for self-management");
 
     // Read the in-cluster CA certificate
-    // This is mounted by Kubernetes at a well-known path in every pod
     const IN_CLUSTER_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
     let in_cluster_ca = std::fs::read_to_string(IN_CLUSTER_CA_PATH).map_err(|e| {
         PivotError::Internal(format!(
@@ -505,12 +311,10 @@ pub async fn patch_kubeconfig_for_self_management(
     })?;
     let in_cluster_ca_b64 = STANDARD.encode(in_cluster_ca.as_bytes());
 
-    // Get in-cluster client
     let client = kube::Client::try_default()
         .await
         .map_err(|e| PivotError::Internal(format!("failed to create k8s client: {}", e)))?;
 
-    // Get the kubeconfig secret
     let secrets: Api<Secret> = Api::namespaced(client, namespace);
     let secret_name = format!("{}-kubeconfig", cluster_name);
 
@@ -521,7 +325,6 @@ pub async fn patch_kubeconfig_for_self_management(
         ))
     })?;
 
-    // Get the kubeconfig data
     let data = secret
         .data
         .ok_or_else(|| PivotError::Internal("kubeconfig secret has no data".to_string()))?;
@@ -529,11 +332,9 @@ pub async fn patch_kubeconfig_for_self_management(
         .get("value")
         .ok_or_else(|| PivotError::Internal("kubeconfig secret missing 'value' key".to_string()))?;
 
-    // Parse the kubeconfig
     let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
         .map_err(|e| PivotError::Internal(format!("kubeconfig is not valid UTF-8: {}", e)))?;
 
-    // Parse as YAML and update the server URL and CA
     let mut kubeconfig: serde_yaml::Value = serde_yaml::from_str(&kubeconfig_str)
         .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
 
@@ -547,14 +348,11 @@ pub async fn patch_kubeconfig_for_self_management(
             if let Some(cluster_config) = cluster.get_mut("cluster") {
                 if let Some(server) = cluster_config.get_mut("server") {
                     let old_server = server.as_str().unwrap_or("unknown").to_string();
-                    // Only patch if it's not already using the internal endpoint
                     if !old_server.contains("kubernetes.default.svc") {
                         *server = serde_yaml::Value::String(
                             "https://kubernetes.default.svc:443".to_string(),
                         );
 
-                        // Also update the CA certificate to the in-cluster CA
-                        // Remove certificate-authority if present and use certificate-authority-data
                         if let Some(m) = cluster_config.as_mapping_mut() {
                             m.remove("certificate-authority");
                             m.insert(
@@ -581,14 +379,11 @@ pub async fn patch_kubeconfig_for_self_management(
         return Ok(());
     }
 
-    // Serialize back to YAML
     let updated_kubeconfig = serde_yaml::to_string(&kubeconfig)
         .map_err(|e| PivotError::Internal(format!("failed to serialize kubeconfig: {}", e)))?;
 
-    // Encode as base64
     let encoded = STANDARD.encode(updated_kubeconfig.as_bytes());
 
-    // Patch the secret
     let patch = serde_json::json!({
         "data": {
             "value": encoded
@@ -616,12 +411,6 @@ pub async fn patch_kubeconfig_for_self_management(
 ///
 /// Updates the server URL to point to the internal central proxy service
 /// with path-based routing: `/cluster/{cluster_name}`. Includes CA cert for TLS.
-///
-/// # Arguments
-/// * `cluster_name` - Name of the child cluster
-/// * `namespace` - Namespace where the kubeconfig secret exists
-/// * `proxy_url` - URL of the central proxy (e.g., "https://lattice-proxy.lattice-system.svc:8081")
-/// * `ca_cert_pem` - CA certificate PEM for TLS verification
 pub async fn patch_kubeconfig_for_child_cluster(
     cluster_name: &str,
     namespace: &str,
@@ -642,7 +431,6 @@ pub async fn patch_kubeconfig_for_child_cluster(
         "Patching kubeconfig for child cluster to use central proxy"
     );
 
-    // Get the current kubeconfig secret
     let secret = secrets.get(&secret_name).await.map_err(|e| {
         PivotError::Internal(format!(
             "failed to get kubeconfig secret '{}': {}",
@@ -662,10 +450,8 @@ pub async fn patch_kubeconfig_for_child_cluster(
     let mut kubeconfig: serde_yaml::Value = serde_yaml::from_str(&kubeconfig_str)
         .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
 
-    // Build the proxy URL with path-based cluster routing
     let proxy_server = format!("{}/cluster/{}", proxy_url, cluster_name);
 
-    // Update ALL cluster server URLs to proxy endpoint
     let mut updated_count = 0;
     if let Some(clusters) = kubeconfig
         .get_mut("clusters")
@@ -675,10 +461,8 @@ pub async fn patch_kubeconfig_for_child_cluster(
             if let Some(cluster_config) = cluster.get_mut("cluster") {
                 if let Some(server) = cluster_config.get_mut("server") {
                     let old_server = server.as_str().unwrap_or("unknown").to_string();
-                    // Only patch if not already using the proxy (check for /cluster/ path)
                     if !old_server.contains("/cluster/") {
                         *server = serde_yaml::Value::String(proxy_server.clone());
-                        // Set certificate-authority-data to our CA cert for TLS
                         let ca_cert_b64 = STANDARD.encode(ca_cert_pem.as_bytes());
                         cluster_config["certificate-authority-data"] =
                             serde_yaml::Value::String(ca_cert_b64);
@@ -739,46 +523,23 @@ pub const CENTRAL_PROXY_SERVICE_URL: &str = "https://lattice-proxy.lattice-syste
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use tempfile::NamedTempFile;
 
     // ==========================================================================
-    // Mock Command Runner for Testing
+    // Mock Command Runner for Testing AgentPivotHandler
     // ==========================================================================
-    //
-    // A configurable mock that allows tests to specify expected behavior
-    // for external commands without actually executing them.
 
-    type ClusterctlMockFn = Box<
-        dyn Fn(&Path, &str, &str, Option<PathBuf>) -> Result<CommandOutput, PivotError>
-            + Send
-            + Sync,
-    >;
     type KubectlMockFn = Box<dyn Fn(&str, &str) -> Result<CommandOutput, PivotError> + Send + Sync>;
 
-    /// Mock command runner for testing
     #[derive(Clone)]
     pub struct MockCommandRunner {
-        clusterctl_fn: std::sync::Arc<Mutex<Option<ClusterctlMockFn>>>,
         kubectl_fn: std::sync::Arc<Mutex<Option<KubectlMockFn>>>,
     }
 
     impl MockCommandRunner {
         pub fn new() -> Self {
             Self {
-                clusterctl_fn: std::sync::Arc::new(Mutex::new(None)),
                 kubectl_fn: std::sync::Arc::new(Mutex::new(None)),
             }
-        }
-
-        pub fn with_clusterctl<F>(self, f: F) -> Self
-        where
-            F: Fn(&Path, &str, &str, Option<PathBuf>) -> Result<CommandOutput, PivotError>
-                + Send
-                + Sync
-                + 'static,
-        {
-            *self.clusterctl_fn.lock().unwrap() = Some(Box::new(f));
-            self
         }
 
         pub fn with_kubectl<F>(self, f: F) -> Self
@@ -792,29 +553,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CommandRunner for MockCommandRunner {
-        async fn run_clusterctl_move(
-            &self,
-            target_kubeconfig: &Path,
-            namespace: &str,
-            cluster_name: &str,
-            source_kubeconfig: Option<PathBuf>,
-        ) -> Result<CommandOutput, PivotError> {
-            let guard = self.clusterctl_fn.lock().unwrap();
-            match &*guard {
-                Some(f) => f(
-                    target_kubeconfig,
-                    namespace,
-                    cluster_name,
-                    source_kubeconfig,
-                ),
-                None => Ok(CommandOutput {
-                    success: true,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                }),
-            }
-        }
-
         async fn run_kubectl_get(
             &self,
             resource_type: &str,
@@ -833,115 +571,11 @@ mod tests {
     }
 
     // ==========================================================================
-    // Story Tests: Pivot Operation Lifecycle
+    // AgentPivotHandler Tests
     // ==========================================================================
-    //
-    // The pivot operation moves CAPI resources from the cell to a workload cluster,
-    // making the workload cluster fully self-managing.
 
-    /// Story: Successful pivot moves resources to target cluster
-    ///
-    /// When clusterctl move succeeds, we extract the resource count from output
-    /// and return a successful result.
     #[tokio::test]
-    async fn story_successful_pivot_moves_resources() {
-        let mock = MockCommandRunner::new().with_clusterctl(|_, _, _, _| {
-            Ok(CommandOutput {
-                success: true,
-                stdout: r#"Performing move...
-Moving cluster.x-k8s.io/v1beta1, Kind=Cluster, ns/my-cluster
-Moving cluster.x-k8s.io/v1beta1, Kind=Machine, ns/my-cluster-cp-0
-Moving cluster.x-k8s.io/v1beta1, Kind=MachineDeployment, ns/my-cluster-md-0
-Creating cluster.x-k8s.io/v1beta1, Kind=Cluster
-Done."#
-                    .to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
-
-        let temp_kubeconfig = NamedTempFile::new().unwrap();
-        let result = orchestrator
-            .execute_pivot("my-cluster", temp_kubeconfig.path(), None)
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        assert_eq!(result.resources_moved, 4); // 3 Moving + 1 Creating
-        assert!(result.error.is_none());
-    }
-
-    /// Story: Failed pivot returns error with details
-    ///
-    /// When clusterctl move fails, we capture stderr and return it in the error.
-    #[tokio::test]
-    async fn story_failed_pivot_returns_error_details() {
-        let mock = MockCommandRunner::new().with_clusterctl(|_, _, _, _| {
-            Ok(CommandOutput {
-                success: false,
-                stdout: String::new(),
-                stderr: "Error: unable to connect to target cluster".to_string(),
-            })
-        });
-
-        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
-
-        let temp_kubeconfig = NamedTempFile::new().unwrap();
-        let result = orchestrator
-            .execute_pivot("my-cluster", temp_kubeconfig.path(), None)
-            .await;
-
-        assert!(result.is_err());
-        match result {
-            Err(PivotError::ClusterctlFailed(msg)) => {
-                assert!(msg.contains("unable to connect"));
-            }
-            _ => panic!("Expected ClusterctlFailed error"),
-        }
-    }
-
-    /// Story: Pivot with source kubeconfig for non-default context
-    ///
-    /// When pivoting from a cell that isn't the default context,
-    /// we pass the source kubeconfig to clusterctl.
-    #[tokio::test]
-    async fn story_pivot_with_explicit_source_kubeconfig() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let source_was_some = std::sync::Arc::new(AtomicBool::new(false));
-        let source_was_some_clone = source_was_some.clone();
-
-        let mock = MockCommandRunner::new().with_clusterctl(move |_, _, _, source| {
-            source_was_some_clone.store(source.is_some(), Ordering::SeqCst);
-            Ok(CommandOutput {
-                success: true,
-                stdout: "Moving cluster.x-k8s.io/v1beta1, Kind=Cluster".to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
-
-        let target = NamedTempFile::new().unwrap();
-        let source = NamedTempFile::new().unwrap();
-
-        let result = orchestrator
-            .execute_pivot("cluster", target.path(), Some(source.path()))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        assert!(
-            source_was_some.load(Ordering::SeqCst),
-            "Source kubeconfig should have been passed"
-        );
-    }
-
-    /// Story: Agent detects CAPI resources after pivot
-    ///
-    /// After pivot, the agent checks for CAPI resources to confirm success.
-    #[tokio::test]
-    async fn story_agent_detects_capi_resources_after_pivot() {
+    async fn agent_detects_capi_resources() {
         let mock = MockCommandRunner::new().with_kubectl(|_, _| {
             Ok(CommandOutput {
                 success: true,
@@ -952,15 +586,11 @@ Done."#
 
         let handler = AgentPivotHandler::with_runner(mock);
         let has_resources = handler.check_capi_resources_present().await.unwrap();
-
         assert!(has_resources);
     }
 
-    /// Story: Agent detects no CAPI resources before pivot
-    ///
-    /// Before pivot completes, no CAPI resources exist on the workload cluster.
     #[tokio::test]
-    async fn story_agent_detects_no_capi_resources_before_pivot() {
+    async fn agent_detects_no_capi_resources() {
         let mock = MockCommandRunner::new().with_kubectl(|_, _| {
             Ok(CommandOutput {
                 success: true,
@@ -971,15 +601,11 @@ Done."#
 
         let handler = AgentPivotHandler::with_runner(mock);
         let has_resources = handler.check_capi_resources_present().await.unwrap();
-
         assert!(!has_resources);
     }
 
-    /// Story: Agent counts all CAPI resource types
-    ///
-    /// The agent counts clusters, machines, machinedeployments, and control planes.
     #[tokio::test]
-    async fn story_agent_counts_all_capi_resource_types() {
+    async fn agent_counts_all_capi_resource_types() {
         let mock = MockCommandRunner::new().with_kubectl(|resource_type, _| {
             let stdout = match resource_type {
                 "clusters.cluster.x-k8s.io" => "my-cluster   True",
@@ -997,318 +623,13 @@ Done."#
 
         let handler = AgentPivotHandler::with_runner(mock);
         let count = handler.count_capi_resources().await.unwrap();
-
         // 1 cluster + 3 machines + 1 machinedeployment + 1 controlplane = 6
         assert_eq!(count, 6);
     }
 
-    /// Story: Kubeconfig is written for clusterctl
-    ///
-    /// Before pivot, we write a temporary kubeconfig for the target cluster.
-    #[test]
-    fn story_kubeconfig_written_for_clusterctl() {
-        let temp = NamedTempFile::new().unwrap();
-        let kubeconfig = r#"
-apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: http://127.0.0.1:8080
-  name: proxy
-"#;
-
-        let result =
-            PivotOrchestrator::<RealCommandRunner>::write_proxy_kubeconfig(kubeconfig, temp.path());
-        assert!(result.is_ok());
-
-        let written = std::fs::read_to_string(temp.path()).unwrap();
-        assert!(written.contains("server: http://127.0.0.1:8080"));
-    }
-
-    /// Story: Kubeconfig write fails for invalid path
-    #[test]
-    fn story_kubeconfig_write_fails_for_invalid_path() {
-        let result = PivotOrchestrator::<RealCommandRunner>::write_proxy_kubeconfig(
-            "content",
-            Path::new("/nonexistent/directory/kubeconfig"),
-        );
-
-        assert!(result.is_err());
-        match result {
-            Err(PivotError::KubeconfigFailed(_)) => {}
-            _ => panic!("Expected KubeconfigFailed"),
-        }
-    }
-
-    // ==========================================================================
-    // Resource Count Extraction Tests
-    // ==========================================================================
-
-    #[test]
-    fn test_extract_resource_count_mixed() {
-        let output = r#"
-Moving cluster.x-k8s.io/v1beta1, Kind=Cluster
-Moving cluster.x-k8s.io/v1beta1, Kind=Machine
-Creating some-resource
-Other log line
-"#;
-        assert_eq!(extract_resource_count(output), 3);
-    }
-
-    #[test]
-    fn test_extract_resource_count_empty() {
-        assert_eq!(extract_resource_count(""), 0);
-    }
-
-    #[test]
-    fn test_extract_resource_count_no_matches() {
-        assert_eq!(extract_resource_count("Some random output"), 0);
-    }
-
-    // ==========================================================================
-    // Configuration Tests
-    // ==========================================================================
-
-    #[test]
-    fn test_orchestrator_configuration() {
-        let orchestrator =
-            PivotOrchestrator::new(Duration::from_secs(600)).with_capi_namespace("capi-system");
-
-        assert_eq!(orchestrator.timeout(), Duration::from_secs(600));
-        assert_eq!(orchestrator.namespace(), "capi-system");
-    }
-
-    #[test]
-    fn test_handler_configuration() {
-        let handler = AgentPivotHandler::new().with_capi_namespace("my-namespace");
-
-        assert_eq!(handler.namespace(), "my-namespace");
-    }
-
-    #[test]
-    fn test_handler_default() {
-        let handler = AgentPivotHandler::default();
-        assert_eq!(handler.namespace(), "default");
-    }
-
-    // ==========================================================================
-    // Error Display Tests
-    // ==========================================================================
-
-    #[test]
-    fn test_error_display() {
-        assert_eq!(
-            PivotError::ClusterctlFailed("cmd error".to_string()).to_string(),
-            "clusterctl failed: cmd error"
-        );
-        assert_eq!(
-            PivotError::KubeconfigFailed("io error".to_string()).to_string(),
-            "kubeconfig generation failed: io error"
-        );
-        assert_eq!(PivotError::Timeout.to_string(), "pivot timed out");
-        assert_eq!(
-            PivotError::AgentNotConnected("cluster-1".to_string()).to_string(),
-            "agent not connected: cluster-1"
-        );
-        assert_eq!(
-            PivotError::Internal("panic".to_string()).to_string(),
-            "internal error: panic"
-        );
-    }
-
-    // ==========================================================================
-    // CommandOutput Tests
-    // ==========================================================================
-
-    #[test]
-    fn test_command_output_from_std_output() {
-        // We can't easily create Output, so test CommandOutput directly
-        let output = CommandOutput {
-            success: true,
-            stdout: "hello".to_string(),
-            stderr: "".to_string(),
-        };
-
-        assert!(output.success);
-        assert_eq!(output.stdout, "hello");
-    }
-
-    #[test]
-    fn test_pivot_result_equality() {
-        let r1 = PivotResult {
-            success: true,
-            resources_moved: 5,
-            error: None,
-        };
-        let r2 = PivotResult {
-            success: true,
-            resources_moved: 5,
-            error: None,
-        };
-        assert_eq!(r1, r2);
-    }
-
-    // ==========================================================================
-    // Story Tests: CAPI Export
-    // ==========================================================================
-    //
-    // "When exporting cluster resources, the pivot manager should..."
-
-    /// When exporting cluster resources, the pivot manager should pass the
-    /// correct namespace and cluster name to clusterctl.
     #[tokio::test]
-    async fn when_exporting_resources_should_pass_correct_namespace() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        let namespace_correct = Arc::new(AtomicBool::new(false));
-        let cluster_correct = Arc::new(AtomicBool::new(false));
-        let ns_clone = namespace_correct.clone();
-        let cl_clone = cluster_correct.clone();
-
-        let mock = MockCommandRunner::new().with_clusterctl(move |_, namespace, cluster, _| {
-            ns_clone.store(namespace == "capi-system", Ordering::SeqCst);
-            cl_clone.store(cluster == "production-cluster", Ordering::SeqCst);
-            Ok(CommandOutput {
-                success: true,
-                stdout: "Moving cluster.x-k8s.io/v1beta1, Kind=Cluster".to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock)
-            .with_capi_namespace("capi-system");
-
-        let temp_kubeconfig = NamedTempFile::new().unwrap();
-        let result = orchestrator
-            .execute_pivot("production-cluster", temp_kubeconfig.path(), None)
-            .await;
-
-        assert!(result.is_ok());
-        assert!(
-            namespace_correct.load(Ordering::SeqCst),
-            "Expected namespace 'capi-system' to be passed to clusterctl"
-        );
-        assert!(
-            cluster_correct.load(Ordering::SeqCst),
-            "Expected cluster 'production-cluster' to be passed to clusterctl"
-        );
-    }
-
-    /// When exporting cluster resources, the pivot manager should use the
-    /// target kubeconfig path for the destination cluster.
-    #[tokio::test]
-    async fn when_exporting_resources_should_use_target_kubeconfig() {
-        use std::sync::{Arc, Mutex as StdMutex};
-
-        let captured_path = Arc::new(StdMutex::new(PathBuf::new()));
-        let path_clone = captured_path.clone();
-
-        let mock = MockCommandRunner::new().with_clusterctl(move |target, _, _, _| {
-            *path_clone.lock().unwrap() = target.to_path_buf();
-            Ok(CommandOutput {
-                success: true,
-                stdout: "Moving cluster.x-k8s.io/v1beta1, Kind=Cluster".to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
-
-        let temp_kubeconfig = NamedTempFile::new().unwrap();
-        let expected_path = temp_kubeconfig.path().to_path_buf();
-        let _ = orchestrator
-            .execute_pivot("cluster", temp_kubeconfig.path(), None)
-            .await;
-
-        assert_eq!(*captured_path.lock().unwrap(), expected_path);
-    }
-
-    // ==========================================================================
-    // Story Tests: CAPI Import
-    // ==========================================================================
-    //
-    // "When importing cluster resources, the pivot manager should..."
-
-    /// When importing cluster resources, the agent should detect when resources
-    /// appear in the target namespace.
-    #[tokio::test]
-    async fn when_importing_resources_agent_should_detect_arrival() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        use std::sync::Arc;
-
-        // Simulate resources appearing after 2 checks
-        let check_count = Arc::new(AtomicU32::new(0));
-        let check_count_clone = check_count.clone();
-
-        let mock = MockCommandRunner::new().with_kubectl(move |_, _| {
-            let count = check_count_clone.fetch_add(1, Ordering::SeqCst);
-            if count < 2 {
-                // No resources yet
-                Ok(CommandOutput {
-                    success: true,
-                    stdout: "No resources found in default namespace.\n".to_string(),
-                    stderr: String::new(),
-                })
-            } else {
-                // Resources have arrived
-                Ok(CommandOutput {
-                    success: true,
-                    stdout: "my-cluster   True   v1.28.0   5m\n".to_string(),
-                    stderr: String::new(),
-                })
-            }
-        });
-
-        let handler = AgentPivotHandler::with_runner(mock);
-        let result = handler
-            .wait_for_capi_resources(Duration::from_secs(5), Duration::from_millis(10))
-            .await;
-
-        assert!(result.is_ok());
-        // Should have checked at least 3 times (2 misses + 1 hit)
-        assert!(check_count.load(Ordering::SeqCst) >= 3);
-    }
-
-    /// When importing cluster resources, the agent should count all resource types.
-    #[tokio::test]
-    async fn when_importing_resources_agent_should_count_all_types() {
-        let mock = MockCommandRunner::new().with_kubectl(|resource_type, _| {
-            let stdout = match resource_type {
-                "clusters.cluster.x-k8s.io" => "cluster-1   True",
-                "machines.cluster.x-k8s.io" => "machine-1   Running\nmachine-2   Running",
-                "machinedeployments.cluster.x-k8s.io" => "md-0   2   2   2",
-                "kubeadmcontrolplanes.controlplane.cluster.x-k8s.io" => "kcp   Initialized",
-                _ => "",
-            };
-            Ok(CommandOutput {
-                success: true,
-                stdout: stdout.to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let handler = AgentPivotHandler::with_runner(mock);
-        let result = handler
-            .wait_for_capi_resources(Duration::from_secs(5), Duration::from_millis(10))
-            .await;
-
-        // 1 cluster + 2 machines + 1 md + 1 kcp = 5
-        assert_eq!(result.unwrap(), 5);
-    }
-
-    // ==========================================================================
-    // Story Tests: Pivot Orchestration
-    // ==========================================================================
-    //
-    // "When a pivot command is received, the agent should..."
-
-    /// When a pivot command is received and times out waiting for resources,
-    /// the agent should return a Timeout error.
-    #[tokio::test]
-    async fn when_pivot_received_and_no_resources_appear_should_timeout() {
+    async fn wait_times_out_when_no_resources() {
         let mock = MockCommandRunner::new().with_kubectl(|_, _| {
-            // Resources never appear
             Ok(CommandOutput {
                 success: true,
                 stdout: "No resources found in default namespace.\n".to_string(),
@@ -1324,12 +645,11 @@ Other log line
         assert!(matches!(result, Err(PivotError::Timeout)));
     }
 
-    /// When a pivot command is received, the agent should check the correct namespace.
     #[tokio::test]
-    async fn when_pivot_received_should_check_correct_namespace() {
-        use std::sync::{Arc, Mutex as StdMutex};
+    async fn handler_uses_configured_namespace() {
+        use std::sync::Arc;
 
-        let captured_namespace = Arc::new(StdMutex::new(String::new()));
+        let captured_namespace = Arc::new(Mutex::new(String::new()));
         let ns_clone = captured_namespace.clone();
 
         let mock = MockCommandRunner::new().with_kubectl(move |_, namespace| {
@@ -1349,248 +669,34 @@ Other log line
         assert_eq!(*captured_namespace.lock().unwrap(), "workload-ns");
     }
 
-    // ==========================================================================
-    // Story Tests: Error Recovery
-    // ==========================================================================
-    //
-    // "When pivot fails, the system should..."
-
-    /// When pivot fails due to clusterctl error, the system should return
-    /// a ClusterctlFailed error with the stderr message.
-    #[tokio::test]
-    async fn when_pivot_fails_should_return_clusterctl_error() {
-        let mock = MockCommandRunner::new().with_clusterctl(|_, _, _, _| {
-            Ok(CommandOutput {
-                success: false,
-                stdout: String::new(),
-                stderr: "Error: cluster 'test' not found in namespace 'default'".to_string(),
-            })
-        });
-
-        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
-
-        let temp_kubeconfig = NamedTempFile::new().unwrap();
-        let result = orchestrator
-            .execute_pivot("test", temp_kubeconfig.path(), None)
-            .await;
-
-        match result {
-            Err(PivotError::ClusterctlFailed(msg)) => {
-                assert!(msg.contains("cluster 'test' not found"));
-            }
-            other => panic!("Expected ClusterctlFailed, got {:?}", other),
-        }
-    }
-
-    /// When pivot fails due to command execution error, the system should
-    /// return an appropriate error.
-    #[tokio::test]
-    async fn when_pivot_command_fails_to_execute_should_return_error() {
-        let mock = MockCommandRunner::new().with_clusterctl(|_, _, _, _| {
-            Err(PivotError::ClusterctlFailed(
-                "failed to execute: No such file or directory".to_string(),
-            ))
-        });
-
-        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
-
-        let temp_kubeconfig = NamedTempFile::new().unwrap();
-        let result = orchestrator
-            .execute_pivot("cluster", temp_kubeconfig.path(), None)
-            .await;
-
-        assert!(matches!(result, Err(PivotError::ClusterctlFailed(_))));
-    }
-
-    /// When kubectl fails during resource check, the system should propagate
-    /// the error.
-    #[tokio::test]
-    async fn when_kubectl_fails_should_propagate_error() {
-        let mock = MockCommandRunner::new().with_kubectl(|_, _| {
-            Err(PivotError::Internal(
-                "kubectl: command not found".to_string(),
-            ))
-        });
-
-        let handler = AgentPivotHandler::with_runner(mock);
-        let result = handler.check_capi_resources_present().await;
-
-        assert!(matches!(result, Err(PivotError::Internal(_))));
-    }
-
-    /// When kubectl fails during wait, the system should stop waiting and
-    /// return the error.
-    #[tokio::test]
-    async fn when_kubectl_fails_during_wait_should_return_error() {
-        let mock = MockCommandRunner::new()
-            .with_kubectl(|_, _| Err(PivotError::Internal("connection refused".to_string())));
-
-        let handler = AgentPivotHandler::with_runner(mock);
-        let result = handler
-            .wait_for_capi_resources(Duration::from_secs(5), Duration::from_millis(10))
-            .await;
-
-        match result {
-            Err(PivotError::Internal(msg)) => {
-                assert!(msg.contains("connection refused"));
-            }
-            other => panic!("Expected Internal error, got {:?}", other),
-        }
+    #[test]
+    fn handler_default_namespace() {
+        let handler = AgentPivotHandler::default();
+        assert_eq!(handler.namespace(), "default");
     }
 
     // ==========================================================================
-    // Story Tests: Edge Cases
-    // ==========================================================================
-
-    /// When resources exist but output is empty lines, should not count them.
-    #[tokio::test]
-    async fn when_output_has_empty_lines_should_not_count_them() {
-        let mock = MockCommandRunner::new().with_kubectl(|resource_type, _| {
-            let stdout = match resource_type {
-                "clusters.cluster.x-k8s.io" => "\n\n",
-                "machines.cluster.x-k8s.io" => "machine-1   Running\n\n",
-                _ => "",
-            };
-            Ok(CommandOutput {
-                success: true,
-                stdout: stdout.to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let handler = AgentPivotHandler::with_runner(mock);
-        let count = handler.count_capi_resources().await.unwrap();
-
-        // Only 1 machine line, empty lines should not count
-        assert_eq!(count, 1);
-    }
-
-    /// When pivot output has no Moving/Creating lines, resource count should be zero.
-    #[tokio::test]
-    async fn when_pivot_output_has_no_resource_lines_count_should_be_zero() {
-        let mock = MockCommandRunner::new().with_clusterctl(|_, _, _, _| {
-            Ok(CommandOutput {
-                success: true,
-                stdout: "Performing move...\nDone.".to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let orchestrator = PivotOrchestrator::with_runner(Duration::from_secs(300), mock);
-
-        let temp_kubeconfig = NamedTempFile::new().unwrap();
-        let result = orchestrator
-            .execute_pivot("cluster", temp_kubeconfig.path(), None)
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        assert_eq!(result.resources_moved, 0);
-    }
-
-    // ==========================================================================
-    // CommandOutput From std::process::Output Tests
-    // ==========================================================================
-
-    /// Test that CommandOutput correctly converts from std::process::Output.
-    /// This tests the From implementation for lines 75-83.
-    #[test]
-    fn test_command_output_from_process_output() {
-        // Create a successful output manually using std::process::Command
-        // We need to run an actual command to get a real Output
-        let output = std::process::Command::new("echo")
-            .arg("hello world")
-            .output()
-            .expect("Failed to run echo command");
-
-        let cmd_output = CommandOutput::from(output);
-        assert!(cmd_output.success);
-        assert!(cmd_output.stdout.contains("hello world"));
-        assert!(cmd_output.stderr.is_empty());
-    }
-
-    /// Test CommandOutput from a failing command.
-    #[test]
-    fn test_command_output_from_failing_command() {
-        // Run a command that exits with non-zero status
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("exit 1")
-            .output()
-            .expect("Failed to run sh command");
-
-        let cmd_output = CommandOutput::from(output);
-        assert!(!cmd_output.success);
-    }
-
-    /// Test CommandOutput captures stderr.
-    #[test]
-    fn test_command_output_captures_stderr() {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("echo 'error message' >&2")
-            .output()
-            .expect("Failed to run sh command");
-
-        let cmd_output = CommandOutput::from(output);
-        assert!(cmd_output.stderr.contains("error message"));
-    }
-
-    // ==========================================================================
-    // Debug Trait Tests
+    // Error Display Tests
     // ==========================================================================
 
     #[test]
-    fn test_pivot_error_debug() {
-        let err = PivotError::Timeout;
-        let debug_str = format!("{:?}", err);
-        assert!(debug_str.contains("Timeout"));
-    }
-
-    #[test]
-    fn test_pivot_result_debug() {
-        let result = PivotResult {
-            success: true,
-            resources_moved: 3,
-            error: None,
-        };
-        let debug_str = format!("{:?}", result);
-        assert!(debug_str.contains("success: true"));
-        assert!(debug_str.contains("resources_moved: 3"));
-    }
-
-    #[test]
-    fn test_command_output_debug() {
-        let output = CommandOutput {
-            success: true,
-            stdout: "test output".to_string(),
-            stderr: String::new(),
-        };
-        let debug_str = format!("{:?}", output);
-        assert!(debug_str.contains("test output"));
-    }
-
-    #[test]
-    fn test_pivot_result_clone() {
-        let result = PivotResult {
-            success: true,
-            resources_moved: 5,
-            error: Some("test".to_string()),
-        };
-        let cloned = result.clone();
-        assert_eq!(result, cloned);
-    }
-
-    #[test]
-    fn test_command_output_clone() {
-        let output = CommandOutput {
-            success: false,
-            stdout: "out".to_string(),
-            stderr: "err".to_string(),
-        };
-        let cloned = output.clone();
-        assert_eq!(output.success, cloned.success);
-        assert_eq!(output.stdout, cloned.stdout);
-        assert_eq!(output.stderr, cloned.stderr);
+    fn error_display() {
+        assert_eq!(
+            PivotError::ClusterctlFailed("cmd error".to_string()).to_string(),
+            "clusterctl failed: cmd error"
+        );
+        assert_eq!(
+            PivotError::KubeconfigFailed("io error".to_string()).to_string(),
+            "kubeconfig generation failed: io error"
+        );
+        assert_eq!(PivotError::Timeout.to_string(), "pivot timed out");
+        assert_eq!(
+            PivotError::AgentNotConnected("cluster-1".to_string()).to_string(),
+            "agent not connected: cluster-1"
+        );
+        assert_eq!(
+            PivotError::Internal("panic".to_string()).to_string(),
+            "internal error: panic"
+        );
     }
 }

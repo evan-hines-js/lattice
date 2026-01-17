@@ -166,6 +166,8 @@ pub struct ClusterConfig<'a> {
     pub labels: std::collections::BTreeMap<String, String>,
     /// Bootstrap mechanism (kubeadm or rke2)
     pub bootstrap: crate::crd::BootstrapProvider,
+    /// Infrastructure provider type (Docker, Proxmox, etc.)
+    pub provider_type: ProviderType,
 }
 
 /// Infrastructure provider reference configuration
@@ -354,9 +356,35 @@ pub fn generate_bootstrap_config_template(config: &ClusterConfig) -> CAPIManifes
     }
 }
 
+/// Build kubelet extra args based on provider type
+///
+/// All providers include the eviction-hard arg to disable aggressive eviction in test.
+/// Cloud providers (non-Docker) also include provider-id which uses cloud-init templating
+/// to set the node's providerID for CAPI machine-node linking.
+fn build_kubelet_extra_args(provider_type: ProviderType) -> Vec<serde_json::Value> {
+    let mut args = vec![serde_json::json!({
+        "name": "eviction-hard",
+        "value": "nodefs.available<0%,imagefs.available<0%"
+    })];
+
+    // Cloud providers need provider-id for CAPI to link Machine to Node
+    // The value uses cloud-init templating to get the instance ID at boot time
+    if provider_type != ProviderType::Docker {
+        args.push(serde_json::json!({
+            "name": "provider-id",
+            "value": format!("{}://'{{{{ ds.meta_data.instance_id }}}}'", provider_type)
+        }));
+    }
+
+    args
+}
+
 /// Generate KubeadmConfigTemplate manifest for workers
 fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest {
     let template_name = format!("{}-md-0", config.name);
+
+    // Build kubelet extra args using the shared function
+    let kubelet_extra_args = build_kubelet_extra_args(config.provider_type);
 
     // In CAPI v1beta2, kubeletExtraArgs is a list of {name, value} objects
     let spec = serde_json::json!({
@@ -365,9 +393,7 @@ fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest {
                 "joinConfiguration": {
                     "nodeRegistration": {
                         "criSocket": "/var/run/containerd/containerd.sock",
-                        "kubeletExtraArgs": [
-                            {"name": "eviction-hard", "value": "nodefs.available<0%,imagefs.available<0%"}
-                        ]
+                        "kubeletExtraArgs": kubelet_extra_args
                     }
                 }
             }
@@ -483,6 +509,9 @@ fn generate_kubeadm_control_plane(
 ) -> CAPIManifest {
     let cp_name = format!("{}-control-plane", config.name);
 
+    // Build kubelet extra args based on provider type
+    let kubelet_extra_args = build_kubelet_extra_args(config.provider_type);
+
     // In CAPI v1beta2, extraArgs changed from map to list of {name, value} objects
     let mut kubeadm_config_spec = serde_json::json!({
         "clusterConfiguration": {
@@ -503,17 +532,13 @@ fn generate_kubeadm_control_plane(
         "initConfiguration": {
             "nodeRegistration": {
                 "criSocket": "/var/run/containerd/containerd.sock",
-                "kubeletExtraArgs": [
-                    {"name": "eviction-hard", "value": "nodefs.available<0%,imagefs.available<0%"}
-                ]
+                "kubeletExtraArgs": kubelet_extra_args.clone()
             }
         },
         "joinConfiguration": {
             "nodeRegistration": {
                 "criSocket": "/var/run/containerd/containerd.sock",
-                "kubeletExtraArgs": [
-                    {"name": "eviction-hard", "value": "nodefs.available<0%,imagefs.available<0%"}
-                ]
+                "kubeletExtraArgs": kubelet_extra_args
             }
         }
     });
@@ -836,6 +861,19 @@ pub trait Provider: Send + Sync {
     ///
     /// `Ok(())` if the spec is valid, or an error describing what's wrong
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()>;
+
+    /// Get secrets required by this provider in the cluster's namespace
+    ///
+    /// Some providers (like Proxmox, OpenStack, AWS) require credential secrets
+    /// in the cluster's CAPI namespace. Returns secrets to copy from source
+    /// namespace to the cluster namespace before generating CAPI manifests.
+    ///
+    /// # Returns
+    ///
+    /// A vector of (secret_name, source_namespace) tuples
+    fn required_secrets(&self, _cluster: &LatticeCluster) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// Create a provider instance for the given provider type
@@ -984,6 +1022,7 @@ mod tests {
                 k8s_version: "1.32.0",
                 labels: std::collections::BTreeMap::new(),
                 bootstrap,
+                provider_type: ProviderType::Docker,
             }
         }
 

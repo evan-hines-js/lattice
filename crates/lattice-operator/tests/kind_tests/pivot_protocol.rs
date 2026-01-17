@@ -419,6 +419,7 @@ async fn setup_cell_infrastructure() -> Result<
         "test:latest".to_string(),
         None,
         None,
+        None,
     ));
 
     // Create agent registry and gRPC server
