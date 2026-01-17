@@ -128,7 +128,7 @@ impl InfraProviderInfo {
             ProviderType::Proxmox => Self {
                 name: "proxmox",
                 version: env!("CAPMOX_VERSION").to_string(),
-                credentials_secret: Some(("capmox-system", "capmox-manager-credentials")),
+                credentials_secret: Some(("capmox-system", "proxmox-credentials")),
                 credentials_env_map: &[
                     ("url", "PROXMOX_URL"),
                     ("token", "PROXMOX_TOKEN"),
