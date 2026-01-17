@@ -1,0 +1,21 @@
+# Docker workload cluster for E2E testing
+# Uses CAPD (Cluster API Provider Docker) for local development/CI
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: e2e-workload
+spec:
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: kubeadm
+      certSANs:
+        - "127.0.0.1"
+        - "localhost"
+    config:
+      docker: {}
+  nodes:
+    controlPlane: 1
+    workers: 2
+  environment: e2e-test
+  region: local

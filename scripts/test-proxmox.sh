@@ -2,26 +2,49 @@
 # E2E test with Proxmox provider (CAPMOX)
 #
 # Prerequisites:
-# - Proxmox server with API access
-# - VM template with cloud-init support (PROXMOX_TEMPLATE_ID)
-# - SSH key at ~/.ssh/id_rsa.pub
+# 1. Copy and customize the example CRD files:
+#    cp crates/lattice-cli/tests/e2e/fixtures/proxmox-mgmt-example.yaml clusters/proxmox-mgmt.yaml
+#    cp crates/lattice-cli/tests/e2e/fixtures/proxmox-workload-example.yaml clusters/proxmox-workload.yaml
+#
+# 2. Create the Proxmox credentials secret on the bootstrap cluster:
+#    kubectl create secret generic proxmox-credentials \
+#      --from-literal=url='https://proxmox.example.com:8006' \
+#      --from-literal=token='user@pam!token-name' \
+#      --from-literal=secret='your-token-secret' \
+#      -n lattice-system
+#
+# 3. Update the CRD files with your infrastructure details:
+#    - sourceNode: Your Proxmox node name
+#    - templateId: VM template ID with cloud-init
+#    - controlPlaneEndpoint: VIP for each cluster (must be different)
+#    - ipv4Addresses: IPs for each VM (must not overlap)
+#    - sshAuthorizedKeys: Your SSH public key
 
 set -e
 
-export PROXMOX_URL='https://10.0.0.97:8006'
-export PROXMOX_TOKEN='root@pam!lattice'
-export PROXMOX_SECRET='2b3c8618-6a00-4848-8abf-d3af16cf2e83'
-export PROXMOX_NODE='poweredge-lg'
-export PROXMOX_TEMPLATE_ID='9000'
-export PROXMOX_VIP='10.0.0.100'
-export PROXMOX_VIP_INTERFACE='ens18'
-export PROXMOX_IP_POOL='10.0.0.101,10.0.0.102,10.0.0.103'
-export PROXMOX_GATEWAY='10.0.0.1'
-export PROXMOX_SSH_KEY="$(cat ~/.ssh/id_ed25519.pub)"
+# Path to your customized CRD files
+export LATTICE_MGMT_CLUSTER_CONFIG="${LATTICE_MGMT_CLUSTER_CONFIG:-clusters/proxmox-mgmt.yaml}"
+export LATTICE_WORKLOAD_CLUSTER_CONFIG="${LATTICE_WORKLOAD_CLUSTER_CONFIG:-clusters/proxmox-workload.yaml}"
 
+# Provider hints for test behavior
 export LATTICE_MGMT_PROVIDER=proxmox
 export LATTICE_WORKLOAD_PROVIDER=proxmox
-export LATTICE_MGMT_BOOTSTRAP=kubeadm
-export LATTICE_WORKLOAD_BOOTSTRAP=rke2
+
+# Verify CRD files exist
+if [[ ! -f "$LATTICE_MGMT_CLUSTER_CONFIG" ]]; then
+    echo "Error: Management cluster CRD not found: $LATTICE_MGMT_CLUSTER_CONFIG"
+    echo "Copy and customize the example: crates/lattice-cli/tests/e2e/fixtures/proxmox-mgmt-example.yaml"
+    exit 1
+fi
+
+if [[ ! -f "$LATTICE_WORKLOAD_CLUSTER_CONFIG" ]]; then
+    echo "Error: Workload cluster CRD not found: $LATTICE_WORKLOAD_CLUSTER_CONFIG"
+    echo "Copy and customize the example: crates/lattice-cli/tests/e2e/fixtures/proxmox-workload-example.yaml"
+    exit 1
+fi
+
+echo "Using management cluster config: $LATTICE_MGMT_CLUSTER_CONFIG"
+echo "Using workload cluster config: $LATTICE_WORKLOAD_CLUSTER_CONFIG"
+echo
 
 RUST_LOG=info cargo test -p lattice-cli --features provider-e2e --test e2e pivot_e2e -- --nocapture
