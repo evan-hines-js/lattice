@@ -189,10 +189,9 @@ impl ProxmoxProvider {
 
         let proxmox_config = Self::get_proxmox_config(cluster);
 
-        // VM configuration - control plane defaults
-        let source_node = proxmox_config
-            .and_then(|c| c.source_node.clone())
-            .unwrap_or_else(|| "pve".to_string());
+        // VM configuration - control plane
+        // sourceNode is optional - only needed if template is on local storage
+        let source_node = proxmox_config.and_then(|c| c.source_node.clone());
 
         let cp_cores = proxmox_config
             .and_then(|c| c.cp_cores)
@@ -227,7 +226,6 @@ impl ProxmoxProvider {
 
         // Build template spec
         let mut template_spec = serde_json::json!({
-            "sourceNode": source_node,
             "format": format,
             "full": full_clone,
             "storage": storage,
@@ -247,6 +245,11 @@ impl ProxmoxProvider {
                 }
             }
         });
+
+        // sourceNode is optional - only needed if template is on local storage
+        if let Some(node) = source_node {
+            template_spec["sourceNode"] = serde_json::json!(node);
+        }
 
         // Add templateID or templateSelector
         if let Some(cfg) = proxmox_config {
@@ -331,10 +334,9 @@ impl ProxmoxProvider {
 
         let proxmox_config = Self::get_proxmox_config(cluster);
 
-        // VM configuration - worker defaults (can be different from CP)
-        let source_node = proxmox_config
-            .and_then(|c| c.source_node.clone())
-            .unwrap_or_else(|| "pve".to_string());
+        // VM configuration - worker (can be different from CP)
+        // sourceNode is optional - only needed if template is on local storage
+        let source_node = proxmox_config.and_then(|c| c.source_node.clone());
 
         let worker_cores = proxmox_config
             .and_then(|c| c.worker_cores)
@@ -369,7 +371,6 @@ impl ProxmoxProvider {
 
         // Build template spec
         let mut template_spec = serde_json::json!({
-            "sourceNode": source_node,
             "format": format,
             "full": full_clone,
             "storage": storage,
@@ -389,6 +390,11 @@ impl ProxmoxProvider {
                 }
             }
         });
+
+        // sourceNode is optional - only needed if template is on local storage
+        if let Some(node) = source_node {
+            template_spec["sourceNode"] = serde_json::json!(node);
+        }
 
         // Add templateID or templateSelector
         if let Some(cfg) = proxmox_config {
