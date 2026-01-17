@@ -169,7 +169,10 @@ fn add_cluster(repo_path: &Path, args: AddArgs) -> Result<()> {
 
     // Set up paths
     let parent = repo.get_cluster(&args.parent)?;
-    let parent_dir = parent.path.parent().unwrap();
+    let parent_dir = parent
+        .path
+        .parent()
+        .ok_or_else(|| crate::Error::validation("invalid parent cluster path"))?;
     let cluster_dir = parent_dir.join("children").join(&cluster_name);
 
     if cluster_dir.exists() {
@@ -243,12 +246,18 @@ fn delete_cluster(repo_path: &Path, name: &str, confirmed: bool) -> Result<()> {
         return Ok(());
     }
 
-    let cluster_dir = cluster.path.parent().unwrap();
+    let cluster_dir = cluster
+        .path
+        .parent()
+        .ok_or_else(|| crate::Error::validation("invalid cluster path"))?;
 
     // Update parent's kustomization
     if let Some(parent_name) = &cluster.parent {
         let parent = repo.get_cluster(parent_name)?;
-        let parent_dir = parent.path.parent().unwrap();
+        let parent_dir = parent
+            .path
+            .parent()
+            .ok_or_else(|| crate::Error::validation("invalid parent cluster path"))?;
         let children_kust = parent_dir.join("children/kustomization.yaml");
         remove_from_kustomization(&children_kust, &format!("{}/cluster.yaml", name))?;
     }

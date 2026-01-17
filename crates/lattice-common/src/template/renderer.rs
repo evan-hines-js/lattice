@@ -1081,4 +1081,159 @@ mod tests {
 
         assert_eq!(rendered.image, "nginx:latest");
     }
+
+    // =========================================================================
+    // Story: Volume rendering with templates
+    // =========================================================================
+
+    #[test]
+    fn test_render_volume_with_template() {
+        let ctx = TemplateContext::builder()
+            .metadata("api", std::collections::HashMap::new())
+            .resource(
+                "storage",
+                crate::template::context::ResourceOutputs::builder()
+                    .output("name", "my-pvc")
+                    .output("path", "/data/app")
+                    .build(),
+            )
+            .build();
+
+        let mut volumes = BTreeMap::new();
+        volumes.insert(
+            "/data".to_string(),
+            VolumeMount {
+                source: TemplateString::from("${resources.storage.name}"),
+                path: Some("subdir".to_string()),
+                read_only: Some(true),
+            },
+        );
+
+        let container = ContainerSpec {
+            image: "app:latest".to_string(),
+            command: None,
+            args: None,
+            variables: BTreeMap::new(),
+            files: BTreeMap::new(),
+            volumes,
+            resources: None,
+            liveness_probe: None,
+            readiness_probe: None,
+            startup_probe: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let rendered = renderer.render_container("main", &container, &ctx).unwrap();
+
+        assert_eq!(rendered.volumes["/data"].source, "my-pvc");
+        assert_eq!(rendered.volumes["/data"].path, Some("subdir".to_string()));
+        assert_eq!(rendered.volumes["/data"].read_only, Some(true));
+    }
+
+    #[test]
+    fn test_render_volume_with_complex_template() {
+        let ctx = TemplateContext::builder()
+            .metadata("api", std::collections::HashMap::new())
+            .config("storage_class", "fast-ssd")
+            .cluster("name", "prod-cluster")
+            .build();
+
+        let mut volumes = BTreeMap::new();
+        volumes.insert(
+            "/cache".to_string(),
+            VolumeMount {
+                source: TemplateString::from("${cluster.name}-${config.storage_class}-cache"),
+                path: None,
+                read_only: None,
+            },
+        );
+
+        let container = ContainerSpec {
+            image: "app:latest".to_string(),
+            command: None,
+            args: None,
+            variables: BTreeMap::new(),
+            files: BTreeMap::new(),
+            volumes,
+            resources: None,
+            liveness_probe: None,
+            readiness_probe: None,
+            startup_probe: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let rendered = renderer.render_container("main", &container, &ctx).unwrap();
+
+        assert_eq!(rendered.volumes["/cache"].source, "prod-cluster-fast-ssd-cache");
+    }
+
+    #[test]
+    fn test_render_volume_static_source() {
+        let ctx = TemplateContext::builder()
+            .metadata("api", std::collections::HashMap::new())
+            .build();
+
+        let mut volumes = BTreeMap::new();
+        volumes.insert(
+            "/logs".to_string(),
+            VolumeMount {
+                source: TemplateString::from("shared-logs-pvc"),
+                path: Some("app-logs".to_string()),
+                read_only: Some(false),
+            },
+        );
+
+        let container = ContainerSpec {
+            image: "app:latest".to_string(),
+            command: None,
+            args: None,
+            variables: BTreeMap::new(),
+            files: BTreeMap::new(),
+            volumes,
+            resources: None,
+            liveness_probe: None,
+            readiness_probe: None,
+            startup_probe: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let rendered = renderer.render_container("main", &container, &ctx).unwrap();
+
+        assert_eq!(rendered.volumes["/logs"].source, "shared-logs-pvc");
+    }
+
+    #[test]
+    fn test_render_volume_undefined_variable_errors() {
+        let ctx = TemplateContext::builder()
+            .metadata("api", std::collections::HashMap::new())
+            .build();
+
+        let mut volumes = BTreeMap::new();
+        volumes.insert(
+            "/data".to_string(),
+            VolumeMount {
+                source: TemplateString::from("${resources.missing.name}"),
+                path: None,
+                read_only: None,
+            },
+        );
+
+        let container = ContainerSpec {
+            image: "app:latest".to_string(),
+            command: None,
+            args: None,
+            variables: BTreeMap::new(),
+            files: BTreeMap::new(),
+            volumes,
+            resources: None,
+            liveness_probe: None,
+            readiness_probe: None,
+            startup_probe: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let result = renderer.render_container("main", &container, &ctx);
+
+        assert!(result.is_err());
+    }
 }

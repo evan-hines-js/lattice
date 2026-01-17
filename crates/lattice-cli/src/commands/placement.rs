@@ -96,7 +96,11 @@ fn create_placement(repo_path: &Path, args: CreateArgs) -> Result<()> {
     let repo = LatticeRepo::open(repo_path)?;
     let cluster = repo.get_cluster(&args.cluster)?;
 
-    let placements_dir = cluster.path.parent().unwrap().join("placements");
+    let placements_dir = cluster
+        .path
+        .parent()
+        .ok_or_else(|| crate::Error::validation("invalid cluster path"))?
+        .join("placements");
     std::fs::create_dir_all(&placements_dir)?;
 
     // Build YAML sections
@@ -162,7 +166,7 @@ fn scale_placement(repo_path: &Path, name: &str, cluster_name: &str, replicas: i
     let placement_path = cluster
         .path
         .parent()
-        .unwrap()
+        .ok_or_else(|| crate::Error::validation("invalid cluster path"))?
         .join("placements")
         .join(format!("{name}.yaml"));
 
@@ -193,7 +197,11 @@ fn delete_placement(repo_path: &Path, name: &str, cluster_name: &str) -> Result<
     let repo = LatticeRepo::open(repo_path)?;
     let cluster = repo.get_cluster(cluster_name)?;
 
-    let placements_dir = cluster.path.parent().unwrap().join("placements");
+    let placements_dir = cluster
+        .path
+        .parent()
+        .ok_or_else(|| crate::Error::validation("invalid cluster path"))?
+        .join("placements");
     let placement_path = placements_dir.join(format!("{name}.yaml"));
 
     if !placement_path.exists() {

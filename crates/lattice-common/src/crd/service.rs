@@ -11,7 +11,6 @@
 //! - `containers.*.files.*.content` - Inline file content
 //! - `containers.*.files.*.source` - File source path
 //! - `containers.*.volumes.*.source` - Volume source reference
-//! - `resources.*.params.*` - Resource parameters
 //!
 //! Use `$${...}` to escape and produce literal `${...}` in output.
 
@@ -77,12 +76,6 @@ pub enum ResourceType {
     Service,
     /// External service (LatticeExternalService)
     ExternalService,
-    /// HTTP route (future: for ingress)
-    Route,
-    /// PostgreSQL database
-    Postgres,
-    /// Redis cache
-    Redis,
 }
 
 /// Resource metadata (Score-compatible)
@@ -117,7 +110,10 @@ pub struct ResourceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ResourceMetadata>,
 
-    /// Resource-specific parameters (arbitrary JSON object)
+    /// Resource-specific parameters (Score-compatible, currently unused)
+    ///
+    /// Reserved for future use with external provisioners. The Score spec allows
+    /// arbitrary parameters here for resource-specific configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "arbitrary_json_object")]
     pub params: Option<serde_json::Value>,

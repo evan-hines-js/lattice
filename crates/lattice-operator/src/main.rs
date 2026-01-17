@@ -440,7 +440,8 @@ async fn ensure_capi_on_bootstrap() -> anyhow::Result<()> {
 
     tracing::info!(infrastructure = %provider_str, "Installing CAPI providers for bootstrap cluster");
 
-    let config = CapiProviderConfig::new(infrastructure);
+    let config = CapiProviderConfig::new(infrastructure)
+        .map_err(|e| anyhow::anyhow!("Failed to create CAPI config: {}", e))?;
     ensure_capi_installed(&ClusterctlInstaller::new(), &config)
         .await
         .map_err(|e| anyhow::anyhow!("CAPI installation failed: {}", e))?;

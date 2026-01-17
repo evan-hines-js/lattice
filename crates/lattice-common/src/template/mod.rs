@@ -392,4 +392,113 @@ mod tests {
         assert_eq!(engine.render("$PATH", &ctx).unwrap(), "$PATH");
         assert_eq!(engine.render("cost: $100", &ctx).unwrap(), "cost: $100");
     }
+
+    // =========================================================================
+    // Story: Filter Integration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_default_filter_with_undefined_variable() {
+        let engine = TemplateEngine::new();
+        let ctx = TemplateContext::builder()
+            .metadata("api", HashMap::new())
+            // Note: config.missing is NOT defined
+            .build();
+
+        // default filter should return fallback for undefined variable
+        assert_eq!(
+            engine
+                .render("${config.missing | default(\"fallback\")}", &ctx)
+                .unwrap(),
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn test_required_filter_with_defined_variable() {
+        let engine = TemplateEngine::new();
+        let ctx = TemplateContext::builder()
+            .metadata("api", HashMap::new())
+            .config("required_value", "present")
+            .build();
+
+        assert_eq!(
+            engine
+                .render("${config.required_value | required}", &ctx)
+                .unwrap(),
+            "present"
+        );
+    }
+
+    #[test]
+    fn test_required_filter_with_undefined_errors() {
+        let engine = TemplateEngine::new();
+        let ctx = TemplateContext::builder()
+            .metadata("api", HashMap::new())
+            .build();
+
+        let result = engine.render("${config.missing | required}", &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_chained_filters() {
+        let engine = TemplateEngine::new();
+        let ctx = TemplateContext::builder()
+            .metadata("api", HashMap::new())
+            .config("name", "MyService")
+            .build();
+
+        // Chain filters: lower then default (default won't apply since value exists)
+        assert_eq!(
+            engine
+                .render("${config.name | lower | default(\"unknown\")}", &ctx)
+                .unwrap(),
+            "myservice"
+        );
+    }
+
+    #[test]
+    fn test_base64_filters_in_template() {
+        let engine = TemplateEngine::new();
+        let ctx = TemplateContext::builder()
+            .metadata("api", HashMap::new())
+            .config("secret", "password123")
+            .config("encoded", "cGFzc3dvcmQxMjM=") // base64 of "password123"
+            .build();
+
+        // Encode
+        assert_eq!(
+            engine
+                .render("${config.secret | base64_encode}", &ctx)
+                .unwrap(),
+            "cGFzc3dvcmQxMjM="
+        );
+
+        // Decode
+        assert_eq!(
+            engine
+                .render("${config.encoded | base64_decode}", &ctx)
+                .unwrap(),
+            "password123"
+        );
+    }
+
+    #[test]
+    fn test_case_filters_in_template() {
+        let engine = TemplateEngine::new();
+        let ctx = TemplateContext::builder()
+            .metadata("api", HashMap::new())
+            .config("name", "MyServiceName")
+            .build();
+
+        assert_eq!(
+            engine.render("${config.name | upper}", &ctx).unwrap(),
+            "MYSERVICENAME"
+        );
+        assert_eq!(
+            engine.render("${config.name | lower}", &ctx).unwrap(),
+            "myservicename"
+        );
+    }
 }

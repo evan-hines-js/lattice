@@ -141,4 +141,47 @@ mod tests {
         assert_eq!(lower("HELLO"), "hello");
         assert_eq!(lower("Hello World"), "hello world");
     }
+
+    #[test]
+    fn test_default_filter_with_none() {
+        let value = Value::from(());
+        let fallback = Value::from("fallback");
+        let result = default_filter(value, fallback);
+        assert_eq!(result.to_string(), "fallback");
+    }
+
+    #[test]
+    fn test_default_filter_with_empty_string() {
+        // Empty string is a valid value, should NOT use fallback
+        let value = Value::from("");
+        let fallback = Value::from("fallback");
+        let result = default_filter(value, fallback);
+        assert_eq!(result.to_string(), "");
+    }
+
+    #[test]
+    fn test_base64_roundtrip() {
+        let original = "test data with special chars: !@#$%^&*()";
+        let encoded = base64_encode(original);
+        let decoded = base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_base64_decode_invalid_utf8() {
+        // This is valid base64 but decodes to invalid UTF-8 (0xFF 0xFE)
+        let result = base64_decode("//4=");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("UTF-8"));
+    }
+
+    #[test]
+    fn test_upper_with_unicode() {
+        assert_eq!(upper("café"), "CAFÉ");
+    }
+
+    #[test]
+    fn test_lower_with_unicode() {
+        assert_eq!(lower("CAFÉ"), "café");
+    }
 }
