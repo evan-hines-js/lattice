@@ -53,6 +53,11 @@ pub fn generate_cilium_manifests(provider: Option<&str>) -> Result<Vec<String>, 
         // Don't replace kube-proxy - less invasive
         "--set",
         "kubeProxyReplacement=false",
+        // Enable L2 announcements for LoadBalancer IPs (required for VIP reachability)
+        "--set",
+        "l2announcements.enabled=true",
+        "--set",
+        "externalIPs.enabled=true",
         // Disable host firewall - prevents blocking bridge traffic
         "--set",
         "hostFirewall.enabled=false",

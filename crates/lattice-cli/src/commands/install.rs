@@ -112,6 +112,8 @@ pub struct Installer {
     config: InstallConfig,
     cluster: LatticeCluster,
     cluster_name: String,
+    /// Bootstrap cluster name with random suffix for concurrent runs
+    bootstrap_cluster_name: String,
 }
 
 impl Installer {
@@ -131,10 +133,23 @@ impl Installer {
             .clone()
             .ok_or_else(|| Error::validation("LatticeCluster must have metadata.name"))?;
 
+        // Generate unique suffix for bootstrap cluster to allow concurrent runs
+        // Use process ID and timestamp for uniqueness
+        let suffix = format!(
+            "{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                % 0xFFFFFF
+        );
+        let bootstrap_cluster_name = format!("lattice-bootstrap-{}", suffix);
+
         Ok(Self {
             config,
             cluster,
             cluster_name,
+            bootstrap_cluster_name,
         })
     }
 
@@ -246,11 +261,6 @@ impl Installer {
     }
 
     async fn create_kind_cluster(&self) -> Result<()> {
-        let _ = Command::new("kind")
-            .args(["delete", "cluster", "--name", "lattice-bootstrap"])
-            .output()
-            .await;
-
         let kind_config = r#"kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -258,13 +268,6 @@ nodes:
   extraMounts:
   - hostPath: /var/run/docker.sock
     containerPath: /var/run/docker.sock
-  extraPortMappings:
-  - containerPort: 30443
-    hostPort: 30443
-    protocol: TCP
-  - containerPort: 30051
-    hostPort: 30051
-    protocol: TCP
   kubeadmConfigPatches:
   - |
     kind: ClusterConfiguration
@@ -273,12 +276,14 @@ nodes:
         tls-cipher-suites: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
 "#;
 
+        info!("Creating bootstrap cluster: {}", self.bootstrap_cluster_name);
+
         let mut child = Command::new("kind")
             .args([
                 "create",
                 "cluster",
                 "--name",
-                "lattice-bootstrap",
+                &self.bootstrap_cluster_name,
                 "--config",
                 "-",
             ])
@@ -318,7 +323,7 @@ nodes:
     async fn delete_kind_cluster(&self) -> Result<()> {
         self.run_command(
             "kind",
-            &["delete", "cluster", "--name", "lattice-bootstrap"],
+            &["delete", "cluster", "--name", &self.bootstrap_cluster_name],
         )
         .await?;
         Ok(())
