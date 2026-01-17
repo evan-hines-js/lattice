@@ -316,6 +316,12 @@ impl Provider for DockerProvider {
                 }
             }
         }
+        // Auto-add endpoints.host to certSANs so users don't have to specify it twice
+        if let Some(ref endpoints) = cluster.spec.endpoints {
+            if !cert_sans.contains(&endpoints.host) {
+                cert_sans.push(endpoints.host.clone());
+            }
+        }
 
         // Build config structs
         let config = ClusterConfig {
