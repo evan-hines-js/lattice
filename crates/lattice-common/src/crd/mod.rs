@@ -8,7 +8,7 @@ mod providers;
 mod service;
 mod types;
 
-pub use cluster::{LatticeCluster, LatticeClusterSpec, LatticeClusterStatus};
+pub use cluster::{BootstrapMethodStatus, LatticeCluster, LatticeClusterSpec, LatticeClusterStatus};
 pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,

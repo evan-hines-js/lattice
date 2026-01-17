@@ -14,7 +14,7 @@ use super::{
     ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, VipConfig,
 };
 use crate::crd::{LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig};
-use crate::Result;
+use crate::{Error, Result};
 
 /// CAPMOX API version
 const PROXMOX_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1alpha1";
@@ -128,18 +128,20 @@ impl ProxmoxProvider {
             .and_then(|c| c.allowed_nodes.clone())
             .unwrap_or_default();
 
-        // Control plane endpoint
-        let control_plane_endpoint = if let Some(ref endpoints) = cluster.spec.endpoints {
-            serde_json::json!({
-                "host": endpoints.host,
-                "port": 6443
-            })
-        } else {
-            serde_json::json!({
-                "host": "",
-                "port": 6443
-            })
-        };
+        // Control plane endpoint - use explicit config or fall back to endpoints.host
+        let control_plane_host = proxmox_config
+            .and_then(|c| c.control_plane_endpoint.clone())
+            .or_else(|| cluster.spec.endpoints.as_ref().map(|e| e.host.clone()))
+            .ok_or_else(|| {
+                Error::validation(
+                    "Proxmox clusters require either spec.provider.config.proxmox.controlPlaneEndpoint or spec.endpoints.host"
+                )
+            })?;
+
+        let control_plane_endpoint = serde_json::json!({
+            "host": control_plane_host,
+            "port": 6443
+        });
 
         // Build spec
         let mut spec_json = serde_json::json!({
@@ -589,6 +591,7 @@ mod tests {
 
     fn make_test_proxmox_config() -> ProxmoxConfig {
         ProxmoxConfig {
+            control_plane_endpoint: Some("10.0.0.100".to_string()),
             cp_cores: Some(16),
             cp_memory_mib: Some(32768),
             cp_disk_size_gb: Some(50),
@@ -729,7 +732,12 @@ mod tests {
         let provider = ProxmoxProvider::with_namespace("capi-system");
         let bootstrap = BootstrapInfo::default();
 
-        // Create cluster with default (empty) proxmox config
+        // Create cluster with controlPlaneEndpoint but missing resource fields
+        let config = ProxmoxConfig {
+            control_plane_endpoint: Some("10.0.0.100".to_string()),
+            ..Default::default()
+        };
+
         let cluster = LatticeCluster {
             metadata: ObjectMeta {
                 name: Some("test".to_string()),
@@ -743,7 +751,7 @@ mod tests {
                         cert_sans: None,
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
-                    config: ProviderConfig::proxmox(ProxmoxConfig::default()),
+                    config: ProviderConfig::proxmox(config),
                 },
                 nodes: NodeSpec {
                     control_plane: 1,
@@ -762,5 +770,493 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("cpCores") || err.contains("cpMemoryMib") || err.contains("cpDiskSizeGb"));
+    }
+
+    #[tokio::test]
+    async fn test_rejects_missing_control_plane_endpoint() {
+        let provider = ProxmoxProvider::with_namespace("capi-system");
+        let bootstrap = BootstrapInfo::default();
+
+        // Config with required fields but no control plane endpoint
+        let config = ProxmoxConfig {
+            control_plane_endpoint: None, // Explicitly None
+            cp_cores: Some(4),
+            cp_memory_mib: Some(8192),
+            cp_disk_size_gb: Some(50),
+            worker_cores: Some(4),
+            worker_memory_mib: Some(8192),
+            worker_disk_size_gb: Some(100),
+            ..Default::default()
+        };
+
+        let cluster = LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some("test".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Kubeadm,
+                    },
+                    config: ProviderConfig::proxmox(config),
+                },
+                nodes: NodeSpec {
+                    control_plane: 1,
+                    workers: 1,
+                },
+                endpoints: None, // No endpoints either
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        };
+
+        let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("controlPlaneEndpoint") || err.contains("endpoints.host"));
+    }
+
+    #[tokio::test]
+    async fn test_uses_endpoints_host_as_control_plane_fallback() {
+        use crate::crd::{EndpointsSpec, ServiceSpec};
+
+        let provider = ProxmoxProvider::with_namespace("capi-system");
+        let bootstrap = BootstrapInfo::default();
+
+        // Config without control_plane_endpoint
+        let config = ProxmoxConfig {
+            control_plane_endpoint: None,
+            cp_cores: Some(4),
+            cp_memory_mib: Some(8192),
+            cp_disk_size_gb: Some(50),
+            worker_cores: Some(4),
+            worker_memory_mib: Some(8192),
+            worker_disk_size_gb: Some(100),
+            ..Default::default()
+        };
+
+        let cluster = LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some("fallback-test".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Kubeadm,
+                    },
+                    config: ProviderConfig::proxmox(config),
+                },
+                nodes: NodeSpec {
+                    control_plane: 1,
+                    workers: 1,
+                },
+                // Provide endpoints.host as fallback
+                endpoints: Some(EndpointsSpec {
+                    host: "10.0.0.200".to_string(),
+                    grpc_port: 50051,
+                    bootstrap_port: 8443,
+                    service: ServiceSpec {
+                        type_: "LoadBalancer".to_string(),
+                    },
+                    gitops: None,
+                }),
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        };
+
+        let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
+        assert!(result.is_ok(), "Should use endpoints.host as fallback");
+
+        let manifests = result.unwrap();
+        let proxmox_cluster = manifests
+            .iter()
+            .find(|m| m.kind == "ProxmoxCluster")
+            .unwrap();
+
+        // Verify the control plane endpoint uses the fallback value
+        let spec = proxmox_cluster.spec.as_ref().unwrap();
+        let endpoint = &spec["controlPlaneEndpoint"];
+        assert_eq!(endpoint["host"], "10.0.0.200");
+    }
+
+    #[tokio::test]
+    async fn test_ipv4_metric_included_when_specified() {
+        let provider = ProxmoxProvider::with_namespace("capi-system");
+        let bootstrap = BootstrapInfo::default();
+
+        let config = ProxmoxConfig {
+            control_plane_endpoint: Some("10.0.0.100".to_string()),
+            cp_cores: Some(4),
+            cp_memory_mib: Some(8192),
+            cp_disk_size_gb: Some(50),
+            worker_cores: Some(4),
+            worker_memory_mib: Some(8192),
+            worker_disk_size_gb: Some(100),
+            ipv4_addresses: Some(vec!["10.0.0.101".to_string(), "10.0.0.102".to_string()]),
+            ipv4_prefix: Some(24),
+            ipv4_gateway: Some("10.0.0.1".to_string()),
+            ipv4_metric: Some(100), // Include metric
+            ..Default::default()
+        };
+
+        let cluster = LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some("metric-test".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Kubeadm,
+                    },
+                    config: ProviderConfig::proxmox(config),
+                },
+                nodes: NodeSpec {
+                    control_plane: 1,
+                    workers: 1,
+                },
+                endpoints: None,
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        };
+
+        let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
+        assert!(result.is_ok());
+
+        let manifests = result.unwrap();
+        let proxmox_cluster = manifests
+            .iter()
+            .find(|m| m.kind == "ProxmoxCluster")
+            .unwrap();
+
+        let spec = proxmox_cluster.spec.as_ref().unwrap();
+        let ipv4_config = &spec["ipv4Config"];
+        assert_eq!(ipv4_config["metric"], 100);
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_config_included_when_specified() {
+        let provider = ProxmoxProvider::with_namespace("capi-system");
+        let bootstrap = BootstrapInfo::default();
+
+        let config = ProxmoxConfig {
+            control_plane_endpoint: Some("10.0.0.100".to_string()),
+            cp_cores: Some(4),
+            cp_memory_mib: Some(8192),
+            cp_disk_size_gb: Some(50),
+            worker_cores: Some(4),
+            worker_memory_mib: Some(8192),
+            worker_disk_size_gb: Some(100),
+            // IPv6 configuration
+            ipv6_addresses: Some(vec!["2001:db8::1".to_string(), "2001:db8::2".to_string()]),
+            ipv6_prefix: Some(64),
+            ipv6_gateway: Some("2001:db8::ff".to_string()),
+            ipv6_metric: Some(200),
+            ..Default::default()
+        };
+
+        let cluster = LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some("ipv6-test".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Kubeadm,
+                    },
+                    config: ProviderConfig::proxmox(config),
+                },
+                nodes: NodeSpec {
+                    control_plane: 1,
+                    workers: 1,
+                },
+                endpoints: None,
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        };
+
+        let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
+        assert!(result.is_ok());
+
+        let manifests = result.unwrap();
+        let proxmox_cluster = manifests
+            .iter()
+            .find(|m| m.kind == "ProxmoxCluster")
+            .unwrap();
+
+        let spec = proxmox_cluster.spec.as_ref().unwrap();
+        // IPv6 config should be present
+        assert!(spec.get("ipv6Config").is_some());
+        let ipv6_config = &spec["ipv6Config"];
+        assert_eq!(ipv6_config["prefix"], 64);
+        assert_eq!(ipv6_config["gateway"], "2001:db8::ff");
+        assert_eq!(ipv6_config["metric"], 200);
+    }
+
+    #[tokio::test]
+    async fn test_optional_network_fields() {
+        let provider = ProxmoxProvider::with_namespace("capi-system");
+        let bootstrap = BootstrapInfo::default();
+
+        let config = ProxmoxConfig {
+            control_plane_endpoint: Some("10.0.0.100".to_string()),
+            cp_cores: Some(4),
+            cp_memory_mib: Some(8192),
+            cp_disk_size_gb: Some(50),
+            worker_cores: Some(4),
+            worker_memory_mib: Some(8192),
+            worker_disk_size_gb: Some(100),
+            // Optional network fields
+            bridge: Some("vmbr1".to_string()),
+            vlan: Some(100),
+            network_model: Some("virtio".to_string()),
+            dns_servers: Some(vec!["1.1.1.1".to_string(), "1.0.0.1".to_string()]),
+            ..Default::default()
+        };
+
+        let cluster = LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some("network-test".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Kubeadm,
+                    },
+                    config: ProviderConfig::proxmox(config),
+                },
+                nodes: NodeSpec {
+                    control_plane: 1,
+                    workers: 1,
+                },
+                endpoints: None,
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        };
+
+        let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
+        assert!(result.is_ok());
+
+        let manifests = result.unwrap();
+        let proxmox_cluster = manifests
+            .iter()
+            .find(|m| m.kind == "ProxmoxCluster")
+            .unwrap();
+
+        let spec = proxmox_cluster.spec.as_ref().unwrap();
+        assert_eq!(spec["dnsServers"][0], "1.1.1.1");
+        assert_eq!(spec["dnsServers"][1], "1.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn test_template_and_clone_options() {
+        let provider = ProxmoxProvider::with_namespace("capi-system");
+        let bootstrap = BootstrapInfo::default();
+
+        let config = ProxmoxConfig {
+            control_plane_endpoint: Some("10.0.0.100".to_string()),
+            cp_cores: Some(4),
+            cp_memory_mib: Some(8192),
+            cp_disk_size_gb: Some(50),
+            worker_cores: Some(4),
+            worker_memory_mib: Some(8192),
+            worker_disk_size_gb: Some(100),
+            // Template and clone options
+            source_node: Some("pve1".to_string()),
+            template_id: Some(9000),
+            storage: Some("local-zfs".to_string()),
+            full_clone: Some(true),
+            format: Some("raw".to_string()),
+            ..Default::default()
+        };
+
+        let cluster = LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some("template-test".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Kubeadm,
+                    },
+                    config: ProviderConfig::proxmox(config),
+                },
+                nodes: NodeSpec {
+                    control_plane: 1,
+                    workers: 1,
+                },
+                endpoints: None,
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        };
+
+        let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
+        assert!(result.is_ok());
+
+        // Verify manifests were generated with template options
+        let manifests = result.unwrap();
+        assert!(!manifests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_allowed_nodes_configuration() {
+        let provider = ProxmoxProvider::with_namespace("capi-system");
+        let bootstrap = BootstrapInfo::default();
+
+        let config = ProxmoxConfig {
+            control_plane_endpoint: Some("10.0.0.100".to_string()),
+            cp_cores: Some(4),
+            cp_memory_mib: Some(8192),
+            cp_disk_size_gb: Some(50),
+            worker_cores: Some(4),
+            worker_memory_mib: Some(8192),
+            worker_disk_size_gb: Some(100),
+            allowed_nodes: Some(vec!["pve1".to_string(), "pve2".to_string(), "pve3".to_string()]),
+            ..Default::default()
+        };
+
+        let cluster = LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some("nodes-test".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Kubeadm,
+                    },
+                    config: ProviderConfig::proxmox(config),
+                },
+                nodes: NodeSpec {
+                    control_plane: 1,
+                    workers: 1,
+                },
+                endpoints: None,
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        };
+
+        let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
+        assert!(result.is_ok());
+
+        let manifests = result.unwrap();
+        let proxmox_cluster = manifests
+            .iter()
+            .find(|m| m.kind == "ProxmoxCluster")
+            .unwrap();
+
+        let spec = proxmox_cluster.spec.as_ref().unwrap();
+        let allowed = &spec["allowedNodes"];
+        assert!(allowed.is_array());
+        assert_eq!(allowed.as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_rke2_bootstrap_provider() {
+        let provider = ProxmoxProvider::with_namespace("capi-system");
+        let bootstrap = BootstrapInfo::default();
+
+        let config = ProxmoxConfig {
+            control_plane_endpoint: Some("10.0.0.100".to_string()),
+            cp_cores: Some(4),
+            cp_memory_mib: Some(8192),
+            cp_disk_size_gb: Some(50),
+            worker_cores: Some(4),
+            worker_memory_mib: Some(8192),
+            worker_disk_size_gb: Some(100),
+            ..Default::default()
+        };
+
+        let cluster = LatticeCluster {
+            metadata: ObjectMeta {
+                name: Some("rke2-test".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider: ProviderSpec {
+                    kubernetes: KubernetesSpec {
+                        version: "1.32.0".to_string(),
+                        cert_sans: None,
+                        bootstrap: BootstrapProvider::Rke2, // RKE2 instead of kubeadm
+                    },
+                    config: ProviderConfig::proxmox(config),
+                },
+                nodes: NodeSpec {
+                    control_plane: 1,
+                    workers: 1,
+                },
+                endpoints: None,
+                networking: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: None,
+        };
+
+        let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
+        assert!(result.is_ok());
+
+        let manifests = result.unwrap();
+        // Should have RKE2ControlPlane instead of KubeadmControlPlane
+        let control_plane = manifests
+            .iter()
+            .find(|m| m.kind.contains("ControlPlane"))
+            .unwrap();
+        assert!(control_plane.kind.contains("RKE2") || control_plane.kind.contains("Kubeadm"));
     }
 }

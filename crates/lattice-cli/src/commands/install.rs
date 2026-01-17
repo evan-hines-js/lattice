@@ -19,8 +19,8 @@ use tracing::info;
 
 use lattice_common::clusterctl::{execute_move, ClusterctlMoveConfig};
 use lattice_operator::bootstrap::{
-    capmox_credentials_manifests, generate_all_manifests, DefaultManifestGenerator, ManifestConfig,
-    ManifestGenerator,
+    capmox_credentials_manifests, generate_all_manifests, generate_crs_yaml_manifests,
+    DefaultManifestGenerator, ManifestConfig, ManifestGenerator,
 };
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 use lattice_operator::fips;
@@ -454,15 +454,16 @@ nodes:
 
     async fn create_bootstrap_crs(&self) -> Result<()> {
         let generator = DefaultManifestGenerator::new();
-        let cluster_name = self.cluster.metadata.name.as_deref();
+        let cluster_name = self.cluster_name();
         let provider_str = self.cluster.spec.provider.provider_type().to_string();
         let bootstrap_str = self.cluster.spec.provider.kubernetes.bootstrap.to_string();
+        let namespace = format!("capi-{}", cluster_name);
 
         let config = ManifestConfig {
             image: &self.config.image,
             registry_credentials: self.config.registry_credentials.as_deref(),
             networking: self.cluster.spec.networking.as_ref(),
-            cluster_name,
+            cluster_name: Some(cluster_name),
             provider: Some(&provider_str),
             bootstrap: Some(&bootstrap_str),
             parent_host: None,
@@ -478,127 +479,25 @@ nodes:
 
         let all_manifests = generate_all_manifests(&generator, &config);
 
-        let yaml_manifests: Vec<&str> = all_manifests
-            .iter()
-            .filter(|m| m.starts_with("---") || m.starts_with("apiVersion:"))
-            .map(|s| s.as_str())
-            .collect();
-
-        let operator_manifests: Vec<&str> = all_manifests
-            .iter()
-            .filter(|m| m.starts_with("{"))
-            .map(|s| s.as_str())
-            .collect();
-
-        let cilium_yaml = yaml_manifests.join("\n---\n");
-        let namespace = format!("capi-{}", self.cluster_name());
-
-        let cilium_configmap = format!(
-            r#"apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: cilium-cni
-  namespace: {namespace}
-data:
-  cilium.yaml: |
-{cilium_data}
-"#,
-            namespace = namespace,
-            cilium_data = cilium_yaml
-                .lines()
-                .map(|l| format!("    {}", l))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-
-        let mut operator_data_keys = String::new();
-        for (i, manifest) in operator_manifests.iter().enumerate() {
-            let key_name = format!("{:02}-manifest.json", i + 1);
-            let indented = manifest
-                .lines()
-                .map(|l| format!("    {}", l))
-                .collect::<Vec<_>>()
-                .join("\n");
-            operator_data_keys.push_str(&format!("  {}: |\n{}\n", key_name, indented));
-        }
-
-        let operator_configmap = format!(
-            r#"apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: lattice-operator
-  namespace: {namespace}
-data:
-{operator_data}
-"#,
-            namespace = namespace,
-            operator_data = operator_data_keys.trim_end()
-        );
-
-        // Build CRS resources list - always include cilium and operator
-        let mut crs_resources = String::from(
-            r#"    - kind: ConfigMap
-      name: cilium-cni
-    - kind: ConfigMap
-      name: lattice-operator"#,
-        );
-
-        // Add CAPMOX credentials secret if Proxmox provider
-        // CRS installs credentials BEFORE pivot so the target cluster has them.
-        // clusterctl move will also try to copy them (since ProxmoxCluster refs them),
-        // but our move retry logic handles "already exists" gracefully.
-        let capmox_secret = if self.provider() == ProviderType::Proxmox {
+        // Get CAPMOX credentials if Proxmox provider
+        let capmox_credentials = if self.provider() == ProviderType::Proxmox {
             let (url, token, secret) = Self::get_proxmox_credentials()?;
-
-            crs_resources.push_str(
-                r#"
-    - kind: Secret
-      name: capmox-credentials"#,
-            );
-
-            let capmox_manifests = capmox_credentials_manifests(&url, &token, &secret);
-
-            Some(format!(
-                r#"apiVersion: v1
-kind: Secret
-metadata:
-  name: capmox-credentials
-  namespace: {namespace}
-type: addons.cluster.x-k8s.io/resource-set
-stringData:
-  capmox.yaml: |
-{capmox_data}
-"#,
-                namespace = namespace,
-                capmox_data = capmox_manifests
-                    .lines()
-                    .map(|l| format!("    {}", l))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ))
+            Some((url, token, secret))
         } else {
             None
         };
 
-        let crs = format!(
-            r#"apiVersion: addons.cluster.x-k8s.io/v1beta2
-kind: ClusterResourceSet
-metadata:
-  name: {cluster_name}-bootstrap
-  namespace: {namespace}
-spec:
-  strategy: ApplyOnce
-  clusterSelector:
-    matchLabels:
-      cluster.x-k8s.io/cluster-name: {cluster_name}
-  resources:
-{crs_resources}
-"#,
-            namespace = namespace,
-            cluster_name = self.cluster_name(),
-            crs_resources = crs_resources
+        // Generate all CRS YAML manifests using shared function
+        let crs_manifests = generate_crs_yaml_manifests(
+            cluster_name,
+            &namespace,
+            &all_manifests,
+            capmox_credentials
+                .as_ref()
+                .map(|(u, t, s)| (u.as_str(), t.as_str(), s.as_str())),
         );
 
+        // Apply manifests to bootstrap cluster
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
         let _ = self
             .run_command_with_kubeconfig(
@@ -608,16 +507,17 @@ spec:
             )
             .await;
 
-        self.kubectl_apply(&cilium_configmap, Some(&bootstrap_kubeconfig))
-            .await?;
-        self.kubectl_apply(&operator_configmap, Some(&bootstrap_kubeconfig))
-            .await?;
-        if let Some(ref secret) = capmox_secret {
-            self.kubectl_apply(secret, Some(&bootstrap_kubeconfig))
-                .await?;
+        // Apply all CRS manifests (ConfigMaps, optional Secret, ClusterResourceSet)
+        for (i, manifest) in crs_manifests.iter().enumerate() {
+            if i == crs_manifests.len() - 1 {
+                // Last manifest is the CRS, use retry for CRD availability
+                self.kubectl_apply_with_retry(manifest, Some(&bootstrap_kubeconfig), Duration::from_secs(120))
+                    .await?;
+            } else {
+                self.kubectl_apply(manifest, Some(&bootstrap_kubeconfig))
+                    .await?;
+            }
         }
-        self.kubectl_apply_with_retry(&crs, Some(&bootstrap_kubeconfig), Duration::from_secs(120))
-            .await?;
 
         Ok(())
     }

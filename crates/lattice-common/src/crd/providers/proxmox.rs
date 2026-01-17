@@ -74,6 +74,11 @@ pub struct ProxmoxConfig {
     // Cluster-Level Configuration
     // ==========================================================================
 
+    /// Control plane endpoint IP or FQDN (required for workload clusters)
+    /// This is the VIP that kube-vip will manage for API server access
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane_endpoint: Option<String>,
+
     /// Allowed Proxmox nodes for VM placement
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_nodes: Option<Vec<String>>,

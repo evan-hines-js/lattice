@@ -97,6 +97,7 @@ async fn build_and_push_lattice_image() -> Result<(), String> {
 
     let output = ProcessCommand::new("./scripts/docker-build.sh")
         .args(["-t", LATTICE_IMAGE])
+        .env("DOCKER_BUILDKIT", "1")
         .current_dir(workspace_root())
         .output()
         .map_err(|e| format!("Failed to run docker build: {}", e))?;
@@ -239,6 +240,11 @@ fn cleanup_all() {
 #[tokio::test]
 async fn test_configurable_provider_pivot() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // Initialize tracing for log output
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
 
     let mgmt_provider = InfraProvider::from_env("LATTICE_MGMT_PROVIDER", InfraProvider::Docker);
     let workload_provider =

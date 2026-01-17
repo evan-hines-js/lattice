@@ -231,8 +231,7 @@ message CellCommand {
 //
 // Used for:
 // - Post-pivot setup: LatticeCluster CRD + self-referential resource
-// - The controller on the workload cluster will reconcile the LatticeCluster
-//   and lazily install CAPI based on spec.provider.type
+// - The controller reconciles LatticeCluster and lazily installs CAPI
 message ApplyManifestsCommand {
   // YAML manifests to apply (will be kubectl apply -f)
   repeated bytes manifests = 1;
@@ -243,8 +242,7 @@ message ApplyManifestsCommand {
 // Flow:
 // 1. Cell sends StartPivotCommand
 // 2. Agent sends PivotStarted, enters PIVOTING state
-// 3. Cell runs: clusterctl move --to-kubeconfig <proxy-kubeconfig>
-//    (This uses ProxyKubernetesAPI to tunnel requests to agent)
+// 3. Cell runs clusterctl move with proxy kubeconfig (via ProxyKubernetesAPI)
 // 4. Agent detects CAPI resources imported, sends PivotComplete
 message StartPivotCommand {
   // Source namespace on cell where CAPI resources currently live
