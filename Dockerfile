@@ -31,19 +31,26 @@ ENV GOFIPS140=${FIPS:+latest}
 ENV CGO_ENABLED=0
 
 # Build kubectl from source with FIPS
-RUN git clone --depth 1 --branch v${KUBECTL_VERSION} https://github.com/kubernetes/kubernetes.git /build/kubernetes && \
+# Use BuildKit cache mount for Go module cache
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    git clone --depth 1 --branch v${KUBECTL_VERSION} https://github.com/kubernetes/kubernetes.git /build/kubernetes && \
     cd /build/kubernetes && \
     go build -o /usr/local/bin/kubectl ./cmd/kubectl
 
 # Build helm from source with FIPS
 # Must use 'make build' to set proper ldflags (k8s version defaults)
-RUN git clone --depth 1 --branch v${HELM_VERSION} https://github.com/helm/helm.git /build/helm && \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    git clone --depth 1 --branch v${HELM_VERSION} https://github.com/helm/helm.git /build/helm && \
     cd /build/helm && \
     make build && \
     cp bin/helm /usr/local/bin/helm
 
 # Build clusterctl from source with FIPS
-RUN git clone --depth 1 --branch v${CLUSTERCTL_VERSION} https://github.com/kubernetes-sigs/cluster-api.git /build/cluster-api && \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    git clone --depth 1 --branch v${CLUSTERCTL_VERSION} https://github.com/kubernetes-sigs/cluster-api.git /build/cluster-api && \
     cd /build/cluster-api && \
     go build -o /usr/local/bin/clusterctl ./cmd/clusterctl
 
@@ -73,13 +80,14 @@ COPY crates ./crates
 COPY scripts ./scripts
 
 # Build with FIPS if enabled, otherwise standard build
-# RUN if [ -n "$FIPS" ]; then \
-#         echo "Building with FIPS support..." && \
-#         cargo build --release --features fips -p lattice-operator; \
-#     else \
-RUN        echo "Building without FIPS..." && \
-        cargo build --release -p lattice-operator; 
-    # fi
+# Use BuildKit cache mounts for cargo registry and target directory
+# This dramatically speeds up rebuilds by caching compiled dependencies
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    echo "Building without FIPS..." && \
+    cargo build --release -p lattice-operator && \
+    cp /app/target/release/lattice-operator /usr/local/bin/lattice-operator
 
 # -----------------------------------------------------------------------------
 # Stage 3: Runtime image (minimal)
@@ -105,7 +113,7 @@ COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
 COPY --from=go-builder /usr/local/bin/clusterctl /usr/local/bin/clusterctl
 
 # Copy Lattice operator binary
-COPY --from=rust-builder /app/target/release/lattice-operator /usr/local/bin/lattice-operator
+COPY --from=rust-builder /usr/local/bin/lattice-operator /usr/local/bin/lattice-operator
 
 # Copy helm charts from source (pre-downloaded)
 COPY test-charts /charts

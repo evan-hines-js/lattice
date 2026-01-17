@@ -284,6 +284,32 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         self.bootstrap_state.read().await.clone()
     }
 
+    /// Get the operator image from config
+    pub fn image(&self) -> &str {
+        &self.config.image
+    }
+
+    /// Get registry credentials from config
+    pub fn registry_credentials(&self) -> Option<&str> {
+        self.config.registry_credentials.as_deref()
+    }
+
+    /// Get CAPMOX credentials (blocking read of bootstrap state)
+    ///
+    /// Returns None if servers not running or no credentials available.
+    /// Returns owned strings to avoid lifetime issues with the lock.
+    pub fn capmox_credentials(&self) -> Option<(String, String, String)> {
+        // Use try_read to avoid blocking - if locked, return None
+        if let Ok(guard) = self.bootstrap_state.try_read() {
+            if let Some(ref state) = *guard {
+                return state
+                    .capmox_credentials()
+                    .map(|(u, t, s)| (u.to_string(), t.to_string(), s.to_string()));
+            }
+        }
+        None
+    }
+
     /// Start the cell servers if not already running
     ///
     /// This is idempotent - calling multiple times is safe.

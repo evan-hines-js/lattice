@@ -25,7 +25,12 @@
 //! 3. Cell signs CSR with CA and returns certificate
 //! 4. Agent uses cert for mTLS connection to gRPC server
 
+mod crs;
+mod detect;
 mod token;
+
+pub use crs::{apply_bootstrap_crs, generate_crs_yaml_manifests};
+pub use detect::{client_from_kubeconfig, detect_bootstrap_method, BootstrapMethod};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -626,6 +631,23 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     /// Get the CA certificate PEM for distribution
     pub fn ca_cert_pem(&self) -> &str {
         self.ca.ca_cert_pem()
+    }
+
+    /// Get the operator image
+    pub fn image(&self) -> &str {
+        &self.image
+    }
+
+    /// Get registry credentials
+    pub fn registry_credentials(&self) -> Option<&str> {
+        self.registry_credentials.as_deref()
+    }
+
+    /// Get CAPMOX credentials if available
+    pub fn capmox_credentials(&self) -> Option<(&str, &str, &str)> {
+        self.capmox_credentials
+            .as_ref()
+            .map(|(url, token, secret)| (url.as_str(), token.as_str(), secret.as_str()))
     }
 
     /// Register a cluster for bootstrap

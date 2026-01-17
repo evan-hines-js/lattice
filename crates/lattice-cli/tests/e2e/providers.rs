@@ -257,17 +257,30 @@ fn generate_proxmox_config(name: &str, bootstrap: &str, is_mgmt: bool) -> String
         .map(|k| format!("\n        sshAuthorizedKeys:\n          - \"{}\"", k))
         .unwrap_or_default();
 
-    let endpoints_section = if is_mgmt {
-        format!(
-            r#"  endpoints:
+    // For workload clusters, we need a separate VIP
+    let workload_vip = std::env::var("PROXMOX_WORKLOAD_VIP").ok();
+
+    let (endpoints_section, control_plane_endpoint) = if is_mgmt {
+        (
+            format!(
+                r#"  endpoints:
     host: {vip}
     grpcPort: 50051
     bootstrapPort: 8443
     service:
       type: LoadBalancer"#
+            ),
+            String::new(), // Management clusters use endpoints.host
         )
     } else {
-        String::new()
+        // Workload clusters need controlPlaneEndpoint in proxmox config
+        let workload_endpoint = workload_vip.unwrap_or_else(|| {
+            panic!("PROXMOX_WORKLOAD_VIP required for workload clusters (must be different from PROXMOX_VIP)")
+        });
+        (
+            String::new(),
+            format!("\n        controlPlaneEndpoint: \"{}\"", workload_endpoint),
+        )
     };
 
     format!(
@@ -296,7 +309,7 @@ spec:
         ipv4Gateway: "{gateway}"
         dnsServers:
           - "{dns}"
-        virtualIpNetworkInterface: "{vip_interface}"{ssh_keys_yaml}
+        virtualIpNetworkInterface: "{vip_interface}"{ssh_keys_yaml}{control_plane_endpoint}
         cpCores: 16
         cpMemoryMib: 32768
         cpDiskSizeGb: 50

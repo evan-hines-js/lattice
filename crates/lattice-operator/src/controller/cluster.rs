@@ -20,11 +20,13 @@ use tracing::{debug, error, info, instrument, warn};
 use mockall::automock;
 
 use crate::agent::connection::SharedAgentRegistry;
-use crate::bootstrap::DefaultManifestGenerator;
+use crate::bootstrap::{
+    apply_bootstrap_crs, detect_bootstrap_method, BootstrapMethod, DefaultManifestGenerator,
+};
 use crate::capi::{ensure_capi_installed, CapiInstaller, CapiProviderConfig};
 use crate::crd::{
-    BootstrapProvider, ClusterPhase, Condition, ConditionStatus, LatticeCluster,
-    LatticeClusterStatus,
+    BootstrapMethodStatus, BootstrapProvider, ClusterPhase, Condition, ConditionStatus,
+    LatticeCluster, LatticeClusterStatus,
 };
 use crate::parent::ParentServers;
 use crate::proto::{cell_command, AgentState, CellCommand, StartPivotCommand};
@@ -100,6 +102,11 @@ pub trait KubeClient: Send + Sync {
         source_namespace: &str,
         target_namespace: &str,
     ) -> Result<(), Error>;
+
+    /// Get the underlying kube Client
+    ///
+    /// Used when we need to pass the client to other functions that require it.
+    fn client(&self) -> Client;
 }
 
 /// Trait abstracting CAPI resource operations
@@ -534,6 +541,10 @@ impl KubeClient for KubeClientImpl {
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn client(&self) -> Client {
+        self.client.clone()
     }
 }
 
@@ -1208,6 +1219,25 @@ impl Context {
             self_cluster_name: None,
         }
     }
+
+    /// Create a context for testing a self-managed cluster
+    ///
+    /// Sets the self_cluster_name to skip bootstrap detection paths.
+    #[cfg(test)]
+    pub fn for_testing_self_cluster(
+        kube: Arc<dyn KubeClient>,
+        capi: Arc<dyn CAPIClient>,
+        capi_installer: Arc<dyn CapiInstaller>,
+        cluster_name: &str,
+    ) -> Self {
+        Self {
+            kube,
+            capi,
+            capi_installer,
+            parent_servers: None,
+            self_cluster_name: Some(cluster_name.to_string()),
+        }
+    }
 }
 
 /// Builder for constructing [`Context`] instances
@@ -1477,47 +1507,138 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Each cluster gets its own CAPI namespace
             let capi_namespace = format!("capi-{}", name);
 
-            // For child clusters, patch kubeconfig to use central proxy when agent connects
-            // This allows CAPI to reach the workload cluster's API server
-            if !is_self {
-                if let Some(ref parent_servers) = ctx.parent_servers {
-                    if parent_servers.is_running()
-                        && parent_servers
-                            .agent_registry()
-                            .get_proxy_channels(&name)
-                            .is_some()
-                    {
-                        // Proxy channels registered = agent connected, patch kubeconfig
-                        let ca_cert_pem = parent_servers.ca().ca_cert_pem();
-                        if let Err(e) = crate::pivot::patch_kubeconfig_for_child_cluster(
-                            &name,
-                            &capi_namespace,
-                            crate::pivot::CENTRAL_PROXY_SERVICE_URL,
-                            ca_cert_pem,
-                        )
-                        .await
-                        {
-                            debug!(error = %e, "Failed to patch kubeconfig for child cluster (may already be patched)");
-                        }
-                    }
-                }
-            }
-
-            let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
+            let bootstrap_provider = cluster.spec.provider.kubernetes.bootstrap.clone();
             let is_ready = ctx
                 .capi
-                .is_infrastructure_ready(&name, &capi_namespace, bootstrap)
+                .is_infrastructure_ready(&name, &capi_namespace, bootstrap_provider)
                 .await?;
 
-            if is_ready {
-                // Infrastructure is ready, transition to Pivoting
-                info!("infrastructure ready, transitioning to Pivoting phase");
-                update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None, false).await?;
-                Ok(Action::requeue(Duration::from_secs(5)))
-            } else {
-                // Still provisioning, requeue
+            if !is_ready {
                 debug!("infrastructure not ready yet");
-                Ok(Action::requeue(Duration::from_secs(30)))
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+
+            // Infrastructure is ready - detect or retrieve bootstrap method
+            let stored_method = cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.bootstrap_method.as_ref());
+
+            // For self-cluster, we don't need bootstrap detection (already bootstrapped)
+            if is_self {
+                info!("infrastructure ready (self-cluster), transitioning to Pivoting phase");
+                update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None, false).await?;
+                return Ok(Action::requeue(Duration::from_secs(5)));
+            }
+
+            // Get kubeconfig from CAPI secret for bootstrap method detection
+            let kubeconfig_secret_name = format!("{}-kubeconfig", name);
+            let kubeconfig_data = match ctx
+                .kube
+                .get_secret(&kubeconfig_secret_name, &capi_namespace)
+                .await?
+            {
+                Some(secret) => secret
+                    .data
+                    .and_then(|d| d.get("value").cloned())
+                    .map(|v| v.0)
+                    .ok_or_else(|| Error::Bootstrap("kubeconfig secret missing 'value' key".into()))?,
+                None => {
+                    debug!("kubeconfig secret not yet available");
+                    return Ok(Action::requeue(Duration::from_secs(10)));
+                }
+            };
+
+            // Detect bootstrap method if not already stored
+            let method = if let Some(m) = stored_method {
+                match m {
+                    BootstrapMethodStatus::ClusterResourceSet => BootstrapMethod::ClusterResourceSet,
+                    BootstrapMethodStatus::Webhook => BootstrapMethod::Webhook,
+                }
+            } else {
+                let detected = detect_bootstrap_method(&kubeconfig_data).await;
+                info!(cluster = %name, method = %detected, "detected bootstrap method");
+
+                // Store method in status
+                let method_status = match detected {
+                    BootstrapMethod::ClusterResourceSet => BootstrapMethodStatus::ClusterResourceSet,
+                    BootstrapMethod::Webhook => BootstrapMethodStatus::Webhook,
+                };
+                update_cluster_bootstrap_method(&cluster, &ctx, method_status).await?;
+                detected
+            };
+
+            match method {
+                BootstrapMethod::ClusterResourceSet => {
+                    // CRS path: push manifests directly to child cluster
+                    info!(cluster = %name, "applying bootstrap via ClusterResourceSet");
+
+                    // Get CAPMOX credentials if Proxmox provider
+                    let capmox_creds_owned = ctx
+                        .parent_servers
+                        .as_ref()
+                        .and_then(|p| p.capmox_credentials());
+                    let capmox_creds = capmox_creds_owned
+                        .as_ref()
+                        .map(|(u, t, s)| (u.as_str(), t.as_str(), s.as_str()));
+
+                    // Get operator image from parent_servers or use default
+                    let image = ctx
+                        .parent_servers
+                        .as_ref()
+                        .map(|p| p.image())
+                        .unwrap_or("ghcr.io/lattice-cloud/lattice-operator:latest");
+
+                    let registry_creds = ctx
+                        .parent_servers
+                        .as_ref()
+                        .and_then(|p| p.registry_credentials());
+
+                    apply_bootstrap_crs(
+                        &ctx.kube.client(),
+                        &cluster,
+                        image,
+                        registry_creds,
+                        capmox_creds,
+                    )
+                    .await?;
+
+                    info!(cluster = %name, "CRS bootstrap applied, transitioning to Pivoting");
+                    update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None, false).await?;
+                    Ok(Action::requeue(Duration::from_secs(5)))
+                }
+                BootstrapMethod::Webhook => {
+                    // Webhook path: wait for agent to connect, patch kubeconfig for central proxy
+                    if let Some(ref parent_servers) = ctx.parent_servers {
+                        if parent_servers.is_running()
+                            && parent_servers
+                                .agent_registry()
+                                .get_proxy_channels(&name)
+                                .is_some()
+                        {
+                            // Agent connected - patch kubeconfig to use central proxy
+                            let ca_cert_pem = parent_servers.ca().ca_cert_pem();
+                            if let Err(e) = crate::pivot::patch_kubeconfig_for_child_cluster(
+                                &name,
+                                &capi_namespace,
+                                crate::pivot::CENTRAL_PROXY_SERVICE_URL,
+                                ca_cert_pem,
+                            )
+                            .await
+                            {
+                                debug!(error = %e, "Failed to patch kubeconfig (may already be patched)");
+                            }
+
+                            info!(cluster = %name, "webhook bootstrap: agent connected, transitioning to Pivoting");
+                            update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None, false).await?;
+                            return Ok(Action::requeue(Duration::from_secs(5)));
+                        }
+                    }
+
+                    // Waiting for agent to connect via webhook/gRPC
+                    debug!(cluster = %name, "webhook bootstrap: waiting for agent to connect");
+                    Ok(Action::requeue(Duration::from_secs(10)))
+                }
             }
         }
         ClusterPhase::Pivoting => {
@@ -2068,6 +2189,34 @@ async fn update_cluster_status(
     Ok(())
 }
 
+/// Update the bootstrap_method field in cluster status
+///
+/// Uses a merge patch to only update this field without affecting other status fields.
+async fn update_cluster_bootstrap_method(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+    method: BootstrapMethodStatus,
+) -> Result<(), Error> {
+    let name = cluster.name_any();
+    let api: Api<LatticeCluster> = Api::all(ctx.kube.client());
+
+    let patch = serde_json::json!({
+        "status": {
+            "bootstrapMethod": method
+        }
+    });
+
+    api.patch_status(
+        &name,
+        &PatchParams::apply("lattice-controller"),
+        &Patch::Merge(&patch),
+    )
+    .await?;
+
+    info!(cluster = %name, method = ?method, "stored bootstrap method in status");
+    Ok(())
+}
+
 /// Real implementation of PivotOperations using AgentRegistry and PivotOrchestrator
 pub struct PivotOperationsImpl {
     /// Agent registry for sending commands
@@ -2459,7 +2608,10 @@ mod tests {
         }
 
         /// Creates a context where infrastructure reports ready.
-        fn mock_context_infra_ready_with_capture() -> (Arc<Context>, StatusCapture) {
+        /// Uses the self-cluster path to skip bootstrap detection.
+        fn mock_context_infra_ready_with_capture(
+            cluster_name: &str,
+        ) -> (Arc<Context>, StatusCapture) {
             let capture = StatusCapture::new();
             let capture_clone = capture.clone();
 
@@ -2475,10 +2627,11 @@ mod tests {
                 .returning(|_, _, _| Ok(true));
 
             (
-                Arc::new(Context::for_testing(
+                Arc::new(Context::for_testing_self_cluster(
                     Arc::new(mock),
                     Arc::new(capi_mock),
                     mock_capi_installer(),
+                    cluster_name,
                 )),
                 capture,
             )
@@ -2548,7 +2701,7 @@ mod tests {
                 "ready-infra-cluster",
                 ClusterPhase::Provisioning,
             ));
-            let (ctx, capture) = mock_context_infra_ready_with_capture();
+            let (ctx, capture) = mock_context_infra_ready_with_capture("ready-infra-cluster");
 
             let action = reconcile(cluster, ctx)
                 .await
@@ -3042,10 +3195,11 @@ mod tests {
             let mut installer = MockCapiInstaller::new();
             installer.expect_ensure().returning(|_| Ok(()));
 
-            let ctx = Arc::new(Context::for_testing(
+            let ctx = Arc::new(Context::for_testing_self_cluster(
                 Arc::new(mock),
                 Arc::new(capi_mock),
                 Arc::new(installer),
+                "ready-cluster",
             ));
 
             let action = reconcile(cluster, ctx)
