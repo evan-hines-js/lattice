@@ -607,22 +607,33 @@ fn generate_rke2_control_plane(
 ) -> CAPIManifest {
     let cp_name = format!("{}-control-plane", config.name);
 
-    // RKE2 agent configuration (kubelet settings)
-    let agent_config = serde_json::json!({
-        "kubelet": {
-            "extraArgs": [
-                "eviction-hard=nodefs.available<0%,imagefs.available<0%"
-            ]
-        }
-    });
+    // Build files array for static pods and SSH keys
+    let mut files: Vec<serde_json::Value> = Vec::new();
 
-    // Build spec - postRKE2Commands is at the TOP level, not inside agentConfig
+    // Add kube-vip static pod if VIP is configured
+    if let Some(ref vip) = cp_config.vip {
+        files.push(serde_json::json!({
+            "content": generate_kube_vip_manifest(vip),
+            "owner": "root:root",
+            "path": "/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml",
+            "permissions": "0644"
+        }));
+    }
+
+    // Add SSH authorized keys via files (RKE2 doesn't have native user support)
+    if !cp_config.ssh_authorized_keys.is_empty() {
+        files.push(serde_json::json!({
+            "content": cp_config.ssh_authorized_keys.join("\n"),
+            "owner": "root:root",
+            "path": "/root/.ssh/authorized_keys",
+            "permissions": "0600"
+        }));
+    }
+
     let mut spec = serde_json::json!({
         "replicas": cp_config.replicas,
         "version": format!("v{}+rke2r1", config.k8s_version.trim_start_matches('v')),
-        // Use control-plane-endpoint for node registration (via CAPD load balancer)
         "registrationMethod": "control-plane-endpoint",
-        // Use machineTemplate.infrastructureRef (the non-deprecated path)
         "machineTemplate": {
             "infrastructureRef": {
                 "apiVersion": infra.api_version,
@@ -630,17 +641,17 @@ fn generate_rke2_control_plane(
                 "name": format!("{}-control-plane", config.name)
             }
         },
-        "agentConfig": agent_config,
+        "agentConfig": {
+            "kubelet": {
+                "extraArgs": ["eviction-hard=nodefs.available<0%,imagefs.available<0%"]
+            }
+        },
         "serverConfig": {
             "tlsSan": cp_config.cert_sans,
-            "cni": "none",  // We use Cilium, not built-in CNI
-            // Disable cloud controller - we don't use a cloud provider with CAPD
+            "cni": "none",
             "disableComponents": {
                 "kubernetesComponents": ["cloudController"]
             },
-            // Force FIPS-compliant TLS ciphers - RKE2's BoringCrypto allows X25519
-            // but our GOFIPS140 kubectl rejects it
-            // Enable anonymous auth so HAProxy can health-check /healthz without credentials
             "kubeAPIServer": {
                 "extraArgs": [
                     "anonymous-auth=true",
@@ -648,41 +659,18 @@ fn generate_rke2_control_plane(
                 ]
             }
         },
-        // Required by RKE2ControlPlane CRD - matches the default
         "rolloutStrategy": {
             "type": "RollingUpdate",
-            "rollingUpdate": {
-                "maxSurge": 1
-            }
+            "rollingUpdate": { "maxSurge": 1 }
         }
     });
 
-    // Add postRKE2Commands at the spec level if provided
     if !cp_config.post_kubeadm_commands.is_empty() {
         spec["postRKE2Commands"] = serde_json::json!(cp_config.post_kubeadm_commands);
     }
 
-    // Add kube-vip static pod if VIP is configured
-    // RKE2 uses /var/lib/rancher/rke2/agent/pod-manifests/ for static pods
-    if let Some(ref vip) = cp_config.vip {
-        spec["files"] = serde_json::json!([
-            {
-                "content": generate_kube_vip_manifest(vip),
-                "owner": "root:root",
-                "path": "/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml",
-                "permissions": "0644"
-            }
-        ]);
-    }
-
-    // Add SSH authorized keys if configured
-    if !cp_config.ssh_authorized_keys.is_empty() {
-        spec["agentConfig"]["users"] = serde_json::json!([
-            {
-                "name": "root",
-                "sshAuthorizedKeys": cp_config.ssh_authorized_keys
-            }
-        ]);
+    if !files.is_empty() {
+        spec["files"] = serde_json::json!(files);
     }
 
     CAPIManifest::new(
@@ -1289,7 +1277,7 @@ mod tests {
         }
 
         #[test]
-        fn rke2_control_plane_no_files_without_vip() {
+        fn rke2_control_plane_no_files_without_vip_or_ssh() {
             let config = test_config(BootstrapProvider::Rke2);
             let infra = test_infra();
             let cp_config = ControlPlaneConfig {
@@ -1305,8 +1293,66 @@ mod tests {
 
             assert!(
                 spec.pointer("/files").is_none(),
-                "should not have files when VIP not configured"
+                "should not have files when neither VIP nor SSH configured"
             );
+        }
+
+        #[test]
+        fn rke2_control_plane_includes_ssh_keys_in_files() {
+            let config = test_config(BootstrapProvider::Rke2);
+            let infra = test_infra();
+            let cp_config = ControlPlaneConfig {
+                replicas: 1,
+                cert_sans: vec![],
+                post_kubeadm_commands: vec![],
+                vip: None,
+                ssh_authorized_keys: vec![
+                    "ssh-ed25519 AAAAC3... user@host".to_string(),
+                    "ssh-rsa AAAAB3... other@host".to_string(),
+                ],
+            };
+
+            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let spec = manifest.spec.expect("should have spec");
+
+            let files = spec
+                .pointer("/files")
+                .expect("should have files when SSH keys configured");
+            let file = files.as_array().unwrap().first().unwrap();
+
+            assert_eq!(file["path"], "/root/.ssh/authorized_keys");
+            assert_eq!(file["permissions"], "0600");
+            assert_eq!(file["owner"], "root:root");
+            assert!(file["content"].as_str().unwrap().contains("ssh-ed25519"));
+            assert!(file["content"].as_str().unwrap().contains("ssh-rsa"));
+        }
+
+        #[test]
+        fn rke2_control_plane_combines_vip_and_ssh_files() {
+            let config = test_config(BootstrapProvider::Rke2);
+            let infra = test_infra();
+            let cp_config = ControlPlaneConfig {
+                replicas: 1,
+                cert_sans: vec!["10.0.0.100".to_string()],
+                post_kubeadm_commands: vec![],
+                vip: Some(VipConfig::new("10.0.0.100".to_string(), None, None)),
+                ssh_authorized_keys: vec!["ssh-ed25519 AAAAC3... user@host".to_string()],
+            };
+
+            let manifest = generate_control_plane(&config, &infra, &cp_config);
+            let spec = manifest.spec.expect("should have spec");
+
+            let files = spec.pointer("/files").expect("should have files");
+            let files_arr = files.as_array().unwrap();
+
+            assert_eq!(files_arr.len(), 2, "should have both kube-vip and SSH files");
+
+            let paths: Vec<&str> = files_arr
+                .iter()
+                .map(|f| f["path"].as_str().unwrap())
+                .collect();
+            assert!(paths.contains(&"/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml"));
+            assert!(paths.contains(&"/root/.ssh/authorized_keys"));
         }
     }
 }
