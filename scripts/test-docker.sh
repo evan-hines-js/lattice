@@ -11,6 +11,8 @@ export LATTICE_MGMT_CLUSTER_CONFIG="$REPO_ROOT/crates/lattice-cli/tests/e2e/fixt
 export LATTICE_WORKLOAD_CLUSTER_CONFIG="$REPO_ROOT/crates/lattice-cli/tests/e2e/fixtures/docker-workload.yaml"
 export LATTICE_MGMT_PROVIDER=docker
 export LATTICE_WORKLOAD_PROVIDER=docker
+export LATTICE_ENABLE_INDEPENDENCE_TEST=true
+export LATTICE_ENABLE_MESH_TEST=true
 
 echo "Using management cluster config: $LATTICE_MGMT_CLUSTER_CONFIG"
 echo "Using workload cluster config: $LATTICE_WORKLOAD_CLUSTER_CONFIG"
