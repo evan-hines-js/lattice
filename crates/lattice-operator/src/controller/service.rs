@@ -326,6 +326,38 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
                 .await?;
         }
 
+        // Apply waypoint outbound TrafficPolicies
+        for policy in &compiled.waypoint_policies.outbound_policies {
+            debug!(name = %policy.metadata.name, "applying outbound TrafficPolicy");
+            let json = serde_json::to_value(policy)
+                .map_err(|e| Error::serialization(format!("TrafficPolicy: {}", e)))?;
+
+            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+                group: "gateway.kgateway.dev".to_string(),
+                version: "v1alpha1".to_string(),
+                kind: "TrafficPolicy".to_string(),
+            });
+            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+            api.patch(&policy.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
+        // Apply waypoint inbound TrafficPolicies
+        for policy in &compiled.waypoint_policies.inbound_policies {
+            debug!(name = %policy.metadata.name, "applying inbound TrafficPolicy");
+            let json = serde_json::to_value(policy)
+                .map_err(|e| Error::serialization(format!("TrafficPolicy: {}", e)))?;
+
+            let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+                group: "gateway.kgateway.dev".to_string(),
+                version: "v1alpha1".to_string(),
+                kind: "TrafficPolicy".to_string(),
+            });
+            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+            api.patch(&policy.metadata.name, &params, &Patch::Apply(&json))
+                .await?;
+        }
+
         info!(
             service = %service_name,
             namespace = %namespace,
