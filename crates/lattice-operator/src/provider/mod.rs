@@ -224,7 +224,14 @@ impl VipConfig {
 }
 
 /// Generate kube-vip static pod manifest
-fn generate_kube_vip_manifest(vip: &VipConfig) -> String {
+fn generate_kube_vip_manifest(vip: &VipConfig, bootstrap: &crate::crd::BootstrapProvider) -> String {
+    use crate::crd::BootstrapProvider;
+
+    let kubeconfig_path = match bootstrap {
+        BootstrapProvider::Rke2 => "/etc/rancher/rke2/rke2.yaml",
+        BootstrapProvider::Kubeadm => "/etc/kubernetes/super-admin.conf",
+    };
+
     format!(
         r#"apiVersion: v1
 kind: Pod
@@ -252,11 +259,11 @@ spec:
     - name: vip_leaderelection
       value: "true"
     - name: vip_leaseduration
-      value: "15"
+      value: "60"
     - name: vip_renewdeadline
-      value: "10"
+      value: "40"
     - name: vip_retryperiod
-      value: "2"
+      value: "5"
     securityContext:
       capabilities:
         add:
@@ -272,13 +279,14 @@ spec:
   hostNetwork: true
   volumes:
   - hostPath:
-      path: /etc/kubernetes/super-admin.conf
+      path: {kubeconfig_path}
       type: FileOrCreate
     name: kubeconfig
 "#,
         image = vip.image,
         interface = vip.interface,
         address = vip.address,
+        kubeconfig_path = kubeconfig_path,
     )
 }
 
@@ -312,6 +320,13 @@ pub fn generate_machine_deployment(
         "replicas": 0,  // ALWAYS 0 - scaling happens after pivot
         "selector": {
             "matchLabels": {}
+        },
+        "strategy": {
+            "type": "RollingUpdate",
+            "rollingUpdate": {
+                "maxSurge": 1,
+                "maxUnavailable": 0
+            }
         },
         "template": {
             "spec": {
@@ -552,7 +567,7 @@ fn generate_kubeadm_control_plane(
     if let Some(ref vip) = cp_config.vip {
         kubeadm_config_spec["files"] = serde_json::json!([
             {
-                "content": generate_kube_vip_manifest(vip),
+                "content": generate_kube_vip_manifest(vip, &config.bootstrap),
                 "owner": "root:root",
                 "path": "/etc/kubernetes/manifests/kube-vip.yaml",
                 "permissions": "0644"
@@ -613,7 +628,7 @@ fn generate_rke2_control_plane(
     // Add kube-vip static pod if VIP is configured
     if let Some(ref vip) = cp_config.vip {
         files.push(serde_json::json!({
-            "content": generate_kube_vip_manifest(vip),
+            "content": generate_kube_vip_manifest(vip, &config.bootstrap),
             "owner": "root:root",
             "path": "/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml",
             "permissions": "0644"
@@ -1224,6 +1239,11 @@ mod tests {
             assert!(content.contains("10.0.0.100"));
             assert!(content.contains("eth0"));
             assert!(content.contains(DEFAULT_KUBE_VIP_IMAGE));
+            // Kubeadm uses super-admin.conf kubeconfig
+            assert!(
+                content.contains("/etc/kubernetes/super-admin.conf"),
+                "Kubeadm kube-vip should use kubeadm kubeconfig path"
+            );
         }
 
         #[test]
@@ -1274,6 +1294,15 @@ mod tests {
             assert_eq!(path, "/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml");
             assert!(content.contains("kube-vip"));
             assert!(content.contains("10.0.0.100"));
+            // RKE2 uses different kubeconfig path than kubeadm
+            assert!(
+                content.contains("/etc/rancher/rke2/rke2.yaml"),
+                "RKE2 kube-vip should use RKE2 kubeconfig path"
+            );
+            assert!(
+                !content.contains("/etc/kubernetes/super-admin.conf"),
+                "RKE2 kube-vip should not use kubeadm kubeconfig path"
+            );
         }
 
         #[test]

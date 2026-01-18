@@ -133,7 +133,7 @@ impl InfraProviderInfo {
                     ("token", "PROXMOX_TOKEN"),
                     ("secret", "PROXMOX_SECRET"),
                 ],
-                extra_init_args: &["--ipam", "in-cluster"], // CAPMOX requires IPAM provider
+                extra_init_args: &["--ipam", "in-cluster"],
             }),
             ProviderType::OpenStack | ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => {
                 Err(Error::capi_installation(format!(

@@ -117,23 +117,6 @@ pub struct LatticeClusterStatus {
     /// for clusters that completed bootstrap before the restart.
     #[serde(default, skip_serializing_if = "is_false")]
     pub bootstrap_complete: bool,
-
-    /// Bootstrap method used for this cluster
-    ///
-    /// Detected when infrastructure is ready. CRS means parent pushes manifests
-    /// directly (can reach child API). Webhook means child pulls via callback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bootstrap_method: Option<BootstrapMethodStatus>,
-}
-
-/// Bootstrap method for child cluster provisioning (status tracking)
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-pub enum BootstrapMethodStatus {
-    /// Parent pushed manifests via ClusterResourceSet
-    #[serde(rename = "CRS")]
-    ClusterResourceSet,
-    /// Child pulled manifests via webhook callback
-    Webhook,
 }
 
 fn is_false(b: &bool) -> bool {

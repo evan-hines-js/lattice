@@ -9,4 +9,4 @@ mod docker;
 mod proxmox;
 
 pub use docker::DockerConfig;
-pub use proxmox::ProxmoxConfig;
+pub use proxmox::{Ipv4PoolConfig, Ipv6PoolConfig, ProxmoxConfig};

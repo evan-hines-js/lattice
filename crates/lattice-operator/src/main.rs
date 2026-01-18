@@ -673,6 +673,13 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
             ca_certificate: ca_cert,
             cluster_manifest,
             networking: cluster.spec.networking.clone(),
+            proxmox_ipv4_pool: cluster
+                .spec
+                .provider
+                .config
+                .proxmox
+                .as_ref()
+                .map(|p| p.ipv4_pool.clone()),
             provider: cluster.spec.provider.provider_type().to_string(),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
         };
