@@ -66,7 +66,14 @@ impl ProxmoxProvider {
         let dns_servers = cfg.dns_servers.clone()
             .unwrap_or_else(|| vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]);
         let allowed_nodes = cfg.allowed_nodes.clone().unwrap_or_default();
-        let ip_range = format!("{}-{}", cfg.ipv4_pool.start, cfg.ipv4_pool.end);
+
+        // Parse ipv4_pool range to get start-end and prefix
+        let (ip_range, prefix) = cfg.ipv4_pool.parse_range()
+            .map(|(start, end, prefix)| (format!("{}-{}", start, end), prefix))
+            .ok_or_else(|| Error::validation(format!(
+                "invalid ipv4Pool range format: '{}', expected format like '10.0.0.101-102/24'",
+                cfg.ipv4_pool.range
+            )))?;
 
         let mut spec = serde_json::json!({
             "controlPlaneEndpoint": {
@@ -77,7 +84,7 @@ impl ProxmoxProvider {
             "allowedNodes": allowed_nodes,
             "ipv4Config": {
                 "addresses": [ip_range],
-                "prefix": cfg.ipv4_pool.prefix,
+                "prefix": prefix,
                 "gateway": &cfg.ipv4_pool.gateway
             },
             "credentialsRef": {
@@ -303,9 +310,7 @@ mod tests {
         ProxmoxConfig {
             control_plane_endpoint: "10.0.0.100".to_string(),
             ipv4_pool: Ipv4PoolConfig {
-                start: "10.0.0.101".to_string(),
-                end: "10.0.0.120".to_string(),
-                prefix: 24,
+                range: "10.0.0.101-120/24".to_string(),
                 gateway: "10.0.0.1".to_string(),
             },
             cp_cores: 4,

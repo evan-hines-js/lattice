@@ -730,9 +730,7 @@ mod tests {
             let proxmox = ProxmoxConfig {
                 control_plane_endpoint: "10.0.0.100".to_string(),
                 ipv4_pool: Ipv4PoolConfig {
-                    start: "10.0.0.101".to_string(),
-                    end: "10.0.0.120".to_string(),
-                    prefix: 24,
+                    range: "10.0.0.101-120/24".to_string(),
                     gateway: "10.0.0.1".to_string(),
                 },
                 cp_cores: 4,

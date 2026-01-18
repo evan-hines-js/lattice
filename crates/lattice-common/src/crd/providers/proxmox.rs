@@ -13,47 +13,108 @@ use super::super::types::SecretRef;
 /// IPv4 pool configuration for CAPI IPAM
 ///
 /// Defines a range of IPv4 addresses for automatic allocation to cluster nodes.
+///
+/// # Range Format
+///
+/// The range field uses a compact CIDR notation: `"START-END_SUFFIX/PREFIX"`
+///
+/// Examples:
+/// - `"10.0.0.101-102/24"` → IPs 10.0.0.101 to 10.0.0.102 with /24 prefix
+/// - `"10.0.0.101-10.0.0.120/24"` → Full IP notation also supported
+/// - `"192.168.1.50-100/24"` → IPs 192.168.1.50 to 192.168.1.100
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Ipv4PoolConfig {
-    /// Start of IP range (e.g., "10.0.0.101")
-    pub start: String,
-
-    /// End of IP range (e.g., "10.0.0.120")
-    pub end: String,
-
-    /// Network prefix length (default: 24)
-    #[serde(default = "default_ipv4_prefix")]
-    pub prefix: u8,
+    /// IP range in compact CIDR notation (e.g., "10.0.0.101-102/24")
+    pub range: String,
 
     /// Gateway address (e.g., "10.0.0.1")
     pub gateway: String,
 }
 
-fn default_ipv4_prefix() -> u8 {
-    24
+impl Ipv4PoolConfig {
+    /// Parse the range field into start IP, end IP, and prefix length
+    ///
+    /// Supports two formats:
+    /// - Compact: "10.0.0.101-102/24" (end is just the last octet)
+    /// - Full: "10.0.0.101-10.0.0.120/24" (full end IP)
+    ///
+    /// Returns (start_ip, end_ip, prefix) or None if parsing fails
+    pub fn parse_range(&self) -> Option<(String, String, u8)> {
+        // Split off the CIDR prefix
+        let (range_part, prefix_str) = self.range.rsplit_once('/')?;
+        let prefix: u8 = prefix_str.parse().ok()?;
+
+        // Split start and end
+        let (start, end_part) = range_part.split_once('-')?;
+
+        // Validate start IP
+        let start_parts: Vec<&str> = start.split('.').collect();
+        if start_parts.len() != 4 {
+            return None;
+        }
+        for part in &start_parts {
+            part.parse::<u8>().ok()?;
+        }
+
+        // Check if end is full IP or just last octet(s)
+        let end = if end_part.contains('.') {
+            // Full IP format: "10.0.0.101-10.0.0.120/24"
+            let end_parts: Vec<&str> = end_part.split('.').collect();
+            if end_parts.len() != 4 {
+                return None;
+            }
+            for part in &end_parts {
+                part.parse::<u8>().ok()?;
+            }
+            end_part.to_string()
+        } else {
+            // Compact format: "10.0.0.101-120/24" (last octet only)
+            end_part.parse::<u8>().ok()?;
+            format!(
+                "{}.{}.{}.{}",
+                start_parts[0], start_parts[1], start_parts[2], end_part
+            )
+        };
+
+        Some((start.to_string(), end, prefix))
+    }
+
+    /// Get the start IP address
+    pub fn start(&self) -> Option<String> {
+        self.parse_range().map(|(start, _, _)| start)
+    }
+
+    /// Get the end IP address
+    pub fn end(&self) -> Option<String> {
+        self.parse_range().map(|(_, end, _)| end)
+    }
+
+    /// Get the prefix length
+    pub fn prefix(&self) -> Option<u8> {
+        self.parse_range().map(|(_, _, prefix)| prefix)
+    }
+
+    /// Get the IP range as "start-end" format for CAPI
+    pub fn address_range(&self) -> Option<String> {
+        let (start, end, _) = self.parse_range()?;
+        Some(format!("{}-{}", start, end))
+    }
 }
 
 /// IPv6 pool configuration for CAPI IPAM
+///
+/// # Range Format
+///
+/// The range field uses a compact CIDR notation similar to IPv4.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Ipv6PoolConfig {
-    /// Start of IP range
-    pub start: String,
-
-    /// End of IP range
-    pub end: String,
-
-    /// Network prefix length (default: 64)
-    #[serde(default = "default_ipv6_prefix")]
-    pub prefix: u8,
+    /// IP range in CIDR notation (e.g., "2001:db8::101-120/64")
+    pub range: String,
 
     /// Gateway address
     pub gateway: String,
-}
-
-fn default_ipv6_prefix() -> u8 {
-    64
 }
 
 /// Proxmox VE provider configuration (CAPMOX)
@@ -231,4 +292,105 @@ pub struct ProxmoxConfig {
     /// CPU sockets for worker nodes (default: 1)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_sockets: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_compact_range() {
+        let pool = Ipv4PoolConfig {
+            range: "10.0.0.101-102/24".to_string(),
+            gateway: "10.0.0.1".to_string(),
+        };
+
+        let (start, end, prefix) = pool.parse_range().unwrap();
+        assert_eq!(start, "10.0.0.101");
+        assert_eq!(end, "10.0.0.102");
+        assert_eq!(prefix, 24);
+    }
+
+    #[test]
+    fn parse_full_range() {
+        let pool = Ipv4PoolConfig {
+            range: "10.0.0.101-10.0.0.120/24".to_string(),
+            gateway: "10.0.0.1".to_string(),
+        };
+
+        let (start, end, prefix) = pool.parse_range().unwrap();
+        assert_eq!(start, "10.0.0.101");
+        assert_eq!(end, "10.0.0.120");
+        assert_eq!(prefix, 24);
+    }
+
+    #[test]
+    fn parse_range_different_prefix() {
+        let pool = Ipv4PoolConfig {
+            range: "192.168.1.50-100/16".to_string(),
+            gateway: "192.168.0.1".to_string(),
+        };
+
+        let (start, end, prefix) = pool.parse_range().unwrap();
+        assert_eq!(start, "192.168.1.50");
+        assert_eq!(end, "192.168.1.100");
+        assert_eq!(prefix, 16);
+    }
+
+    #[test]
+    fn address_range_format() {
+        let pool = Ipv4PoolConfig {
+            range: "10.0.0.101-107/24".to_string(),
+            gateway: "10.0.0.1".to_string(),
+        };
+
+        assert_eq!(pool.address_range(), Some("10.0.0.101-10.0.0.107".to_string()));
+    }
+
+    #[test]
+    fn accessors() {
+        let pool = Ipv4PoolConfig {
+            range: "10.0.0.101-105/24".to_string(),
+            gateway: "10.0.0.1".to_string(),
+        };
+
+        assert_eq!(pool.start(), Some("10.0.0.101".to_string()));
+        assert_eq!(pool.end(), Some("10.0.0.105".to_string()));
+        assert_eq!(pool.prefix(), Some(24));
+    }
+
+    #[test]
+    fn invalid_range_returns_none() {
+        let invalid_cases = [
+            "invalid",
+            "10.0.0.1",
+            "10.0.0.1-",
+            "-10/24",
+            "10.0.0.1-10/",
+            "10.0.0.1-10.0.0/24",
+        ];
+
+        for range in invalid_cases {
+            let pool = Ipv4PoolConfig {
+                range: range.to_string(),
+                gateway: "10.0.0.1".to_string(),
+            };
+            assert!(pool.parse_range().is_none(), "expected None for: {}", range);
+        }
+    }
+
+    #[test]
+    fn serde_yaml_roundtrip() {
+        let pool = Ipv4PoolConfig {
+            range: "10.0.0.101-102/24".to_string(),
+            gateway: "10.0.0.1".to_string(),
+        };
+
+        let yaml = serde_yaml::to_string(&pool).unwrap();
+        assert!(yaml.contains("range: 10.0.0.101-102/24"));
+        assert!(yaml.contains("gateway: 10.0.0.1"));
+
+        let parsed: Ipv4PoolConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, pool);
+    }
 }

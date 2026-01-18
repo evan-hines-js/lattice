@@ -21,11 +21,9 @@ spec:
         # kube-vip VIP for K8s API server
         controlPlaneEndpoint: "10.0.0.104"
         bridge: "vmbr0"
-        # Node IPs assigned by CAPMOX (105-107)
+        # Node IPs assigned by CAPMOX
         ipv4Pool:
-          start: "10.0.0.105"
-          end: "10.0.0.107"
-          prefix: 24
+          range: "10.0.0.105-107/24"
           gateway: "10.0.0.1"
         dnsServers:
           - "10.0.0.1"

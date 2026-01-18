@@ -237,9 +237,7 @@ mod tests {
     #[test]
     fn test_derive_lb_cidr_from_pool() {
         let pool = Ipv4PoolConfig {
-            start: "10.0.0.101".to_string(),
-            end: "10.0.0.120".to_string(),
-            prefix: 24,
+            range: "10.0.0.101-120/24".to_string(),
             gateway: "10.0.0.1".to_string(),
         };
 
@@ -251,9 +249,7 @@ mod tests {
     #[test]
     fn test_derive_lb_cidr_different_subnet() {
         let pool = Ipv4PoolConfig {
-            start: "192.168.1.50".to_string(),
-            end: "192.168.1.100".to_string(),
-            prefix: 24,
+            range: "192.168.1.50-100/24".to_string(),
             gateway: "192.168.1.1".to_string(),
         };
 
@@ -265,9 +261,7 @@ mod tests {
     #[test]
     fn test_generate_lb_resources_from_proxmox() {
         let pool = Ipv4PoolConfig {
-            start: "10.0.0.101".to_string(),
-            end: "10.0.0.120".to_string(),
-            prefix: 24,
+            range: "10.0.0.101-120/24".to_string(),
             gateway: "10.0.0.1".to_string(),
         };
 
