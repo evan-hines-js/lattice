@@ -566,6 +566,16 @@ fn generate_kubeadm_control_plane(
                 "permissions": "0644"
             }
         ]);
+
+        // Set node-ip before kubeadm starts to prevent VIP registration issue
+        // See: https://github.com/kube-vip/kube-vip/issues/741
+        let interface = &vip.interface;
+        kubeadm_config_spec["preKubeadmCommands"] = serde_json::json!([
+            format!(
+                r#"NODE_IP=$(ip -4 -o addr show {iface} | awk '{{{{print $4}}}}' | cut -d/ -f1 | head -1) && echo "KUBELET_EXTRA_ARGS=\"$KUBELET_EXTRA_ARGS --node-ip=$NODE_IP\"" >> /etc/default/kubelet"#,
+                iface = interface
+            )
+        ]);
     }
 
     // Add SSH authorized keys if configured
@@ -647,10 +657,8 @@ fn generate_rke2_control_plane(
         // Get the node's actual IP (not the VIP) and write to RKE2 config
         // This runs BEFORE RKE2 starts, so kube-vip hasn't added the VIP yet
         pre_rke2_commands.push(format!(
-            r#"NODE_IP=$(ip -4 addr show {} | grep -oP '(?<=inet\s)\d+(\.\d+){{3}}' | head -1) && \
-mkdir -p /etc/rancher/rke2 && \
-echo "node-ip: $NODE_IP" >> /etc/rancher/rke2/config.yaml"#,
-            interface
+            r#"NODE_IP=$(ip -4 -o addr show {iface} | awk '{{print $4}}' | cut -d/ -f1 | head -1) && mkdir -p /etc/rancher/rke2 && echo "node-ip: $NODE_IP" >> /etc/rancher/rke2/config.yaml"#,
+            iface = interface
         ));
     }
 
@@ -1257,6 +1265,17 @@ mod tests {
                 content.contains("/etc/kubernetes/super-admin.conf"),
                 "Kubeadm kube-vip should use kubeadm kubeconfig path"
             );
+
+            // Verify preKubeadmCommands sets node-ip to prevent VIP registration issue
+            // See: https://github.com/kube-vip/kube-vip/issues/741
+            let pre_commands = spec
+                .pointer("/kubeadmConfigSpec/preKubeadmCommands")
+                .expect("should have preKubeadmCommands when VIP configured");
+            let pre_commands_arr = pre_commands.as_array().expect("preKubeadmCommands should be array");
+            assert!(!pre_commands_arr.is_empty(), "preKubeadmCommands should have commands");
+            let cmd = pre_commands_arr[0].as_str().unwrap();
+            assert!(cmd.contains("node-ip"), "should set node-ip for kubelet");
+            assert!(cmd.contains("eth0"), "should use VIP interface for IP detection");
         }
 
         #[test]
@@ -1277,6 +1296,10 @@ mod tests {
             assert!(
                 spec.pointer("/kubeadmConfigSpec/files").is_none(),
                 "should not have files when VIP not configured"
+            );
+            assert!(
+                spec.pointer("/kubeadmConfigSpec/preKubeadmCommands").is_none(),
+                "should not have preKubeadmCommands when VIP not configured"
             );
         }
 
