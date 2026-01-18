@@ -226,13 +226,36 @@ pub fn extract_docker_cluster_kubeconfig(
     }
     println!("  Found control plane container: {}", cp_container);
 
-    // Extract kubeconfig from the container
+    // Extract kubeconfig from the container (with retries - file may not exist immediately)
     let kubeconfig_container_path = get_kubeconfig_path_for_bootstrap(bootstrap);
     println!("  Extracting kubeconfig from {}", kubeconfig_container_path);
-    let kubeconfig = run_cmd(
-        "docker",
-        &["exec", cp_container, "cat", kubeconfig_container_path],
-    )?;
+
+    let mut kubeconfig = String::new();
+    let max_retries = 60; // 5 minutes with 5s intervals
+    for attempt in 1..=max_retries {
+        match run_cmd(
+            "docker",
+            &["exec", cp_container, "cat", kubeconfig_container_path],
+        ) {
+            Ok(content) => {
+                kubeconfig = content;
+                break;
+            }
+            Err(e) => {
+                if attempt == max_retries {
+                    return Err(format!(
+                        "Failed to extract kubeconfig after {} attempts: {}",
+                        max_retries, e
+                    ));
+                }
+                println!(
+                    "  Waiting for kubeconfig to be available (attempt {}/{})...",
+                    attempt, max_retries
+                );
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        }
+    }
 
     // Write initial kubeconfig
     std::fs::write(output_path, &kubeconfig)
