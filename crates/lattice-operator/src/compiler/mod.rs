@@ -27,7 +27,9 @@
 
 use crate::crd::LatticeService;
 use crate::graph::ServiceGraph;
-use crate::ingress::{GeneratedIngress, GeneratedWaypointPolicies, IngressCompiler, WaypointPolicyCompiler};
+use crate::ingress::{
+    GeneratedIngress, GeneratedWaypointPolicies, IngressCompiler, WaypointPolicyCompiler,
+};
 use crate::policy::{AuthorizationPolicy, GeneratedPolicies, PolicyCompiler};
 use crate::workload::{GeneratedWorkloads, WorkloadCompiler};
 

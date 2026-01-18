@@ -1604,7 +1604,9 @@ mod tests {
             "Should have kgateway principal"
         );
         assert!(
-            principals.iter().any(|p| p.contains("/sa/kgateway-waypoint")),
+            principals
+                .iter()
+                .any(|p| p.contains("/sa/kgateway-waypoint")),
             "Should have kgateway-waypoint principal"
         );
         assert!(
