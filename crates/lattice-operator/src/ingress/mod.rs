@@ -505,7 +505,11 @@ impl GeneratedWaypointPolicies {
     pub fn total_count(&self) -> usize {
         self.outbound_policies.len()
             + self.inbound_policies.len()
-            + if self.waypoint_gateway.is_some() { 1 } else { 0 }
+            + if self.waypoint_gateway.is_some() {
+                1
+            } else {
+                0
+            }
     }
 }
 
@@ -859,10 +863,7 @@ impl WaypointPolicyCompiler {
             "lattice".to_string(),
         );
         // Label required by kgateway to identify this as a service waypoint
-        labels.insert(
-            "istio.io/waypoint-for".to_string(),
-            "service".to_string(),
-        );
+        labels.insert("istio.io/waypoint-for".to_string(), "service".to_string());
 
         Gateway {
             api_version: "gateway.networking.k8s.io/v1".to_string(),

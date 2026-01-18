@@ -179,7 +179,12 @@ stringData:
     };
 
     // ClusterResourceSet referencing all chunks
-    result.push(generate_crs(cluster_name, namespace, &configmap_names, secret_name));
+    result.push(generate_crs(
+        cluster_name,
+        namespace,
+        &configmap_names,
+        secret_name,
+    ));
 
     result
 }
@@ -330,7 +335,9 @@ mod tests {
 
         assert!(chunks.len() >= 2);
         // Oversized manifest is alone
-        let huge_chunk = chunks.iter().find(|c| c.iter().any(|m| m.len() > TEST_CHUNK_SIZE));
+        let huge_chunk = chunks
+            .iter()
+            .find(|c| c.iter().any(|m| m.len() > TEST_CHUNK_SIZE));
         assert!(huge_chunk.is_some());
         assert_eq!(huge_chunk.unwrap().len(), 1);
     }

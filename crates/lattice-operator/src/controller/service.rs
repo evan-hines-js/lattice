@@ -177,7 +177,9 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 
         // Collect all patch operations as futures and run them in parallel
         // This significantly improves performance vs sequential application
-        let mut futures: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>> = Vec::new();
+        let mut futures: Vec<
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>,
+        > = Vec::new();
 
         // ServiceAccount
         if let Some(ref sa) = compiled.workloads.service_account {

@@ -19,7 +19,7 @@ pub use service::{
     InboundTrafficPolicy, IngressPath, IngressSpec, IngressTls, LatticeService, LatticeServiceSpec,
     LatticeServiceStatus, OutboundTrafficPolicy, PathMatchType, PortSpec, Probe, RateLimitSpec,
     ReplicaSpec, ResourceSpec, ResourceType, RetryPolicy, ServicePhase, ServicePortsSpec,
-    TcpSocketProbe, TimeoutPolicy, TlsMode, VolumeMount,
+    TcpSocketProbe, TimeoutPolicy, TlsMode, VolumeAccessMode, VolumeMount, VolumeParams,
 };
 pub use types::{
     BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig, EndpointsSpec,

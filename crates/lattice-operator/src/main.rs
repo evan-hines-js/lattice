@@ -378,10 +378,8 @@ async fn apply_manifests(client: &Client, manifests: &[impl AsRef<str>]) -> anyh
     }
 
     // Split into foundational (Namespace, CRD) and rest
-    let (mut foundational, mut rest): (Vec<&str>, Vec<&str>) = manifests
-        .iter()
-        .map(|m| m.as_ref())
-        .partition(|m| {
+    let (mut foundational, mut rest): (Vec<&str>, Vec<&str>) =
+        manifests.iter().map(|m| m.as_ref()).partition(|m| {
             let kind = extract_kind(m);
             kind == "Namespace" || kind == "CustomResourceDefinition"
         });
@@ -443,9 +441,7 @@ async fn apply_single_manifest(
         .pointer("/metadata/name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing metadata.name"))?;
-    let namespace = obj
-        .pointer("/metadata/namespace")
-        .and_then(|v| v.as_str());
+    let namespace = obj.pointer("/metadata/namespace").and_then(|v| v.as_str());
 
     // Parse apiVersion into group/version
     let (group, version) = if let Some((g, v)) = api_version.split_once('/') {

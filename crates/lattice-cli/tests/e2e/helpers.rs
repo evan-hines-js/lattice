@@ -356,10 +356,7 @@ pub async fn extract_capi_kubeconfig(
         }
 
         if attempt < max_retries {
-            println!(
-                "  Waiting for kubeconfig secret (attempt {}/{})...",
-                attempt, max_retries
-            );
+            println!("Waiting for kubeconfig secret (attempt {}/{})...", attempt, max_retries);
             sleep(Duration::from_secs(5)).await;
         }
     }
@@ -387,10 +384,8 @@ pub async fn watch_cluster_phases(
     use lattice_operator::crd::LatticeCluster;
 
     let api: Api<LatticeCluster> = Api::all(client.clone());
-
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(1800));
-
     let mut last_phase: Option<ClusterPhase> = None;
 
     loop {
@@ -410,12 +405,12 @@ pub async fn watch_cluster_phases(
                     .unwrap_or(ClusterPhase::Pending);
 
                 if last_phase.as_ref() != Some(&current_phase) {
-                    println!("  Cluster {} phase: {:?}", cluster_name, current_phase);
+                    println!("Cluster {} phase: {:?}", cluster_name, current_phase);
                     last_phase = Some(current_phase.clone());
                 }
 
                 if matches!(current_phase, ClusterPhase::Ready) {
-                    println!("  Cluster {} reached Ready state!", cluster_name);
+                    println!("Cluster {} reached Ready state!", cluster_name);
                     return Ok(());
                 }
 
@@ -429,14 +424,151 @@ pub async fn watch_cluster_phases(
                 }
             }
             Err(e) => {
-                println!(
-                    "  Warning: failed to get cluster {} status: {}",
-                    cluster_name, e
-                );
+                println!("Warning: failed to get cluster {} status: {}", cluster_name, e);
             }
         }
 
         sleep(Duration::from_secs(10)).await;
+    }
+}
+
+/// Watch LatticeCluster and extract kubeconfig during Provisioning phase
+///
+/// For cloud providers (Proxmox, AWS, etc.), the kubeconfig secret is moved
+/// during pivot. This function extracts it BEFORE pivot so it can be used
+/// to access the cluster after pivot completes.
+///
+/// # Arguments
+/// * `mgmt_kubeconfig` - Path to management cluster kubeconfig
+/// * `cluster_name` - Name of the cluster to watch
+/// * `timeout_secs` - Timeout in seconds (default 1800 = 30 minutes if None)
+/// * `kubeconfig_output_path` - Path to write workload cluster kubeconfig
+#[cfg(feature = "provider-e2e")]
+pub async fn watch_cluster_phases_with_kubeconfig(
+    mgmt_kubeconfig: &str,
+    cluster_name: &str,
+    timeout_secs: Option<u64>,
+    kubeconfig_output_path: &str,
+) -> Result<(), String> {
+    use base64::Engine;
+    use kube::Api;
+    use lattice_operator::crd::LatticeCluster;
+
+    let client = client_from_kubeconfig(mgmt_kubeconfig).await?;
+    let api: Api<LatticeCluster> = Api::all(client.clone());
+
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(1800));
+
+    let mut last_phase: Option<ClusterPhase> = None;
+    let mut kubeconfig_extracted = false;
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout waiting for cluster {} to reach Ready state. Last phase: {:?}",
+                cluster_name, last_phase
+            ));
+        }
+
+        match api.get(cluster_name).await {
+            Ok(cluster) => {
+                let current_phase = cluster
+                    .status
+                    .as_ref()
+                    .map(|s| s.phase.clone())
+                    .unwrap_or(ClusterPhase::Pending);
+
+                if last_phase.as_ref() != Some(&current_phase) {
+                    println!("Cluster {} phase: {:?}", cluster_name, current_phase);
+                    last_phase = Some(current_phase.clone());
+                }
+
+                // Extract kubeconfig during Provisioning (before pivot moves it)
+                if !kubeconfig_extracted
+                    && matches!(current_phase, ClusterPhase::Provisioning | ClusterPhase::Pivoting)
+                {
+                    if let Ok(()) = try_extract_kubeconfig(
+                        mgmt_kubeconfig,
+                        cluster_name,
+                        kubeconfig_output_path,
+                    ) {
+                        println!("Kubeconfig extracted to {} (before pivot)", kubeconfig_output_path);
+                        kubeconfig_extracted = true;
+                    }
+                }
+
+                if matches!(current_phase, ClusterPhase::Ready) {
+                    println!("Cluster {} reached Ready state!", cluster_name);
+                    if !kubeconfig_extracted {
+                        return Err(format!(
+                            "Cluster {} is Ready but kubeconfig was not extracted before pivot",
+                            cluster_name
+                        ));
+                    }
+                    return Ok(());
+                }
+
+                if matches!(current_phase, ClusterPhase::Failed) {
+                    let msg = cluster
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.message.as_deref())
+                        .unwrap_or("unknown error");
+                    return Err(format!("Cluster {} failed: {}", cluster_name, msg));
+                }
+            }
+            Err(e) => {
+                println!("Warning: failed to get cluster {} status: {}", cluster_name, e);
+            }
+        }
+
+        sleep(Duration::from_secs(10)).await;
+    }
+}
+
+/// Try to extract kubeconfig from CAPI secret (non-blocking, returns error if not found)
+#[cfg(feature = "provider-e2e")]
+fn try_extract_kubeconfig(
+    mgmt_kubeconfig: &str,
+    cluster_name: &str,
+    output_path: &str,
+) -> Result<(), String> {
+    use base64::Engine;
+
+    let namespace = format!("capi-{}", cluster_name);
+    let secret_name = format!("{}-kubeconfig", cluster_name);
+
+    let result = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            mgmt_kubeconfig,
+            "get",
+            "secret",
+            &secret_name,
+            "-n",
+            &namespace,
+            "-o",
+            "jsonpath={.data.value}",
+        ],
+    );
+
+    match result {
+        Ok(output) if !output.trim().is_empty() => {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(output.trim())
+                .map_err(|e| format!("Failed to decode kubeconfig: {}", e))?;
+
+            let kubeconfig = String::from_utf8(decoded)
+                .map_err(|e| format!("Kubeconfig is not valid UTF-8: {}", e))?;
+
+            std::fs::write(output_path, &kubeconfig)
+                .map_err(|e| format!("Failed to write kubeconfig: {}", e))?;
+
+            Ok(())
+        }
+        _ => Err("Kubeconfig secret not found yet".to_string()),
     }
 }
 

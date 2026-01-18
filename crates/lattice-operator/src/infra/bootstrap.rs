@@ -54,7 +54,10 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     // kgateway
     manifests.extend(generate_kgateway());
 
-    info!(total = manifests.len(), "generated infrastructure manifests");
+    info!(
+        total = manifests.len(),
+        "generated infrastructure manifests"
+    );
     manifests
 }
 
@@ -196,8 +199,11 @@ spec:
 // Helpers
 
 fn charts_dir() -> String {
-    std::env::var("LATTICE_CHARTS_DIR")
-        .unwrap_or_else(|_| option_env!("LATTICE_CHARTS_DIR").unwrap_or("/charts").to_string())
+    std::env::var("LATTICE_CHARTS_DIR").unwrap_or_else(|_| {
+        option_env!("LATTICE_CHARTS_DIR")
+            .unwrap_or("/charts")
+            .to_string()
+    })
 }
 
 fn find_chart(dir: &str, name: &str) -> Result<String, String> {
@@ -336,10 +342,20 @@ mod tests {
 
     #[test]
     fn test_is_cluster_scoped() {
-        assert!(is_cluster_scoped("kind: Namespace\nmetadata:\n  name: test"));
-        assert!(is_cluster_scoped("kind: ClusterRole\nmetadata:\n  name: test"));
-        assert!(is_cluster_scoped("kind: CustomResourceDefinition\nmetadata:\n  name: test"));
-        assert!(!is_cluster_scoped("kind: ServiceAccount\nmetadata:\n  name: test"));
-        assert!(!is_cluster_scoped("kind: Deployment\nmetadata:\n  name: test"));
+        assert!(is_cluster_scoped(
+            "kind: Namespace\nmetadata:\n  name: test"
+        ));
+        assert!(is_cluster_scoped(
+            "kind: ClusterRole\nmetadata:\n  name: test"
+        ));
+        assert!(is_cluster_scoped(
+            "kind: CustomResourceDefinition\nmetadata:\n  name: test"
+        ));
+        assert!(!is_cluster_scoped(
+            "kind: ServiceAccount\nmetadata:\n  name: test"
+        ));
+        assert!(!is_cluster_scoped(
+            "kind: Deployment\nmetadata:\n  name: test"
+        ));
     }
 }

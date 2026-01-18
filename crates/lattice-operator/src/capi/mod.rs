@@ -507,7 +507,10 @@ impl ClusterctlInstaller {
             .collect();
 
         let manifest_count = docs.len();
-        debug!(count = manifest_count, "applying cert-manager manifests in parallel");
+        debug!(
+            count = manifest_count,
+            "applying cert-manager manifests in parallel"
+        );
 
         let futures: Vec<_> = docs
             .into_iter()
