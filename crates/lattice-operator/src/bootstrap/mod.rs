@@ -26,11 +26,9 @@
 //! 4. Agent uses cert for mTLS connection to gRPC server
 
 mod crs;
-mod detect;
 mod token;
 
-pub use crs::{apply_bootstrap_crs, generate_crs_yaml_manifests};
-pub use detect::{client_from_kubeconfig, detect_bootstrap_method, BootstrapMethod};
+pub use crs::generate_crs_yaml_manifests;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -165,6 +163,8 @@ pub struct ClusterRegistration {
     pub cluster_manifest: String,
     /// Optional networking config for Cilium LB-IPAM
     pub networking: Option<crate::crd::NetworkingSpec>,
+    /// Proxmox ipv4_pool for auto-deriving LB-IPAM (when networking is None)
+    pub proxmox_ipv4_pool: Option<lattice_common::crd::Ipv4PoolConfig>,
     /// Infrastructure provider (docker, aws, gcp, azure)
     pub provider: String,
     /// Bootstrap mechanism (kubeadm or rke2)
@@ -205,6 +205,8 @@ pub struct ManifestConfig<'a> {
     pub registry_credentials: Option<&'a str>,
     /// Optional networking configuration (for LB-IPAM)
     pub networking: Option<&'a crate::crd::NetworkingSpec>,
+    /// Optional Proxmox ipv4_pool config (for auto-deriving LB-IPAM when networking is None)
+    pub proxmox_ipv4_pool: Option<&'a lattice_common::crd::Ipv4PoolConfig>,
     /// Cluster name (for operator identity)
     pub cluster_name: Option<&'a str>,
     /// Provider type (docker, aws, etc.)
@@ -250,9 +252,13 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
             .collect();
     }
 
-    // Add Cilium LB-IPAM resources if networking is configured
+    // Add Cilium LB-IPAM resources
+    // Priority: explicit networking config > auto-derived from Proxmox ipv4_pool
     if let Some(networking) = config.networking {
         manifests.extend(crate::cilium::generate_lb_resources(networking));
+    } else if let Some(ipv4_pool) = config.proxmox_ipv4_pool {
+        // Auto-derive LB pool from Proxmox ipv4_pool (uses .200/27 range from same subnet)
+        manifests.extend(crate::cilium::generate_lb_resources_from_proxmox(ipv4_pool));
     }
 
     // NOTE: CiliumNetworkPolicy is NOT included in bootstrap manifests because
@@ -579,6 +585,8 @@ pub struct ClusterBootstrapInfo {
     pub token_used: bool,
     /// Networking configuration for Cilium LB-IPAM
     pub networking: Option<crate::crd::NetworkingSpec>,
+    /// Proxmox ipv4_pool for auto-deriving LB-IPAM (when networking is None)
+    pub proxmox_ipv4_pool: Option<lattice_common::crd::Ipv4PoolConfig>,
     /// Infrastructure provider (docker, aws, gcp, azure)
     pub provider: String,
     /// Bootstrap mechanism (kubeadm or rke2) - determines FIPS relaxation needs
@@ -673,6 +681,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             token_created: Instant::now(),
             token_used: mark_used,
             networking: registration.networking,
+            proxmox_ipv4_pool: registration.proxmox_ipv4_pool,
             provider: registration.provider,
             bootstrap: registration.bootstrap,
         };
@@ -785,6 +794,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
             networking: info.networking.as_ref(),
+            proxmox_ipv4_pool: info.proxmox_ipv4_pool.as_ref(),
             cluster_name: Some(&info.cluster_id),
             provider: Some(&info.provider),
             bootstrap: Some(&bootstrap_str),
@@ -1047,6 +1057,7 @@ mod tests {
                 ca_certificate: ca_certificate.into(),
                 cluster_manifest,
                 networking: None,
+                proxmox_ipv4_pool: None,
                 provider: "docker".to_string(),
                 bootstrap: crate::crd::BootstrapProvider::default(),
             },
@@ -2063,6 +2074,7 @@ mod tests {
                 token_created: std::time::Instant::now(),
                 token_used: true, // Already bootstrapped
                 networking: None,
+                proxmox_ipv4_pool: None,
                 provider: "docker".to_string(),
                 bootstrap: crate::crd::BootstrapProvider::Kubeadm,
             },
@@ -2110,6 +2122,7 @@ mod tests {
                 token_created: std::time::Instant::now(),
                 token_used: true, // Already bootstrapped
                 networking: None,
+                proxmox_ipv4_pool: None,
                 provider: "docker".to_string(),
                 bootstrap: crate::crd::BootstrapProvider::Rke2,
             },

@@ -24,11 +24,11 @@ spec:
         controlPlaneEndpoint: "10.0.0.100"
         storage: "local-lvm"
         bridge: "vmbr0"
-        ipv4Addresses:
-          - "10.0.0.101"
-          - "10.0.0.102"
-        ipv4Prefix: 24
-        ipv4Gateway: "10.0.0.1"
+        ipv4Pool:
+          start: "10.0.0.101"
+          end: "10.0.0.102"
+          prefix: 24
+          gateway: "10.0.0.1"
         dnsServers:
           - "10.0.0.1"
         virtualIpNetworkInterface: "ens18"

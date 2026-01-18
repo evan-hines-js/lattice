@@ -459,10 +459,21 @@ nodes:
         let bootstrap_str = self.cluster.spec.provider.kubernetes.bootstrap.to_string();
         let namespace = format!("capi-{}", cluster_name);
 
+        // Extract Proxmox ipv4_pool for auto-deriving LB pool (if not explicitly configured)
+        let proxmox_ipv4_pool = self
+            .cluster
+            .spec
+            .provider
+            .config
+            .proxmox
+            .as_ref()
+            .map(|p| &p.ipv4_pool);
+
         let config = ManifestConfig {
             image: &self.config.image,
             registry_credentials: self.config.registry_credentials.as_deref(),
             networking: self.cluster.spec.networking.as_ref(),
+            proxmox_ipv4_pool,
             cluster_name: Some(cluster_name),
             provider: Some(&provider_str),
             bootstrap: Some(&bootstrap_str),

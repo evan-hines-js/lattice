@@ -10,22 +10,96 @@ use serde::{Deserialize, Serialize};
 
 use super::super::types::SecretRef;
 
+/// IPv4 pool configuration for CAPI IPAM
+///
+/// Defines a range of IPv4 addresses for automatic allocation to cluster nodes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Ipv4PoolConfig {
+    /// Start of IP range (e.g., "10.0.0.101")
+    pub start: String,
+
+    /// End of IP range (e.g., "10.0.0.120")
+    pub end: String,
+
+    /// Network prefix length (default: 24)
+    #[serde(default = "default_ipv4_prefix")]
+    pub prefix: u8,
+
+    /// Gateway address (e.g., "10.0.0.1")
+    pub gateway: String,
+}
+
+fn default_ipv4_prefix() -> u8 {
+    24
+}
+
+/// IPv6 pool configuration for CAPI IPAM
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Ipv6PoolConfig {
+    /// Start of IP range
+    pub start: String,
+
+    /// End of IP range
+    pub end: String,
+
+    /// Network prefix length (default: 64)
+    #[serde(default = "default_ipv6_prefix")]
+    pub prefix: u8,
+
+    /// Gateway address
+    pub gateway: String,
+}
+
+fn default_ipv6_prefix() -> u8 {
+    64
+}
+
 /// Proxmox VE provider configuration (CAPMOX)
 ///
 /// Configuration for provisioning clusters on Proxmox Virtual Environment.
-/// All fields are optional with sensible defaults.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxmoxConfig {
     // ==========================================================================
-    // Template Source Configuration
+    // Required Fields
+    // ==========================================================================
+
+    /// Control plane endpoint IP or FQDN
+    /// This is the VIP that kube-vip will manage for API server access
+    pub control_plane_endpoint: String,
+
+    /// IPv4 address pool for automatic node IP allocation via CAPI IPAM
+    pub ipv4_pool: Ipv4PoolConfig,
+
+    /// CPU cores for control plane nodes
+    pub cp_cores: u32,
+
+    /// Memory in MiB for control plane nodes
+    pub cp_memory_mib: u32,
+
+    /// Disk size in GB for control plane nodes
+    pub cp_disk_size_gb: u32,
+
+    /// CPU cores for worker nodes
+    pub worker_cores: u32,
+
+    /// Memory in MiB for worker nodes
+    pub worker_memory_mib: u32,
+
+    /// Disk size in GB for worker nodes
+    pub worker_disk_size_gb: u32,
+
+    // ==========================================================================
+    // Template Source Configuration (Optional)
     // ==========================================================================
 
     /// Proxmox node where the template VM is located
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_node: Option<String>,
 
-    /// VM template ID to clone from
+    /// VM template ID to clone from (default: 9000)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_id: Option<u32>,
 
@@ -39,20 +113,18 @@ pub struct ProxmoxConfig {
     pub snap_name: Option<String>,
 
     // ==========================================================================
-    // Clone Configuration
+    // Clone Configuration (Optional)
     // ==========================================================================
 
-    /// Storage backend for full clone (e.g., "local-lvm", "ceph", "local-zfs")
+    /// Storage backend for full clone (default: "local-lvm")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<String>,
 
-    /// Disk format for cloned VMs (qcow2, raw, vmdk)
-    /// Only applies when full clone is enabled
+    /// Disk format for cloned VMs (default: "qcow2")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
 
     /// Use full clone instead of linked clone (default: true)
-    /// Full clones are independent but use more storage
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_clone: Option<bool>,
 
@@ -73,19 +145,14 @@ pub struct ProxmoxConfig {
     pub tags: Option<Vec<String>>,
 
     // ==========================================================================
-    // Cluster-Level Configuration
+    // Cluster-Level Configuration (Optional)
     // ==========================================================================
-
-    /// Control plane endpoint IP or FQDN (required for workload clusters)
-    /// This is the VIP that kube-vip will manage for API server access
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub control_plane_endpoint: Option<String>,
 
     /// Allowed Proxmox nodes for VM placement
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_nodes: Option<Vec<String>>,
 
-    /// DNS servers for cluster nodes
+    /// DNS servers for cluster nodes (default: ["8.8.8.8", "8.8.4.4"])
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns_servers: Option<Vec<String>>,
 
@@ -93,7 +160,7 @@ pub struct ProxmoxConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_authorized_keys: Option<Vec<String>>,
 
-    /// Network interface where kube-vip binds for virtual IP
+    /// Network interface where kube-vip binds for virtual IP (default: "ens18")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtual_ip_network_interface: Option<String>,
 
@@ -102,59 +169,26 @@ pub struct ProxmoxConfig {
     pub kube_vip_image: Option<String>,
 
     // ==========================================================================
-    // Credentials
+    // Credentials (Optional)
     // ==========================================================================
 
     /// Reference to Secret containing Proxmox API credentials
-    /// The secret should contain: url, token, secret
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_ref: Option<SecretRef>,
 
     // ==========================================================================
-    // IPv4 Configuration
+    // IPv6 Configuration (Optional)
     // ==========================================================================
 
-    /// IPv4 address pool for nodes (individual IPs or CIDR ranges)
+    /// IPv6 address pool for automatic node IP allocation
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv4_addresses: Option<Vec<String>>,
-
-    /// IPv4 network prefix length (default: 24)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv4_prefix: Option<u8>,
-
-    /// IPv4 gateway address
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv4_gateway: Option<String>,
-
-    /// IPv4 route metric (priority) for default gateway
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv4_metric: Option<u32>,
+    pub ipv6_pool: Option<Ipv6PoolConfig>,
 
     // ==========================================================================
-    // IPv6 Configuration
+    // Network Configuration (Optional)
     // ==========================================================================
 
-    /// IPv6 address pool for nodes (individual IPs or CIDR ranges)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv6_addresses: Option<Vec<String>>,
-
-    /// IPv6 network prefix length (default: 64)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv6_prefix: Option<u8>,
-
-    /// IPv6 gateway address
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv6_gateway: Option<String>,
-
-    /// IPv6 route metric (priority) for default gateway
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv6_metric: Option<u32>,
-
-    // ==========================================================================
-    // Network Configuration
-    // ==========================================================================
-
-    /// Network bridge (e.g., "vmbr0")
+    /// Network bridge (default: "vmbr0")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge: Option<String>,
 
@@ -162,20 +196,20 @@ pub struct ProxmoxConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vlan: Option<u16>,
 
-    /// Network model (virtio, e1000, rtl8139) - default: virtio
+    /// Network model (default: "virtio")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_model: Option<String>,
 
     // ==========================================================================
-    // Scheduler Hints
+    // Scheduler Hints (Optional)
     // ==========================================================================
 
-    /// Memory adjustment percentage for scheduling (0=disabled, 100=default, >100=overprovisioning)
+    /// Memory adjustment percentage for scheduling
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_adjustment: Option<u64>,
 
     // ==========================================================================
-    // VM ID Range
+    // VM ID Range (Optional)
     // ==========================================================================
 
     /// Minimum VMID for created VMs
@@ -187,7 +221,7 @@ pub struct ProxmoxConfig {
     pub vmid_max: Option<u32>,
 
     // ==========================================================================
-    // Health Checks
+    // Health Checks (Optional)
     // ==========================================================================
 
     /// Skip cloud-init status check (required for Flatcar Linux)
@@ -199,42 +233,14 @@ pub struct ProxmoxConfig {
     pub skip_qemu_guest_agent: Option<bool>,
 
     // ==========================================================================
-    // Control Plane VM Sizing
+    // VM Sizing - Optional Overrides
     // ==========================================================================
 
     /// CPU sockets for control plane nodes (default: 1)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cp_sockets: Option<u32>,
 
-    /// CPU cores for control plane nodes (default: 4)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_cores: Option<u32>,
-
-    /// Memory in MiB for control plane nodes (default: 8192)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_memory_mib: Option<u32>,
-
-    /// Disk size in GB for control plane nodes (default: 50)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_disk_size_gb: Option<u32>,
-
-    // ==========================================================================
-    // Worker VM Sizing
-    // ==========================================================================
-
     /// CPU sockets for worker nodes (default: 1)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_sockets: Option<u32>,
-
-    /// CPU cores for worker nodes (default: 4)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_cores: Option<u32>,
-
-    /// Memory in MiB for worker nodes (default: 8192)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_memory_mib: Option<u32>,
-
-    /// Disk size in GB for worker nodes (default: 100)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_disk_size_gb: Option<u32>,
 }

@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 // Re-export provider configs from the providers module
-pub use super::providers::{DockerConfig, ProxmoxConfig};
+pub use super::providers::{DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, ProxmoxConfig};
 
 // =============================================================================
 // Provider Types
@@ -727,7 +727,50 @@ mod tests {
 
         #[test]
         fn test_proxmox_config() {
-            let config = ProviderConfig::proxmox(ProxmoxConfig::default());
+            let proxmox = ProxmoxConfig {
+                control_plane_endpoint: "10.0.0.100".to_string(),
+                ipv4_pool: Ipv4PoolConfig {
+                    start: "10.0.0.101".to_string(),
+                    end: "10.0.0.120".to_string(),
+                    prefix: 24,
+                    gateway: "10.0.0.1".to_string(),
+                },
+                cp_cores: 4,
+                cp_memory_mib: 8192,
+                cp_disk_size_gb: 50,
+                worker_cores: 4,
+                worker_memory_mib: 8192,
+                worker_disk_size_gb: 100,
+                source_node: None,
+                template_id: None,
+                template_tags: None,
+                snap_name: None,
+                storage: None,
+                format: None,
+                full_clone: None,
+                target_node: None,
+                pool: None,
+                description: None,
+                tags: None,
+                allowed_nodes: None,
+                dns_servers: None,
+                ssh_authorized_keys: None,
+                virtual_ip_network_interface: None,
+                kube_vip_image: None,
+                secret_ref: None,
+                ipv6_pool: None,
+                bridge: None,
+                vlan: None,
+                network_model: None,
+                memory_adjustment: None,
+                vmid_min: None,
+                vmid_max: None,
+                skip_cloud_init_status: None,
+                skip_qemu_guest_agent: None,
+                cp_sockets: None,
+                worker_sockets: None,
+            };
+            let config = ProviderConfig::proxmox(proxmox);
             assert!(config.proxmox.is_some());
             assert_eq!(config.provider_type(), ProviderType::Proxmox);
             assert!(config.validate().is_ok());

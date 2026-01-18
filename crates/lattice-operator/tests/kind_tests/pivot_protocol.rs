@@ -232,6 +232,7 @@ async fn run_pivot_e2e_test() -> Result<(), String> {
             ca_certificate: ca.ca_cert_pem().to_string(),
             cluster_manifest,
             networking: None,
+            proxmox_ipv4_pool: None,
             provider: "docker".to_string(),
             bootstrap: lattice_operator::crd::BootstrapProvider::default(),
         },
