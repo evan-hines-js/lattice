@@ -9,6 +9,7 @@ struct Versions {
     capa: String,
     capo: String,
     ipam_in_cluster: String,
+    gateway_api: String,
     cilium: String,
     istio: String,
     kgateway: String,
@@ -31,6 +32,7 @@ fn load_versions() -> Versions {
         capa: String::new(),
         capo: String::new(),
         ipam_in_cluster: String::new(),
+        gateway_api: String::new(),
         cilium: String::new(),
         istio: String::new(),
         kgateway: String::new(),
@@ -53,6 +55,7 @@ fn load_versions() -> Versions {
                 ("capa", "version") => versions.capa = value.to_string(),
                 ("capo", "version") => versions.capo = value.to_string(),
                 ("ipam-in-cluster", "version") => versions.ipam_in_cluster = value.to_string(),
+                ("gateway-api", "version") => versions.gateway_api = value.to_string(),
                 ("charts", "cilium") => versions.cilium = value.to_string(),
                 ("charts", "istio") => versions.istio = value.to_string(),
                 ("charts", "kgateway") => versions.kgateway = value.to_string(),
@@ -100,6 +103,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cargo:rustc-env=IPAM_IN_CLUSTER_VERSION={}",
         versions.ipam_in_cluster
     );
+    println!(
+        "cargo:rustc-env=GATEWAY_API_VERSION={}",
+        versions.gateway_api
+    );
 
     let config_path = providers_dir.join("clusterctl.yaml");
     println!(
@@ -128,6 +135,9 @@ fn download_helm_charts(
     let cert_manager_chart =
         charts_dir.join(format!("cert-manager-v{}.tgz", versions.cert_manager));
     let flux_chart = charts_dir.join(format!("flux2-{}.tgz", versions.flux));
+    // Gateway API CRDs (not a helm chart, just a YAML file)
+    let gateway_api_crds =
+        charts_dir.join(format!("gateway-api-crds-v{}.yaml", versions.gateway_api));
 
     // Tell cargo to re-run if any chart is missing or changes
     for chart in [
@@ -140,6 +150,7 @@ fn download_helm_charts(
         &kgateway_chart,
         &cert_manager_chart,
         &flux_chart,
+        &gateway_api_crds,
     ] {
         println!("cargo:rerun-if-changed={}", chart.display());
     }
@@ -154,6 +165,7 @@ fn download_helm_charts(
         &kgateway_chart,
         &cert_manager_chart,
         &flux_chart,
+        &gateway_api_crds,
     ];
 
     if all_charts.iter().all(|c| c.exists()) {
@@ -170,12 +182,20 @@ fn download_helm_charts(
     // Add helm repos
     let repos = [
         ("cilium", "https://helm.cilium.io/"),
-        ("istio", "https://istio-release.storage.googleapis.com/charts"),
+        (
+            "istio",
+            "https://istio-release.storage.googleapis.com/charts",
+        ),
         ("jetstack", "https://charts.jetstack.io"),
-        ("fluxcd-community", "https://fluxcd-community.github.io/helm-charts"),
+        (
+            "fluxcd-community",
+            "https://fluxcd-community.github.io/helm-charts",
+        ),
     ];
     for (name, url) in repos {
-        let _ = Command::new("helm").args(["repo", "add", name, url]).output();
+        let _ = Command::new("helm")
+            .args(["repo", "add", name, url])
+            .output();
     }
     let _ = Command::new("helm").args(["repo", "update"]).output();
 
@@ -183,11 +203,31 @@ fn download_helm_charts(
     let charts = [
         (&cilium_chart, "cilium/cilium", &versions.cilium, "Cilium"),
         (&base_chart, "istio/base", &versions.istio, "Istio base"),
-        (&istiod_chart, "istio/istiod", &versions.istio, "Istio istiod"),
+        (
+            &istiod_chart,
+            "istio/istiod",
+            &versions.istio,
+            "Istio istiod",
+        ),
         (&cni_chart, "istio/cni", &versions.istio, "Istio CNI"),
-        (&ztunnel_chart, "istio/ztunnel", &versions.istio, "Istio ztunnel"),
-        (&cert_manager_chart, "jetstack/cert-manager", &versions.cert_manager, "cert-manager"),
-        (&flux_chart, "fluxcd-community/flux2", &versions.flux, "Flux"),
+        (
+            &ztunnel_chart,
+            "istio/ztunnel",
+            &versions.istio,
+            "Istio ztunnel",
+        ),
+        (
+            &cert_manager_chart,
+            "jetstack/cert-manager",
+            &versions.cert_manager,
+            "cert-manager",
+        ),
+        (
+            &flux_chart,
+            "fluxcd-community/flux2",
+            &versions.flux,
+            "Flux",
+        ),
     ];
 
     for (path, chart, version, name) in charts {
@@ -206,11 +246,11 @@ fn download_helm_charts(
         let _ = Command::new("helm")
             .args([
                 "pull",
-                &format!("oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds"),
+                "oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds",
                 "--version",
-                &format!("v{}", versions.kgateway),
-                "--destination",
             ])
+            .arg(format!("v{}", versions.kgateway))
+            .arg("--destination")
             .arg(charts_dir)
             .status();
     }
@@ -219,13 +259,25 @@ fn download_helm_charts(
         let _ = Command::new("helm")
             .args([
                 "pull",
-                &format!("oci://cr.kgateway.dev/kgateway-dev/charts/kgateway"),
+                "oci://cr.kgateway.dev/kgateway-dev/charts/kgateway",
                 "--version",
-                &format!("v{}", versions.kgateway),
-                "--destination",
             ])
+            .arg(format!("v{}", versions.kgateway))
+            .arg("--destination")
             .arg(charts_dir)
             .status();
+    }
+
+    // Download Gateway API CRDs (standard channel)
+    if !gateway_api_crds.exists() {
+        eprintln!("Downloading Gateway API CRDs v{}...", versions.gateway_api);
+        download_file(
+            &format!(
+                "https://github.com/kubernetes-sigs/gateway-api/releases/download/v{}/standard-install.yaml",
+                versions.gateway_api
+            ),
+            &gateway_api_crds,
+        );
     }
 
     Ok(())

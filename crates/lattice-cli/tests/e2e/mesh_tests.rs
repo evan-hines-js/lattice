@@ -733,6 +733,10 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     println!("  Waiting for traffic tests to complete (60s)...");
     sleep(Duration::from_secs(60)).await;
     verify_traffic_patterns(kubeconfig_path).await?;
+
+    // Run L7 policy enforcement tests
+    run_policy_enforcement_test(kubeconfig_path).await?;
+
     Ok(())
 }
 

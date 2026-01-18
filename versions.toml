@@ -35,6 +35,10 @@ version = "0.11.0"
 # Required by CAPMOX (Proxmox provider)
 version = "1.0.3"
 
+[gateway-api]
+# Gateway API CRDs from https://github.com/kubernetes-sigs/gateway-api
+version = "1.2.1"
+
 [charts]
 cilium = "1.18.5"
 istio = "1.28.2"

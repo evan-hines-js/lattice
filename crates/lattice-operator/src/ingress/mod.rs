@@ -553,8 +553,11 @@ impl IngressCompiler {
 
         // Compile TrafficPolicy if rate limiting is configured
         if let Some(ref rate_limit) = ingress.rate_limit {
-            output.traffic_policy =
-                Some(Self::compile_traffic_policy(service_name, namespace, rate_limit));
+            output.traffic_policy = Some(Self::compile_traffic_policy(
+                service_name,
+                namespace,
+                rate_limit,
+            ));
         }
 
         output
@@ -807,33 +810,24 @@ impl WaypointPolicyCompiler {
 
         for (resource_name, resource) in resources {
             // Only process service resources
-            if !matches!(
-                resource.type_,
-                lattice_common::crd::ResourceType::Service
-            ) {
+            if !matches!(resource.type_, lattice_common::crd::ResourceType::Service) {
                 continue;
             }
 
             // Compile outbound policy (caller-side)
             if let Some(ref outbound) = resource.outbound {
-                if let Some(policy) = Self::compile_outbound_policy(
-                    service_name,
-                    resource_name,
-                    namespace,
-                    outbound,
-                ) {
+                if let Some(policy) =
+                    Self::compile_outbound_policy(service_name, resource_name, namespace, outbound)
+                {
                     output.outbound_policies.push(policy);
                 }
             }
 
             // Compile inbound policy (callee-side)
             if let Some(ref inbound) = resource.inbound {
-                if let Some(policy) = Self::compile_inbound_policy(
-                    service_name,
-                    resource_name,
-                    namespace,
-                    inbound,
-                ) {
+                if let Some(policy) =
+                    Self::compile_inbound_policy(service_name, resource_name, namespace, inbound)
+                {
                     output.inbound_policies.push(policy);
                 }
             }
@@ -1369,9 +1363,10 @@ mod tests {
                     burst: Some(150),
                 }),
                 headers: Some(HeaderPolicy {
-                    add: std::collections::BTreeMap::from([
-                        ("X-Caller".to_string(), "frontend".to_string()),
-                    ]),
+                    add: std::collections::BTreeMap::from([(
+                        "X-Caller".to_string(),
+                        "frontend".to_string(),
+                    )]),
                     remove: vec!["X-Internal".to_string()],
                 }),
             }),

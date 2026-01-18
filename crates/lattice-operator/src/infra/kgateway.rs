@@ -9,7 +9,7 @@
 
 use std::process::Command;
 use std::sync::OnceLock;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Default charts directory (set by LATTICE_CHARTS_DIR env var in container)
 const DEFAULT_CHARTS_DIR: &str = "/charts";
@@ -30,12 +30,15 @@ fn get_charts_dir() -> String {
 pub struct KgatewayConfig {
     /// kgateway version (pinned to Lattice release)
     pub version: &'static str,
+    /// Gateway API version (for CRDs)
+    pub gateway_api_version: &'static str,
 }
 
 impl Default for KgatewayConfig {
     fn default() -> Self {
         Self {
             version: env!("KGATEWAY_VERSION"),
+            gateway_api_version: env!("GATEWAY_API_VERSION"),
         }
     }
 }
@@ -110,8 +113,36 @@ spec:
         .to_string()
     }
 
+    /// Load Gateway API standard CRDs from disk
+    ///
+    /// These are the standard Kubernetes Gateway API CRDs required for GatewayClass,
+    /// Gateway, HTTPRoute, etc. They must be installed before kgateway.
+    /// The CRDs are downloaded from https://github.com/kubernetes-sigs/gateway-api during build.
+    fn load_gateway_api_crds(version: &str) -> Result<String, String> {
+        let charts_dir = get_charts_dir();
+        let crds_path = format!("{}/gateway-api-crds-v{}.yaml", charts_dir, version);
+
+        match std::fs::read_to_string(&crds_path) {
+            Ok(content) => {
+                info!(path = %crds_path, "Loaded Gateway API CRDs from disk");
+                Ok(content)
+            }
+            Err(e) => {
+                warn!(path = %crds_path, error = %e, "Failed to load Gateway API CRDs");
+                Err(format!(
+                    "failed to load Gateway API CRDs from {}: {}",
+                    crds_path, e
+                ))
+            }
+        }
+    }
+
     fn render_manifests(config: &KgatewayConfig) -> Result<Vec<String>, String> {
         let mut all_manifests = Vec::new();
+
+        // 0. Add Gateway API CRDs first (required for GatewayClass, Gateway, HTTPRoute)
+        let gateway_api_crds = Self::load_gateway_api_crds(config.gateway_api_version)?;
+        all_manifests.extend(parse_yaml_documents(&gateway_api_crds));
 
         let charts_dir = get_charts_dir();
         let crds_chart = format!("{}/kgateway-crds-v{}.tgz", charts_dir, config.version);
@@ -238,14 +269,14 @@ mod tests {
             assert!(!manifests.is_empty());
 
             // Should contain GatewayClasses
-            let has_ingress_gc = manifests.iter().any(|m| {
-                m.contains("kind: GatewayClass") && m.contains("name: kgateway")
-            });
+            let has_ingress_gc = manifests
+                .iter()
+                .any(|m| m.contains("kind: GatewayClass") && m.contains("name: kgateway"));
             assert!(has_ingress_gc, "Should contain ingress GatewayClass");
 
-            let has_waypoint_gc = manifests.iter().any(|m| {
-                m.contains("kind: GatewayClass") && m.contains("name: kgateway-waypoint")
-            });
+            let has_waypoint_gc = manifests
+                .iter()
+                .any(|m| m.contains("kind: GatewayClass") && m.contains("name: kgateway-waypoint"));
             assert!(has_waypoint_gc, "Should contain waypoint GatewayClass");
         }
     }
