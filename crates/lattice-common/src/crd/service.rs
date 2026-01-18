@@ -888,6 +888,26 @@ impl LatticeServiceSpec {
             .collect()
     }
 
+    /// Get shared volume IDs that this service owns (has size defined)
+    /// Returns: Vec<(resource_name, volume_id)>
+    pub fn owned_volume_ids(&self) -> Vec<(&str, &str)> {
+        self.resources
+            .iter()
+            .filter(|(_, spec)| spec.is_volume_owner() && spec.id.is_some())
+            .filter_map(|(name, spec)| spec.id.as_ref().map(|id| (name.as_str(), id.as_str())))
+            .collect()
+    }
+
+    /// Get shared volume IDs that this service references (no size, just id)
+    /// Returns: Vec<(resource_name, volume_id)>
+    pub fn referenced_volume_ids(&self) -> Vec<(&str, &str)> {
+        self.resources
+            .iter()
+            .filter(|(_, spec)| spec.is_volume_reference())
+            .filter_map(|(name, spec)| spec.id.as_ref().map(|id| (name.as_str(), id.as_str())))
+            .collect()
+    }
+
     /// Get the ports this service exposes
     pub fn ports(&self) -> BTreeMap<&str, u16> {
         self.service
@@ -1148,6 +1168,90 @@ fn validate_file_mode(mode: &str, container_name: &str, path: &str) -> Result<()
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Cross-Service Validation
+// =============================================================================
+
+/// Error for duplicate volume ownership
+#[derive(Debug, Clone)]
+pub struct DuplicateVolumeOwner {
+    /// The shared volume ID
+    pub volume_id: String,
+    /// Services that claim ownership (have size defined)
+    pub owners: Vec<String>,
+}
+
+/// Validate that shared volumes have exactly one owner across all services
+///
+/// Returns a list of validation errors if multiple services define the same
+/// volume ID with size (both claiming to be the owner).
+///
+/// # Example
+/// ```ignore
+/// let services = vec![
+///     ("nzbget", &nzbget_spec),
+///     ("sonarr", &sonarr_spec),
+/// ];
+/// let errors = validate_volume_ownership(&services);
+/// if !errors.is_empty() {
+///     // Handle duplicate owners
+/// }
+/// ```
+pub fn validate_volume_ownership(
+    services: &[(&str, &LatticeServiceSpec)],
+) -> Vec<DuplicateVolumeOwner> {
+    use std::collections::HashMap;
+
+    // Collect all volume ID owners: volume_id -> [service_names]
+    let mut owners: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (service_name, spec) in services {
+        for (_resource_name, volume_id) in spec.owned_volume_ids() {
+            owners
+                .entry(volume_id.to_string())
+                .or_default()
+                .push(service_name.to_string());
+        }
+    }
+
+    // Find volume IDs with multiple owners
+    owners
+        .into_iter()
+        .filter(|(_, service_names)| service_names.len() > 1)
+        .map(|(volume_id, service_names)| DuplicateVolumeOwner {
+            volume_id,
+            owners: service_names,
+        })
+        .collect()
+}
+
+/// Validate that referenced volumes have an owner
+///
+/// Returns volume IDs that are referenced but have no owner.
+pub fn validate_volume_references(
+    services: &[(&str, &LatticeServiceSpec)],
+) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+
+    // Collect all owned volume IDs
+    let owned: HashSet<String> = services
+        .iter()
+        .flat_map(|(_, spec)| spec.owned_volume_ids())
+        .map(|(_, id)| id.to_string())
+        .collect();
+
+    // Find references without owners
+    services
+        .iter()
+        .flat_map(|(service_name, spec)| {
+            spec.referenced_volume_ids()
+                .into_iter()
+                .filter(|(_, id)| !owned.contains(*id))
+                .map(|(_, id)| (service_name.to_string(), id.to_string()))
+        })
+        .collect()
 }
 
 /// Status for a LatticeService
@@ -2130,7 +2234,10 @@ resources:
 
         // Check inbound policy
         let inbound = resource.inbound.as_ref().unwrap();
-        assert_eq!(inbound.rate_limit.as_ref().unwrap().requests_per_interval, 1000);
+        assert_eq!(
+            inbound.rate_limit.as_ref().unwrap().requests_per_interval,
+            1000
+        );
     }
 
     /// Story: Minimal retry policy with just attempts
@@ -2152,7 +2259,13 @@ resources:
         let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
         let resource = &spec.resources["backend"];
 
-        let retries = resource.outbound.as_ref().unwrap().retries.as_ref().unwrap();
+        let retries = resource
+            .outbound
+            .as_ref()
+            .unwrap()
+            .retries
+            .as_ref()
+            .unwrap();
         assert_eq!(retries.attempts, 2);
         assert!(retries.per_try_timeout.is_none());
         assert!(retries.retry_on.is_empty());
@@ -2179,7 +2292,13 @@ resources:
         let spec: LatticeServiceSpec = serde_yaml::from_str(yaml).unwrap();
         let resource = &spec.resources["database"];
 
-        let cb = resource.outbound.as_ref().unwrap().circuit_breaker.as_ref().unwrap();
+        let cb = resource
+            .outbound
+            .as_ref()
+            .unwrap()
+            .circuit_breaker
+            .as_ref()
+            .unwrap();
         assert_eq!(cb.consecutive_5xx_errors, Some(10));
         assert_eq!(cb.base_ejection_time, Some("1m".to_string()));
         assert_eq!(cb.max_ejection_percent, Some(50));
@@ -2206,7 +2325,111 @@ resources:
         let resource = &spec.resources["api"];
 
         let headers = resource.inbound.as_ref().unwrap().headers.as_ref().unwrap();
-        assert_eq!(headers.add.get("X-Environment"), Some(&"production".to_string()));
+        assert_eq!(
+            headers.add.get("X-Environment"),
+            Some(&"production".to_string())
+        );
         assert!(resource.inbound.as_ref().unwrap().rate_limit.is_none());
+    }
+
+    // =========================================================================
+    // Volume Ownership Tests
+    // =========================================================================
+
+    fn service_with_owned_volume(id: &str, size: &str) -> LatticeServiceSpec {
+        let mut spec = sample_service_spec();
+        spec.resources.insert(
+            "data".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Volume,
+                direction: DependencyDirection::default(),
+                id: Some(id.to_string()),
+                class: None,
+                metadata: None,
+                params: Some(serde_json::json!({ "size": size })),
+                outbound: None,
+                inbound: None,
+            },
+        );
+        spec
+    }
+
+    fn service_with_volume_reference(id: &str) -> LatticeServiceSpec {
+        let mut spec = sample_service_spec();
+        spec.resources.insert(
+            "data".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Volume,
+                direction: DependencyDirection::default(),
+                id: Some(id.to_string()),
+                class: None,
+                metadata: None,
+                params: None, // No params = reference
+                outbound: None,
+                inbound: None,
+            },
+        );
+        spec
+    }
+
+    #[test]
+    fn test_volume_owner_detection() {
+        let spec = service_with_owned_volume("shared-data", "10Gi");
+        let owned = spec.owned_volume_ids();
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0], ("data", "shared-data"));
+    }
+
+    #[test]
+    fn test_volume_reference_detection() {
+        let spec = service_with_volume_reference("shared-data");
+        let refs = spec.referenced_volume_ids();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0], ("data", "shared-data"));
+    }
+
+    #[test]
+    fn test_validate_volume_ownership_single_owner() {
+        let svc1 = service_with_owned_volume("shared-data", "10Gi");
+        let svc2 = service_with_volume_reference("shared-data");
+
+        let errors = validate_volume_ownership(&[("svc1", &svc1), ("svc2", &svc2)]);
+        assert!(errors.is_empty(), "Single owner should not produce errors");
+    }
+
+    #[test]
+    fn test_validate_volume_ownership_duplicate_owners() {
+        let svc1 = service_with_owned_volume("shared-data", "10Gi");
+        let svc2 = service_with_owned_volume("shared-data", "20Gi");
+
+        let errors = validate_volume_ownership(&[("svc1", &svc1), ("svc2", &svc2)]);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].volume_id, "shared-data");
+        assert!(errors[0].owners.contains(&"svc1".to_string()));
+        assert!(errors[0].owners.contains(&"svc2".to_string()));
+    }
+
+    #[test]
+    fn test_validate_volume_references_orphan() {
+        let svc1 = service_with_volume_reference("nonexistent-volume");
+
+        let orphans = validate_volume_references(&[("svc1", &svc1)]);
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(
+            orphans[0],
+            ("svc1".to_string(), "nonexistent-volume".to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_volume_references_valid() {
+        let svc1 = service_with_owned_volume("shared-data", "10Gi");
+        let svc2 = service_with_volume_reference("shared-data");
+
+        let orphans = validate_volume_references(&[("svc1", &svc1), ("svc2", &svc2)]);
+        assert!(
+            orphans.is_empty(),
+            "Reference with owner should not be orphan"
+        );
     }
 }

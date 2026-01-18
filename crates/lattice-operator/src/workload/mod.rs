@@ -12,8 +12,13 @@
 pub mod env;
 pub mod error;
 pub mod files;
+pub mod volume;
 
 pub use error::CompilationError;
+pub use volume::{
+    Affinity, GeneratedVolumes, PersistentVolumeClaim, PodAffinity, PodVolume, PvcVolumeSource,
+    VolumeCompiler, VOLUME_OWNER_LABEL_PREFIX,
+};
 
 use std::collections::BTreeMap;
 
@@ -336,6 +341,9 @@ pub struct PodSpec {
     /// Volumes
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<Volume>,
+    /// Pod affinity rules (for RWO volume co-location)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affinity: Option<volume::Affinity>,
 }
 
 /// Container spec
@@ -536,6 +544,9 @@ pub struct Volume {
     /// EmptyDir source
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub empty_dir: Option<EmptyDirVolumeSource>,
+    /// PVC source
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistent_volume_claim: Option<volume::PvcVolumeSource>,
 }
 
 /// ConfigMap volume source
@@ -741,6 +752,8 @@ pub struct GeneratedWorkloads {
     pub files_config_map: Option<ConfigMap>,
     /// Secret for file mounts (binary content)
     pub files_secret: Option<Secret>,
+    /// PersistentVolumeClaims for owned volumes
+    pub pvcs: Vec<PersistentVolumeClaim>,
 }
 
 impl GeneratedWorkloads {
@@ -759,6 +772,7 @@ impl GeneratedWorkloads {
             && self.env_secret.is_none()
             && self.files_config_map.is_none()
             && self.files_secret.is_none()
+            && self.pvcs.is_empty()
     }
 }
 
@@ -904,6 +918,10 @@ impl WorkloadCompiler {
         output.files_config_map = compiled_files.config_map;
         output.files_secret = compiled_files.secret;
 
+        // Compile volumes (PVCs, affinity, mounts)
+        let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec);
+        output.pvcs = compiled_volumes.pvcs;
+
         // Compute config hash for rollout triggers
         let config_hash = compute_config_hash(
             output.env_config_map.as_ref(),
@@ -957,6 +975,12 @@ impl WorkloadCompiler {
                     .and_then(|cs| cs.startup_probe.as_ref())
                     .map(Self::compile_probe);
 
+                // Merge volume mounts from files and volumes
+                let mut all_volume_mounts = compiled_files.volume_mounts.clone();
+                if let Some(pvc_mounts) = compiled_volumes.volume_mounts.get(container_name) {
+                    all_volume_mounts.extend(pvc_mounts.clone());
+                }
+
                 Container {
                     name: container_name.clone(),
                     image: rc.image.clone(),
@@ -969,7 +993,7 @@ impl WorkloadCompiler {
                     liveness_probe,
                     readiness_probe,
                     startup_probe,
-                    volume_mounts: compiled_files.volume_mounts.clone(),
+                    volume_mounts: all_volume_mounts,
                 }
             })
             .collect();
@@ -977,6 +1001,10 @@ impl WorkloadCompiler {
         // Build deployment with compiled containers
         let mut labels = std::collections::BTreeMap::new();
         labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
+        // Add volume ownership labels (for RWO affinity)
+        for (k, v) in &compiled_volumes.pod_labels {
+            labels.insert(k.clone(), v.clone());
+        }
 
         // Add config hash as pod annotation to trigger rollouts on config changes
         let mut annotations = std::collections::BTreeMap::new();
@@ -1007,7 +1035,21 @@ impl WorkloadCompiler {
                     spec: PodSpec {
                         service_account_name: name.to_string(),
                         containers,
-                        volumes: compiled_files.volumes,
+                        volumes: {
+                            // Merge file volumes and PVC volumes
+                            let mut all_volumes = compiled_files.volumes;
+                            for pv in &compiled_volumes.volumes {
+                                all_volumes.push(Volume {
+                                    name: pv.name.clone(),
+                                    config_map: None,
+                                    secret: None,
+                                    empty_dir: None,
+                                    persistent_volume_claim: pv.persistent_volume_claim.clone(),
+                                });
+                            }
+                            all_volumes
+                        },
+                        affinity: compiled_volumes.affinity.clone(),
                     },
                 },
                 strategy,
@@ -1234,6 +1276,7 @@ impl WorkloadCompiler {
                         service_account_name: String::new(),
                         containers: vec![],
                         volumes: vec![],
+                        affinity: None,
                     },
                 },
                 strategy,

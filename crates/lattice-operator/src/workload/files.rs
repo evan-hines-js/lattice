@@ -68,6 +68,7 @@ pub fn compile(
             }),
             secret: None,
             empty_dir: None,
+            persistent_volume_claim: None,
         });
 
         // Create volume mounts for each file
@@ -101,6 +102,7 @@ pub fn compile(
                 secret_name: secret_name.clone(),
             }),
             empty_dir: None,
+            persistent_volume_claim: None,
         });
 
         // Create volume mounts for each file

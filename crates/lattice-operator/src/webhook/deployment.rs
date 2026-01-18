@@ -277,6 +277,7 @@ mod tests {
                 config_map: None,
                 secret: None,
                 empty_dir: Some(EmptyDirVolumeSource {}),
+                persistent_volume_claim: None,
             }],
             strategy: None,
         };

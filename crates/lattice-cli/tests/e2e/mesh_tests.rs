@@ -1673,7 +1673,10 @@ fn create_timeout_backend() -> LatticeService {
 
 fn create_timeout_client() -> LatticeService {
     let script = generate_timeout_test_script("backend-timeout", POLICY_TEST_NAMESPACE, 3);
-    parse_service_with_script(include_str!("fixtures/services/timeout-client.yaml"), &script)
+    parse_service_with_script(
+        include_str!("fixtures/services/timeout-client.yaml"),
+        &script,
+    )
 }
 
 fn create_rate_limited_backend() -> LatticeService {
@@ -1682,7 +1685,10 @@ fn create_rate_limited_backend() -> LatticeService {
 
 fn create_rate_limit_client() -> LatticeService {
     let script = generate_rate_limit_test_script("backend-rate-limited", POLICY_TEST_NAMESPACE, 10);
-    parse_service_with_script(include_str!("fixtures/services/rate-limit-client.yaml"), &script)
+    parse_service_with_script(
+        include_str!("fixtures/services/rate-limit-client.yaml"),
+        &script,
+    )
 }
 
 /// Deploy L7 policy test services

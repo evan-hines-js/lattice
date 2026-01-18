@@ -1475,8 +1475,12 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                         let kube = Arc::clone(&ctx.kube);
                         let target_namespace = capi_namespace.clone();
                         async move {
-                            kube.copy_secret_to_namespace(&secret_name, &source_namespace, &target_namespace)
-                                .await
+                            kube.copy_secret_to_namespace(
+                                &secret_name,
+                                &source_namespace,
+                                &target_namespace,
+                            )
+                            .await
                         }
                     })
                     .collect();

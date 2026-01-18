@@ -59,9 +59,9 @@ use lattice_cli::commands::install::{InstallConfig, Installer};
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster};
 
 use super::helpers::{
-    client_from_kubeconfig, ensure_docker_network, extract_capi_kubeconfig,
-    extract_docker_cluster_kubeconfig, run_cmd, run_cmd_allow_fail, verify_control_plane_taints,
-    watch_cluster_phases, watch_worker_scaling,
+    client_from_kubeconfig, ensure_docker_network, extract_docker_cluster_kubeconfig, run_cmd,
+    run_cmd_allow_fail, verify_control_plane_taints, watch_cluster_phases,
+    watch_cluster_phases_with_kubeconfig, watch_worker_scaling,
 };
 use super::mesh_tests::{mesh_test_enabled, run_mesh_test, run_random_mesh_test};
 use super::providers::InfraProvider;
@@ -464,7 +464,20 @@ async fn run_provider_e2e(
     // =========================================================================
     println!("\n[Phase 4] Watching workload cluster provisioning...\n");
 
-    watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME, None).await?;
+    let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
+
+    // For non-Docker providers, extract kubeconfig DURING provisioning (before pivot moves it)
+    if workload_provider == InfraProvider::Docker {
+        watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME, None).await?;
+    } else {
+        watch_cluster_phases_with_kubeconfig(
+            &kubeconfig_path,
+            WORKLOAD_CLUSTER_NAME,
+            None,
+            &workload_kubeconfig_path,
+        )
+        .await?;
+    }
 
     println!("\n  SUCCESS: Workload cluster is Ready!");
 
@@ -473,24 +486,18 @@ async fn run_provider_e2e(
     // =========================================================================
     println!("\n[Phase 5] Verifying workload cluster...\n");
 
-    let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
-
-    println!("  Extracting workload cluster kubeconfig...");
+    // For Docker, extract kubeconfig now (it's not pivoted away like CAPI secrets)
     if workload_provider == InfraProvider::Docker {
+        println!("  Extracting workload cluster kubeconfig...");
         extract_docker_cluster_kubeconfig(
             WORKLOAD_CLUSTER_NAME,
             &workload_bootstrap,
             &workload_kubeconfig_path,
         )?;
+        println!("  Kubeconfig extracted successfully");
     } else {
-        extract_capi_kubeconfig(
-            &kubeconfig_path,
-            WORKLOAD_CLUSTER_NAME,
-            &workload_kubeconfig_path,
-        )
-        .await?;
+        println!("  Using kubeconfig extracted during provisioning");
     }
-    println!("  Kubeconfig extracted successfully");
 
     let nodes_output = run_cmd(
         "kubectl",
