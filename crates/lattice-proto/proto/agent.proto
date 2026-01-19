@@ -104,6 +104,9 @@ message AgentMessage {
     Heartbeat heartbeat = 6;
     ClusterHealth cluster_health = 7;
     StatusResponse status_response = 8;
+    UnpivotStarted unpivot_started = 9;
+    UnpivotManifests unpivot_manifests = 10;
+    UnpivotComplete unpivot_complete = 11;
   }
 }
 
@@ -142,6 +145,39 @@ message PivotComplete {
   string error_message = 2;
   // Number of CAPI resources imported
   int32 resources_imported = 3;
+}
+
+// Sent when agent begins unpivot (LatticeCluster deletion detected)
+//
+// Flow:
+// 1. User deletes LatticeCluster on self-managed cluster
+// 2. Agent finalizer triggers, runs clusterctl move --to-directory
+// 3. Agent sends UnpivotStarted
+// 4. Agent sends UnpivotManifests with CAPI resources
+// 5. Cell applies manifests, sends UnpivotAck
+// 6. Agent sends UnpivotComplete, removes finalizer
+// 7. Cluster terminates, cell's CAPI cleans up infrastructure
+message UnpivotStarted {
+  // Namespace where CAPI resources are being exported from
+  string source_namespace = 1;
+}
+
+// CAPI manifests being sent to parent during unpivot
+message UnpivotManifests {
+  // YAML manifests exported via clusterctl move --to-directory
+  repeated bytes manifests = 1;
+  // Total number of resources being sent
+  int32 total_resources = 2;
+}
+
+// Sent when unpivot operation completes
+message UnpivotComplete {
+  // Whether unpivot succeeded
+  bool success = 1;
+  // Error message if success=false
+  string error_message = 2;
+  // Number of CAPI resources exported
+  int32 resources_exported = 3;
 }
 
 // Periodic heartbeat with agent state
@@ -209,6 +245,8 @@ enum AgentState {
   AGENT_STATE_DEGRADED = 4;
   // Cluster is in a failed state
   AGENT_STATE_FAILED = 5;
+  // CAPI resources are being exported back to parent (unpivot in progress)
+  AGENT_STATE_UNPIVOTING = 6;
 }
 
 // =============================================================================
@@ -224,6 +262,7 @@ message CellCommand {
     ApplyManifestsCommand apply_manifests = 2;
     StartPivotCommand start_pivot = 3;
     StatusRequest status_request = 4;
+    UnpivotAck unpivot_ack = 5;
   }
 }
 
@@ -259,4 +298,16 @@ message StatusRequest {
   bool include_nodes = 1;
   // Whether to include CAPI resource status
   bool include_capi = 2;
+}
+
+// Acknowledgment that cell has applied unpivot manifests
+//
+// Agent waits for this before removing finalizer and terminating
+message UnpivotAck {
+  // Whether manifests were successfully applied
+  bool success = 1;
+  // Error message if success=false
+  string error_message = 2;
+  // Number of resources applied
+  int32 resources_applied = 3;
 }
