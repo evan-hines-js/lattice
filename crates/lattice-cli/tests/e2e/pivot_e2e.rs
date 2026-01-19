@@ -612,13 +612,15 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 8: Create Second Workload Cluster (Deep Hierarchy)
     // =========================================================================
-    if hierarchy_test_enabled() {
+    // Skip hierarchy test if config not provided or explicitly disabled
+    let workload2_config_result = load_cluster_config("LATTICE_WORKLOAD2_CLUSTER_CONFIG");
+    if hierarchy_test_enabled() && workload2_config_result.is_ok() {
         println!("\n[Phase 8] Creating second workload cluster (deep hierarchy)...\n");
         println!("  This tests creating a cluster off workload1 (which just lost its parent)");
 
         // Load workload2 cluster config (bootstrap provider comes from the config)
         let (_workload2_config_path, workload2_config, workload2_cluster) =
-            load_cluster_config("LATTICE_WORKLOAD2_CLUSTER_CONFIG")?;
+            workload2_config_result.unwrap();
         let workload2_bootstrap = workload2_cluster.spec.provider.kubernetes.bootstrap.clone();
         println!("  Workload2 cluster config:\n{}", workload2_config);
         println!("  Workload2 bootstrap provider: {:?}", workload2_bootstrap);
@@ -777,8 +779,10 @@ async fn run_provider_e2e() -> Result<(), String> {
         }
 
         println!("\n  SUCCESS: Unpivot test complete!");
+    } else if !hierarchy_test_enabled() {
+        println!("\n[Phase 8-11] Skipping hierarchy/unpivot tests (LATTICE_ENABLE_HIERARCHY_TEST=false)\n");
     } else {
-        println!("\n[Phase 8-11] Skipping hierarchy/unpivot tests (set LATTICE_ENABLE_HIERARCHY_TEST=true to enable)\n");
+        println!("\n[Phase 8-11] Skipping hierarchy/unpivot tests (LATTICE_WORKLOAD2_CLUSTER_CONFIG not set)\n");
     }
 
     // =========================================================================
