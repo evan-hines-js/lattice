@@ -16,10 +16,12 @@
 //! let manifests = provider.generate_capi_manifests(&cluster).await?;
 //! ```
 
+mod aws;
 mod docker;
 mod openstack;
 mod proxmox;
 
+pub use aws::AwsProvider;
 pub use docker::DockerProvider;
 pub use openstack::OpenStackProvider;
 pub use proxmox::ProxmoxProvider;
@@ -942,12 +944,10 @@ pub trait Provider: Send + Sync {
 /// A boxed provider instance, or an error if the provider type is not supported
 pub fn create_provider(provider_type: ProviderType, namespace: &str) -> Result<Box<dyn Provider>> {
     match provider_type {
+        ProviderType::Aws => Ok(Box::new(AwsProvider::with_namespace(namespace))),
         ProviderType::Docker => Ok(Box::new(DockerProvider::with_namespace(namespace))),
-        ProviderType::Proxmox => Ok(Box::new(ProxmoxProvider::with_namespace(namespace))),
         ProviderType::OpenStack => Ok(Box::new(OpenStackProvider::with_namespace(namespace))),
-        ProviderType::Aws => Err(crate::Error::provider(
-            "AWS provider not yet implemented".to_string(),
-        )),
+        ProviderType::Proxmox => Ok(Box::new(ProxmoxProvider::with_namespace(namespace))),
         ProviderType::Gcp => Err(crate::Error::provider(
             "GCP provider not yet implemented".to_string(),
         )),

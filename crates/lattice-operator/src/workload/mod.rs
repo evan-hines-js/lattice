@@ -1304,8 +1304,7 @@ impl WorkloadCompiler {
             })
             .unwrap_or_default();
 
-        // Add istio.io/use-waypoint label to route traffic through the namespace waypoint
-        // This enables L7 policy enforcement via Envoy Gateway acting as waypoint proxy
+        // Add istio.io/use-waypoint label to route traffic through namespace waypoint
         let waypoint_name = format!("{}-waypoint", namespace);
         let metadata =
             ObjectMeta::new(name, namespace).with_label("istio.io/use-waypoint", waypoint_name);

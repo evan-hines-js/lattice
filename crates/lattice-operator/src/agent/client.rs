@@ -591,6 +591,22 @@ impl AgentClient {
         self.send_message(msg).await
     }
 
+    /// Extract kind and name from a YAML manifest for logging
+    fn extract_manifest_info(yaml: &str) -> (String, String) {
+        let value: Result<serde_yaml::Value, _> = serde_yaml::from_str(yaml);
+        match value {
+            Ok(v) => {
+                let kind = v["kind"].as_str().unwrap_or("unknown").to_string();
+                let name = v["metadata"]["name"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
+                (kind, name)
+            }
+            Err(_) => ("invalid".to_string(), "invalid".to_string()),
+        }
+    }
+
     /// Apply a Kubernetes manifest using kube-rs server-side apply
     ///
     /// This is used to apply manifests received via ApplyManifestsCommand
@@ -600,9 +616,7 @@ impl AgentClient {
         use kube::core::DynamicObject;
         use kube::discovery::ApiResource;
 
-        debug!("Applying manifest via kube-rs");
-
-        // Parse YAML to extract metadata
+        // Parse YAML to extract metadata first for better logging
         let value: serde_yaml::Value = serde_yaml::from_str(yaml)
             .map_err(|e| std::io::Error::other(format!("Invalid YAML: {}", e)))?;
 
@@ -616,6 +630,14 @@ impl AgentClient {
             .as_str()
             .ok_or_else(|| std::io::Error::other("Missing metadata.name"))?;
         let namespace = value["metadata"]["namespace"].as_str();
+
+        debug!(
+            api_version = api_version,
+            kind = kind,
+            name = name,
+            namespace = namespace,
+            "Applying manifest via kube-rs"
+        );
 
         // Parse group and version from apiVersion
         let (group, version) = if api_version.contains('/') {
@@ -755,19 +777,27 @@ impl AgentClient {
                 let mut applied = 0;
                 let mut errors = Vec::new();
 
-                for manifest in &cmd.manifests {
+                for (i, manifest) in cmd.manifests.iter().enumerate() {
                     match String::from_utf8(manifest.clone()) {
                         Ok(yaml) => {
+                            // Extract kind/name for logging
+                            let (kind, name) = Self::extract_manifest_info(&yaml);
                             if let Err(e) = Self::apply_manifest(&yaml).await {
-                                error!(error = %e, "Failed to apply manifest");
-                                errors.push(e.to_string());
+                                error!(
+                                    error = %e,
+                                    manifest_index = i,
+                                    kind = kind,
+                                    name = name,
+                                    "Failed to apply manifest"
+                                );
+                                errors.push(format!("{}/{}: {}", kind, name, e));
                             } else {
                                 applied += 1;
                             }
                         }
                         Err(e) => {
-                            error!(error = %e, "Invalid UTF-8 in manifest");
-                            errors.push(format!("invalid UTF-8: {}", e));
+                            error!(error = %e, manifest_index = i, "Invalid UTF-8 in manifest");
+                            errors.push(format!("manifest {}: invalid UTF-8: {}", i, e));
                         }
                     }
                 }

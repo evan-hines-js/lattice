@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 // Re-export provider configs from the providers module
 pub use super::providers::{
-    DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig, ProxmoxConfig,
+    AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig, ProxmoxConfig,
 };
 
 // =============================================================================
@@ -143,53 +143,71 @@ impl ProviderSpec {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
+    /// AWS public cloud
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<AwsConfig>,
     /// Docker/Kind for local development
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker: Option<DockerConfig>,
-    /// Proxmox VE on-premises virtualization
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxmox: Option<ProxmoxConfig>,
     /// OpenStack private/public cloud
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openstack: Option<OpenStackConfig>,
+    /// Proxmox VE on-premises virtualization
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxmox: Option<ProxmoxConfig>,
 }
 
 impl ProviderConfig {
-    /// Create a Docker provider config
-    pub fn docker() -> Self {
+    /// Create an AWS provider config
+    pub fn aws(config: AwsConfig) -> Self {
         Self {
-            docker: Some(DockerConfig::default()),
-            proxmox: None,
+            aws: Some(config),
+            docker: None,
             openstack: None,
+            proxmox: None,
         }
     }
 
-    /// Create a Proxmox provider config
-    pub fn proxmox(config: ProxmoxConfig) -> Self {
+    /// Create a Docker provider config
+    pub fn docker() -> Self {
         Self {
-            docker: None,
-            proxmox: Some(config),
+            aws: None,
+            docker: Some(DockerConfig::default()),
             openstack: None,
+            proxmox: None,
         }
     }
 
     /// Create an OpenStack provider config
     pub fn openstack(config: OpenStackConfig) -> Self {
         Self {
+            aws: None,
             docker: None,
-            proxmox: None,
             openstack: Some(config),
+            proxmox: None,
+        }
+    }
+
+    /// Create a Proxmox provider config
+    pub fn proxmox(config: ProxmoxConfig) -> Self {
+        Self {
+            aws: None,
+            docker: None,
+            openstack: None,
+            proxmox: Some(config),
         }
     }
 
     /// Get the provider type
     pub fn provider_type(&self) -> ProviderType {
-        if self.docker.is_some() {
+        if self.aws.is_some() {
+            ProviderType::Aws
+        } else if self.docker.is_some() {
             ProviderType::Docker
-        } else if self.proxmox.is_some() {
-            ProviderType::Proxmox
         } else if self.openstack.is_some() {
             ProviderType::OpenStack
+        } else if self.proxmox.is_some() {
+            ProviderType::Proxmox
         } else {
             ProviderType::Docker
         }
@@ -198,9 +216,10 @@ impl ProviderConfig {
     /// Validate that exactly one provider is configured
     pub fn validate(&self) -> Result<(), crate::Error> {
         let count = [
+            self.aws.is_some(),
             self.docker.is_some(),
-            self.proxmox.is_some(),
             self.openstack.is_some(),
+            self.proxmox.is_some(),
         ]
         .iter()
         .filter(|&&x| x)
@@ -208,7 +227,7 @@ impl ProviderConfig {
 
         if count == 0 {
             return Err(crate::Error::validation(
-                "provider config must specify exactly one provider (docker, proxmox, or openstack)",
+                "provider config must specify exactly one provider (aws, docker, openstack, or proxmox)",
             ));
         }
         if count > 1 {
@@ -842,6 +861,37 @@ mod tests {
             assert_eq!(config.provider_type(), ProviderType::Proxmox);
             assert!(config.validate().is_ok());
         }
+
+        #[test]
+        fn test_aws_config() {
+            let aws = AwsConfig {
+                region: "us-west-2".to_string(),
+                cp_instance_type: "m5.xlarge".to_string(),
+                worker_instance_type: "m5.large".to_string(),
+                ssh_key_name: "lattice-key".to_string(),
+                ..Default::default()
+            };
+            let config = ProviderConfig::aws(aws);
+            assert!(config.aws.is_some());
+            assert_eq!(config.provider_type(), ProviderType::Aws);
+            assert!(config.validate().is_ok());
+        }
+
+        #[test]
+        fn test_openstack_config() {
+            let openstack = OpenStackConfig {
+                external_network_id: "ext-net".to_string(),
+                cp_flavor: "m1.large".to_string(),
+                worker_flavor: "m1.medium".to_string(),
+                image_name: "Ubuntu 22.04".to_string(),
+                ssh_key_name: "lattice-key".to_string(),
+                ..Default::default()
+            };
+            let config = ProviderConfig::openstack(openstack);
+            assert!(config.openstack.is_some());
+            assert_eq!(config.provider_type(), ProviderType::OpenStack);
+            assert!(config.validate().is_ok());
+        }
     }
 
     mod serde_tests {
@@ -902,10 +952,7 @@ mod tests {
                 spec.bootstrap_endpoint(),
                 Some("https://172.18.255.1:8443".to_string())
             );
-            assert_eq!(
-                spec.endpoint(),
-                Some("172.18.255.1:8443:50051".to_string())
-            );
+            assert_eq!(spec.endpoint(), Some("172.18.255.1:8443:50051".to_string()));
         }
 
         #[test]

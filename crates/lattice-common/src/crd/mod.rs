@@ -22,8 +22,8 @@ pub use service::{
     TcpSocketProbe, TimeoutPolicy, TlsMode, VolumeAccessMode, VolumeMount, VolumeParams,
 };
 pub use types::{
-    BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig, EndpointsSpec,
-    GitOpsSpec, Ipv4PoolConfig, Ipv6PoolConfig, KubernetesSpec, NetworkPool, NetworkingSpec,
-    NodeSpec, OpenStackConfig, ProviderConfig, ProviderSpec, ProviderType, ProxmoxConfig,
-    SecretRef, ServiceRef, ServiceSpec, WorkloadSpec,
+    AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig,
+    EndpointsSpec, GitOpsSpec, Ipv4PoolConfig, Ipv6PoolConfig, KubernetesSpec, NetworkPool,
+    NetworkingSpec, NodeSpec, OpenStackConfig, ProviderConfig, ProviderSpec, ProviderType,
+    ProxmoxConfig, SecretRef, ServiceRef, ServiceSpec, WorkloadSpec,
 };
