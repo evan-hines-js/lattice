@@ -14,7 +14,8 @@ spec:
         - /bin/sh
       args:
         - -c
-        - "{{SCRIPT}}"
+        - |
+          {{SCRIPT}}
   resources:
     backend-timeout:
       type: service
