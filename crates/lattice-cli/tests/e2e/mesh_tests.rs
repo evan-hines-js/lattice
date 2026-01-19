@@ -827,7 +827,10 @@ impl RandomMesh {
                 } else {
                     base_size / 3
                 };
-                let size = base_size + rng.gen_range(0..=variance);
+                // Clamp size to not exceed remaining (leave at least 1 per remaining layer)
+                let remaining_layers = config.num_layers - i - 1;
+                let max_size = remaining.saturating_sub(remaining_layers);
+                let size = (base_size + rng.gen_range(0..=variance)).min(max_size);
                 remaining -= size;
                 size
             };
@@ -1654,7 +1657,15 @@ fn parse_service(yaml: &str) -> LatticeService {
 
 /// Parse a LatticeService from YAML fixture, replacing script placeholder
 fn parse_service_with_script(yaml: &str, script: &str) -> LatticeService {
-    let yaml_with_script = yaml.replace("{{SCRIPT}}", &format!("while true; do\n{}\ndone", script));
+    // Build the full script with loop wrapper
+    let full_script = format!("while true; do\n{}\ndone", script);
+    // Indent each line to match YAML literal block indentation (10 spaces)
+    let indented_script = full_script
+        .lines()
+        .map(|line| format!("          {}", line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let yaml_with_script = yaml.replace("{{SCRIPT}}", indented_script.trim_start());
     serde_yaml::from_str(&yaml_with_script).expect("Failed to parse LatticeService YAML")
 }
 
