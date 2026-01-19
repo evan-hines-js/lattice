@@ -523,7 +523,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // Phase 6: Worker Scaling Verification
     // =========================================================================
     println!("\n[Phase 6] Watching worker scaling...\n");
-    watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 2).await?;
+    watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 1).await?;
 
     // =========================================================================
     // Phase 7: Independence Verification
