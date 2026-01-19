@@ -23,30 +23,14 @@ pub struct InfrastructureConfig {
     pub skip_cilium_policies: bool,
 }
 
-/// Generate ALL infrastructure manifests for a self-managing cluster
+/// Generate core infrastructure manifests (Istio, Flux, Gateway API, Envoy Gateway)
 ///
-/// Includes: cert-manager, CAPI, Istio, Flux, Envoy Gateway
-pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
+/// Used by both operator startup and full cluster bootstrap.
+pub fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
     let mut manifests = Vec::new();
 
-    // cert-manager (CAPI prerequisite)
-    if let Ok(cm) = generate_certmanager() {
-        debug!(count = cm.len(), "generated cert-manager manifests");
-        manifests.extend(cm);
-    } else {
-        warn!("failed to generate cert-manager manifests");
-    }
-
-    // CAPI providers
-    if let Ok(capi) = generate_capi(&config.provider) {
-        debug!(count = capi.len(), "generated CAPI manifests");
-        manifests.extend(capi);
-    } else {
-        warn!("failed to generate CAPI manifests");
-    }
-
     // Istio ambient
-    manifests.extend(generate_istio(config.skip_cilium_policies));
+    manifests.extend(generate_istio(skip_cilium_policies));
 
     // Flux
     manifests.extend(generate_flux());
@@ -66,6 +50,34 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     } else {
         warn!("failed to generate Envoy Gateway manifests");
     }
+
+    manifests
+}
+
+/// Generate ALL infrastructure manifests for a self-managing cluster
+///
+/// Includes: cert-manager, CAPI, plus core infrastructure (Istio, Flux, Envoy Gateway)
+pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
+    let mut manifests = Vec::new();
+
+    // cert-manager (CAPI prerequisite)
+    if let Ok(cm) = generate_certmanager() {
+        debug!(count = cm.len(), "generated cert-manager manifests");
+        manifests.extend(cm);
+    } else {
+        warn!("failed to generate cert-manager manifests");
+    }
+
+    // CAPI providers
+    if let Ok(capi) = generate_capi(&config.provider) {
+        debug!(count = capi.len(), "generated CAPI manifests");
+        manifests.extend(capi);
+    } else {
+        warn!("failed to generate CAPI manifests");
+    }
+
+    // Core infrastructure (Istio, Flux, Gateway API, Envoy Gateway)
+    manifests.extend(generate_core(config.skip_cilium_policies));
 
     info!(
         total = manifests.len(),

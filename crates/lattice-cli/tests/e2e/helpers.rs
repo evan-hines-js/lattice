@@ -354,7 +354,10 @@ pub async fn watch_cluster_phases(
                 }
             }
             Err(e) => {
-                println!("Warning: failed to get cluster {} status: {}", cluster_name, e);
+                println!(
+                    "Warning: failed to get cluster {} status: {}",
+                    cluster_name, e
+                );
             }
         }
 
@@ -415,14 +418,20 @@ pub async fn watch_cluster_phases_with_kubeconfig(
 
                 // Extract kubeconfig during Provisioning (before pivot moves it)
                 if !kubeconfig_extracted
-                    && matches!(current_phase, ClusterPhase::Provisioning | ClusterPhase::Pivoting)
+                    && matches!(
+                        current_phase,
+                        ClusterPhase::Provisioning | ClusterPhase::Pivoting
+                    )
                 {
                     if let Ok(()) = try_extract_kubeconfig(
                         mgmt_kubeconfig,
                         cluster_name,
                         kubeconfig_output_path,
                     ) {
-                        println!("Kubeconfig extracted to {} (before pivot)", kubeconfig_output_path);
+                        println!(
+                            "Kubeconfig extracted to {} (before pivot)",
+                            kubeconfig_output_path
+                        );
                         kubeconfig_extracted = true;
                     }
                 }
@@ -448,7 +457,10 @@ pub async fn watch_cluster_phases_with_kubeconfig(
                 }
             }
             Err(e) => {
-                println!("Warning: failed to get cluster {} status: {}", cluster_name, e);
+                println!(
+                    "Warning: failed to get cluster {} status: {}",
+                    cluster_name, e
+                );
             }
         }
 
