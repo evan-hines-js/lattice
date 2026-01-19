@@ -275,34 +275,8 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
 
     tracing::info!("Applying infrastructure manifests (server-side apply)...");
 
-    // Generate all infrastructure manifests
-    let mut manifests = Vec::new();
-
-    // Istio
-    manifests.extend(bootstrap::generate_istio(is_bootstrap_cluster));
-    tracing::debug!(count = manifests.len(), "generated Istio manifests");
-
-    // Flux (includes allow policy)
-    manifests.extend(bootstrap::generate_flux());
-    tracing::debug!("added Flux manifests");
-
-    // Gateway API CRDs (required before Envoy Gateway)
-    if let Ok(gw_crds) = bootstrap::generate_gateway_api_crds() {
-        manifests.extend(gw_crds);
-        tracing::debug!("added Gateway API CRDs");
-    } else {
-        tracing::warn!("failed to generate Gateway API CRDs");
-    }
-
-    // Envoy Gateway (includes allow policy)
-    if let Ok(eg) = bootstrap::generate_envoy_gateway() {
-        manifests.extend(eg);
-        tracing::debug!("added Envoy Gateway manifests");
-    } else {
-        tracing::warn!("failed to generate Envoy Gateway manifests");
-    }
-
-    // Apply all at once
+    // Generate core infrastructure (Istio, Flux, Gateway API, Envoy Gateway)
+    let manifests = bootstrap::generate_core(is_bootstrap_cluster);
     tracing::info!(count = manifests.len(), "applying infrastructure manifests");
     apply_manifests(client, &manifests).await?;
 
