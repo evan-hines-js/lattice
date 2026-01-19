@@ -12,6 +12,8 @@ use thiserror::Error;
 use tokio::process::Command;
 use tracing::{info, warn};
 
+use crate::kube_utils;
+
 /// Timeout for clusterctl commands
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -27,24 +29,6 @@ fn cluster_api_resource() -> ApiResource {
         kind: "Cluster".into(),
         api_version: "cluster.x-k8s.io/v1beta1".into(),
         plural: "clusters".into(),
-    }
-}
-
-/// Create a kube client from optional kubeconfig path
-async fn create_client(kubeconfig: Option<&Path>) -> Result<kube::Client, ClusterctlError> {
-    match kubeconfig {
-        Some(path) => {
-            let kubeconfig = kube::config::Kubeconfig::read_from(path)
-                .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to read kubeconfig: {}", e)))?;
-            let config = kube::Config::from_custom_kubeconfig(kubeconfig, &Default::default())
-                .await
-                .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to load kubeconfig: {}", e)))?;
-            kube::Client::try_from(config)
-                .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to create client: {}", e)))
-        }
-        None => kube::Client::try_default()
-            .await
-            .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to create client: {}", e))),
     }
 }
 
@@ -211,7 +195,9 @@ pub async fn unpause_capi_cluster(
     namespace: &str,
     cluster_name: &str,
 ) -> Result<(), ClusterctlError> {
-    let client = create_client(kubeconfig).await?;
+    let client = kube_utils::create_client(kubeconfig)
+        .await
+        .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
     let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &cluster_api_resource());
     let patch = serde_json::json!({"spec": {"paused": false}});
 
@@ -231,7 +217,9 @@ pub async fn is_capi_cluster_ready(
     namespace: &str,
     cluster_name: &str,
 ) -> Result<bool, ClusterctlError> {
-    let client = create_client(kubeconfig).await?;
+    let client = kube_utils::create_client(kubeconfig)
+        .await
+        .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
     let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &cluster_api_resource());
 
     match api.get(cluster_name).await {

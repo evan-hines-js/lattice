@@ -61,7 +61,7 @@ pub struct CommandOutput {
 #[async_trait::async_trait]
 pub trait CommandRunner: Send + Sync {
     /// List CAPI resources of a given type
-    async fn run_kubectl_get(
+    async fn list_resources(
         &self,
         resource_type: &str,
         namespace: &str,
@@ -74,7 +74,7 @@ pub struct RealCommandRunner;
 
 #[async_trait::async_trait]
 impl CommandRunner for RealCommandRunner {
-    async fn run_kubectl_get(
+    async fn list_resources(
         &self,
         resource_type: &str,
         namespace: &str,
@@ -215,7 +215,7 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
         for resource_type in &resource_types {
             let output = self
                 .runner
-                .run_kubectl_get(resource_type, &self.capi_namespace)
+                .list_resources(resource_type, &self.capi_namespace)
                 .await?;
             let count = output
                 .stdout
@@ -466,37 +466,37 @@ mod tests {
     // Mock Command Runner for Testing AgentPivotHandler
     // ==========================================================================
 
-    type KubectlMockFn = Box<dyn Fn(&str, &str) -> Result<CommandOutput, PivotError> + Send + Sync>;
+    type ListFn = Box<dyn Fn(&str, &str) -> Result<CommandOutput, PivotError> + Send + Sync>;
 
     #[derive(Clone)]
     pub struct MockCommandRunner {
-        kubectl_fn: std::sync::Arc<Mutex<Option<KubectlMockFn>>>,
+        list_fn: std::sync::Arc<Mutex<Option<ListFn>>>,
     }
 
     impl MockCommandRunner {
         pub fn new() -> Self {
             Self {
-                kubectl_fn: std::sync::Arc::new(Mutex::new(None)),
+                list_fn: std::sync::Arc::new(Mutex::new(None)),
             }
         }
 
-        pub fn with_kubectl<F>(self, f: F) -> Self
+        pub fn with_list<F>(self, f: F) -> Self
         where
             F: Fn(&str, &str) -> Result<CommandOutput, PivotError> + Send + Sync + 'static,
         {
-            *self.kubectl_fn.lock().unwrap() = Some(Box::new(f));
+            *self.list_fn.lock().unwrap() = Some(Box::new(f));
             self
         }
     }
 
     #[async_trait::async_trait]
     impl CommandRunner for MockCommandRunner {
-        async fn run_kubectl_get(
+        async fn list_resources(
             &self,
             resource_type: &str,
             namespace: &str,
         ) -> Result<CommandOutput, PivotError> {
-            let guard = self.kubectl_fn.lock().unwrap();
+            let guard = self.list_fn.lock().unwrap();
             match &*guard {
                 Some(f) => f(resource_type, namespace),
                 None => Ok(CommandOutput {
@@ -514,7 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_counts_all_capi_resource_types() {
-        let mock = MockCommandRunner::new().with_kubectl(|resource_type, _| {
+        let mock = MockCommandRunner::new().with_list(|resource_type, _| {
             let stdout = match resource_type {
                 "clusters.cluster.x-k8s.io" => "my-cluster   True",
                 "machines.cluster.x-k8s.io" => "cp-0   Running\ncp-1   Running\nworker-0   Running",

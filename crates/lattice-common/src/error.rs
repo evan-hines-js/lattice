@@ -74,6 +74,10 @@ pub enum Error {
     /// Bootstrap/cell server error
     #[error("bootstrap error: {0}")]
     Bootstrap(String),
+
+    /// Internal/operational error
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl Error {
@@ -236,7 +240,8 @@ impl Error {
             Error::Pivot { .. } => true, // Pivots are generally retryable
             Error::Serialization { .. } => false,
             Error::CapiInstallation { .. } => true,
-            Error::Bootstrap(_) => true, // Bootstrap errors are generally retryable
+            Error::Bootstrap(_) => true,
+            Error::Internal(_) => true,
         }
     }
 
@@ -250,6 +255,7 @@ impl Error {
             Error::Serialization { .. } => None,
             Error::CapiInstallation { .. } => None,
             Error::Bootstrap(_) => None,
+            Error::Internal(_) => None,
         }
     }
 }

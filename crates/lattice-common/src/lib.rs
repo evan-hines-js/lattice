@@ -7,6 +7,7 @@ pub mod crd;
 pub mod error;
 pub mod fips;
 pub mod graph;
+pub mod kube_utils;
 pub mod retry;
 pub mod template;
 
