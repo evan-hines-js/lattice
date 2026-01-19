@@ -41,9 +41,11 @@ git2.workspace = true
 tempfile.workspace = true
 walkdir.workspace = true
 
-[dev-dependencies]
+# Kubernetes
 kube.workspace = true
 k8s-openapi.workspace = true
+
+[dev-dependencies]
 rand.workspace = true
 rustls.workspace = true
 aws-lc-rs.workspace = true

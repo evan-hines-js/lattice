@@ -196,8 +196,8 @@ fn default_cluster_config_path(env_var: &str) -> Option<PathBuf> {
 /// * `env_var` - Environment variable name containing path to the CRD file
 ///
 /// # Returns
-/// Tuple of (config_path, config_content, parsed_cluster)
-fn load_cluster_config(env_var: &str) -> Result<(PathBuf, String, LatticeCluster), String> {
+/// Tuple of (config_content, parsed_cluster)
+fn load_cluster_config(env_var: &str) -> Result<(String, LatticeCluster), String> {
     let path = match std::env::var(env_var) {
         Ok(p) => PathBuf::from(p),
         Err(_) => default_cluster_config_path(env_var)
@@ -211,12 +211,11 @@ fn load_cluster_config(env_var: &str) -> Result<(PathBuf, String, LatticeCluster
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read cluster config {}: {}", path.display(), e))?;
 
-    // Parse the YAML as a LatticeCluster
     let cluster: LatticeCluster = serde_yaml::from_str(&content)
         .map_err(|e| format!("Invalid LatticeCluster YAML in {}: {}", path.display(), e))?;
 
     println!("  Loaded cluster config from: {}", path.display());
-    Ok((path, content, cluster))
+    Ok((content, cluster))
 }
 
 fn get_management_kubeconfig(provider: InfraProvider) -> Result<String, String> {
@@ -325,12 +324,12 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     println!("Loading cluster configurations...\n");
 
-    let (mgmt_config_path, mgmt_config_content, mgmt_cluster) =
+    let (mgmt_config_content, mgmt_cluster) =
         load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG")?;
     let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
     let mgmt_bootstrap = mgmt_cluster.spec.provider.kubernetes.bootstrap.clone();
 
-    let (_, workload_config_content, workload_cluster) =
+    let (workload_config_content, workload_cluster) =
         load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG")?;
     let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
@@ -347,7 +346,7 @@ async fn run_provider_e2e() -> Result<(), String> {
         "  Workload:    {} + {:?}",
         workload_provider, workload_bootstrap
     );
-    if let Some((_, _, ref wl2)) = workload2_config {
+    if let Some((_, ref wl2)) = workload2_config {
         let wl2_bootstrap = &wl2.spec.provider.kubernetes.bootstrap;
         println!("  Workload2:   {} + {:?}", workload_provider, wl2_bootstrap);
     }
@@ -375,11 +374,9 @@ async fn run_provider_e2e() -> Result<(), String> {
     }
 
     let install_config = InstallConfig {
-        cluster_config_path: mgmt_config_path,
         cluster_config_content: mgmt_config_content,
         image: LATTICE_IMAGE.to_string(),
         keep_bootstrap_on_failure: true,
-        timeout: Duration::from_secs(2400),
         registry_credentials,
         bootstrap_override: None,
     };
@@ -629,7 +626,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 8: Create Second Workload Cluster (Deep Hierarchy)
     // =========================================================================
-    if let Some((_, workload2_config_content, workload2_cluster)) = workload2_config {
+    if let Some((workload2_config_content, workload2_cluster)) = workload2_config {
         println!("\n[Phase 8] Creating second workload cluster (deep hierarchy)...\n");
         println!("  This tests creating a cluster off workload1 (which just lost its parent)");
 
