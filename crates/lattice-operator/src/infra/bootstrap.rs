@@ -212,6 +212,7 @@ pub fn generate_envoy_gateway() -> Result<Vec<String>, String> {
             &chart_path,
             "--namespace",
             "envoy-gateway-system",
+            "--include-crds",
         ])
         .output()
         .map_err(|e| format!("helm: {}", e))?;
