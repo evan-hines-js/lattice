@@ -374,12 +374,8 @@ impl WaypointCompiler {
     pub fn compile(service_name: &str, namespace: &str, service_port: u16) -> GeneratedWaypoint {
         let mut output = GeneratedWaypoint::new();
 
-        // Generate waypoint Gateway for this namespace
-        output.gateway = Some(Self::compile_waypoint_gateway(
-            namespace,
-            service_name,
-            service_port,
-        ));
+        // Generate waypoint Gateway for this namespace (one per namespace)
+        output.gateway = Some(Self::compile_waypoint_gateway(namespace));
 
         // Generate HTTPRoute for this service through the waypoint
         output.http_route = Some(Self::compile_waypoint_http_route(
@@ -393,11 +389,11 @@ impl WaypointCompiler {
 
     /// Compile waypoint Gateway for a namespace
     ///
-    /// The Gateway includes:
-    /// - Service listener on the specified port
+    /// ONE waypoint per namespace with fixed listeners:
+    /// - HTTP listener on port 80 for all services
     /// - HBONE listener on 15008 for ztunnel compatibility
     /// - `istio.io/dataplane-mode: ambient` label
-    fn compile_waypoint_gateway(namespace: &str, service_name: &str, port: u16) -> Gateway {
+    fn compile_waypoint_gateway(namespace: &str) -> Gateway {
         let gateway_name = format!("{}-waypoint", namespace);
         let mut metadata = GatewayMetadata::new(&gateway_name, namespace);
         metadata
@@ -411,11 +407,11 @@ impl WaypointCompiler {
             spec: GatewaySpec {
                 gateway_class_name: Self::WAYPOINT_GATEWAY_CLASS.to_string(),
                 listeners: vec![
-                    // Service listener
+                    // HTTP listener for all mesh traffic
                     GatewayListener {
-                        name: service_name.to_string(),
+                        name: "mesh".to_string(),
                         hostname: None,
-                        port,
+                        port: 80,
                         protocol: "HTTP".to_string(),
                         tls: None,
                         allowed_routes: Some(AllowedRoutes {

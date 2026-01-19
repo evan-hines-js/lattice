@@ -114,13 +114,35 @@ impl InfraProviderInfo {
     /// Get provider info for a given infrastructure type
     ///
     /// # Errors
-    /// Returns an error if called with an unsupported provider type (AWS, GCP, Azure).
+    /// Returns an error if called with an unsupported provider type (GCP, Azure).
     pub fn for_provider(provider: ProviderType, capi_version: &str) -> Result<Self, Error> {
         match provider {
+            ProviderType::Aws => Ok(Self {
+                name: "aws",
+                version: env!("CAPA_VERSION").to_string(),
+                credentials_secret: Some(("capa-system", "capa-manager-bootstrap-credentials")),
+                // AWS uses IAM credentials or static credentials via env vars
+                credentials_env_map: &[
+                    ("AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
+                    ("AWS_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
+                    ("AWS_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
+                    ("AWS_REGION", "AWS_REGION"),
+                ],
+                extra_init_args: &[],
+            }),
             ProviderType::Docker => Ok(Self {
                 name: "docker",
                 version: capi_version.to_string(), // CAPD is part of CAPI
                 credentials_secret: None,
+                credentials_env_map: &[],
+                extra_init_args: &[],
+            }),
+            ProviderType::OpenStack => Ok(Self {
+                name: "openstack",
+                version: env!("CAPO_VERSION").to_string(),
+                credentials_secret: Some(("capo-system", "openstack-cloud-config")),
+                // OpenStack uses clouds.yaml in the secret, not individual env vars
+                // The secret key "clouds.yaml" contains the full clouds.yaml file
                 credentials_env_map: &[],
                 extra_init_args: &[],
             }),
@@ -135,18 +157,10 @@ impl InfraProviderInfo {
                 ],
                 extra_init_args: &["--ipam", "in-cluster"],
             }),
-            ProviderType::OpenStack => Ok(Self {
-                name: "openstack",
-                version: env!("CAPO_VERSION").to_string(),
-                credentials_secret: Some(("capo-system", "openstack-cloud-config")),
-                // OpenStack uses clouds.yaml in the secret, not individual env vars
-                // The secret key "clouds.yaml" contains the full clouds.yaml file
-                credentials_env_map: &[],
-                extra_init_args: &[],
-            }),
-            ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => Err(
-                Error::capi_installation(format!("Provider {:?} is not yet implemented", provider)),
-            ),
+            ProviderType::Gcp | ProviderType::Azure => Err(Error::capi_installation(format!(
+                "Provider {:?} is not yet implemented",
+                provider
+            ))),
         }
     }
 }
@@ -191,10 +205,11 @@ impl CapiProviderConfig {
         rke2_version: String,
     ) -> Result<Self, Error> {
         let name = match infrastructure {
+            ProviderType::Aws => "aws",
             ProviderType::Docker => "docker",
-            ProviderType::Proxmox => "proxmox",
             ProviderType::OpenStack => "openstack",
-            ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => {
+            ProviderType::Proxmox => "proxmox",
+            ProviderType::Gcp | ProviderType::Azure => {
                 return Err(Error::capi_installation(format!(
                     "Provider {:?} is not yet implemented",
                     infrastructure
@@ -1068,9 +1083,10 @@ mod tests {
     #[test]
     fn supported_infrastructure_providers_map_correctly() {
         for (provider, expected) in [
+            (ProviderType::Aws, "aws"),
             (ProviderType::Docker, "docker"),
-            (ProviderType::Proxmox, "proxmox"),
             (ProviderType::OpenStack, "openstack"),
+            (ProviderType::Proxmox, "proxmox"),
         ] {
             let config = CapiProviderConfig::with_versions(
                 provider,

@@ -176,6 +176,9 @@ pub trait CAPIClient: Send + Sync {
     /// Delete a CAPI Cluster resource
     async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
 
+    /// Check if a CAPI Cluster resource exists
+    async fn has_cluster(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
+
     /// Get the underlying kube Client for advanced operations
     fn kube_client(&self) -> Client;
 }
@@ -1006,6 +1009,15 @@ impl CAPIClient for CAPIClientImpl {
         }
     }
 
+    async fn has_cluster(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error> {
+        let api = self.capi_cluster_api(namespace);
+        match api.get(cluster_name).await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn kube_client(&self) -> Client {
         self.client.clone()
     }
@@ -1555,14 +1567,25 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // provisioned by this cell, we only handle CAPI provisioning and pivot.
     let is_self = is_self_cluster(&name, ctx.self_cluster_name.as_deref());
 
-    // Check if this child cluster has unpivot manifests waiting (child is being deleted)
+    // Check if this child cluster is being unpivoted (child is being deleted)
     // This only applies when we're the parent, not when reconciling our own cluster
     if !is_self {
         if let Some(ref parent_servers) = ctx.parent_servers {
             let registry = parent_servers.agent_registry();
+            let capi_namespace = format!("capi-{}", name);
+
+            // Check if we have unpivot manifests waiting to be applied
             if registry.has_unpivot_manifests(&name) {
-                info!(cluster = %name, "Child cluster has unpivot manifests - handling deletion");
+                info!(cluster = %name, "Child cluster has unpivot manifests - applying and cleaning up");
                 return handle_child_unpivot(&cluster, &ctx, registry).await;
+            }
+
+            // Check if we're waiting for CAPI to be ready after applying unpivot manifests
+            // (manifests already applied, CAPI namespace exists with resources)
+            let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
+            if ctx.capi.has_cluster(&name, &capi_namespace).await.unwrap_or(false) {
+                info!(cluster = %name, "CAPI resources exist from unpivot - waiting for ready then cleanup");
+                return handle_unpivot_cleanup(&cluster, &ctx, &capi_namespace, bootstrap).await;
             }
         }
     }
@@ -2497,25 +2520,21 @@ impl PivotOperations for PivotOperationsImpl {
     }
 }
 
-/// Handle unpivot of a child cluster from the parent's perspective
+/// Apply unpivot manifests from a child cluster
 ///
-/// When a child cluster is being deleted and has sent its CAPI resources back:
-/// 1. Apply the CAPI manifests to restore them on the parent
-/// 2. Delete the CAPI Cluster resource to trigger infrastructure cleanup
-/// 3. Delete the LatticeCluster CRD on parent
+/// Called when a child cluster sends its CAPI resources back during deletion.
+/// Just applies the manifests and requeues - cleanup is handled separately.
 async fn handle_child_unpivot(
     cluster: &LatticeCluster,
     ctx: &Context,
     registry: SharedAgentRegistry,
 ) -> Result<Action, Error> {
     let name = cluster.name_any();
-    let capi_namespace = format!("capi-{}", name);
 
     // Take the manifests from registry (removes them)
     let manifests = match registry.take_unpivot_manifests(&name) {
         Some(m) => m,
         None => {
-            // Should not happen since we checked has_unpivot_manifests
             warn!(cluster = %name, "Unpivot manifests disappeared before processing");
             return Ok(Action::requeue(Duration::from_secs(5)));
         }
@@ -2527,9 +2546,8 @@ async fn handle_child_unpivot(
         "Applying unpivot manifests from child cluster"
     );
 
-    // Apply each manifest using server-side apply via kube-rs
+    // Apply each manifest using server-side apply
     for (i, manifest_bytes) in manifests.iter().enumerate() {
-        // Parse YAML to DynamicObject
         let manifest_str = match String::from_utf8(manifest_bytes.clone()) {
             Ok(s) => s,
             Err(e) => {
@@ -2538,7 +2556,6 @@ async fn handle_child_unpivot(
             }
         };
 
-        // Apply each document in the YAML file (may contain multiple docs)
         for doc in manifest_str.split("---") {
             let doc = doc.trim();
             if doc.is_empty() {
@@ -2553,19 +2570,47 @@ async fn handle_child_unpivot(
         }
     }
 
-    info!(cluster = %name, "Unpivot manifests applied, deleting CAPI Cluster");
+    info!(cluster = %name, "Unpivot manifests applied, requeuing to wait for CAPI");
+    Ok(Action::requeue(Duration::from_secs(5)))
+}
+
+/// Handle cleanup after unpivot manifests have been applied
+///
+/// Waits for CAPI to reconcile the imported resources, then deletes
+/// the CAPI Cluster to trigger infrastructure cleanup.
+async fn handle_unpivot_cleanup(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+    capi_namespace: &str,
+    bootstrap: BootstrapProvider,
+) -> Result<Action, Error> {
+    let name = cluster.name_any();
+
+    // Check if CAPI has reconciled and is ready
+    let capi_ready = ctx
+        .capi
+        .is_infrastructure_ready(&name, capi_namespace, bootstrap)
+        .await
+        .unwrap_or(false);
+
+    if !capi_ready {
+        debug!(cluster = %name, "CAPI not ready yet, waiting for reconciliation");
+        return Ok(Action::requeue(Duration::from_secs(5)));
+    }
+
+    info!(cluster = %name, "CAPI ready, deleting Cluster to trigger infrastructure cleanup");
 
     // Delete the CAPI Cluster resource to trigger infrastructure cleanup
-    if let Err(e) = ctx.capi.delete_capi_cluster(&name, &capi_namespace).await {
-        warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster (may not exist)");
+    if let Err(e) = ctx.capi.delete_capi_cluster(&name, capi_namespace).await {
+        warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster");
     } else {
         info!(cluster = %name, "CAPI Cluster deleted, infrastructure cleanup will proceed");
     }
 
-    // Delete the LatticeCluster CRD on parent
-    info!(cluster = %name, "Deleting LatticeCluster CRD on parent");
+    // Delete the LatticeCluster
+    info!(cluster = %name, "Deleting LatticeCluster");
     if let Err(e) = ctx.kube.delete_cluster(&name).await {
-        warn!(cluster = %name, error = %e, "Failed to delete LatticeCluster (may already be deleted)");
+        warn!(cluster = %name, error = %e, "Failed to delete LatticeCluster");
     }
 
     Ok(Action::await_change())

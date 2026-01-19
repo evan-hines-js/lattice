@@ -777,21 +777,41 @@ async fn run_provider_e2e() -> Result<(), String> {
             );
         }
 
-        // Verify CAPI cleaned up the infrastructure
+        // Verify CAPI cleaned up the infrastructure - wait for containers to be deleted
         if workload_provider == InfraProvider::Docker {
-            let workload2_containers = run_cmd_allow_fail(
-                "docker",
-                &[
-                    "ps",
-                    "--filter",
-                    &format!("name={}", WORKLOAD2_CLUSTER_NAME),
-                    "-q",
-                ],
-            );
-            if workload2_containers.trim().is_empty() {
-                println!("  SUCCESS: Workload2 Docker containers cleaned up by CAPI");
-            } else {
-                println!("  Warning: Some workload2 containers still exist (CAPI may still be cleaning up)");
+            println!("  Waiting for workload2 Docker containers to be cleaned up...");
+            let mut container_attempts = 0;
+            loop {
+                container_attempts += 1;
+                std::thread::sleep(std::time::Duration::from_secs(5));
+
+                let workload2_containers = run_cmd_allow_fail(
+                    "docker",
+                    &[
+                        "ps",
+                        "-a", // Include stopped containers
+                        "--filter",
+                        &format!("name={}", WORKLOAD2_CLUSTER_NAME),
+                        "-q",
+                    ],
+                );
+
+                if workload2_containers.trim().is_empty() {
+                    println!("  SUCCESS: Workload2 Docker containers cleaned up by CAPI");
+                    break;
+                }
+
+                if container_attempts > 30 {
+                    return Err(format!(
+                        "Timeout waiting for workload2 containers to be deleted. Still running: {}",
+                        workload2_containers.trim()
+                    ));
+                }
+
+                println!(
+                    "    Still waiting for container cleanup... (attempt {}/30)",
+                    container_attempts
+                );
             }
         }
 
