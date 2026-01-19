@@ -286,6 +286,14 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
     manifests.extend(bootstrap::generate_flux());
     tracing::debug!("added Flux manifests");
 
+    // Gateway API CRDs (required before Envoy Gateway)
+    if let Ok(gw_crds) = bootstrap::generate_gateway_api_crds() {
+        manifests.extend(gw_crds);
+        tracing::debug!("added Gateway API CRDs");
+    } else {
+        tracing::warn!("failed to generate Gateway API CRDs");
+    }
+
     // Envoy Gateway (includes allow policy)
     if let Ok(eg) = bootstrap::generate_envoy_gateway() {
         manifests.extend(eg);

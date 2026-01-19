@@ -51,6 +51,14 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     // Flux
     manifests.extend(generate_flux());
 
+    // Gateway API CRDs (must be installed before Envoy Gateway)
+    if let Ok(gw_api) = generate_gateway_api_crds() {
+        debug!(count = gw_api.len(), "generated Gateway API CRDs");
+        manifests.extend(gw_api);
+    } else {
+        warn!("failed to generate Gateway API CRDs");
+    }
+
     // Envoy Gateway (north-south ingress)
     if let Ok(eg) = generate_envoy_gateway() {
         debug!(count = eg.len(), "generated Envoy Gateway manifests");
@@ -166,6 +174,18 @@ pub fn generate_flux() -> Vec<String> {
     };
     manifests.push(allow_all_policy("flux", "flux-system"));
     manifests
+}
+
+/// Generate Gateway API CRDs
+pub fn generate_gateway_api_crds() -> Result<Vec<String>, String> {
+    let charts_dir = charts_dir();
+    let version = option_env!("GATEWAY_API_VERSION").unwrap_or("1.2.1");
+    let crds_path = format!("{}/gateway-api-crds-v{}.yaml", charts_dir, version);
+
+    let content =
+        std::fs::read_to_string(&crds_path).map_err(|e| format!("read {}: {}", crds_path, e))?;
+
+    Ok(split_yaml(&content))
 }
 
 /// Generate Envoy Gateway manifests for north-south ingress
