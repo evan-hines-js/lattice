@@ -8,7 +8,6 @@ description = "CLI for managing Lattice cluster hierarchies"
 [features]
 default = []
 provider-e2e = []
-aws-e2e = []
 
 [dependencies]
 lattice-common.workspace = true
@@ -39,7 +38,6 @@ git2.workspace = true
 
 # File system
 tempfile.workspace = true
-walkdir.workspace = true
 
 # Kubernetes
 kube.workspace = true
