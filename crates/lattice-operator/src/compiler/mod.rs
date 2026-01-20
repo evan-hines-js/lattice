@@ -155,7 +155,8 @@ impl<'a> ServiceCompiler<'a> {
             .and_then(|s| s.ports.values().next())
             .map(|p| p.port)
             .unwrap_or(80);
-        let waypoint = WaypointCompiler::compile(name, namespace, waypoint_port);
+        let waypoint =
+            WaypointCompiler::compile(name, namespace, waypoint_port, &service.spec.resources);
 
         // Compile ingress resources if configured
         let ingress = if let Some(ref ingress_spec) = service.spec.ingress {
