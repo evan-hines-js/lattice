@@ -315,7 +315,10 @@ async fn test_configurable_provider_pivot() {
         }
     }
 
-    cleanup_all();
+    // NOTE: Cleanup disabled for debugging L7 policy enforcement
+    // cleanup_all();
+    println!("\n  *** CLEANUP SKIPPED - Infrastructure preserved for investigation ***");
+    println!("  Run 'kind delete clusters --all' manually when done.\n");
 }
 
 async fn run_provider_e2e() -> Result<(), String> {

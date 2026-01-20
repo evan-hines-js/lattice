@@ -265,6 +265,7 @@ pub struct OutboundTrafficPolicy {
 /// Inbound traffic policy for callee-side L7 configuration
 ///
 /// These policies are applied when receiving traffic from the specified caller.
+/// For Istio Ambient waypoints, these are enforced on the target service's waypoint.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundTrafficPolicy {
@@ -275,6 +276,16 @@ pub struct InboundTrafficPolicy {
     /// Header manipulation rules
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<HeaderPolicy>,
+
+    /// Timeout policy for requests from this caller
+    /// Applied on the waypoint HTTPRoute (Gateway API native)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<TimeoutPolicy>,
+
+    /// Retry policy for requests from this caller
+    /// Applied on the waypoint HTTPRoute (Gateway API native)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<RetryPolicy>,
 }
 
 /// Retry policy for failed requests

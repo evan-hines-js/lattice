@@ -1529,7 +1529,7 @@ echo "=== Rate Limit Enforcement Test ==="
 echo "Testing rate limit of {rate_limit} requests per minute to {target}..."
 
 # Make requests at 2x the rate limit
-TOTAL_REQUESTS=$((rate_limit * 2))
+TOTAL_REQUESTS=$(({rate_limit} * 2))
 SUCCESS=0
 RATE_LIMITED=0
 
@@ -1630,8 +1630,11 @@ ELAPSED=$((END - START))
 echo "Response code: $RESPONSE"
 echo "Elapsed time: $ELAPSED seconds"
 
-# Request should complete in roughly timeout_secs, not the full 10s delay
-if [ $ELAPSED -le $(({timeout_secs} + 2)) ]; then
+# Response code 000 means curl couldn't connect - not a valid test result
+if [ "$RESPONSE" = "000" ]; then
+    echo "TIMEOUT_TEST:FAIL - Connection failed (code 000), cannot verify timeout"
+# Request should complete in roughly timeout_secs (not 0!), with a timeout-related response
+elif [ $ELAPSED -gt 0 ] && [ $ELAPSED -le $(({timeout_secs} + 2)) ]; then
     echo "TIMEOUT_TEST:PASS - Request terminated in $ELAPSED seconds (timeout enforced)"
 else
     echo "TIMEOUT_TEST:FAIL - Request took $ELAPSED seconds (timeout not enforced)"
@@ -1777,11 +1780,104 @@ async fn wait_for_policy_test_pods(kubeconfig_path: &str) -> Result<(), String> 
 async fn verify_policy_enforcement(kubeconfig_path: &str) -> Result<(), String> {
     println!("  Checking policy enforcement results...");
 
+    // Debug: Check waypoint infrastructure
+    println!("\n  --- Waypoint Infrastructure Debug ---");
+
+    // Check for waypoint Gateway
+    let gw_output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "gateway",
+            "-n",
+            POLICY_TEST_NAMESPACE,
+            "-o",
+            "wide",
+        ],
+    )
+    .unwrap_or_else(|e| format!("Error: {}", e));
+    println!("  Gateways:\n{}", gw_output);
+
+    // Check for HTTPRoutes
+    let hr_output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "httproute",
+            "-n",
+            POLICY_TEST_NAMESPACE,
+            "-o",
+            "wide",
+        ],
+    )
+    .unwrap_or_else(|e| format!("Error: {}", e));
+    println!("  HTTPRoutes:\n{}", hr_output);
+
+    // Check for BackendTrafficPolicy
+    let btp_output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "backendtrafficpolicy",
+            "-n",
+            POLICY_TEST_NAMESPACE,
+            "-o",
+            "wide",
+        ],
+    )
+    .unwrap_or_else(|e| format!("Error: {}", e));
+    println!("  BackendTrafficPolicies:\n{}", btp_output);
+
+    // Check service labels for waypoint
+    let svc_output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "svc",
+            "-n",
+            POLICY_TEST_NAMESPACE,
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}: {.metadata.labels.istio\\.io/use-waypoint}{\"\\n\"}{end}",
+        ],
+    )
+    .unwrap_or_else(|e| format!("Error: {}", e));
+    println!("  Service waypoint labels:\n{}", svc_output);
+
+    // Check waypoint pods
+    let wp_pods = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "pods",
+            "-n",
+            POLICY_TEST_NAMESPACE,
+            "-l",
+            "istio.io/waypoint-for=service",
+            "-o",
+            "wide",
+        ],
+    )
+    .unwrap_or_else(|e| format!("Error: {}", e));
+    println!("  Waypoint pods:\n{}", wp_pods);
+
+    println!("  --- End Debug ---\n");
+
     // Check all policy test client logs
     let clients = ["client", "retry-client", "timeout-client"];
     let mut all_logs = String::new();
 
     for client in &clients {
+        println!("\n  --- Logs from {} ---", client);
         let output = run_cmd(
             "kubectl",
             &[
@@ -1792,38 +1888,56 @@ async fn verify_policy_enforcement(kubeconfig_path: &str) -> Result<(), String> 
                 POLICY_TEST_NAMESPACE,
                 "-l",
                 &format!("app.kubernetes.io/name={}", client),
-                "--tail=100",
+                "--tail=50",
             ],
         )
         .unwrap_or_default();
+        // Print last 20 lines of each client's logs for debugging
+        let lines: Vec<&str> = output.lines().collect();
+        let start = if lines.len() > 20 { lines.len() - 20 } else { 0 };
+        for line in &lines[start..] {
+            println!("    {}", line);
+        }
         all_logs.push_str(&output);
         all_logs.push('\n');
     }
 
-    let mut rate_limit_passed = false;
-    let mut retry_passed = false;
-    let mut timeout_passed = false;
+    // Track pass/fail counts - require at least one pass and no failures for success
+    let mut rate_limit_pass_count = 0;
+    let mut rate_limit_fail_count = 0;
+    let mut retry_pass_count = 0;
+    let mut retry_fail_count = 0;
+    let mut timeout_pass_count = 0;
+    let mut timeout_fail_count = 0;
 
     for line in all_logs.lines() {
         if line.contains("RATE_LIMIT_TEST:PASS") {
-            rate_limit_passed = true;
+            rate_limit_pass_count += 1;
             println!("  [PASS] Rate limiting enforced");
         } else if line.contains("RATE_LIMIT_TEST:FAIL") {
+            rate_limit_fail_count += 1;
             println!("  [WARN] Rate limiting not observed");
         }
         if line.contains("RETRY_TEST:PASS") {
-            retry_passed = true;
+            retry_pass_count += 1;
             println!("  [PASS] Retries are working");
         } else if line.contains("RETRY_TEST:FAIL") {
+            retry_fail_count += 1;
             println!("  [WARN] Retries not observed");
         }
         if line.contains("TIMEOUT_TEST:PASS") {
-            timeout_passed = true;
+            timeout_pass_count += 1;
             println!("  [PASS] Timeouts enforced");
         } else if line.contains("TIMEOUT_TEST:FAIL") {
+            timeout_fail_count += 1;
             println!("  [WARN] Timeouts not enforced");
         }
     }
+
+    // Require at least one pass AND no failures for a test to be considered passing
+    let rate_limit_passed = rate_limit_pass_count > 0 && rate_limit_fail_count == 0;
+    let retry_passed = retry_pass_count > 0 && retry_fail_count == 0;
+    let timeout_passed = timeout_pass_count > 0 && timeout_fail_count == 0;
 
     println!("\n  ========================================");
     println!("  L7 POLICY ENFORCEMENT SUMMARY");

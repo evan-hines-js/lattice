@@ -208,6 +208,39 @@ pub struct HttpRouteRule {
     pub matches: Vec<HttpRouteMatch>,
     /// Backend references
     pub backend_refs: Vec<BackendRef>,
+    /// Request timeouts (Gateway API native)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeouts: Option<HttpRouteTimeouts>,
+    /// Retry policy (Gateway API native)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<HttpRouteRetry>,
+}
+
+/// HTTPRoute timeout configuration (Gateway API native)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpRouteTimeouts {
+    /// Request timeout - total time for request including retries
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+    /// Backend request timeout - timeout for each individual backend request
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_request: Option<String>,
+}
+
+/// HTTPRoute retry configuration (Gateway API native)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpRouteRetry {
+    /// HTTP status codes to retry (e.g., 500, 502, 503, 504)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codes: Vec<u16>,
+    /// Maximum number of retry attempts
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
+    /// Backoff duration between retries (e.g., "100ms")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff: Option<String>,
 }
 
 /// HTTPRoute match condition
@@ -287,6 +320,152 @@ pub struct IssuerRef {
 }
 
 // =============================================================================
+// Envoy Gateway Types (for Waypoint)
+// =============================================================================
+
+/// Envoy Gateway EnvoyProxy resource for waypoint configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvoyProxy {
+    /// API version
+    pub api_version: String,
+    /// Kind
+    pub kind: String,
+    /// Metadata
+    pub metadata: GatewayMetadata,
+    /// Spec
+    pub spec: EnvoyProxySpec,
+}
+
+/// EnvoyProxy spec
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvoyProxySpec {
+    /// Provider configuration
+    pub provider: EnvoyProxyProvider,
+}
+
+/// EnvoyProxy provider configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvoyProxyProvider {
+    /// Provider type (Kubernetes)
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Kubernetes-specific configuration
+    pub kubernetes: EnvoyProxyKubernetes,
+}
+
+/// Kubernetes provider configuration for EnvoyProxy
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvoyProxyKubernetes {
+    /// Service configuration
+    pub envoy_service: EnvoyProxyService,
+}
+
+/// EnvoyProxy service configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvoyProxyService {
+    /// Service type (ClusterIP for waypoints)
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Strategic merge patch for service
+    pub patch: EnvoyProxyPatch,
+}
+
+/// EnvoyProxy patch configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvoyProxyPatch {
+    /// Patch type
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Patch value
+    pub value: EnvoyProxyPatchValue,
+}
+
+/// EnvoyProxy patch value
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvoyProxyPatchValue {
+    /// Service spec patch
+    pub spec: EnvoyProxyPatchSpec,
+}
+
+/// EnvoyProxy patch spec
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvoyProxyPatchSpec {
+    /// Ports to add
+    pub ports: Vec<EnvoyProxyPort>,
+}
+
+/// EnvoyProxy port configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvoyProxyPort {
+    /// Port name
+    pub name: String,
+    /// Port number
+    pub port: u16,
+    /// Protocol
+    pub protocol: String,
+    /// Target port
+    pub target_port: u16,
+}
+
+/// Gateway API GatewayClass resource
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayClass {
+    /// API version
+    pub api_version: String,
+    /// Kind
+    pub kind: String,
+    /// Metadata
+    pub metadata: GatewayClassMetadata,
+    /// Spec
+    pub spec: GatewayClassSpec,
+}
+
+/// GatewayClass metadata (no namespace - cluster-scoped)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayClassMetadata {
+    /// Resource name
+    pub name: String,
+    /// Labels
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+}
+
+/// GatewayClass spec
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayClassSpec {
+    /// Controller name
+    pub controller_name: String,
+    /// Parameters reference
+    pub parameters_ref: GatewayClassParametersRef,
+}
+
+/// GatewayClass parameters reference
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayClassParametersRef {
+    /// API group
+    pub group: String,
+    /// Kind
+    pub kind: String,
+    /// Name
+    pub name: String,
+    /// Namespace
+    pub namespace: String,
+}
+
+// =============================================================================
 // Generated Ingress Container
 // =============================================================================
 
@@ -335,7 +514,11 @@ impl GeneratedIngress {
 /// The waypoint Gateway handles L7 traffic between ztunnel endpoints.
 #[derive(Clone, Debug, Default)]
 pub struct GeneratedWaypoint {
-    /// Waypoint Gateway (one per namespace, includes HBONE listener)
+    /// EnvoyProxy configuration (one per namespace, configures HBONE port on Service)
+    pub envoy_proxy: Option<EnvoyProxy>,
+    /// GatewayClass for this namespace (references namespace-local EnvoyProxy)
+    pub gateway_class: Option<GatewayClass>,
+    /// Waypoint Gateway (one per namespace, includes HTTP and HBONE listeners)
     pub gateway: Option<Gateway>,
     /// HTTPRoute for service (routes traffic through waypoint)
     pub http_route: Option<HttpRoute>,
@@ -349,7 +532,10 @@ impl GeneratedWaypoint {
 
     /// Check if any resources were generated
     pub fn is_empty(&self) -> bool {
-        self.gateway.is_none() && self.http_route.is_none()
+        self.envoy_proxy.is_none()
+            && self.gateway_class.is_none()
+            && self.gateway.is_none()
+            && self.http_route.is_none()
     }
 }
 
@@ -360,10 +546,15 @@ impl GeneratedWaypoint {
 pub struct WaypointCompiler;
 
 impl WaypointCompiler {
-    /// Waypoint GatewayClass name
-    const WAYPOINT_GATEWAY_CLASS: &'static str = "eg-waypoint";
-    /// HBONE port for ztunnel compatibility
+    /// HBONE port for ztunnel tunnel termination
     const HBONE_PORT: u16 = 15008;
+    /// HTTP port for L7 traffic processing
+    const WAYPOINT_HTTP_PORT: u16 = 9080;
+
+    /// Get the GatewayClass name for a namespace
+    fn gateway_class_name(namespace: &str) -> String {
+        format!("{}-waypoint", namespace)
+    }
 
     /// Compile waypoint resources for a service
     ///
@@ -371,8 +562,20 @@ impl WaypointCompiler {
     /// * `service_name` - Name of the LatticeService
     /// * `namespace` - Target namespace
     /// * `service_port` - Primary service port
-    pub fn compile(service_name: &str, namespace: &str, service_port: u16) -> GeneratedWaypoint {
+    /// * `resources` - Resource dependencies with traffic policies
+    pub fn compile(
+        service_name: &str,
+        namespace: &str,
+        service_port: u16,
+        resources: &BTreeMap<String, ResourceSpec>,
+    ) -> GeneratedWaypoint {
         let mut output = GeneratedWaypoint::new();
+
+        // Generate namespace-local EnvoyProxy (configures HBONE port on Service)
+        output.envoy_proxy = Some(Self::compile_envoy_proxy(namespace));
+
+        // Generate namespace-specific GatewayClass (references local EnvoyProxy)
+        output.gateway_class = Some(Self::compile_gateway_class(namespace));
 
         // Generate waypoint Gateway for this namespace (one per namespace)
         output.gateway = Some(Self::compile_waypoint_gateway(namespace));
@@ -382,20 +585,102 @@ impl WaypointCompiler {
             service_name,
             namespace,
             service_port,
+            resources,
         ));
 
         output
     }
 
+    /// Compile EnvoyProxy for a namespace
+    ///
+    /// Must be in the same namespace as the Gateway for GatewayNamespace mode.
+    /// Configures the HBONE port (15008) on the Envoy Service for ztunnel compatibility.
+    fn compile_envoy_proxy(namespace: &str) -> EnvoyProxy {
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "app.kubernetes.io/managed-by".to_string(),
+            "lattice".to_string(),
+        );
+
+        EnvoyProxy {
+            api_version: "gateway.envoyproxy.io/v1alpha1".to_string(),
+            kind: "EnvoyProxy".to_string(),
+            metadata: GatewayMetadata {
+                name: "waypoint".to_string(),
+                namespace: namespace.to_string(),
+                labels,
+            },
+            spec: EnvoyProxySpec {
+                provider: EnvoyProxyProvider {
+                    type_: "Kubernetes".to_string(),
+                    kubernetes: EnvoyProxyKubernetes {
+                        envoy_service: EnvoyProxyService {
+                            type_: "ClusterIP".to_string(),
+                            patch: EnvoyProxyPatch {
+                                type_: "StrategicMerge".to_string(),
+                                value: EnvoyProxyPatchValue {
+                                    spec: EnvoyProxyPatchSpec {
+                                        ports: vec![EnvoyProxyPort {
+                                            // HACK: ztunnel expects HBONE port on waypoint Service
+                                            name: "fake-hbone-port".to_string(),
+                                            port: Self::HBONE_PORT,
+                                            protocol: "TCP".to_string(),
+                                            target_port: Self::HBONE_PORT,
+                                        }],
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+    }
+
+    /// Compile GatewayClass for a namespace
+    ///
+    /// Each namespace gets its own GatewayClass that references the namespace-local EnvoyProxy.
+    /// This is required because GatewayClass.parametersRef.namespace must match where
+    /// the EnvoyProxy lives.
+    fn compile_gateway_class(namespace: &str) -> GatewayClass {
+        let class_name = Self::gateway_class_name(namespace);
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "app.kubernetes.io/managed-by".to_string(),
+            "lattice".to_string(),
+        );
+
+        GatewayClass {
+            api_version: "gateway.networking.k8s.io/v1".to_string(),
+            kind: "GatewayClass".to_string(),
+            metadata: GatewayClassMetadata {
+                name: class_name,
+                labels,
+            },
+            spec: GatewayClassSpec {
+                controller_name: "gateway.envoyproxy.io/gatewayclass-controller".to_string(),
+                parameters_ref: GatewayClassParametersRef {
+                    group: "gateway.envoyproxy.io".to_string(),
+                    kind: "EnvoyProxy".to_string(),
+                    name: "waypoint".to_string(),
+                    namespace: namespace.to_string(),
+                },
+            },
+        }
+    }
+
     /// Compile waypoint Gateway for a namespace
     ///
-    /// ONE waypoint per namespace with fixed listeners:
-    /// - HTTP listener on port 80 for all services
-    /// - HBONE listener on 15008 for ztunnel compatibility
-    /// - `istio.io/dataplane-mode: ambient` label
+    /// ONE waypoint per namespace with both HTTP and HBONE listeners:
+    /// - HTTP listener on port 9080 for L7 traffic processing
+    /// - TCP listener on port 15008 for HBONE tunnel termination
+    ///
+    /// - `istio.io/dataplane-mode: ambient` label required for Istio recognition
     fn compile_waypoint_gateway(namespace: &str) -> Gateway {
         let gateway_name = format!("{}-waypoint", namespace);
+        let gateway_class = Self::gateway_class_name(namespace);
         let mut metadata = GatewayMetadata::new(&gateway_name, namespace);
+        // Required for Istio Ambient to recognize this as a waypoint
         metadata
             .labels
             .insert("istio.io/dataplane-mode".to_string(), "ambient".to_string());
@@ -405,13 +690,13 @@ impl WaypointCompiler {
             kind: "Gateway".to_string(),
             metadata,
             spec: GatewaySpec {
-                gateway_class_name: Self::WAYPOINT_GATEWAY_CLASS.to_string(),
+                gateway_class_name: gateway_class,
                 listeners: vec![
-                    // HTTP listener for all mesh traffic
+                    // HTTP listener for L7 traffic processing
                     GatewayListener {
                         name: "mesh".to_string(),
                         hostname: None,
-                        port: 80,
+                        port: Self::WAYPOINT_HTTP_PORT,
                         protocol: "HTTP".to_string(),
                         tls: None,
                         allowed_routes: Some(AllowedRoutes {
@@ -420,9 +705,9 @@ impl WaypointCompiler {
                             },
                         }),
                     },
-                    // HBONE listener for ztunnel
+                    // HBONE listener for ztunnel tunnel termination
                     GatewayListener {
-                        name: "hbone".to_string(),
+                        name: "fake-hbone".to_string(),
                         hostname: None,
                         port: Self::HBONE_PORT,
                         protocol: "TCP".to_string(),
@@ -442,9 +727,19 @@ impl WaypointCompiler {
     ///
     /// Routes traffic to the service via the waypoint Gateway.
     /// Hostnames include all DNS variants for the service.
-    fn compile_waypoint_http_route(service_name: &str, namespace: &str, port: u16) -> HttpRoute {
+    /// Includes native Gateway API timeout/retry from outbound policies.
+    fn compile_waypoint_http_route(
+        service_name: &str,
+        namespace: &str,
+        port: u16,
+        resources: &BTreeMap<String, ResourceSpec>,
+    ) -> HttpRoute {
         let route_name = format!("{}-waypoint", service_name);
         let gateway_name = format!("{}-waypoint", namespace);
+
+        // Extract timeout/retry from outbound policies in resources
+        // These are policies for when THIS service calls other services
+        let (timeouts, retry) = Self::extract_route_policies(resources);
 
         HttpRoute {
             api_version: "gateway.networking.k8s.io/v1".to_string(),
@@ -469,9 +764,66 @@ impl WaypointCompiler {
                         name: service_name.to_string(),
                         port,
                     }],
+                    timeouts,
+                    retry,
                 }],
             },
         }
+    }
+
+    /// Extract timeout and retry policies from resource specs
+    ///
+    /// Looks for INBOUND policies that define timeout or retry settings.
+    /// Waypoints process INBOUND traffic, so policies come from inbound resources.
+    /// Returns the first timeout/retry found (could be enhanced to merge or select).
+    fn extract_route_policies(
+        resources: &BTreeMap<String, ResourceSpec>,
+    ) -> (Option<HttpRouteTimeouts>, Option<HttpRouteRetry>) {
+        let mut timeouts = None;
+        let mut retry = None;
+
+        for resource in resources.values() {
+            // Only look at inbound resources - waypoints process inbound traffic
+            if resource.direction != crate::crd::DependencyDirection::Inbound {
+                continue;
+            }
+
+            if let Some(ref inbound) = resource.inbound {
+                // Extract timeout from inbound policy
+                if timeouts.is_none() {
+                    if let Some(ref timeout_policy) = inbound.timeout {
+                        timeouts = Some(HttpRouteTimeouts {
+                            request: Some(timeout_policy.request.clone()),
+                            backend_request: timeout_policy.idle.clone(),
+                        });
+                    }
+                }
+
+                // Extract retry from inbound policy
+                if retry.is_none() {
+                    if let Some(ref retry_policy) = inbound.retries {
+                        // Convert retry_on conditions to HTTP status codes
+                        let codes: Vec<u16> = retry_policy
+                            .retry_on
+                            .iter()
+                            .flat_map(|condition| match condition.as_str() {
+                                "5xx" => vec![500, 502, 503, 504],
+                                "gateway-error" => vec![502, 503, 504],
+                                s => s.parse::<u16>().map(|c| vec![c]).unwrap_or_default(),
+                            })
+                            .collect();
+
+                        retry = Some(HttpRouteRetry {
+                            codes,
+                            attempts: Some(retry_policy.attempts),
+                            backoff: retry_policy.per_try_timeout.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        (timeouts, retry)
     }
 }
 
@@ -649,6 +1001,8 @@ impl IngressCompiler {
                         name: service_name.to_string(),
                         port: backend_port,
                     }],
+                    timeouts: None,
+                    retry: None,
                 }],
             },
         }
@@ -1439,6 +1793,8 @@ mod tests {
                         burst: None,
                     }),
                     headers: None,
+                    timeout: None,
+                    retries: None,
                 }),
             ),
         );

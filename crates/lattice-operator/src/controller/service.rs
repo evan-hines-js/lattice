@@ -357,6 +357,47 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
+        // Waypoint EnvoyProxy (configures HBONE port on waypoint Service)
+        let envoy_proxy_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+            group: "gateway.envoyproxy.io".to_string(),
+            version: "v1alpha1".to_string(),
+            kind: "EnvoyProxy".to_string(),
+        });
+        if let Some(ref envoy_proxy) = compiled.waypoint.envoy_proxy {
+            let name = envoy_proxy.metadata.name.clone();
+            let json = serde_json::to_value(envoy_proxy)
+                .map_err(|e| Error::serialization(format!("EnvoyProxy: {}", e)))?;
+            let api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), namespace, &envoy_proxy_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying waypoint EnvoyProxy");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
+        // Waypoint GatewayClass (references namespace-local EnvoyProxy)
+        let gateway_class_ar = ApiResource::from_gvk(&kube::api::GroupVersionKind {
+            group: "gateway.networking.k8s.io".to_string(),
+            version: "v1".to_string(),
+            kind: "GatewayClass".to_string(),
+        });
+        if let Some(ref gateway_class) = compiled.waypoint.gateway_class {
+            let name = gateway_class.metadata.name.clone();
+            let json = serde_json::to_value(gateway_class)
+                .map_err(|e| Error::serialization(format!("GatewayClass: {}", e)))?;
+            // GatewayClass is cluster-scoped
+            let api: Api<DynamicObject> =
+                Api::all_with(self.client.clone(), &gateway_class_ar);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying waypoint GatewayClass");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
         // Waypoint Gateway (for east-west L7 policies via Envoy Gateway)
         if let Some(ref gateway) = compiled.waypoint.gateway {
             let name = gateway.metadata.name.clone();
