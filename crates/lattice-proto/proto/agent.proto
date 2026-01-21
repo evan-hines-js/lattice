@@ -186,6 +186,9 @@ message PivotManifestsCommand {
   string target_namespace = 2;
   // Cluster name
   string cluster_name = 3;
+  // Secrets to distribute (labeled lattice.io/distribute: "true")
+  // Applied to lattice-system namespace on child cluster
+  repeated bytes secrets = 4;
 }
 
 // Request current cluster status

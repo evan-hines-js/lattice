@@ -675,7 +675,9 @@ impl WaypointCompiler {
     /// - HTTP listener on port 9080 for L7 traffic processing
     /// - TCP listener on port 15008 for HBONE tunnel termination
     ///
-    /// - `istio.io/dataplane-mode: ambient` label required for Istio recognition
+    /// Required labels for Istio Ambient waypoint:
+    /// - `istio.io/dataplane-mode: ambient` - identifies as ambient mesh component
+    /// - `istio.io/waypoint-for: service` - handles traffic destined for Kubernetes services
     fn compile_waypoint_gateway(namespace: &str) -> Gateway {
         let gateway_name = format!("{}-waypoint", namespace);
         let gateway_class = Self::gateway_class_name(namespace);
@@ -684,6 +686,10 @@ impl WaypointCompiler {
         metadata
             .labels
             .insert("istio.io/dataplane-mode".to_string(), "ambient".to_string());
+        // Specifies waypoint handles traffic to Kubernetes services (not raw workload IPs)
+        metadata
+            .labels
+            .insert("istio.io/waypoint-for".to_string(), "service".to_string());
 
         Gateway {
             api_version: "gateway.networking.k8s.io/v1".to_string(),

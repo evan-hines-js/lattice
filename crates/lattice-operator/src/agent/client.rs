@@ -23,7 +23,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::bootstrap::{CsrRequest, CsrResponse};
 use crate::pivot::{
-    patch_kubeconfig_for_self_management, retry_with_backoff, AgentPivotHandler, RetryConfig,
+    apply_distributed_secrets, patch_kubeconfig_for_self_management, retry_with_backoff,
+    AgentPivotHandler, RetryConfig,
 };
 use crate::pki::AgentCertRequest;
 use crate::proto::lattice_agent_client::LatticeAgentClient;
@@ -774,6 +775,7 @@ impl AgentClient {
             Some(Command::PivotManifests(cmd)) => {
                 info!(
                     manifests = cmd.manifests.len(),
+                    secrets = cmd.secrets.len(),
                     namespace = %cmd.target_namespace,
                     "pivot started"
                 );
@@ -782,6 +784,7 @@ impl AgentClient {
                 // Spawn background task to import manifests
                 let target_namespace = cmd.target_namespace.clone();
                 let manifests = cmd.manifests.clone();
+                let secrets = cmd.secrets.clone();
                 let pivot_cluster_name = cmd.cluster_name.clone();
                 let agent_state_clone = agent_state.clone();
                 let message_tx_clone = message_tx.clone();
@@ -800,6 +803,15 @@ impl AgentClient {
                                 resources = resource_count,
                                 "CAPI resources imported successfully"
                             );
+
+                            // Apply distributed secrets to lattice-system namespace
+                            if !secrets.is_empty() {
+                                if let Err(e) = apply_distributed_secrets(&secrets).await {
+                                    warn!(error = %e, "Failed to apply distributed secrets (non-fatal)");
+                                } else {
+                                    info!(count = secrets.len(), "Applied distributed secrets");
+                                }
+                            }
 
                             // Patch kubeconfig secret to use internal endpoint for self-management
                             let cluster_name_for_patch = pivot_cluster_name.clone();
