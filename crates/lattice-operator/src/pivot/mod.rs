@@ -481,15 +481,92 @@ async fn apply_kubeconfig_patch(
     Ok(())
 }
 
-/// Apply distributed secrets to the lattice-system namespace.
+/// Label selector for distributable resources
+const DISTRIBUTE_LABEL: &str = "lattice.io/distribute=true";
+
+/// Resources labeled for distribution to child clusters
+#[derive(Debug, Default, Clone)]
+pub struct DistributableResources {
+    /// Secrets (credentials, tokens, keys)
+    pub secrets: Vec<Vec<u8>>,
+    /// ConfigMaps (configuration, feature flags)
+    pub configmaps: Vec<Vec<u8>>,
+}
+
+impl DistributableResources {
+    /// Check if there are any resources to distribute
+    pub fn is_empty(&self) -> bool {
+        self.secrets.is_empty() && self.configmaps.is_empty()
+    }
+}
+
+/// Fetch all resources labeled for distribution from lattice-system namespace.
 ///
-/// During pivot, the parent cluster sends secrets labeled `lattice.io/distribute: "true"`
-/// to child clusters. This function applies those secrets to the child's lattice-system
-/// namespace, enabling the child to use provider credentials, etc.
-pub async fn apply_distributed_secrets(secrets: &[Vec<u8>]) -> Result<(), PivotError> {
+/// Resources with label `lattice.io/distribute: "true"` are sent to child clusters
+/// during pivot and via periodic sync. Use cases:
+/// - Secrets: provider credentials, ESO vault creds, registry pull secrets
+/// - ConfigMaps: feature flags, environment config, operator settings
+pub async fn fetch_distributable_resources(client: &Client) -> Result<DistributableResources, PivotError> {
+    use k8s_openapi::api::core::v1::ConfigMap;
+    use kube::api::ListParams;
+
+    let lp = ListParams::default().labels(DISTRIBUTE_LABEL);
+
+    // Fetch secrets
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), "lattice-system");
+    let secrets_list = secret_api
+        .list(&lp)
+        .await
+        .map_err(|e| PivotError::Internal(format!("failed to list secrets: {}", e)))?;
+
+    let mut secrets = Vec::new();
+    for secret in secrets_list.items {
+        let yaml = serialize_for_distribution(&secret)?;
+        secrets.push(yaml);
+    }
+
+    // Fetch configmaps
+    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), "lattice-system");
+    let cms_list = cm_api
+        .list(&lp)
+        .await
+        .map_err(|e| PivotError::Internal(format!("failed to list configmaps: {}", e)))?;
+
+    let mut configmaps = Vec::new();
+    for cm in cms_list.items {
+        let yaml = serialize_for_distribution(&cm)?;
+        configmaps.push(yaml);
+    }
+
+    debug!(secrets = secrets.len(), configmaps = configmaps.len(), "fetched distributable resources");
+    Ok(DistributableResources { secrets, configmaps })
+}
+
+/// Serialize a Kubernetes resource for distribution, stripping cluster-specific metadata
+fn serialize_for_distribution<T: serde::Serialize + Clone + k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>>(
+    resource: &T,
+) -> Result<Vec<u8>, PivotError> {
+    let mut clean = resource.clone();
+    let meta = clean.metadata_mut();
+    meta.uid = None;
+    meta.resource_version = None;
+    meta.creation_timestamp = None;
+    meta.managed_fields = None;
+
+    serde_yaml::to_string(&clean)
+        .map(|s| s.into_bytes())
+        .map_err(|e| PivotError::Internal(format!("failed to serialize resource: {}", e)))
+}
+
+/// Apply distributed resources to the lattice-system namespace.
+///
+/// During pivot and periodic sync, parent clusters send resources labeled
+/// `lattice.io/distribute: "true"` to child clusters.
+pub async fn apply_distributed_resources(resources: &DistributableResources) -> Result<(), PivotError> {
+    use k8s_openapi::api::core::v1::ConfigMap;
     use kube::api::{Patch, PatchParams};
 
-    if secrets.is_empty() {
+    if resources.is_empty() {
         return Ok(());
     }
 
@@ -497,25 +574,40 @@ pub async fn apply_distributed_secrets(secrets: &[Vec<u8>]) -> Result<(), PivotE
         .await
         .map_err(|e| PivotError::Internal(format!("failed to create k8s client: {}", e)))?;
 
-    let api: Api<Secret> = Api::namespaced(client, "lattice-system");
     let params = PatchParams::apply("lattice-pivot").force();
 
-    for secret_bytes in secrets {
+    // Apply secrets
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), "lattice-system");
+    for secret_bytes in &resources.secrets {
         let yaml_str = String::from_utf8_lossy(secret_bytes);
         let secret: Secret = serde_yaml::from_str(&yaml_str)
             .map_err(|e| PivotError::Internal(format!("failed to parse secret YAML: {}", e)))?;
 
-        let name = secret
-            .metadata
-            .name
-            .as_ref()
+        let name = secret.metadata.name.as_ref()
             .ok_or_else(|| PivotError::Internal("secret has no name".to_string()))?;
 
-        api.patch(name, &params, &Patch::Apply(&secret))
+        secret_api.patch(name, &params, &Patch::Apply(&secret))
             .await
             .map_err(|e| PivotError::Internal(format!("failed to apply secret {}: {}", name, e)))?;
 
         info!(secret = %name, "Applied distributed secret");
+    }
+
+    // Apply configmaps
+    let cm_api: Api<ConfigMap> = Api::namespaced(client, "lattice-system");
+    for cm_bytes in &resources.configmaps {
+        let yaml_str = String::from_utf8_lossy(cm_bytes);
+        let cm: ConfigMap = serde_yaml::from_str(&yaml_str)
+            .map_err(|e| PivotError::Internal(format!("failed to parse configmap YAML: {}", e)))?;
+
+        let name = cm.metadata.name.as_ref()
+            .ok_or_else(|| PivotError::Internal("configmap has no name".to_string()))?;
+
+        cm_api.patch(name, &params, &Patch::Apply(&cm))
+            .await
+            .map_err(|e| PivotError::Internal(format!("failed to apply configmap {}: {}", name, e)))?;
+
+        info!(configmap = %name, "Applied distributed configmap");
     }
 
     Ok(())
@@ -671,22 +763,27 @@ mod tests {
     }
 
     // ==========================================================================
-    // apply_distributed_secrets Tests
+    // apply_distributed_resources Tests
     // ==========================================================================
 
-    /// Story: Empty secrets list should succeed immediately
+    /// Story: Empty resources should succeed immediately
     #[tokio::test]
-    async fn apply_distributed_secrets_empty_list_succeeds() {
-        let result = apply_distributed_secrets(&[]).await;
+    async fn apply_distributed_resources_empty_succeeds() {
+        let resources = DistributableResources::default();
+        let result = apply_distributed_resources(&resources).await;
         assert!(result.is_ok());
     }
 
     /// Story: Invalid YAML should return an error
     #[tokio::test]
-    async fn apply_distributed_secrets_invalid_yaml_fails() {
+    async fn apply_distributed_resources_invalid_yaml_fails() {
         // This test runs even without a K8s cluster because parsing happens before API calls
         let invalid_yaml = b"not: valid: yaml: [unclosed".to_vec();
-        let result = apply_distributed_secrets(&[invalid_yaml]).await;
+        let resources = DistributableResources {
+            secrets: vec![invalid_yaml],
+            configmaps: vec![],
+        };
+        let result = apply_distributed_resources(&resources).await;
 
         // Without a K8s cluster, it will fail on client creation first
         // With a K8s cluster, it will fail on YAML parsing
@@ -695,7 +792,7 @@ mod tests {
 
     /// Story: Secret without a name should return an error
     #[tokio::test]
-    async fn apply_distributed_secrets_missing_name_fails() {
+    async fn apply_distributed_resources_missing_name_fails() {
         // Skip if no K8s cluster (parsing happens after client creation)
         if kube::Client::try_default().await.is_err() {
             eprintln!("Skipping test: no K8s cluster available");
@@ -710,7 +807,11 @@ metadata:
 data:
   key: dmFsdWU=
 "#;
-        let result = apply_distributed_secrets(&[nameless_secret.as_bytes().to_vec()]).await;
+        let resources = DistributableResources {
+            secrets: vec![nameless_secret.as_bytes().to_vec()],
+            configmaps: vec![],
+        };
+        let result = apply_distributed_resources(&resources).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("secret has no name"), "Expected 'secret has no name' error, got: {}", err);
@@ -732,5 +833,24 @@ data:
 "#;
         let secret: Secret = serde_yaml::from_str(valid_secret).unwrap();
         assert_eq!(secret.metadata.name.as_deref(), Some("test-secret"));
+    }
+
+    /// Story: DistributableResources is_empty works correctly
+    #[test]
+    fn distributable_resources_is_empty() {
+        let empty = DistributableResources::default();
+        assert!(empty.is_empty());
+
+        let with_secrets = DistributableResources {
+            secrets: vec![vec![1, 2, 3]],
+            configmaps: vec![],
+        };
+        assert!(!with_secrets.is_empty());
+
+        let with_configmaps = DistributableResources {
+            secrets: vec![],
+            configmaps: vec![vec![1, 2, 3]],
+        };
+        assert!(!with_configmaps.is_empty());
     }
 }

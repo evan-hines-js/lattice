@@ -12,13 +12,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::ByteString;
 use kube::api::{Api, PostParams};
+use kube::runtime::watcher::{self, Event};
 use kube::Client;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::agent::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::agent::mtls::ServerMtlsConfig;
@@ -27,7 +29,9 @@ use crate::bootstrap::{
     bootstrap_router, BootstrapState, DefaultManifestGenerator, ManifestGenerator,
     CAPMOX_NAMESPACE, CAPMOX_SECRET_NAME,
 };
+use crate::pivot::{fetch_distributable_resources, DistributableResources};
 use crate::pki::CertificateAuthority;
+use crate::proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};
 use crate::webhook::{webhook_router, WebhookState};
 
 /// Configuration for cell servers
@@ -97,6 +101,130 @@ pub struct ParentServers<G: ManifestGenerator + Send + Sync + 'static = DefaultM
 struct ServerHandles {
     bootstrap_handle: JoinHandle<()>,
     grpc_handle: JoinHandle<()>,
+    secret_sync_handle: JoinHandle<()>,
+}
+
+/// Interval for periodic secret sync (safety net)
+const SECRET_SYNC_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
+
+/// Label selector for distributable secrets
+const DISTRIBUTE_LABEL: &str = "lattice.io/distribute=true";
+
+/// Push distributable resources to all connected agents
+async fn push_resources_to_agents(registry: &SharedAgentRegistry, resources: DistributableResources, full_sync: bool) {
+    let agents = registry.list_clusters();
+    if agents.is_empty() {
+        debug!("No connected agents to push resources to");
+        return;
+    }
+
+    let cmd = CellCommand {
+        command_id: uuid::Uuid::new_v4().to_string(),
+        command: Some(cell_command::Command::SyncResources(SyncDistributedResourcesCommand {
+            secrets: resources.secrets.clone(),
+            configmaps: resources.configmaps.clone(),
+            full_sync,
+        })),
+    };
+
+    for agent_name in &agents {
+        if let Err(e) = registry.send_command(agent_name, cmd.clone()).await {
+            warn!(agent = %agent_name, error = %e, "Failed to push resources to agent");
+        } else {
+            debug!(
+                agent = %agent_name,
+                secrets = resources.secrets.len(),
+                configmaps = resources.configmaps.len(),
+                "Pushed resources to agent"
+            );
+        }
+    }
+}
+
+/// Run the resource sync service
+///
+/// Watches for changes to secrets/configmaps with the distribute label and:
+/// 1. Immediately pushes changes to all connected agents (watch-triggered)
+/// 2. Periodically does a full sync as a safety net
+async fn run_resource_sync(client: Client, registry: SharedAgentRegistry) {
+    use k8s_openapi::api::core::v1::ConfigMap;
+
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), "lattice-system");
+    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), "lattice-system");
+
+    // Create watchers for distributable resources
+    let watcher_config = watcher::Config::default().labels(DISTRIBUTE_LABEL);
+    let secret_watcher = watcher::watcher(secret_api, watcher_config.clone());
+    let cm_watcher = watcher::watcher(cm_api, watcher_config);
+
+    let mut secret_watcher = std::pin::pin!(secret_watcher);
+    let mut cm_watcher = std::pin::pin!(cm_watcher);
+
+    // Periodic sync timer
+    let mut sync_interval = tokio::time::interval(SECRET_SYNC_INTERVAL);
+    sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    info!("Resource sync service started");
+
+    loop {
+        tokio::select! {
+            // Watch for secret changes
+            Some(event) = secret_watcher.next() => {
+                handle_resource_event(&client, &registry, event, "secret").await;
+            }
+            // Watch for configmap changes
+            Some(event) = cm_watcher.next() => {
+                handle_resource_event(&client, &registry, event, "configmap").await;
+            }
+            // Periodic full sync
+            _ = sync_interval.tick() => {
+                debug!("Running periodic resource sync");
+                match fetch_distributable_resources(&client).await {
+                    Ok(resources) if !resources.is_empty() => {
+                        push_resources_to_agents(&registry, resources, true).await;
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(error = %e, "Failed to fetch resources for periodic sync"),
+                }
+            }
+        }
+    }
+}
+
+/// Handle a watcher event for distributable resources
+async fn handle_resource_event<T>(
+    client: &Client,
+    registry: &SharedAgentRegistry,
+    event: Result<Event<T>, watcher::Error>,
+    resource_type: &str,
+) where
+    T: k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>,
+{
+    match event {
+        Ok(Event::Apply(resource)) | Ok(Event::InitApply(resource)) => {
+            let name = resource.metadata().name.as_deref().unwrap_or("unknown");
+            info!(%resource_type, %name, "Distributable resource changed, pushing to agents");
+            match fetch_distributable_resources(client).await {
+                Ok(resources) => push_resources_to_agents(registry, resources, false).await,
+                Err(e) => warn!(error = %e, "Failed to fetch resources for sync"),
+            }
+        }
+        Ok(Event::Delete(resource)) => {
+            let name = resource.metadata().name.as_deref().unwrap_or("unknown");
+            info!(%resource_type, %name, "Distributable resource deleted, triggering full sync");
+            match fetch_distributable_resources(client).await {
+                Ok(resources) => push_resources_to_agents(registry, resources, true).await,
+                Err(e) => warn!(error = %e, "Failed to fetch resources for sync"),
+            }
+        }
+        Ok(Event::Init) | Ok(Event::InitDone) => {
+            debug!(%resource_type, "Watcher initialized");
+        }
+        Err(e) => {
+            warn!(error = %e, %resource_type, "Watcher error, will retry");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
 }
 
 /// Secret name for persisting the CA
@@ -365,8 +493,9 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         info!(sans = ?self.config.server_sans, "Generated server certificate");
 
-        // Clone kube_client for gRPC server before it's moved into WebhookState
+        // Clone kube_client for services before it's moved
         let grpc_kube_client = kube_client.clone();
+        let sync_client = kube_client.clone();
 
         // Create routers
         let bootstrap_router = bootstrap_router(bootstrap_state);
@@ -419,10 +548,18 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             }
         });
 
+        // Start resource sync service (secrets + configmaps)
+        let sync_registry = self.agent_registry.clone();
+        info!("Starting resource sync service");
+        let secret_sync_handle = tokio::spawn(async move {
+            run_resource_sync(sync_client, sync_registry).await;
+        });
+
         // Store handles
         *self.handles.write().await = Some(ServerHandles {
             bootstrap_handle,
             grpc_handle,
+            secret_sync_handle,
         });
 
         info!("Cell servers started successfully");
@@ -465,6 +602,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         if let Some(handles) = self.handles.write().await.take() {
             handles.bootstrap_handle.abort();
             handles.grpc_handle.abort();
+            handles.secret_sync_handle.abort();
         }
 
         *self.bootstrap_state.write().await = None;
