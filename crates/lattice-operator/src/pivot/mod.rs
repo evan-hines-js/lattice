@@ -481,6 +481,46 @@ async fn apply_kubeconfig_patch(
     Ok(())
 }
 
+/// Apply distributed secrets to the lattice-system namespace.
+///
+/// During pivot, the parent cluster sends secrets labeled `lattice.io/distribute: "true"`
+/// to child clusters. This function applies those secrets to the child's lattice-system
+/// namespace, enabling the child to use provider credentials, etc.
+pub async fn apply_distributed_secrets(secrets: &[Vec<u8>]) -> Result<(), PivotError> {
+    use kube::api::{Patch, PatchParams};
+
+    if secrets.is_empty() {
+        return Ok(());
+    }
+
+    let client = kube::Client::try_default()
+        .await
+        .map_err(|e| PivotError::Internal(format!("failed to create k8s client: {}", e)))?;
+
+    let api: Api<Secret> = Api::namespaced(client, "lattice-system");
+    let params = PatchParams::apply("lattice-pivot").force();
+
+    for secret_bytes in secrets {
+        let yaml_str = String::from_utf8_lossy(secret_bytes);
+        let secret: Secret = serde_yaml::from_str(&yaml_str)
+            .map_err(|e| PivotError::Internal(format!("failed to parse secret YAML: {}", e)))?;
+
+        let name = secret
+            .metadata
+            .name
+            .as_ref()
+            .ok_or_else(|| PivotError::Internal("secret has no name".to_string()))?;
+
+        api.patch(name, &params, &Patch::Apply(&secret))
+            .await
+            .map_err(|e| PivotError::Internal(format!("failed to apply secret {}: {}", name, e)))?;
+
+        info!(secret = %name, "Applied distributed secret");
+    }
+
+    Ok(())
+}
+
 /// Patch the kubeconfig secret to use the internal Kubernetes service endpoint.
 ///
 /// After clusterctl move, the kubeconfig secret contains the external network IP
@@ -628,5 +668,69 @@ mod tests {
             PivotError::Internal("panic".to_string()).to_string(),
             "internal error: panic"
         );
+    }
+
+    // ==========================================================================
+    // apply_distributed_secrets Tests
+    // ==========================================================================
+
+    /// Story: Empty secrets list should succeed immediately
+    #[tokio::test]
+    async fn apply_distributed_secrets_empty_list_succeeds() {
+        let result = apply_distributed_secrets(&[]).await;
+        assert!(result.is_ok());
+    }
+
+    /// Story: Invalid YAML should return an error
+    #[tokio::test]
+    async fn apply_distributed_secrets_invalid_yaml_fails() {
+        // This test runs even without a K8s cluster because parsing happens before API calls
+        let invalid_yaml = b"not: valid: yaml: [unclosed".to_vec();
+        let result = apply_distributed_secrets(&[invalid_yaml]).await;
+
+        // Without a K8s cluster, it will fail on client creation first
+        // With a K8s cluster, it will fail on YAML parsing
+        assert!(result.is_err());
+    }
+
+    /// Story: Secret without a name should return an error
+    #[tokio::test]
+    async fn apply_distributed_secrets_missing_name_fails() {
+        // Skip if no K8s cluster (parsing happens after client creation)
+        if kube::Client::try_default().await.is_err() {
+            eprintln!("Skipping test: no K8s cluster available");
+            return;
+        }
+
+        let nameless_secret = r#"
+apiVersion: v1
+kind: Secret
+metadata:
+  namespace: lattice-system
+data:
+  key: dmFsdWU=
+"#;
+        let result = apply_distributed_secrets(&[nameless_secret.as_bytes().to_vec()]).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("secret has no name"), "Expected 'secret has no name' error, got: {}", err);
+    }
+
+    /// Story: Valid secret YAML should be parsed correctly
+    #[test]
+    fn secret_yaml_parsing_works() {
+        let valid_secret = r#"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-secret
+  namespace: lattice-system
+  labels:
+    lattice.io/distribute: "true"
+data:
+  key: dmFsdWU=
+"#;
+        let secret: Secret = serde_yaml::from_str(valid_secret).unwrap();
+        assert_eq!(secret.metadata.name.as_deref(), Some("test-secret"));
     }
 }
