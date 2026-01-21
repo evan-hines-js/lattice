@@ -141,28 +141,6 @@ spec:
         .to_string()
     }
 
-    /// Generate AuthorizationPolicy allowing all traffic to flux-system namespace
-    ///
-    /// Flux controllers need to communicate with each other and external git repos.
-    /// Since flux-system is infrastructure, we allow all traffic similar to other
-    /// system namespaces.
-    pub fn generate_flux_allow_policy() -> String {
-        r#"---
-apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: flux-allow-all
-  namespace: flux-system
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  action: ALLOW
-  rules:
-  - {}
-"#
-        .to_string()
-    }
-
     fn render_manifests(config: &IstioConfig) -> Result<Vec<String>, String> {
         let mut all_manifests = Vec::new();
 
@@ -381,19 +359,6 @@ mod tests {
         assert!(policy.contains("action: ALLOW"));
         assert!(policy.contains("8443"));
         assert!(policy.contains("50051"));
-    }
-
-    #[test]
-    fn test_flux_allow_policy() {
-        let policy = IstioReconciler::generate_flux_allow_policy();
-        assert!(policy.contains("apiVersion: security.istio.io/v1"));
-        assert!(policy.contains("kind: AuthorizationPolicy"));
-        assert!(policy.contains("name: flux-allow-all"));
-        assert!(policy.contains("namespace: flux-system"));
-        assert!(policy.contains("app.kubernetes.io/managed-by: lattice"));
-        assert!(policy.contains("action: ALLOW"));
-        assert!(policy.contains("rules:"));
-        assert!(policy.contains("- {}"));
     }
 
     #[test]

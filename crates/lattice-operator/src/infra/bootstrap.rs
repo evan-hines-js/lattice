@@ -9,7 +9,7 @@
 use std::process::Command;
 use tracing::{debug, info, warn};
 
-use super::{FluxReconciler, IstioReconciler};
+use super::IstioReconciler;
 use crate::crd::BootstrapProvider;
 
 /// Configuration for infrastructure manifest generation
@@ -23,7 +23,7 @@ pub struct InfrastructureConfig {
     pub skip_cilium_policies: bool,
 }
 
-/// Generate core infrastructure manifests (Istio, Flux, Gateway API, Envoy Gateway)
+/// Generate core infrastructure manifests (Istio, Gateway API, Envoy Gateway)
 ///
 /// Used by both operator startup and full cluster bootstrap.
 pub fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
@@ -31,9 +31,6 @@ pub fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
 
     // Istio ambient
     manifests.extend(generate_istio(skip_cilium_policies));
-
-    // Flux
-    manifests.extend(generate_flux());
 
     // Gateway API CRDs (must be installed before Envoy Gateway)
     if let Ok(gw_api) = generate_gateway_api_crds() {
@@ -56,7 +53,7 @@ pub fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
 
 /// Generate ALL infrastructure manifests for a self-managing cluster
 ///
-/// Includes: cert-manager, CAPI, plus core infrastructure (Istio, Flux, Envoy Gateway)
+/// Includes: cert-manager, CAPI, plus core infrastructure (Istio, Envoy Gateway)
 pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     let mut manifests = Vec::new();
 
@@ -76,7 +73,7 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
         warn!("failed to generate CAPI manifests");
     }
 
-    // Core infrastructure (Istio, Flux, Gateway API, Envoy Gateway)
+    // Core infrastructure (Istio, Gateway API, Envoy Gateway)
     manifests.extend(generate_core(config.skip_cilium_policies));
 
     info!(
@@ -169,22 +166,6 @@ pub fn generate_istio(skip_cilium_policies: bool) -> Vec<String> {
         manifests.push(super::generate_default_deny());
     }
 
-    manifests
-}
-
-/// Generate Flux manifests including allow policy
-pub fn generate_flux() -> Vec<String> {
-    let mut manifests = vec![namespace_yaml("flux-system")];
-
-    match FluxReconciler::new() {
-        Ok(r) => {
-            for m in r.manifests() {
-                manifests.push(inject_namespace(m, "flux-system"));
-            }
-        }
-        Err(e) => warn!(error = %e, "failed to create Flux reconciler"),
-    };
-    manifests.push(allow_all_policy("flux", "flux-system"));
     manifests
 }
 

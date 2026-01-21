@@ -753,7 +753,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     /// Generates ALL manifests needed for a self-managing cluster:
     /// - CNI (Cilium)
     /// - Lattice operator
-    /// - cert-manager, CAPI, Istio, Flux, Envoy Gateway (infrastructure)
+    /// - cert-manager, CAPI, Istio, Envoy Gateway (infrastructure)
     /// - LatticeCluster CRD definition
     /// - Parent connection config Secret
     ///
@@ -777,7 +777,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         };
         let mut manifests = generate_all_manifests(&self.manifest_generator, &config);
 
-        // Add ALL infrastructure manifests (cert-manager, CAPI, Istio, Flux, Envoy Gateway)
+        // Add ALL infrastructure manifests (cert-manager, CAPI, Istio, Envoy Gateway)
         // These install in parallel with the operator, massively speeding up cluster creation
         let infra_config = crate::infra::InfrastructureConfig {
             provider: info.provider.clone(),

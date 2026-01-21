@@ -13,7 +13,6 @@ struct Versions {
     cilium: String,
     istio: String,
     cert_manager: String,
-    flux: String,
     envoy_gateway: String,
 }
 
@@ -36,7 +35,6 @@ fn load_versions() -> Versions {
         cilium: String::new(),
         istio: String::new(),
         cert_manager: String::new(),
-        flux: String::new(),
         envoy_gateway: String::new(),
     };
     let mut section = "";
@@ -59,7 +57,6 @@ fn load_versions() -> Versions {
                 ("charts", "cilium") => versions.cilium = value.to_string(),
                 ("charts", "istio") => versions.istio = value.to_string(),
                 ("charts", "cert-manager") => versions.cert_manager = value.to_string(),
-                ("charts", "flux") => versions.flux = value.to_string(),
                 ("charts", "envoy-gateway") => versions.envoy_gateway = value.to_string(),
                 _ => {}
             }
@@ -94,7 +91,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-env=ISTIO_VERSION={}", versions.istio);
     println!("cargo:rustc-env=CAPI_VERSION={}", versions.capi);
     println!("cargo:rustc-env=RKE2_VERSION={}", versions.rke2);
-    println!("cargo:rustc-env=FLUX_VERSION={}", versions.flux);
     println!("cargo:rustc-env=CAPMOX_VERSION={}", versions.capmox);
     println!("cargo:rustc-env=CAPA_VERSION={}", versions.capa);
     println!("cargo:rustc-env=CAPO_VERSION={}", versions.capo);
@@ -135,7 +131,6 @@ fn download_helm_charts(
     let ztunnel_chart = charts_dir.join(format!("ztunnel-{}.tgz", versions.istio));
     let cert_manager_chart =
         charts_dir.join(format!("cert-manager-v{}.tgz", versions.cert_manager));
-    let flux_chart = charts_dir.join(format!("flux2-{}.tgz", versions.flux));
     // Envoy Gateway (OCI chart from docker.io/envoyproxy/gateway-helm)
     let envoy_gateway_chart =
         charts_dir.join(format!("gateway-helm-v{}.tgz", versions.envoy_gateway));
@@ -151,7 +146,6 @@ fn download_helm_charts(
         &cni_chart,
         &ztunnel_chart,
         &cert_manager_chart,
-        &flux_chart,
         &envoy_gateway_chart,
         &gateway_api_crds,
     ] {
@@ -165,7 +159,6 @@ fn download_helm_charts(
         &cni_chart,
         &ztunnel_chart,
         &cert_manager_chart,
-        &flux_chart,
         &envoy_gateway_chart,
         &gateway_api_crds,
     ];
@@ -189,10 +182,6 @@ fn download_helm_charts(
             "https://istio-release.storage.googleapis.com/charts",
         ),
         ("jetstack", "https://charts.jetstack.io"),
-        (
-            "fluxcd-community",
-            "https://fluxcd-community.github.io/helm-charts",
-        ),
     ];
     for (name, url) in repos {
         let _ = Command::new("helm")
@@ -223,12 +212,6 @@ fn download_helm_charts(
             "jetstack/cert-manager",
             &versions.cert_manager,
             "cert-manager",
-        ),
-        (
-            &flux_chart,
-            "fluxcd-community/flux2",
-            &versions.flux,
-            "Flux",
         ),
     ];
 

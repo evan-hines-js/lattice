@@ -6,7 +6,6 @@
 //! 3. Installing CAPI providers and Lattice operator
 //! 4. Provisioning the management cluster
 //! 5. Pivoting CAPI resources to make it self-managing
-//! 6. Optionally installing Flux for GitOps
 
 use std::fmt::Display;
 use std::path::{Path, PathBuf};

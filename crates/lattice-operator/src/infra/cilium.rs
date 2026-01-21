@@ -185,7 +185,6 @@ spec:
           - cilium-system
           - istio-system
           - lattice-system
-          - flux-system
           - cert-manager
           - envoy-gateway-system
           - capi-system

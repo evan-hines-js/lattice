@@ -1192,15 +1192,10 @@ pub trait PivotOperations: Send + Sync {
 
     /// Store post-pivot manifests to send after PivotComplete
     ///
-    /// These manifests (GitOps resources + network policy) will be sent to the
-    /// agent via ApplyManifestsCommand after pivot succeeds.
+    /// These manifests (network policy) will be sent to the agent via
+    /// ApplyManifestsCommand after pivot succeeds.
     /// Note: LatticeCluster CRD and instance are delivered via bootstrap webhook.
-    fn store_post_pivot_manifests(
-        &self,
-        cluster_name: &str,
-        flux_manifests: Vec<String>,
-        network_policy_yaml: Option<String>,
-    );
+    fn store_post_pivot_manifests(&self, cluster_name: &str, network_policy_yaml: Option<String>);
 
     /// Take unpivot manifests received from child during deletion
     ///
@@ -1749,17 +1744,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                         // Store post-pivot manifests before triggering pivot
                         // Note: LatticeCluster CRD/instance already delivered via bootstrap webhook
 
-                        // Generate GitOps manifests if parent has GitOps config
-                        let flux_manifests = generate_flux_manifests_for_child(&ctx, &name).await?;
-
                         // Generate CiliumNetworkPolicy for operator (requires Cilium CRDs)
                         let network_policy_yaml = generate_network_policy_for_child(&ctx).await?;
 
-                        pivot_ops.store_post_pivot_manifests(
-                            &name,
-                            flux_manifests,
-                            network_policy_yaml,
-                        );
+                        pivot_ops.store_post_pivot_manifests(&name, network_policy_yaml);
 
                         // Trigger pivot: export CAPI manifests and send to agent
                         info!("agent ready, triggering pivot");
@@ -2028,72 +2016,6 @@ async fn generate_capi_manifests(
     provider.generate_capi_manifests(cluster, &bootstrap).await
 }
 
-/// Generate Flux GitOps manifests for a child cluster
-///
-/// Reads the parent cluster's GitOps config and credentials from the referenced Secret,
-/// then generates the manifests that will be applied to the child cluster after pivot.
-async fn generate_flux_manifests_for_child(
-    ctx: &Context,
-    child_name: &str,
-) -> Result<Vec<String>, Error> {
-    use crate::infra::ResolvedGitCredentials;
-
-    // Get parent cluster's GitOps config
-    let Some(ref self_name) = ctx.self_cluster_name else {
-        return Ok(Vec::new());
-    };
-
-    let Some(parent_cluster) = ctx.kube.get_cluster(self_name).await? else {
-        return Ok(Vec::new());
-    };
-
-    let Some(ref endpoints) = parent_cluster.spec.endpoints else {
-        return Ok(Vec::new());
-    };
-
-    let Some(ref gitops) = endpoints.gitops else {
-        return Ok(Vec::new());
-    };
-
-    // Read credentials from Secret if referenced
-    let credentials = if let Some(ref secret_ref) = gitops.secret_ref {
-        if let Some(secret) = ctx
-            .kube
-            .get_secret(&secret_ref.name, &secret_ref.namespace)
-            .await?
-        {
-            let data = secret.data.unwrap_or_default();
-            Some(ResolvedGitCredentials {
-                ssh_identity: data.get("identity").map(|v| base64_encode(&v.0)),
-                ssh_known_hosts: data.get("known_hosts").map(|v| base64_encode(&v.0)),
-                https_username: data.get("username").map(|v| base64_encode(&v.0)),
-                https_password: data.get("password").map(|v| base64_encode(&v.0)),
-            })
-        } else {
-            warn!(
-                secret = %secret_ref.name,
-                namespace = %secret_ref.namespace,
-                "GitOps secret not found, generating manifests without credentials"
-            );
-            None
-        }
-    } else {
-        None
-    };
-
-    Ok(crate::infra::generate_gitops_resources(
-        gitops,
-        child_name,
-        credentials.as_ref(),
-    ))
-}
-
-/// Base64 encode bytes for Secret data
-fn base64_encode(bytes: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
 /// Generate CiliumNetworkPolicy for child cluster's operator
 ///
 /// Reads the parent cluster's endpoint config and generates a network policy
@@ -2334,17 +2256,11 @@ impl PivotOperations for PivotOperationsImpl {
             .is_some_and(|a| a.pivot_complete)
     }
 
-    fn store_post_pivot_manifests(
-        &self,
-        cluster_name: &str,
-        flux_manifests: Vec<String>,
-        network_policy_yaml: Option<String>,
-    ) {
+    fn store_post_pivot_manifests(&self, cluster_name: &str, network_policy_yaml: Option<String>) {
         use crate::agent::connection::PostPivotManifests;
         self.agent_registry.set_post_pivot_manifests(
             cluster_name,
             PostPivotManifests {
-                flux_manifests,
                 network_policy_yaml,
             },
         );
@@ -2620,7 +2536,6 @@ mod tests {
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },
-            gitops: None,
         });
         cluster
     }
