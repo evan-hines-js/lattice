@@ -218,6 +218,39 @@ spec:
     .to_string()
 }
 
+/// Generate a CiliumClusterwideNetworkPolicy for Envoy Gateway waypoint proxies.
+///
+/// Waypoint proxies need to connect to the Envoy Gateway control plane in
+/// envoy-gateway-system to receive their xDS configuration. This policy allows
+/// only pods with the Envoy Gateway ownership label to make that connection.
+pub fn generate_waypoint_egress_policy() -> String {
+    r#"---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: waypoint-egress
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  description: "Allow waypoint proxies to reach Envoy Gateway control plane for xDS"
+  endpointSelector:
+    matchLabels:
+      gateway.envoyproxy.io/owning-gateway-name: waypoint
+  egress:
+    # Allow xDS connection to Envoy Gateway control plane
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: envoy-gateway-system
+      toPorts:
+        - ports:
+            - port: "18000"
+              protocol: TCP
+            - port: "18001"
+              protocol: TCP
+"#
+    .to_string()
+}
+
 /// Generate a CiliumNetworkPolicy for the Lattice operator/agent.
 ///
 /// This policy restricts the operator to only communicate with:
