@@ -118,9 +118,6 @@ impl std::error::Error for SendError {}
 /// bootstrap (e.g., requires Cilium CRDs to exist first).
 #[derive(Clone, Debug, Default)]
 pub struct PostPivotManifests {
-    /// Flux manifests (GitRepository + Kustomization + credential Secret)
-    /// for syncing child cluster from parent's GitOps repo
-    pub flux_manifests: Vec<String>,
     /// CiliumNetworkPolicy for the operator (applied after Cilium CRDs exist)
     pub network_policy_yaml: Option<String>,
 }
@@ -258,8 +255,8 @@ impl AgentRegistry {
 
     /// Store manifests to send after pivot completes
     ///
-    /// These manifests (Flux config, CiliumNetworkPolicy) will be sent
-    /// to the agent via ApplyManifestsCommand after PivotComplete is received.
+    /// These manifests (CiliumNetworkPolicy) will be sent to the agent
+    /// via ApplyManifestsCommand after PivotComplete is received.
     /// Note: LatticeCluster CRD and instance are delivered via bootstrap webhook.
     pub fn set_post_pivot_manifests(&self, cluster_name: &str, manifests: PostPivotManifests) {
         info!(cluster = %cluster_name, "Stored post-pivot manifests");

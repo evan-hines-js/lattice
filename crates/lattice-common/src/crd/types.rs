@@ -319,32 +319,8 @@ pub struct NetworkPool {
 }
 
 // =============================================================================
-// GitOps Configuration
+// Secret Reference
 // =============================================================================
-
-/// GitOps configuration for child clusters
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct GitOpsSpec {
-    /// Git repository URL (SSH or HTTPS)
-    pub url: String,
-
-    /// Git branch to watch (default: "main")
-    #[serde(default = "default_git_branch")]
-    pub branch: String,
-
-    /// Base path in the repo for cluster configs (default: "clusters")
-    #[serde(default = "default_git_base_path")]
-    pub base_path: String,
-
-    /// Sync interval (e.g., "5m", "1h") - default: "5m"
-    #[serde(default = "default_git_interval")]
-    pub interval: String,
-
-    /// Reference to a Secret containing git credentials
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret_ref: Option<GitSecretRef>,
-}
 
 /// Reference to a Kubernetes Secret
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -357,35 +333,8 @@ pub struct SecretRef {
     pub namespace: String,
 }
 
-/// Reference to a Secret containing git credentials (alias for SecretRef)
-pub type GitSecretRef = SecretRef;
-
-fn default_git_branch() -> String {
-    "main".to_string()
-}
-
-fn default_git_base_path() -> String {
-    "clusters".to_string()
-}
-
-fn default_git_interval() -> String {
-    "5m".to_string()
-}
-
 fn default_lattice_namespace() -> String {
     "lattice-system".to_string()
-}
-
-impl GitOpsSpec {
-    /// Get the path for a specific cluster
-    pub fn cluster_path(&self, cluster_name: &str) -> String {
-        format!("{}/{}", self.base_path, cluster_name)
-    }
-
-    /// Check if credentials are configured
-    pub fn has_credentials(&self) -> bool {
-        self.secret_ref.is_some()
-    }
 }
 
 // =============================================================================
@@ -412,10 +361,6 @@ pub struct EndpointsSpec {
 
     /// Service exposure configuration
     pub service: ServiceSpec,
-
-    /// GitOps configuration for child clusters
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gitops: Option<GitOpsSpec>,
 }
 
 fn default_grpc_port() -> u16 {
@@ -945,7 +890,6 @@ mod tests {
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
-                gitops: None,
             };
             assert_eq!(
                 spec.grpc_endpoint(),
@@ -967,7 +911,6 @@ mod tests {
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
-                gitops: None,
             };
             assert_eq!(spec.grpc_endpoint(), None);
             assert_eq!(spec.bootstrap_endpoint(), None);

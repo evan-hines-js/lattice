@@ -115,29 +115,18 @@ async fn handle_agent_message_impl(
                     info!(cluster = %cluster_name, "Pivot complete persisted to cluster status");
                 }
 
-                // Send post-pivot manifests (Flux config + CiliumNetworkPolicy)
+                // Send post-pivot manifests (CiliumNetworkPolicy)
                 // Note: LatticeCluster CRD/instance already delivered via bootstrap webhook
                 if let Some(manifests) = registry.take_post_pivot_manifests(cluster_name) {
-                    let mut manifest_bytes = Vec::new();
-
-                    // Clone for restore on failure
-                    let flux_manifests = manifests.flux_manifests.clone();
                     let network_policy_yaml = manifests.network_policy_yaml.clone();
 
-                    // Add Flux manifests (GitRepository + Kustomization + credential Secret)
-                    for flux_yaml in &flux_manifests {
-                        manifest_bytes.push(flux_yaml.clone().into_bytes());
-                    }
                     // Add CiliumNetworkPolicy for lattice-operator (requires Cilium CRDs)
                     if let Some(ref policy) = network_policy_yaml {
-                        manifest_bytes.push(policy.clone().into_bytes());
-                    }
+                        let manifest_bytes = vec![policy.clone().into_bytes()];
 
-                    if !manifest_bytes.is_empty() {
                         info!(
                             cluster = %cluster_name,
                             manifest_count = manifest_bytes.len(),
-                            flux_count = flux_manifests.len(),
                             "Sending post-pivot ApplyManifestsCommand"
                         );
 
@@ -160,7 +149,6 @@ async fn handle_agent_message_impl(
                             registry.set_post_pivot_manifests(
                                 cluster_name,
                                 super::connection::PostPivotManifests {
-                                    flux_manifests,
                                     network_policy_yaml,
                                 },
                             );
@@ -392,19 +380,11 @@ mod tests {
 
                     // Send post-pivot manifests like the real handler does
                     if let Some(manifests) = registry.take_post_pivot_manifests(cluster_name) {
-                        let mut manifest_bytes = Vec::new();
-
-                        let flux_manifests = manifests.flux_manifests.clone();
                         let network_policy_yaml = manifests.network_policy_yaml.clone();
 
-                        for flux_yaml in &flux_manifests {
-                            manifest_bytes.push(flux_yaml.clone().into_bytes());
-                        }
                         if let Some(ref policy) = network_policy_yaml {
-                            manifest_bytes.push(policy.clone().into_bytes());
-                        }
+                            let manifest_bytes = vec![policy.clone().into_bytes()];
 
-                        if !manifest_bytes.is_empty() {
                             let apply_cmd = CellCommand {
                                 command_id: format!("post-pivot-apply-{}", cluster_name),
                                 command: Some(crate::proto::cell_command::Command::ApplyManifests(
@@ -418,7 +398,6 @@ mod tests {
                                 registry.set_post_pivot_manifests(
                                     cluster_name,
                                     crate::agent::connection::PostPivotManifests {
-                                        flux_manifests,
                                         network_policy_yaml,
                                     },
                                 );
@@ -786,7 +765,7 @@ mod tests {
     /// Story: When pivot completes successfully and post-pivot manifests exist,
     /// they should be sent to the agent via an ApplyManifestsCommand.
     ///
-    /// This tests post-pivot manifest delivery for Flux config and CiliumNetworkPolicy.
+    /// This tests post-pivot manifest delivery for CiliumNetworkPolicy.
     /// Note: LatticeCluster CRD/instance are now delivered via bootstrap webhook.
     #[tokio::test]
     async fn test_pivot_complete_sends_post_pivot_manifests() {
@@ -807,13 +786,11 @@ mod tests {
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
 
-        // Store post-pivot manifests (Flux config + network policy)
-        let flux_yaml = "apiVersion: source.toolkit.fluxcd.io/v1\nkind: GitRepository\n...";
+        // Store post-pivot manifests (network policy)
         let policy_yaml = "apiVersion: cilium.io/v2\nkind: CiliumNetworkPolicy\n...";
         registry.set_post_pivot_manifests(
             "self-managed-cluster",
             PostPivotManifests {
-                flux_manifests: vec![flux_yaml.to_string()],
                 network_policy_yaml: Some(policy_yaml.to_string()),
             },
         );
@@ -841,16 +818,10 @@ mod tests {
 
         match cmd.command {
             Some(crate::proto::cell_command::Command::ApplyManifests(apply)) => {
-                assert_eq!(
-                    apply.manifests.len(),
-                    2,
-                    "should include flux manifest and network policy"
-                );
+                assert_eq!(apply.manifests.len(), 1, "should include network policy");
                 // Verify manifest contents
-                let manifest1 = String::from_utf8(apply.manifests[0].clone()).unwrap();
-                let manifest2 = String::from_utf8(apply.manifests[1].clone()).unwrap();
-                assert!(manifest1.contains("GitRepository"));
-                assert!(manifest2.contains("CiliumNetworkPolicy"));
+                let manifest = String::from_utf8(apply.manifests[0].clone()).unwrap();
+                assert!(manifest.contains("CiliumNetworkPolicy"));
             }
             _ => panic!("expected ApplyManifestsCommand"),
         }
@@ -927,7 +898,6 @@ mod tests {
         registry.set_post_pivot_manifests(
             "failed-pivot-cluster",
             PostPivotManifests {
-                flux_manifests: vec!["flux-manifest".to_string()],
                 network_policy_yaml: Some("policy".to_string()),
             },
         );
@@ -988,7 +958,6 @@ mod tests {
         registry.set_post_pivot_manifests(
             "restore-test",
             PostPivotManifests {
-                flux_manifests: vec!["flux-yaml-content".to_string()],
                 network_policy_yaml: Some("policy-yaml-content".to_string()),
             },
         );
@@ -1015,14 +984,13 @@ mod tests {
 
         // Verify the restored manifests still have their content
         let manifests = registry.take_post_pivot_manifests("restore-test").unwrap();
-        assert_eq!(manifests.flux_manifests, vec!["flux-yaml-content"]);
         assert_eq!(
             manifests.network_policy_yaml,
             Some("policy-yaml-content".to_string())
         );
     }
 
-    /// Story: Post-pivot manifests with only network policy (no flux)
+    /// Story: Post-pivot manifests with only network policy
     /// should still be sent correctly.
     #[tokio::test]
     async fn test_pivot_complete_with_partial_manifests() {
@@ -1043,11 +1011,10 @@ mod tests {
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
 
-        // Store only network policy (no flux manifests)
+        // Store network policy
         registry.set_post_pivot_manifests(
             "partial-manifests",
             PostPivotManifests {
-                flux_manifests: Vec::new(),
                 network_policy_yaml: Some(
                     "apiVersion: cilium.io/v2\nkind: CiliumNetworkPolicy".to_string(),
                 ),
