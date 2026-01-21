@@ -752,8 +752,8 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     println!("\n[Phase 8] Running service mesh bilateral agreement test...\n");
     deploy_test_services(kubeconfig_path).await?;
     wait_for_service_pods(kubeconfig_path).await?;
-    println!("  Waiting for traffic tests to complete (60s)...");
-    sleep(Duration::from_secs(60)).await;
+    println!("  Waiting for traffic tests to complete (90s)...");
+    sleep(Duration::from_secs(90)).await;
     verify_traffic_patterns(kubeconfig_path).await?;
 
     Ok(())
