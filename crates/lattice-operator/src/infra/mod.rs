@@ -32,6 +32,6 @@ pub mod istio;
 pub use bootstrap::{generate_all as generate_infrastructure_manifests, InfrastructureConfig};
 pub use cilium::{
     cilium_version, generate_cilium_manifests, generate_default_deny,
-    generate_operator_network_policy, generate_ztunnel_allowlist,
+    generate_operator_network_policy, generate_waypoint_egress_policy, generate_ztunnel_allowlist,
 };
 pub use istio::{IstioConfig, IstioReconciler};

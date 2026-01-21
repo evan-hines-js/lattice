@@ -164,6 +164,7 @@ pub fn generate_istio(skip_cilium_policies: bool) -> Vec<String> {
     if !skip_cilium_policies {
         manifests.push(super::generate_ztunnel_allowlist());
         manifests.push(super::generate_default_deny());
+        manifests.push(super::generate_waypoint_egress_policy());
     }
 
     manifests
