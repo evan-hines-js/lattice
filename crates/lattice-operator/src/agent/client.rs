@@ -23,8 +23,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::bootstrap::{CsrRequest, CsrResponse};
 use crate::pivot::{
-    apply_distributed_secrets, patch_kubeconfig_for_self_management, retry_with_backoff,
-    AgentPivotHandler, RetryConfig,
+    apply_distributed_resources, patch_kubeconfig_for_self_management, retry_with_backoff,
+    AgentPivotHandler, DistributableResources, RetryConfig,
 };
 use crate::pki::AgentCertRequest;
 use crate::proto::lattice_agent_client::LatticeAgentClient;
@@ -776,6 +776,7 @@ impl AgentClient {
                 info!(
                     manifests = cmd.manifests.len(),
                     secrets = cmd.secrets.len(),
+                    configmaps = cmd.configmaps.len(),
                     namespace = %cmd.target_namespace,
                     "pivot started"
                 );
@@ -784,7 +785,10 @@ impl AgentClient {
                 // Spawn background task to import manifests
                 let target_namespace = cmd.target_namespace.clone();
                 let manifests = cmd.manifests.clone();
-                let secrets = cmd.secrets.clone();
+                let resources = DistributableResources {
+                    secrets: cmd.secrets.clone(),
+                    configmaps: cmd.configmaps.clone(),
+                };
                 let pivot_cluster_name = cmd.cluster_name.clone();
                 let agent_state_clone = agent_state.clone();
                 let message_tx_clone = message_tx.clone();
@@ -804,12 +808,16 @@ impl AgentClient {
                                 "CAPI resources imported successfully"
                             );
 
-                            // Apply distributed secrets to lattice-system namespace
-                            if !secrets.is_empty() {
-                                if let Err(e) = apply_distributed_secrets(&secrets).await {
-                                    warn!(error = %e, "Failed to apply distributed secrets (non-fatal)");
+                            // Apply distributed resources to lattice-system namespace
+                            if !resources.is_empty() {
+                                if let Err(e) = apply_distributed_resources(&resources).await {
+                                    warn!(error = %e, "Failed to apply distributed resources (non-fatal)");
                                 } else {
-                                    info!(count = secrets.len(), "Applied distributed secrets");
+                                    info!(
+                                        secrets = resources.secrets.len(),
+                                        configmaps = resources.configmaps.len(),
+                                        "Applied distributed resources"
+                                    );
                                 }
                             }
 
@@ -892,6 +900,40 @@ impl AgentClient {
                     })),
                 };
                 let _ = message_tx.send(msg).await;
+            }
+            Some(Command::SyncResources(cmd)) => {
+                info!(
+                    secrets = cmd.secrets.len(),
+                    configmaps = cmd.configmaps.len(),
+                    full_sync = cmd.full_sync,
+                    "Received sync resources command"
+                );
+
+                // Apply resources in background to not block command processing
+                let resources = DistributableResources {
+                    secrets: cmd.secrets.clone(),
+                    configmaps: cmd.configmaps.clone(),
+                };
+                let full_sync = cmd.full_sync;
+
+                tokio::spawn(async move {
+                    if let Err(e) = apply_distributed_resources(&resources).await {
+                        warn!(error = %e, "Failed to apply synced resources");
+                    } else {
+                        info!(
+                            secrets = resources.secrets.len(),
+                            configmaps = resources.configmaps.len(),
+                            full_sync,
+                            "Synced resources applied"
+                        );
+                    }
+
+                    // TODO: If full_sync, delete resources with lattice.io/distribute=true
+                    // that are not in the provided list
+                    if full_sync {
+                        debug!("Full sync requested - cleanup of removed resources not yet implemented");
+                    }
+                });
             }
             None => {
                 warn!(command_id = %command.command_id, "Received command with no payload");

@@ -172,6 +172,7 @@ message CellCommand {
     ApplyManifestsCommand apply_manifests = 2;
     StatusRequest status_request = 3;
     PivotManifestsCommand pivot_manifests = 4;
+    SyncDistributedResourcesCommand sync_resources = 5;
   }
 }
 
@@ -187,8 +188,21 @@ message PivotManifestsCommand {
   // Cluster name
   string cluster_name = 3;
   // Secrets to distribute (labeled lattice.io/distribute: "true")
-  // Applied to lattice-system namespace on child cluster
   repeated bytes secrets = 4;
+  // ConfigMaps to distribute (labeled lattice.io/distribute: "true")
+  repeated bytes configmaps = 5;
+}
+
+// Sync distributable resources (secrets + configmaps) to child cluster
+// Used for both watch-triggered updates and periodic reconciliation
+message SyncDistributedResourcesCommand {
+  // Secrets to apply (YAML, labeled lattice.io/distribute: "true")
+  repeated bytes secrets = 1;
+  // ConfigMaps to apply (YAML, labeled lattice.io/distribute: "true")
+  repeated bytes configmaps = 2;
+  // If true, delete resources not in this list (full sync)
+  // If false, only add/update (incremental)
+  bool full_sync = 3;
 }
 
 // Request current cluster status

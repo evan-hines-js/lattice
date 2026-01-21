@@ -528,6 +528,13 @@ impl<'a> PolicyCompiler<'a> {
         service: &ServiceNode,
         namespace: &str,
     ) -> Option<AuthorizationPolicy> {
+        let ports: Vec<String> = service.ports.values().map(|p| p.to_string()).collect();
+
+        // Don't generate policy if service has no ports - no traffic to authorize
+        if ports.is_empty() {
+            return None;
+        }
+
         let mut match_labels = BTreeMap::new();
         match_labels.insert("app.kubernetes.io/name".to_string(), service.name.clone());
 
@@ -545,7 +552,12 @@ impl<'a> PolicyCompiler<'a> {
                             principals: vec![self.waypoint_principal(namespace)],
                         },
                     }],
-                    to: vec![],
+                    to: vec![AuthorizationOperation {
+                        operation: OperationSpec {
+                            ports,
+                            hosts: vec![],
+                        },
+                    }],
                 }],
             },
         })

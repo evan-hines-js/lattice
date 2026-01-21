@@ -2191,37 +2191,6 @@ impl PivotOperationsImpl {
             client,
         }
     }
-
-    /// Fetch secrets labeled for distribution to child clusters
-    async fn fetch_distributable_secrets(&self) -> Result<Vec<Vec<u8>>, Error> {
-        use k8s_openapi::api::core::v1::Secret;
-        use kube::api::ListParams;
-
-        let api: Api<Secret> = Api::namespaced(self.client.clone(), "lattice-system");
-        let lp = ListParams::default().labels("lattice.io/distribute=true");
-
-        let secrets = api.list(&lp).await?;
-        let mut result = Vec::new();
-
-        for secret in secrets.items {
-            // Strip cluster-specific metadata before distribution
-            let mut clean_secret = secret.clone();
-            if let Some(ref mut meta) = clean_secret.metadata.resource_version {
-                *meta = String::new();
-            }
-            clean_secret.metadata.uid = None;
-            clean_secret.metadata.resource_version = None;
-            clean_secret.metadata.creation_timestamp = None;
-            clean_secret.metadata.managed_fields = None;
-
-            let yaml = serde_yaml::to_string(&clean_secret)
-                .map_err(|e| Error::serialization(format!("failed to serialize secret: {}", e)))?;
-            result.push(yaml.into_bytes());
-        }
-
-        debug!(count = result.len(), "fetched distributable secrets");
-        Ok(result)
-    }
 }
 
 #[async_trait]
@@ -2261,12 +2230,15 @@ impl PivotOperations for PivotOperationsImpl {
             .map_err(|e| Error::pivot(format!("clusterctl move --to-directory failed: {}", e)))?;
         let manifest_count = manifests.len();
 
-        // Fetch secrets labeled for distribution
-        let secrets = self.fetch_distributable_secrets().await.unwrap_or_else(|e| {
-            warn!(error = %e, "failed to fetch distributable secrets, continuing without");
-            Vec::new()
-        });
-        let secret_count = secrets.len();
+        // Fetch resources labeled for distribution
+        let resources = crate::pivot::fetch_distributable_resources(&self.client)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "failed to fetch distributable resources, continuing without");
+                crate::pivot::DistributableResources::default()
+            });
+        let secret_count = resources.secrets.len();
+        let configmap_count = resources.configmaps.len();
 
         // Send PivotManifestsCommand to agent
         let pivot_manifests_cmd = CellCommand {
@@ -2276,7 +2248,8 @@ impl PivotOperations for PivotOperationsImpl {
                     manifests,
                     target_namespace: target_namespace.to_string(),
                     cluster_name: cluster_name.to_string(),
-                    secrets,
+                    secrets: resources.secrets,
+                    configmaps: resources.configmaps,
                 },
             )),
         };
@@ -2286,7 +2259,7 @@ impl PivotOperations for PivotOperationsImpl {
             .await
             .map_err(|e| Error::pivot(format!("failed to send PivotManifestsCommand: {}", e)))?;
 
-        info!(cluster = %cluster_name, manifests = manifest_count, secrets = secret_count, "pivot triggered");
+        info!(cluster = %cluster_name, manifests = manifest_count, secrets = secret_count, configmaps = configmap_count, "pivot triggered");
         Ok(())
     }
 
@@ -3742,35 +3715,6 @@ mod tests {
                     assert!(message.contains("agent not connected"));
                 }
                 _ => panic!("Expected Pivot error"),
-            }
-        }
-
-        /// Story: fetch_distributable_secrets should return empty vec when no secrets labeled
-        #[tokio::test]
-        async fn story_fetch_distributable_secrets_empty_when_no_labeled_secrets() {
-            let Some(client) = test_client().await else {
-                eprintln!("Skipping test: no K8s cluster available");
-                return;
-            };
-            let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry, client);
-
-            // Most test clusters won't have lattice.io/distribute=true labeled secrets
-            let result = ops.fetch_distributable_secrets().await;
-            // Should succeed (possibly empty) or fail gracefully if lattice-system doesn't exist
-            match result {
-                Ok(secrets) => {
-                    // Just verify it returns a valid vec (could be empty)
-                    let _ = secrets.len();
-                }
-                Err(e) => {
-                    // If lattice-system namespace doesn't exist, that's fine for this test
-                    let err_msg = e.to_string();
-                    assert!(
-                        err_msg.contains("not found") || err_msg.contains("NotFound"),
-                        "Unexpected error: {}", err_msg
-                    );
-                }
             }
         }
 
