@@ -96,7 +96,8 @@ impl AwsProvider {
             .unwrap_or_else(|| "nlb".to_string());
         spec["controlPlaneLoadBalancer"] = serde_json::json!({
             "scheme": "internet-facing",
-            "loadBalancerType": lb_type
+            "loadBalancerType": lb_type,
+            "healthCheckProtocol": "HTTPS"
         });
 
         Ok(CAPIManifest::new(AWS_API_VERSION, "AWSCluster", name, &self.namespace).with_spec(spec))
