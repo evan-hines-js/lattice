@@ -8,8 +8,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::super::types::SecretRef;
-
 /// IPv4 pool configuration for CAPI IPAM
 ///
 /// Defines a range of IPv4 addresses for automatic allocation to cluster nodes.
@@ -212,13 +210,6 @@ pub struct ProxmoxConfig {
     /// kube-vip image (default: ghcr.io/kube-vip/kube-vip:v0.8.0)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kube_vip_image: Option<String>,
-
-    // ==========================================================================
-    // Credentials (Optional)
-    // ==========================================================================
-    /// Reference to Secret containing Proxmox API credentials
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret_ref: Option<SecretRef>,
 
     // ==========================================================================
     // IPv6 Configuration (Optional)

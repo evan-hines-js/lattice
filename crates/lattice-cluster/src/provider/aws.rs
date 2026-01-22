@@ -275,12 +275,16 @@ impl Provider for AwsProvider {
         Ok(())
     }
 
-    fn required_secrets(&self, _cluster: &LatticeCluster) -> Vec<(String, String)> {
-        // AWS uses IAM roles or static credentials in capa-manager-bootstrap-credentials
-        // For now, require the bootstrap credentials secret
+    fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
+        // Use credentials_secret_ref from ProviderSpec if set, otherwise use default
+        let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
         vec![(
-            "capa-manager-bootstrap-credentials".to_string(),
-            "capa-system".to_string(),
+            secret_ref
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "capa-manager-bootstrap-credentials".to_string()),
+            secret_ref
+                .map(|s| s.namespace.clone())
+                .unwrap_or_else(|| "capa-system".to_string()),
         )]
     }
 }
@@ -319,6 +323,7 @@ mod tests {
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
                     config: ProviderConfig::aws(test_aws_config()),
+                    credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
                     control_plane: 3,
@@ -381,6 +386,7 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::aws(test_aws_config()),
+            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&valid).await.is_ok());
 
@@ -391,6 +397,7 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::aws(test_aws_config()),
+            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&invalid).await.is_err());
     }
@@ -409,6 +416,7 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::aws(cfg),
+            credentials_secret_ref: None,
         };
 
         let result = provider.validate_spec(&spec).await;
@@ -431,6 +439,7 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::aws(cfg),
+            credentials_secret_ref: None,
         };
 
         let result = provider.validate_spec(&spec).await;

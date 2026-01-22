@@ -261,15 +261,31 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
     manifests
 }
 
+/// Label key for identifying provider credential secrets
+pub const CREDENTIAL_TYPE_LABEL: &str = "lattice.dev/credential-type";
+/// Label key for identifying the provider type
+pub const PROVIDER_LABEL: &str = "lattice.dev/provider";
+/// Label value for provider credentials
+pub const CREDENTIAL_TYPE_PROVIDER: &str = "provider";
+
 /// CAPMOX namespace where credentials Secret is stored
 pub const CAPMOX_NAMESPACE: &str = "capmox-system";
 /// CAPMOX Secret name containing Proxmox API credentials
 pub const CAPMOX_SECRET_NAME: &str = "proxmox-credentials";
 
+/// CAPA namespace where credentials Secret is stored
+pub const CAPA_NAMESPACE: &str = "capa-system";
+/// CAPA Secret name containing AWS API credentials
+pub const CAPA_SECRET_NAME: &str = "capa-manager-bootstrap-credentials";
+
 /// Generate CAPMOX credentials manifests (namespace + secret)
 ///
 /// Used by both CLI (for CRS) and webhook (for bootstrap response) to ensure
 /// consistent credential propagation through the cluster hierarchy.
+///
+/// The secret is labeled with:
+/// - `lattice.dev/credential-type: provider` - marks it for propagation
+/// - `lattice.dev/provider: proxmox` - identifies the provider type
 pub fn capmox_credentials_manifests(url: &str, token: &str, secret: &str) -> String {
     format!(
         r#"apiVersion: v1
@@ -283,12 +299,62 @@ metadata:
   name: {CAPMOX_SECRET_NAME}
   namespace: {CAPMOX_NAMESPACE}
   labels:
-    platform.ionos.com/secret-type: proxmox-credentials
+    {CREDENTIAL_TYPE_LABEL}: {CREDENTIAL_TYPE_PROVIDER}
+    {PROVIDER_LABEL}: proxmox
 type: Opaque
 stringData:
   url: "{url}"
   token: "{token}"
   secret: "{secret}""#
+    )
+}
+
+/// AWS credentials for CAPA provider
+pub struct AwsCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub region: String,
+    pub session_token: Option<String>,
+}
+
+/// Generate CAPA credentials manifests (namespace + secret)
+///
+/// The secret contains individual AWS credential fields which the operator
+/// uses to generate AWS_B64ENCODED_CREDENTIALS for clusterctl.
+///
+/// The secret is labeled with:
+/// - `lattice.dev/credential-type: provider` - marks it for propagation
+/// - `lattice.dev/provider: aws` - identifies the provider type
+pub fn capa_credentials_manifests(creds: &AwsCredentials) -> String {
+    let session_token_line = creds
+        .session_token
+        .as_ref()
+        .map(|t| format!("\n  AWS_SESSION_TOKEN: \"{}\"", t))
+        .unwrap_or_default();
+
+    format!(
+        r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {CAPA_NAMESPACE}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {CAPA_SECRET_NAME}
+  namespace: {CAPA_NAMESPACE}
+  labels:
+    {CREDENTIAL_TYPE_LABEL}: {CREDENTIAL_TYPE_PROVIDER}
+    {PROVIDER_LABEL}: aws
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "{access_key}"
+  AWS_SECRET_ACCESS_KEY: "{secret_key}"
+  AWS_REGION: "{region}"{session_token}"#,
+        access_key = creds.access_key_id,
+        secret_key = creds.secret_access_key,
+        region = creds.region,
+        session_token = session_token_line
     )
 }
 

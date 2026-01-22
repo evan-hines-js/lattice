@@ -121,13 +121,9 @@ impl InfraProviderInfo {
                 name: "aws",
                 version: env!("CAPA_VERSION").to_string(),
                 credentials_secret: Some(("capa-system", "capa-manager-bootstrap-credentials")),
-                // AWS uses IAM credentials or static credentials via env vars
-                credentials_env_map: &[
-                    ("AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
-                    ("AWS_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
-                    ("AWS_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
-                    ("AWS_REGION", "AWS_REGION"),
-                ],
+                // AWS generates AWS_B64ENCODED_CREDENTIALS from these fields in get_provider_env_vars
+                // credentials_env_map is not used directly - see generate_aws_b64_credentials()
+                credentials_env_map: &[],
                 extra_init_args: &[],
             }),
             ProviderType::Docker => Ok(Self {
@@ -176,6 +172,9 @@ pub struct CapiProviderConfig {
     pub rke2_version: String,
     /// Infrastructure provider info (name, version, credentials, etc.)
     pub infra_info: InfraProviderInfo,
+    /// Override for credentials secret location (from LatticeCluster spec)
+    /// If set, this takes precedence over the default in infra_info.
+    pub credentials_secret_override: Option<(String, String)>,
 }
 
 impl CapiProviderConfig {
@@ -192,7 +191,27 @@ impl CapiProviderConfig {
             capi_version,
             rke2_version: env!("RKE2_VERSION").to_string(),
             infra_info,
+            credentials_secret_override: None,
         })
+    }
+
+    /// Set credentials secret override from LatticeCluster spec
+    ///
+    /// When set, this takes precedence over the default secret location.
+    pub fn with_credentials_secret(mut self, namespace: String, name: String) -> Self {
+        self.credentials_secret_override = Some((namespace, name));
+        self
+    }
+
+    /// Get the effective credentials secret location
+    ///
+    /// Returns the override if set, otherwise the default from infra_info.
+    pub fn credentials_secret(&self) -> Option<(&str, &str)> {
+        if let Some((ref ns, ref name)) = self.credentials_secret_override {
+            Some((ns.as_str(), name.as_str()))
+        } else {
+            self.infra_info.credentials_secret
+        }
     }
 
     /// Create config with explicit versions (for testing)
@@ -230,6 +249,7 @@ impl CapiProviderConfig {
             capi_version,
             rke2_version,
             infra_info,
+            credentials_secret_override: None,
         })
     }
 
@@ -644,6 +664,12 @@ impl ClusterctlInstaller {
     ///
     /// Reads credentials from pre-created secrets so clusterctl can substitute
     /// template variables like ${PROXMOX_URL} correctly.
+    ///
+    /// Uses the credentials_secret_override if set (from LatticeCluster spec),
+    /// otherwise falls back to the default secret location for the provider.
+    ///
+    /// For AWS, this generates AWS_B64ENCODED_CREDENTIALS from individual credentials
+    /// since clusterctl requires the encoded profile format.
     async fn get_provider_env_vars(
         client: &KubeClient,
         config: &CapiProviderConfig,
@@ -651,25 +677,69 @@ impl ClusterctlInstaller {
         let mut env_vars = Vec::new();
         let info = &config.infra_info;
 
-        // Read credentials from secret if configured
-        if let Some((namespace, secret_name)) = info.credentials_secret {
+        // Use override if set, otherwise use default from infra_info
+        if let Some((namespace, secret_name)) = config.credentials_secret() {
             if let Ok(secret) = Self::read_secret(client, namespace, secret_name).await {
-                for (secret_key, env_key) in info.credentials_env_map {
-                    if let Some(value) = secret.get(*secret_key) {
-                        env_vars.push((env_key.to_string(), value.clone()));
+                // AWS requires special handling: generate AWS_B64ENCODED_CREDENTIALS
+                if config.infrastructure == ProviderType::Aws {
+                    if let Some(encoded) = Self::generate_aws_b64_credentials(&secret) {
+                        env_vars.push(("AWS_B64ENCODED_CREDENTIALS".to_string(), encoded));
+                        info!(
+                            provider = "aws",
+                            secret = format!("{}/{}", namespace, secret_name),
+                            "Generated AWS_B64ENCODED_CREDENTIALS for clusterctl"
+                        );
                     }
-                }
-                if !env_vars.is_empty() {
-                    info!(
-                        provider = info.name,
-                        credentials_count = env_vars.len(),
-                        "Loaded provider credentials for clusterctl"
-                    );
+                } else {
+                    // Other providers: direct mapping from secret keys to env vars
+                    for (secret_key, env_key) in info.credentials_env_map {
+                        if let Some(value) = secret.get(*secret_key) {
+                            env_vars.push((env_key.to_string(), value.clone()));
+                        }
+                    }
+                    if !env_vars.is_empty() {
+                        info!(
+                            provider = info.name,
+                            secret = format!("{}/{}", namespace, secret_name),
+                            credentials_count = env_vars.len(),
+                            "Loaded provider credentials for clusterctl"
+                        );
+                    }
                 }
             }
         }
 
         env_vars
+    }
+
+    /// Generate AWS_B64ENCODED_CREDENTIALS from individual AWS credentials
+    ///
+    /// clusterctl for AWS requires credentials in a base64-encoded INI profile format:
+    /// ```text
+    /// [default]
+    /// aws_access_key_id = <access_key>
+    /// aws_secret_access_key = <secret_key>
+    /// region = <region>
+    /// aws_session_token = <token>  # optional
+    /// ```
+    fn generate_aws_b64_credentials(secret: &HashMap<String, String>) -> Option<String> {
+        use base64::Engine;
+
+        let access_key = secret.get("AWS_ACCESS_KEY_ID")?;
+        let secret_key = secret.get("AWS_SECRET_ACCESS_KEY")?;
+        let region = secret.get("AWS_REGION")?;
+
+        let mut profile = format!(
+            "[default]\naws_access_key_id = {}\naws_secret_access_key = {}\nregion = {}",
+            access_key, secret_key, region
+        );
+
+        // Add session token if present (for temporary credentials)
+        if let Some(token) = secret.get("AWS_SESSION_TOKEN") {
+            profile.push_str(&format!("\naws_session_token = {}", token));
+        }
+
+        Some(base64::engine::general_purpose::STANDARD.encode(profile))
     }
 
     /// Read a secret and return its string data

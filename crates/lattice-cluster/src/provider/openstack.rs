@@ -275,7 +275,8 @@ impl Provider for OpenStackProvider {
     }
 
     fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
-        let secret_ref = Self::get_config(cluster).and_then(|c| c.secret_ref.as_ref());
+        // Use credentials_secret_ref from ProviderSpec if set, otherwise use default
+        let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
         vec![(
             secret_ref
                 .map(|s| s.name.clone())
@@ -322,6 +323,7 @@ mod tests {
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
                     config: ProviderConfig::openstack(test_openstack_config()),
+                    credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
                     control_plane: 3,
@@ -384,6 +386,7 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::openstack(test_openstack_config()),
+            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&valid).await.is_ok());
 
@@ -394,6 +397,7 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::openstack(test_openstack_config()),
+            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&invalid).await.is_err());
     }
@@ -412,6 +416,7 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::openstack(cfg),
+            credentials_secret_ref: None,
         };
 
         let result = provider.validate_spec(&spec).await;
