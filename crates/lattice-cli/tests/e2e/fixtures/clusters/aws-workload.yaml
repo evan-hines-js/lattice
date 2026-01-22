@@ -15,8 +15,8 @@ spec:
     config:
       aws:
         region: "us-west-2"
-        cpInstanceType: "m5.xlarge"
-        workerInstanceType: "m5.large"
+        cpInstanceType: "m7i-flex.large"
+        workerInstanceType: "t3.small"
         sshKeyName: "lattice-e2e"
         cpRootVolumeSizeGb: 50
         cpRootVolumeType: "gp3"
