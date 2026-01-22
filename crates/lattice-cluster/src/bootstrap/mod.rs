@@ -25,9 +25,11 @@
 //! 3. Cell signs CSR with CA and returns certificate
 //! 4. Agent uses cert for mTLS connection to gRPC server
 
+mod aws_addons;
 mod crs;
 mod token;
 
+pub use aws_addons::generate_all_aws_addon_crs;
 pub use crs::generate_crs_yaml_manifests;
 
 use std::collections::BTreeMap;

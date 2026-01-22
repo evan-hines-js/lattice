@@ -23,9 +23,9 @@ use tracing::info;
 use lattice_common::clusterctl::{export_for_pivot, import_from_manifests};
 use lattice_common::kube_utils;
 use lattice_operator::bootstrap::{
-    capa_credentials_manifests, capmox_credentials_manifests, generate_all_manifests,
-    generate_crs_yaml_manifests, AwsCredentials, DefaultManifestGenerator, ManifestConfig,
-    ManifestGenerator,
+    capa_credentials_manifests, capmox_credentials_manifests, generate_all_aws_addon_crs,
+    generate_all_manifests, generate_crs_yaml_manifests, AwsCredentials, DefaultManifestGenerator,
+    ManifestConfig, ManifestGenerator,
 };
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 use lattice_operator::fips;
@@ -295,6 +295,11 @@ impl Installer {
 
         info!("[Phase 2] Deploying Lattice operator...");
         self.deploy_lattice_operator(&bootstrap_client).await?;
+
+        if self.provider() == ProviderType::Aws {
+            info!("[Phase 2.5] Creating AWS addon ClusterResourceSets...");
+            self.create_aws_addon_crs(&bootstrap_client).await?;
+        }
 
         info!("[Phase 3] Creating management cluster LatticeCluster CR...");
         self.create_management_cluster_crd(&bootstrap_client)
@@ -792,6 +797,26 @@ nodes:
         kube_utils::apply_manifest_with_retry(client, &manifests, Duration::from_secs(30))
             .await
             .cmd_err()
+    }
+
+    /// Create AWS addon ClusterResourceSets (CCM + EBS CSI)
+    ///
+    /// The CCM sets correct providerID format (aws:///ZONE/INSTANCE_ID) on nodes,
+    /// which CAPI requires to match Machine to Node resources.
+    /// The EBS CSI driver provides persistent volume support.
+    async fn create_aws_addon_crs(&self, client: &Client) -> Result<()> {
+        let namespace = self.capi_namespace();
+        kube_utils::create_namespace(client, &namespace)
+            .await
+            .cmd_err()?;
+
+        let manifests = generate_all_aws_addon_crs(&namespace);
+        for manifest in &manifests {
+            kube_utils::apply_manifest(client, manifest).await.cmd_err()?;
+        }
+
+        info!("AWS addon ClusterResourceSets created (CCM + EBS CSI)");
+        Ok(())
     }
 
     async fn pivot_capi_resources(&self) -> Result<()> {
