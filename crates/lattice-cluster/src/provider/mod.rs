@@ -374,21 +374,33 @@ pub fn generate_bootstrap_config_template(config: &ClusterConfig) -> CAPIManifes
 /// Build kubelet extra args for kubeadm based on provider type
 ///
 /// All providers include the eviction-hard arg to disable aggressive eviction in test.
-/// Cloud providers (non-Docker) also include provider-id which uses cloud-init templating
-/// to set the node's providerID for CAPI machine-node linking.
+/// - AWS: Uses cloud-provider=external (AWS CCM sets providerID with correct format)
+/// - Other cloud providers: Manual provider-id via cloud-init templating
 fn build_kubelet_extra_args(provider_type: ProviderType) -> Vec<serde_json::Value> {
     let mut args = vec![serde_json::json!({
         "name": "eviction-hard",
         "value": "nodefs.available<0%,imagefs.available<0%"
     })];
 
-    // Cloud providers need provider-id for CAPI to link Machine to Node
-    // The value uses cloud-init templating to get the instance ID at boot time
-    if provider_type != ProviderType::Docker {
-        args.push(serde_json::json!({
-            "name": "provider-id",
-            "value": format!("{}://{{{{ ds.meta_data.instance_id }}}}", provider_type)
-        }));
+    match provider_type {
+        ProviderType::Docker => {
+            // Docker provider doesn't need cloud provider settings
+        }
+        ProviderType::Aws => {
+            // AWS uses external cloud provider - CCM sets providerID with correct format
+            // Format: aws:///ZONE/INSTANCE_ID (e.g., aws:///us-west-2a/i-1234567890abcdef0)
+            args.push(serde_json::json!({
+                "name": "cloud-provider",
+                "value": "external"
+            }));
+        }
+        _ => {
+            // Other cloud providers use manual provider-id via cloud-init templating
+            args.push(serde_json::json!({
+                "name": "provider-id",
+                "value": format!("{}://{{{{ ds.meta_data.instance_id }}}}", provider_type)
+            }));
+        }
     }
 
     args
@@ -397,17 +409,56 @@ fn build_kubelet_extra_args(provider_type: ProviderType) -> Vec<serde_json::Valu
 /// Build kubelet extra args for RKE2 based on provider type
 ///
 /// RKE2 uses a different format: list of "key=value" strings instead of {name, value} objects.
-/// Cloud providers (non-Docker) include provider-id for CAPI machine-node linking.
+/// - AWS: Uses cloud-provider=external (AWS CCM sets providerID with correct format)
+/// - Other cloud providers: Manual provider-id via cloud-init templating
 fn build_rke2_kubelet_extra_args(provider_type: ProviderType) -> Vec<String> {
     let mut args = vec!["eviction-hard=nodefs.available<0%,imagefs.available<0%".to_string()];
 
-    // Cloud providers need provider-id for CAPI to link Machine to Node
-    // The value uses cloud-init templating to get the instance ID at boot time
-    if provider_type != ProviderType::Docker {
-        args.push(format!(
-            "provider-id={}://{{{{ ds.meta_data.instance_id }}}}",
-            provider_type
-        ));
+    match provider_type {
+        ProviderType::Docker => {
+            // Docker provider doesn't need cloud provider settings
+        }
+        ProviderType::Aws => {
+            // AWS uses external cloud provider - CCM sets providerID with correct format
+            args.push("cloud-provider=external".to_string());
+        }
+        _ => {
+            // Other cloud providers use manual provider-id via cloud-init templating
+            args.push(format!(
+                "provider-id={}://{{{{ ds.meta_data.instance_id }}}}",
+                provider_type
+            ));
+        }
+    }
+
+    args
+}
+
+/// Check if a provider uses external cloud controller manager
+///
+/// Providers that use external CCM need `cloud-provider: external` in:
+/// - kubelet args (already handled in build_kubelet_extra_args)
+/// - API server extra args
+/// - Controller manager extra args
+fn uses_external_cloud_provider(provider_type: ProviderType) -> bool {
+    matches!(provider_type, ProviderType::Aws)
+}
+
+/// Build API server extra args based on provider type
+fn build_api_server_extra_args(provider_type: ProviderType) -> Vec<serde_json::Value> {
+    if uses_external_cloud_provider(provider_type) {
+        vec![serde_json::json!({"name": "cloud-provider", "value": "external"})]
+    } else {
+        vec![]
+    }
+}
+
+/// Build controller manager extra args based on provider type
+fn build_controller_manager_extra_args(provider_type: ProviderType) -> Vec<serde_json::Value> {
+    let mut args = vec![serde_json::json!({"name": "bind-address", "value": "0.0.0.0"})];
+
+    if uses_external_cloud_provider(provider_type) {
+        args.push(serde_json::json!({"name": "cloud-provider", "value": "external"}));
     }
 
     args
@@ -544,19 +595,20 @@ fn generate_kubeadm_control_plane(
 ) -> CAPIManifest {
     let cp_name = format!("{}-control-plane", config.name);
 
-    // Build kubelet extra args based on provider type
+    // Build extra args based on provider type
     let kubelet_extra_args = build_kubelet_extra_args(config.provider_type);
+    let api_server_extra_args = build_api_server_extra_args(config.provider_type);
+    let controller_manager_extra_args = build_controller_manager_extra_args(config.provider_type);
 
     // In CAPI v1beta2, extraArgs changed from map to list of {name, value} objects
     let mut kubeadm_config_spec = serde_json::json!({
         "clusterConfiguration": {
             "apiServer": {
-                "certSANs": cp_config.cert_sans
+                "certSANs": cp_config.cert_sans,
+                "extraArgs": api_server_extra_args
             },
             "controllerManager": {
-                "extraArgs": [
-                    {"name": "bind-address", "value": "0.0.0.0"}
-                ]
+                "extraArgs": controller_manager_extra_args
             },
             "scheduler": {
                 "extraArgs": [

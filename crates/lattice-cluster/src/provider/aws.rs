@@ -162,10 +162,13 @@ impl Provider for AwsProvider {
         let cfg =
             Self::get_config(cluster).ok_or_else(|| Error::validation("aws config required"))?;
 
-        // Build cluster config
+        // Build cluster config with AWS-specific labels for addon ClusterResourceSets
         let mut labels = BTreeMap::new();
         labels.insert("cluster.x-k8s.io/cluster-name".to_string(), name.clone());
         labels.insert("lattice.dev/cluster".to_string(), name.clone());
+        // AWS clusters use external cloud controller manager and EBS CSI driver
+        labels.insert("ccm".to_string(), "external".to_string());
+        labels.insert("csi".to_string(), "external".to_string());
 
         let config = ClusterConfig {
             name,
