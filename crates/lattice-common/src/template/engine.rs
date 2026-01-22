@@ -36,13 +36,27 @@ impl Default for TemplateEngine {
 
 impl TemplateEngine {
     /// Create a new template engine with Score-compatible syntax
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the minijinja syntax configuration fails to build.
+    /// This should never happen with the hardcoded delimiters used here, but if it does,
+    /// it indicates a fundamental incompatibility with the minijinja library version.
     pub fn new() -> Self {
+        // Build syntax config with Score-compatible delimiters.
+        // These are static, well-formed delimiters that should always succeed.
+        // If this fails, it indicates a minijinja API change or library bug.
         let syntax = SyntaxConfig::builder()
             .variable_delimiters("${", "}")
             .block_delimiters("{%", "%}")
             .comment_delimiters("{#", "#}")
             .build()
-            .expect("valid syntax config");
+            .unwrap_or_else(|e| {
+                // Log the error for debugging before panicking
+                eprintln!("FATAL: Failed to build template syntax config: {e}");
+                eprintln!("This indicates a minijinja library incompatibility.");
+                panic!("template engine initialization failed: {e}");
+            });
 
         let mut env = Environment::new();
         env.set_syntax(syntax);

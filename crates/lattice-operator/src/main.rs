@@ -852,11 +852,19 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     // Check if we need to connect as an agent to a parent cell
     // This happens when the cluster has a cellRef (was provisioned by a parent)
     // Connection happens in background with retries - don't block controller startup
+    // Agent task is cancelled when parent_servers shuts down
+    let agent_cancel_token = tokio_util::sync::CancellationToken::new();
     if let Some(ref cluster_name) = self_cluster_name {
         let client_clone = client.clone();
         let cluster_name_clone = cluster_name.clone();
+        let token = agent_cancel_token.clone();
         tokio::spawn(async move {
-            start_agent_with_retry(&client_clone, &cluster_name_clone, unpivot_rx).await;
+            tokio::select! {
+                _ = token.cancelled() => {
+                    tracing::info!("Agent connection loop cancelled during shutdown");
+                }
+                _ = start_agent_with_retry(&client_clone, &cluster_name_clone, unpivot_rx) => {}
+            }
         });
     }
 
@@ -1004,7 +1012,8 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         }
     }
 
-    // Shutdown cell servers (agent background task cancelled automatically)
+    // Cancel agent background task and shutdown cell servers
+    agent_cancel_token.cancel();
     parent_servers.shutdown().await;
 
     tracing::info!("Lattice controller shutting down");
@@ -1041,7 +1050,12 @@ async fn start_agent_with_retry(
                                 "Received unpivot request"
                             );
                             let result = handle_unpivot_request(&agent, &request).await;
-                            let _ = request.completion_tx.send(result);
+                            if request.completion_tx.send(result).is_err() {
+                                tracing::warn!(
+                                    cluster = %request.cluster_name,
+                                    "Unpivot completion receiver dropped - requester may have timed out"
+                                );
+                            }
                         }
                         // Periodic connection check
                         _ = tokio::time::sleep(Duration::from_secs(5)) => {
@@ -1064,9 +1078,16 @@ async fn start_agent_with_retry(
                 tracing::debug!("No parent cell configured, running as standalone");
                 // Still need to drain unpivot requests even if no parent
                 while let Some(request) = unpivot_rx.recv().await {
-                    let _ = request
+                    if request
                         .completion_tx
-                        .send(Err("No parent cell configured".to_string()));
+                        .send(Err("No parent cell configured".to_string()))
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            cluster = %request.cluster_name,
+                            "Unpivot completion receiver dropped while draining requests"
+                        );
+                    }
                 }
                 return;
             }

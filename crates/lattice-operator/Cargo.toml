@@ -50,6 +50,7 @@ rustls-pemfile.workspace = true
 base64.workspace = true
 pem.workspace = true
 tokio-stream.workspace = true
+tokio-util.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 clap.workspace = true
