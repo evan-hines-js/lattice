@@ -84,6 +84,12 @@ impl ProxmoxProvider {
                 ))
             })?;
 
+        // Use credentials_secret_ref from ProviderSpec if set, otherwise default
+        let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
+        let credentials_name = secret_ref
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "proxmox-credentials".to_string());
+
         let mut spec = serde_json::json!({
             "controlPlaneEndpoint": {
                 "host": &cfg.control_plane_endpoint,
@@ -97,8 +103,7 @@ impl ProxmoxProvider {
                 "gateway": &cfg.ipv4_pool.gateway
             },
             "credentialsRef": {
-                "name": cfg.secret_ref.as_ref().map(|s| s.name.clone())
-                    .unwrap_or_else(|| "proxmox-credentials".to_string()),
+                "name": credentials_name,
                 "namespace": &self.namespace
             }
         });
@@ -328,7 +333,8 @@ impl Provider for ProxmoxProvider {
     }
 
     fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
-        let secret_ref = Self::get_config(cluster).and_then(|c| c.secret_ref.as_ref());
+        // Use credentials_secret_ref from ProviderSpec if set, otherwise use default
+        let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
         vec![(
             secret_ref
                 .map(|s| s.name.clone())
@@ -375,7 +381,6 @@ mod tests {
             ssh_authorized_keys: None,
             virtual_ip_network_interface: None,
             kube_vip_image: None,
-            secret_ref: None,
             ipv6_pool: None,
             bridge: None,
             vlan: None,
@@ -405,6 +410,7 @@ mod tests {
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
                     config: ProviderConfig::proxmox(test_proxmox_config()),
+                    credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
                     control_plane: 3,
@@ -484,6 +490,7 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::proxmox(test_proxmox_config()),
+            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&valid).await.is_ok());
 
@@ -494,6 +501,7 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::proxmox(test_proxmox_config()),
+            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&invalid).await.is_err());
     }

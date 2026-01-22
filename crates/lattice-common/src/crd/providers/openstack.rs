@@ -8,8 +8,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::super::types::SecretRef;
-
 /// OpenStack provider configuration (CAPO)
 ///
 /// Configuration for provisioning clusters on OpenStack.
@@ -42,11 +40,6 @@ pub struct OpenStackConfig {
     /// Cloud name from clouds.yaml (default: "openstack")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud_name: Option<String>,
-
-    /// Reference to Secret containing clouds.yaml
-    /// Secret must have key "clouds.yaml" with OpenStack credentials
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret_ref: Option<SecretRef>,
 
     // ==========================================================================
     // Network Configuration (Optional)

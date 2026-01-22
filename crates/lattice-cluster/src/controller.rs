@@ -2535,6 +2535,7 @@ mod tests {
                         bootstrap: BootstrapProvider::default(),
                     },
                     config: ProviderConfig::docker(),
+                    credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
                     control_plane: 1,
@@ -3109,6 +3110,7 @@ mod tests {
                             bootstrap: BootstrapProvider::default(),
                         },
                         config: ProviderConfig::docker(),
+                        credentials_secret_ref: None,
                     },
                     nodes: NodeSpec {
                         control_plane: 1,
@@ -3696,6 +3698,8 @@ mod tests {
 
         /// Get a K8s client for tests, or skip if not available
         async fn test_client() -> Option<Client> {
+            // Install the crypto provider for rustls (ignore error if already installed)
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             Client::try_default().await.ok()
         }
 

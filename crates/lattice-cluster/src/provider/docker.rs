@@ -438,6 +438,7 @@ mod tests {
                         bootstrap: BootstrapProvider::default(),
                     },
                     config: ProviderConfig::docker(),
+                    credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
                     control_plane: 1,
@@ -870,6 +871,7 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
+                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -888,6 +890,7 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
+                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -906,6 +909,7 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
+                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -924,6 +928,7 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
+                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -946,6 +951,7 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
+                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -965,6 +971,7 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
+                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;

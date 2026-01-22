@@ -21,8 +21,9 @@ use tracing::info;
 use lattice_common::clusterctl::{export_for_pivot, import_from_manifests};
 use lattice_common::kube_utils;
 use lattice_operator::bootstrap::{
-    capmox_credentials_manifests, generate_all_manifests, generate_crs_yaml_manifests,
-    DefaultManifestGenerator, ManifestConfig, ManifestGenerator,
+    capa_credentials_manifests, capmox_credentials_manifests, generate_all_manifests,
+    generate_crs_yaml_manifests, AwsCredentials, DefaultManifestGenerator, ManifestConfig,
+    ManifestGenerator,
 };
 use lattice_operator::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 use lattice_operator::fips;
@@ -274,9 +275,16 @@ impl Installer {
 
         let bootstrap_client = self.bootstrap_client().await?;
 
-        if self.provider() == ProviderType::Proxmox {
-            info!("[Phase 1.5] Creating Proxmox credentials...");
-            self.create_capmox_credentials(&bootstrap_client).await?;
+        match self.provider() {
+            ProviderType::Proxmox => {
+                info!("[Phase 1.5] Creating Proxmox credentials...");
+                self.create_capmox_credentials(&bootstrap_client).await?;
+            }
+            ProviderType::Aws => {
+                info!("[Phase 1.5] Creating AWS credentials...");
+                self.create_capa_credentials(&bootstrap_client).await?;
+            }
+            _ => {}
         }
 
         info!("[Phase 2] Deploying Lattice operator...");
@@ -742,6 +750,38 @@ nodes:
         info!("PROXMOX_URL: {}", url);
 
         let manifests = capmox_credentials_manifests(&url, &token, &secret);
+        kube_utils::apply_manifest_with_retry(client, &manifests, Duration::from_secs(30))
+            .await
+            .cmd_err()
+    }
+
+    fn get_aws_credentials() -> Result<AwsCredentials> {
+        let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
+            Error::validation("AWS_ACCESS_KEY_ID environment variable required for AWS provider")
+        })?;
+        let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
+            Error::validation(
+                "AWS_SECRET_ACCESS_KEY environment variable required for AWS provider",
+            )
+        })?;
+        let region = std::env::var("AWS_REGION").map_err(|_| {
+            Error::validation("AWS_REGION environment variable required for AWS provider")
+        })?;
+        let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
+
+        Ok(AwsCredentials {
+            access_key_id,
+            secret_access_key,
+            region,
+            session_token,
+        })
+    }
+
+    async fn create_capa_credentials(&self, client: &Client) -> Result<()> {
+        let creds = Self::get_aws_credentials()?;
+        info!("AWS_REGION: {}", creds.region);
+
+        let manifests = capa_credentials_manifests(&creds);
         kube_utils::apply_manifest_with_retry(client, &manifests, Duration::from_secs(30))
             .await
             .cmd_err()
