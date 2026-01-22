@@ -483,7 +483,20 @@ pub async fn apply_manifest(client: &Client, manifest: &str) -> Result<(), Error
 /// Retry interval for apply operations
 const APPLY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Apply a manifest with retry
+/// Apply a multi-document YAML manifest (documents separated by ---)
+pub async fn apply_manifests(client: &Client, manifests: &str) -> Result<(), Error> {
+    for doc in manifests.split("\n---") {
+        let doc = doc.trim();
+        // Skip non-manifest documents (empty, comments-only, etc.)
+        if !doc.contains("apiVersion") {
+            continue;
+        }
+        apply_manifest(client, doc).await?;
+    }
+    Ok(())
+}
+
+/// Apply a manifest with retry (supports multi-document YAML)
 pub async fn apply_manifest_with_retry(
     client: &Client,
     manifest: &str,
@@ -500,7 +513,7 @@ pub async fn apply_manifest_with_retry(
             let client = client_clone.clone();
             let manifest = manifest_owned.clone();
             async move {
-                match apply_manifest(&client, &manifest).await {
+                match apply_manifests(&client, &manifest).await {
                     Ok(()) => Ok(true),
                     Err(e) => {
                         // Use debug! level since retries are expected behavior

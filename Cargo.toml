@@ -79,6 +79,7 @@ pem = "3.0"
 
 # Streaming
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # Async utilities
 async-trait = "0.1"

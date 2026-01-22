@@ -369,6 +369,9 @@ nodes:
 
         // Export kubeconfig
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
+        let bootstrap_kubeconfig_str = bootstrap_kubeconfig
+            .to_str()
+            .ok_or_else(|| Error::command_failed("bootstrap kubeconfig path contains invalid UTF-8"))?;
         let export_output = Command::new("kind")
             .args([
                 "export",
@@ -376,9 +379,7 @@ nodes:
                 "--name",
                 BOOTSTRAP_CLUSTER_NAME,
                 "--kubeconfig",
-                bootstrap_kubeconfig
-                    .to_str()
-                    .expect("bootstrap kubeconfig path should be valid UTF-8"),
+                bootstrap_kubeconfig_str,
             ])
             .output()
             .await?;
