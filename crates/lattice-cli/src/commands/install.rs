@@ -804,6 +804,9 @@ nodes:
     /// The CCM sets correct providerID format (aws:///ZONE/INSTANCE_ID) on nodes,
     /// which CAPI requires to match Machine to Node resources.
     /// The EBS CSI driver provides persistent volume support.
+    ///
+    /// Uses retry logic because the CAPI webhook may not be ready immediately
+    /// after CRDs are installed.
     async fn create_aws_addon_crs(&self, client: &Client) -> Result<()> {
         let namespace = self.capi_namespace();
         kube_utils::create_namespace(client, &namespace)
@@ -812,7 +815,9 @@ nodes:
 
         let manifests = generate_all_aws_addon_crs(&namespace);
         for manifest in &manifests {
-            kube_utils::apply_manifest(client, manifest).await.cmd_err()?;
+            kube_utils::apply_manifest_with_retry(client, manifest, Duration::from_secs(60))
+                .await
+                .cmd_err()?;
         }
 
         info!("AWS addon ClusterResourceSets created (CCM + EBS CSI)");

@@ -111,6 +111,21 @@ metadata:
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloud-controller-manager:apiserver-authentication-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - apiGroup: ""
+    kind: ServiceAccount
+    name: cloud-controller-manager
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: system:cloud-controller-manager
@@ -119,7 +134,8 @@ roleRef:
   kind: ClusterRole
   name: system:cloud-controller-manager
 subjects:
-  - kind: ServiceAccount
+  - apiGroup: ""
+    kind: ServiceAccount
     name: cloud-controller-manager
     namespace: kube-system
 ---
@@ -145,13 +161,16 @@ rules:
     verbs: ["list", "patch", "update", "watch"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
-    verbs: ["create"]
+    verbs: ["create", "get", "list", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list", "update", "watch"]
   - apiGroups: [""]
     resources: ["endpoints"]
     verbs: ["create", "get", "list", "watch", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["list", "watch"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["create", "get", "list", "watch", "update"]
@@ -185,6 +204,13 @@ spec:
           effect: NoSchedule
         - key: node-role.kubernetes.io/control-plane
           effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
       serviceAccountName: cloud-controller-manager
       containers:
         - name: aws-cloud-controller-manager
