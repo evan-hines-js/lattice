@@ -112,6 +112,31 @@ spec:
         .to_string()
     }
 
+    /// Generate waypoint default-deny AuthorizationPolicy
+    ///
+    /// This targets the istio-waypoint GatewayClass to ensure default-deny is
+    /// enforced AT the waypoint, not just at ztunnel. Without this, once
+    /// waypoint→target is allowed, the waypoint becomes permissive to all sources.
+    ///
+    /// See: https://github.com/istio/istio/issues/54696
+    pub fn generate_waypoint_default_deny() -> String {
+        r#"---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: waypoint-default-deny
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/managed-by: lattice
+spec:
+  targetRefs:
+  - kind: GatewayClass
+    group: gateway.networking.k8s.io
+    name: istio-waypoint
+"#
+        .to_string()
+    }
+
     /// Generate AuthorizationPolicy allowing traffic to lattice-operator
     ///
     /// The lattice-operator needs to accept connections from:

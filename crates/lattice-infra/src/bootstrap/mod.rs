@@ -159,6 +159,7 @@ pub fn generate_istio(skip_cilium_policies: bool) -> Vec<String> {
     // Istio policies
     manifests.push(IstioReconciler::generate_peer_authentication());
     manifests.push(IstioReconciler::generate_default_deny());
+    manifests.push(IstioReconciler::generate_waypoint_default_deny());
     manifests.push(IstioReconciler::generate_operator_allow_policy());
 
     // Cilium policies (skip on kind/bootstrap clusters)
