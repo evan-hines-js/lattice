@@ -1,0 +1,35 @@
+# AWS workload2 cluster for E2E hierarchy testing
+# Provisioned from workload1 to test deep cluster hierarchy
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: e2e-workload2
+spec:
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: kubeadm
+      certSANs:
+        - "127.0.0.1"
+        - "localhost"
+    config:
+      aws:
+        region: "us-west-2"
+        cpInstanceType: "m7i-flex.large"
+        workerInstanceType: "t3.small"
+        sshKeyName: "lattice-e2e"
+        cpRootVolumeSizeGb: 50
+        cpRootVolumeType: "gp3"
+        workerRootVolumeSizeGb: 50
+        workerRootVolumeType: "gp3"
+  nodes:
+    controlPlane: 1
+    workers: 1
+  parentConfig:
+    # host is auto-discovered from NLB
+    grpcPort: 50051
+    bootstrapPort: 8443
+    service:
+      type: LoadBalancer
+  environment: e2e-test
+  region: local

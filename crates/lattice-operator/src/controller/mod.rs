@@ -1,17 +1,16 @@
 //! Controller implementations for Lattice CRDs
 //!
-//! This module contains the reconciliation logic for all Lattice custom resources.
-//! Controllers follow the Kubernetes controller pattern with observe-diff-act loops.
+//! Re-exports controllers from lattice-cluster and lattice-service.
+//! lattice-operator starts and manages these controllers.
 
-mod cluster;
-mod service;
-
-pub use cluster::{
-    error_policy, reconcile, Context, ContextBuilder, KubeClient, KubeClientImpl, PivotOperations,
-    PivotOperationsImpl, UnpivotChannel, UnpivotRequest,
+// Re-export cluster controller
+pub use lattice_cluster::controller::{
+    error_policy, reconcile, CAPIClient, CAPIClientImpl, Context, ContextBuilder, KubeClient,
+    KubeClientImpl, PivotOperations, PivotOperationsImpl, UnpivotChannel, UnpivotRequest,
 };
 
-pub use service::{
+// Re-export service controller
+pub use lattice_service::controller::{
     cleanup_external_service, cleanup_service, error_policy as service_error_policy,
     error_policy_external, reconcile as service_reconcile, reconcile_external, ServiceContext,
     ServiceKubeClient, ServiceKubeClientImpl,
