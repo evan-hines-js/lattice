@@ -19,18 +19,20 @@ use tracing::{debug, error, info, instrument, warn};
 use mockall::automock;
 
 use lattice_common::clusterctl::unpause_capi_cluster;
+use lattice_common::crd::{
+    BootstrapProvider, ClusterPhase, Condition, ConditionStatus, LatticeCluster,
+    LatticeClusterStatus,
+};
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
+use lattice_common::Error;
+use lattice_infra::generate_operator_network_policy;
+use lattice_proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand};
 
 use crate::agent::connection::SharedAgentRegistry;
 use crate::bootstrap::DefaultManifestGenerator;
 use crate::capi::{ensure_capi_installed, CapiInstaller, CapiProviderConfig};
 use crate::parent::ParentServers;
 use crate::provider::{create_provider, CAPIManifest};
-use lattice_common::crd::{
-    BootstrapProvider, ClusterPhase, Condition, ConditionStatus, LatticeCluster,
-    LatticeClusterStatus,
-};
-use lattice_common::Error;
-use lattice_proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand};
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
 ///
@@ -111,6 +113,12 @@ pub trait KubeClient: Send + Sync {
 
     /// Delete a LatticeCluster by name
     async fn delete_cluster(&self, name: &str) -> Result<(), Error>;
+
+    /// Get the cell host from the LoadBalancer Service status
+    ///
+    /// Returns the hostname or IP from the lattice-cell Service's LoadBalancer ingress.
+    /// Returns None if the Service doesn't exist or has no ingress assigned yet.
+    async fn get_cell_host(&self) -> Result<Option<String>, Error>;
 }
 
 /// Trait abstracting CAPI resource operations
@@ -171,6 +179,9 @@ pub trait CAPIClient: Send + Sync {
 
     /// Delete a CAPI Cluster resource
     async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
+
+    /// Check if a CAPI Cluster resource exists
+    async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
 
     /// Get the underlying kube Client for advanced operations
     fn kube_client(&self) -> Client;
@@ -472,6 +483,7 @@ impl KubeClient for KubeClientImpl {
             metadata: ObjectMeta {
                 name: Some("lattice-cell".to_string()),
                 namespace: Some("lattice-system".to_string()),
+                labels: Some(labels.clone()),
                 ..Default::default()
             },
             spec: Some(ServiceSpec {
@@ -603,6 +615,27 @@ impl KubeClient for KubeClientImpl {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn get_cell_host(&self) -> Result<Option<String>, Error> {
+        use k8s_openapi::api::core::v1::Service;
+
+        let api: Api<Service> = Api::namespaced(self.client.clone(), "lattice-system");
+        let svc = match api.get("lattice-cell").await {
+            Ok(s) => s,
+            Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+
+        // Get host from LoadBalancer ingress status
+        let host = svc
+            .status
+            .and_then(|s| s.load_balancer)
+            .and_then(|lb| lb.ingress)
+            .and_then(|ingress| ingress.first().cloned())
+            .and_then(|first| first.hostname.or(first.ip));
+
+        Ok(host)
     }
 }
 
@@ -953,6 +986,15 @@ impl CAPIClient for CAPIClientImpl {
                 debug!(cluster = %cluster_name, "CAPI Cluster not found (already deleted)");
                 Ok(())
             }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error> {
+        let api = self.capi_cluster_api(namespace);
+        match api.get(cluster_name).await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
             Err(e) => Err(e.into()),
         }
     }
@@ -1586,8 +1628,8 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 let cluster_name = name.clone();
                 let namespace = capi_namespace.clone();
                 let patch_result =
-                    lattice_common::retry::retry_with_backoff(
-                        &lattice_common::retry::RetryConfig::with_max_attempts(10),
+                    retry_with_backoff(
+                        &RetryConfig::with_max_attempts(10),
                         "patch_kubeconfig_for_self_management",
                         || {
                             let cn = cluster_name.clone();
@@ -1972,17 +2014,21 @@ async fn generate_capi_manifests(
 
         let ca_cert = bootstrap_state.ca_cert_pem().to_string();
 
-        // Cell endpoint and bootstrap endpoint require host to be known.
-        // For cloud providers, the host must be discovered from the LB before provisioning children.
-        let cell_endpoint = endpoints.endpoint().ok_or_else(|| {
+        // Get the cell host from the LoadBalancer Service (source of truth for both
+        // cloud providers and on-prem with Cilium L2).
+        let cell_host = ctx.kube.get_cell_host().await?.ok_or_else(|| {
             Error::validation(
-                "endpoints.host must be set to provision child clusters. \
-                 For cloud providers, wait for the LB IP to be discovered.",
+                "cell Service has no LoadBalancer ingress yet. \
+                 Wait for the cloud provider or Cilium L2 to assign an address.",
             )
         })?;
-        let bootstrap_endpoint = endpoints.bootstrap_endpoint().ok_or_else(|| {
-            Error::validation("endpoints.host must be set for bootstrap endpoint")
-        })?;
+
+        // Build endpoints using the discovered host and configured ports
+        let cell_endpoint = format!(
+            "{}:{}:{}",
+            cell_host, endpoints.bootstrap_port, endpoints.grpc_port
+        );
+        let bootstrap_endpoint = format!("https://{}:{}", cell_host, endpoints.bootstrap_port);
 
         // Serialize the LatticeCluster CRD to pass to workload cluster
         let cluster_manifest =
@@ -2023,11 +2069,11 @@ async fn generate_capi_manifests(
 
 /// Generate CiliumNetworkPolicy for child cluster's operator
 ///
-/// Reads the parent cluster's endpoint config and generates a network policy
+/// Gets the cell host from the LoadBalancer Service and generates a network policy
 /// that allows the child's operator to communicate with its parent cell.
 /// This is applied post-pivot when Cilium CRDs are available.
 async fn generate_network_policy_for_child(ctx: &Context) -> Result<Option<String>, Error> {
-    // Get parent cluster's endpoint
+    // Get parent cluster's endpoint config for the gRPC port
     let Some(ref self_name) = ctx.self_cluster_name else {
         return Ok(None);
     };
@@ -2040,28 +2086,15 @@ async fn generate_network_policy_for_child(ctx: &Context) -> Result<Option<Strin
         return Ok(None);
     };
 
-    // Parse cell_endpoint: host:http_port:grpc_port
-    let Some(cell_endpoint) = endpoints.endpoint() else {
-        // Host not yet known (cloud provider waiting for LB IP)
+    // Get the cell host from the LoadBalancer Service
+    let Some(cell_host) = ctx.kube.get_cell_host().await? else {
+        // Host not yet available from Service
         return Ok(None);
     };
-    let parts: Vec<&str> = cell_endpoint.split(':').collect();
-    if parts.len() != 3 {
-        warn!(
-            cell_endpoint = %cell_endpoint,
-            "Invalid cell_endpoint format, expected host:http_port:grpc_port"
-        );
-        return Ok(None);
-    }
 
-    let parent_host = parts[0];
-    let grpc_port: u16 = parts[2].parse().map_err(|_| {
-        Error::validation(format!("Invalid gRPC port in cell_endpoint: {}", parts[2]))
-    })?;
-
-    Ok(Some(lattice_infra::generate_operator_network_policy(
-        Some(parent_host),
-        grpc_port,
+    Ok(Some(generate_operator_network_policy(
+        Some(&cell_host),
+        endpoints.grpc_port,
     )))
 }
 
@@ -2300,9 +2333,13 @@ impl PivotOperations for PivotOperationsImpl {
 
 /// Handle cleanup during unpivot
 ///
-/// Called after CAPI manifests have been imported from the child and unpaused.
-/// Waits for CAPI to reconcile the imported resources, then deletes
-/// the CAPI Cluster to trigger infrastructure cleanup.
+/// This follows the same logic as `lattice uninstall`:
+/// 1. Wait for CAPI to reconcile (InfrastructureReady)
+/// 2. Delete CAPI Cluster to trigger infrastructure cleanup
+/// 3. Wait for CAPI Cluster deletion (infrastructure cleanup complete)
+/// 4. Delete LatticeCluster
+///
+/// Uses requeue pattern for non-blocking waits.
 async fn handle_unpivot_cleanup(
     cluster: &LatticeCluster,
     ctx: &Context,
@@ -2311,29 +2348,39 @@ async fn handle_unpivot_cleanup(
 ) -> Result<Action, Error> {
     let name = cluster.name_any();
 
-    // Check if CAPI has reconciled and is ready
-    let capi_ready = ctx
+    // Check if CAPI Cluster still exists
+    let capi_exists = ctx
         .capi
-        .is_infrastructure_ready(&name, capi_namespace, bootstrap)
+        .capi_cluster_exists(&name, capi_namespace)
         .await
-        .unwrap_or(false);
+        .unwrap_or(true); // Assume exists on error to avoid premature deletion
 
-    if !capi_ready {
-        debug!(cluster = %name, "CAPI not ready yet, waiting for reconciliation");
-        return Ok(Action::requeue(Duration::from_secs(5)));
+    if capi_exists {
+        // Step 1: Wait for CAPI to reconcile (InfrastructureReady)
+        let capi_ready = ctx
+            .capi
+            .is_infrastructure_ready(&name, capi_namespace, bootstrap)
+            .await
+            .unwrap_or(false);
+
+        if !capi_ready {
+            debug!(cluster = %name, "CAPI not ready yet, waiting for reconciliation");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+
+        // Step 2: Delete CAPI Cluster to trigger infrastructure cleanup
+        info!(cluster = %name, "CAPI ready, deleting Cluster to trigger infrastructure cleanup");
+        if let Err(e) = ctx.capi.delete_capi_cluster(&name, capi_namespace).await {
+            warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster");
+        }
+
+        // Step 3: Requeue to wait for CAPI Cluster deletion
+        info!(cluster = %name, "Waiting for infrastructure cleanup...");
+        return Ok(Action::requeue(Duration::from_secs(10)));
     }
 
-    info!(cluster = %name, "CAPI ready, deleting Cluster to trigger infrastructure cleanup");
-
-    // Delete the CAPI Cluster resource to trigger infrastructure cleanup
-    if let Err(e) = ctx.capi.delete_capi_cluster(&name, capi_namespace).await {
-        warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster");
-    } else {
-        info!(cluster = %name, "CAPI Cluster deleted, infrastructure cleanup will proceed");
-    }
-
-    // Delete the LatticeCluster (status.unpivot_pending is cleared with deletion)
-    info!(cluster = %name, "Deleting LatticeCluster");
+    // Step 4: CAPI Cluster is gone (infrastructure cleanup complete), delete LatticeCluster
+    info!(cluster = %name, "Infrastructure cleanup complete, deleting LatticeCluster");
     if let Err(e) = ctx.kube.delete_cluster(&name).await {
         warn!(cluster = %name, error = %e, "Failed to delete LatticeCluster");
     }
@@ -2450,50 +2497,16 @@ async fn handle_deletion(
     }
 
     // Wait for completion (with timeout)
-    match tokio::time::timeout(Duration::from_secs(300), completion_rx).await {
-        Ok(Ok(Ok(()))) => {
-            info!(cluster = %name, "Unpivot completed successfully, removing finalizer");
-
-            // Set UnpivotComplete condition
-            let status = cluster
-                .status
-                .clone()
-                .unwrap_or_default()
-                .condition(Condition::new(
-                    "UnpivotComplete",
-                    ConditionStatus::True,
-                    "Success",
-                    "CAPI resources exported to parent",
-                ));
-            ctx.kube.patch_status(&name, &status).await?;
-
-            remove_finalizer(cluster, ctx).await?;
-            Ok(Action::await_change())
-        }
-        Ok(Ok(Err(e))) => {
-            error!(cluster = %name, error = %e, "Unpivot failed");
-
-            let status = cluster
-                .status
-                .clone()
-                .unwrap_or_default()
-                .condition(Condition::new(
-                    "UnpivotComplete",
-                    ConditionStatus::False,
-                    "Failed",
-                    &e,
-                ));
-            ctx.kube.patch_status(&name, &status).await?;
-
-            Ok(Action::requeue(Duration::from_secs(30)))
-        }
+    // Flatten: timeout -> oneshot recv -> unpivot result
+    let result = tokio::time::timeout(Duration::from_secs(300), completion_rx).await;
+    let unpivot_result = match result {
+        Ok(Ok(inner)) => inner,
         Ok(Err(_)) => {
             error!(cluster = %name, "Unpivot completion channel closed unexpectedly");
-            Ok(Action::requeue(Duration::from_secs(30)))
+            return Ok(Action::requeue(Duration::from_secs(30)));
         }
         Err(_) => {
             error!(cluster = %name, "Unpivot timed out after 5 minutes");
-
             let status = cluster
                 .status
                 .clone()
@@ -2505,8 +2518,41 @@ async fn handle_deletion(
                     "Unpivot timed out after 5 minutes",
                 ));
             ctx.kube.patch_status(&name, &status).await?;
+            return Ok(Action::requeue(Duration::from_secs(60)));
+        }
+    };
 
-            Ok(Action::requeue(Duration::from_secs(60)))
+    match unpivot_result {
+        Ok(()) => {
+            info!(cluster = %name, "Unpivot completed successfully, removing finalizer");
+            let status = cluster
+                .status
+                .clone()
+                .unwrap_or_default()
+                .condition(Condition::new(
+                    "UnpivotComplete",
+                    ConditionStatus::True,
+                    "Success",
+                    "CAPI resources exported to parent",
+                ));
+            ctx.kube.patch_status(&name, &status).await?;
+            remove_finalizer(cluster, ctx).await?;
+            Ok(Action::await_change())
+        }
+        Err(e) => {
+            error!(cluster = %name, error = %e, "Unpivot failed");
+            let status = cluster
+                .status
+                .clone()
+                .unwrap_or_default()
+                .condition(Condition::new(
+                    "UnpivotComplete",
+                    ConditionStatus::False,
+                    "Failed",
+                    &e,
+                ));
+            ctx.kube.patch_status(&name, &status).await?;
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
     }
 }
@@ -2514,11 +2560,24 @@ async fn handle_deletion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capi::CapiProviderConfig;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
         BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
         ProviderConfig, ProviderSpec, ServiceSpec,
     };
+    use mockall::mock;
+
+    // Local mock for CapiInstaller since the mockall-generated mock is only
+    // available within the lattice-cluster crate's test configuration
+    mock! {
+        pub CapiInstaller {}
+
+        #[async_trait::async_trait]
+        impl CapiInstaller for CapiInstaller {
+            async fn ensure(&self, config: &CapiProviderConfig) -> Result<(), Error>;
+        }
+    }
 
     /// Create a sample LatticeCluster for testing
     fn sample_cluster(name: &str) -> LatticeCluster {
@@ -2643,7 +2702,7 @@ mod tests {
     /// - Status capture allows verifying phase transitions without tight coupling
     mod cluster_lifecycle_flow {
         use super::*;
-        use crate::capi::MockCapiInstaller;
+
         use std::sync::{Arc as StdArc, Mutex};
 
         /// Captured status update for verification without coupling to mock internals.
@@ -2962,7 +3021,7 @@ mod tests {
 
     mod error_policy_tests {
         use super::*;
-        use crate::capi::MockCapiInstaller;
+
         use rstest::rstest;
 
         fn mock_context_no_updates() -> Arc<Context> {
@@ -2999,7 +3058,6 @@ mod tests {
     /// These tests focus on error propagation which is a separate concern.
     mod status_error_handling {
         use super::*;
-        use crate::capi::MockCapiInstaller;
 
         /// Story: When the Kubernetes API fails during status update, the error
         /// should propagate up so the controller can retry the reconciliation.
@@ -3094,7 +3152,6 @@ mod tests {
 
     mod generate_manifests_tests {
         use super::*;
-        use crate::capi::MockCapiInstaller;
 
         fn cluster_with_docker_config(name: &str) -> LatticeCluster {
             LatticeCluster {
@@ -3265,7 +3322,6 @@ mod tests {
     /// infrastructure is ready based on the Cluster resource status.
     mod infrastructure_ready_detection {
         use super::*;
-        use crate::capi::MockCapiInstaller;
 
         /// Story: When CAPI reports infrastructure NOT ready, the controller
         /// should continue polling with the Provisioning phase requeue interval.
@@ -3396,7 +3452,7 @@ mod tests {
     /// clusterctl init is always called (it's idempotent).
     mod capi_installation_flow {
         use super::*;
-        use crate::capi::MockCapiInstaller;
+
         use std::sync::{Arc as StdArc, Mutex};
 
         /// Story: Controller always calls clusterctl init before provisioning
@@ -3474,7 +3530,7 @@ mod tests {
     /// message, and conditions as the cluster progresses through its lifecycle.
     mod status_update_content {
         use super::*;
-        use crate::capi::MockCapiInstaller;
+
         use std::sync::{Arc as StdArc, Mutex};
 
         /// Story: When transitioning to Provisioning, the status should include
@@ -3623,7 +3679,6 @@ mod tests {
     /// types of errors and returns appropriate requeue actions.
     mod error_policy_behavior {
         use super::*;
-        use crate::capi::MockCapiInstaller;
 
         fn mock_context_minimal() -> Arc<Context> {
             Arc::new(Context::for_testing(

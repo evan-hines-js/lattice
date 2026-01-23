@@ -344,8 +344,9 @@ async fn run_provider_e2e() -> Result<(), String> {
         workload_provider, workload_bootstrap
     );
     if let Some((_, ref wl2)) = workload2_config {
+        let wl2_provider: InfraProvider = wl2.spec.provider.provider_type().into();
         let wl2_bootstrap = &wl2.spec.provider.kubernetes.bootstrap;
-        println!("  Workload2:   {} + {:?}", workload_provider, wl2_bootstrap);
+        println!("  Workload2:   {} + {:?}", wl2_provider, wl2_bootstrap);
     }
     println!();
 

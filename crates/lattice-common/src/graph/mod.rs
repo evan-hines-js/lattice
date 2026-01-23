@@ -37,8 +37,10 @@ pub struct ServiceNode {
     pub type_: ServiceType,
     /// Services this node depends on (outbound)
     pub dependencies: Vec<String>,
-    /// Services allowed to call this node (inbound)
-    pub allowed_callers: Vec<String>,
+    /// Services allowed to call this node (inbound) - HashSet for O(1) lookup
+    pub allowed_callers: HashSet<String>,
+    /// Whether this service allows all callers (wildcard "*")
+    pub allows_all: bool,
     /// Container image (for local services)
     pub image: Option<String>,
     /// Exposed ports: name -> port
@@ -52,15 +54,14 @@ pub struct ServiceNode {
 impl ServiceNode {
     /// Create a new local service node from a LatticeService spec
     pub fn from_service_spec(name: &str, spec: &LatticeServiceSpec) -> Self {
+        let callers = spec.allowed_callers();
+        let allows_all = callers.iter().any(|c| *c == "*");
         Self {
             name: name.to_string(),
             type_: ServiceType::Local,
             dependencies: spec.dependencies().into_iter().map(String::from).collect(),
-            allowed_callers: spec
-                .allowed_callers()
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            allowed_callers: callers.into_iter().map(String::from).collect(),
+            allows_all,
             image: spec.primary_image().map(String::from),
             ports: spec
                 .ports()
@@ -74,11 +75,13 @@ impl ServiceNode {
 
     /// Create a new external service node from a LatticeExternalService spec
     pub fn from_external_spec(name: &str, spec: &LatticeExternalServiceSpec) -> Self {
+        let allows_all = spec.allowed_requesters.iter().any(|c| c == "*");
         Self {
             name: name.to_string(),
             type_: ServiceType::External,
             dependencies: vec![],
-            allowed_callers: spec.allowed_requesters.clone(),
+            allowed_callers: spec.allowed_requesters.iter().cloned().collect(),
+            allows_all,
             image: None,
             ports: BTreeMap::new(),
             endpoints: spec.valid_endpoints(),
@@ -92,7 +95,8 @@ impl ServiceNode {
             name: name.to_string(),
             type_: ServiceType::Unknown,
             dependencies: vec![],
-            allowed_callers: vec![],
+            allowed_callers: HashSet::new(),
+            allows_all: false,
             image: None,
             ports: BTreeMap::new(),
             endpoints: BTreeMap::new(),
@@ -100,9 +104,9 @@ impl ServiceNode {
         }
     }
 
-    /// Check if this service allows a specific caller
+    /// Check if this service allows a specific caller (O(1) lookup)
     pub fn allows(&self, caller: &str) -> bool {
-        self.allowed_callers.iter().any(|c| c == "*" || c == caller)
+        self.allows_all || self.allowed_callers.contains(caller)
     }
 }
 

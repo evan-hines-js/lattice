@@ -600,13 +600,19 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
         };
 
         let ca_cert = parent_servers.ca().ca_cert_pem().to_string();
-        let cell_endpoint = match endpoints.endpoint() {
-            Some(e) => e,
+
+        // Get the cell host from the LoadBalancer Service
+        let cell_host = match discover_cell_host(client).await {
+            Some(h) => h,
             None => {
-                tracing::warn!(cluster = %name, "Cell endpoint host not set, cannot re-register");
+                tracing::warn!(cluster = %name, "Cell host not available from Service, cannot re-register");
                 continue;
             }
         };
+        let cell_endpoint = format!(
+            "{}:{}:{}",
+            cell_host, endpoints.bootstrap_port, endpoints.grpc_port
+        );
 
         // Serialize cluster manifest for export
         let cluster_manifest = match serde_json::to_string(&cluster.for_export()) {
@@ -712,53 +718,26 @@ async fn ensure_cell_service_exists(
     Ok(())
 }
 
-/// Discover the cell service endpoint for TLS certificate SANs.
+/// Discover the cell service host from the LoadBalancer Service.
 ///
 /// The cell service is the LoadBalancer that exposes the Lattice operator's
 /// gRPC and bootstrap endpoints. Child clusters connect to this endpoint.
 ///
-/// Checks two sources in order:
-/// 1. LatticeCluster's spec.parent_config.host (explicit config, for on-prem/static IPs)
-/// 2. Cell Service's status.loadBalancer.ingress (cloud provider assigned hostname/IP)
-///
-/// Returns None if neither source has the endpoint yet.
-async fn discover_cell_endpoint(client: &Client, cluster_name: &str) -> Option<String> {
+/// Returns the host (hostname or IP) from the Service's LoadBalancer status,
+/// or None if not yet assigned by the cloud provider.
+async fn discover_cell_host(client: &Client) -> Option<String> {
     use k8s_openapi::api::core::v1::Service;
 
-    // First, check LatticeCluster's parent_config.host (explicit config)
-    let lattice_clusters: Api<lattice_operator::crd::LatticeCluster> = Api::all(client.clone());
-    if let Ok(cluster) = lattice_clusters.get(cluster_name).await {
-        if let Some(host) = cluster
-            .spec
-            .parent_config
-            .as_ref()
-            .and_then(|pc| pc.host.as_ref())
-        {
-            return Some(host.clone());
-        }
-    }
-
-    // Fall back to cell Service's LoadBalancer ingress (cloud provider assigned)
     let services: Api<Service> = Api::namespaced(client.clone(), "lattice-system");
-    if let Ok(svc) = services.get("lattice-cell").await {
-        if let Some(status) = svc.status {
-            if let Some(lb) = status.load_balancer {
-                if let Some(ingress) = lb.ingress {
-                    if let Some(first) = ingress.first() {
-                        // Prefer hostname (AWS ELB) over IP
-                        if let Some(hostname) = &first.hostname {
-                            return Some(hostname.clone());
-                        }
-                        if let Some(ip) = &first.ip {
-                            return Some(ip.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let svc = services.get("lattice-cell").await.ok()?;
+    let ingress = svc.status?.load_balancer?.ingress?;
+    let first = ingress.first()?;
 
-    None
+    // Prefer hostname (AWS ELB) over IP
+    first
+        .hostname
+        .clone()
+        .or_else(|| first.ip.clone())
 }
 
 /// Run in controller mode - manages clusters and/or services
@@ -834,11 +813,11 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
             // - Management clusters: wait for endpoint to be discovered
             if is_child_cluster {
                 // Child clusters can't block - check once and continue
-                if let Some(host) = discover_cell_endpoint(&client, cluster_name).await {
-                    tracing::info!(host = %host, "Cell endpoint found");
+                if let Some(host) = discover_cell_host(&client).await {
+                    tracing::info!(host = %host, "Cell host found");
                     vec![host]
                 } else {
-                    tracing::info!("Cell endpoint not yet available, using default SANs");
+                    tracing::info!("Cell host not yet available, using default SANs");
                     vec![]
                 }
             } else {
@@ -871,11 +850,11 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
                     }
                 }
 
-                // Step 3: Wait for cell endpoint
-                tracing::info!(cluster = %cluster_name, "Waiting for cell endpoint...");
+                // Step 3: Wait for cell host from LoadBalancer
+                tracing::info!(cluster = %cluster_name, "Waiting for cell host...");
                 loop {
-                    if let Some(host) = discover_cell_endpoint(&client, cluster_name).await {
-                        tracing::info!(host = %host, "Cell endpoint discovered");
+                    if let Some(host) = discover_cell_host(&client).await {
+                        tracing::info!(host = %host, "Cell host discovered");
                         break vec![host];
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;

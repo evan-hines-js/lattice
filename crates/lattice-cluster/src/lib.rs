@@ -23,7 +23,10 @@ pub use bootstrap::{
     BootstrapState, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
 };
 pub use capi::{CapiInstaller, CapiProviderConfig};
-pub use controller::{error_policy, reconcile, Context};
+pub use controller::{
+    error_policy, reconcile, CAPIClient, CAPIClientImpl, Context, ContextBuilder, KubeClient,
+    KubeClientImpl, PivotOperations, PivotOperationsImpl, UnpivotChannel, UnpivotRequest,
+};
 pub use parent::ParentServers;
 pub use provider::{create_provider, CAPIManifest, Provider};
 
