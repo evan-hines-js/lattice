@@ -1,5 +1,5 @@
 # AWS workload cluster for E2E testing
-# Uses CAPA (Cluster API Provider AWS) with NLB
+# Uses CAPA (Cluster API Provider AWS) with NLB and BYOI
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeCluster
 metadata:
@@ -22,6 +22,12 @@ spec:
         cpRootVolumeType: "gp3"
         workerRootVolumeSizeGb: 50
         workerRootVolumeType: "gp3"
+        # BYOI: share VPC/subnets across clusters
+        vpcId: "vpc-02334e828aa108521"
+        subnetIds:
+          - "subnet-0baada5edd89b23c1"
+          - "subnet-0b0d0d0ff4909e119"
+          - "subnet-0d4feb8582c12782d"
   nodes:
     controlPlane: 1
     workers: 1

@@ -69,24 +69,21 @@ impl AwsProvider {
             "sshKeyName": &cfg.ssh_key_name
         });
 
-        // VPC configuration - either use existing or let CAPA create one
+        // BYOI: use existing VPC and subnets
         if let Some(ref vpc_id) = cfg.vpc_id {
-            spec["network"] = serde_json::json!({
-                "vpc": {
-                    "id": vpc_id
-                }
+            let mut network = serde_json::json!({
+                "vpc": { "id": vpc_id }
             });
 
-            // Add subnets if configured
-            if let Some(ref cp_subnets) = cfg.cp_subnet_ids {
-                let subnets: Vec<serde_json::Value> = cp_subnets
+            if let Some(ref subnets) = cfg.subnet_ids {
+                let subnet_list: Vec<serde_json::Value> = subnets
                     .iter()
-                    .map(|id: &String| serde_json::json!({ "id": id }))
+                    .map(|id| serde_json::json!({ "id": id }))
                     .collect();
-                if let Some(network) = spec.get_mut("network") {
-                    network["subnets"] = serde_json::json!(subnets);
-                }
+                network["subnets"] = serde_json::json!(subnet_list);
             }
+
+            spec["network"] = network;
         }
 
         // Control plane load balancer configuration (NLB by default)
@@ -268,10 +265,10 @@ impl Provider for AwsProvider {
                 return Err(Error::validation("aws config requires sshKeyName"));
             }
 
-            // Validate VPC configuration consistency
-            if cfg.vpc_id.is_some() && cfg.cp_subnet_ids.is_none() {
+            // BYOI requires both VPC and subnets
+            if cfg.vpc_id.is_some() && cfg.subnet_ids.is_none() {
                 return Err(Error::validation(
-                    "aws config requires cpSubnetIds when vpcId is specified",
+                    "aws config requires subnetIds when vpcId is specified",
                 ));
             }
         }
@@ -434,7 +431,6 @@ mod tests {
 
         let mut cfg = test_aws_config();
         cfg.vpc_id = Some("vpc-12345".to_string());
-        // No cp_subnet_ids
 
         let spec = ProviderSpec {
             kubernetes: KubernetesSpec {
@@ -448,7 +444,7 @@ mod tests {
 
         let result = provider.validate_spec(&spec).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cpSubnetIds"));
+        assert!(result.unwrap_err().to_string().contains("subnetIds"));
     }
 
     #[tokio::test]
@@ -564,27 +560,21 @@ mod tests {
 
         if let Some(ref mut cfg) = cluster.spec.provider.config.aws {
             cfg.vpc_id = Some("vpc-12345".to_string());
-            cfg.cp_subnet_ids = Some(vec!["subnet-a".to_string(), "subnet-b".to_string()]);
+            cfg.subnet_ids = Some(vec!["subnet-a".to_string(), "subnet-b".to_string()]);
         }
 
         let manifests = provider
             .generate_capi_manifests(&cluster, &BootstrapInfo::default())
             .await
-            .expect("manifest generation should succeed");
+            .expect("manifest generation");
 
         let aws_cluster = manifests
             .iter()
             .find(|m| m.kind == "AWSCluster")
-            .expect("AWSCluster should exist");
+            .expect("AWSCluster");
 
-        let vpc_id = aws_cluster.spec.as_ref().expect("spec should exist")["network"]["vpc"]["id"]
-            .as_str()
-            .expect("vpc id should be a string");
-        assert_eq!(vpc_id, "vpc-12345");
-
-        let subnets = aws_cluster.spec.as_ref().expect("spec should exist")["network"]["subnets"]
-            .as_array()
-            .expect("subnets should be an array");
-        assert_eq!(subnets.len(), 2);
+        let spec = aws_cluster.spec.as_ref().expect("spec");
+        assert_eq!(spec["network"]["vpc"]["id"].as_str().unwrap(), "vpc-12345");
+        assert_eq!(spec["network"]["subnets"].as_array().unwrap().len(), 2);
     }
 }
