@@ -24,6 +24,7 @@ mod context;
 mod engine;
 mod error;
 mod filters;
+mod output;
 mod provisioner;
 mod renderer;
 mod types;
@@ -31,9 +32,10 @@ mod types;
 pub use context::{MetadataContext, ResourceOutputs, TemplateContext};
 pub use engine::TemplateEngine;
 pub use error::TemplateError;
+pub use output::ProvisionOutput;
 pub use provisioner::{
     ExternalServiceProvisioner, ProvisionerContext, ProvisionerRegistry, ResourceProvisioner,
-    ServiceProvisioner,
+    ServiceProvisioner, VolumeProvisioner,
 };
 pub use renderer::{
     RenderConfig, RenderedContainer, RenderedFile, RenderedVariable, RenderedVolume,

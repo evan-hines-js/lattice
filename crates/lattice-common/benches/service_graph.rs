@@ -376,7 +376,6 @@ fn bench_get_active_edges(c: &mut Criterion) {
     group.finish();
 }
 
-
 // =============================================================================
 // Benchmarks: Concurrent Operations
 // =============================================================================
@@ -465,134 +464,6 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 }
 
 // =============================================================================
-// Benchmarks: Volume Cross-Affinity
-// =============================================================================
-
-/// Create a graph with volume sharing pattern:
-/// - `n` volume owners, each owning an RWO volume
-/// - `m` referencers, each referencing `refs_per_service` random volumes
-fn setup_volume_sharing_graph(owners: usize, referencers: usize, refs_per_service: usize) -> ServiceGraph {
-    let graph = ServiceGraph::new();
-    let mut rng = rand::thread_rng();
-
-    // Create owner services, each with an RWO volume
-    for i in 0..owners {
-        let volume_id = format!("volume-{}", i);
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            "data".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Volume,
-                direction: DependencyDirection::default(),
-                id: Some(volume_id),
-                class: None,
-                metadata: None,
-                params: Some(BTreeMap::from([
-                    ("size".to_string(), serde_json::json!("10Gi")),
-                    ("accessMode".to_string(), serde_json::json!("ReadWriteOnce")),
-                ])),
-                namespace: None,
-                inbound: None,
-                outbound: None,
-            },
-        );
-
-        let spec = LatticeServiceSpec {
-            containers: {
-                let mut c = BTreeMap::new();
-                c.insert("main".to_string(), simple_container());
-                c
-            },
-            resources,
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-        };
-
-        graph.put_service("test", &format!("owner-{}", i), &spec);
-    }
-
-    // Create referencer services, each referencing multiple volumes
-    for i in 0..referencers {
-        let mut resources = BTreeMap::new();
-
-        // Pick random volumes to reference
-        let volume_indices: Vec<usize> = (0..owners)
-            .choose_multiple(&mut rng, refs_per_service.min(owners));
-
-        for (j, vol_idx) in volume_indices.iter().enumerate() {
-            let volume_id = format!("volume-{}", vol_idx);
-            resources.insert(
-                format!("vol-{}", j),
-                ResourceSpec {
-                    type_: ResourceType::Volume,
-                    direction: DependencyDirection::default(),
-                    id: Some(volume_id),
-                    class: None,
-                    metadata: None,
-                    params: None, // Reference - no params
-                    namespace: None,
-                    inbound: None,
-                    outbound: None,
-                },
-            );
-        }
-
-        let spec = LatticeServiceSpec {
-            containers: {
-                let mut c = BTreeMap::new();
-                c.insert("main".to_string(), simple_container());
-                c
-            },
-            resources,
-            service: None,
-            replicas: ReplicaSpec::default(),
-            deploy: DeploySpec::default(),
-            ingress: None,
-        };
-
-        graph.put_service("test", &format!("ref-{}", i), &spec);
-    }
-
-    graph
-}
-
-fn bench_volume_cross_affinity(c: &mut Criterion) {
-    let mut group = c.benchmark_group("volume_cross_affinity");
-
-    // Test finding cross-affinity owners in graphs of varying sizes
-    for (owners, referencers, refs_per) in [
-        (10, 5, 3),     // Small: 10 owners, 5 referencers each referencing 3 volumes
-        (50, 20, 5),    // Medium: 50 owners, 20 referencers each referencing 5 volumes
-        (100, 50, 10),  // Large: 100 owners, 50 referencers each referencing 10 volumes
-    ] {
-        group.throughput(Throughput::Elements(1));
-
-        let label = format!("{}owners_{}refs_{}per", owners, referencers, refs_per);
-        group.bench_with_input(
-            BenchmarkId::new("find_cross_affinity", &label),
-            &(owners, referencers, refs_per),
-            |b, &(owners, referencers, refs_per)| {
-                let graph = setup_volume_sharing_graph(owners, referencers, refs_per);
-                let mut rng = rand::thread_rng();
-
-                b.iter(|| {
-                    // Query cross-affinity for a random owner
-                    let idx = rng.gen_range(0..owners);
-                    let volume_id = format!("volume-{}", idx);
-                    let owner_name = format!("owner-{}", idx);
-
-                    black_box(graph.find_rwo_cross_affinity_owners("test", &owner_name, &volume_id));
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
-
-// =============================================================================
 // Benchmarks: Reconciliation Patterns
 // =============================================================================
 
@@ -653,7 +524,6 @@ criterion_group!(
     bench_concurrent_reads,
     bench_concurrent_mixed,
     bench_reconcile_pattern,
-    bench_volume_cross_affinity,
 );
 
 criterion_main!(benches);

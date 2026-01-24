@@ -51,17 +51,11 @@ pub struct ServiceNode {
     pub endpoints: BTreeMap<String, ParsedEndpoint>,
     /// Resolution strategy (for external services)
     pub resolution: Option<Resolution>,
-    /// RWO volume IDs this service owns (has size in params)
-    pub owned_rwo_volumes: HashSet<String>,
-    /// RWO volume IDs this service references (no params, just id)
-    pub referenced_rwo_volumes: HashSet<String>,
 }
 
 impl ServiceNode {
     /// Create a new local service node from a LatticeService spec
     pub fn from_service_spec(namespace: &str, name: &str, spec: &LatticeServiceSpec) -> Self {
-        use crate::crd::{ResourceType, VolumeAccessMode};
-
         let caller_refs = spec.allowed_callers(namespace);
         let allows_all = caller_refs.iter().any(|r| r.name == "*");
 
@@ -75,32 +69,6 @@ impl ServiceNode {
             .into_iter()
             .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
             .collect();
-
-        // Extract RWO volume ownership and references
-        let mut owned_rwo_volumes = HashSet::new();
-        let mut referenced_rwo_volumes = HashSet::new();
-
-        for resource_spec in spec.resources.values() {
-            if resource_spec.type_ != ResourceType::Volume {
-                continue;
-            }
-
-            let Some(volume_id) = &resource_spec.id else {
-                continue;
-            };
-
-            if resource_spec.is_volume_owner() {
-                // Owner - check if RWO
-                let params = resource_spec.volume_params().unwrap_or_default();
-                let access_mode = params.access_mode.unwrap_or(VolumeAccessMode::ReadWriteOnce);
-                if access_mode == VolumeAccessMode::ReadWriteOnce {
-                    owned_rwo_volumes.insert(volume_id.clone());
-                }
-            } else if resource_spec.is_volume_reference() {
-                // Reference - assume RWO (owner decides, we comply)
-                referenced_rwo_volumes.insert(volume_id.clone());
-            }
-        }
 
         Self {
             namespace: namespace.to_string(),
@@ -117,13 +85,15 @@ impl ServiceNode {
                 .collect(),
             endpoints: BTreeMap::new(),
             resolution: None,
-            owned_rwo_volumes,
-            referenced_rwo_volumes,
         }
     }
 
     /// Create a new external service node from a LatticeExternalService spec
-    pub fn from_external_spec(namespace: &str, name: &str, spec: &LatticeExternalServiceSpec) -> Self {
+    pub fn from_external_spec(
+        namespace: &str,
+        name: &str,
+        spec: &LatticeExternalServiceSpec,
+    ) -> Self {
         let allows_all = spec.allowed_requesters.iter().any(|c| c == "*");
 
         // External services specify callers by name only - they're assumed to be in the same namespace
@@ -145,8 +115,6 @@ impl ServiceNode {
             ports: BTreeMap::new(),
             endpoints: spec.valid_endpoints(),
             resolution: Some(spec.resolution.clone()),
-            owned_rwo_volumes: HashSet::new(),
-            referenced_rwo_volumes: HashSet::new(),
         }
     }
 
@@ -163,14 +131,15 @@ impl ServiceNode {
             ports: BTreeMap::new(),
             endpoints: BTreeMap::new(),
             resolution: None,
-            owned_rwo_volumes: HashSet::new(),
-            referenced_rwo_volumes: HashSet::new(),
         }
     }
 
     /// Check if this service allows a specific caller (O(1) lookup)
     pub fn allows(&self, caller_namespace: &str, caller_name: &str) -> bool {
-        self.allows_all || self.allowed_callers.contains(&(caller_namespace.to_string(), caller_name.to_string()))
+        self.allows_all
+            || self
+                .allowed_callers
+                .contains(&(caller_namespace.to_string(), caller_name.to_string()))
     }
 }
 
@@ -234,7 +203,12 @@ impl ServiceGraph {
     }
 
     /// Insert or update an external service in the graph
-    pub fn put_external_service(&self, namespace: &str, name: &str, spec: &LatticeExternalServiceSpec) {
+    pub fn put_external_service(
+        &self,
+        namespace: &str,
+        name: &str,
+        spec: &LatticeExternalServiceSpec,
+    ) {
         let node = ServiceNode::from_external_spec(namespace, name, spec);
         self.put_node(node);
     }
@@ -274,7 +248,8 @@ impl ServiceGraph {
 
                 // Create unknown stub if dependency doesn't exist
                 if !self.vertices.contains_key(&dep_key) {
-                    self.vertices.insert(dep_key, ServiceNode::unknown(dep_ns, dep_name));
+                    self.vertices
+                        .insert(dep_key, ServiceNode::unknown(dep_ns, dep_name));
                 }
             }
         }
@@ -497,55 +472,6 @@ impl ServiceGraph {
         self.ns_index.clear();
     }
 
-    /// Find other RWO volume owners that share a referencer with this owner
-    ///
-    /// When service A owns volume V1 and service B owns volume V2, and service C
-    /// references BOTH V1 and V2, then A and B need cross-affinity so C can schedule.
-    ///
-    /// # Arguments
-    /// * `namespace` - Namespace of the owner service
-    /// * `owner_name` - Name of the owner service
-    /// * `volume_id` - The RWO volume ID owned by this service
-    ///
-    /// # Returns
-    /// List of other owner service names that need cross-affinity with this owner
-    pub fn find_rwo_cross_affinity_owners(
-        &self,
-        namespace: &str,
-        owner_name: &str,
-        volume_id: &str,
-    ) -> Vec<String> {
-        let mut cross_affinity_owners = HashSet::new();
-
-        // Find all services in this namespace that reference our volume
-        let services = self.list_services(namespace);
-
-        for service in &services {
-            // Skip if this service doesn't reference our volume
-            if !service.referenced_rwo_volumes.contains(volume_id) {
-                continue;
-            }
-
-            // This service references our volume - check if it also references other volumes
-            for other_volume_id in &service.referenced_rwo_volumes {
-                if other_volume_id == volume_id {
-                    continue;
-                }
-
-                // Find the owner of this other volume
-                for other_service in &services {
-                    if other_service.name == owner_name {
-                        continue; // Skip self
-                    }
-                    if other_service.owned_rwo_volumes.contains(other_volume_id) {
-                        cross_affinity_owners.insert(other_service.name.clone());
-                    }
-                }
-            }
-        }
-
-        cross_affinity_owners.into_iter().collect()
-    }
 }
 
 /// Thread-safe shared reference to a service graph
@@ -649,7 +575,9 @@ mod tests {
 
         graph.put_service("prod", "api", &spec);
 
-        let node = graph.get_service("prod", "api").expect("service should exist");
+        let node = graph
+            .get_service("prod", "api")
+            .expect("service should exist");
         assert_eq!(node.name, "api");
         assert_eq!(node.namespace, "prod");
         assert_eq!(node.type_, ServiceType::Local);
@@ -702,7 +630,14 @@ mod tests {
             containers,
             resources,
             service: Some(ServicePortsSpec {
-                ports: BTreeMap::from([("http".to_string(), PortSpec { port: 80, target_port: None, protocol: None })]),
+                ports: BTreeMap::from([(
+                    "http".to_string(),
+                    PortSpec {
+                        port: 80,
+                        target_port: None,
+                        protocol: None,
+                    },
+                )]),
             }),
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
@@ -712,12 +647,19 @@ mod tests {
         graph.put_service("frontend", "web", &frontend_spec);
 
         // Check that the cross-namespace dependency was recorded
-        let web = graph.get_service("frontend", "web").expect("web should exist");
+        let web = graph
+            .get_service("frontend", "web")
+            .expect("web should exist");
         assert_eq!(web.dependencies.len(), 1);
-        assert_eq!(web.dependencies[0], ("backend".to_string(), "api".to_string()));
+        assert_eq!(
+            web.dependencies[0],
+            ("backend".to_string(), "api".to_string())
+        );
 
         // Check that an unknown stub was created in the backend namespace
-        let api_stub = graph.get_service("backend", "api").expect("api stub should exist");
+        let api_stub = graph
+            .get_service("backend", "api")
+            .expect("api stub should exist");
         assert_eq!(api_stub.type_, ServiceType::Unknown);
     }
 

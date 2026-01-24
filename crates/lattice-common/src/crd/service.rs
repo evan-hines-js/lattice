@@ -50,16 +50,106 @@ impl DependencyDirection {
 }
 
 /// Type of resource dependency
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
+///
+/// Built-in types have strong typing; custom types use `Custom(String)` for extensibility.
+/// Built-ins always win during deserialization - explicit match before Custom.
+#[derive(Clone, Debug, JsonSchema, PartialEq, Eq, Hash)]
 pub enum ResourceType {
     /// Internal service (another LatticeService)
-    #[default]
     Service,
     /// External service (LatticeExternalService)
     ExternalService,
     /// Persistent volume (Score-compatible)
     Volume,
+    /// Custom resource type (escape hatch for extensibility)
+    /// Validated at parse time: lowercase alphanumeric with hyphens, starts with letter
+    #[schemars(skip)]
+    Custom(String),
+}
+
+impl Serialize for ResourceType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl Default for ResourceType {
+    fn default() -> Self {
+        Self::Service
+    }
+}
+
+impl ResourceType {
+    /// Get the string representation of this resource type
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Service => "service",
+            Self::ExternalService => "external-service",
+            Self::Volume => "volume",
+            Self::Custom(s) => s.as_str(),
+        }
+    }
+
+    /// Returns true if this is a service-like resource type (handles network traffic)
+    pub fn is_service_like(&self) -> bool {
+        matches!(self, Self::Service | Self::ExternalService)
+    }
+
+    /// Returns true if this is a volume resource
+    pub fn is_volume(&self) -> bool {
+        matches!(self, Self::Volume)
+    }
+
+    /// Returns true if this is a custom resource type
+    pub fn is_custom(&self) -> bool {
+        matches!(self, Self::Custom(_))
+    }
+}
+
+/// Validate custom type: lowercase alphanumeric with hyphens, starts with letter
+fn validate_custom_type(s: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err("resource type cannot be empty".to_string());
+    }
+    if !s.chars().next().unwrap().is_ascii_lowercase() {
+        return Err(format!(
+            "resource type must start with lowercase letter: {}",
+            s
+        ));
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(format!(
+            "resource type must be lowercase alphanumeric with hyphens: {}",
+            s
+        ));
+    }
+    Ok(())
+}
+
+impl<'de> Deserialize<'de> for ResourceType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+
+        // Built-ins always win - explicit match before Custom
+        match s.as_str() {
+            "service" => Ok(Self::Service),
+            "external-service" => Ok(Self::ExternalService),
+            "volume" => Ok(Self::Volume),
+            _ => {
+                validate_custom_type(&s).map_err(serde::de::Error::custom)?;
+                Ok(Self::Custom(s))
+            }
+        }
+    }
 }
 
 /// Resource metadata (Score-compatible)
@@ -89,7 +179,6 @@ pub struct ResourceSpec {
     // =========================================================================
     // Score Standard Fields
     // =========================================================================
-
     /// Type of resource (Score: type)
     #[serde(rename = "type")]
     pub type_: ResourceType,
@@ -120,7 +209,6 @@ pub struct ResourceSpec {
     // =========================================================================
     // Lattice Extensions (additions to Score, not replacements)
     // =========================================================================
-
     /// Direction of the dependency (Lattice extension)
     ///
     /// Used for bilateral service mesh agreements:
@@ -264,7 +352,7 @@ impl ResourceSpec {
     /// Returns None if this is not a volume resource.
     /// Returns default VolumeParams if params is missing or empty.
     pub fn volume_params(&self) -> Option<VolumeParams> {
-        if self.type_ != ResourceType::Volume {
+        if !self.type_.is_volume() {
             return None;
         }
         match &self.params {
@@ -285,7 +373,7 @@ impl ResourceSpec {
 
     /// Returns true if this is a volume resource that references a shared PVC
     pub fn is_volume_reference(&self) -> bool {
-        self.type_ == ResourceType::Volume
+        self.type_.is_volume()
             && self.id.is_some()
             && self
                 .volume_params()
@@ -295,7 +383,7 @@ impl ResourceSpec {
 
     /// Get the PVC name for this volume resource
     pub fn volume_pvc_name(&self, service_name: &str, resource_name: &str) -> Option<String> {
-        if self.type_ != ResourceType::Volume {
+        if !self.type_.is_volume() {
             return None;
         }
         Some(match &self.id {
@@ -741,16 +829,11 @@ impl LatticeServiceSpec {
     pub fn dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
         self.resources
             .iter()
-            .filter(|(_, spec)| {
-                spec.direction.is_outbound()
-                    && matches!(
-                        spec.type_,
-                        ResourceType::Service | ResourceType::ExternalService
-                    )
-            })
+            .filter(|(_, spec)| spec.direction.is_outbound() && spec.type_.is_service_like())
             .map(|(name, spec)| {
                 let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                ServiceRef::new(ns, name)
+                let svc_name = spec.id.as_deref().unwrap_or(name);
+                ServiceRef::new(ns, svc_name)
             })
             .collect()
     }
@@ -767,7 +850,8 @@ impl LatticeServiceSpec {
             })
             .map(|(name, spec)| {
                 let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                ServiceRef::new(ns, name)
+                let svc_name = spec.id.as_deref().unwrap_or(name);
+                ServiceRef::new(ns, svc_name)
             })
             .collect()
     }
@@ -781,7 +865,8 @@ impl LatticeServiceSpec {
             })
             .map(|(name, spec)| {
                 let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                ServiceRef::new(ns, name)
+                let svc_name = spec.id.as_deref().unwrap_or(name);
+                ServiceRef::new(ns, svc_name)
             })
             .collect()
     }
@@ -795,7 +880,8 @@ impl LatticeServiceSpec {
             })
             .map(|(name, spec)| {
                 let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                ServiceRef::new(ns, name)
+                let svc_name = spec.id.as_deref().unwrap_or(name);
+                ServiceRef::new(ns, svc_name)
             })
             .collect()
     }
@@ -1321,7 +1407,10 @@ mod tests {
 
         // Should appear in both dependencies and allowed_callers
         assert!(spec.dependencies("test").iter().any(|r| r.name == "cache"));
-        assert!(spec.allowed_callers("test").iter().any(|r| r.name == "cache"));
+        assert!(spec
+            .allowed_callers("test")
+            .iter()
+            .any(|r| r.name == "cache"));
     }
 
     /// Story: External services are separated from internal
@@ -1931,7 +2020,10 @@ containers:
                 id: Some(id.to_string()),
                 class: None,
                 metadata: None,
-                params: Some(BTreeMap::from([("size".to_string(), serde_json::json!(size))])),
+                params: Some(BTreeMap::from([(
+                    "size".to_string(),
+                    serde_json::json!(size),
+                )])),
                 namespace: None,
                 inbound: None,
                 outbound: None,
@@ -2016,7 +2108,10 @@ resources:
         assert_eq!(media.id, Some("media-library".to_string()));
         let media_params = media.volume_params().expect("media volume params");
         assert_eq!(media_params.size, Some("1Ti".to_string()));
-        assert_eq!(media_params.access_mode, Some(VolumeAccessMode::ReadWriteOnce));
+        assert_eq!(
+            media_params.access_mode,
+            Some(VolumeAccessMode::ReadWriteOnce)
+        );
     }
 
     /// Story: Score-compatible volume reference (no params)
@@ -2074,15 +2169,24 @@ resources:
         // Verify inbound policy
         let sonarr = spec.resources.get("sonarr").expect("sonarr should exist");
         assert_eq!(sonarr.direction, DependencyDirection::Inbound);
-        let inbound = sonarr.inbound.as_ref().expect("inbound policy should exist");
-        let rate_limit = inbound.rate_limit.as_ref().expect("rate limit should exist");
+        let inbound = sonarr
+            .inbound
+            .as_ref()
+            .expect("inbound policy should exist");
+        let rate_limit = inbound
+            .rate_limit
+            .as_ref()
+            .expect("rate limit should exist");
         assert_eq!(rate_limit.requests_per_interval, 100);
         assert_eq!(rate_limit.interval_seconds, 60);
 
         // Verify outbound policy
         let nzbget = spec.resources.get("nzbget").expect("nzbget should exist");
         assert_eq!(nzbget.direction, DependencyDirection::Outbound);
-        let outbound = nzbget.outbound.as_ref().expect("outbound policy should exist");
+        let outbound = nzbget
+            .outbound
+            .as_ref()
+            .expect("outbound policy should exist");
         let retries = outbound.retries.as_ref().expect("retries should exist");
         assert_eq!(retries.attempts, 3);
         assert_eq!(retries.per_try_timeout, Some("5s".to_string()));
@@ -2163,8 +2267,16 @@ replicas:
 
         // Verify resources
         assert_eq!(spec.resources.len(), 3);
-        assert!(spec.resources.get("config").expect("config").is_volume_owner());
-        assert!(spec.resources.get("media").expect("media").is_volume_owner());
+        assert!(spec
+            .resources
+            .get("config")
+            .expect("config")
+            .is_volume_owner());
+        assert!(spec
+            .resources
+            .get("media")
+            .expect("media")
+            .is_volume_owner());
 
         // Verify service
         let service = spec.service.as_ref().expect("service should exist");
@@ -2176,5 +2288,126 @@ replicas:
 
         // Validate the spec
         spec.validate().expect("spec should be valid");
+    }
+
+    // =========================================================================
+    // ResourceType Custom Variant Tests
+    // =========================================================================
+
+    /// Story: Built-in types always win during deserialization
+    #[test]
+    fn test_builtin_type_not_custom() {
+        let t: ResourceType = serde_json::from_str("\"service\"").unwrap();
+        assert!(matches!(t, ResourceType::Service));
+        assert!(!t.is_custom());
+
+        let t: ResourceType = serde_json::from_str("\"external-service\"").unwrap();
+        assert!(matches!(t, ResourceType::ExternalService));
+        assert!(!t.is_custom());
+
+        let t: ResourceType = serde_json::from_str("\"volume\"").unwrap();
+        assert!(matches!(t, ResourceType::Volume));
+        assert!(!t.is_custom());
+    }
+
+    /// Story: Valid custom types are accepted
+    #[test]
+    fn test_valid_custom_accepted() {
+        let t: ResourceType = serde_json::from_str("\"postgres\"").unwrap();
+        assert!(matches!(t, ResourceType::Custom(ref s) if s == "postgres"));
+        assert!(t.is_custom());
+
+        let t: ResourceType = serde_json::from_str("\"my-custom-db\"").unwrap();
+        assert!(matches!(t, ResourceType::Custom(ref s) if s == "my-custom-db"));
+
+        let t: ResourceType = serde_json::from_str("\"redis123\"").unwrap();
+        assert!(matches!(t, ResourceType::Custom(ref s) if s == "redis123"));
+    }
+
+    /// Story: Invalid custom types are rejected
+    #[test]
+    fn test_invalid_custom_rejected() {
+        // Uppercase - rejected
+        assert!(serde_json::from_str::<ResourceType>("\"Postgres\"").is_err());
+
+        // Special chars - rejected
+        assert!(serde_json::from_str::<ResourceType>("\"postgres!\"").is_err());
+
+        // Starts with number - rejected
+        assert!(serde_json::from_str::<ResourceType>("\"123db\"").is_err());
+
+        // Empty - rejected
+        assert!(serde_json::from_str::<ResourceType>("\"\"").is_err());
+
+        // Underscore - rejected (only hyphens allowed)
+        assert!(serde_json::from_str::<ResourceType>("\"my_db\"").is_err());
+    }
+
+    /// Story: ResourceType helper methods work correctly
+    #[test]
+    fn test_resource_type_helper_methods() {
+        // is_service_like
+        assert!(ResourceType::Service.is_service_like());
+        assert!(ResourceType::ExternalService.is_service_like());
+        assert!(!ResourceType::Volume.is_service_like());
+        assert!(!ResourceType::Custom("postgres".to_string()).is_service_like());
+
+        // is_volume
+        assert!(ResourceType::Volume.is_volume());
+        assert!(!ResourceType::Service.is_volume());
+        assert!(!ResourceType::Custom("postgres".to_string()).is_volume());
+
+        // is_custom
+        assert!(!ResourceType::Service.is_custom());
+        assert!(!ResourceType::Volume.is_custom());
+        assert!(ResourceType::Custom("redis".to_string()).is_custom());
+    }
+
+    /// Story: ResourceType as_str returns correct values
+    #[test]
+    fn test_resource_type_as_str() {
+        assert_eq!(ResourceType::Service.as_str(), "service");
+        assert_eq!(ResourceType::ExternalService.as_str(), "external-service");
+        assert_eq!(ResourceType::Volume.as_str(), "volume");
+        assert_eq!(
+            ResourceType::Custom("postgres".to_string()).as_str(),
+            "postgres"
+        );
+    }
+
+    /// Story: Custom types serialize correctly
+    #[test]
+    fn test_custom_type_serialization() {
+        let custom = ResourceType::Custom("postgres".to_string());
+        let serialized = serde_json::to_string(&custom).unwrap();
+        assert_eq!(serialized, "\"postgres\"");
+
+        // Round-trip
+        let deserialized: ResourceType = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, custom);
+    }
+
+    /// Story: Custom type in YAML spec parses correctly
+    #[test]
+    fn test_custom_type_in_yaml_spec() {
+        let yaml = r#"
+containers:
+  main:
+    image: myapp:latest
+resources:
+  my-postgres:
+    type: postgres
+    params:
+      size: 10Gi
+      version: "15"
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Custom resource type in YAML should parse");
+
+        let resource = spec
+            .resources
+            .get("my-postgres")
+            .expect("my-postgres should exist");
+        assert!(matches!(resource.type_, ResourceType::Custom(ref s) if s == "postgres"));
     }
 }

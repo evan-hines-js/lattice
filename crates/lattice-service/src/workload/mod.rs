@@ -818,8 +818,12 @@ impl WorkloadCompiler {
         output.service_account = Some(Self::compile_service_account(name, namespace));
 
         // Always generate Deployment (skeleton - webhook fills containers)
-        output.deployment =
-            Some(Self::compile_deployment(name, namespace, &service.spec, volumes));
+        output.deployment = Some(Self::compile_deployment(
+            name,
+            namespace,
+            &service.spec,
+            volumes,
+        ));
 
         // Generate Service if ports are defined
         if service.spec.service.is_some() {
@@ -1143,9 +1147,17 @@ mod tests {
 
     /// Helper to compile a service with empty volumes (for basic tests)
     fn compile_service(service: &LatticeService) -> GeneratedWorkloads {
-        let name = service.metadata.name.as_deref().expect("test service must have a name");
-        let namespace = service.metadata.namespace.as_deref().expect("test service must have a namespace");
-        let volumes = VolumeCompiler::compile(name, namespace, &service.spec, None);
+        let name = service
+            .metadata
+            .name
+            .as_deref()
+            .expect("test service must have a name");
+        let namespace = service
+            .metadata
+            .namespace
+            .as_deref()
+            .expect("test service must have a namespace");
+        let volumes = VolumeCompiler::compile(name, namespace, &service.spec);
         WorkloadCompiler::compile(service, namespace, &volumes)
     }
 
@@ -1269,10 +1281,7 @@ mod tests {
         );
 
         // Deployment has service account name matching the service
-        assert_eq!(
-            deployment.spec.template.spec.service_account_name,
-            "my-app"
-        );
+        assert_eq!(deployment.spec.template.spec.service_account_name, "my-app");
     }
 
     // =========================================================================

@@ -1,10 +1,20 @@
 //! Resource Provisioner Interface
 //!
 //! Defines how resource dependencies are resolved to template outputs.
-//! Each resource type (service, external-service) has a provisioner that
+//! Each resource type (service, external-service, volume) has a provisioner that
 //! knows how to resolve `${resources.NAME.*}` placeholders.
+//!
+//! ## Extensibility
+//!
+//! The provisioner system supports both built-in types (Service, ExternalService, Volume)
+//! and custom resource types. Provisioners match resources using a `matches()` method
+//! that can consider type, class, and id for flexible routing.
+//!
+//! ## Registry Priority
+//!
+//! The registry uses a "last match wins" strategy. Built-in provisioners are registered
+//! first, so custom provisioners registered later can override built-in behavior.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::warn;
@@ -14,6 +24,7 @@ use crate::graph::ServiceGraph;
 
 use super::context::ResourceOutputs;
 use super::error::TemplateError;
+pub use super::output::ProvisionOutput;
 
 /// Context provided to provisioners during resolution
 pub struct ProvisionerContext<'a> {
@@ -52,15 +63,38 @@ impl<'a> ProvisionerContext<'a> {
     }
 }
 
-/// Trait for resolving resource outputs
+/// Trait for resolving and provisioning resources
 ///
 /// Implementations resolve the outputs for a specific resource type,
 /// making values like `${resources.postgres.host}` available.
+///
+/// ## Matching
+///
+/// The `matches()` method determines which resources this provisioner handles.
+/// It receives the resource type, class, and id to enable fine-grained routing:
+/// - Built-in provisioners typically match by type only
+/// - Custom provisioners can match by class (e.g., "aws-rds") or id (e.g., specific instance)
 pub trait ResourceProvisioner: Send + Sync {
-    /// The resource type this provisioner handles
-    fn resource_type(&self) -> ResourceType;
+    /// URI identifying this provisioner (e.g., "builtin://service", "custom://postgres")
+    fn uri(&self) -> &str;
 
-    /// Resolve outputs for a resource
+    /// Check if this provisioner handles the given resource
+    ///
+    /// Takes ResourceType for type-safe matching of built-ins.
+    /// Class and id enable fine-grained routing for custom provisioners.
+    fn matches(&self, type_: &ResourceType, class: Option<&str>, id: Option<&str>) -> bool;
+
+    /// Supported params for validation/documentation
+    fn supported_params(&self) -> &[&str] {
+        &[]
+    }
+
+    /// Expected outputs for validation/documentation
+    fn expected_outputs(&self) -> &[&str] {
+        &[]
+    }
+
+    /// Resolve outputs for a resource (template substitution)
     ///
     /// Given a resource spec and context, returns the outputs that will
     /// be available as `${resources.NAME.*}` in templates.
@@ -70,6 +104,18 @@ pub trait ResourceProvisioner: Send + Sync {
         resource: &ResourceSpec,
         ctx: &ProvisionerContext<'_>,
     ) -> Result<ResourceOutputs, TemplateError>;
+
+    /// Generate K8s manifests (PVCs, Secrets, etc.)
+    ///
+    /// Default implementation returns empty output.
+    fn provision(
+        &self,
+        _resource_name: &str,
+        _resource: &ResourceSpec,
+        _ctx: &ProvisionerContext<'_>,
+    ) -> Result<ProvisionOutput, TemplateError> {
+        Ok(ProvisionOutput::default())
+    }
 }
 
 /// Provisioner for internal services (other LatticeServices)
@@ -79,8 +125,16 @@ pub trait ResourceProvisioner: Send + Sync {
 pub struct ServiceProvisioner;
 
 impl ResourceProvisioner for ServiceProvisioner {
-    fn resource_type(&self) -> ResourceType {
-        ResourceType::Service
+    fn uri(&self) -> &str {
+        "builtin://service"
+    }
+
+    fn matches(&self, type_: &ResourceType, _class: Option<&str>, _id: Option<&str>) -> bool {
+        matches!(type_, ResourceType::Service)
+    }
+
+    fn expected_outputs(&self) -> &[&str] {
+        &["host", "port", "url"]
     }
 
     fn resolve(
@@ -130,8 +184,16 @@ impl ResourceProvisioner for ServiceProvisioner {
 pub struct ExternalServiceProvisioner;
 
 impl ResourceProvisioner for ExternalServiceProvisioner {
-    fn resource_type(&self) -> ResourceType {
-        ResourceType::ExternalService
+    fn uri(&self) -> &str {
+        "builtin://external-service"
+    }
+
+    fn matches(&self, type_: &ResourceType, _class: Option<&str>, _id: Option<&str>) -> bool {
+        matches!(type_, ResourceType::ExternalService)
+    }
+
+    fn expected_outputs(&self) -> &[&str] {
+        &["host", "port", "url"]
     }
 
     fn resolve(
@@ -176,11 +238,56 @@ impl ResourceProvisioner for ExternalServiceProvisioner {
     }
 }
 
+/// Provisioner for persistent volumes
+///
+/// Resolves volume claim names for Score-compatible volume resources.
+/// PVC generation and affinity rules are handled by VolumeCompiler.
+#[derive(Debug, Default)]
+pub struct VolumeProvisioner;
+
+impl ResourceProvisioner for VolumeProvisioner {
+    fn uri(&self) -> &str {
+        "builtin://volume"
+    }
+
+    fn matches(&self, type_: &ResourceType, _class: Option<&str>, _id: Option<&str>) -> bool {
+        matches!(type_, ResourceType::Volume)
+    }
+
+    fn supported_params(&self) -> &[&str] {
+        &["size", "storageClass", "accessMode"]
+    }
+
+    fn expected_outputs(&self) -> &[&str] {
+        &["claim_name"]
+    }
+
+    fn resolve(
+        &self,
+        resource_name: &str,
+        resource: &ResourceSpec,
+        ctx: &ProvisionerContext<'_>,
+    ) -> Result<ResourceOutputs, TemplateError> {
+        // Use the service name from context if available, otherwise use resource name
+        // The actual PVC name is computed based on whether there's an id
+        let service_name = ctx.namespace; // Use namespace as service name fallback
+        let claim_name = resource
+            .volume_pvc_name(service_name, resource_name)
+            .unwrap_or_else(|| format!("{}-{}", service_name, resource_name));
+
+        Ok(ResourceOutputs::builder()
+            .output("claim_name", claim_name)
+            .build())
+    }
+}
+
 /// Registry of resource provisioners
 ///
-/// Maps resource types to their provisioners for resolution.
+/// Uses an ordered list with "last match wins" semantics. Built-in provisioners
+/// are registered first (lowest priority), allowing custom provisioners to override.
 pub struct ProvisionerRegistry {
-    provisioners: HashMap<ResourceType, Arc<dyn ResourceProvisioner>>,
+    /// Ordered list of provisioners (later registrations have higher priority)
+    provisioners: Vec<Arc<dyn ResourceProvisioner>>,
 }
 
 impl Default for ProvisionerRegistry {
@@ -193,25 +300,47 @@ impl ProvisionerRegistry {
     /// Create a new registry with built-in provisioners
     pub fn new() -> Self {
         let mut registry = Self {
-            provisioners: HashMap::new(),
+            provisioners: Vec::new(),
         };
 
-        // Register built-in provisioners
+        // Register built-in provisioners (lowest priority - registered first)
         registry.register(Arc::new(ServiceProvisioner));
         registry.register(Arc::new(ExternalServiceProvisioner));
+        registry.register(Arc::new(VolumeProvisioner));
 
         registry
     }
 
-    /// Register a provisioner
+    /// Register a provisioner (later registrations have higher priority)
     pub fn register(&mut self, provisioner: Arc<dyn ResourceProvisioner>) {
-        self.provisioners
-            .insert(provisioner.resource_type(), provisioner);
+        self.provisioners.push(provisioner);
     }
 
-    /// Get the provisioner for a resource type
-    pub fn get(&self, type_: &ResourceType) -> Option<&Arc<dyn ResourceProvisioner>> {
-        self.provisioners.get(type_)
+    /// Find matching provisioner (iterates from end, last match wins)
+    pub fn find(
+        &self,
+        type_: &ResourceType,
+        class: Option<&str>,
+        id: Option<&str>,
+    ) -> Option<&Arc<dyn ResourceProvisioner>> {
+        self.provisioners
+            .iter()
+            .rev()
+            .find(|p| p.matches(type_, class, id))
+    }
+
+    /// Get the provisioner for a resource type (convenience method)
+    ///
+    /// Uses the resource's type, class, and id to find a matching provisioner.
+    pub fn get_for_resource(
+        &self,
+        resource: &ResourceSpec,
+    ) -> Option<&Arc<dyn ResourceProvisioner>> {
+        self.find(
+            &resource.type_,
+            resource.class.as_deref(),
+            resource.id.as_deref(),
+        )
     }
 
     /// Resolve all resources from a service spec
@@ -222,11 +351,11 @@ impl ProvisionerRegistry {
         &self,
         spec: &LatticeServiceSpec,
         ctx: &ProvisionerContext<'_>,
-    ) -> Result<HashMap<String, ResourceOutputs>, TemplateError> {
-        let mut outputs = HashMap::new();
+    ) -> Result<std::collections::HashMap<String, ResourceOutputs>, TemplateError> {
+        let mut outputs = std::collections::HashMap::new();
 
         for (name, resource) in &spec.resources {
-            if let Some(provisioner) = self.get(&resource.type_) {
+            if let Some(provisioner) = self.get_for_resource(resource) {
                 let resource_outputs = provisioner.resolve(name, resource, ctx)?;
                 outputs.insert(name.clone(), resource_outputs);
             } else {
@@ -239,6 +368,26 @@ impl ProvisionerRegistry {
         }
 
         Ok(outputs)
+    }
+
+    /// Provision all resources from a service spec
+    ///
+    /// Returns a combined ProvisionOutput with all manifests and outputs.
+    pub fn provision_all(
+        &self,
+        spec: &LatticeServiceSpec,
+        ctx: &ProvisionerContext<'_>,
+    ) -> Result<ProvisionOutput, TemplateError> {
+        let mut combined = ProvisionOutput::default();
+
+        for (name, resource) in &spec.resources {
+            if let Some(provisioner) = self.get_for_resource(resource) {
+                let output = provisioner.provision(name, resource, ctx)?;
+                combined.merge(output);
+            }
+        }
+
+        Ok(combined)
     }
 }
 
@@ -433,8 +582,12 @@ mod tests {
     fn test_registry_has_builtin_provisioners() {
         let registry = ProvisionerRegistry::new();
 
-        assert!(registry.get(&ResourceType::Service).is_some());
-        assert!(registry.get(&ResourceType::ExternalService).is_some());
+        // Find by type
+        assert!(registry.find(&ResourceType::Service, None, None).is_some());
+        assert!(registry
+            .find(&ResourceType::ExternalService, None, None)
+            .is_some());
+        assert!(registry.find(&ResourceType::Volume, None, None).is_some());
     }
 
     #[test]
@@ -493,6 +646,125 @@ mod tests {
             outputs["db"].outputs.get("host"),
             Some(&"postgres.prod-ns.svc.cluster.local".to_string())
         );
+    }
+
+    #[test]
+    fn test_provisioner_type_safe_matching() {
+        let registry = ProvisionerRegistry::new();
+
+        // Built-in matches by enum variant (type-safe)
+        let p = registry.find(&ResourceType::Service, None, None);
+        assert!(p.is_some());
+        assert_eq!(p.unwrap().uri(), "builtin://service");
+
+        let p = registry.find(&ResourceType::ExternalService, None, None);
+        assert!(p.is_some());
+        assert_eq!(p.unwrap().uri(), "builtin://external-service");
+
+        // Custom type has no default provisioner
+        let p = registry.find(&ResourceType::Custom("postgres".to_string()), None, None);
+        assert!(p.is_none());
+    }
+
+    #[test]
+    fn test_provisioner_uri_and_outputs() {
+        let service_prov = ServiceProvisioner;
+        assert_eq!(service_prov.uri(), "builtin://service");
+        assert_eq!(service_prov.expected_outputs(), &["host", "port", "url"]);
+
+        let ext_prov = ExternalServiceProvisioner;
+        assert_eq!(ext_prov.uri(), "builtin://external-service");
+        assert_eq!(ext_prov.expected_outputs(), &["host", "port", "url"]);
+
+        let vol_prov = VolumeProvisioner;
+        assert_eq!(vol_prov.uri(), "builtin://volume");
+        assert_eq!(vol_prov.expected_outputs(), &["claim_name"]);
+        assert_eq!(
+            vol_prov.supported_params(),
+            &["size", "storageClass", "accessMode"]
+        );
+    }
+
+    // =========================================================================
+    // Story: VolumeProvisioner resolves claim names
+    // =========================================================================
+
+    #[test]
+    fn test_volume_provisioner_resolves_claim_name() {
+        let graph = ServiceGraph::new();
+        let ctx = ProvisionerContext::new(&graph, "prod", "myapp", "cluster.local");
+
+        let provisioner = VolumeProvisioner;
+        let resource = ResourceSpec {
+            type_: ResourceType::Volume,
+            direction: DependencyDirection::default(),
+            id: None,
+            class: None,
+            metadata: None,
+            params: Some(BTreeMap::from([(
+                "size".to_string(),
+                serde_json::json!("10Gi"),
+            )])),
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        };
+
+        let outputs = provisioner
+            .resolve("config", &resource, &ctx)
+            .expect("volume resolution should succeed");
+
+        // Without id, claim name is service-resource format
+        assert_eq!(
+            outputs.outputs.get("claim_name"),
+            Some(&"myapp-config".to_string())
+        );
+    }
+
+    #[test]
+    fn test_volume_provisioner_resolves_claim_name_with_id() {
+        let graph = ServiceGraph::new();
+        let ctx = ProvisionerContext::new(&graph, "prod", "myapp", "cluster.local");
+
+        let provisioner = VolumeProvisioner;
+        let resource = ResourceSpec {
+            type_: ResourceType::Volume,
+            direction: DependencyDirection::default(),
+            id: Some("media-library".to_string()),
+            class: None,
+            metadata: None,
+            params: Some(BTreeMap::from([(
+                "size".to_string(),
+                serde_json::json!("1Ti"),
+            )])),
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        };
+
+        let outputs = provisioner
+            .resolve("media", &resource, &ctx)
+            .expect("volume resolution should succeed");
+
+        // With id, claim name uses vol- prefix
+        assert_eq!(
+            outputs.outputs.get("claim_name"),
+            Some(&"vol-media-library".to_string())
+        );
+    }
+
+    #[test]
+    fn test_volume_provisioner_matches() {
+        let provisioner = VolumeProvisioner;
+
+        // Should match Volume type
+        assert!(provisioner.matches(&ResourceType::Volume, None, None));
+
+        // Should not match Service type
+        assert!(!provisioner.matches(&ResourceType::Service, None, None));
+
+        // Should not match custom type
+        assert!(!provisioner.matches(&ResourceType::Custom("postgres".to_string()), None, None));
     }
 
     // =========================================================================
