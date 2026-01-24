@@ -1521,9 +1521,9 @@ mod tests {
         let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Operator manifests are JSON, check for JSON format
-        let has_deployment = manifests
-            .iter()
-            .any(|m: &String| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-operator"));
+        let has_deployment = manifests.iter().any(|m: &String| {
+            m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-operator")
+        });
         assert!(has_deployment);
     }
 
@@ -1533,9 +1533,9 @@ mod tests {
         let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Should have ServiceAccount for operator
-        let has_sa = manifests
-            .iter()
-            .any(|m: &String| m.contains("\"kind\":\"ServiceAccount\"") && m.contains("lattice-operator"));
+        let has_sa = manifests.iter().any(|m: &String| {
+            m.contains("\"kind\":\"ServiceAccount\"") && m.contains("lattice-operator")
+        });
         assert!(has_sa);
     }
 
@@ -1845,15 +1845,15 @@ mod tests {
         assert!(has_namespace, "Should create lattice-system namespace");
 
         // Manifests deploy the operator (JSON format)
-        let has_operator = manifests
-            .iter()
-            .any(|m: &String| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-operator"));
+        let has_operator = manifests.iter().any(|m: &String| {
+            m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-operator")
+        });
         assert!(has_operator, "Should deploy lattice-operator");
 
         // Should have cluster-admin binding
-        let has_rbac = manifests
-            .iter()
-            .any(|m: &String| m.contains("\"kind\":\"ClusterRoleBinding\"") && m.contains("cluster-admin"));
+        let has_rbac = manifests.iter().any(|m: &String| {
+            m.contains("\"kind\":\"ClusterRoleBinding\"") && m.contains("cluster-admin")
+        });
         assert!(has_rbac, "Should have cluster-admin binding");
     }
 
