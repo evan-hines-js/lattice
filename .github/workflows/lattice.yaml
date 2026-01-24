@@ -103,6 +103,48 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --lib
 
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Run coverage
+        run: |
+          cargo tarpaulin --workspace --lib --out xml --out html \
+            --exclude-files "*/tests/*" \
+            --exclude-files "*/benches/*" \
+            --exclude-files "build.rs" \
+            --fail-under 80
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: |
+            cobertura.xml
+            tarpaulin-report.html
+
   trivy-fs:
     name: Trivy Filesystem Scan
     runs-on: ubuntu-latest
