@@ -4,7 +4,6 @@ metadata:
   name: jellyfin
   namespace: media
 spec:
-  environment: media
   containers:
     main:
       image: jellyfin/jellyfin:latest
@@ -42,12 +41,10 @@ spec:
       type: volume
       params:
         size: 10Gi
-        storageClass: local-path
     cache:
       type: volume
       params:
         size: 20Gi
-        storageClass: local-path
     # Shared media storage (OWNER - has size)
     # Single volume with subdirectories for library and downloads
     # All services mount subpaths, co-located via pod affinity
@@ -55,8 +52,7 @@ spec:
       type: volume
       id: media-storage
       params:
-        size: 1500Gi
-        storageClass: local-path
+        size: 1Ti
         accessMode: ReadWriteOnce
     # Service dependencies (bilateral agreement)
     sonarr:
