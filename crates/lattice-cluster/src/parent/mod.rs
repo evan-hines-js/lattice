@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Router;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::ByteString;
@@ -427,13 +426,11 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// * `manifest_generator` - Generator for bootstrap manifests
     /// * `extra_sans` - Additional SANs to include in server certificate (e.g., cell host IP)
     /// * `kube_client` - Kubernetes client for K8s API access
-    /// * `additional_router` - Optional additional router to merge (e.g., webhook for service mode)
-    pub async fn ensure_running_with(
+    pub async fn ensure_running(
         &self,
         manifest_generator: G,
         extra_sans: &[String],
         kube_client: Client,
-        additional_router: Option<Router>,
     ) -> Result<bool, CellServerError> {
         // Use compare_exchange to atomically check and set
         if self
@@ -479,14 +476,8 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         let grpc_kube_client = kube_client.clone();
         let sync_client = kube_client.clone();
 
-        // Create routers
-        let bootstrap_router = bootstrap_router(bootstrap_state);
-
-        // Merge with additional router if provided (e.g., webhook for service mode)
-        let app_router = match additional_router {
-            Some(extra) => bootstrap_router.merge(extra),
-            None => bootstrap_router,
-        };
+        // Create bootstrap router
+        let app_router = bootstrap_router(bootstrap_state);
         let bootstrap_addr = self.config.bootstrap_addr;
 
         let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
@@ -574,6 +565,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 mod tests {
     use super::*;
     use crate::bootstrap::ManifestGenerator;
+    use lattice_common::crd::ProviderType;
 
     /// Mock manifest generator for testing
     struct MockManifestGenerator;
@@ -584,7 +576,7 @@ mod tests {
             _image: &str,
             _registry_credentials: Option<&str>,
             _cluster_name: Option<&str>,
-            _provider: Option<&str>,
+            _provider: Option<ProviderType>,
         ) -> Vec<String> {
             vec!["mock-manifest".to_string()]
         }
@@ -659,7 +651,7 @@ mod tests {
 
         // Start servers
         let result = servers
-            .ensure_running_with(MockManifestGenerator, &[], client.clone(), None)
+            .ensure_running(MockManifestGenerator, &[], client.clone())
             .await;
         assert!(result.is_ok());
         assert!(result.expect("ensure_running should succeed")); // Should return true (started)
@@ -667,7 +659,7 @@ mod tests {
 
         // Second call should return false (already running)
         let result = servers
-            .ensure_running_with(MockManifestGenerator, &[], client, None)
+            .ensure_running(MockManifestGenerator, &[], client)
             .await;
         assert!(result.is_ok());
         assert!(!result.expect("ensure_running should succeed")); // Should return false (was already running)
@@ -688,7 +680,7 @@ mod tests {
         // Start and shutdown (only if we have a client)
         if let Some(client) = try_test_client().await {
             servers
-                .ensure_running_with(MockManifestGenerator, &[], client, None)
+                .ensure_running(MockManifestGenerator, &[], client)
                 .await
                 .expect("ensure_running should succeed");
             servers.shutdown().await;
@@ -717,7 +709,7 @@ mod tests {
 
         // After start, bootstrap state should be available
         servers
-            .ensure_running_with(MockManifestGenerator, &[], client, None)
+            .ensure_running(MockManifestGenerator, &[], client)
             .await
             .expect("ensure_running should succeed");
         assert!(servers.bootstrap_state().await.is_some());

@@ -777,42 +777,6 @@ impl GeneratedWorkloads {
 }
 
 // =============================================================================
-// Compiled Pod Spec (for webhook injection)
-// =============================================================================
-
-/// Compiled pod specification for webhook injection
-///
-/// This contains just the parts of a pod spec that the webhook needs
-/// to inject into a Deployment. Used by the mutating admission webhook.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CompiledPodSpec {
-    /// Containers to inject
-    pub containers: Vec<Container>,
-    /// Volumes to inject
-    pub volumes: Vec<Volume>,
-    /// Deployment strategy
-    pub strategy: Option<DeploymentStrategy>,
-}
-
-impl CompiledPodSpec {
-    /// Create a new empty compiled pod spec
-    pub fn new() -> Self {
-        Self {
-            containers: vec![],
-            volumes: vec![],
-            strategy: None,
-        }
-    }
-}
-
-impl Default for CompiledPodSpec {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// =============================================================================
 // Workload Compiler
 // =============================================================================
 
@@ -836,225 +800,26 @@ impl WorkloadCompiler {
     /// # Arguments
     /// * `service` - The LatticeService to compile
     /// * `namespace` - Target namespace (from environment label, since LatticeService is cluster-scoped)
-    pub fn compile(service: &LatticeService, namespace: &str) -> GeneratedWorkloads {
-        let name = service.metadata.name.as_deref().unwrap_or("unknown");
-
-        let mut output = GeneratedWorkloads::new();
-
-        // Always generate ServiceAccount for SPIFFE identity
-        output.service_account = Some(Self::compile_service_account(name, namespace));
-
-        // Always generate Deployment
-        output.deployment = Some(Self::compile_deployment(name, namespace, &service.spec));
-
-        // Generate Service if ports are defined
-        if service.spec.service.is_some() {
-            output.service = Some(Self::compile_service(name, namespace, &service.spec));
-        }
-
-        // Generate HPA if max replicas is set
-        if service.spec.replicas.max.is_some() {
-            output.hpa = Some(Self::compile_hpa(name, namespace, &service.spec));
-        }
-
-        output
-    }
-
-    /// Compile a LatticeService with pre-rendered containers
-    ///
-    /// This is the full compilation path that:
-    /// 1. Routes env vars to ConfigMap (non-sensitive) or Secret (sensitive)
-    /// 2. Routes file mounts to ConfigMap (text) or Secret (binary)
-    /// 3. Wires up envFrom and volumeMounts in containers
-    ///
-    /// # Arguments
-    /// * `service` - The LatticeService to compile
-    /// * `namespace` - Target namespace
-    /// * `rendered` - Pre-rendered containers from TemplateRenderer
-    pub fn compile_rendered(
+    /// * `volumes` - Pre-compiled volume resources (affinity, labels, etc.)
+    pub fn compile(
         service: &LatticeService,
         namespace: &str,
-        rendered: &std::collections::BTreeMap<String, lattice_common::template::RenderedContainer>,
+        volumes: &GeneratedVolumes,
     ) -> GeneratedWorkloads {
-        let name = service.metadata.name.as_deref().unwrap_or("unknown");
+        let name = service
+            .metadata
+            .name
+            .as_deref()
+            .expect("LatticeService must have a name");
 
         let mut output = GeneratedWorkloads::new();
 
         // Always generate ServiceAccount for SPIFFE identity
         output.service_account = Some(Self::compile_service_account(name, namespace));
 
-        // Compile env vars and files for each container, aggregate into single ConfigMap/Secret
-        let mut all_env_vars = std::collections::BTreeMap::new();
-        let mut all_files = std::collections::BTreeMap::new();
-
-        for (container_name, container) in rendered {
-            // Prefix env vars with container name to avoid collisions
-            for (key, var) in &container.variables {
-                let prefixed_key = if rendered.len() > 1 {
-                    format!(
-                        "{}_{}",
-                        container_name.to_uppercase().replace('-', "_"),
-                        key
-                    )
-                } else {
-                    key.clone()
-                };
-                all_env_vars.insert(prefixed_key, var.clone());
-            }
-
-            // Aggregate files (paths are unique across containers)
-            for (path, file) in &container.files {
-                all_files.insert(path.clone(), file.clone());
-            }
-        }
-
-        // Compile env vars to ConfigMap/Secret
-        let compiled_env = env::compile(name, namespace, &all_env_vars);
-        output.env_config_map = compiled_env.config_map;
-        output.env_secret = compiled_env.secret;
-
-        // Compile files to ConfigMap/Secret
-        let compiled_files = files::compile(name, namespace, &all_files);
-        output.files_config_map = compiled_files.config_map;
-        output.files_secret = compiled_files.secret;
-
-        // Compile volumes (PVCs, affinity, mounts)
-        let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec);
-        output.pvcs = compiled_volumes.pvcs;
-
-        // Compute config hash for rollout triggers
-        let config_hash = compute_config_hash(
-            output.env_config_map.as_ref(),
-            output.env_secret.as_ref(),
-            output.files_config_map.as_ref(),
-            output.files_secret.as_ref(),
-        );
-
-        // Build containers with envFrom and volumeMounts
-        let containers: Vec<Container> = rendered
-            .iter()
-            .map(|(container_name, rc)| {
-                let container_spec = service.spec.containers.get(container_name);
-
-                // Build ports from service spec
-                let ports: Vec<ContainerPort> = if let Some(svc) = &service.spec.service {
-                    svc.ports
-                        .iter()
-                        .map(|(port_name, port_spec)| ContainerPort {
-                            name: Some(port_name.clone()),
-                            container_port: port_spec.target_port.unwrap_or(port_spec.port),
-                            protocol: port_spec.protocol.clone(),
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                };
-
-                // Build resource requirements
-                let resources = container_spec
-                    .and_then(|cs| cs.resources.as_ref())
-                    .map(|r| ResourceRequirements {
-                        requests: r.requests.as_ref().map(|req| ResourceQuantity {
-                            cpu: req.cpu.clone(),
-                            memory: req.memory.clone(),
-                        }),
-                        limits: r.limits.as_ref().map(|lim| ResourceQuantity {
-                            cpu: lim.cpu.clone(),
-                            memory: lim.memory.clone(),
-                        }),
-                    });
-
-                // Compile probes from container spec
-                let liveness_probe = container_spec
-                    .and_then(|cs| cs.liveness_probe.as_ref())
-                    .map(Self::compile_probe);
-                let readiness_probe = container_spec
-                    .and_then(|cs| cs.readiness_probe.as_ref())
-                    .map(Self::compile_probe);
-                let startup_probe = container_spec
-                    .and_then(|cs| cs.startup_probe.as_ref())
-                    .map(Self::compile_probe);
-
-                // Merge volume mounts from files and volumes
-                let mut all_volume_mounts = compiled_files.volume_mounts.clone();
-                if let Some(pvc_mounts) = compiled_volumes.volume_mounts.get(container_name) {
-                    all_volume_mounts.extend(pvc_mounts.clone());
-                }
-
-                Container {
-                    name: container_name.clone(),
-                    image: rc.image.clone(),
-                    command: rc.command.clone(),
-                    args: rc.args.clone(),
-                    env: vec![], // Using envFrom instead
-                    env_from: compiled_env.env_from.clone(),
-                    ports,
-                    resources,
-                    liveness_probe,
-                    readiness_probe,
-                    startup_probe,
-                    volume_mounts: all_volume_mounts,
-                }
-            })
-            .collect();
-
-        // Build deployment with compiled containers
-        let mut labels = std::collections::BTreeMap::new();
-        labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
-        // Add volume ownership labels (for RWO affinity)
-        for (k, v) in &compiled_volumes.pod_labels {
-            labels.insert(k.clone(), v.clone());
-        }
-
-        // Add config hash as pod annotation to trigger rollouts on config changes
-        let mut annotations = std::collections::BTreeMap::new();
-        annotations.insert("lattice.dev/config-hash".to_string(), config_hash);
-
-        let strategy = Self::compile_strategy(&service.spec);
-
-        let replicas = if service.spec.replicas.min == 0 {
-            1
-        } else {
-            service.spec.replicas.min
-        };
-
-        output.deployment = Some(Deployment {
-            api_version: "apps/v1".to_string(),
-            kind: "Deployment".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
-            spec: DeploymentSpec {
-                replicas,
-                selector: LabelSelector {
-                    match_labels: labels.clone(),
-                },
-                template: PodTemplateSpec {
-                    metadata: PodMeta {
-                        labels,
-                        annotations,
-                    },
-                    spec: PodSpec {
-                        service_account_name: name.to_string(),
-                        containers,
-                        volumes: {
-                            // Merge file volumes and PVC volumes
-                            let mut all_volumes = compiled_files.volumes;
-                            for pv in &compiled_volumes.volumes {
-                                all_volumes.push(Volume {
-                                    name: pv.name.clone(),
-                                    config_map: None,
-                                    secret: None,
-                                    empty_dir: None,
-                                    persistent_volume_claim: pv.persistent_volume_claim.clone(),
-                                });
-                            }
-                            all_volumes
-                        },
-                        affinity: compiled_volumes.affinity.clone(),
-                    },
-                },
-                strategy,
-            },
-        });
+        // Always generate Deployment (skeleton - webhook fills containers)
+        output.deployment =
+            Some(Self::compile_deployment(name, namespace, &service.spec, volumes));
 
         // Generate Service if ports are defined
         if service.spec.service.is_some() {
@@ -1069,23 +834,11 @@ impl WorkloadCompiler {
         output
     }
 
-    /// Compile just the pod spec for webhook injection
-    ///
-    /// This returns the containers, volumes, and strategy that the webhook
-    /// will inject into an existing Deployment skeleton.
-    pub fn compile_pod_spec(service: &LatticeService) -> CompiledPodSpec {
-        let containers = Self::compile_containers(&service.spec);
-        let strategy = Self::compile_strategy(&service.spec);
-
-        CompiledPodSpec {
-            containers,
-            volumes: vec![], // TODO: Add volume support from file mounts
-            strategy,
-        }
-    }
-
-    /// Compile containers from a LatticeServiceSpec
-    fn compile_containers(spec: &LatticeServiceSpec) -> Vec<Container> {
+    /// Compile containers from a LatticeServiceSpec with volume mounts
+    fn compile_containers_with_volumes(
+        spec: &LatticeServiceSpec,
+        volumes: &GeneratedVolumes,
+    ) -> Vec<Container> {
         spec.containers
             .iter()
             .map(|(container_name, container_spec)| {
@@ -1146,6 +899,13 @@ impl WorkloadCompiler {
                     .as_ref()
                     .map(Self::compile_probe);
 
+                // Get volume mounts for this container
+                let volume_mounts = volumes
+                    .volume_mounts
+                    .get(container_name)
+                    .cloned()
+                    .unwrap_or_default();
+
                 Container {
                     name: container_name.clone(),
                     image: container_spec.image.clone(),
@@ -1158,13 +918,13 @@ impl WorkloadCompiler {
                     liveness_probe,
                     readiness_probe,
                     startup_probe,
-                    volume_mounts: vec![],
+                    volume_mounts,
                 }
             })
             .collect()
     }
 
-    /// Compile a CRD Probe to a K8s ProbeSpec (1:1 mapping)
+    /// Compile a Score-compliant Probe to a K8s ProbeSpec with sensible defaults
     fn compile_probe(p: &crate::crd::Probe) -> ProbeSpec {
         ProbeSpec {
             http_get: p.http_get.as_ref().map(|h| HttpGetAction {
@@ -1187,20 +947,16 @@ impl WorkloadCompiler {
             exec: p.exec.as_ref().map(|e| ExecAction {
                 command: e.command.clone(),
             }),
-            tcp_socket: p.tcp_socket.as_ref().map(|t| TcpSocketAction {
-                port: t.port,
-                host: t.host.clone(),
-            }),
-            grpc: p.grpc.as_ref().map(|g| GrpcAction {
-                port: g.port,
-                service: g.service.clone(),
-            }),
-            initial_delay_seconds: p.initial_delay_seconds,
-            period_seconds: p.period_seconds,
-            timeout_seconds: p.timeout_seconds,
-            success_threshold: p.success_threshold,
-            failure_threshold: p.failure_threshold,
-            termination_grace_period_seconds: p.termination_grace_period_seconds,
+            // K8s-specific probe types not in Score - leave as None
+            tcp_socket: None,
+            grpc: None,
+            // Sensible defaults for K8s timing (Score doesn't specify these)
+            initial_delay_seconds: Some(0),
+            period_seconds: Some(10),
+            timeout_seconds: Some(1),
+            success_threshold: Some(1),
+            failure_threshold: Some(3),
+            termination_grace_period_seconds: None,
         }
     }
 
@@ -1232,31 +988,54 @@ impl WorkloadCompiler {
         }
     }
 
-    /// Compile a skeleton Deployment for webhook mutation.
+    /// Compile a complete Deployment from the LatticeService spec.
     ///
-    /// Creates a Deployment with minimal spec - the mutating webhook will
-    /// inject the actual container spec from the LatticeService.
-    /// The `lattice.dev/service` label links this Deployment to its LatticeService.
-    fn compile_deployment(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> Deployment {
-        use crate::webhook::deployment::LATTICE_SERVICE_LABEL;
+    /// Generates a fully-specified Deployment with:
+    /// - Containers with image, env vars, ports, probes, volume mounts
+    /// - Volumes for PVCs
+    /// - Pod affinity for RWO volume co-location
+    /// - Volume ownership labels
+    fn compile_deployment(
+        name: &str,
+        namespace: &str,
+        spec: &LatticeServiceSpec,
+        volumes: &GeneratedVolumes,
+    ) -> Deployment {
+        // Compile containers with volume mounts
+        let containers = Self::compile_containers_with_volumes(spec, volumes);
 
+        // Build pod labels
         let mut labels = BTreeMap::new();
         labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
         labels.insert(
             "app.kubernetes.io/managed-by".to_string(),
             "lattice".to_string(),
         );
-        // Label for webhook to find the LatticeService
-        labels.insert(LATTICE_SERVICE_LABEL.to_string(), name.to_string());
 
-        // Strategy is set at Deployment level, not patched by webhook
+        // Add volume ownership labels (for RWO affinity)
+        for (k, v) in &volumes.pod_labels {
+            labels.insert(k.clone(), v.clone());
+        }
+
+        // Build pod volumes from PVCs
+        let pod_volumes: Vec<Volume> = volumes
+            .volumes
+            .iter()
+            .map(|pv| Volume {
+                name: pv.name.clone(),
+                config_map: None,
+                secret: None,
+                empty_dir: None,
+                persistent_volume_claim: pv.persistent_volume_claim.clone(),
+            })
+            .collect();
+
         let strategy = Self::compile_strategy(spec);
 
         Deployment {
             api_version: "apps/v1".to_string(),
             kind: "Deployment".to_string(),
-            // Deployment metadata must have lattice.dev/service label for webhook objectSelector
-            metadata: ObjectMeta::new(name, namespace).with_label(LATTICE_SERVICE_LABEL, name),
+            metadata: ObjectMeta::new(name, namespace),
             spec: DeploymentSpec {
                 replicas: spec.replicas.min,
                 selector: LabelSelector {
@@ -1272,11 +1051,10 @@ impl WorkloadCompiler {
                         annotations: BTreeMap::new(),
                     },
                     spec: PodSpec {
-                        // Webhook patches serviceAccountName and containers
-                        service_account_name: String::new(),
-                        containers: vec![],
-                        volumes: vec![],
-                        affinity: None,
+                        service_account_name: name.to_string(),
+                        containers,
+                        volumes: pod_volumes,
+                        affinity: volumes.affinity.clone(),
                     },
                 },
                 strategy,
@@ -1363,6 +1141,14 @@ mod tests {
     use crate::crd::{ContainerSpec, DeploySpec, PortSpec, ReplicaSpec, ServicePortsSpec};
     use lattice_common::template::TemplateString;
 
+    /// Helper to compile a service with empty volumes (for basic tests)
+    fn compile_service(service: &LatticeService) -> GeneratedWorkloads {
+        let name = service.metadata.name.as_deref().expect("test service must have a name");
+        let namespace = &service.spec.environment;
+        let volumes = VolumeCompiler::compile(name, namespace, &service.spec);
+        WorkloadCompiler::compile(service, namespace, &volumes)
+    }
+
     fn make_service(name: &str, namespace: &str) -> LatticeService {
         let mut containers = BTreeMap::new();
         containers.insert(
@@ -1416,7 +1202,7 @@ mod tests {
     #[test]
     fn story_always_generates_service_account() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
 
         let sa = output.service_account.expect("should have service account");
         assert_eq!(sa.metadata.name, "my-app");
@@ -1432,7 +1218,7 @@ mod tests {
     #[test]
     fn story_always_generates_deployment() {
         let service = make_service("my-app", "prod");
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
 
         let deployment = output.deployment.expect("should have deployment");
         assert_eq!(deployment.metadata.name, "my-app");
@@ -1445,7 +1231,7 @@ mod tests {
     #[test]
     fn story_deployment_has_correct_labels() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
 
         let deployment = output.deployment.expect("deployment should be set");
         assert_eq!(
@@ -1468,30 +1254,24 @@ mod tests {
     }
 
     #[test]
-    fn story_deployment_is_skeleton() {
-        use crate::webhook::deployment::LATTICE_SERVICE_LABEL;
-
+    fn story_deployment_has_complete_spec() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
 
         let deployment = output.deployment.expect("deployment should be set");
 
-        // Skeleton deployment has empty containers (webhook fills these)
-        assert!(deployment.spec.template.spec.containers.is_empty());
-
-        // Skeleton deployment has empty service account (webhook fills this)
-        assert!(deployment
-            .spec
-            .template
-            .spec
-            .service_account_name
-            .is_empty());
-
-        // Has the lattice.dev/service label for webhook to find LatticeService
-        let labels = &deployment.spec.template.metadata.labels;
+        // Deployment has containers
+        assert!(!deployment.spec.template.spec.containers.is_empty());
+        assert_eq!(deployment.spec.template.spec.containers[0].name, "main");
         assert_eq!(
-            labels.get(LATTICE_SERVICE_LABEL),
-            Some(&"my-app".to_string())
+            deployment.spec.template.spec.containers[0].image,
+            "nginx:latest"
+        );
+
+        // Deployment has service account name matching the service
+        assert_eq!(
+            deployment.spec.template.spec.service_account_name,
+            "my-app"
         );
     }
 
@@ -1502,7 +1282,7 @@ mod tests {
     #[test]
     fn story_generates_service_with_ports() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
 
         let svc = output.service.expect("should have service");
         assert_eq!(svc.metadata.name, "my-app");
@@ -1516,7 +1296,7 @@ mod tests {
         let mut service = make_service("my-app", "default");
         service.spec.service = None;
 
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
         assert!(output.service.is_none());
     }
 
@@ -1532,7 +1312,7 @@ mod tests {
             max: Some(10),
         };
 
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
 
         let hpa = output.hpa.expect("should have HPA");
         assert_eq!(hpa.metadata.name, "my-app");
@@ -1546,7 +1326,7 @@ mod tests {
     #[test]
     fn story_no_hpa_without_max_replicas() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
         assert!(output.hpa.is_none());
     }
 
@@ -1557,7 +1337,7 @@ mod tests {
     #[test]
     fn story_rolling_strategy() {
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
 
         let strategy = output
             .deployment
@@ -1578,7 +1358,7 @@ mod tests {
         let mut service = make_service("my-app", "default");
         service.spec.deploy.strategy = DeployStrategy::Canary;
 
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
 
         let strategy = output
             .deployment
@@ -1610,10 +1390,13 @@ mod tests {
             .variables
             .insert("LOG_LEVEL".to_string(), TemplateString::from("debug"));
 
-        // Use compile_pod_spec which generates container specs for webhook
-        let pod_spec = WorkloadCompiler::compile_pod_spec(&service);
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("deployment should be set");
 
-        let env = &pod_spec
+        let env = &deployment
+            .spec
+            .template
+            .spec
             .containers
             .iter()
             .find(|c| c.name == "main")
@@ -1628,10 +1411,13 @@ mod tests {
     fn story_container_ports_from_service() {
         let service = make_service("my-app", "default");
 
-        // Use compile_pod_spec which generates container specs for webhook
-        let pod_spec = WorkloadCompiler::compile_pod_spec(&service);
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("deployment should be set");
 
-        let ports = &pod_spec
+        let ports = &deployment
+            .spec
+            .template
+            .spec
             .containers
             .iter()
             .find(|c| c.name == "main")
@@ -1650,7 +1436,7 @@ mod tests {
         assert!(empty.is_empty());
 
         let service = make_service("my-app", "default");
-        let output = WorkloadCompiler::compile(&service, &service.spec.environment);
+        let output = compile_service(&service);
         assert!(!output.is_empty());
     }
 
@@ -1735,286 +1521,5 @@ mod tests {
         let hash_partial = compute_config_hash(Some(&env_cm), Some(&env_secret), None, None);
 
         assert_ne!(hash_all, hash_partial);
-    }
-
-    // =========================================================================
-    // Story: Full Compilation Pipeline (compile_rendered)
-    // =========================================================================
-
-    #[test]
-    fn test_compile_rendered_routes_env_to_configmap() {
-        use lattice_common::template::{RenderedContainer, RenderedVariable};
-
-        let service = make_service("api", "prod");
-
-        let mut rendered = BTreeMap::new();
-        let mut vars = BTreeMap::new();
-        vars.insert("HOST".to_string(), RenderedVariable::plain("localhost"));
-        vars.insert("PORT".to_string(), RenderedVariable::plain("8080"));
-
-        rendered.insert(
-            "main".to_string(),
-            RenderedContainer {
-                name: "main".to_string(),
-                image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: vars,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-            },
-        );
-
-        let output = WorkloadCompiler::compile_rendered(&service, "prod", &rendered);
-
-        // Should create ConfigMap for non-sensitive vars
-        let cm = output.env_config_map.expect("should have env ConfigMap");
-        assert_eq!(cm.metadata.name, "api-env");
-        assert_eq!(cm.data.get("HOST"), Some(&"localhost".to_string()));
-        assert_eq!(cm.data.get("PORT"), Some(&"8080".to_string()));
-
-        // Should NOT create Secret (no sensitive vars)
-        assert!(output.env_secret.is_none());
-    }
-
-    #[test]
-    fn test_compile_rendered_routes_sensitive_to_secret() {
-        use lattice_common::template::{RenderedContainer, RenderedVariable};
-
-        let service = make_service("api", "prod");
-
-        let mut rendered = BTreeMap::new();
-        let mut vars = BTreeMap::new();
-        vars.insert("HOST".to_string(), RenderedVariable::plain("localhost"));
-        vars.insert(
-            "DB_PASSWORD".to_string(),
-            RenderedVariable::secret("supersecret"),
-        );
-
-        rendered.insert(
-            "main".to_string(),
-            RenderedContainer {
-                name: "main".to_string(),
-                image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: vars,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-            },
-        );
-
-        let output = WorkloadCompiler::compile_rendered(&service, "prod", &rendered);
-
-        // Non-sensitive goes to ConfigMap
-        let cm = output.env_config_map.expect("should have env ConfigMap");
-        assert_eq!(cm.data.get("HOST"), Some(&"localhost".to_string()));
-        assert!(!cm.data.contains_key("DB_PASSWORD"));
-
-        // Sensitive goes to Secret
-        let secret = output.env_secret.expect("should have env Secret");
-        assert_eq!(
-            secret.string_data.get("DB_PASSWORD"),
-            Some(&"supersecret".to_string())
-        );
-        assert!(!secret.string_data.contains_key("HOST"));
-    }
-
-    #[test]
-    fn test_compile_rendered_adds_config_hash_annotation() {
-        use lattice_common::template::{RenderedContainer, RenderedVariable};
-
-        let service = make_service("api", "prod");
-
-        let mut rendered = BTreeMap::new();
-        let mut vars = BTreeMap::new();
-        vars.insert("KEY".to_string(), RenderedVariable::plain("value"));
-
-        rendered.insert(
-            "main".to_string(),
-            RenderedContainer {
-                name: "main".to_string(),
-                image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: vars,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-            },
-        );
-
-        let output = WorkloadCompiler::compile_rendered(&service, "prod", &rendered);
-
-        let deployment = output.deployment.expect("should have deployment");
-        let annotations = &deployment.spec.template.metadata.annotations;
-
-        // Should have config hash annotation
-        let hash = annotations
-            .get("lattice.dev/config-hash")
-            .expect("should have config hash");
-        assert_eq!(hash.len(), 16); // 8 bytes = 16 hex chars
-    }
-
-    #[test]
-    fn test_compile_rendered_config_hash_changes_with_data() {
-        use lattice_common::template::{RenderedContainer, RenderedVariable};
-
-        let service = make_service("api", "prod");
-
-        // First compilation
-        let mut rendered1 = BTreeMap::new();
-        let mut vars1 = BTreeMap::new();
-        vars1.insert("KEY".to_string(), RenderedVariable::plain("value1"));
-        rendered1.insert(
-            "main".to_string(),
-            RenderedContainer {
-                name: "main".to_string(),
-                image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: vars1,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-            },
-        );
-
-        let output1 = WorkloadCompiler::compile_rendered(&service, "prod", &rendered1);
-        let hash1 = output1
-            .deployment
-            .expect("deployment should be generated")
-            .spec
-            .template
-            .metadata
-            .annotations
-            .get("lattice.dev/config-hash")
-            .expect("config-hash annotation should be set")
-            .clone();
-
-        // Second compilation with different value
-        let mut rendered2 = BTreeMap::new();
-        let mut vars2 = BTreeMap::new();
-        vars2.insert("KEY".to_string(), RenderedVariable::plain("value2"));
-        rendered2.insert(
-            "main".to_string(),
-            RenderedContainer {
-                name: "main".to_string(),
-                image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: vars2,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-            },
-        );
-
-        let output2 = WorkloadCompiler::compile_rendered(&service, "prod", &rendered2);
-        let hash2 = output2
-            .deployment
-            .expect("deployment should be generated")
-            .spec
-            .template
-            .metadata
-            .annotations
-            .get("lattice.dev/config-hash")
-            .expect("config-hash annotation should be set")
-            .clone();
-
-        // Hashes should differ when config changes
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_compile_rendered_wires_envfrom() {
-        use lattice_common::template::{RenderedContainer, RenderedVariable};
-
-        let service = make_service("api", "prod");
-
-        let mut rendered = BTreeMap::new();
-        let mut vars = BTreeMap::new();
-        vars.insert("HOST".to_string(), RenderedVariable::plain("localhost"));
-        vars.insert("PASSWORD".to_string(), RenderedVariable::secret("secret"));
-
-        rendered.insert(
-            "main".to_string(),
-            RenderedContainer {
-                name: "main".to_string(),
-                image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: vars,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-            },
-        );
-
-        let output = WorkloadCompiler::compile_rendered(&service, "prod", &rendered);
-
-        let deployment = output.deployment.expect("should have deployment");
-        let container = &deployment.spec.template.spec.containers[0];
-
-        // Should have envFrom references
-        assert_eq!(container.env_from.len(), 2);
-
-        // One for ConfigMap
-        assert!(container
-            .env_from
-            .iter()
-            .any(|ef| ef.config_map_ref.is_some()));
-
-        // One for Secret
-        assert!(container.env_from.iter().any(|ef| ef.secret_ref.is_some()));
-    }
-
-    #[test]
-    fn test_compile_rendered_with_files() {
-        use lattice_common::template::{RenderedContainer, RenderedFile};
-
-        let service = make_service("api", "prod");
-
-        let mut rendered = BTreeMap::new();
-        let mut files = BTreeMap::new();
-        files.insert(
-            "/etc/app/config.yaml".to_string(),
-            RenderedFile {
-                content: Some("key: value".to_string()),
-                binary_content: None,
-                source: None,
-                mode: Some("0644".to_string()),
-            },
-        );
-
-        rendered.insert(
-            "main".to_string(),
-            RenderedContainer {
-                name: "main".to_string(),
-                image: "nginx:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                files,
-                volumes: BTreeMap::new(),
-            },
-        );
-
-        let output = WorkloadCompiler::compile_rendered(&service, "prod", &rendered);
-
-        // Should create files ConfigMap
-        let files_cm = output
-            .files_config_map
-            .expect("should have files ConfigMap");
-        assert_eq!(files_cm.metadata.name, "api-files");
-        assert!(!files_cm.data.is_empty());
-
-        // Deployment should have volume
-        let deployment = output.deployment.expect("should have deployment");
-        assert!(!deployment.spec.template.spec.volumes.is_empty());
-
-        // Container should have volume mount
-        let container = &deployment.spec.template.spec.containers[0];
-        assert!(!container.volume_mounts.is_empty());
-        assert!(container
-            .volume_mounts
-            .iter()
-            .any(|vm| vm.mount_path == "/etc/app/config.yaml"));
     }
 }

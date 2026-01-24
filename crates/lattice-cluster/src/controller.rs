@@ -85,10 +85,6 @@ pub trait KubeClient: Send + Sync {
         grpc_port: u16,
     ) -> Result<(), Error>;
 
-    /// Ensure the central proxy ClusterIP Service exists
-    /// Check if the MutatingWebhookConfiguration for LatticeService deployments exists
-    async fn is_webhook_config_ready(&self) -> Result<bool, Error>;
-
     /// Copy a secret from one namespace to another
     ///
     /// If the secret already exists in the target namespace, this is a no-op.
@@ -536,17 +532,6 @@ impl KubeClient for KubeClientImpl {
         }
 
         Ok(())
-    }
-
-    async fn is_webhook_config_ready(&self) -> Result<bool, Error> {
-        use k8s_openapi::api::admissionregistration::v1::MutatingWebhookConfiguration;
-
-        let api: Api<MutatingWebhookConfiguration> = Api::all(self.client.clone());
-        match api.get("lattice-deployment-mutator").await {
-            Ok(_) => Ok(true),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
-            Err(e) => Err(e.into()),
-        }
     }
 
     async fn add_cluster_finalizer(
@@ -2017,23 +2002,8 @@ async fn try_transition_to_ready(
         }
     }
 
-    // Check MutatingWebhookConfiguration exists
-    match ctx.kube.is_webhook_config_ready().await {
-        Ok(true) => {
-            debug!("webhook configuration ready");
-        }
-        Ok(false) => {
-            debug!("webhook configuration not found yet, waiting before Ready");
-            return Ok(Action::requeue(Duration::from_secs(5)));
-        }
-        Err(e) => {
-            warn!(error = %e, "failed to check webhook configuration, waiting");
-            return Ok(Action::requeue(Duration::from_secs(5)));
-        }
-    }
-
-    // Webhook is ready, transition to Ready
-    info!("webhook ready, transitioning cluster to Ready phase");
+    // All checks passed, transition to Ready
+    info!("transitioning cluster to Ready phase");
     update_cluster_status(cluster, ctx, ClusterPhase::Ready, None, set_pivot_complete).await?;
     Ok(Action::requeue(Duration::from_secs(60)))
 }
@@ -2119,7 +2089,7 @@ async fn generate_capi_manifests(
             cluster_manifest,
             networking: cluster.spec.networking.clone(),
             proxmox_ipv4_pool,
-            provider: cluster.spec.provider.provider_type().to_string(),
+            provider: cluster.spec.provider.provider_type(),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             k8s_version: cluster.spec.provider.kubernetes.version.clone(),
         };

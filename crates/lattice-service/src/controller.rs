@@ -232,6 +232,22 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
+        // PersistentVolumeClaims (must exist before Deployment references them)
+        for pvc in &compiled.workloads.pvcs {
+            use k8s_openapi::api::core::v1::PersistentVolumeClaim as K8sPvc;
+
+            let name = pvc.metadata.name.clone();
+            let json = serde_json::to_value(pvc)
+                .map_err(|e| Error::serialization(format!("PersistentVolumeClaim: {}", e)))?;
+            let api: Api<K8sPvc> = Api::namespaced(self.client.clone(), namespace);
+            let params = params.clone();
+            futures.push(Box::pin(async move {
+                debug!(name = %name, "applying PersistentVolumeClaim");
+                api.patch(&name, &params, &Patch::Apply(&json)).await?;
+                Ok(())
+            }));
+        }
+
         // Deployment
         if let Some(ref deployment) = compiled.workloads.deployment {
             let name = deployment.metadata.name.clone();

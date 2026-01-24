@@ -12,7 +12,7 @@ pub mod istio;
 use std::process::Command;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::BootstrapProvider;
+use lattice_common::crd::{BootstrapProvider, ProviderType};
 
 // Re-export submodule types
 pub use cilium::{
@@ -25,7 +25,7 @@ pub use istio::{IstioConfig, IstioReconciler};
 #[derive(Debug, Clone)]
 pub struct InfrastructureConfig {
     /// Infrastructure provider type (docker, proxmox, aws, etc.)
-    pub provider: String,
+    pub provider: ProviderType,
     /// Bootstrap mechanism (kubeadm or rke2)
     pub bootstrap: BootstrapProvider,
     /// Skip Cilium policies (true for kind/bootstrap clusters without Cilium)
@@ -67,7 +67,7 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     }
 
     // CAPI providers
-    if let Ok(capi) = generate_capi(&config.provider) {
+    if let Ok(capi) = generate_capi(config.provider) {
         debug!(count = capi.len(), "generated CAPI manifests");
         manifests.extend(capi);
     } else {
@@ -115,14 +115,14 @@ pub fn generate_certmanager() -> Result<Vec<String>, String> {
 }
 
 /// Generate CAPI provider manifests
-pub fn generate_capi(provider: &str) -> Result<Vec<String>, String> {
-    let infra = match provider.to_lowercase().as_str() {
-        "docker" => "docker",
-        "proxmox" => "proxmox",
-        "aws" => "aws",
-        "gcp" => "gcp",
-        "azure" => "azure",
-        p => return Err(format!("unknown provider: {}", p)),
+pub fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String> {
+    let infra = match provider {
+        ProviderType::Docker => "docker",
+        ProviderType::Proxmox => "proxmox",
+        ProviderType::Aws => "aws",
+        ProviderType::Gcp => "gcp",
+        ProviderType::Azure => "azure",
+        ProviderType::OpenStack => "openstack",
     };
 
     // Always include both kubeadm and rke2 for clusterctl move compatibility
