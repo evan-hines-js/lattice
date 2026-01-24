@@ -4,7 +4,6 @@ metadata:
   name: sonarr
   namespace: media
 spec:
-  environment: media
   containers:
     main:
       image: linuxserver/sonarr:latest
@@ -18,7 +17,7 @@ spec:
         /downloads:
           source: ${resources.media-storage}
           path: downloads
-        /media:
+        /tv:
           source: ${resources.media-storage}
           path: library
       resources:
@@ -45,7 +44,6 @@ spec:
       type: volume
       params:
         size: 5Gi
-        storageClass: local-path
     # Shared media storage (REFERENCE - no size)
     # References jellyfin's volume, co-located via pod affinity
     media-storage:

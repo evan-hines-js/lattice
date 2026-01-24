@@ -4,7 +4,6 @@ metadata:
   name: nzbget
   namespace: media
 spec:
-  environment: media
   containers:
     main:
       image: linuxserver/nzbget:latest
@@ -42,7 +41,6 @@ spec:
       type: volume
       params:
         size: 1Gi
-        storageClass: local-path
     # Shared media storage (REFERENCE - no size)
     # References jellyfin's volume, co-located via pod affinity
     media-storage:
