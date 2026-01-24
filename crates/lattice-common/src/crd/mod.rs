@@ -17,9 +17,9 @@ pub use service::{
     CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec, DeployStrategy, ExecProbe,
     FileMount, HttpGetProbe, HttpHeader, InboundPolicy, IngressPath, IngressSpec, IngressTls,
     LatticeService, LatticeServiceSpec, LatticeServiceStatus, OutboundPolicy, PathMatchType,
-    PortSpec, Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec, ResourceMetadata, ResourceSpec,
-    ResourceType, RetryConfig, ServicePhase, ServicePortsSpec, TimeoutConfig, TlsMode,
-    VolumeAccessMode, VolumeMount, VolumeParams,
+    PortSpec, Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec, ResourceMetadata,
+    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RetryConfig, ServicePhase,
+    ServicePortsSpec, TimeoutConfig, TlsMode, VolumeAccessMode, VolumeMount, VolumeParams,
 };
 pub use types::{
     AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig,

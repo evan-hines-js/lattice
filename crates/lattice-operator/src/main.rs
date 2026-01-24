@@ -122,6 +122,59 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Wait for the API server to be responsive after infrastructure installation
+///
+/// After installing CRDs, Istio, and CAPI, the API server needs time to:
+/// - Register webhooks
+/// - Process CRD schemas
+/// - Settle etcd writes
+///
+/// This function does a quick health check by listing our CRD and verifying
+/// the response time is reasonable. This prevents race conditions where
+/// controllers start before the API server is ready.
+async fn wait_for_api_ready(client: &Client) -> anyhow::Result<()> {
+    use kube::api::ListParams;
+    use std::time::Instant;
+
+    let api: Api<LatticeCluster> = Api::all(client.clone());
+    let max_wait = Duration::from_secs(30);
+    let start = Instant::now();
+
+    tracing::info!("Waiting for API server to be ready...");
+
+    loop {
+        let op_start = Instant::now();
+        match tokio::time::timeout(Duration::from_secs(5), api.list(&ListParams::default())).await {
+            Ok(Ok(_)) => {
+                let elapsed = op_start.elapsed();
+                if elapsed < Duration::from_millis(500) {
+                    // API responded quickly - we're good to go
+                    tracing::info!(response_time_ms = elapsed.as_millis(), "API server ready");
+                    return Ok(());
+                }
+                // API is slow, wait a bit and retry
+                tracing::debug!(
+                    response_time_ms = elapsed.as_millis(),
+                    "API slow, waiting for it to settle..."
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "API request failed, retrying...");
+            }
+            Err(_) => {
+                tracing::debug!("API request timed out, retrying...");
+            }
+        }
+
+        if start.elapsed() > max_wait {
+            tracing::warn!("API server still slow after 30s, proceeding anyway");
+            return Ok(());
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 /// Ensure all Lattice CRDs are installed
 ///
 /// The operator installs its own CRDs on startup using server-side apply.
@@ -720,6 +773,10 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 
     // Ensure infrastructure (Istio, etc.) is installed
     ensure_infrastructure(&client).await?;
+
+    // Wait for API server to settle after infrastructure installation
+    // This prevents race conditions where controllers start before the API is fully ready
+    wait_for_api_ready(&client).await?;
 
     // Create cell servers (started later with correct TLS SANs)
     let parent_servers = Arc::new(
