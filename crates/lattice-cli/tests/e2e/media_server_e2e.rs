@@ -165,6 +165,7 @@ fn create_jellyfin() -> LatticeService {
             class: None,
             metadata: None,
             params: volume_params(&[("size", "1Gi"), ("storageClass", "standard")]),
+            namespace: None,
             inbound: None,
             outbound: None,
         },
@@ -185,6 +186,7 @@ fn create_jellyfin() -> LatticeService {
                 ("storageClass", "standard"),
                 ("accessMode", "ReadWriteOnce"), // RWO forces same-node scheduling
             ]),
+            namespace: None,
             inbound: None,
             outbound: None,
         },
@@ -200,6 +202,7 @@ fn create_jellyfin() -> LatticeService {
             class: None,
             metadata: None,
             params: None,
+            namespace: None,
             inbound: Some(InboundPolicy {
                 rate_limit: Some(RateLimitConfig {
                     requests_per_interval: 100,
@@ -224,7 +227,6 @@ fn create_jellyfin() -> LatticeService {
             ..Default::default()
         },
         spec: LatticeServiceSpec {
-            environment: MEDIA_NAMESPACE.to_string(),
             containers,
             resources,
             service: Some(http_port(8096)),
@@ -275,6 +277,7 @@ fn create_nzbget() -> LatticeService {
             class: None,
             metadata: None,
             params: volume_params(&[("size", "1Gi"), ("storageClass", "standard")]),
+            namespace: None,
             inbound: None,
             outbound: None,
         },
@@ -294,6 +297,7 @@ fn create_nzbget() -> LatticeService {
                 ("storageClass", "standard"),
                 ("accessMode", "ReadWriteOnce"), // RWO forces same-node scheduling
             ]),
+            namespace: None,
             inbound: None,
             outbound: None,
         },
@@ -309,6 +313,7 @@ fn create_nzbget() -> LatticeService {
             class: None,
             metadata: None,
             params: None,
+            namespace: None,
             inbound: Some(InboundPolicy {
                 rate_limit: Some(RateLimitConfig {
                     requests_per_interval: 50,
@@ -333,7 +338,6 @@ fn create_nzbget() -> LatticeService {
             ..Default::default()
         },
         spec: LatticeServiceSpec {
-            environment: MEDIA_NAMESPACE.to_string(),
             containers,
             resources,
             service: Some(http_port(6789)),
@@ -397,6 +401,7 @@ fn create_sonarr() -> LatticeService {
             class: None,
             metadata: None,
             params: volume_params(&[("size", "1Gi"), ("storageClass", "standard")]),
+            namespace: None,
             inbound: None,
             outbound: None,
         },
@@ -412,6 +417,7 @@ fn create_sonarr() -> LatticeService {
             class: None,
             metadata: None,
             params: None, // NO PARAMS = REFERENCE (not owner)
+            namespace: None,
             inbound: None,
             outbound: None,
         },
@@ -427,6 +433,7 @@ fn create_sonarr() -> LatticeService {
             class: None,
             metadata: None,
             params: None, // NO PARAMS = REFERENCE
+            namespace: None,
             inbound: None,
             outbound: None,
         },
@@ -442,6 +449,7 @@ fn create_sonarr() -> LatticeService {
             class: None,
             metadata: None,
             params: None,
+            namespace: None,
             inbound: None,
             outbound: Some(OutboundPolicy {
                 retries: Some(RetryConfig {
@@ -466,6 +474,7 @@ fn create_sonarr() -> LatticeService {
             class: None,
             metadata: None,
             params: None,
+            namespace: None,
             inbound: None,
             outbound: Some(OutboundPolicy {
                 retries: Some(RetryConfig {
@@ -494,7 +503,6 @@ fn create_sonarr() -> LatticeService {
             ..Default::default()
         },
         spec: LatticeServiceSpec {
-            environment: MEDIA_NAMESPACE.to_string(),
             containers,
             resources,
             service: Some(http_port(8989)),

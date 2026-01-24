@@ -832,13 +832,22 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
             // their ingress policies (if they allow A).
             .watches(services, WatcherConfig::default(), move |service| {
                 let graph = graph_for_watch.clone();
-                let env = &service.spec.environment;
+                let namespace = match service.metadata.namespace.as_deref() {
+                    Some(ns) => ns,
+                    None => {
+                        tracing::warn!(
+                            service = ?service.metadata.name,
+                            "Service missing namespace, skipping dependency resolution"
+                        );
+                        return vec![];
+                    }
+                };
                 let name = service.metadata.name.as_deref().unwrap_or_default();
 
                 // Get services that this service depends on (they need to update ingress)
-                let dependencies = graph.get_dependencies(env, name);
+                let dependencies = graph.get_dependencies(namespace, name);
                 // Get services that depend on this service (they need to update egress)
-                let dependents = graph.get_dependents(env, name);
+                let dependents = graph.get_dependents(namespace, name);
 
                 // Combine and deduplicate
                 let mut affected: Vec<String> = dependencies;
@@ -848,14 +857,16 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 
                 tracing::debug!(
                     service = %name,
-                    env = %env,
+                    namespace = %namespace,
                     affected_count = affected.len(),
                     "Service changed, triggering re-reconciliation of affected services"
                 );
 
+                let ns = namespace.to_string();
                 affected
                     .into_iter()
-                    .map(|dep_name| ObjectRef::<LatticeService>::new(&dep_name))
+                    .map(|dep_name| ObjectRef::<LatticeService>::new(&dep_name).within(&ns))
+                    .collect()
             })
             .shutdown_on_signal()
             .run(service_reconcile, service_error_policy, service_ctx.clone())

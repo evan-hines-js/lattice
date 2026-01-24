@@ -279,7 +279,6 @@ mod tests {
         );
 
         let spec = crate::crd::LatticeServiceSpec {
-            environment: env.to_string(),
             containers,
             resources: BTreeMap::new(),
             service: Some(crate::crd::ServicePortsSpec { ports }),
@@ -296,7 +295,6 @@ mod tests {
         let graph = ServiceGraph::new();
 
         let spec = LatticeExternalServiceSpec {
-            environment: env.to_string(),
             endpoints: BTreeMap::from([("default".to_string(), url.to_string())]),
             allowed_requesters: vec!["*".to_string()],
             resolution: crate::crd::Resolution::Dns,
@@ -324,6 +322,7 @@ mod tests {
             class: None,
             metadata: None,
             params: None,
+            namespace: None,
             inbound: None,
             outbound: None,
         };
@@ -359,6 +358,7 @@ mod tests {
             class: None,
             metadata: None,
             params: None,
+            namespace: None,
             inbound: None,
             outbound: None,
         };
@@ -385,6 +385,7 @@ mod tests {
             class: None,
             metadata: None,
             params: None,
+            namespace: None,
             inbound: None,
             outbound: None,
         };
@@ -415,6 +416,7 @@ mod tests {
             class: None,
             metadata: None,
             params: None,
+            namespace: None,
             inbound: None,
             outbound: None,
         };
@@ -450,14 +452,14 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
-            inbound: None,
-            outbound: None,
+                namespace: None,
+                inbound: None,
+                outbound: None,
             },
         );
 
         // Create a minimal spec with the resources
         let spec = crate::crd::LatticeServiceSpec {
-            environment: "prod".to_string(),
             containers: BTreeMap::from([(
                 "main".to_string(),
                 crate::crd::ContainerSpec {

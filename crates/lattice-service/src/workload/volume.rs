@@ -377,6 +377,7 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: Some(params),
+                    namespace: None,
                     inbound: None,
                     outbound: None,
                 },
@@ -394,6 +395,7 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None, // No params = reference
+                    namespace: None,
                     inbound: None,
                     outbound: None,
                 },
@@ -431,7 +433,6 @@ mod tests {
         );
 
         LatticeServiceSpec {
-            environment: "default".to_string(),
             containers,
             resources,
             service: None,
@@ -709,7 +710,6 @@ mod tests {
     #[test]
     fn story_no_volumes_returns_empty() {
         let spec = LatticeServiceSpec {
-            environment: "default".to_string(),
             containers: BTreeMap::new(),
             resources: BTreeMap::new(),
             service: None,

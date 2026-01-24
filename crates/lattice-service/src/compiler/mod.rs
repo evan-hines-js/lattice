@@ -114,17 +114,18 @@ impl<'a> ServiceCompiler<'a> {
     /// - Ingress: Gateway, HTTPRoute, Certificate (if ingress configured)
     /// - Waypoint: Istio ambient mesh L7 policy enforcement
     ///
-    /// The environment (and namespace) comes from `spec.environment`, since
-    /// LatticeService is cluster-scoped.
+    /// The namespace comes from the CRD's metadata (LatticeService is namespace-scoped).
     pub fn compile(&self, service: &LatticeService) -> CompiledService {
         let name = service
             .metadata
             .name
             .as_deref()
             .expect("LatticeService must have a name");
-        // Environment is in spec, determines namespace for workloads
-        let env = &service.spec.environment;
-        let namespace = env; // Environment determines namespace
+        let namespace = service
+            .metadata
+            .namespace
+            .as_deref()
+            .expect("LatticeService must have a namespace");
 
         // Compile volumes first (PVCs must exist before Deployment references them)
         let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec);
@@ -136,7 +137,7 @@ impl<'a> ServiceCompiler<'a> {
         workloads.pvcs = compiled_volumes.pvcs;
 
         let policy_compiler = PolicyCompiler::new(self.graph, &self.trust_domain);
-        let mut policies = policy_compiler.compile(name, namespace, env);
+        let mut policies = policy_compiler.compile(name, namespace);
 
         // Compile waypoint Gateway for east-west L7 policies (Istio ambient mesh)
         let waypoint = WaypointCompiler::compile(namespace);
@@ -200,7 +201,7 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    fn make_service(name: &str, env: &str) -> LatticeService {
+    fn make_service(name: &str, namespace: &str) -> LatticeService {
         let mut containers = BTreeMap::new();
         containers.insert(
             "main".to_string(),
@@ -231,10 +232,10 @@ mod tests {
         LatticeService {
             metadata: kube::api::ObjectMeta {
                 name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
                 ..Default::default()
             },
             spec: crate::crd::LatticeServiceSpec {
-                environment: env.to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: Some(ServicePortsSpec { ports }),
@@ -246,8 +247,8 @@ mod tests {
         }
     }
 
-    fn make_service_with_ingress(name: &str, env: &str) -> LatticeService {
-        let mut service = make_service(name, env);
+    fn make_service_with_ingress(name: &str, namespace: &str) -> LatticeService {
+        let mut service = make_service(name, namespace);
         service.spec.ingress = Some(IngressSpec {
             hosts: vec!["api.example.com".to_string()],
             paths: None,
@@ -266,7 +267,6 @@ mod tests {
     }
 
     fn make_service_spec_for_graph(
-        env: &str,
         deps: Vec<&str>,
         callers: Vec<&str>,
     ) -> crate::crd::LatticeServiceSpec {
@@ -281,6 +281,7 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    namespace: None,
                     inbound: None,
                     outbound: None,
                 },
@@ -296,6 +297,7 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    namespace: None,
                     inbound: None,
                     outbound: None,
                 },
@@ -330,7 +332,6 @@ mod tests {
         );
 
         crate::crd::LatticeServiceSpec {
-            environment: env.to_string(),
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
@@ -350,11 +351,11 @@ mod tests {
         let env = "prod";
 
         // api allows gateway
-        let api_spec = make_service_spec_for_graph("prod", vec![], vec!["gateway"]);
+        let api_spec = make_service_spec_for_graph(vec![], vec!["gateway"]);
         graph.put_service(env, "api", &api_spec);
 
         // gateway calls api
-        let gateway_spec = make_service_spec_for_graph("prod", vec!["api"], vec![]);
+        let gateway_spec = make_service_spec_for_graph(vec!["api"], vec![]);
         graph.put_service(env, "gateway", &gateway_spec);
 
         // Create LatticeService for api
@@ -382,7 +383,7 @@ mod tests {
         let graph = ServiceGraph::new();
 
         // Put service in "staging" environment
-        let spec = make_service_spec_for_graph("default", vec![], vec![]);
+        let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("staging", "my-app", &spec);
 
         // Create LatticeService with staging label
@@ -400,7 +401,7 @@ mod tests {
         let graph = ServiceGraph::new();
 
         // Put service in "prod-ns" environment (same as namespace)
-        let spec = make_service_spec_for_graph("default", vec![], vec![]);
+        let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod-ns", "my-app", &spec);
 
         // Create LatticeService without env label
@@ -442,7 +443,7 @@ mod tests {
     #[test]
     fn story_resource_count() {
         let graph = ServiceGraph::new();
-        let spec = make_service_spec_for_graph("default", vec![], vec![]);
+        let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("default", "my-app", &spec);
 
         let service = make_service("my-app", "default");
@@ -494,7 +495,7 @@ mod tests {
     #[test]
     fn story_service_with_ingress_generates_gateway_resources() {
         let graph = ServiceGraph::new();
-        let spec = make_service_spec_for_graph("prod", vec![], vec![]);
+        let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
 
         let service = make_service_with_ingress("api", "prod");
@@ -533,7 +534,7 @@ mod tests {
     #[test]
     fn story_service_without_ingress_has_no_gateway_resources() {
         let graph = ServiceGraph::new();
-        let spec = make_service_spec_for_graph("prod", vec![], vec![]);
+        let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
 
         let service = make_service("api", "prod");
@@ -551,7 +552,7 @@ mod tests {
     #[test]
     fn story_resource_count_includes_ingress() {
         let graph = ServiceGraph::new();
-        let spec = make_service_spec_for_graph("prod", vec![], vec![]);
+        let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
 
         let service = make_service_with_ingress("api", "prod");
