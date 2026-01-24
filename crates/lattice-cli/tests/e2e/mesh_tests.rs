@@ -749,8 +749,8 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     deploy_test_services(kubeconfig_path).await?;
     wait_for_service_pods(kubeconfig_path).await?;
     // Traffic generators wait up to 120s for policy propagation + 10s stabilization + test time
-    println!("  Waiting for traffic tests to complete (60s)...");
-    sleep(Duration::from_secs(60)).await;
+    println!("  Waiting for traffic tests to complete (90s)...");
+    sleep(Duration::from_secs(90)).await;
     verify_traffic_patterns(kubeconfig_path).await?;
 
     Ok(())
@@ -1486,8 +1486,8 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     println!("\n  Waiting for pods...");
     wait_for_random_mesh_pods(&mesh, kubeconfig_path).await?;
     // Traffic generators wait up to 120s for policy propagation + 10s stabilization + test time
-    println!("\n  Waiting for traffic tests to complete (60s)...");
-    sleep(Duration::from_secs(60)).await;
+    println!("\n  Waiting for traffic tests to complete (90s)...");
+    sleep(Duration::from_secs(90)).await;
     verify_random_mesh_traffic(&mesh, kubeconfig_path).await?;
 
     Ok(())

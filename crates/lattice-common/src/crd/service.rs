@@ -190,7 +190,7 @@ pub struct ResourceMetadata {
 /// - `direction`: Bilateral agreement direction (inbound/outbound/both)
 /// - `inbound`: L7 policies for inbound traffic (rate limiting)
 /// - `outbound`: L7 policies for outbound traffic (retries, timeouts)
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceSpec {
     // =========================================================================
