@@ -53,7 +53,7 @@ impl DependencyDirection {
 ///
 /// Built-in types have strong typing; custom types use `Custom(String)` for extensibility.
 /// Built-ins always win during deserialization - explicit match before Custom.
-#[derive(Clone, Debug, JsonSchema, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ResourceType {
     /// Internal service (another LatticeService)
     Service,
@@ -63,8 +63,29 @@ pub enum ResourceType {
     Volume,
     /// Custom resource type (escape hatch for extensibility)
     /// Validated at parse time: lowercase alphanumeric with hyphens, starts with letter
-    #[schemars(skip)]
     Custom(String),
+}
+
+impl JsonSchema for ResourceType {
+    fn schema_name() -> String {
+        "ResourceType".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        // Accept any string - built-in values are "service", "external-service", "volume"
+        // Custom types are validated at parse time
+        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "Resource type: 'service', 'external-service', 'volume', or custom type"
+                        .to_string(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
 }
 
 impl Serialize for ResourceType {
