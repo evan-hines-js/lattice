@@ -401,9 +401,13 @@ impl<'a> PolicyCompiler<'a> {
 
         // Generate ServiceEntries and AuthorizationPolicies for external dependencies
         for edge in &outbound_edges {
-            if let Some(callee) = self.graph.get_service(&edge.callee_namespace, &edge.callee_name) {
+            if let Some(callee) = self
+                .graph
+                .get_service(&edge.callee_namespace, &edge.callee_name)
+            {
                 if callee.type_ == ServiceType::External {
-                    if let Some(entry) = self.compile_service_entry(&callee, &edge.callee_namespace) {
+                    if let Some(entry) = self.compile_service_entry(&callee, &edge.callee_namespace)
+                    {
                         output.service_entries.push(entry);
                     }
                     // Generate default-deny for this ServiceEntry
@@ -411,7 +415,10 @@ impl<'a> PolicyCompiler<'a> {
                     // (mesh-default-deny only applies to workloads, not ServiceEntry)
                     output
                         .authorization_policies
-                        .push(Self::compile_external_default_deny(&callee.name, &edge.callee_namespace));
+                        .push(Self::compile_external_default_deny(
+                            &callee.name,
+                            &edge.callee_namespace,
+                        ));
                     // Generate ALLOW policy for THIS service to access the external
                     output
                         .authorization_policies
@@ -699,7 +706,10 @@ impl<'a> PolicyCompiler<'a> {
 
         // Add egress rules for dependencies
         for edge in outbound_edges {
-            if let Some(callee) = self.graph.get_service(&edge.callee_namespace, &edge.callee_name) {
+            if let Some(callee) = self
+                .graph
+                .get_service(&edge.callee_namespace, &edge.callee_name)
+            {
                 match callee.type_ {
                     ServiceType::Local => {
                         let mut dep_labels = BTreeMap::new();

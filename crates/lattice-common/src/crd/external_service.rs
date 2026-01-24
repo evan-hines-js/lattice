@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn test_allows_specific_service() {
         let spec = LatticeExternalServiceSpec {
-                        endpoints: BTreeMap::from([("api".to_string(), "https://api.example.com".to_string())]),
+            endpoints: BTreeMap::from([("api".to_string(), "https://api.example.com".to_string())]),
             allowed_requesters: vec!["my-service".to_string()],
             resolution: Resolution::Dns,
             description: None,
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn test_allows_wildcard() {
         let spec = LatticeExternalServiceSpec {
-                        endpoints: BTreeMap::from([("api".to_string(), "https://api.example.com".to_string())]),
+            endpoints: BTreeMap::from([("api".to_string(), "https://api.example.com".to_string())]),
             allowed_requesters: vec!["*".to_string()],
             resolution: Resolution::Dns,
             description: None,
@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn test_allows_empty_denies_all() {
         let spec = LatticeExternalServiceSpec {
-                        endpoints: BTreeMap::from([("api".to_string(), "https://api.example.com".to_string())]),
+            endpoints: BTreeMap::from([("api".to_string(), "https://api.example.com".to_string())]),
             allowed_requesters: vec![],
             resolution: Resolution::Dns,
             description: None,
@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn test_valid_spec_passes() {
         let spec = LatticeExternalServiceSpec {
-                        endpoints: BTreeMap::from([
+            endpoints: BTreeMap::from([
                 ("api".to_string(), "https://api.stripe.com".to_string()),
                 ("db".to_string(), "tcp://10.0.0.5:5432".to_string()),
             ]),
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn test_empty_endpoints_fails() {
         let spec = LatticeExternalServiceSpec {
-                        endpoints: BTreeMap::new(),
+            endpoints: BTreeMap::new(),
             allowed_requesters: vec!["my-service".to_string()],
             resolution: Resolution::Dns,
             description: None,
@@ -619,7 +619,7 @@ mod tests {
     #[test]
     fn test_invalid_url_fails() {
         let spec = LatticeExternalServiceSpec {
-                        endpoints: BTreeMap::from([("bad".to_string(), "not-a-valid-url".to_string())]),
+            endpoints: BTreeMap::from([("bad".to_string(), "not-a-valid-url".to_string())]),
             allowed_requesters: vec![],
             resolution: Resolution::Dns,
             description: None,
@@ -677,7 +677,7 @@ allowedRequesters:
     #[test]
     fn test_spec_survives_yaml_roundtrip() {
         let spec = LatticeExternalServiceSpec {
-                        endpoints: BTreeMap::from([("api".to_string(), "https://api.example.com".to_string())]),
+            endpoints: BTreeMap::from([("api".to_string(), "https://api.example.com".to_string())]),
             allowed_requesters: vec!["service-a".to_string(), "service-b".to_string()],
             resolution: Resolution::Static,
             description: Some("Test service".to_string()),

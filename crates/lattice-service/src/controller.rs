@@ -56,8 +56,11 @@ pub trait ServiceKubeClient: Send + Sync {
     ) -> Result<(), Error>;
 
     /// Get a LatticeService by name and namespace
-    async fn get_service(&self, name: &str, namespace: &str)
-        -> Result<Option<LatticeService>, Error>;
+    async fn get_service(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<LatticeService>, Error>;
 
     /// Get a LatticeExternalService by name and namespace
     async fn get_external_service(
@@ -768,7 +771,8 @@ pub async fn reconcile_external(
     };
 
     // Update graph with this external service
-    ctx.graph.put_external_service(namespace, &name, &external.spec);
+    ctx.graph
+        .put_external_service(namespace, &name, &external.spec);
 
     // Only update status if not already Ready (avoid reconcile loop)
     let is_ready = external
@@ -865,7 +869,9 @@ async fn update_service_status_compiling(
             "Checking service dependencies",
         ));
 
-    ctx.kube.patch_service_status(&name, &namespace, &status).await
+    ctx.kube
+        .patch_service_status(&name, &namespace, &status)
+        .await
 }
 
 async fn update_service_status_ready(
@@ -884,7 +890,9 @@ async fn update_service_status_ready(
             "All dependencies resolved",
         ));
 
-    ctx.kube.patch_service_status(&name, &namespace, &status).await
+    ctx.kube
+        .patch_service_status(&name, &namespace, &status)
+        .await
 }
 
 async fn update_service_status_failed(
@@ -903,7 +911,9 @@ async fn update_service_status_failed(
             message,
         ));
 
-    ctx.kube.patch_service_status(&name, &namespace, &status).await
+    ctx.kube
+        .patch_service_status(&name, &namespace, &status)
+        .await
 }
 
 async fn update_external_status_ready(
@@ -923,7 +933,9 @@ async fn update_external_status_ready(
             "All endpoints are configured",
         ));
 
-    ctx.kube.patch_external_service_status(&name, &namespace, &status).await
+    ctx.kube
+        .patch_external_service_status(&name, &namespace, &status)
+        .await
 }
 
 async fn update_external_status_failed(
@@ -944,7 +956,9 @@ async fn update_external_status_failed(
             message,
         ));
 
-    ctx.kube.patch_external_service_status(&name, &namespace, &status).await
+    ctx.kube
+        .patch_external_service_status(&name, &namespace, &status)
+        .await
 }
 
 // =============================================================================
