@@ -475,7 +475,7 @@ pub struct ExecProbe {
 /// Probe configuration (liveness or readiness)
 ///
 /// Score-compliant probe specification. Supports HTTP GET and exec probe types.
-/// Timing configuration is handled by the platform with sensible defaults.
+/// Timing parameters use platform defaults (initialDelaySeconds: 0, periodSeconds: 10).
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Probe {
