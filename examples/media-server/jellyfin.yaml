@@ -28,8 +28,6 @@ spec:
         httpGet:
           path: /health
           port: 8096
-        initialDelaySeconds: 30
-        periodSeconds: 10
   service:
     ports:
       http:

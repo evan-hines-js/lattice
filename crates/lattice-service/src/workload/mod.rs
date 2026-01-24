@@ -444,30 +444,6 @@ pub struct ProbeSpec {
     /// Exec probe
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecAction>,
-    /// TCP socket probe
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tcp_socket: Option<TcpSocketAction>,
-    /// gRPC probe (requires Kubernetes 1.24+)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grpc: Option<GrpcAction>,
-    /// Initial delay seconds (default: 0)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub initial_delay_seconds: Option<u32>,
-    /// Period seconds (default: 10)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub period_seconds: Option<u32>,
-    /// Timeout seconds (default: 1)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_seconds: Option<u32>,
-    /// Success threshold (default: 1)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub success_threshold: Option<u32>,
-    /// Failure threshold (default: 3)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_threshold: Option<u32>,
-    /// Override pod's terminationGracePeriodSeconds when probe fails
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub termination_grace_period_seconds: Option<i64>,
 }
 
 /// HTTP GET action for probe
@@ -506,29 +482,6 @@ pub struct ExecAction {
     /// Command
     pub command: Vec<String>,
 }
-
-/// TCP socket action for probe
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TcpSocketAction {
-    /// Port
-    pub port: u16,
-    /// Host (defaults to pod IP)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-}
-
-/// gRPC action for probe
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct GrpcAction {
-    /// Port (must be a gRPC server with health checking)
-    pub port: u16,
-    /// Service name (defaults to "" for server health)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service: Option<String>,
-}
-
 /// Volume
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -928,7 +881,7 @@ impl WorkloadCompiler {
             .collect()
     }
 
-    /// Compile a Score-compliant Probe to a K8s ProbeSpec with sensible defaults
+    /// Compile a Score-compliant Probe to a K8s ProbeSpec
     fn compile_probe(p: &crate::crd::Probe) -> ProbeSpec {
         ProbeSpec {
             http_get: p.http_get.as_ref().map(|h| HttpGetAction {
@@ -936,31 +889,19 @@ impl WorkloadCompiler {
                 port: h.port,
                 scheme: h.scheme.clone(),
                 host: h.host.clone(),
-                http_headers: h.http_headers.as_ref().map(
-                    |headers: &Vec<crate::crd::HttpHeader>| {
-                        headers
-                            .iter()
-                            .map(|hdr| HttpHeader {
-                                name: hdr.name.clone(),
-                                value: hdr.value.clone(),
-                            })
-                            .collect()
-                    },
-                ),
+                http_headers: h.http_headers.as_ref().map(|headers| {
+                    headers
+                        .iter()
+                        .map(|hdr| HttpHeader {
+                            name: hdr.name.clone(),
+                            value: hdr.value.clone(),
+                        })
+                        .collect()
+                }),
             }),
             exec: p.exec.as_ref().map(|e| ExecAction {
                 command: e.command.clone(),
             }),
-            // K8s-specific probe types not in Score - leave as None
-            tcp_socket: None,
-            grpc: None,
-            // Sensible defaults for K8s timing (Score doesn't specify these)
-            initial_delay_seconds: Some(0),
-            period_seconds: Some(10),
-            timeout_seconds: Some(1),
-            success_threshold: Some(1),
-            failure_threshold: Some(3),
-            termination_grace_period_seconds: None,
         }
     }
 

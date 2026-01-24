@@ -31,8 +31,6 @@ spec:
         httpGet:
           path: /ping
           port: 8989
-        initialDelaySeconds: 30
-        periodSeconds: 10
   service:
     ports:
       http:
