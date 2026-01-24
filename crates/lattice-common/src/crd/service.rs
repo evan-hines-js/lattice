@@ -530,6 +530,102 @@ pub struct VolumeMount {
     pub read_only: Option<bool>,
 }
 
+/// Container security context
+///
+/// Controls Linux security settings for a container. All fields are optional
+/// with secure defaults. Most services never need to set these.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityContext {
+    /// Linux capabilities to add (e.g., NET_ADMIN, SYS_MODULE)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+
+    /// Capabilities to drop (default: [ALL] for security)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_capabilities: Option<Vec<String>>,
+
+    /// Run container in privileged mode (strongly discouraged)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privileged: Option<bool>,
+
+    /// Mount root filesystem as read-only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_root_filesystem: Option<bool>,
+
+    /// Require the container to run as a non-root user
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_non_root: Option<bool>,
+
+    /// UID to run the container as
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_user: Option<i64>,
+
+    /// GID to run the container as
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_group: Option<i64>,
+
+    /// Allow privilege escalation (setuid binaries)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_privilege_escalation: Option<bool>,
+}
+
+/// Sidecar container specification
+///
+/// Identical to ContainerSpec but with additional sidecar-specific options.
+/// Sidecars are infrastructure containers (VPN, logging, metrics) that support
+/// the main application containers.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SidecarSpec {
+    /// Container image
+    pub image: String,
+
+    /// Override container entrypoint
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+
+    /// Override container arguments
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+
+    /// Environment variables (values support `${...}` placeholders)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, TemplateString>,
+
+    /// Resource requirements
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+
+    /// Files to mount in the container
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, FileMount>,
+
+    /// Volumes to mount
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub volumes: BTreeMap<String, VolumeMount>,
+
+    /// Liveness probe - restarts container when it fails
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_probe: Option<Probe>,
+
+    /// Readiness probe - removes container from service endpoints when it fails
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_probe: Option<Probe>,
+
+    /// Startup probe - delays liveness/readiness checks until container is ready
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_probe: Option<Probe>,
+
+    /// Run as init container (runs once before main containers)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init: Option<bool>,
+
+    /// Security context for the container
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<SecurityContext>,
+}
+
 /// Container specification (Score-compatible)
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -575,6 +671,10 @@ pub struct ContainerSpec {
     /// will not run until the startup probe succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_probe: Option<Probe>,
+
+    /// Security context for the container
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<SecurityContext>,
 }
 
 /// Service port specification
@@ -836,6 +936,22 @@ pub struct LatticeServiceSpec {
     /// Ingress configuration for external access via Gateway API
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<IngressSpec>,
+
+    /// Sidecar containers (VPN, logging, metrics, etc.)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sidecars: BTreeMap<String, SidecarSpec>,
+
+    /// Pod-level sysctls (e.g., net.ipv4.conf.all.src_valid_mark)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sysctls: BTreeMap<String, String>,
+
+    /// Use host network namespace
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_network: Option<bool>,
+
+    /// Share PID namespace between containers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_process_namespace: Option<bool>,
 }
 
 impl LatticeServiceSpec {
@@ -1270,6 +1386,7 @@ mod tests {
             liveness_probe: None,
             readiness_probe: None,
             startup_probe: None,
+            security: None,
         }
     }
 
@@ -1284,6 +1401,10 @@ mod tests {
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         }
     }
 
@@ -1496,6 +1617,10 @@ mod tests {
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         };
 
         let result = spec.validate();
@@ -1683,6 +1808,10 @@ deploy:
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         };
 
         assert_eq!(spec.primary_image(), Some("nginx:latest"));
@@ -2426,5 +2555,240 @@ resources:
             .get("my-postgres")
             .expect("my-postgres should exist");
         assert!(matches!(resource.type_, ResourceType::Custom(ref s) if s == "postgres"));
+    }
+
+    // =========================================================================
+    // Security Context Tests
+    // =========================================================================
+
+    /// Story: SecurityContext parses from YAML with all fields
+    #[test]
+    fn story_security_context_parses() {
+        let yaml = r#"
+containers:
+  main:
+    image: myapp:latest
+    security:
+      capabilities: [NET_ADMIN, SYS_MODULE]
+      dropCapabilities: [ALL]
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      allowPrivilegeEscalation: false
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Security context YAML should parse");
+
+        let security = spec.containers["main"]
+            .security
+            .as_ref()
+            .expect("security should be present");
+        assert_eq!(security.capabilities, vec!["NET_ADMIN", "SYS_MODULE"]);
+        assert_eq!(security.drop_capabilities, Some(vec!["ALL".to_string()]));
+        assert_eq!(security.privileged, Some(false));
+        assert_eq!(security.read_only_root_filesystem, Some(true));
+        assert_eq!(security.run_as_non_root, Some(true));
+        assert_eq!(security.run_as_user, Some(1000));
+        assert_eq!(security.run_as_group, Some(1000));
+        assert_eq!(security.allow_privilege_escalation, Some(false));
+    }
+
+    /// Story: SecurityContext with only capabilities
+    #[test]
+    fn story_security_context_minimal() {
+        let yaml = r#"
+containers:
+  main:
+    image: myapp:latest
+    security:
+      capabilities: [NET_BIND_SERVICE]
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Minimal security context should parse");
+
+        let security = spec.containers["main"]
+            .security
+            .as_ref()
+            .expect("security should be present");
+        assert_eq!(security.capabilities, vec!["NET_BIND_SERVICE"]);
+        assert!(security.drop_capabilities.is_none());
+        assert!(security.privileged.is_none());
+    }
+
+    // =========================================================================
+    // Sidecar Tests
+    // =========================================================================
+
+    /// Story: Sidecars parse with init flag
+    #[test]
+    fn story_sidecars_parse_with_init_flag() {
+        let yaml = r#"
+containers:
+  main:
+    image: myapp:latest
+sidecars:
+  setup:
+    image: busybox:latest
+    init: true
+    command: ["sh", "-c"]
+    args: ["chown -R 1000:1000 /data"]
+    security:
+      runAsUser: 0
+  vpn:
+    image: wireguard:latest
+    init: false
+    security:
+      capabilities: [NET_ADMIN]
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Sidecar YAML should parse");
+
+        assert_eq!(spec.sidecars.len(), 2);
+
+        let setup = spec.sidecars.get("setup").expect("setup should exist");
+        assert_eq!(setup.image, "busybox:latest");
+        assert_eq!(setup.init, Some(true));
+        assert_eq!(
+            setup.security.as_ref().map(|s| s.run_as_user),
+            Some(Some(0))
+        );
+
+        let vpn = spec.sidecars.get("vpn").expect("vpn should exist");
+        assert_eq!(vpn.image, "wireguard:latest");
+        assert_eq!(vpn.init, Some(false));
+        assert_eq!(
+            vpn.security.as_ref().map(|s| s.capabilities.clone()),
+            Some(vec!["NET_ADMIN".to_string()])
+        );
+    }
+
+    /// Story: Sidecar with all fields parses
+    #[test]
+    fn story_sidecar_full_spec() {
+        let yaml = r#"
+containers:
+  main:
+    image: myapp:latest
+sidecars:
+  logging:
+    image: fluent-bit:latest
+    command: ["/fluent-bit/bin/fluent-bit"]
+    args: ["-c", "/config/fluent-bit.conf"]
+    variables:
+      LOG_LEVEL: info
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 2020
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Full sidecar spec should parse");
+
+        let logging = spec.sidecars.get("logging").expect("logging should exist");
+        assert_eq!(logging.image, "fluent-bit:latest");
+        assert!(logging.command.is_some());
+        assert!(logging.args.is_some());
+        assert!(!logging.variables.is_empty());
+        assert!(logging.resources.is_some());
+        assert!(logging.readiness_probe.is_some());
+    }
+
+    // =========================================================================
+    // Pod-Level Settings Tests
+    // =========================================================================
+
+    /// Story: Sysctls parse correctly
+    #[test]
+    fn story_pod_level_settings_parse() {
+        let yaml = r#"
+containers:
+  main:
+    image: myapp:latest
+sysctls:
+  net.ipv4.conf.all.src_valid_mark: "1"
+  net.core.somaxconn: "65535"
+hostNetwork: true
+shareProcessNamespace: true
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Pod-level settings should parse");
+
+        assert_eq!(spec.sysctls.len(), 2);
+        assert_eq!(
+            spec.sysctls.get("net.ipv4.conf.all.src_valid_mark"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            spec.sysctls.get("net.core.somaxconn"),
+            Some(&"65535".to_string())
+        );
+        assert_eq!(spec.host_network, Some(true));
+        assert_eq!(spec.share_process_namespace, Some(true));
+    }
+
+    /// Story: VPN killswitch example parses (full nzbget spec)
+    #[test]
+    fn story_vpn_killswitch_example() {
+        let yaml = r#"
+containers:
+  main:
+    image: linuxserver/nzbget:latest
+    variables:
+      PUID: "1000"
+sysctls:
+  net.ipv4.conf.all.src_valid_mark: "1"
+sidecars:
+  vpn:
+    image: linuxserver/wireguard:latest
+    security:
+      capabilities: [NET_ADMIN, SYS_MODULE]
+service:
+  ports:
+    http:
+      port: 6789
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("VPN killswitch example should parse");
+
+        // Verify main container
+        assert!(spec.containers.contains_key("main"));
+
+        // Verify sysctl
+        assert!(spec
+            .sysctls
+            .contains_key("net.ipv4.conf.all.src_valid_mark"));
+
+        // Verify VPN sidecar
+        let vpn = spec.sidecars.get("vpn").expect("vpn sidecar should exist");
+        let caps = &vpn
+            .security
+            .as_ref()
+            .expect("security should be set")
+            .capabilities;
+        assert!(caps.contains(&"NET_ADMIN".to_string()));
+        assert!(caps.contains(&"SYS_MODULE".to_string()));
+    }
+
+    /// Story: Empty sidecars and sysctls are allowed
+    #[test]
+    fn story_empty_sidecars_and_sysctls() {
+        let yaml = r#"
+containers:
+  main:
+    image: myapp:latest
+"#;
+        let spec: LatticeServiceSpec =
+            serde_yaml::from_str(yaml).expect("Spec without sidecars should parse");
+
+        assert!(spec.sidecars.is_empty());
+        assert!(spec.sysctls.is_empty());
+        assert!(spec.host_network.is_none());
+        assert!(spec.share_process_namespace.is_none());
     }
 }

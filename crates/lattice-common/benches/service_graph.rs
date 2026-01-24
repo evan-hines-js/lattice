@@ -32,6 +32,7 @@ fn simple_container() -> ContainerSpec {
         liveness_probe: None,
         readiness_probe: None,
         startup_probe: None,
+        security: None,
     }
 }
 
@@ -90,6 +91,10 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
         replicas: ReplicaSpec::default(),
         deploy: DeploySpec::default(),
         ingress: None,
+        sidecars: BTreeMap::new(),
+        sysctls: BTreeMap::new(),
+        host_network: None,
+        share_process_namespace: None,
     }
 }
 

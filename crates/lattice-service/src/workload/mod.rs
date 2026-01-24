@@ -338,12 +338,24 @@ pub struct PodSpec {
     pub service_account_name: String,
     /// Containers
     pub containers: Vec<Container>,
+    /// Init containers (run before main containers)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub init_containers: Vec<Container>,
     /// Volumes
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<Volume>,
     /// Pod affinity rules (for RWO volume co-location)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affinity: Option<volume::Affinity>,
+    /// Pod-level security context
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<PodSecurityContext>,
+    /// Use host network namespace
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_network: Option<bool>,
+    /// Share PID namespace between containers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_process_namespace: Option<bool>,
 }
 
 /// Container spec
@@ -384,6 +396,9 @@ pub struct Container {
     /// Volume mounts
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volume_mounts: Vec<VolumeMount>,
+    /// Security context
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<K8sSecurityContext>,
 }
 
 /// Environment variable
@@ -482,6 +497,64 @@ pub struct ExecAction {
     /// Command
     pub command: Vec<String>,
 }
+
+/// Kubernetes container security context
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct K8sSecurityContext {
+    /// Capabilities to add/drop
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Capabilities>,
+    /// Run container in privileged mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privileged: Option<bool>,
+    /// Mount root filesystem as read-only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_root_filesystem: Option<bool>,
+    /// Require the container to run as a non-root user
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_non_root: Option<bool>,
+    /// UID to run the container as
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_user: Option<i64>,
+    /// GID to run the container as
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_group: Option<i64>,
+    /// Allow privilege escalation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_privilege_escalation: Option<bool>,
+}
+
+/// Linux capabilities for containers
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Capabilities {
+    /// Capabilities to add
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add: Option<Vec<String>>,
+    /// Capabilities to drop
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop: Option<Vec<String>>,
+}
+
+/// Pod-level security context
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PodSecurityContext {
+    /// Sysctls for the pod
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sysctls: Option<Vec<Sysctl>>,
+}
+
+/// Sysctl setting for pod
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Sysctl {
+    /// Sysctl name (e.g., net.ipv4.conf.all.src_valid_mark)
+    pub name: String,
+    /// Sysctl value
+    pub value: String,
+}
+
 /// Volume
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -858,6 +931,12 @@ impl WorkloadCompiler {
                     .cloned()
                     .unwrap_or_default();
 
+                // Compile security context
+                let security_context = container_spec
+                    .security
+                    .as_ref()
+                    .and_then(Self::compile_security_context);
+
                 Container {
                     name: container_name.clone(),
                     image: container_spec.image.clone(),
@@ -871,6 +950,7 @@ impl WorkloadCompiler {
                     readiness_probe,
                     startup_probe,
                     volume_mounts,
+                    security_context,
                 }
             })
             .collect()
@@ -920,6 +1000,165 @@ impl WorkloadCompiler {
         }
     }
 
+    /// Compile a CRD SecurityContext to a K8s SecurityContext
+    fn compile_security_context(
+        security: &crate::crd::SecurityContext,
+    ) -> Option<K8sSecurityContext> {
+        // Only generate security context if any field is set
+        let has_caps = !security.capabilities.is_empty() || security.drop_capabilities.is_some();
+        let has_other = security.privileged.is_some()
+            || security.read_only_root_filesystem.is_some()
+            || security.run_as_non_root.is_some()
+            || security.run_as_user.is_some()
+            || security.run_as_group.is_some()
+            || security.allow_privilege_escalation.is_some();
+
+        if !has_caps && !has_other {
+            return None;
+        }
+
+        let capabilities = if has_caps {
+            Some(Capabilities {
+                add: if security.capabilities.is_empty() {
+                    None
+                } else {
+                    Some(security.capabilities.clone())
+                },
+                // Default: drop ALL capabilities for security when any capability setting is used
+                drop: Some(
+                    security
+                        .drop_capabilities
+                        .clone()
+                        .unwrap_or_else(|| vec!["ALL".to_string()]),
+                ),
+            })
+        } else {
+            None
+        };
+
+        Some(K8sSecurityContext {
+            capabilities,
+            privileged: security.privileged,
+            read_only_root_filesystem: security.read_only_root_filesystem,
+            run_as_non_root: security.run_as_non_root,
+            run_as_user: security.run_as_user,
+            run_as_group: security.run_as_group,
+            allow_privilege_escalation: security.allow_privilege_escalation,
+        })
+    }
+
+    /// Compile pod-level security context from sysctls
+    fn compile_pod_security_context(spec: &LatticeServiceSpec) -> Option<PodSecurityContext> {
+        if spec.sysctls.is_empty() {
+            return None;
+        }
+
+        Some(PodSecurityContext {
+            sysctls: Some(
+                spec.sysctls
+                    .iter()
+                    .map(|(name, value)| Sysctl {
+                        name: name.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+            ),
+        })
+    }
+
+    /// Compile sidecars into init containers and regular sidecar containers
+    ///
+    /// Returns (init_containers, sidecar_containers)
+    fn compile_sidecars(
+        spec: &LatticeServiceSpec,
+        volumes: &GeneratedVolumes,
+    ) -> (Vec<Container>, Vec<Container>) {
+        let mut init_containers = Vec::new();
+        let mut sidecar_containers = Vec::new();
+
+        for (sidecar_name, sidecar_spec) in &spec.sidecars {
+            // Build env vars
+            let env: Vec<EnvVar> = sidecar_spec
+                .variables
+                .iter()
+                .map(|(k, v)| EnvVar {
+                    name: k.clone(),
+                    value: v.to_string(),
+                })
+                .collect();
+
+            // Convert resources
+            let resources = sidecar_spec
+                .resources
+                .as_ref()
+                .map(|r| ResourceRequirements {
+                    requests: r.requests.as_ref().map(|req| ResourceQuantity {
+                        cpu: req.cpu.clone(),
+                        memory: req.memory.clone(),
+                    }),
+                    limits: r.limits.as_ref().map(|lim| ResourceQuantity {
+                        cpu: lim.cpu.clone(),
+                        memory: lim.memory.clone(),
+                    }),
+                });
+
+            // Convert probes (only for non-init containers)
+            let is_init = sidecar_spec.init.unwrap_or(false);
+            let (liveness_probe, readiness_probe, startup_probe) = if is_init {
+                (None, None, None)
+            } else {
+                (
+                    sidecar_spec
+                        .liveness_probe
+                        .as_ref()
+                        .map(Self::compile_probe),
+                    sidecar_spec
+                        .readiness_probe
+                        .as_ref()
+                        .map(Self::compile_probe),
+                    sidecar_spec.startup_probe.as_ref().map(Self::compile_probe),
+                )
+            };
+
+            // Get volume mounts for this sidecar
+            let volume_mounts = volumes
+                .volume_mounts
+                .get(sidecar_name)
+                .cloned()
+                .unwrap_or_default();
+
+            // Compile security context
+            let security_context = sidecar_spec
+                .security
+                .as_ref()
+                .and_then(Self::compile_security_context);
+
+            let container = Container {
+                name: sidecar_name.clone(),
+                image: sidecar_spec.image.clone(),
+                command: sidecar_spec.command.clone(),
+                args: sidecar_spec.args.clone(),
+                env,
+                env_from: vec![],
+                ports: vec![], // Sidecars typically don't expose ports
+                resources,
+                liveness_probe,
+                readiness_probe,
+                startup_probe,
+                volume_mounts,
+                security_context,
+            };
+
+            if is_init {
+                init_containers.push(container);
+            } else {
+                sidecar_containers.push(container);
+            }
+        }
+
+        (init_containers, sidecar_containers)
+    }
+
     fn compile_service_account(name: &str, namespace: &str) -> ServiceAccount {
         ServiceAccount {
             api_version: "v1".to_string(),
@@ -932,17 +1171,25 @@ impl WorkloadCompiler {
     ///
     /// Generates a fully-specified Deployment with:
     /// - Containers with image, env vars, ports, probes, volume mounts
+    /// - Init containers and sidecars
     /// - Volumes for PVCs
     /// - Pod affinity for RWO volume co-location
     /// - Volume ownership labels
+    /// - Pod-level security context (sysctls)
     fn compile_deployment(
         name: &str,
         namespace: &str,
         spec: &LatticeServiceSpec,
         volumes: &GeneratedVolumes,
     ) -> Deployment {
-        // Compile containers with volume mounts
-        let containers = Self::compile_containers_with_volumes(spec, volumes);
+        // Compile main containers with volume mounts
+        let mut containers = Self::compile_containers_with_volumes(spec, volumes);
+
+        // Compile sidecars (init + regular)
+        let (init_containers, sidecar_containers) = Self::compile_sidecars(spec, volumes);
+
+        // Merge sidecar containers with main containers
+        containers.extend(sidecar_containers);
 
         // Build pod labels
         let mut labels = BTreeMap::new();
@@ -972,6 +1219,9 @@ impl WorkloadCompiler {
 
         let strategy = Self::compile_strategy(spec);
 
+        // Compile pod-level security context
+        let security_context = Self::compile_pod_security_context(spec);
+
         Deployment {
             api_version: "apps/v1".to_string(),
             kind: "Deployment".to_string(),
@@ -993,8 +1243,12 @@ impl WorkloadCompiler {
                     spec: PodSpec {
                         service_account_name: name.to_string(),
                         containers,
+                        init_containers,
                         volumes: pod_volumes,
                         affinity: volumes.affinity.clone(),
+                        security_context,
+                        host_network: spec.host_network,
+                        share_process_namespace: spec.share_process_namespace,
                     },
                 },
                 strategy,
@@ -1112,6 +1366,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -1138,6 +1393,10 @@ mod tests {
                 replicas: ReplicaSpec { min: 1, max: None },
                 deploy: DeploySpec::default(),
                 ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
             },
             status: None,
         }
@@ -1466,5 +1725,298 @@ mod tests {
         let hash_partial = compute_config_hash(Some(&env_cm), Some(&env_secret), None, None);
 
         assert_ne!(hash_all, hash_partial);
+    }
+
+    // =========================================================================
+    // Story: Security Context Compilation
+    // =========================================================================
+
+    #[test]
+    fn story_security_context_compilation() {
+        use crate::crd::SecurityContext;
+
+        let security = SecurityContext {
+            capabilities: vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()],
+            drop_capabilities: None, // Should default to [ALL]
+            privileged: Some(false),
+            read_only_root_filesystem: Some(true),
+            run_as_non_root: Some(true),
+            run_as_user: Some(1000),
+            run_as_group: Some(1000),
+            allow_privilege_escalation: Some(false),
+        };
+
+        let k8s_ctx = WorkloadCompiler::compile_security_context(&security)
+            .expect("should produce security context");
+
+        // Check capabilities
+        let caps = k8s_ctx.capabilities.expect("should have capabilities");
+        assert_eq!(
+            caps.add,
+            Some(vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()])
+        );
+        assert_eq!(caps.drop, Some(vec!["ALL".to_string()])); // Default drop ALL
+
+        // Check other fields
+        assert_eq!(k8s_ctx.privileged, Some(false));
+        assert_eq!(k8s_ctx.read_only_root_filesystem, Some(true));
+        assert_eq!(k8s_ctx.run_as_non_root, Some(true));
+        assert_eq!(k8s_ctx.run_as_user, Some(1000));
+        assert_eq!(k8s_ctx.run_as_group, Some(1000));
+        assert_eq!(k8s_ctx.allow_privilege_escalation, Some(false));
+    }
+
+    #[test]
+    fn story_security_context_empty_returns_none() {
+        use crate::crd::SecurityContext;
+
+        let security = SecurityContext::default();
+        let k8s_ctx = WorkloadCompiler::compile_security_context(&security);
+        assert!(k8s_ctx.is_none());
+    }
+
+    // =========================================================================
+    // Story: Pod Security Context (Sysctls)
+    // =========================================================================
+
+    #[test]
+    fn story_pod_security_context_sysctls() {
+        let mut service = make_service("my-app", "default");
+        service.spec.sysctls.insert(
+            "net.ipv4.conf.all.src_valid_mark".to_string(),
+            "1".to_string(),
+        );
+        service
+            .spec
+            .sysctls
+            .insert("net.core.somaxconn".to_string(), "65535".to_string());
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        let pod_sec = deployment
+            .spec
+            .template
+            .spec
+            .security_context
+            .expect("should have pod security context");
+
+        let sysctls = pod_sec.sysctls.expect("should have sysctls");
+        assert_eq!(sysctls.len(), 2);
+        assert!(sysctls
+            .iter()
+            .any(|s| s.name == "net.ipv4.conf.all.src_valid_mark" && s.value == "1"));
+        assert!(sysctls
+            .iter()
+            .any(|s| s.name == "net.core.somaxconn" && s.value == "65535"));
+    }
+
+    #[test]
+    fn story_empty_sysctls_no_security_context() {
+        let service = make_service("my-app", "default");
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        assert!(deployment.spec.template.spec.security_context.is_none());
+    }
+
+    // =========================================================================
+    // Story: Init Containers Separated
+    // =========================================================================
+
+    #[test]
+    fn story_init_containers_separated() {
+        use crate::crd::SidecarSpec;
+
+        let mut service = make_service("my-app", "default");
+        service.spec.sidecars.insert(
+            "init-setup".to_string(),
+            SidecarSpec {
+                image: "busybox:latest".to_string(),
+                command: Some(vec!["sh".to_string(), "-c".to_string()]),
+                args: Some(vec!["echo hello".to_string()]),
+                variables: BTreeMap::new(),
+                resources: None,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+                init: Some(true),
+                security: None,
+            },
+        );
+        service.spec.sidecars.insert(
+            "vpn".to_string(),
+            SidecarSpec {
+                image: "wireguard:latest".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                resources: None,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+                init: Some(false),
+                security: None,
+            },
+        );
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        // Check init containers
+        assert_eq!(deployment.spec.template.spec.init_containers.len(), 1);
+        assert_eq!(
+            deployment.spec.template.spec.init_containers[0].name,
+            "init-setup"
+        );
+
+        // Check regular containers (main + vpn sidecar)
+        assert_eq!(deployment.spec.template.spec.containers.len(), 2);
+        assert!(deployment
+            .spec
+            .template
+            .spec
+            .containers
+            .iter()
+            .any(|c| c.name == "main"));
+        assert!(deployment
+            .spec
+            .template
+            .spec
+            .containers
+            .iter()
+            .any(|c| c.name == "vpn"));
+    }
+
+    // =========================================================================
+    // Story: Sidecars Included in Deployment
+    // =========================================================================
+
+    #[test]
+    fn story_sidecars_included_in_deployment() {
+        use crate::crd::{SecurityContext, SidecarSpec};
+
+        let mut service = make_service("my-app", "default");
+        service.spec.sidecars.insert(
+            "vpn".to_string(),
+            SidecarSpec {
+                image: "wireguard:latest".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                resources: None,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+                init: None,
+                security: Some(SecurityContext {
+                    capabilities: vec!["NET_ADMIN".to_string()],
+                    ..Default::default()
+                }),
+            },
+        );
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        // Main + VPN sidecar
+        assert_eq!(deployment.spec.template.spec.containers.len(), 2);
+
+        let vpn = deployment
+            .spec
+            .template
+            .spec
+            .containers
+            .iter()
+            .find(|c| c.name == "vpn")
+            .expect("vpn container should exist");
+
+        assert_eq!(vpn.image, "wireguard:latest");
+
+        // Check security context on sidecar
+        let sec = vpn
+            .security_context
+            .as_ref()
+            .expect("should have security context");
+        let caps = sec.capabilities.as_ref().expect("should have capabilities");
+        assert_eq!(caps.add, Some(vec!["NET_ADMIN".to_string()]));
+        assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
+    }
+
+    // =========================================================================
+    // Story: Host Network and Share Process Namespace
+    // =========================================================================
+
+    #[test]
+    fn story_host_network_and_share_process_namespace() {
+        let mut service = make_service("my-app", "default");
+        service.spec.host_network = Some(true);
+        service.spec.share_process_namespace = Some(true);
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        assert_eq!(deployment.spec.template.spec.host_network, Some(true));
+        assert_eq!(
+            deployment.spec.template.spec.share_process_namespace,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn story_host_network_none_by_default() {
+        let service = make_service("my-app", "default");
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        assert!(deployment.spec.template.spec.host_network.is_none());
+        assert!(deployment
+            .spec
+            .template
+            .spec
+            .share_process_namespace
+            .is_none());
+    }
+
+    // =========================================================================
+    // Story: Container Security Context
+    // =========================================================================
+
+    #[test]
+    fn story_main_container_security_context() {
+        use crate::crd::SecurityContext;
+
+        let mut service = make_service("my-app", "default");
+        service.spec.containers.get_mut("main").unwrap().security = Some(SecurityContext {
+            capabilities: vec!["NET_BIND_SERVICE".to_string()],
+            run_as_non_root: Some(true),
+            run_as_user: Some(1000),
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        let main = deployment
+            .spec
+            .template
+            .spec
+            .containers
+            .iter()
+            .find(|c| c.name == "main")
+            .expect("main container should exist");
+
+        let sec = main
+            .security_context
+            .as_ref()
+            .expect("should have security context");
+        assert_eq!(sec.run_as_non_root, Some(true));
+        assert_eq!(sec.run_as_user, Some(1000));
     }
 }

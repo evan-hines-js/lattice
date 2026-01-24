@@ -434,6 +434,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -454,6 +455,10 @@ mod tests {
             replicas: ReplicaSpec::default(),
             deploy: crate::crd::DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         };
 
         graph.put_service(env, "postgres", &spec);
@@ -506,6 +511,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -538,6 +544,10 @@ mod tests {
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
                 ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
             },
             status: None,
         }
@@ -646,6 +656,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -662,6 +673,10 @@ mod tests {
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
                 ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
             },
             status: None,
         };
@@ -732,6 +747,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -748,6 +764,10 @@ mod tests {
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
                 ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
             },
             status: None,
         };
@@ -793,6 +813,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -809,6 +830,10 @@ mod tests {
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
                 ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
             },
             status: None,
         };
@@ -880,6 +905,7 @@ mod tests {
             liveness_probe: None,
             readiness_probe: None,
             startup_probe: None,
+            security: None,
         };
 
         let renderer = TemplateRenderer::new();
@@ -946,6 +972,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -962,6 +989,10 @@ mod tests {
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
                 ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
             },
             status: None,
         };
@@ -998,6 +1029,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
         containers.insert(
@@ -1013,6 +1045,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -1029,6 +1062,10 @@ mod tests {
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
                 ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
             },
             status: None,
         };
@@ -1071,6 +1108,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -1087,6 +1125,10 @@ mod tests {
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
                 ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
             },
             status: None,
         };
@@ -1123,6 +1165,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -1139,6 +1182,10 @@ mod tests {
                 replicas: ReplicaSpec::default(),
                 deploy: crate::crd::DeploySpec::default(),
                 ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
             },
             status: None,
         };
@@ -1194,6 +1241,7 @@ mod tests {
             liveness_probe: None,
             readiness_probe: None,
             startup_probe: None,
+            security: None,
         };
 
         let renderer = TemplateRenderer::new();
@@ -1235,6 +1283,7 @@ mod tests {
             liveness_probe: None,
             readiness_probe: None,
             startup_probe: None,
+            security: None,
         };
 
         let renderer = TemplateRenderer::new();
@@ -1275,6 +1324,7 @@ mod tests {
             liveness_probe: None,
             readiness_probe: None,
             startup_probe: None,
+            security: None,
         };
 
         let renderer = TemplateRenderer::new();
@@ -1312,6 +1362,7 @@ mod tests {
             liveness_probe: None,
             readiness_probe: None,
             startup_probe: None,
+            security: None,
         };
 
         let renderer = TemplateRenderer::new();

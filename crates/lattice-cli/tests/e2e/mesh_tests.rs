@@ -224,6 +224,7 @@ fn nginx_container() -> ContainerSpec {
         liveness_probe: None,
         readiness_probe: None,
         startup_probe: None,
+        security: None,
     }
 }
 
@@ -308,6 +309,10 @@ fn create_service(
             replicas: ReplicaSpec { min: 1, max: None },
             deploy: DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         },
         status: None,
     }
@@ -338,6 +343,7 @@ fn create_frontend_web() -> LatticeService {
         liveness_probe: None,
         readiness_probe: None,
         startup_probe: None,
+        security: None,
     };
 
     create_service(
@@ -383,6 +389,7 @@ fn create_frontend_mobile() -> LatticeService {
         liveness_probe: None,
         readiness_probe: None,
         startup_probe: None,
+        security: None,
     };
 
     create_service(
@@ -428,6 +435,7 @@ fn create_frontend_admin() -> LatticeService {
         liveness_probe: None,
         readiness_probe: None,
         startup_probe: None,
+        security: None,
     };
 
     create_service(
@@ -1161,6 +1169,7 @@ impl RandomMesh {
                     liveness_probe: None,
                     readiness_probe: None,
                     startup_probe: None,
+                    security: None,
                 },
             );
         } else {
@@ -1177,6 +1186,7 @@ impl RandomMesh {
                     liveness_probe: None,
                     readiness_probe: None,
                     startup_probe: None,
+                    security: None,
                 },
             );
         }
@@ -1211,6 +1221,10 @@ impl RandomMesh {
                 replicas: ReplicaSpec { min: 1, max: None },
                 deploy: DeploySpec::default(),
                 ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
             },
             status: None,
         }
@@ -1476,7 +1490,7 @@ async fn verify_random_mesh_traffic(
 
 /// Run the randomized 25-50 service mesh test
 pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
-    println!("\n[Mesh Test] Running randomized large-scale mesh test (50-75 services)...\n");
+    println!("\n[Mesh Test] Running randomized large-scale mesh test (25-50 services)...\n");
 
     let mesh = RandomMesh::generate(&RandomMeshConfig::default());
     println!("{}", mesh.stats());
