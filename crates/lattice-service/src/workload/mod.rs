@@ -755,16 +755,11 @@ impl WorkloadCompiler {
     /// * `namespace` - Target namespace (from environment label, since LatticeService is cluster-scoped)
     /// * `volumes` - Pre-compiled volume resources (affinity, labels, etc.)
     pub fn compile(
+        name: &str,
         service: &LatticeService,
         namespace: &str,
         volumes: &GeneratedVolumes,
     ) -> GeneratedWorkloads {
-        let name = service
-            .metadata
-            .name
-            .as_deref()
-            .expect("LatticeService must have a name");
-
         let mut output = GeneratedWorkloads::new();
 
         // Always generate ServiceAccount for SPIFFE identity
@@ -1099,7 +1094,7 @@ mod tests {
             .as_deref()
             .expect("test service must have a namespace");
         let volumes = VolumeCompiler::compile(name, namespace, &service.spec);
-        WorkloadCompiler::compile(service, namespace, &volumes)
+        WorkloadCompiler::compile(name, service, namespace, &volumes)
     }
 
     fn make_service(name: &str, namespace: &str) -> LatticeService {
