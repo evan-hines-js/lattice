@@ -16,7 +16,8 @@ spec:
         /cache:
           source: ${resources.cache}
         /media:
-          source: ${resources.media}
+          source: ${resources.media-storage}
+          path: library
       resources:
         requests:
           cpu: 500m
@@ -47,14 +48,14 @@ spec:
       params:
         size: 20Gi
         storageClass: local-path
-    # Owned shared volume (OWNER - has size)
-    # Uses RWO because local-path doesn't support RWX
-    # Sonarr will be co-located via pod affinity
-    media:
+    # Shared media storage (OWNER - has size)
+    # Single volume with subdirectories for library and downloads
+    # All services mount subpaths, co-located via pod affinity
+    media-storage:
       type: volume
-      id: media-library
+      id: media-storage
       params:
-        size: 1Ti
+        size: 1500Gi
         storageClass: local-path
         accessMode: ReadWriteOnce
     # Service dependencies (bilateral agreement)
