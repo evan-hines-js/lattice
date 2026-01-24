@@ -74,6 +74,7 @@ fn outbound_dep(name: &str) -> (String, ResourceSpec) {
             class: None,
             metadata: None,
             params: None,
+            namespace: None,
             inbound: None,
             outbound: None,
         },
@@ -90,6 +91,7 @@ fn inbound_allow(name: &str) -> (String, ResourceSpec) {
             class: None,
             metadata: None,
             params: None,
+            namespace: None,
             inbound: None,
             outbound: None,
         },
@@ -124,7 +126,6 @@ fn create_service(
             ..Default::default()
         },
         spec: LatticeServiceSpec {
-            environment: TEST_SERVICES_NAMESPACE.to_string(),
             containers,
             resources,
             service: if has_port { Some(http_port()) } else { None },
@@ -1109,8 +1110,9 @@ impl RandomMesh {
                     class: None,
                     metadata: None,
                     params: None,
-            inbound: None,
-            outbound: None,
+                    namespace: None,
+                    inbound: None,
+                    outbound: None,
                 },
             );
         }
@@ -1124,8 +1126,9 @@ impl RandomMesh {
                     class: None,
                     metadata: None,
                     params: None,
-            inbound: None,
-            outbound: None,
+                    namespace: None,
+                    inbound: None,
+                    outbound: None,
                 },
             );
         }
@@ -1139,8 +1142,9 @@ impl RandomMesh {
                     class: None,
                     metadata: None,
                     params: None,
-            inbound: None,
-            outbound: None,
+                    namespace: None,
+                    inbound: None,
+                    outbound: None,
                 },
             );
         }
@@ -1191,7 +1195,6 @@ impl RandomMesh {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                environment: namespace.to_string(),
                 containers,
                 resources,
                 service: if svc.is_traffic_generator {
@@ -1224,10 +1227,10 @@ impl RandomMesh {
         LatticeExternalService {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
                 ..Default::default()
             },
             spec: LatticeExternalServiceSpec {
-                environment: namespace.to_string(),
                 endpoints,
                 allowed_requesters: ext_svc.allowed_requesters.iter().cloned().collect(),
                 resolution: ext_svc.resolution.clone(),

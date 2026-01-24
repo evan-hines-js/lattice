@@ -21,7 +21,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::types::Condition;
+use super::types::{Condition, ServiceRef};
 use crate::template::TemplateString;
 
 /// Direction of a service dependency
@@ -129,6 +129,13 @@ pub struct ResourceSpec {
     /// - both: Bidirectional communication
     #[serde(default)]
     pub direction: DependencyDirection,
+
+    /// Target namespace for cross-namespace dependencies (Lattice extension)
+    ///
+    /// When omitted, defaults to the same namespace as the owning service.
+    /// Use this to reference services in other namespaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 
     /// L7 policies for inbound traffic (Lattice extension)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -694,20 +701,14 @@ impl std::fmt::Display for ServicePhase {
     kind = "LatticeService",
     plural = "latticeservices",
     shortname = "ls",
+    namespaced,
     status = "LatticeServiceStatus",
-    namespaced = false,
     printcolumn = r#"{"name":"Strategy","type":"string","jsonPath":".spec.deploy.strategy"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeServiceSpec {
-    /// Environment name - determines the namespace where workloads deploy
-    ///
-    /// This is required since LatticeService is cluster-scoped. The environment
-    /// maps to a Kubernetes namespace where the Deployment, Service, etc. are created.
-    pub environment: String,
-
     /// Named container specifications (Score-compatible)
     pub containers: BTreeMap<String, ContainerSpec>,
 
@@ -733,8 +734,11 @@ pub struct LatticeServiceSpec {
 }
 
 impl LatticeServiceSpec {
-    /// Extract service names that this service depends on (outbound)
-    pub fn dependencies(&self) -> Vec<&str> {
+    /// Extract all service dependencies (outbound) with namespace resolution
+    ///
+    /// Returns ServiceRefs for both internal and external services.
+    /// If a resource doesn't specify a namespace, it defaults to `own_namespace`.
+    pub fn dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
         self.resources
             .iter()
             .filter(|(_, spec)| {
@@ -744,40 +748,55 @@ impl LatticeServiceSpec {
                         ResourceType::Service | ResourceType::ExternalService
                     )
             })
-            .map(|(name, _)| name.as_str())
+            .map(|(name, spec)| {
+                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
+                ServiceRef::new(ns, name)
+            })
             .collect()
     }
 
-    /// Extract service names that are allowed to call this service (inbound)
-    pub fn allowed_callers(&self) -> Vec<&str> {
+    /// Extract services allowed to call this service (inbound) with namespace resolution
+    ///
+    /// Returns ServiceRefs for callers. If a resource doesn't specify a namespace,
+    /// it defaults to `own_namespace`.
+    pub fn allowed_callers(&self, own_namespace: &str) -> Vec<ServiceRef> {
         self.resources
             .iter()
             .filter(|(_, spec)| {
                 spec.direction.is_inbound() && matches!(spec.type_, ResourceType::Service)
             })
-            .map(|(name, _)| name.as_str())
+            .map(|(name, spec)| {
+                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
+                ServiceRef::new(ns, name)
+            })
             .collect()
     }
 
-    /// Extract external service dependencies
-    pub fn external_dependencies(&self) -> Vec<&str> {
+    /// Extract external service dependencies with namespace resolution
+    pub fn external_dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
         self.resources
             .iter()
             .filter(|(_, spec)| {
                 spec.direction.is_outbound() && matches!(spec.type_, ResourceType::ExternalService)
             })
-            .map(|(name, _)| name.as_str())
+            .map(|(name, spec)| {
+                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
+                ServiceRef::new(ns, name)
+            })
             .collect()
     }
 
-    /// Extract internal service dependencies
-    pub fn internal_dependencies(&self) -> Vec<&str> {
+    /// Extract internal service dependencies with namespace resolution
+    pub fn internal_dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
         self.resources
             .iter()
             .filter(|(_, spec)| {
                 spec.direction.is_outbound() && matches!(spec.type_, ResourceType::Service)
             })
-            .map(|(name, _)| name.as_str())
+            .map(|(name, spec)| {
+                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
+                ServiceRef::new(ns, name)
+            })
             .collect()
     }
 
@@ -1156,7 +1175,6 @@ mod tests {
         containers.insert("main".to_string(), simple_container());
 
         LatticeServiceSpec {
-            environment: "test".to_string(),
             containers,
             resources: BTreeMap::new(),
             service: None,
@@ -1208,6 +1226,7 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -1221,6 +1240,7 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -1229,10 +1249,10 @@ mod tests {
         let mut spec = sample_service_spec();
         spec.resources = resources;
 
-        let deps = spec.dependencies();
+        let deps = spec.dependencies("test");
         assert_eq!(deps.len(), 2);
-        assert!(deps.contains(&"redis"));
-        assert!(deps.contains(&"api-gateway"));
+        assert!(deps.iter().any(|r| r.name == "redis"));
+        assert!(deps.iter().any(|r| r.name == "api-gateway"));
     }
 
     /// Story: Service declares which callers are allowed
@@ -1248,6 +1268,7 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -1261,6 +1282,7 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -1269,10 +1291,10 @@ mod tests {
         let mut spec = sample_service_spec();
         spec.resources = resources;
 
-        let callers = spec.allowed_callers();
+        let callers = spec.allowed_callers("test");
         assert_eq!(callers.len(), 2);
-        assert!(callers.contains(&"curl-tester"));
-        assert!(callers.contains(&"frontend"));
+        assert!(callers.iter().any(|r| r.name == "curl-tester"));
+        assert!(callers.iter().any(|r| r.name == "frontend"));
     }
 
     /// Story: Bidirectional relationships are counted in both directions
@@ -1288,6 +1310,7 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -1297,8 +1320,8 @@ mod tests {
         spec.resources = resources;
 
         // Should appear in both dependencies and allowed_callers
-        assert!(spec.dependencies().contains(&"cache"));
-        assert!(spec.allowed_callers().contains(&"cache"));
+        assert!(spec.dependencies("test").iter().any(|r| r.name == "cache"));
+        assert!(spec.allowed_callers("test").iter().any(|r| r.name == "cache"));
     }
 
     /// Story: External services are separated from internal
@@ -1314,6 +1337,7 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -1327,6 +1351,7 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -1335,11 +1360,13 @@ mod tests {
         let mut spec = sample_service_spec();
         spec.resources = resources;
 
-        let external = spec.external_dependencies();
-        let internal = spec.internal_dependencies();
+        let external = spec.external_dependencies("test");
+        let internal = spec.internal_dependencies("test");
 
-        assert_eq!(external, vec!["google"]);
-        assert_eq!(internal, vec!["backend"]);
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].name, "google");
+        assert_eq!(internal.len(), 1);
+        assert_eq!(internal[0].name, "backend");
     }
 
     // =========================================================================
@@ -1357,7 +1384,6 @@ mod tests {
     #[test]
     fn story_service_without_containers_fails() {
         let spec = LatticeServiceSpec {
-            environment: "test".to_string(),
             containers: BTreeMap::new(),
             resources: BTreeMap::new(),
             service: None,
@@ -1396,7 +1422,6 @@ mod tests {
     #[test]
     fn story_yaml_simple_service() {
         let yaml = r#"
-environment: test
 containers:
   main:
     image: nginx:latest
@@ -1424,7 +1449,6 @@ replicas:
     #[test]
     fn story_yaml_service_with_dependencies() {
         let yaml = r#"
-environment: test
 containers:
   main:
     image: my-api:v1.0
@@ -1449,14 +1473,14 @@ service:
             .expect("service with dependencies YAML should parse successfully");
 
         // Check dependencies
-        let deps = spec.dependencies();
-        assert!(deps.contains(&"google"));
-        assert!(deps.contains(&"cache"));
+        let deps = spec.dependencies("test");
+        assert!(deps.iter().any(|r| r.name == "google"));
+        assert!(deps.iter().any(|r| r.name == "cache"));
 
         // Check allowed callers
-        let callers = spec.allowed_callers();
-        assert!(callers.contains(&"curl-tester"));
-        assert!(callers.contains(&"cache"));
+        let callers = spec.allowed_callers("test");
+        assert!(callers.iter().any(|r| r.name == "curl-tester"));
+        assert!(callers.iter().any(|r| r.name == "cache"));
 
         // Check variables
         assert_eq!(
@@ -1472,7 +1496,6 @@ service:
     #[test]
     fn story_yaml_canary_deployment() {
         let yaml = r#"
-environment: test
 containers:
   main:
     image: app:v2.0
@@ -1548,7 +1571,6 @@ deploy:
         containers.insert("worker".to_string(), simple_container());
 
         let spec = LatticeServiceSpec {
-            environment: "test".to_string(),
             containers,
             resources: BTreeMap::new(),
             service: None,
@@ -1727,7 +1749,6 @@ deploy:
     #[test]
     fn test_variables_support_templates() {
         let yaml = r#"
-environment: test
 containers:
   main:
     image: app:latest
@@ -1749,7 +1770,6 @@ containers:
     #[test]
     fn test_file_content_supports_templates() {
         let yaml = r#"
-environment: test
 containers:
   main:
     image: app:latest
@@ -1775,7 +1795,6 @@ containers:
     #[test]
     fn test_volume_source_supports_templates() {
         let yaml = r#"
-environment: test
 containers:
   main:
     image: app:latest
@@ -1799,7 +1818,6 @@ containers:
     fn test_probe_with_timing_parameters() {
         // Score-compliant probe: only httpGet, no timing fields
         let yaml = r#"
-environment: test
 containers:
   main:
     image: app:latest
@@ -1827,7 +1845,6 @@ containers:
     #[test]
     fn test_http_probe_full() {
         let yaml = r#"
-environment: test
 containers:
   main:
     image: app:latest
@@ -1863,7 +1880,6 @@ containers:
     #[test]
     fn test_exec_probe() {
         let yaml = r#"
-environment: test
 containers:
   main:
     image: app:latest
@@ -1891,7 +1907,6 @@ containers:
     #[test]
     fn test_image_dot_placeholder_yaml() {
         let yaml = r#"
-environment: test
 containers:
   main:
     image: "."
@@ -1917,6 +1932,7 @@ containers:
                 class: None,
                 metadata: None,
                 params: Some(BTreeMap::from([("size".to_string(), serde_json::json!(size))])),
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -1935,6 +1951,7 @@ containers:
                 class: None,
                 metadata: None,
                 params: None, // No params = reference
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -1966,7 +1983,6 @@ containers:
     #[test]
     fn test_score_compatible_volume_params() {
         let yaml = r#"
-environment: media
 containers:
   main:
     image: jellyfin/jellyfin:latest
@@ -2007,7 +2023,6 @@ resources:
     #[test]
     fn test_score_compatible_volume_reference() {
         let yaml = r#"
-environment: media
 containers:
   main:
     image: sonarr:latest
@@ -2029,7 +2044,6 @@ resources:
     #[test]
     fn test_lattice_bilateral_agreement_extensions() {
         let yaml = r#"
-environment: media
 containers:
   main:
     image: jellyfin/jellyfin:latest
@@ -2081,7 +2095,6 @@ resources:
     #[test]
     fn test_media_server_style_spec() {
         let yaml = r#"
-environment: media
 containers:
   main:
     image: jellyfin/jellyfin:latest

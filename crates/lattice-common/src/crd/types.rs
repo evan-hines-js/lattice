@@ -449,11 +449,37 @@ pub struct WorkloadSpec {
     pub services: Vec<ServiceRef>,
 }
 
-/// Reference to a service to deploy
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+/// Reference to a service with optional namespace qualification
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
 pub struct ServiceRef {
     /// Name of the service
     pub name: String,
+    /// Namespace of the service (defaults to same namespace if omitted)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+impl ServiceRef {
+    /// Create a new ServiceRef with explicit namespace
+    pub fn new(namespace: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            namespace: Some(namespace.into()),
+            name: name.into(),
+        }
+    }
+
+    /// Create a ServiceRef that inherits namespace from context
+    pub fn local(name: impl Into<String>) -> Self {
+        Self {
+            namespace: None,
+            name: name.into(),
+        }
+    }
+
+    /// Resolve the namespace, using the provided default if not specified
+    pub fn resolve_namespace<'a>(&'a self, default_namespace: &'a str) -> &'a str {
+        self.namespace.as_deref().unwrap_or(default_namespace)
+    }
 }
 
 // =============================================================================

@@ -557,15 +557,22 @@ pub async fn reconcile(
 
     debug!(?current_phase, "current service phase");
 
-    // Get environment from spec (determines namespace)
-    let env = &service.spec.environment;
+    // Get namespace from metadata (LatticeService is namespace-scoped)
+    let namespace = match service.metadata.namespace.as_deref() {
+        Some(ns) => ns,
+        None => {
+            error!("LatticeService is missing namespace - this is a cluster-scoped resource that needs migration");
+            update_service_status_failed(&service, &ctx, "Resource missing namespace").await?;
+            return Ok(Action::await_change());
+        }
+    };
 
     // State machine: transition based on current phase
     match current_phase {
         ServicePhase::Pending => {
             // Update graph with this service's dependencies
-            info!(env = %env, "adding service to graph");
-            ctx.graph.put_service(env, &name, &service.spec);
+            info!(namespace = %namespace, "adding service to graph");
+            ctx.graph.put_service(namespace, &name, &service.spec);
 
             // Transition to Compiling
             update_service_status_compiling(&service, &ctx).await?;
@@ -573,7 +580,7 @@ pub async fn reconcile(
         }
         ServicePhase::Compiling => {
             // Verify dependencies exist in the graph
-            let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, env);
+            let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
 
             if !missing_deps.is_empty() {
                 debug!(?missing_deps, "waiting for dependencies");
@@ -582,8 +589,8 @@ pub async fn reconcile(
             }
 
             // All dependencies exist, check for bilateral agreements (active edges)
-            let active_in = ctx.graph.get_active_inbound_edges(env, &name);
-            let active_out = ctx.graph.get_active_outbound_edges(env, &name);
+            let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
+            let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
 
             debug!(
                 active_inbound = active_in.len(),
@@ -594,9 +601,6 @@ pub async fn reconcile(
             // Compile workloads and policies
             let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain);
             let compiled = compiler.compile(&service);
-
-            // Use environment as namespace (LatticeService is cluster-scoped, so metadata.namespace is always None)
-            let namespace = env;
 
             // Apply compiled resources to the cluster
             info!(
@@ -620,10 +624,10 @@ pub async fn reconcile(
         }
         ServicePhase::Ready => {
             // Service is ready, ensure graph is up to date
-            ctx.graph.put_service(env, &name, &service.spec);
+            ctx.graph.put_service(namespace, &name, &service.spec);
 
             // Check for any issues that would cause degradation
-            let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, env);
+            let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
             if !missing_deps.is_empty() {
                 warn!(?missing_deps, "dependencies no longer available");
                 // Transition back to Compiling to wait for deps
@@ -638,7 +642,6 @@ pub async fn reconcile(
             let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain);
             let compiled = compiler.compile(&service);
 
-            let namespace = env;
             debug!(
                 resources = compiled.resource_count(),
                 "reapplying compiled resources for policy drift"
@@ -696,18 +699,27 @@ pub fn error_policy(
 fn check_missing_dependencies(
     spec: &LatticeServiceSpec,
     graph: &ServiceGraph,
-    env: &str,
+    namespace: &str,
 ) -> Vec<String> {
-    spec.internal_dependencies()
+    spec.internal_dependencies(namespace)
         .into_iter()
         .filter(|dep| {
             // Check if dependency exists (not Unknown type)
+            let dep_ns = dep.resolve_namespace(namespace);
             graph
-                .get_service(env, dep)
+                .get_service(dep_ns, &dep.name)
                 .map(|node| node.type_ == crate::graph::ServiceType::Unknown)
                 .unwrap_or(true)
         })
-        .map(String::from)
+        .map(|dep| {
+            // Format as "namespace/name" for cross-namespace deps, just "name" for same namespace
+            let dep_ns = dep.resolve_namespace(namespace);
+            if dep_ns == namespace {
+                dep.name
+            } else {
+                format!("{}/{}", dep_ns, dep.name)
+            }
+        })
         .collect()
 }
 
@@ -734,11 +746,18 @@ pub async fn reconcile_external(
         return Ok(Action::await_change());
     }
 
-    // Get environment from spec
-    let env = &external.spec.environment;
+    // Get namespace from metadata (LatticeExternalService is namespace-scoped)
+    let namespace = match external.metadata.namespace.as_deref() {
+        Some(ns) => ns,
+        None => {
+            error!("LatticeExternalService is missing namespace - this is a cluster-scoped resource that needs migration");
+            update_external_status_failed(&external, &ctx, "Resource missing namespace").await?;
+            return Ok(Action::await_change());
+        }
+    };
 
     // Update graph with this external service
-    ctx.graph.put_external_service(env, &name, &external.spec);
+    ctx.graph.put_external_service(namespace, &name, &external.spec);
 
     // Only update status if not already Ready (avoid reconcile loop)
     let is_ready = external
@@ -748,7 +767,7 @@ pub async fn reconcile_external(
         .unwrap_or(false);
 
     if !is_ready {
-        info!(env = %env, "external service transitioning to Ready");
+        info!(namespace = %namespace, "external service transitioning to Ready");
         update_external_status_ready(&external, &ctx).await?;
     }
 
@@ -789,19 +808,31 @@ pub fn error_policy_external(
 /// and cleans up edges.
 pub fn cleanup_service(service: &LatticeService, ctx: &ServiceContext) {
     let name = service.name_any();
-    let env = &service.spec.environment;
+    let namespace = match service.metadata.namespace.as_deref() {
+        Some(ns) => ns,
+        None => {
+            warn!(service = %name, "LatticeService missing namespace during cleanup, skipping");
+            return;
+        }
+    };
 
-    info!(service = %name, env = %env, "removing service from graph");
-    ctx.graph.delete_service(env, &name);
+    info!(service = %name, namespace = %namespace, "removing service from graph");
+    ctx.graph.delete_service(namespace, &name);
 }
 
 /// Handle external service deletion by removing from the graph
 pub fn cleanup_external_service(external: &LatticeExternalService, ctx: &ServiceContext) {
     let name = external.name_any();
-    let env = &external.spec.environment;
+    let namespace = match external.metadata.namespace.as_deref() {
+        Some(ns) => ns,
+        None => {
+            warn!(external_service = %name, "LatticeExternalService missing namespace during cleanup, skipping");
+            return;
+        }
+    };
 
-    info!(external_service = %name, env = %env, "removing external service from graph");
-    ctx.graph.delete_service(env, &name);
+    info!(external_service = %name, namespace = %namespace, "removing external service from graph");
+    ctx.graph.delete_service(namespace, &name);
 }
 
 // =============================================================================
@@ -938,7 +969,6 @@ mod tests {
         containers.insert("main".to_string(), simple_container());
 
         LatticeServiceSpec {
-            environment: "test".to_string(),
             containers,
             resources: BTreeMap::new(),
             service: None,
@@ -952,6 +982,7 @@ mod tests {
         LatticeService {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
+                namespace: Some("test".to_string()),
                 ..Default::default()
             },
             spec: sample_service_spec(),
@@ -971,6 +1002,7 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    namespace: None,
                     inbound: None,
                     outbound: None,
                 },
@@ -980,6 +1012,7 @@ mod tests {
         LatticeService {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
+                namespace: Some("test".to_string()),
                 ..Default::default()
             },
             spec,
@@ -999,6 +1032,7 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    namespace: None,
                     inbound: None,
                     outbound: None,
                 },
@@ -1008,6 +1042,7 @@ mod tests {
         LatticeService {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
+                namespace: Some("test".to_string()),
                 ..Default::default()
             },
             spec,
@@ -1022,10 +1057,10 @@ mod tests {
         LatticeExternalService {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
+                namespace: Some("test".to_string()),
                 ..Default::default()
             },
             spec: LatticeExternalServiceSpec {
-                environment: "test".to_string(),
                 endpoints,
                 allowed_requesters: vec!["*".to_string()],
                 resolution: Resolution::Dns,
@@ -1200,7 +1235,7 @@ mod tests {
         // Should have active edge from frontend to backend
         let active = ctx.graph.get_active_outbound_edges("test", "frontend");
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].callee, "backend");
+        assert_eq!(active[0].callee_name, "backend");
     }
 
     /// Story: Graph handles service deletion

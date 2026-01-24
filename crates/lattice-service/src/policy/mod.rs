@@ -361,8 +361,8 @@ impl<'a> PolicyCompiler<'a> {
     /// Compile policies for a service
     ///
     /// Returns empty policies if service is not in graph or has no active edges.
-    pub fn compile(&self, name: &str, namespace: &str, env: &str) -> GeneratedPolicies {
-        let Some(service_node) = self.graph.get_service(env, name) else {
+    pub fn compile(&self, name: &str, namespace: &str) -> GeneratedPolicies {
+        let Some(service_node) = self.graph.get_service(namespace, name) else {
             return GeneratedPolicies::new();
         };
 
@@ -374,8 +374,8 @@ impl<'a> PolicyCompiler<'a> {
         let mut output = GeneratedPolicies::new();
 
         // Get active edges
-        let inbound_edges = self.graph.get_active_inbound_edges(env, name);
-        let outbound_edges = self.graph.get_active_outbound_edges(env, name);
+        let inbound_edges = self.graph.get_active_inbound_edges(namespace, name);
+        let outbound_edges = self.graph.get_active_outbound_edges(namespace, name);
 
         // Generate L7 AuthorizationPolicy for inbound traffic
         if !inbound_edges.is_empty() {
@@ -395,16 +395,15 @@ impl<'a> PolicyCompiler<'a> {
         output.cilium_policies.push(self.compile_cilium_policy(
             &service_node,
             namespace,
-            env,
             &inbound_edges,
             &outbound_edges,
         ));
 
         // Generate ServiceEntries and AuthorizationPolicies for external dependencies
         for edge in &outbound_edges {
-            if let Some(callee) = self.graph.get_service(env, &edge.callee) {
+            if let Some(callee) = self.graph.get_service(&edge.callee_namespace, &edge.callee_name) {
                 if callee.type_ == ServiceType::External {
-                    if let Some(entry) = self.compile_service_entry(&callee, namespace) {
+                    if let Some(entry) = self.compile_service_entry(&callee, &edge.callee_namespace) {
                         output.service_entries.push(entry);
                     }
                     // Generate default-deny for this ServiceEntry
@@ -412,7 +411,7 @@ impl<'a> PolicyCompiler<'a> {
                     // (mesh-default-deny only applies to workloads, not ServiceEntry)
                     output
                         .authorization_policies
-                        .push(Self::compile_external_default_deny(&callee.name, namespace));
+                        .push(Self::compile_external_default_deny(&callee.name, &edge.callee_namespace));
                     // Generate ALLOW policy for THIS service to access the external
                     output
                         .authorization_policies
@@ -478,7 +477,7 @@ impl<'a> PolicyCompiler<'a> {
 
         let principals: Vec<String> = inbound_edges
             .iter()
-            .map(|edge| self.spiffe_principal(namespace, &edge.caller))
+            .map(|edge| self.spiffe_principal(&edge.caller_namespace, &edge.caller_name))
             .collect();
 
         let ports: Vec<String> = service.ports.values().map(|p| p.to_string()).collect();
@@ -559,7 +558,6 @@ impl<'a> PolicyCompiler<'a> {
         &self,
         service: &ServiceNode,
         namespace: &str,
-        env: &str,
         inbound_edges: &[ActiveEdge],
         outbound_edges: &[ActiveEdge],
     ) -> CiliumNetworkPolicy {
@@ -581,12 +579,12 @@ impl<'a> PolicyCompiler<'a> {
                     let mut labels = BTreeMap::new();
                     labels.insert(
                         "k8s:io.kubernetes.pod.namespace".to_string(),
-                        namespace.to_string(),
+                        edge.caller_namespace.clone(),
                     );
                     // Cilium requires k8s: prefix for Kubernetes pod labels
                     labels.insert(
                         "k8s:app.kubernetes.io/name".to_string(),
-                        edge.caller.clone(),
+                        edge.caller_name.clone(),
                     );
                     EndpointSelector {
                         match_labels: labels,
@@ -701,18 +699,18 @@ impl<'a> PolicyCompiler<'a> {
 
         // Add egress rules for dependencies
         for edge in outbound_edges {
-            if let Some(callee) = self.graph.get_service(env, &edge.callee) {
+            if let Some(callee) = self.graph.get_service(&edge.callee_namespace, &edge.callee_name) {
                 match callee.type_ {
                     ServiceType::Local => {
                         let mut dep_labels = BTreeMap::new();
                         dep_labels.insert(
                             "k8s:io.kubernetes.pod.namespace".to_string(),
-                            namespace.to_string(),
+                            edge.callee_namespace.clone(),
                         );
                         // Cilium requires k8s: prefix for Kubernetes pod labels
                         dep_labels.insert(
                             "k8s:app.kubernetes.io/name".to_string(),
-                            edge.callee.clone(),
+                            edge.callee_name.clone(),
                         );
 
                         let to_ports: Vec<CiliumPortRule> = if callee.ports.is_empty() {
@@ -1026,7 +1024,6 @@ mod tests {
 
     fn make_external_spec(allowed: Vec<&str>) -> LatticeExternalServiceSpec {
         LatticeExternalServiceSpec {
-            environment: "test".to_string(),
             endpoints: BTreeMap::from([(
                 "api".to_string(),
                 "https://api.stripe.com:443".to_string(),
@@ -1049,6 +1046,7 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    namespace: None,
                     inbound: None,
                     outbound: None,
                 },
@@ -1064,6 +1062,7 @@ mod tests {
                     class: None,
                     metadata: None,
                     params: None,
+                    namespace: None,
                     inbound: None,
                     outbound: None,
                 },
@@ -1098,7 +1097,6 @@ mod tests {
         );
 
         crate::crd::LatticeServiceSpec {
-            environment: "test".to_string(),
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
@@ -1115,19 +1113,19 @@ mod tests {
     #[test]
     fn story_bilateral_agreement_generates_policy() {
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         // api allows gateway
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         // gateway depends on api
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
-        graph.put_service(env, "gateway", &gateway_spec);
+        graph.put_service(ns, "gateway", &gateway_spec);
 
         // Compile policies for api (the callee)
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("api", "prod-ns", env);
+        let output = compiler.compile("api", "prod-ns");
 
         // Should have auth policy allowing gateway
         assert!(!output.authorization_policies.is_empty());
@@ -1143,18 +1141,18 @@ mod tests {
     #[test]
     fn story_no_policy_without_bilateral_agreement() {
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         // api allows gateway, but gateway doesn't declare dependency
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         // gateway doesn't depend on api (no bilateral agreement)
         let gateway_spec = make_service_spec(vec![], vec![]);
-        graph.put_service(env, "gateway", &gateway_spec);
+        graph.put_service(ns, "gateway", &gateway_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("api", "prod-ns", env);
+        let output = compiler.compile("api", "prod-ns");
 
         // No auth policy (no bilateral agreement)
         assert!(output.authorization_policies.is_empty());
@@ -1169,7 +1167,7 @@ mod tests {
         let graph = ServiceGraph::new();
 
         let compiler = PolicyCompiler::new(&graph, "test.lattice.local");
-        let output = compiler.compile("nonexistent", "default", "prod");
+        let output = compiler.compile("nonexistent", "default");
 
         assert!(output.is_empty());
     }
@@ -1181,16 +1179,16 @@ mod tests {
     #[test]
     fn story_spiffe_uses_trust_domain() {
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
-        graph.put_service(env, "gateway", &gateway_spec);
+        graph.put_service(ns, "gateway", &gateway_spec);
 
         let compiler = PolicyCompiler::new(&graph, "my-cluster.example.com");
-        let output = compiler.compile("api", "prod-ns", env);
+        let output = compiler.compile("api", "prod-ns");
 
         let principals = &output.authorization_policies[0].spec.rules[0].from[0]
             .source
@@ -1208,13 +1206,13 @@ mod tests {
     #[test]
     fn story_cilium_policy_always_generated() {
         let graph = ServiceGraph::new();
-        let env = "default";
+        let ns = "default";
 
         let spec = make_service_spec(vec![], vec![]);
-        graph.put_service(env, "my-app", &spec);
+        graph.put_service(ns, "my-app", &spec);
 
         let compiler = PolicyCompiler::new(&graph, "test.lattice.local");
-        let output = compiler.compile("my-app", "default", env);
+        let output = compiler.compile("my-app", ns);
 
         assert_eq!(output.cilium_policies.len(), 1);
         let cnp = &output.cilium_policies[0];
@@ -1251,17 +1249,17 @@ mod tests {
     #[test]
     fn story_external_service_generates_service_entry() {
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         // api depends on external
         let api_spec = make_service_spec(vec!["stripe-api"], vec![]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         // stripe-api is external (allows api)
-        graph.put_external_service(env, "stripe-api", &make_external_spec(vec!["api"]));
+        graph.put_external_service(ns, "stripe-api", &make_external_spec(vec!["api"]));
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("api", "prod-ns", env);
+        let output = compiler.compile("api", "prod-ns");
 
         assert_eq!(output.service_entries.len(), 1);
         let entry = &output.service_entries[0];
@@ -1273,14 +1271,13 @@ mod tests {
     #[test]
     fn story_external_service_respects_dns_resolution() {
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec!["stripe-api"], vec![]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         // External service with DNS resolution (hostname-based)
         let ext_spec = LatticeExternalServiceSpec {
-            environment: "test".to_string(),
             endpoints: BTreeMap::from([(
                 "api".to_string(),
                 "https://api.stripe.com:443".to_string(),
@@ -1289,10 +1286,10 @@ mod tests {
             resolution: Resolution::Dns,
             description: None,
         };
-        graph.put_external_service(env, "stripe-api", &ext_spec);
+        graph.put_external_service(ns, "stripe-api", &ext_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("api", "prod-ns", env);
+        let output = compiler.compile("api", "prod-ns");
 
         assert_eq!(output.service_entries.len(), 1);
         let entry = &output.service_entries[0];
@@ -1302,23 +1299,22 @@ mod tests {
     #[test]
     fn story_external_service_respects_static_resolution() {
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec!["cloudflare"], vec![]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         // External service with STATIC resolution (IP-based)
         let ext_spec = LatticeExternalServiceSpec {
-            environment: "test".to_string(),
             endpoints: BTreeMap::from([("dns".to_string(), "https://1.1.1.1:443".to_string())]),
             allowed_requesters: vec!["api".to_string()],
             resolution: Resolution::Static,
             description: None,
         };
-        graph.put_external_service(env, "cloudflare", &ext_spec);
+        graph.put_external_service(ns, "cloudflare", &ext_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("api", "prod-ns", env);
+        let output = compiler.compile("api", "prod-ns");
 
         assert_eq!(output.service_entries.len(), 1);
         let entry = &output.service_entries[0];
@@ -1333,22 +1329,22 @@ mod tests {
     #[test]
     fn story_external_service_generates_access_control_policies() {
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         // api depends on stripe (external)
         let api_spec = make_service_spec(vec!["stripe"], vec![]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         // frontend does NOT depend on stripe
         let frontend_spec = make_service_spec(vec!["api"], vec![]);
-        graph.put_service(env, "frontend", &frontend_spec);
+        graph.put_service(ns, "frontend", &frontend_spec);
 
-        graph.put_external_service(env, "stripe", &make_external_spec(vec!["api"]));
+        graph.put_external_service(ns, "stripe", &make_external_spec(vec!["api"]));
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
 
         // Compile for api (has stripe dependency)
-        let api_output = compiler.compile("api", "prod-ns", env);
+        let api_output = compiler.compile("api", "prod-ns");
 
         // Should have deny-all and allow-api policies for stripe
         let deny_policy = api_output
@@ -1382,7 +1378,7 @@ mod tests {
         );
 
         // Compile for frontend (no stripe dependency)
-        let frontend_output = compiler.compile("frontend", "prod-ns", env);
+        let frontend_output = compiler.compile("frontend", "prod-ns");
 
         // Should NOT have any stripe policies (no dependency declared)
         let has_stripe_policy = frontend_output
@@ -1417,18 +1413,18 @@ mod tests {
     #[test]
     fn story_total_count() {
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec!["stripe"], vec!["gateway"]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
-        graph.put_service(env, "gateway", &gateway_spec);
+        graph.put_service(ns, "gateway", &gateway_spec);
 
-        graph.put_external_service(env, "stripe", &make_external_spec(vec!["api"]));
+        graph.put_external_service(ns, "stripe", &make_external_spec(vec!["api"]));
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("api", "prod-ns", env);
+        let output = compiler.compile("api", "prod-ns");
 
         // 2 auth policies (allow + waypoint) for inbound
         // + 2 auth policies (deny-all + allow-api) for external
@@ -1443,8 +1439,6 @@ mod tests {
     #[test]
     fn story_unknown_service_type_returns_empty() {
         let graph = ServiceGraph::new();
-        let env = "prod";
-
         // Manually insert a service node with Unknown type via internal method
         // by creating a service and then checking Unknown handling
         // The graph doesn't have a direct way to create Unknown, but we test
@@ -1452,7 +1446,7 @@ mod tests {
         let compiler = PolicyCompiler::new(&graph, "test.lattice.local");
 
         // Non-existent service returns empty (similar path to Unknown)
-        let output = compiler.compile("unknown-service", "default", env);
+        let output = compiler.compile("unknown-service", "default");
         assert!(output.is_empty());
     }
 
@@ -1463,18 +1457,18 @@ mod tests {
     #[test]
     fn story_local_service_egress_generates_cilium_rules() {
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         // gateway depends on api (local service)
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
-        graph.put_service(env, "gateway", &gateway_spec);
+        graph.put_service(ns, "gateway", &gateway_spec);
 
         // api allows gateway (bilateral agreement for egress)
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("gateway", "prod-ns", env);
+        let output = compiler.compile("gateway", "prod-ns");
 
         // Should have Cilium policy with egress rule to api
         assert_eq!(output.cilium_policies.len(), 1);
@@ -1505,18 +1499,18 @@ mod tests {
     #[test]
     fn story_local_egress_includes_ports() {
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         // gateway depends on api
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
-        graph.put_service(env, "gateway", &gateway_spec);
+        graph.put_service(ns, "gateway", &gateway_spec);
 
         // api has ports and allows gateway
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("gateway", "prod-ns", env);
+        let output = compiler.compile("gateway", "prod-ns");
 
         let cnp = &output.cilium_policies[0];
         let api_egress = cnp
@@ -1588,20 +1582,20 @@ mod tests {
         // When external service uses an IP address (e.g., 1.1.1.1), Cilium needs
         // toCIDR rules, not toFQDNs (which only works for DNS names)
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         // api depends on cloudflare (an IP-based external service)
         let api_spec = make_service_spec(vec!["cloudflare"], vec![]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         // cloudflare is external with IP address endpoint
         let mut ext_spec = make_external_spec(vec!["api"]);
         ext_spec.endpoints =
             BTreeMap::from([("default".to_string(), "https://1.1.1.1".to_string())]);
-        graph.put_external_service(env, "cloudflare", &ext_spec);
+        graph.put_external_service(ns, "cloudflare", &ext_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("api", "prod-ns", env);
+        let output = compiler.compile("api", "prod-ns");
 
         // Find the Cilium policy
         let cnp = &output.cilium_policies[0];
@@ -1631,17 +1625,17 @@ mod tests {
     fn story_external_domain_uses_fqdn() {
         // When external service uses a domain name, Cilium needs toFQDNs rules
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         // api depends on stripe (domain-based external service)
         let api_spec = make_service_spec(vec!["stripe-api"], vec![]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         // stripe is external with domain name endpoint
-        graph.put_external_service(env, "stripe-api", &make_external_spec(vec!["api"]));
+        graph.put_external_service(ns, "stripe-api", &make_external_spec(vec!["api"]));
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("api", "prod-ns", env);
+        let output = compiler.compile("api", "prod-ns");
 
         let cnp = &output.cilium_policies[0];
 
@@ -1673,10 +1667,10 @@ mod tests {
         // External service with both IP and domain endpoints should generate
         // separate egress rules for each type
         let graph = ServiceGraph::new();
-        let env = "prod";
+        let ns = "prod-ns";
 
         let api_spec = make_service_spec(vec!["mixed-external"], vec![]);
-        graph.put_service(env, "api", &api_spec);
+        graph.put_service(ns, "api", &api_spec);
 
         // External service with both IP and domain endpoints
         let mut ext_spec = make_external_spec(vec!["api"]);
@@ -1684,10 +1678,10 @@ mod tests {
             ("ip".to_string(), "https://10.0.0.1:443".to_string()),
             ("domain".to_string(), "https://api.example.com".to_string()),
         ]);
-        graph.put_external_service(env, "mixed-external", &ext_spec);
+        graph.put_external_service(ns, "mixed-external", &ext_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile("api", "prod-ns", env);
+        let output = compiler.compile("api", "prod-ns");
 
         let cnp = &output.cilium_policies[0];
 

@@ -1144,7 +1144,7 @@ mod tests {
     /// Helper to compile a service with empty volumes (for basic tests)
     fn compile_service(service: &LatticeService) -> GeneratedWorkloads {
         let name = service.metadata.name.as_deref().expect("test service must have a name");
-        let namespace = &service.spec.environment;
+        let namespace = service.metadata.namespace.as_deref().expect("test service must have a namespace");
         let volumes = VolumeCompiler::compile(name, namespace, &service.spec);
         WorkloadCompiler::compile(service, namespace, &volumes)
     }
@@ -1180,10 +1180,10 @@ mod tests {
         LatticeService {
             metadata: kube::api::ObjectMeta {
                 name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
                 ..Default::default()
             },
             spec: crate::crd::LatticeServiceSpec {
-                environment: namespace.to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: Some(ServicePortsSpec { ports }),

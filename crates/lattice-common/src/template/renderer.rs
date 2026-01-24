@@ -448,7 +448,6 @@ mod tests {
         );
 
         let spec = LatticeServiceSpec {
-            environment: env.to_string(),
             containers,
             resources: BTreeMap::new(),
             service: Some(ServicePortsSpec { ports }),
@@ -520,6 +519,7 @@ mod tests {
                 class: None,
                 metadata: None,
                 params: None,
+                namespace: None,
                 inbound: None,
                 outbound: None,
             },
@@ -528,10 +528,10 @@ mod tests {
         LatticeService {
             metadata: ObjectMeta {
                 name: Some("my-api".to_string()),
+                namespace: Some("prod".to_string()),
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                environment: "prod".to_string(),
                 containers,
                 resources,
                 service: None,
@@ -652,10 +652,10 @@ mod tests {
         let service = LatticeService {
             metadata: ObjectMeta {
                 name: Some("test".to_string()),
+                namespace: Some("test".to_string()),
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                environment: "test".to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: None,
@@ -738,10 +738,10 @@ mod tests {
         let service = LatticeService {
             metadata: ObjectMeta {
                 name: Some("test".to_string()),
+                namespace: Some("test".to_string()),
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                environment: "test".to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: None,
@@ -799,10 +799,10 @@ mod tests {
         let service = LatticeService {
             metadata: ObjectMeta {
                 name: Some("test".to_string()),
+                namespace: Some("prod".to_string()),
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                environment: "prod".to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: None,
@@ -952,10 +952,10 @@ mod tests {
         let service = LatticeService {
             metadata: ObjectMeta {
                 name: Some("my-app".to_string()),
+                namespace: Some("prod".to_string()),
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                environment: "prod".to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: None,
@@ -1019,10 +1019,10 @@ mod tests {
         let service = LatticeService {
             metadata: ObjectMeta {
                 name: Some("my-app".to_string()),
+                namespace: Some("prod".to_string()),
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                environment: "prod".to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: None,
@@ -1077,10 +1077,10 @@ mod tests {
         let service = LatticeService {
             metadata: ObjectMeta {
                 name: Some("my-app".to_string()),
+                namespace: Some("prod".to_string()),
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                environment: "prod".to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: None,
@@ -1129,10 +1129,10 @@ mod tests {
         let service = LatticeService {
             metadata: ObjectMeta {
                 name: Some("my-app".to_string()),
+                namespace: Some("prod".to_string()),
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                environment: "prod".to_string(),
                 containers,
                 resources: BTreeMap::new(),
                 service: None,
