@@ -570,8 +570,9 @@ mod tests {
     /// Mock manifest generator for testing
     struct MockManifestGenerator;
 
+    #[async_trait::async_trait]
     impl ManifestGenerator for MockManifestGenerator {
-        fn generate(
+        async fn generate(
             &self,
             _image: &str,
             _registry_credentials: Option<&str>,

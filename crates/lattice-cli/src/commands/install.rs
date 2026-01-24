@@ -412,12 +412,14 @@ impl Installer {
 
     async fn deploy_lattice_operator(&self, client: &Client) -> Result<()> {
         let generator = DefaultManifestGenerator::new();
-        let all_manifests = generator.generate(
-            &self.image,
-            self.registry_credentials.as_deref(),
-            Some("lattice-installer"),
-            None,
-        );
+        let all_manifests = generator
+            .generate(
+                &self.image,
+                self.registry_credentials.as_deref(),
+                Some("lattice-installer"),
+                None,
+            )
+            .await;
 
         let provider_str = self.provider().to_string();
         let operator_manifests: Vec<String> = all_manifests
@@ -507,7 +509,7 @@ impl Installer {
                 .needs_fips_relax(),
         };
 
-        let all_manifests = generate_all_manifests(&generator, &config);
+        let all_manifests = generate_all_manifests(&generator, &config).await;
 
         // Get provider credentials for the CRS (applied to management cluster)
         let credentials = match self.provider() {

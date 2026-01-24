@@ -3,8 +3,8 @@
 //! Generates Istio manifests using Helm charts with ambient mesh mode.
 //! Installs four charts: base (CRDs), istiod (control plane), istio-cni, and ztunnel.
 
-use std::process::Command;
-use std::sync::OnceLock;
+use tokio::process::Command;
+use tokio::sync::OnceCell;
 use tracing::info;
 
 use super::charts_dir;
@@ -27,7 +27,7 @@ impl Default for IstioConfig {
 /// Istio manifest generator
 pub struct IstioReconciler {
     config: IstioConfig,
-    manifests: OnceLock<Result<Vec<String>, String>>,
+    manifests: OnceCell<Result<Vec<String>, String>>,
 }
 
 impl IstioReconciler {
@@ -40,7 +40,7 @@ impl IstioReconciler {
     pub fn with_config(config: IstioConfig) -> Self {
         Self {
             config,
-            manifests: OnceLock::new(),
+            manifests: OnceCell::new(),
         }
     }
 
@@ -49,11 +49,15 @@ impl IstioReconciler {
         self.config.version
     }
 
-    /// Get manifests (lazily rendered)
-    pub fn manifests(&self) -> Result<&[String], String> {
+    /// Get manifests (lazily rendered, async)
+    ///
+    /// This is an async function to avoid blocking the tokio runtime during
+    /// helm template execution.
+    pub async fn manifests(&self) -> Result<&[String], String> {
         let result = self
             .manifests
-            .get_or_init(|| Self::render_manifests(&self.config));
+            .get_or_init(|| async { Self::render_manifests(&self.config).await })
+            .await;
         match result {
             Ok(m) => Ok(m),
             Err(e) => Err(e.clone()),
@@ -151,7 +155,7 @@ spec:
         .to_string()
     }
 
-    fn render_manifests(config: &IstioConfig) -> Result<Vec<String>, String> {
+    async fn render_manifests(config: &IstioConfig) -> Result<Vec<String>, String> {
         let mut all_manifests = Vec::new();
 
         // Use local chart tarballs (pulled at Docker build time or by build.rs)
@@ -172,6 +176,7 @@ spec:
                 "istio-system",
             ])
             .output()
+            .await
             .map_err(|e| format!("failed to run helm: {}", e))?;
 
         if !base_output.status.success() {
@@ -199,6 +204,7 @@ spec:
                 "cni.cniConfFileName=05-cilium.conflist",
             ])
             .output()
+            .await
             .map_err(|e| format!("failed to run helm: {}", e))?;
 
         if !cni_output.status.success() {
@@ -230,6 +236,7 @@ spec:
                 "pilot.resources.requests.memory=128Mi",
             ])
             .output()
+            .await
             .map_err(|e| format!("failed to run helm: {}", e))?;
 
         if !istiod_output.status.success() {
@@ -252,6 +259,7 @@ spec:
                 "istio-system",
             ])
             .output()
+            .await
             .map_err(|e| format!("failed to run helm: {}", e))?;
 
         if !ztunnel_output.status.success() {
@@ -302,11 +310,11 @@ mod tests {
         assert_eq!(reconciler.version(), env!("ISTIO_VERSION"));
     }
 
-    #[test]
-    fn test_manifest_rendering() {
+    #[tokio::test]
+    async fn test_manifest_rendering() {
         // Only runs if helm is available with istio repo
         let reconciler = IstioReconciler::new();
-        if let Ok(manifests) = reconciler.manifests() {
+        if let Ok(manifests) = reconciler.manifests().await {
             // Should have rendered some manifests
             assert!(!manifests.is_empty());
 
