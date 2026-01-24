@@ -606,12 +606,6 @@ pub fn service_fixtures_dir() -> PathBuf {
     workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/services")
 }
 
-// Backwards compatibility alias
-#[cfg(feature = "provider-e2e")]
-pub fn fixtures_dir() -> PathBuf {
-    cluster_fixtures_dir()
-}
-
 /// Build and push the lattice Docker image
 #[cfg(feature = "provider-e2e")]
 pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {

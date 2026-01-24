@@ -414,6 +414,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -434,6 +435,10 @@ mod tests {
             replicas: crate::crd::ReplicaSpec::default(),
             deploy: crate::crd::DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         };
 
         graph.put_service(env, name, &spec);
@@ -626,6 +631,7 @@ mod tests {
                     liveness_probe: None,
                     readiness_probe: None,
                     startup_probe: None,
+                    security: None,
                 },
             )]),
             resources,
@@ -633,6 +639,10 @@ mod tests {
             replicas: crate::crd::ReplicaSpec::default(),
             deploy: crate::crd::DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         };
 
         let registry = ProvisionerRegistry::new();

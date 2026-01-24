@@ -501,6 +501,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -555,6 +556,10 @@ mod tests {
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         }
     }
 
@@ -622,6 +627,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -641,6 +647,10 @@ mod tests {
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         };
 
         graph.put_service("frontend", "web", &frontend_spec);

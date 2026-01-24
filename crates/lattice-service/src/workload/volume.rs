@@ -297,6 +297,35 @@ impl VolumeCompiler {
             }
         }
 
+        // Generate volume mounts from sidecar specs
+        for (sidecar_name, sidecar_spec) in &spec.sidecars {
+            let mut mounts = Vec::new();
+
+            for (mount_path, volume_mount) in &sidecar_spec.volumes {
+                // Parse the source to find the resource name
+                if let Some(resource_name) =
+                    Self::parse_volume_source(&volume_mount.source.to_string())
+                {
+                    // Only add mount if we have this volume resource
+                    if volume_resources
+                        .iter()
+                        .any(|(name, _)| name.as_str() == resource_name)
+                    {
+                        mounts.push(super::VolumeMount {
+                            name: resource_name.to_string(),
+                            mount_path: mount_path.clone(),
+                            sub_path: volume_mount.path.clone(),
+                            read_only: volume_mount.read_only,
+                        });
+                    }
+                }
+            }
+
+            if !mounts.is_empty() {
+                output.volume_mounts.insert(sidecar_name.clone(), mounts);
+            }
+        }
+
         output
     }
 
@@ -432,6 +461,7 @@ mod tests {
                 liveness_probe: None,
                 readiness_probe: None,
                 startup_probe: None,
+                security: None,
             },
         );
 
@@ -442,6 +472,10 @@ mod tests {
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         }
     }
 
@@ -719,6 +753,10 @@ mod tests {
             replicas: ReplicaSpec::default(),
             deploy: DeploySpec::default(),
             ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
         };
 
         let output = VolumeCompiler::compile("myapp", "prod", &spec);
