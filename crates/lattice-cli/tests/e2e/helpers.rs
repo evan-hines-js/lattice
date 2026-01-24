@@ -596,8 +596,20 @@ pub fn workspace_root() -> PathBuf {
 
 /// Get the fixtures directory for cluster configs
 #[cfg(feature = "provider-e2e")]
-pub fn fixtures_dir() -> PathBuf {
+pub fn cluster_fixtures_dir() -> PathBuf {
     workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/clusters")
+}
+
+/// Get the fixtures directory for service configs
+#[cfg(feature = "provider-e2e")]
+pub fn service_fixtures_dir() -> PathBuf {
+    workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/services")
+}
+
+// Backwards compatibility alias
+#[cfg(feature = "provider-e2e")]
+pub fn fixtures_dir() -> PathBuf {
+    cluster_fixtures_dir()
 }
 
 /// Build and push the lattice Docker image
@@ -683,7 +695,7 @@ pub fn load_cluster_config(
 ) -> Result<(String, LatticeCluster), String> {
     let path = match std::env::var(env_var) {
         Ok(p) => PathBuf::from(p),
-        Err(_) => fixtures_dir().join(default_fixture),
+        Err(_) => cluster_fixtures_dir().join(default_fixture),
     };
 
     if !path.exists() {
@@ -698,6 +710,26 @@ pub fn load_cluster_config(
 
     println!("  Loaded cluster config: {}", path.display());
     Ok((content, cluster))
+}
+
+/// Load a LatticeService config from a fixture file
+#[cfg(feature = "provider-e2e")]
+pub fn load_service_config(
+    filename: &str,
+) -> Result<lattice_operator::crd::LatticeService, String> {
+    let path = service_fixtures_dir().join(filename);
+
+    if !path.exists() {
+        return Err(format!("Service config not found: {}", path.display()));
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    let service: lattice_operator::crd::LatticeService = serde_yaml::from_str(&content)
+        .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
+
+    Ok(service)
 }
 
 /// Get a localhost-accessible kubeconfig for a Docker cluster
