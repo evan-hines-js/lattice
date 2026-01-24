@@ -614,7 +614,7 @@ pub async fn reconcile(
 
             // Compile workloads and policies
             let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain);
-            let compiled = compiler.compile(&service);
+            let compiled = compiler.compile(&service)?;
 
             // Apply compiled resources to the cluster
             info!(
@@ -654,7 +654,7 @@ pub async fn reconcile(
             // or when a service we depend on changes its allowed callers, we need to
             // update our ingress/egress policies to reflect the new bilateral agreements.
             let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain);
-            let compiled = compiler.compile(&service);
+            let compiled = compiler.compile(&service)?;
 
             debug!(
                 resources = compiled.resource_count(),

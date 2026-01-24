@@ -15,7 +15,7 @@ pub mod policy;
 pub mod workload;
 
 // Re-export key types
-pub use compiler::{CompiledService, ServiceCompiler};
+pub use compiler::{CompileError, CompiledService, ServiceCompiler};
 pub use controller::{
     error_policy as service_error_policy, error_policy_external, reconcile as service_reconcile,
     reconcile_external, ServiceContext,

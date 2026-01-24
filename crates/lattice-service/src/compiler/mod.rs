@@ -36,6 +36,20 @@ pub use crate::ingress::{Certificate, Gateway, HttpRoute};
 pub use crate::policy::{CiliumNetworkPolicy, ServiceEntry};
 pub use crate::workload::{Deployment, HorizontalPodAutoscaler, Service, ServiceAccount};
 
+/// Errors that can occur during service compilation
+#[derive(Debug, thiserror::Error)]
+pub enum CompileError {
+    /// LatticeService is missing required metadata
+    #[error("LatticeService missing {field}")]
+    MissingMetadata { field: &'static str },
+}
+
+impl From<CompileError> for crate::Error {
+    fn from(err: CompileError) -> Self {
+        crate::Error::validation(err.to_string())
+    }
+}
+
 /// Combined output from compiling a LatticeService
 #[derive(Clone, Debug, Default)]
 pub struct CompiledService {
@@ -115,23 +129,27 @@ impl<'a> ServiceCompiler<'a> {
     /// - Waypoint: Istio ambient mesh L7 policy enforcement
     ///
     /// The namespace comes from the CRD's metadata (LatticeService is namespace-scoped).
-    pub fn compile(&self, service: &LatticeService) -> CompiledService {
+    ///
+    /// # Errors
+    ///
+    /// Returns `CompileError::MissingMetadata` if the service is missing name or namespace.
+    pub fn compile(&self, service: &LatticeService) -> Result<CompiledService, CompileError> {
         let name = service
             .metadata
             .name
             .as_deref()
-            .expect("LatticeService must have a name");
+            .ok_or(CompileError::MissingMetadata { field: "name" })?;
         let namespace = service
             .metadata
             .namespace
             .as_deref()
-            .expect("LatticeService must have a namespace");
+            .ok_or(CompileError::MissingMetadata { field: "namespace" })?;
 
         // Compile volumes first (PVCs must exist before Deployment references them)
         let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec);
 
         // Delegate to specialized compilers
-        let mut workloads = WorkloadCompiler::compile(service, namespace, &compiled_volumes);
+        let mut workloads = WorkloadCompiler::compile(name, service, namespace, &compiled_volumes);
 
         // Add PVCs to workloads
         workloads.pvcs = compiled_volumes.pvcs;
@@ -172,12 +190,12 @@ impl<'a> ServiceCompiler<'a> {
             GeneratedIngress::new()
         };
 
-        CompiledService {
+        Ok(CompiledService {
             workloads,
             policies,
             ingress,
             waypoint,
-        }
+        })
     }
 
     /// Compile the mesh-wide default-deny AuthorizationPolicy
@@ -362,7 +380,7 @@ mod tests {
         let service = make_service("api", "prod");
 
         let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile(&service);
+        let output = compiler.compile(&service).unwrap();
 
         // Should have workloads (from WorkloadCompiler)
         assert!(output.workloads.deployment.is_some());
@@ -390,7 +408,7 @@ mod tests {
         let service = make_service("my-app", "staging");
 
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
-        let output = compiler.compile(&service);
+        let output = compiler.compile(&service).unwrap();
 
         // Should find service in graph and generate cilium policy
         assert!(!output.policies.cilium_policies.is_empty());
@@ -408,7 +426,7 @@ mod tests {
         let service = make_service("my-app", "prod-ns");
 
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
-        let output = compiler.compile(&service);
+        let output = compiler.compile(&service).unwrap();
 
         // Should find service using namespace as env
         assert!(!output.policies.cilium_policies.is_empty());
@@ -426,7 +444,7 @@ mod tests {
         let service = make_service("my-app", "default");
 
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
-        let output = compiler.compile(&service);
+        let output = compiler.compile(&service).unwrap();
 
         // Should still have workloads
         assert!(output.workloads.deployment.is_some());
@@ -449,7 +467,7 @@ mod tests {
         let service = make_service("my-app", "default");
 
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
-        let output = compiler.compile(&service);
+        let output = compiler.compile(&service).unwrap();
 
         // Deployment + Service + ServiceAccount + CiliumPolicy + WaypointGateway + WaypointAuthPolicy = 6
         // (VirtualService is generated per dependency, not per service)
@@ -484,7 +502,7 @@ mod tests {
         let service = make_service("my-app", "default");
 
         let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
-        let output = compiler.compile(&service);
+        let output = compiler.compile(&service).unwrap();
         assert!(!output.is_empty());
     }
 
@@ -501,7 +519,7 @@ mod tests {
         let service = make_service_with_ingress("api", "prod");
 
         let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile(&service);
+        let output = compiler.compile(&service).unwrap();
 
         // Should have ingress resources
         assert!(output.ingress.gateway.is_some());
@@ -540,7 +558,7 @@ mod tests {
         let service = make_service("api", "prod");
 
         let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile(&service);
+        let output = compiler.compile(&service).unwrap();
 
         // Should NOT have ingress resources
         assert!(output.ingress.is_empty());
@@ -558,7 +576,7 @@ mod tests {
         let service = make_service_with_ingress("api", "prod");
 
         let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
-        let output = compiler.compile(&service);
+        let output = compiler.compile(&service).unwrap();
 
         // Should include: Deployment + Service + ServiceAccount + CiliumPolicy +
         //                 Gateway + HTTPRoute + Certificate + GatewayAllowPolicy
