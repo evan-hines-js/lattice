@@ -29,7 +29,7 @@ use crate::crd::LatticeService;
 use crate::graph::ServiceGraph;
 use crate::ingress::{GeneratedIngress, GeneratedWaypoint, IngressCompiler, WaypointCompiler};
 use crate::policy::{AuthorizationPolicy, GeneratedPolicies, PolicyCompiler};
-use crate::workload::{GeneratedWorkloads, WorkloadCompiler};
+use crate::workload::{GeneratedWorkloads, VolumeCompiler, WorkloadCompiler};
 
 // Re-export types for convenience
 pub use crate::ingress::{Certificate, Gateway, HttpRoute};
@@ -117,13 +117,24 @@ impl<'a> ServiceCompiler<'a> {
     /// The environment (and namespace) comes from `spec.environment`, since
     /// LatticeService is cluster-scoped.
     pub fn compile(&self, service: &LatticeService) -> CompiledService {
-        let name = service.metadata.name.as_deref().unwrap_or("unknown");
+        let name = service
+            .metadata
+            .name
+            .as_deref()
+            .expect("LatticeService must have a name");
         // Environment is in spec, determines namespace for workloads
         let env = &service.spec.environment;
         let namespace = env; // Environment determines namespace
 
+        // Compile volumes first (PVCs must exist before Deployment references them)
+        let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec);
+
         // Delegate to specialized compilers
-        let workloads = WorkloadCompiler::compile(service, namespace);
+        let mut workloads = WorkloadCompiler::compile(service, namespace, &compiled_volumes);
+
+        // Add PVCs to workloads
+        workloads.pvcs = compiled_volumes.pvcs;
+
         let policy_compiler = PolicyCompiler::new(self.graph, &self.trust_domain);
         let mut policies = policy_compiler.compile(name, namespace, env);
 

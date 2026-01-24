@@ -473,7 +473,7 @@ impl Installer {
     async fn create_bootstrap_crs(&self, client: &Client) -> Result<()> {
         let generator = DefaultManifestGenerator::new();
         let cluster_name = self.cluster_name();
-        let provider_str = self.cluster.spec.provider.provider_type().to_string();
+        let provider = self.cluster.spec.provider.provider_type();
         let namespace = self.capi_namespace();
 
         let proxmox_ipv4_pool = self
@@ -492,7 +492,7 @@ impl Installer {
             networking: self.cluster.spec.networking.as_ref(),
             proxmox_ipv4_pool,
             cluster_name: Some(cluster_name),
-            provider: Some(&provider_str),
+            provider: Some(provider),
             k8s_version: Some(k8s_version),
             parent_host: None,
             parent_grpc_port: lattice_operator::DEFAULT_GRPC_PORT,

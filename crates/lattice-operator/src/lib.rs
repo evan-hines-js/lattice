@@ -15,7 +15,6 @@ pub use lattice_cluster::provider;
 pub use lattice_service::compiler;
 pub use lattice_service::ingress;
 pub use lattice_service::policy;
-pub use lattice_service::webhook;
 pub use lattice_service::workload;
 
 // Re-export controllers - these need to stay local as they orchestrate everything

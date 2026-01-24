@@ -27,10 +27,12 @@
 
 mod aws_addons;
 mod crs;
+mod docker_addons;
 mod token;
 
 pub use aws_addons::generate_aws_addon_manifests;
 pub use crs::{generate_crs_yaml_manifests, ProviderCredentials};
+pub use docker_addons::generate_docker_addon_manifests;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -56,7 +58,7 @@ use tracing::{debug, info, warn};
 
 use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
-use lattice_common::crd::LatticeCluster;
+use lattice_common::crd::{LatticeCluster, ProviderType};
 use lattice_common::{DISTRIBUTE_LABEL_KEY, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::pki::{CertificateAuthority, PkiError};
 
@@ -171,7 +173,7 @@ pub struct ClusterRegistration {
     /// Proxmox ipv4_pool for auto-deriving LB-IPAM (when networking is None)
     pub proxmox_ipv4_pool: Option<lattice_common::crd::Ipv4PoolConfig>,
     /// Infrastructure provider (docker, aws, gcp, azure)
-    pub provider: String,
+    pub provider: ProviderType,
     /// Bootstrap mechanism (kubeadm or rke2)
     pub bootstrap: lattice_common::crd::BootstrapProvider,
     /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons
@@ -192,7 +194,7 @@ pub trait ManifestGenerator: Send + Sync {
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
-        provider: Option<&str>,
+        provider: Option<ProviderType>,
     ) -> Vec<String>;
 }
 
@@ -212,8 +214,8 @@ pub struct ManifestConfig<'a> {
     pub proxmox_ipv4_pool: Option<&'a lattice_common::crd::Ipv4PoolConfig>,
     /// Cluster name (for operator identity)
     pub cluster_name: Option<&'a str>,
-    /// Provider type (docker, aws, etc.)
-    pub provider: Option<&'a str>,
+    /// Provider type
+    pub provider: Option<ProviderType>,
     /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons
     pub k8s_version: Option<&'a str>,
     /// Parent host (None for root/cell clusters)
@@ -271,10 +273,17 @@ pub fn generate_all_manifests<G: ManifestGenerator>(
 
     // Add provider-specific addons
     if let Some(provider) = config.provider {
-        if provider.eq_ignore_ascii_case("aws") {
-            if let Some(k8s_version) = config.k8s_version {
-                manifests.push(generate_aws_addon_manifests(k8s_version));
+        match provider {
+            ProviderType::Aws => {
+                if let Some(k8s_version) = config.k8s_version {
+                    manifests.push(generate_aws_addon_manifests(k8s_version));
+                }
             }
+            ProviderType::Docker => {
+                // Docker/kind clusters need local-path-provisioner for PVC support
+                manifests.push(generate_docker_addon_manifests());
+            }
+            _ => {} // Other providers don't need special addons yet
         }
     }
 
@@ -441,7 +450,7 @@ impl DefaultManifestGenerator {
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
-        provider: Option<&str>,
+        provider: Option<ProviderType>,
     ) -> Result<Vec<String>, serde_json::Error> {
         let registry_creds = registry_credentials.map(|s| s.to_string());
 
@@ -655,7 +664,7 @@ impl ManifestGenerator for DefaultManifestGenerator {
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
-        provider: Option<&str>,
+        provider: Option<ProviderType>,
     ) -> Vec<String> {
         match self.try_generate(image, registry_credentials, cluster_name, provider) {
             Ok(manifests) => manifests,
@@ -676,7 +685,7 @@ impl DefaultManifestGenerator {
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
-        provider: Option<&str>,
+        provider: Option<ProviderType>,
     ) -> Result<Vec<String>, ManifestError> {
         let mut manifests = Vec::new();
 
@@ -723,7 +732,7 @@ pub struct ClusterBootstrapInfo {
     /// Proxmox ipv4_pool for auto-deriving LB-IPAM (when networking is None)
     pub proxmox_ipv4_pool: Option<lattice_common::crd::Ipv4PoolConfig>,
     /// Infrastructure provider (docker, aws, gcp, azure)
-    pub provider: String,
+    pub provider: ProviderType,
     /// Bootstrap mechanism (kubeadm or rke2) - determines FIPS relaxation needs
     pub bootstrap: lattice_common::crd::BootstrapProvider,
     /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons like CCM
@@ -927,7 +936,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             networking: info.networking.as_ref(),
             proxmox_ipv4_pool: info.proxmox_ipv4_pool.as_ref(),
             cluster_name: Some(&info.cluster_id),
-            provider: Some(&info.provider),
+            provider: Some(info.provider),
             k8s_version: Some(&info.k8s_version),
             parent_host: parent_host.as_deref(),
             parent_grpc_port: grpc_port,
@@ -938,7 +947,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // Add ALL infrastructure manifests (cert-manager, CAPI, Istio, Envoy Gateway)
         // These install in parallel with the operator, massively speeding up cluster creation
         let infra_config = lattice_infra::InfrastructureConfig {
-            provider: info.provider.clone(),
+            provider: info.provider,
             bootstrap: info.bootstrap.clone(),
             skip_cilium_policies: false, // Real clusters have Cilium
         };
@@ -1185,7 +1194,7 @@ mod tests {
             image: &str,
             _registry_credentials: Option<&str>,
             _cluster_name: Option<&str>,
-            _provider: Option<&str>,
+            _provider: Option<ProviderType>,
         ) -> Vec<String> {
             vec![format!("# Test manifest with image {}", image)]
         }
@@ -1234,7 +1243,7 @@ mod tests {
                 cluster_manifest,
                 networking: None,
                 proxmox_ipv4_pool: None,
-                provider: "docker".to_string(),
+                provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::default(),
                 k8s_version: "1.32.0".to_string(),
             },
@@ -2329,7 +2338,7 @@ mod tests {
                 token_used: true, // Already bootstrapped
                 networking: None,
                 proxmox_ipv4_pool: None,
-                provider: "docker".to_string(),
+                provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
             },
@@ -2383,7 +2392,7 @@ mod tests {
                 token_used: true, // Already bootstrapped
                 networking: None,
                 proxmox_ipv4_pool: None,
-                provider: "docker".to_string(),
+                provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::Rke2,
                 k8s_version: "1.32.0".to_string(),
             },
@@ -2450,7 +2459,7 @@ mod tests {
                 token_used: true,
                 networking: None,
                 proxmox_ipv4_pool: None,
-                provider: "aws".to_string(),
+                provider: ProviderType::Aws,
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
             },
@@ -2511,7 +2520,7 @@ mod tests {
                 token_used: true,
                 networking: None,
                 proxmox_ipv4_pool: None,
-                provider: "docker".to_string(),
+                provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
             },

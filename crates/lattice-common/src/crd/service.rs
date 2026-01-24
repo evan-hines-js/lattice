@@ -361,34 +361,10 @@ pub struct ExecProbe {
     pub command: Vec<String>,
 }
 
-/// TCP socket probe configuration
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TcpSocketProbe {
-    /// Port to probe
-    pub port: u16,
-
-    /// Optional host (defaults to pod IP)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-}
-
-/// gRPC probe configuration
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct GrpcProbe {
-    /// Port to probe (must be a gRPC server with health checking enabled)
-    pub port: u16,
-
-    /// Service name to check (optional, defaults to "" which checks server health)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service: Option<String>,
-}
-
-/// Probe configuration (liveness, readiness, or startup)
+/// Probe configuration (liveness or readiness)
 ///
-/// Maps 1:1 with Kubernetes probe specification. Supports HTTP GET, exec,
-/// TCP socket, and gRPC probe types with full timing configuration.
+/// Score-compliant probe specification. Supports HTTP GET and exec probe types.
+/// Timing configuration is handled by the platform with sensible defaults.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Probe {
@@ -399,38 +375,6 @@ pub struct Probe {
     /// Exec probe - executes a command inside the container
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecProbe>,
-
-    /// TCP socket probe - performs a TCP check against the container's IP
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tcp_socket: Option<TcpSocketProbe>,
-
-    /// gRPC probe - performs a gRPC health check (requires Kubernetes 1.24+)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grpc: Option<GrpcProbe>,
-
-    /// Number of seconds after container starts before probes are initiated (default: 0)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub initial_delay_seconds: Option<u32>,
-
-    /// How often (in seconds) to perform the probe (default: 10)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub period_seconds: Option<u32>,
-
-    /// Number of seconds after which the probe times out (default: 1)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_seconds: Option<u32>,
-
-    /// Minimum consecutive successes for probe to be considered successful (default: 1)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub success_threshold: Option<u32>,
-
-    /// Minimum consecutive failures for probe to be considered failed (default: 3)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_threshold: Option<u32>,
-
-    /// Override pod's terminationGracePeriodSeconds when probe fails (optional)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub termination_grace_period_seconds: Option<i64>,
 }
 
 /// File mount specification
@@ -1853,6 +1797,7 @@ containers:
     /// Story: Full probe configuration with all timing parameters
     #[test]
     fn test_probe_with_timing_parameters() {
+        // Score-compliant probe: only httpGet, no timing fields
         let yaml = r#"
 environment: test
 containers:
@@ -1862,24 +1807,13 @@ containers:
       httpGet:
         path: /healthz
         port: 8080
-      initialDelaySeconds: 30
-      periodSeconds: 10
-      timeoutSeconds: 5
-      successThreshold: 1
-      failureThreshold: 3
 "#;
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("probe timing YAML should parse successfully");
+            serde_yaml::from_str(yaml).expect("probe YAML should parse successfully");
         let probe = spec.containers["main"]
             .liveness_probe
             .as_ref()
             .expect("liveness probe should be present");
-
-        assert_eq!(probe.initial_delay_seconds, Some(30));
-        assert_eq!(probe.period_seconds, Some(10));
-        assert_eq!(probe.timeout_seconds, Some(5));
-        assert_eq!(probe.success_threshold, Some(1));
-        assert_eq!(probe.failure_threshold, Some(3));
 
         let http = probe
             .http_get
@@ -1889,96 +1823,43 @@ containers:
         assert_eq!(http.port, 8080);
     }
 
-    /// Story: TCP socket probe
+    /// Story: HTTP probe with all Score options (scheme, host, headers)
     #[test]
-    fn test_tcp_socket_probe() {
+    fn test_http_probe_full() {
         let yaml = r#"
 environment: test
 containers:
   main:
-    image: redis:latest
+    image: app:latest
     readinessProbe:
-      tcpSocket:
-        port: 6379
-      periodSeconds: 5
+      httpGet:
+        path: /ready
+        port: 8080
+        scheme: HTTPS
+        host: localhost
+        httpHeaders:
+          - name: X-Custom-Header
+            value: test-value
 "#;
         let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("TCP probe YAML should parse successfully");
+            serde_yaml::from_str(yaml).expect("probe YAML should parse successfully");
         let probe = spec.containers["main"]
             .readiness_probe
             .as_ref()
             .expect("readiness probe should be present");
 
-        let tcp = probe
-            .tcp_socket
-            .as_ref()
-            .expect("TCP socket probe should be configured");
-        assert_eq!(tcp.port, 6379);
-        assert_eq!(probe.period_seconds, Some(5));
-    }
-
-    /// Story: gRPC probe
-    #[test]
-    fn test_grpc_probe() {
-        let yaml = r#"
-environment: test
-containers:
-  main:
-    image: grpc-server:latest
-    livenessProbe:
-      grpc:
-        port: 50051
-        service: my.health.Service
-      initialDelaySeconds: 10
-"#;
-        let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("gRPC probe YAML should parse successfully");
-        let probe = spec.containers["main"]
-            .liveness_probe
-            .as_ref()
-            .expect("liveness probe should be present");
-
-        let grpc = probe
-            .grpc
-            .as_ref()
-            .expect("gRPC probe should be configured");
-        assert_eq!(grpc.port, 50051);
-        assert_eq!(grpc.service, Some("my.health.Service".to_string()));
-        assert_eq!(probe.initial_delay_seconds, Some(10));
-    }
-
-    /// Story: Startup probe for slow-starting containers
-    #[test]
-    fn test_startup_probe() {
-        let yaml = r#"
-environment: test
-containers:
-  main:
-    image: slow-app:latest
-    startupProbe:
-      httpGet:
-        path: /ready
-        port: 8080
-      failureThreshold: 30
-      periodSeconds: 10
-"#;
-        let spec: LatticeServiceSpec =
-            serde_yaml::from_str(yaml).expect("startup probe YAML should parse successfully");
-        let probe = spec.containers["main"]
-            .startup_probe
-            .as_ref()
-            .expect("startup probe should be present");
-
         let http = probe
             .http_get
             .as_ref()
-            .expect("HTTP startup probe should be configured");
+            .expect("HTTP probe should be configured");
         assert_eq!(http.path, "/ready");
-        assert_eq!(probe.failure_threshold, Some(30));
-        assert_eq!(probe.period_seconds, Some(10));
+        assert_eq!(http.port, 8080);
+        assert_eq!(http.scheme, Some("HTTPS".to_string()));
+        assert_eq!(http.host, Some("localhost".to_string()));
+        assert!(http.http_headers.is_some());
     }
 
-    /// Story: Exec probe with command
+    /// Story: Exec probe with command (Score-compliant)
     #[test]
     fn test_exec_probe() {
         let yaml = r#"
@@ -1991,7 +1872,6 @@ containers:
         command:
           - cat
           - /tmp/healthy
-      periodSeconds: 5
 "#;
         let spec: LatticeServiceSpec =
             serde_yaml::from_str(yaml).expect("exec probe YAML should parse successfully");
