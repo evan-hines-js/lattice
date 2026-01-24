@@ -16,9 +16,11 @@ spec:
         /config:
           source: ${resources.config}
         /downloads:
-          source: ${resources.downloads}
+          source: ${resources.media-storage}
+          path: downloads
         /media:
-          source: ${resources.media}
+          source: ${resources.media-storage}
+          path: library
       resources:
         requests:
           cpu: 100m
@@ -44,13 +46,11 @@ spec:
       params:
         size: 5Gi
         storageClass: local-path
-    # Shared volume REFERENCES (no size = reference only)
-    downloads:
+    # Shared media storage (REFERENCE - no size)
+    # References jellyfin's volume, co-located via pod affinity
+    media-storage:
       type: volume
-      id: media-downloads
-    media:
-      type: volume
-      id: media-library
+      id: media-storage
     # Service dependencies (bilateral agreements)
     nzbget:
       type: service

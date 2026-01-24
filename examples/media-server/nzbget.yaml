@@ -16,7 +16,8 @@ spec:
         /config:
           source: ${resources.config}
         /downloads:
-          source: ${resources.downloads}
+          source: ${resources.media-storage}
+          path: downloads
       resources:
         requests:
           cpu: 100m
@@ -42,16 +43,11 @@ spec:
       params:
         size: 1Gi
         storageClass: local-path
-    # Owned shared volume (OWNER - has size)
-    # Uses RWO because local-path doesn't support RWX
-    # Sonarr will be co-located via pod affinity
-    downloads:
+    # Shared media storage (REFERENCE - no size)
+    # References jellyfin's volume, co-located via pod affinity
+    media-storage:
       type: volume
-      id: media-downloads
-      params:
-        size: 500Gi
-        storageClass: local-path
-        accessMode: ReadWriteOnce
+      id: media-storage
     # Service dependencies (bilateral agreement)
     sonarr:
       type: service
