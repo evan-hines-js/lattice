@@ -5,7 +5,7 @@
 //!
 //! Also provides CiliumNetworkPolicy generation for Lattice components.
 
-use std::process::Command;
+use tokio::process::Command;
 use tracing::info;
 
 use lattice_common::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT};
@@ -14,8 +14,9 @@ use super::{charts_dir, split_yaml_documents};
 
 /// Generate Cilium manifests for a cluster
 ///
-/// Renders via `helm template` on-demand.
-pub fn generate_cilium_manifests() -> Result<Vec<String>, String> {
+/// Renders via `helm template` on-demand. This is an async function to avoid
+/// blocking the tokio runtime during helm execution.
+pub async fn generate_cilium_manifests() -> Result<Vec<String>, String> {
     let charts_dir = charts_dir();
     let version = env!("CILIUM_VERSION");
     let chart_path = format!("{}/cilium-{}.tgz", charts_dir, version);
@@ -76,6 +77,7 @@ pub fn generate_cilium_manifests() -> Result<Vec<String>, String> {
         ])
         .args(&values)
         .output()
+        .await
         .map_err(|e| format!("failed to run helm: {}", e))?;
 
     if !output.status.success() {
@@ -335,10 +337,10 @@ spec:
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_cilium_manifests() {
+    #[tokio::test]
+    async fn test_cilium_manifests() {
         // Only runs if helm is available
-        if let Ok(manifests) = generate_cilium_manifests() {
+        if let Ok(manifests) = generate_cilium_manifests().await {
             assert!(!manifests.is_empty());
             let combined = manifests.join("\n");
             // Check for core Cilium components

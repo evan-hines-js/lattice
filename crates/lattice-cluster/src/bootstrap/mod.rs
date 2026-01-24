@@ -181,6 +181,7 @@ pub struct ClusterRegistration {
 }
 
 /// Bootstrap manifest generator
+#[async_trait::async_trait]
 pub trait ManifestGenerator: Send + Sync {
     /// Generate bootstrap manifests for a cluster
     ///
@@ -189,7 +190,10 @@ pub trait ManifestGenerator: Send + Sync {
     ///
     /// Note: The LatticeCluster instance is added by generate_response(), not here.
     /// This method generates: Cilium, operator deployment, namespace, RBAC, etc.
-    fn generate(
+    ///
+    /// This is an async function to avoid blocking the tokio runtime during
+    /// helm template execution for Cilium manifests.
+    async fn generate(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
@@ -237,16 +241,21 @@ pub struct ManifestConfig<'a> {
 /// - Lattice operator
 /// - LB-IPAM resources (if networking configured)
 /// - Provider-specific addons (AWS CCM/CSI)
-pub fn generate_all_manifests<G: ManifestGenerator>(
+///
+/// This is an async function to avoid blocking the tokio runtime during
+/// helm template execution for Cilium manifests.
+pub async fn generate_all_manifests<G: ManifestGenerator>(
     generator: &G,
     config: &ManifestConfig<'_>,
 ) -> Vec<String> {
-    let mut manifests = generator.generate(
-        config.image,
-        config.registry_credentials,
-        config.cluster_name,
-        config.provider,
-    );
+    let mut manifests = generator
+        .generate(
+            config.image,
+            config.registry_credentials,
+            config.cluster_name,
+            config.provider,
+        )
+        .await;
 
     // Apply FIPS relaxation if needed (for kubeadm-based bootstrap or non-FIPS targets)
     if config.relax_fips {
@@ -658,15 +667,19 @@ enum ManifestError {
     Cilium(String),
 }
 
+#[async_trait::async_trait]
 impl ManifestGenerator for DefaultManifestGenerator {
-    fn generate(
+    async fn generate(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
     ) -> Vec<String> {
-        match self.try_generate(image, registry_credentials, cluster_name, provider) {
+        match self
+            .try_generate(image, registry_credentials, cluster_name, provider)
+            .await
+        {
             Ok(manifests) => manifests,
             Err(e) => {
                 // Log the error but return empty manifests - callers will detect the failure
@@ -680,7 +693,7 @@ impl ManifestGenerator for DefaultManifestGenerator {
 
 impl DefaultManifestGenerator {
     /// Try to generate manifests, returning errors instead of panicking
-    fn try_generate(
+    async fn try_generate(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
@@ -690,7 +703,7 @@ impl DefaultManifestGenerator {
         let mut manifests = Vec::new();
 
         // CNI manifests first (Cilium) - rendered on-demand
-        match lattice_infra::generate_cilium_manifests() {
+        match lattice_infra::generate_cilium_manifests().await {
             Ok(cilium_manifests) => manifests.extend(cilium_manifests),
             Err(e) => {
                 return Err(ManifestError::Cilium(e.to_string()));
@@ -922,7 +935,10 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     ///
     /// Everything installs in parallel with the operator starting up.
     /// Operator will "adopt" pre-installed components (server-side apply is idempotent).
-    pub fn generate_response(
+    ///
+    /// This is an async function to avoid blocking the tokio runtime during
+    /// helm template execution for Cilium and Istio manifests.
+    pub async fn generate_response(
         &self,
         info: &ClusterBootstrapInfo,
     ) -> Result<BootstrapResponse, BootstrapError> {
@@ -942,7 +958,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             parent_grpc_port: grpc_port,
             relax_fips: info.bootstrap.needs_fips_relax(),
         };
-        let mut manifests = generate_all_manifests(&self.manifest_generator, &config);
+        let mut manifests = generate_all_manifests(&self.manifest_generator, &config).await;
 
         // Add ALL infrastructure manifests (cert-manager, CAPI, Istio, Envoy Gateway)
         // These install in parallel with the operator, massively speeding up cluster creation
@@ -951,7 +967,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             bootstrap: info.bootstrap.clone(),
             skip_cilium_policies: false, // Real clusters have Cilium
         };
-        let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config);
+        let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config).await;
         info!(
             count = infra_manifests.len(),
             "adding infrastructure manifests to bootstrap"
@@ -1108,7 +1124,7 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     info!(cluster_id = %cluster_id, "Bootstrap token validated, returning manifests");
 
     // Generate full bootstrap response (includes CNI, operator, LatticeCluster CRD, parent config)
-    let response = state.generate_response(&info)?;
+    let response = state.generate_response(&info).await?;
 
     // Collect all manifests
     let mut all_manifests = response.manifests;
@@ -1188,8 +1204,9 @@ mod tests {
 
     struct TestManifestGenerator;
 
+    #[async_trait::async_trait]
     impl ManifestGenerator for TestManifestGenerator {
-        fn generate(
+        async fn generate(
             &self,
             image: &str,
             _registry_credentials: Option<&str>,
@@ -1373,6 +1390,7 @@ mod tests {
             .expect("token validation should succeed");
         let response = state
             .generate_response(&info)
+            .await
             .expect("generating bootstrap response should succeed");
 
         assert_eq!(response.cluster_id, "test-cluster");
@@ -1485,57 +1503,57 @@ mod tests {
         assert!(cn.contains("cluster-xyz"));
     }
 
-    #[test]
-    fn default_generator_creates_namespace() {
+    #[tokio::test]
+    async fn default_generator_creates_namespace() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Operator manifests are JSON, check for JSON format
         let has_namespace = manifests
             .iter()
-            .any(|m| m.contains("\"kind\":\"Namespace\"") && m.contains("lattice-system"));
+            .any(|m: &String| m.contains("\"kind\":\"Namespace\"") && m.contains("lattice-system"));
         assert!(has_namespace);
     }
 
-    #[test]
-    fn default_generator_creates_operator_deployment() {
+    #[tokio::test]
+    async fn default_generator_creates_operator_deployment() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Operator manifests are JSON, check for JSON format
         let has_deployment = manifests
             .iter()
-            .any(|m| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-operator"));
+            .any(|m: &String| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-operator"));
         assert!(has_deployment);
     }
 
-    #[test]
-    fn default_generator_creates_service_account() {
+    #[tokio::test]
+    async fn default_generator_creates_service_account() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Should have ServiceAccount for operator
         let has_sa = manifests
             .iter()
-            .any(|m| m.contains("\"kind\":\"ServiceAccount\"") && m.contains("lattice-operator"));
+            .any(|m: &String| m.contains("\"kind\":\"ServiceAccount\"") && m.contains("lattice-operator"));
         assert!(has_sa);
     }
 
-    #[test]
-    fn default_generator_creates_cilium_cni() {
+    #[tokio::test]
+    async fn default_generator_creates_cilium_cni() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Should include Cilium DaemonSet (rendered from helm template)
         let has_cilium_daemonset = manifests
             .iter()
-            .any(|m| m.contains("kind: DaemonSet") && m.contains("cilium"));
+            .any(|m: &String| m.contains("kind: DaemonSet") && m.contains("cilium"));
         assert!(has_cilium_daemonset, "Should include Cilium DaemonSet");
 
         // Should include Cilium ConfigMap
         let has_cilium_config = manifests
             .iter()
-            .any(|m| m.contains("kind: ConfigMap") && m.contains("cilium"));
+            .any(|m: &String| m.contains("kind: ConfigMap") && m.contains("cilium"));
         assert!(has_cilium_config, "Should include Cilium ConfigMap");
     }
 
@@ -1622,6 +1640,7 @@ mod tests {
         // ----------------------------------------------------------
         let response = state
             .generate_response(&info)
+            .await
             .expect("bootstrap response generation should succeed");
         assert!(!response.manifests.is_empty());
         assert!(!response.ca_certificate.is_empty());
@@ -1807,13 +1826,13 @@ mod tests {
     /// The bootstrap response includes Kubernetes manifests that set up
     /// the Lattice operator on new clusters. Every cluster runs the same
     /// deployment - the controller reads LatticeCluster CRD to determine behavior.
-    #[test]
-    fn story_manifest_generation() {
+    #[tokio::test]
+    async fn story_manifest_generation() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator.generate("test:latest", None, None, None);
+        let manifests = generator.generate("test:latest", None, None, None).await;
 
         // CRD must be first so it's applied before any CR instances
-        let has_crd = manifests.iter().any(|m| {
+        let has_crd = manifests.iter().any(|m: &String| {
             m.contains("\"kind\":\"CustomResourceDefinition\"")
                 && m.contains("latticeclusters.lattice.dev")
         });
@@ -1822,19 +1841,19 @@ mod tests {
         // Manifests create the lattice-system namespace (JSON format)
         let has_namespace = manifests
             .iter()
-            .any(|m| m.contains("\"kind\":\"Namespace\"") && m.contains("lattice-system"));
+            .any(|m: &String| m.contains("\"kind\":\"Namespace\"") && m.contains("lattice-system"));
         assert!(has_namespace, "Should create lattice-system namespace");
 
         // Manifests deploy the operator (JSON format)
         let has_operator = manifests
             .iter()
-            .any(|m| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-operator"));
+            .any(|m: &String| m.contains("\"kind\":\"Deployment\"") && m.contains("lattice-operator"));
         assert!(has_operator, "Should deploy lattice-operator");
 
         // Should have cluster-admin binding
         let has_rbac = manifests
             .iter()
-            .any(|m| m.contains("\"kind\":\"ClusterRoleBinding\"") && m.contains("cluster-admin"));
+            .any(|m: &String| m.contains("\"kind\":\"ClusterRoleBinding\"") && m.contains("cluster-admin"));
         assert!(has_rbac, "Should have cluster-admin binding");
     }
 
@@ -1976,6 +1995,7 @@ mod tests {
             .expect("validate_and_consume should succeed");
         let response = state
             .generate_response(&info)
+            .await
             .expect("generate_response should succeed");
 
         assert_eq!(response.ca_certificate, ca_cert);
@@ -2312,8 +2332,8 @@ mod tests {
     /// When a cluster uses kubeadm bootstrap, the generated manifests should
     /// include GODEBUG=fips140=on to allow the operator to communicate with
     /// the kubeadm API server which uses non-FIPS cipher suites (like X25519).
-    #[test]
-    fn story_kubeadm_clusters_get_fips_relaxation() {
+    #[tokio::test]
+    async fn story_kubeadm_clusters_get_fips_relaxation() {
         // Use real DefaultManifestGenerator to get actual Deployment
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
@@ -2351,6 +2371,7 @@ mod tests {
             .clone();
         let response = state
             .generate_response(&info)
+            .await
             .expect("generate_response should succeed");
 
         // Should have GODEBUG=fips140=on in the deployment
@@ -2366,8 +2387,8 @@ mod tests {
     /// When a cluster uses RKE2 bootstrap, the generated manifests should NOT
     /// include FIPS relaxation because RKE2 is FIPS-compliant out of the box.
     /// The container default (fips140=only) is appropriate for RKE2 clusters.
-    #[test]
-    fn story_rke2_clusters_no_fips_relaxation() {
+    #[tokio::test]
+    async fn story_rke2_clusters_no_fips_relaxation() {
         // Use real DefaultManifestGenerator to get actual Deployment
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
@@ -2405,6 +2426,7 @@ mod tests {
             .clone();
         let response = state
             .generate_response(&info)
+            .await
             .expect("generate_response should succeed");
 
         // Should NOT have GODEBUG=fips140=on in the deployment
@@ -2433,8 +2455,8 @@ mod tests {
     ///
     /// Both CRS path (CLI) and webhook path use generate_all_manifests(),
     /// which includes AWS addons when provider is "aws".
-    #[test]
-    fn story_aws_clusters_include_ccm_and_csi() {
+    #[tokio::test]
+    async fn story_aws_clusters_include_ccm_and_csi() {
         // Use real DefaultManifestGenerator
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
@@ -2472,6 +2494,7 @@ mod tests {
             .clone();
         let response = state
             .generate_response(&info)
+            .await
             .expect("generate_response should succeed");
 
         let manifests_str = response.manifests.join("\n");
@@ -2494,8 +2517,8 @@ mod tests {
     }
 
     /// Story: Non-AWS clusters don't get AWS addons
-    #[test]
-    fn story_non_aws_clusters_no_ccm() {
+    #[tokio::test]
+    async fn story_non_aws_clusters_no_ccm() {
         // Use real DefaultManifestGenerator
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
@@ -2533,6 +2556,7 @@ mod tests {
             .clone();
         let response = state
             .generate_response(&info)
+            .await
             .expect("generate_response should succeed");
 
         let manifests_str = response.manifests.join("\n");

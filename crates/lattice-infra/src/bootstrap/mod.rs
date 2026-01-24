@@ -9,7 +9,7 @@
 pub mod cilium;
 pub mod istio;
 
-use std::process::Command;
+use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{BootstrapProvider, ProviderType};
@@ -35,11 +35,13 @@ pub struct InfrastructureConfig {
 /// Generate core infrastructure manifests (Istio, Gateway API)
 ///
 /// Used by both operator startup and full cluster bootstrap.
-pub fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
+/// This is an async function to avoid blocking the tokio runtime during
+/// helm template execution.
+pub async fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
     let mut manifests = Vec::new();
 
     // Istio ambient
-    manifests.extend(generate_istio(skip_cilium_policies));
+    manifests.extend(generate_istio(skip_cilium_policies).await);
 
     // Gateway API CRDs (required for Istio Gateway and waypoints)
     if let Ok(gw_api) = generate_gateway_api_crds() {
@@ -55,11 +57,13 @@ pub fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
 /// Generate ALL infrastructure manifests for a self-managing cluster
 ///
 /// Includes: cert-manager, CAPI, plus core infrastructure (Istio, Gateway API)
-pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
+/// This is an async function to avoid blocking the tokio runtime during
+/// helm and clusterctl execution.
+pub async fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     let mut manifests = Vec::new();
 
     // cert-manager (CAPI prerequisite)
-    if let Ok(cm) = generate_certmanager() {
+    if let Ok(cm) = generate_certmanager().await {
         debug!(count = cm.len(), "generated cert-manager manifests");
         manifests.extend(cm);
     } else {
@@ -67,7 +71,7 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     }
 
     // CAPI providers
-    if let Ok(capi) = generate_capi(config.provider) {
+    if let Ok(capi) = generate_capi(config.provider).await {
         debug!(count = capi.len(), "generated CAPI manifests");
         manifests.extend(capi);
     } else {
@@ -75,7 +79,7 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     }
 
     // Core infrastructure (Istio, Gateway API)
-    manifests.extend(generate_core(config.skip_cilium_policies));
+    manifests.extend(generate_core(config.skip_cilium_policies).await);
 
     info!(
         total = manifests.len(),
@@ -85,7 +89,10 @@ pub fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
 }
 
 /// Generate cert-manager manifests
-pub fn generate_certmanager() -> Result<Vec<String>, String> {
+///
+/// This is an async function to avoid blocking the tokio runtime during
+/// helm template execution.
+pub async fn generate_certmanager() -> Result<Vec<String>, String> {
     let charts_dir = charts_dir();
     let chart_path = find_chart(&charts_dir, "cert-manager")?;
 
@@ -100,6 +107,7 @@ pub fn generate_certmanager() -> Result<Vec<String>, String> {
             "crds.enabled=true",
         ])
         .output()
+        .await
         .map_err(|e| format!("helm: {}", e))?;
 
     if !output.status.success() {
@@ -115,7 +123,10 @@ pub fn generate_certmanager() -> Result<Vec<String>, String> {
 }
 
 /// Generate CAPI provider manifests
-pub fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String> {
+///
+/// This is an async function to avoid blocking the tokio runtime during
+/// clusterctl execution.
+pub async fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String> {
     let infra = match provider {
         ProviderType::Docker => "docker",
         ProviderType::Proxmox => "proxmox",
@@ -138,6 +149,7 @@ pub fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String> {
             "kubeadm,rke2",
         ])
         .output()
+        .await
         .map_err(|e| format!("clusterctl: {}", e))?;
 
     if !output.status.success() {
@@ -150,11 +162,14 @@ pub fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String> {
 }
 
 /// Generate Istio manifests
-pub fn generate_istio(skip_cilium_policies: bool) -> Vec<String> {
+///
+/// This is an async function to avoid blocking the tokio runtime during
+/// helm template execution.
+pub async fn generate_istio(skip_cilium_policies: bool) -> Vec<String> {
     let mut manifests = vec![namespace_yaml("istio-system")];
 
     let reconciler = IstioReconciler::new();
-    if let Ok(istio) = reconciler.manifests() {
+    if let Ok(istio) = reconciler.manifests().await {
         manifests.extend(istio.iter().cloned());
     }
 

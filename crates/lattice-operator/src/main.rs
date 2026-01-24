@@ -243,7 +243,7 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
     if is_bootstrap_cluster {
         // Bootstrap cluster (KIND): Use generate_core() + clusterctl init
         // This is a temporary cluster that doesn't need full self-management infra
-        let manifests = bootstrap::generate_core(true);
+        let manifests = bootstrap::generate_core(true).await;
         tracing::info!(count = manifests.len(), "applying core infrastructure");
         apply_manifests(client, &manifests).await?;
 
@@ -275,7 +275,7 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
             skip_cilium_policies: false,
         };
 
-        let manifests = bootstrap::generate_all(&config);
+        let manifests = bootstrap::generate_all(&config).await;
         tracing::info!(
             count = manifests.len(),
             "applying all infrastructure (same as bootstrap webhook)"
