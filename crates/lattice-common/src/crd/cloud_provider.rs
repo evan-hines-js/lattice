@@ -72,7 +72,7 @@ pub struct CloudProviderSpec {
 
 /// Supported cloud provider types
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "lowercase")]
 pub enum CloudProviderType {
     /// Amazon Web Services
     AWS,
@@ -199,7 +199,7 @@ kind: CloudProvider
 metadata:
   name: aws-prod
 spec:
-  type: AWS
+  type: aws
   region: us-east-1
   credentialsSecretRef:
     name: aws-prod-creds
@@ -222,7 +222,7 @@ kind: CloudProvider
 metadata:
   name: proxmox-lab
 spec:
-  type: Proxmox
+  type: proxmox
   credentialsSecretRef:
     name: proxmox-creds
   proxmox:
@@ -234,3 +234,4 @@ spec:
         assert_eq!(provider.spec.provider_type, CloudProviderType::Proxmox);
     }
 }
+
