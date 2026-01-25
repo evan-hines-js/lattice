@@ -2,7 +2,7 @@
 
 ## Overview
 
-Platform engineers define **capacity pools** and **placement policies**. Services declare **requirements**. Lattice automatically provisions clusters and places workloads. Clusters are an implementation detail - users never create them directly.
+Platform engineers define **capacity pools** (regions with budgets) and **placement policies**. Services declare **requirements** including node selectors and tolerations. Lattice automatically provisions clusters with appropriate **worker pools** and places workloads on the right nodes. Clusters are an implementation detail - users never create them directly.
 
 ## Design Principles
 
@@ -10,19 +10,20 @@ Platform engineers define **capacity pools** and **placement policies**. Service
 2. **Declarative constraints** - Define what you need, not where to put it
 3. **Hierarchical knowledge** - Parents see children, placement quality improves with scope
 4. **Same binary everywhere** - Scheduler is integrated into the operator, not separate
+5. **Worker pools for heterogeneity** - Different node types within a cluster via worker pools
 
 ## CRD Hierarchy
 
 ```
 LatticePool (capacity + budget per region)
     │
-    ├── LatticeNodeClass (machine templates)
-    │
     └── LatticePlacementPolicy (global rules)
             │
             └── LatticeService (workload + requirements)
                     │
                     └── [Auto-created: LatticeCluster]
+                            │
+                            └── Worker Pools (general, gpu, highmem, etc.)
 ```
 
 ---
@@ -58,55 +59,34 @@ spec:
     currency: USD
     alertThreshold: 0.8  # Alert at 80%
 
-  # Node classes available in this pool
-  nodeClasses:
-    - small
-    - medium
-    - large
-    - gpu
+  # Default worker pool templates for auto-created clusters
+  # These define what worker pools are available in this region
+  workerPoolTemplates:
+    general:
+      nodeClass: t3.large      # Provider-specific instance type
+      maxNodes: 50
+      labels:
+        workload-type: general
+    compute:
+      nodeClass: c5.2xlarge
+      maxNodes: 30
+      labels:
+        workload-type: compute
+    gpu:
+      nodeClass: p3.2xlarge
+      maxNodes: 10
+      labels:
+        workload-type: gpu
+        nvidia.com/gpu: "true"
+      taints:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
 
   # Labels for placement matching
   labels:
     compliance: [soc2, hipaa]
     tier: production
     network: low-latency
-```
-
-### LatticeNodeClass
-
-Defines machine templates. Referenced by pools.
-
-```yaml
-apiVersion: lattice.dev/v1alpha1
-kind: LatticeNodeClass
-metadata:
-  name: medium
-spec:
-  # Provider-specific mappings
-  providers:
-    aws:
-      instanceType: m5.xlarge
-      ami: ami-12345678
-    proxmox:
-      cores: 4
-      memory: 16384
-      template: ubuntu-22.04
-    docker:
-      # For local dev
-      memory: 4g
-      cpus: 4
-
-  # Abstract resources (used for scheduling)
-  resources:
-    cores: 4
-    memoryGi: 16
-    storageGi: 100
-
-  # Cost estimate per hour (for budget calculations)
-  costPerHour:
-    aws: 0.192
-    proxmox: 0.05  # Internal chargeback rate
-    docker: 0
 ```
 
 ### LatticePlacementPolicy
@@ -154,9 +134,9 @@ spec:
 
   # Cluster sizing rules
   clusterPolicy:
-    # Min/max nodes per auto-created cluster
+    # Min/max nodes per auto-created cluster (total across all pools)
     minNodes: 3
-    maxNodes: 20
+    maxNodes: 50
 
     # When to create new cluster vs expand existing
     binPackingThreshold: 0.8  # Create new at 80% full
@@ -169,21 +149,24 @@ spec:
 
 ### LatticeService (updated)
 
-Services declare requirements, not locations.
+Services declare requirements including node placement preferences.
 
 ```yaml
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
 metadata:
-  name: api-gateway
+  name: ml-inference
   labels:
     env: production
 spec:
   containers:
     main:
-      image: api-gateway:v1.2.3
+      image: ml-inference:v1.2.3
+      resources:
+        requests:
+          nvidia.com/gpu: 1
 
-  # Placement requirements (replaces explicit cluster targeting)
+  # Placement requirements
   placement:
     # Where it CAN run (pool selector)
     pools:
@@ -195,71 +178,60 @@ spec:
       - us-east
       - eu-west
 
+    # Node selection within cluster (maps to worker pool selection)
+    nodeSelector:
+      workload-type: gpu
+
+    # Tolerations for tainted nodes
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+
     # Resource requirements (for bin packing)
     resources:
-      cores: 2
-      memoryGi: 4
+      cores: 4
+      memoryGi: 16
+      gpu: 1
 
     # Latency requirements to dependencies
     latency:
-      database:
-        maxMs: 10
-        # Implies: place in same cluster/zone as database
+      model-store:
+        maxMs: 5
+        # Implies: place in same cluster as model-store
 
-    # Compliance requirements
-    compliance:
-      - gdpr  # Only eu-west pool has this
-
-  # Service dependencies (unchanged)
+  # Service dependencies
   resources:
-    database:
-      type: Service
-      direction: outbound
-    cache:
+    model-store:
       type: Service
       direction: outbound
 
   replicas:
-    min: 3
-    max: 10
+    min: 2
+    max: 8
 ```
 
 ---
 
 ## Scheduling Algorithm
 
-### Phase 1: Constraint Resolution
+### Phase 1: Pool Selection
 
 ```
 Input: LatticeService with placement requirements
-Output: Set of eligible pools
+Output: Set of eligible LatticePool resources
 
 1. Filter pools by label selector (pools.matchLabels)
 2. Filter by compliance requirements
-3. Filter by capacity (can fit resources)
-4. Filter by budget (won't exceed)
-5. Result: Candidate pools
+3. Filter by worker pool availability:
+   - Service requires nodeSelector: workload-type=gpu
+   - Pool must have workerPoolTemplate with matching labels
+4. Filter by capacity (can fit resources)
+5. Filter by budget (won't exceed)
+6. Result: Candidate pools
 ```
 
-### Phase 2: Dependency-Aware Placement
-
-```
-Input: Candidate pools, service dependencies
-Output: Ranked placements
-
-1. For each dependency with latency constraint:
-   - Find where dependency is currently placed
-   - Score pools by proximity (same cluster > same zone > same region)
-
-2. For dependencies without latency constraints:
-   - Any pool is fine, prefer co-location for cost
-
-3. Apply placement policy preferences (cost, capacity)
-
-4. Result: Ranked list of (pool, score) pairs
-```
-
-### Phase 3: Cluster Selection/Creation
+### Phase 2: Cluster Selection/Creation
 
 ```
 Input: Target pool, service requirements
@@ -267,98 +239,125 @@ Output: Cluster to deploy to
 
 1. List existing clusters in pool
 2. For each cluster:
-   - Check available capacity
-   - Check node class availability
-   - Score by utilization (prefer bin packing)
+   a. Check if required worker pool exists
+   b. Check available capacity in that pool
+   c. Score by utilization (prefer bin packing)
 
 3. If suitable cluster exists:
-   - Return cluster, possibly scale up nodes
+   - Return cluster
+   - Scale up worker pool if needed
 
 4. If no suitable cluster:
-   - Create new LatticeCluster in pool
-   - Cluster auto-pivots and self-manages
-   - Return new cluster
+   a. Create new LatticeCluster with required worker pools
+   b. Worker pools derived from:
+      - Service nodeSelector -> matching pool template
+      - Dependencies in same cluster -> their pool requirements
+   c. Cluster auto-pivots and self-manages
 
-5. Result: Target cluster for deployment
+5. Result: Target cluster with appropriate worker pools
+```
+
+### Phase 3: Worker Pool Matching
+
+```
+Input: Cluster, service nodeSelector/tolerations
+Output: Target worker pool within cluster
+
+1. For each worker pool in cluster:
+   a. Check labels match nodeSelector
+   b. Check tolerations satisfy taints
+
+2. If matching pool exists:
+   - Return pool name
+
+3. If no matching pool:
+   a. Check if pool template exists in LatticePool
+   b. Add new worker pool to cluster spec
+   c. Wait for nodes to be ready
+   d. Return new pool name
+
+4. Result: Worker pool for pod scheduling
 ```
 
 ### Phase 4: Deployment
 
 ```
-Input: Target cluster, LatticeService
+Input: Target cluster, worker pool, LatticeService
 Output: Running workload
 
-1. Deploy service to cluster
-2. Update service status with placement info
-3. Create/update bilateral agreements for cross-cluster deps
-4. Done
+1. Generate Deployment with:
+   - nodeSelector from worker pool labels
+   - tolerations from worker pool taints
+2. Deploy to cluster
+3. Update service status with placement info
+4. Create/update bilateral agreements for cross-cluster deps
+5. Done
 ```
 
 ---
 
-## Hierarchical Scheduling
+## Cluster Auto-Configuration
 
-Each operator has a scheduler. Knowledge scope determines placement quality.
+When the scheduler creates a cluster, it configures worker pools based on service requirements:
 
+```yaml
+# Scheduler creates this LatticeCluster automatically
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: us-east-prod-7a3b
+spec:
+  provider:
+    kubernetes:
+      version: "1.32.0"
+    config:
+      aws:
+        region: us-east-1
+  nodes:
+    controlPlane: 3
+    workerPools:
+      # Created because ml-inference service needs GPU nodes
+      gpu:
+        replicas: 2
+        nodeClass: p3.2xlarge
+        labels:
+          workload-type: gpu
+          nvidia.com/gpu: "true"
+        taints:
+          - key: nvidia.com/gpu
+            effect: NoSchedule
+
+      # Created for api-gateway service (no special requirements)
+      general:
+        replicas: 5
+        nodeClass: t3.large
+        labels:
+          workload-type: general
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Global Root                                                 │
-│ Knows: All pools, all services, all clusters                │
-│ Can: Optimal global placement, cross-region migration       │
-├─────────────────────────────────────────────────────────────┤
-│ Scheduler logic:                                            │
-│   1. Receive placement request                              │
-│   2. Evaluate all known pools                               │
-│   3. Select optimal placement                               │
-│   4. Delegate to child (region operator)                    │
-└─────────────────────────────────────────────────────────────┘
-                            │
-          ┌─────────────────┼─────────────────┐
-          ▼                 ▼                 ▼
-┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│ US Region       │ │ EU Region       │ │ APAC Region     │
-│ Knows: US pools │ │ Knows: EU pools │ │ Knows: APAC     │
-│ Can: US-only    │ │ Can: EU-only    │ │ Can: APAC-only  │
-│ placement       │ │ placement       │ │ placement       │
-└─────────────────┘ └─────────────────┘ └─────────────────┘
-```
 
-### Escalation Flow
+### Worker Pool Scaling
+
+The scheduler adjusts worker pool replicas based on demand:
 
 ```rust
-async fn schedule(&self, svc: &LatticeService) -> Result<Placement> {
-    // Try local placement with my knowledge
-    let candidates = self.find_candidates(svc);
+fn calculate_pool_size(pool: &str, services: &[Service]) -> u32 {
+    let pool_services: Vec<_> = services
+        .iter()
+        .filter(|s| s.targets_pool(pool))
+        .collect();
 
-    if candidates.is_empty() {
-        // Escalate to parent for broader view
-        if let Some(parent) = &self.parent {
-            return parent.schedule(svc).await;
-        }
-        return Err(NoPlacement);
-    }
+    let total_cores: u32 = pool_services.iter().map(|s| s.cores()).sum();
+    let total_memory: u32 = pool_services.iter().map(|s| s.memory()).sum();
 
-    // I have candidates, pick best
-    let best = self.rank_candidates(candidates, svc);
+    let node_class = get_node_class(pool);
+    let nodes_for_cores = (total_cores + node_class.cores - 1) / node_class.cores;
+    let nodes_for_memory = (total_memory + node_class.memory - 1) / node_class.memory;
 
-    // If best candidate is my child, delegate
-    if let Some(child) = self.children.get(&best.region) {
-        return child.place(svc, &best).await;
-    }
-
-    // I own this pool directly, place here
-    self.place_local(svc, &best).await
+    // Add headroom for scheduling flexibility
+    let base_nodes = nodes_for_cores.max(nodes_for_memory);
+    (base_nodes as f32 * 1.2).ceil() as u32
 }
 ```
-
-### Disconnected Operation
-
-When disconnected from parent:
-
-1. Scheduler still works with local knowledge
-2. Placement limited to known pools
-3. Services requiring unknown regions fail with clear error
-4. Reconnection triggers re-evaluation of pending placements
 
 ---
 
@@ -372,21 +371,23 @@ status:
   placements:
     - pool: us-east
       cluster: us-east-prod-7a3b
+      workerPool: gpu
       replicas: 2
-      node: medium
+      nodeClass: p3.2xlarge
       cost:
-        hourly: 0.384
+        hourly: 6.12
 
     - pool: eu-west
       cluster: eu-west-prod-2c1d
+      workerPool: gpu
       replicas: 1
-      node: medium
+      nodeClass: p3.2xlarge
       cost:
-        hourly: 0.192
+        hourly: 3.06
 
   totalCost:
-    hourly: 0.576
-    projected30Day: 414.72
+    hourly: 9.18
+    projected30Day: 6609.60
 
   health:
     available: 3
@@ -394,10 +395,28 @@ status:
 
   lastScheduled: "2024-01-15T10:30:00Z"
   schedulerDecision:
-    reason: "Placed in us-east and eu-west per requiredRegions constraint"
-    alternatives:
-      - pool: ap-south
-        rejected: "No GDPR compliance label"
+    reason: "Placed on gpu worker pools per nodeSelector requirement"
+    workerPoolSelection:
+      required: "workload-type=gpu"
+      matched: ["us-east-prod-7a3b/gpu", "eu-west-prod-2c1d/gpu"]
+```
+
+### LatticeCluster Status (with Worker Pools)
+
+```yaml
+status:
+  phase: Ready
+  readyWorkers: 7
+  workerPools:
+    general:
+      desiredReplicas: 5
+      currentReplicas: 5
+      readyReplicas: 5
+    gpu:
+      desiredReplicas: 2
+      currentReplicas: 2
+      readyReplicas: 2
+  endpoint: "https://k8s-api.us-east.example.com:6443"
 ```
 
 ### LatticePool Status
@@ -420,16 +439,27 @@ status:
     projectedMonthCost: 8200.00
     utilizationPercent: 0.82
 
+  workerPoolUsage:
+    general:
+      totalNodes: 30
+      totalCores: 120
+    compute:
+      totalNodes: 10
+      totalCores: 80
+    gpu:
+      totalNodes: 5
+      totalCores: 40
+      totalGpus: 5
+
   clusters:
     - name: us-east-prod-7a3b
+      workerPools: [general, gpu]
       nodes: 15
       services: 23
     - name: us-east-prod-9x2y
+      workerPools: [general, compute]
       nodes: 12
       services: 18
-    - name: us-east-staging-1a2b
-      nodes: 8
-      services: 12
 ```
 
 ---
@@ -440,9 +470,10 @@ status:
 
 1. **Budget exceeded** - Migrate to cheaper pool
 2. **Capacity exhausted** - Migrate to pool with room
-3. **Consolidation** - Merge underutilized clusters
-4. **Compliance change** - Pool loses compliance label
-5. **Manual** - Platform engineer requests rebalance
+3. **Worker pool exhausted** - Scale pool or create new cluster
+4. **Consolidation** - Merge underutilized clusters
+5. **Compliance change** - Pool loses compliance label
+6. **Manual** - Platform engineer requests rebalance
 
 ### Migration Flow
 
@@ -450,12 +481,96 @@ status:
 1. Scheduler detects trigger
 2. Find new placement for affected services
 3. For each service:
-   a. Scale up in new location
-   b. Wait for healthy
-   c. Update bilateral agreements
-   d. Drain from old location
-4. If source cluster empty, delete it
+   a. Ensure target cluster has required worker pool
+   b. Scale up worker pool if needed
+   c. Scale up service in new location
+   d. Wait for healthy
+   e. Update bilateral agreements
+   f. Drain from old location
+4. If source worker pool empty, scale to 0
+5. If source cluster empty, delete it
 ```
+
+### Worker Pool Consolidation
+
+```
+When pool utilization < 30% for extended period:
+1. Identify services on underutilized pool
+2. Check if another pool in same cluster can absorb
+3. If same-cluster migration possible:
+   a. Reschedule pods to other pool
+   b. Scale down underutilized pool
+4. If cross-cluster migration needed:
+   a. Follow standard migration flow
+   b. Scale down/delete pool after drain
+```
+
+---
+
+## Examples
+
+### GPU Workload Placement
+
+```yaml
+# Service requiring GPU
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: image-classifier
+spec:
+  containers:
+    main:
+      image: classifier:v2
+      resources:
+        requests:
+          nvidia.com/gpu: 1
+  placement:
+    nodeSelector:
+      workload-type: gpu
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+```
+
+Scheduler flow:
+1. Find pools with `gpu` worker pool template
+2. Select pool with capacity and budget
+3. Find/create cluster with `gpu` worker pool
+4. Deploy with `nodeSelector: workload-type=gpu`
+5. Kubernetes schedules to GPU nodes
+
+### Mixed Workload Cluster
+
+```yaml
+# Cluster auto-created with multiple pools
+nodes:
+  controlPlane: 3
+  workerPools:
+    general:
+      replicas: 10
+      nodeClass: t3.large
+      labels:
+        workload-type: general
+    compute:
+      replicas: 5
+      nodeClass: c5.2xlarge
+      labels:
+        workload-type: compute
+    gpu:
+      replicas: 2
+      nodeClass: p3.2xlarge
+      labels:
+        workload-type: gpu
+        nvidia.com/gpu: "true"
+      taints:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+```
+
+Services scheduled to appropriate pools:
+- `api-gateway` -> general pool (no nodeSelector)
+- `data-processor` -> compute pool (nodeSelector: workload-type=compute)
+- `ml-inference` -> gpu pool (nodeSelector + toleration)
 
 ---
 
@@ -463,26 +578,17 @@ status:
 
 ### Not in v0
 
-- Spot/preemptible instance support
-- GPU scheduling
-- Network topology awareness (zone-level latency)
+- Spot/preemptible instance support in worker pools
+- Per-pool autoscaling (min/max in schema, not implemented)
+- Network topology awareness (zone-level pool placement)
 - Cost prediction ML
-- Autoscaling based on metrics (just min/max for now)
+- Pod-level GPU sharing
 
 ### v0 Scope
 
-- Pool and NodeClass CRDs
-- Basic placement policy
-- Constraint-based pool selection
-- Automatic cluster creation
-- Simple bin packing (first fit)
-- Service status with placement info
-
----
-
-## Open Questions
-
-1. **Cluster naming** - Auto-generated vs user-provided prefix?
-2. **Cluster sharing** - One service per cluster or bin pack multiple?
-3. **Upgrade coordination** - How to upgrade clusters without service disruption?
-4. **Cross-region dependencies** - How to handle services that need low latency across regions?
+- LatticePool CRD with worker pool templates
+- LatticePlacementPolicy with nodeSelector support
+- Automatic cluster creation with required worker pools
+- Worker pool scaling based on service demand
+- Service status with worker pool placement info
+- Basic bin packing (first fit by pool)

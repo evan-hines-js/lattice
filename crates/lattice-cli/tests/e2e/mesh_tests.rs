@@ -897,8 +897,8 @@ struct RandomMeshConfig {
 impl Default for RandomMeshConfig {
     fn default() -> Self {
         Self {
-            min_services: 25,
-            max_services: 50,
+            min_services: 10,
+            max_services: 30,
             num_layers: 5,
             outbound_probability: 0.3,
             bilateral_probability: 0.6,

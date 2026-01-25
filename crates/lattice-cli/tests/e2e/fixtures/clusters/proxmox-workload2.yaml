@@ -1,5 +1,5 @@
-# Proxmox workload2 cluster for E2E hierarchy testing
-# Provisioned from workload1 to test deep cluster hierarchy
+# Proxmox workload2 cluster for E2E hierarchy and multi-pool testing
+# Provisioned from workload1 to test deep cluster hierarchy and multiple worker pools
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeCluster
 metadata:
@@ -38,7 +38,13 @@ spec:
   nodes:
     controlPlane: 1
     workerPools:
-      default:
+      general:
         replicas: 1
+        labels:
+          workload-type: general
+      compute:
+        replicas: 1
+        labels:
+          workload-type: compute
   environment: e2e-test
   region: proxmox
