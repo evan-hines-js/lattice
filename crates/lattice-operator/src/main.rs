@@ -825,6 +825,29 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 
     tracing::info!("Cell servers started");
 
+    // Start background CA rotation task (checks daily)
+    {
+        let parent_servers = parent_servers.clone();
+        tokio::spawn(async move {
+            // Check immediately on startup
+            if let Err(e) = parent_servers.rotate_ca_if_needed().await {
+                tracing::error!(error = %e, "CA rotation check failed on startup");
+            }
+
+            // Then check once per day
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
+            interval.tick().await; // Skip first tick (we just checked)
+            loop {
+                interval.tick().await;
+                match parent_servers.rotate_ca_if_needed().await {
+                    Ok(true) => tracing::info!("CA rotated successfully"),
+                    Ok(false) => tracing::debug!("CA rotation not needed"),
+                    Err(e) => tracing::error!(error = %e, "CA rotation check failed"),
+                }
+            }
+        });
+    }
+
     // Re-register any clusters that are past Pending phase (handles operator restarts)
     if let Some(bootstrap_state) = parent_servers.bootstrap_state().await {
         re_register_existing_clusters(
