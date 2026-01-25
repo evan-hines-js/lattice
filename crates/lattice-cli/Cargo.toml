@@ -43,7 +43,9 @@ rustls.workspace = true
 aws-lc-rs.workspace = true
 
 [dev-dependencies]
+parking_lot.workspace = true
 rand.workspace = true
+tokio-util.workspace = true
 
 [[bin]]
 name = "lattice"

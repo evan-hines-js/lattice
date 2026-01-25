@@ -1,5 +1,6 @@
 //! End-to-end tests for Lattice CLI installation
 
+mod chaos;
 mod helpers;
 mod media_server_e2e;
 mod mesh_tests;
