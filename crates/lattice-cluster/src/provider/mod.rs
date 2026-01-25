@@ -338,18 +338,35 @@ fn generate_kube_vip_manifest(
     serde_yaml::to_string(&pod).expect("kube-vip pod serialization")
 }
 
-/// Generate a MachineDeployment manifest
+/// Configuration for a worker pool
+#[derive(Clone, Debug)]
+pub struct WorkerPoolConfig<'a> {
+    /// Pool identifier (e.g., "general", "gpu")
+    pub pool_id: &'a str,
+    /// Worker pool specification
+    pub spec: &'a lattice_common::crd::WorkerPoolSpec,
+}
+
+/// Get the resource suffix for a pool
 ///
-/// This is shared across ALL providers. MachineDeployment is always created with
-/// replicas=0 during initial provisioning. After pivot, the cluster's local
-/// controller scales up to match spec.nodes.workers.
-pub fn generate_machine_deployment(
+/// This generates the suffix used for MachineDeployment, ConfigTemplate, and MachineTemplate names.
+pub fn pool_resource_suffix(pool_id: &str) -> String {
+    format!("pool-{}", pool_id)
+}
+
+/// Generate a MachineDeployment manifest for a worker pool
+///
+/// MachineDeployment is always created with replicas=0 during initial provisioning.
+/// After pivot, the cluster's local controller scales up to match spec.
+pub fn generate_machine_deployment_for_pool(
     config: &ClusterConfig,
     infra: &InfrastructureRef,
+    pool: &WorkerPoolConfig,
 ) -> CAPIManifest {
     use lattice_common::crd::BootstrapProvider;
 
-    let deployment_name = format!("{}-md-0", config.name);
+    let suffix = pool_resource_suffix(pool.pool_id);
+    let deployment_name = format!("{}-{}", config.name, suffix);
 
     // Bootstrap config template kind and version suffix depend on bootstrap provider
     let (bootstrap_config_kind, version) = match config.bootstrap {
@@ -377,13 +394,13 @@ pub fn generate_machine_deployment(
                     "configRef": {
                         "apiGroup": "bootstrap.cluster.x-k8s.io",
                         "kind": bootstrap_config_kind,
-                        "name": format!("{}-md-0", config.name)
+                        "name": format!("{}-{}", config.name, suffix)
                     }
                 },
                 "infrastructureRef": {
                     "apiGroup": infra.api_group,
                     "kind": infra.machine_template_kind,
-                    "name": format!("{}-md-0", config.name)
+                    "name": format!("{}-{}", config.name, suffix)
                 }
             }
         }
@@ -399,16 +416,19 @@ pub fn generate_machine_deployment(
     .with_spec(spec)
 }
 
-/// Generate bootstrap config template for workers (KubeadmConfigTemplate or RKE2ConfigTemplate)
+/// Generate bootstrap config template for a worker pool
 ///
 /// This dispatches to the appropriate config template generator based on the
 /// bootstrap provider configured in the ClusterConfig.
-pub fn generate_bootstrap_config_template(config: &ClusterConfig) -> CAPIManifest {
+pub fn generate_bootstrap_config_template_for_pool(
+    config: &ClusterConfig,
+    pool: &WorkerPoolConfig,
+) -> CAPIManifest {
     use lattice_common::crd::BootstrapProvider;
 
     match config.bootstrap {
-        BootstrapProvider::Kubeadm => generate_kubeadm_config_template(config),
-        BootstrapProvider::Rke2 => generate_rke2_config_template(config),
+        BootstrapProvider::Kubeadm => generate_kubeadm_config_template_for_pool(config, pool),
+        BootstrapProvider::Rke2 => generate_rke2_config_template_for_pool(config, pool),
     }
 }
 
@@ -518,9 +538,13 @@ fn get_node_name_template(provider_type: ProviderType) -> Option<&'static str> {
     }
 }
 
-/// Generate KubeadmConfigTemplate manifest for workers
-fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest {
-    let template_name = format!("{}-md-0", config.name);
+/// Generate KubeadmConfigTemplate manifest for a worker pool
+fn generate_kubeadm_config_template_for_pool(
+    config: &ClusterConfig,
+    pool: &WorkerPoolConfig,
+) -> CAPIManifest {
+    let suffix = pool_resource_suffix(pool.pool_id);
+    let template_name = format!("{}-{}", config.name, suffix);
 
     // Build kubelet extra args using the shared function
     let kubelet_extra_args = build_kubelet_extra_args(config.provider_type);
@@ -534,7 +558,42 @@ fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest {
         node_registration["name"] = serde_json::json!(name_template);
     }
 
-    // In CAPI v1beta2, kubeletExtraArgs is a list of {name, value} objects
+    // Add pool labels to node registration
+    let mut node_labels = pool.spec.labels.clone();
+    node_labels.insert("lattice.dev/pool".to_string(), pool.pool_id.to_string());
+    if !node_labels.is_empty() {
+        let labels_str: Vec<String> = node_labels
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        node_registration["kubeletExtraArgs"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"name": "node-labels", "value": labels_str.join(",")}));
+    }
+
+    // Add pool taints to node registration
+    if !pool.spec.taints.is_empty() {
+        let taints_str: Vec<String> = pool
+            .spec
+            .taints
+            .iter()
+            .map(|t| {
+                if let Some(ref v) = t.value {
+                    format!("{}={}:{}", t.key, v, t.effect)
+                } else {
+                    format!("{}:{}", t.key, t.effect)
+                }
+            })
+            .collect();
+        node_registration["kubeletExtraArgs"]
+            .as_array_mut()
+            .unwrap()
+            .push(
+                serde_json::json!({"name": "register-with-taints", "value": taints_str.join(",")}),
+            );
+    }
+
     let spec = serde_json::json!({
         "template": {
             "spec": {
@@ -555,12 +614,44 @@ fn generate_kubeadm_config_template(config: &ClusterConfig) -> CAPIManifest {
     .with_spec(spec)
 }
 
-/// Generate RKE2ConfigTemplate manifest for workers
-fn generate_rke2_config_template(config: &ClusterConfig) -> CAPIManifest {
-    let template_name = format!("{}-md-0", config.name);
+/// Generate RKE2ConfigTemplate manifest for a worker pool
+fn generate_rke2_config_template_for_pool(
+    config: &ClusterConfig,
+    pool: &WorkerPoolConfig,
+) -> CAPIManifest {
+    let suffix = pool_resource_suffix(pool.pool_id);
+    let template_name = format!("{}-{}", config.name, suffix);
 
     // Build kubelet extra args using the shared function
-    let kubelet_extra_args = build_rke2_kubelet_extra_args(config.provider_type);
+    let mut kubelet_extra_args = build_rke2_kubelet_extra_args(config.provider_type);
+
+    // Add pool labels
+    let mut node_labels = pool.spec.labels.clone();
+    node_labels.insert("lattice.dev/pool".to_string(), pool.pool_id.to_string());
+    if !node_labels.is_empty() {
+        let labels_str: Vec<String> = node_labels
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        kubelet_extra_args.push(format!("node-labels={}", labels_str.join(",")));
+    }
+
+    // Add pool taints
+    if !pool.spec.taints.is_empty() {
+        let taints_str: Vec<String> = pool
+            .spec
+            .taints
+            .iter()
+            .map(|t| {
+                if let Some(ref v) = t.value {
+                    format!("{}={}:{}", t.key, v, t.effect)
+                } else {
+                    format!("{}:{}", t.key, t.effect)
+                }
+            })
+            .collect();
+        kubelet_extra_args.push(format!("register-with-taints={}", taints_str.join(",")));
+    }
 
     let spec = serde_json::json!({
         "template": {
@@ -1240,24 +1331,41 @@ mod tests {
             assert_eq!(manifest.api_version, RKE2_CONTROLPLANE_API_VERSION);
         }
 
+        fn test_pool() -> WorkerPoolConfig<'static> {
+            use lattice_common::crd::WorkerPoolSpec;
+            // Leak a Box to get a 'static reference for test purposes
+            let spec = Box::leak(Box::new(WorkerPoolSpec {
+                replicas: 2,
+                ..Default::default()
+            }));
+            WorkerPoolConfig {
+                pool_id: "default",
+                spec,
+            }
+        }
+
         #[test]
         fn kubeadm_generates_kubeadm_config_template() {
             let config = test_config(BootstrapProvider::Kubeadm);
+            let pool = test_pool();
 
-            let manifest = generate_bootstrap_config_template(&config);
+            let manifest = generate_bootstrap_config_template_for_pool(&config, &pool);
 
             assert_eq!(manifest.kind, "KubeadmConfigTemplate");
             assert_eq!(manifest.api_version, CAPI_BOOTSTRAP_API_VERSION);
+            assert_eq!(manifest.metadata.name, "test-cluster-pool-default");
         }
 
         #[test]
         fn rke2_generates_rke2_config_template() {
             let config = test_config(BootstrapProvider::Rke2);
+            let pool = test_pool();
 
-            let manifest = generate_bootstrap_config_template(&config);
+            let manifest = generate_bootstrap_config_template_for_pool(&config, &pool);
 
             assert_eq!(manifest.kind, "RKE2ConfigTemplate");
             assert_eq!(manifest.api_version, RKE2_BOOTSTRAP_API_VERSION);
+            assert_eq!(manifest.metadata.name, "test-cluster-pool-default");
         }
 
         #[test]
@@ -1296,8 +1404,9 @@ mod tests {
         fn kubeadm_machine_deployment_references_kubeadm_config() {
             let config = test_config(BootstrapProvider::Kubeadm);
             let infra = test_infra();
+            let pool = test_pool();
 
-            let manifest = generate_machine_deployment(&config, &infra);
+            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool);
             let spec = manifest.spec.expect("should have spec");
 
             let bootstrap_kind = spec
@@ -1306,14 +1415,16 @@ mod tests {
                 .expect("should have bootstrap.configRef.kind");
 
             assert_eq!(bootstrap_kind, "KubeadmConfigTemplate");
+            assert_eq!(manifest.metadata.name, "test-cluster-pool-default");
         }
 
         #[test]
         fn rke2_machine_deployment_references_rke2_config() {
             let config = test_config(BootstrapProvider::Rke2);
             let infra = test_infra();
+            let pool = test_pool();
 
-            let manifest = generate_machine_deployment(&config, &infra);
+            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool);
             let spec = manifest.spec.expect("should have spec");
 
             let bootstrap_kind = spec
@@ -1322,6 +1433,7 @@ mod tests {
                 .expect("should have bootstrap.configRef.kind");
 
             assert_eq!(bootstrap_kind, "RKE2ConfigTemplate");
+            assert_eq!(manifest.metadata.name, "test-cluster-pool-default");
         }
 
         #[test]

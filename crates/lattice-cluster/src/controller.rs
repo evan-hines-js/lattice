@@ -34,7 +34,9 @@ use crate::capi::{
     ensure_capi_installed, ensure_provider_credentials, CapiInstaller, CapiProviderConfig,
 };
 use crate::parent::ParentServers;
-use crate::provider::{create_provider, CAPIManifest, CAPI_CLUSTER_API_VERSION};
+use crate::provider::{
+    create_provider, pool_resource_suffix, CAPIManifest, CAPI_CLUSTER_API_VERSION,
+};
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
 ///
@@ -165,21 +167,23 @@ pub trait CAPIClient: Send + Sync {
         bootstrap: BootstrapProvider,
     ) -> Result<bool, Error>;
 
-    /// Get the current replica count of a cluster's MachineDeployment
+    /// Get the current replica count of a pool's MachineDeployment
     ///
-    /// Returns None if no MachineDeployment exists for the cluster.
-    async fn get_machine_deployment_replicas(
+    /// Returns None if no MachineDeployment exists for the pool.
+    async fn get_pool_replicas(
         &self,
         cluster_name: &str,
+        pool_id: &str,
         namespace: &str,
     ) -> Result<Option<u32>, Error>;
 
-    /// Scale a cluster's MachineDeployment to the desired replica count
+    /// Scale a pool's MachineDeployment to the desired replica count
     ///
     /// Creates the MachineDeployment if it doesn't exist.
-    async fn scale_machine_deployment(
+    async fn scale_pool(
         &self,
         cluster_name: &str,
+        pool_id: &str,
         namespace: &str,
         replicas: u32,
     ) -> Result<(), Error>;
@@ -938,9 +942,10 @@ impl CAPIClient for CAPIClientImpl {
         Ok(true)
     }
 
-    async fn get_machine_deployment_replicas(
+    async fn get_pool_replicas(
         &self,
         cluster_name: &str,
+        pool_id: &str,
         namespace: &str,
     ) -> Result<Option<u32>, Error> {
         let api: Api<DynamicObject> = Api::namespaced_with(
@@ -953,8 +958,7 @@ impl CAPIClient for CAPIClientImpl {
             }),
         );
 
-        // MachineDeployment name follows pattern: {cluster_name}-md-0
-        let md_name = format!("{}-md-0", cluster_name);
+        let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
 
         match api.get(&md_name).await {
             Ok(md) => {
@@ -966,22 +970,24 @@ impl CAPIClient for CAPIClientImpl {
                     .map(|r| r as u32);
                 debug!(
                     cluster = %cluster_name,
+                    pool = %pool_id,
                     replicas = ?replicas,
-                    "Got MachineDeployment replicas"
+                    "Got MachineDeployment replicas for pool"
                 );
                 Ok(replicas)
             }
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                debug!(cluster = %cluster_name, "MachineDeployment not found");
+                debug!(cluster = %cluster_name, pool = %pool_id, "MachineDeployment not found for pool");
                 Ok(None)
             }
             Err(e) => Err(e.into()),
         }
     }
 
-    async fn scale_machine_deployment(
+    async fn scale_pool(
         &self,
         cluster_name: &str,
+        pool_id: &str,
         namespace: &str,
         replicas: u32,
     ) -> Result<(), Error> {
@@ -997,8 +1003,7 @@ impl CAPIClient for CAPIClientImpl {
             }),
         );
 
-        // MachineDeployment name follows pattern: {cluster_name}-md-0
-        let md_name = format!("{}-md-0", cluster_name);
+        let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
 
         let patch = serde_json::json!({
             "spec": { "replicas": replicas }
@@ -1009,8 +1014,9 @@ impl CAPIClient for CAPIClientImpl {
 
         info!(
             cluster = %cluster_name,
+            pool = %pool_id,
             replicas = replicas,
-            "Scaled MachineDeployment"
+            "Scaled MachineDeployment for pool"
         );
         Ok(())
     }
@@ -1886,60 +1892,63 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 return Ok(Action::requeue(Duration::from_secs(60)));
             }
 
-            // Self-cluster: reconcile worker count and ensure control plane is tainted
-            debug!("cluster is ready, reconciling worker count");
+            // Self-cluster: reconcile worker pools and ensure control plane is tainted
+            debug!("cluster is ready, reconciling worker pools");
 
             // Each cluster has its own CAPI namespace
             let capi_namespace = format!("capi-{}", name);
 
-            // Get desired worker count from spec
-            let desired_workers = cluster.spec.nodes.workers;
+            // Reconcile each worker pool
+            let mut total_desired: u32 = 0;
+            for (pool_id, pool_spec) in &cluster.spec.nodes.worker_pools {
+                total_desired += pool_spec.replicas;
 
-            // Get current MachineDeployment replica count (desired by CAPI)
-            let current_replicas = ctx
-                .capi
-                .get_machine_deployment_replicas(&name, &capi_namespace)
-                .await
-                .unwrap_or(None);
+                // Get current MachineDeployment replica count for this pool
+                let current_replicas = ctx
+                    .capi
+                    .get_pool_replicas(&name, pool_id, &capi_namespace)
+                    .await
+                    .unwrap_or(None);
 
-            // Scale MachineDeployment if replicas don't match spec
-            // MachineDeployment always exists (created with replicas=0 if workers=0)
-            if let Some(replicas) = current_replicas {
-                if replicas != desired_workers {
-                    info!(
-                        current = replicas,
-                        desired = desired_workers,
-                        "Scaling MachineDeployment to match spec"
-                    );
-                    if let Err(e) = ctx
-                        .capi
-                        .scale_machine_deployment(&name, &capi_namespace, desired_workers)
-                        .await
-                    {
-                        warn!(error = %e, "Failed to scale MachineDeployment, will retry");
-                        return Ok(Action::requeue(Duration::from_secs(10)));
+                // Scale MachineDeployment if replicas don't match spec
+                if let Some(replicas) = current_replicas {
+                    if replicas != pool_spec.replicas {
+                        info!(
+                            pool = %pool_id,
+                            current = replicas,
+                            desired = pool_spec.replicas,
+                            "Scaling pool MachineDeployment to match spec"
+                        );
+                        if let Err(e) = ctx
+                            .capi
+                            .scale_pool(&name, pool_id, &capi_namespace, pool_spec.replicas)
+                            .await
+                        {
+                            warn!(pool = %pool_id, error = %e, "Failed to scale pool, will retry");
+                            return Ok(Action::requeue(Duration::from_secs(10)));
+                        }
                     }
+                } else if pool_spec.replicas > 0 {
+                    // MachineDeployment not found but pool has replicas - will be created on next apply
+                    warn!(
+                        pool = %pool_id,
+                        "MachineDeployment not found for pool, will retry"
+                    );
+                    return Ok(Action::requeue(Duration::from_secs(10)));
                 }
-            } else {
-                // MachineDeployment not found - this shouldn't happen as we always create it
-                warn!(
-                    "MachineDeployment not found for cluster {}, will retry",
-                    name
-                );
-                return Ok(Action::requeue(Duration::from_secs(10)));
             }
 
-            // Get current ready worker count (actual running nodes)
+            // Get current ready worker count (actual running nodes across all pools)
             let ready_workers = ctx.kube.get_ready_worker_count().await.unwrap_or(0);
 
             debug!(
-                desired = desired_workers,
+                desired = total_desired,
                 ready = ready_workers,
                 "worker node status"
             );
 
             // If workers match spec, ensure control plane is tainted
-            if ready_workers >= desired_workers {
+            if ready_workers >= total_desired {
                 // Check if control plane nodes need tainting
                 let tainted = ctx
                     .kube
@@ -1964,7 +1973,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             } else {
                 // Workers not ready yet (CAPI still provisioning), poll faster
                 debug!(
-                    desired = desired_workers,
+                    desired = total_desired,
                     ready = ready_workers,
                     "waiting for workers to be provisioned by CAPI"
                 );
@@ -2675,7 +2684,7 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
         BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
-        ProviderConfig, ProviderSpec, ServiceSpec,
+        ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
     };
     use mockall::mock;
 
@@ -2711,7 +2720,13 @@ mod tests {
                 },
                 nodes: NodeSpec {
                     control_plane: 1,
-                    workers: 2,
+                    worker_pools: std::collections::BTreeMap::from([(
+                        "default".to_string(),
+                        WorkerPoolSpec {
+                            replicas: 2,
+                            ..Default::default()
+                        },
+                    )]),
                 },
                 networking: None,
                 parent_config: None,
@@ -2915,8 +2930,8 @@ mod tests {
                 .returning(|_, _, _| Ok(false));
             // MachineDeployment has 2 replicas to match spec - no scaling needed
             capi_mock
-                .expect_get_machine_deployment_replicas()
-                .returning(|_, _| Ok(Some(2)));
+                .expect_get_pool_replicas()
+                .returning(|_, _, _| Ok(Some(2)));
             Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
@@ -3292,7 +3307,13 @@ mod tests {
                     },
                     nodes: NodeSpec {
                         control_plane: 1,
-                        workers: 2,
+                        worker_pools: std::collections::BTreeMap::from([(
+                            "default".to_string(),
+                            WorkerPoolSpec {
+                                replicas: 2,
+                                ..Default::default()
+                            },
+                        )]),
                     },
                     networking: None,
                     parent_config: None,

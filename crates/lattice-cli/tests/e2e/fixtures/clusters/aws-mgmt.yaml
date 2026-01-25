@@ -35,7 +35,9 @@ spec:
           - "subnet-002e2a39388d962c9"
   nodes:
     controlPlane: 1
-    workers: 1
+    workerPools:
+      default:
+        replicas: 1
   parentConfig:
     # host is auto-discovered from NLB
     grpcPort: 50051

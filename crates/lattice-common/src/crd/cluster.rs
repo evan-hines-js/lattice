@@ -77,6 +77,27 @@ impl LatticeClusterSpec {
     }
 }
 
+/// Status for a worker pool
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerPoolStatus {
+    /// Desired number of replicas (from spec)
+    #[serde(default)]
+    pub desired_replicas: u32,
+
+    /// Current number of replicas (MachineDeployment spec.replicas)
+    #[serde(default)]
+    pub current_replicas: u32,
+
+    /// Number of ready nodes in this pool
+    #[serde(default)]
+    pub ready_replicas: u32,
+
+    /// Human-readable message about pool state
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 /// Status for a LatticeCluster
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -104,9 +125,13 @@ pub struct LatticeClusterStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_control_plane: Option<u32>,
 
-    /// Number of ready worker nodes
+    /// Number of ready worker nodes (sum across all pools)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_workers: Option<u32>,
+
+    /// Status of individual worker pools
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub worker_pools: std::collections::BTreeMap<String, WorkerPoolStatus>,
 
     /// Kubernetes API server endpoint
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,7 +243,9 @@ impl LatticeCluster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::types::{BootstrapProvider, KubernetesSpec, ProviderConfig, ServiceSpec};
+    use crate::crd::types::{
+        BootstrapProvider, KubernetesSpec, ProviderConfig, ServiceSpec, WorkerPoolSpec,
+    };
 
     // =========================================================================
     // Test Fixtures
@@ -239,7 +266,13 @@ mod tests {
     fn sample_node_spec() -> NodeSpec {
         NodeSpec {
             control_plane: 1,
-            workers: 2,
+            worker_pools: std::collections::BTreeMap::from([(
+                "default".to_string(),
+                WorkerPoolSpec {
+                    replicas: 2,
+                    ..Default::default()
+                },
+            )]),
         }
     }
 
@@ -357,7 +390,13 @@ mod tests {
             provider: sample_provider_spec(),
             nodes: NodeSpec {
                 control_plane: 0,
-                workers: 2,
+                worker_pools: std::collections::BTreeMap::from([(
+                    "default".to_string(),
+                    WorkerPoolSpec {
+                        replicas: 2,
+                        ..Default::default()
+                    },
+                )]),
             },
             networking: None,
             parent_config: None,
@@ -468,7 +507,9 @@ provider:
     docker: {}
 nodes:
   controlPlane: 1
-  workers: 2
+  workerPools:
+    default:
+      replicas: 2
 networking:
   default:
     cidr: "172.18.255.1/32"
@@ -482,7 +523,7 @@ parentConfig:
 
         assert!(spec.is_parent(), "Should be a parent cluster");
         assert_eq!(spec.nodes.control_plane, 1);
-        assert_eq!(spec.nodes.workers, 2);
+        assert_eq!(spec.nodes.total_workers(), 2);
         assert_eq!(spec.provider.kubernetes.version, "1.35.0");
         assert_eq!(
             spec.parent_config
@@ -511,7 +552,9 @@ provider:
     docker: {}
 nodes:
   controlPlane: 1
-  workers: 3
+  workerPools:
+    general:
+      replicas: 3
 workload:
   services:
     - name: curl-tester
@@ -523,6 +566,7 @@ workload:
         assert!(!spec.is_parent(), "Should be workload cluster");
         assert_eq!(spec.environment.as_deref(), Some("prod"));
         assert_eq!(spec.region.as_deref(), Some("us-west"));
+        assert_eq!(spec.nodes.total_workers(), 3);
 
         let workload = spec.workload.expect("workload config should be present");
         assert_eq!(workload.services.len(), 2);

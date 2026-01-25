@@ -11,9 +11,10 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 
 use super::{
-    build_post_kubeadm_commands, generate_bootstrap_config_template, generate_cluster,
-    generate_control_plane, generate_machine_deployment, BootstrapInfo, CAPIManifest,
-    ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, VipConfig,
+    build_post_kubeadm_commands, generate_bootstrap_config_template_for_pool, generate_cluster,
+    generate_control_plane, generate_machine_deployment_for_pool, pool_resource_suffix,
+    BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider,
+    VipConfig, WorkerPoolConfig,
 };
 use crate::{Error, Result};
 use lattice_common::crd::{LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig};
@@ -176,8 +177,12 @@ impl ProxmoxProvider {
             spec["pool"] = serde_json::json!(pool);
         }
         if let Some(ref desc) = cfg.description {
-            let desc_with_suffix = if suffix == "md-0" {
-                format!("{} (worker)", desc)
+            let desc_with_suffix = if suffix.starts_with("pool-") {
+                format!(
+                    "{} (worker: {})",
+                    desc,
+                    suffix.strip_prefix("pool-").unwrap_or(suffix)
+                )
             } else {
                 desc.clone()
             };
@@ -291,7 +296,7 @@ impl Provider for ProxmoxProvider {
 
         let infra = self.infra_ref();
 
-        Ok(vec![
+        let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_proxmox_cluster(cluster)?,
             generate_control_plane(&config, &infra, &cp_config),
@@ -306,8 +311,22 @@ impl Provider for ProxmoxProvider {
                 },
                 "control-plane",
             ),
-            generate_machine_deployment(&config, &infra),
-            self.generate_machine_template(
+        ];
+
+        // Generate worker pool resources
+        for (pool_id, pool_spec) in &spec.nodes.worker_pools {
+            let pool_config = WorkerPoolConfig {
+                pool_id,
+                spec: pool_spec,
+            };
+            let suffix = pool_resource_suffix(pool_id);
+
+            manifests.push(generate_machine_deployment_for_pool(
+                &config,
+                &infra,
+                &pool_config,
+            ));
+            manifests.push(self.generate_machine_template(
                 name,
                 cfg,
                 MachineSizing {
@@ -316,10 +335,15 @@ impl Provider for ProxmoxProvider {
                     disk_size_gb: cfg.worker_disk_size_gb,
                     sockets: cfg.worker_sockets.unwrap_or(1),
                 },
-                "md-0",
-            ),
-            generate_bootstrap_config_template(&config),
-        ])
+                &suffix,
+            ));
+            manifests.push(generate_bootstrap_config_template_for_pool(
+                &config,
+                &pool_config,
+            ));
+        }
+
+        Ok(manifests)
     }
 
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()> {
@@ -351,7 +375,7 @@ mod tests {
     use super::*;
     use kube::api::ObjectMeta;
     use lattice_common::crd::{
-        BootstrapProvider, KubernetesSpec, NodeSpec, ProviderConfig, ProviderSpec,
+        BootstrapProvider, KubernetesSpec, NodeSpec, ProviderConfig, ProviderSpec, WorkerPoolSpec,
     };
     use lattice_common::crd::{Ipv4PoolConfig, LatticeClusterSpec};
 
@@ -414,7 +438,13 @@ mod tests {
                 },
                 nodes: NodeSpec {
                     control_plane: 3,
-                    workers: 5,
+                    worker_pools: std::collections::BTreeMap::from([(
+                        "default".to_string(),
+                        WorkerPoolSpec {
+                            replicas: 5,
+                            ..Default::default()
+                        },
+                    )]),
                 },
                 parent_config: None,
                 networking: None,

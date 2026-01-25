@@ -218,7 +218,7 @@ async fn run_independence_test(
             &workload_cluster_name,
             "--type=merge",
             "-p",
-            r#"{"spec":{"nodes":{"workers":2}}}"#,
+            r#"{"spec":{"nodes":{"workerPools":{"default":{"replicas":2}}}}}"#,
         ],
     )?;
 

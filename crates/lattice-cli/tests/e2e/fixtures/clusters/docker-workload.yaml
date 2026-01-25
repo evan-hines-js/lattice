@@ -18,7 +18,9 @@ spec:
       docker: {}
   nodes:
     controlPlane: 1
-    workers: 1
+    workerPools:
+      default:
+        replicas: 1
   networking:
     default:
       cidr: "172.18.255.20/32"

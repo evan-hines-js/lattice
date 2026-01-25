@@ -102,7 +102,9 @@ spec:
         # amiId: "ami-12345"
   nodes:
     controlPlane: 3
-    workers: 5
+    workerPools:
+      default:
+        replicas: 5
   endpoints:
     # host is auto-discovered from NLB
     grpcPort: 50051
