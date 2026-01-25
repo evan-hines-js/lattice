@@ -851,8 +851,25 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     let services: Api<LatticeService> = Api::all(client.clone());
     let external_services: Api<LatticeExternalService> = Api::all(client.clone());
 
+    // Read provider type from LatticeCluster for topology-aware scheduling
+    let provider_type = match clusters.list(&kube::api::ListParams::default()).await {
+        Ok(list) => list
+            .items
+            .first()
+            .map(|c| c.spec.provider.provider_type())
+            .unwrap_or(ProviderType::Docker),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read LatticeCluster, defaulting to Docker provider");
+            ProviderType::Docker
+        }
+    };
+
     // Create service context for service controllers
-    let service_ctx = Arc::new(ServiceContext::from_client(client, "cluster.local"));
+    let service_ctx = Arc::new(ServiceContext::from_client(
+        client,
+        "cluster.local",
+        provider_type,
+    ));
 
     tracing::info!("Starting Lattice controllers...");
 

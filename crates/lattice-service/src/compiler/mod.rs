@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! let graph = ServiceGraph::new();
-//! let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
+//! let compiler = ServiceCompiler::new(&graph, "prod.lattice.local", ProviderType::Docker);
 //! let output = compiler.compile(&lattice_service);
 //! // output.workloads, output.policies
 //! ```
@@ -25,7 +25,7 @@
 //! 1. Label `lattice.dev/environment` on the service
 //! 2. Falls back to namespace
 
-use crate::crd::LatticeService;
+use crate::crd::{LatticeService, ProviderType};
 use crate::graph::ServiceGraph;
 use crate::ingress::{GeneratedIngress, GeneratedWaypoint, IngressCompiler, WaypointCompiler};
 use crate::policy::{AuthorizationPolicy, GeneratedPolicies, PolicyCompiler};
@@ -105,6 +105,7 @@ impl CompiledService {
 pub struct ServiceCompiler<'a> {
     graph: &'a ServiceGraph,
     trust_domain: String,
+    provider_type: ProviderType,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -113,10 +114,16 @@ impl<'a> ServiceCompiler<'a> {
     /// # Arguments
     /// * `graph` - The service graph for policy generation (bilateral agreement checks)
     /// * `trust_domain` - SPIFFE trust domain (e.g., "prod.lattice.local")
-    pub fn new(graph: &'a ServiceGraph, trust_domain: impl Into<String>) -> Self {
+    /// * `provider_type` - Infrastructure provider for topology-aware scheduling
+    pub fn new(
+        graph: &'a ServiceGraph,
+        trust_domain: impl Into<String>,
+        provider_type: ProviderType,
+    ) -> Self {
         Self {
             graph,
             trust_domain: trust_domain.into(),
+            provider_type,
         }
     }
 
@@ -149,7 +156,8 @@ impl<'a> ServiceCompiler<'a> {
         let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec);
 
         // Delegate to specialized compilers
-        let mut workloads = WorkloadCompiler::compile(name, service, namespace, &compiled_volumes);
+        let mut workloads =
+            WorkloadCompiler::compile(name, service, namespace, &compiled_volumes, self.provider_type);
 
         // Add PVCs to workloads
         workloads.pvcs = compiled_volumes.pvcs;
@@ -389,7 +397,7 @@ mod tests {
         // Create LatticeService for api
         let service = make_service("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
+        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local", ProviderType::Docker);
         let output = compiler.compile(&service).unwrap();
 
         // Should have workloads (from WorkloadCompiler)
@@ -417,7 +425,7 @@ mod tests {
         // Create LatticeService with staging label
         let service = make_service("my-app", "staging");
 
-        let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
+        let compiler = ServiceCompiler::new(&graph, "test.lattice.local", ProviderType::Docker);
         let output = compiler.compile(&service).unwrap();
 
         // Should find service in graph and generate cilium policy
@@ -435,7 +443,7 @@ mod tests {
         // Create LatticeService without env label
         let service = make_service("my-app", "prod-ns");
 
-        let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
+        let compiler = ServiceCompiler::new(&graph, "test.lattice.local", ProviderType::Docker);
         let output = compiler.compile(&service).unwrap();
 
         // Should find service using namespace as env
@@ -453,7 +461,7 @@ mod tests {
 
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
+        let compiler = ServiceCompiler::new(&graph, "test.lattice.local", ProviderType::Docker);
         let output = compiler.compile(&service).unwrap();
 
         // Should still have workloads
@@ -476,7 +484,7 @@ mod tests {
 
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
+        let compiler = ServiceCompiler::new(&graph, "test.lattice.local", ProviderType::Docker);
         let output = compiler.compile(&service).unwrap();
 
         // Deployment + Service + ServiceAccount + CiliumPolicy + WaypointGateway + WaypointAuthPolicy = 6
@@ -491,7 +499,7 @@ mod tests {
     #[test]
     fn story_mesh_default_deny() {
         let graph = ServiceGraph::new();
-        let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
+        let compiler = ServiceCompiler::new(&graph, "test.lattice.local", ProviderType::Docker);
 
         let policy = compiler.compile_mesh_default_deny();
 
@@ -511,7 +519,7 @@ mod tests {
         let graph = ServiceGraph::new();
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "test.lattice.local");
+        let compiler = ServiceCompiler::new(&graph, "test.lattice.local", ProviderType::Docker);
         let output = compiler.compile(&service).unwrap();
         assert!(!output.is_empty());
     }
@@ -528,7 +536,7 @@ mod tests {
 
         let service = make_service_with_ingress("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
+        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local", ProviderType::Docker);
         let output = compiler.compile(&service).unwrap();
 
         // Should have ingress resources
@@ -567,7 +575,7 @@ mod tests {
 
         let service = make_service("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
+        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local", ProviderType::Docker);
         let output = compiler.compile(&service).unwrap();
 
         // Should NOT have ingress resources
@@ -585,7 +593,7 @@ mod tests {
 
         let service = make_service_with_ingress("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local");
+        let compiler = ServiceCompiler::new(&graph, "prod.lattice.local", ProviderType::Docker);
         let output = compiler.compile(&service).unwrap();
 
         // Should include: Deployment + Service + ServiceAccount + CiliumPolicy +

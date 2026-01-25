@@ -356,6 +356,23 @@ pub struct PodSpec {
     /// Share PID namespace between containers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_process_namespace: Option<bool>,
+    /// Topology spread constraints for HA
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topology_spread_constraints: Vec<TopologySpreadConstraint>,
+}
+
+/// Topology spread constraint for distributing pods across failure domains
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopologySpreadConstraint {
+    /// Maximum difference in pod count between topology domains
+    pub max_skew: i32,
+    /// Topology key (e.g., topology.kubernetes.io/zone)
+    pub topology_key: String,
+    /// What to do when constraint can't be satisfied
+    pub when_unsatisfiable: String,
+    /// Label selector to find pods to spread
+    pub label_selector: LabelSelector,
 }
 
 /// Container spec
@@ -806,7 +823,7 @@ impl GeneratedWorkloads {
 // Workload Compiler
 // =============================================================================
 
-use crate::crd::{DeployStrategy, LatticeService, LatticeServiceSpec};
+use crate::crd::{DeployStrategy, LatticeService, LatticeServiceSpec, ProviderType};
 
 /// Compiler for generating Kubernetes workload resources from LatticeService
 ///
@@ -824,14 +841,17 @@ impl WorkloadCompiler {
     /// Compile a LatticeService into workload resources
     ///
     /// # Arguments
+    /// * `name` - Service name
     /// * `service` - The LatticeService to compile
-    /// * `namespace` - Target namespace (from environment label, since LatticeService is cluster-scoped)
+    /// * `namespace` - Target namespace (from CRD metadata)
     /// * `volumes` - Pre-compiled volume resources (affinity, labels, etc.)
+    /// * `provider_type` - Infrastructure provider for topology-aware scheduling
     pub fn compile(
         name: &str,
         service: &LatticeService,
         namespace: &str,
         volumes: &GeneratedVolumes,
+        provider_type: ProviderType,
     ) -> GeneratedWorkloads {
         let mut output = GeneratedWorkloads::new();
 
@@ -844,6 +864,7 @@ impl WorkloadCompiler {
             namespace,
             &service.spec,
             volumes,
+            provider_type,
         ));
 
         // Generate Service if ports are defined
@@ -1176,11 +1197,13 @@ impl WorkloadCompiler {
     /// - Pod affinity for RWO volume co-location
     /// - Volume ownership labels
     /// - Pod-level security context (sysctls)
+    /// - Topology spread constraints for HA distribution
     fn compile_deployment(
         name: &str,
         namespace: &str,
         spec: &LatticeServiceSpec,
         volumes: &GeneratedVolumes,
+        provider_type: ProviderType,
     ) -> Deployment {
         // Compile main containers with volume mounts
         let mut containers = Self::compile_containers_with_volumes(spec, volumes);
@@ -1249,6 +1272,18 @@ impl WorkloadCompiler {
                         security_context,
                         host_network: spec.host_network,
                         share_process_namespace: spec.share_process_namespace,
+                        topology_spread_constraints: vec![TopologySpreadConstraint {
+                            max_skew: 1,
+                            topology_key: provider_type.topology_spread_key().to_string(),
+                            when_unsatisfiable: "ScheduleAnyway".to_string(),
+                            label_selector: LabelSelector {
+                                match_labels: {
+                                    let mut labels = BTreeMap::new();
+                                    labels.insert("app.kubernetes.io/name".to_string(), name.to_string());
+                                    labels
+                                },
+                            },
+                        }],
                     },
                 },
                 strategy,
@@ -1348,7 +1383,8 @@ mod tests {
             .as_deref()
             .expect("test service must have a namespace");
         let volumes = VolumeCompiler::compile(name, namespace, &service.spec);
-        WorkloadCompiler::compile(name, service, namespace, &volumes)
+        // Use Docker provider for tests (uses hostname-based spreading)
+        WorkloadCompiler::compile(name, service, namespace, &volumes, ProviderType::Docker)
     }
 
     fn make_service(name: &str, namespace: &str) -> LatticeService {
@@ -1477,6 +1513,18 @@ mod tests {
 
         // Deployment has service account name matching the service
         assert_eq!(deployment.spec.template.spec.service_account_name, "my-app");
+
+        // Deployment has topology spread constraints for HA
+        // Tests use Docker provider which spreads by hostname
+        assert_eq!(deployment.spec.template.spec.topology_spread_constraints.len(), 1);
+        let constraint = &deployment.spec.template.spec.topology_spread_constraints[0];
+        assert_eq!(constraint.max_skew, 1);
+        assert_eq!(constraint.topology_key, "kubernetes.io/hostname");
+        assert_eq!(constraint.when_unsatisfiable, "ScheduleAnyway");
+        assert_eq!(
+            constraint.label_selector.match_labels.get("app.kubernetes.io/name"),
+            Some(&"my-app".to_string())
+        );
     }
 
     // =========================================================================
