@@ -58,6 +58,7 @@
 #![cfg(feature = "provider-e2e")]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use kube::api::{Api, PostParams};
@@ -67,6 +68,7 @@ use lattice_cli::commands::install::Installer;
 use lattice_cli::commands::uninstall::{UninstallArgs, Uninstaller};
 use lattice_operator::crd::LatticeCluster;
 
+use super::chaos::{ChaosMonkey, ChaosTargets};
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, load_cluster_config,
@@ -151,6 +153,16 @@ async fn test_configurable_provider_pivot() {
 }
 
 async fn run_provider_e2e() -> Result<(), String> {
+    let chaos_targets = Arc::new(ChaosTargets::new());
+    let chaos = ChaosMonkey::start(chaos_targets.clone());
+
+    let result = run_provider_e2e_inner(chaos_targets).await;
+
+    chaos.stop().await;
+    result
+}
+
+async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), String> {
     // =========================================================================
     // Load all cluster configs upfront (fail early if missing)
     // =========================================================================
@@ -248,6 +260,9 @@ async fn run_provider_e2e() -> Result<(), String> {
 
     info!("SUCCESS: Management cluster is self-managing!");
 
+    // Add mgmt to chaos targets now that it's ready
+    chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path);
+
     // =========================================================================
     // Phase 3: Create Workload Cluster
     // =========================================================================
@@ -300,6 +315,9 @@ async fn run_provider_e2e() -> Result<(), String> {
 
     verify_cluster_capi_resources(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME).await?;
     watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 1).await?;
+
+    // Add workload to chaos targets now that it's verified
+    chaos_targets.add(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path);
 
     // =========================================================================
     // Phase 6: Create Workload2 + Start Mesh Tests
@@ -403,6 +421,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     info!("[Phase 8] Deleting workload cluster (unpivot flow)...");
     info!("CAPI resources will move back to management cluster");
+    info!("(Chaos monkey continues during unpivot to test resilience)");
 
     delete_cluster_and_wait(
         &workload_kubeconfig_path,
@@ -419,6 +438,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     // =========================================================================
     info!("[Phase 9] Uninstalling management cluster...");
     info!("This uses the proper uninstall flow (reverse pivot to temporary kind cluster)");
+    info!("(Chaos monkey continues during uninstall to test resilience)");
 
     let uninstall_args = UninstallArgs {
         kubeconfig: PathBuf::from(&mgmt_kubeconfig_path),
