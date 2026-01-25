@@ -48,7 +48,10 @@ const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
 fn cleanup_clusters(mgmt_name: &str, workload_name: &str) {
     info!("Cleaning up all test resources...");
-    let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", "lattice-install"]);
+    let _ = run_cmd_allow_fail(
+        "kind",
+        &["delete", "cluster", "--name", "lattice-bootstrap"],
+    );
     force_delete_docker_cluster(mgmt_name);
     force_delete_docker_cluster(workload_name);
 }
@@ -226,7 +229,7 @@ async fn run_independence_test(
 
     watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, 2).await?;
 
-    info!("\n  SUCCESS: Workload cluster scaled from 1 to 2 workers");
+    info!("SUCCESS: Workload cluster scaled from 1 to 2 workers");
     info!("SUCCESS: Cluster is fully operational without parent!");
 
     Ok(())

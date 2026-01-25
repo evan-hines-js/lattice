@@ -100,14 +100,12 @@ fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String,
 // Cleanup Functions
 // =============================================================================
 
-/// Clean up kind bootstrap clusters only (lattice-install, lattice-uninstall)
-/// These are temporary clusters used during install/uninstall and safe to force-delete
+/// Clean up kind bootstrap cluster used during install
 fn cleanup_bootstrap_clusters() {
-    info!("Cleaning up kind bootstrap clusters...");
-    let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", "lattice-install"]);
+    info!("Cleaning up kind bootstrap cluster...");
     let _ = run_cmd_allow_fail(
         "kind",
-        &["delete", "cluster", "--name", "lattice-uninstall"],
+        &["delete", "cluster", "--name", "lattice-bootstrap"],
     );
 }
 
@@ -181,7 +179,6 @@ async fn run_provider_e2e() -> Result<(), String> {
         "Workload2:   {} + {:?}",
         workload_provider, workload2_bootstrap
     );
-    info!("");
 
     // Setup Docker network if needed
     if mgmt_provider == InfraProvider::Docker {
@@ -214,7 +211,7 @@ async fn run_provider_e2e() -> Result<(), String> {
         .await
         .map_err(|e| format!("Installer failed: {}", e))?;
 
-    info!("\n  Management cluster installation complete!");
+    info!("Management cluster installation complete!");
 
     // =========================================================================
     // Phase 2: Verify Management Cluster is Self-Managing
@@ -248,7 +245,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     info!("Waiting for management cluster's LatticeCluster to be Ready...");
     watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
 
-    info!("\n  SUCCESS: Management cluster is self-managing!");
+    info!("SUCCESS: Management cluster is self-managing!");
 
     // =========================================================================
     // Phase 3: Create Workload Cluster
@@ -284,7 +281,7 @@ async fn run_provider_e2e() -> Result<(), String> {
         .await?;
     }
 
-    info!("\n  SUCCESS: Workload cluster is Ready!");
+    info!("SUCCESS: Workload cluster is Ready!");
 
     // =========================================================================
     // Phase 5: Verify Workload Cluster
@@ -394,7 +391,7 @@ async fn run_provider_e2e() -> Result<(), String> {
             .map_err(|e| format!("Mesh test task panicked: {}", e))??;
     }
 
-    info!("\n  SUCCESS: Workload2 + mesh tests complete!");
+    info!("SUCCESS: Workload2 + mesh tests complete!");
 
     // =========================================================================
     // Phase 7: Delete Workload2 (unpivot to workload)
@@ -410,7 +407,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     )
     .await?;
 
-    info!("\n  SUCCESS: Workload2 deleted and unpivoted!");
+    info!("SUCCESS: Workload2 deleted and unpivoted!");
 
     // =========================================================================
     // Phase 8: Delete Workload (unpivot to mgmt)
@@ -426,7 +423,7 @@ async fn run_provider_e2e() -> Result<(), String> {
     )
     .await?;
 
-    info!("\n  SUCCESS: Workload deleted and unpivoted!");
+    info!("SUCCESS: Workload deleted and unpivoted!");
 
     // =========================================================================
     // Phase 9: Uninstall Management Cluster
@@ -450,7 +447,7 @@ async fn run_provider_e2e() -> Result<(), String> {
         .await
         .map_err(|e| format!("Uninstall failed: {}", e))?;
 
-    info!("\n  SUCCESS: Management cluster uninstalled!");
+    info!("SUCCESS: Management cluster uninstalled!");
 
     info!("E2E test complete: full lifecycle verified");
 

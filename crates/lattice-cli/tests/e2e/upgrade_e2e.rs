@@ -78,11 +78,10 @@ fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String,
 // =============================================================================
 
 fn cleanup_bootstrap_clusters() {
-    info!("Cleaning up kind bootstrap clusters...");
-    let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", "lattice-install"]);
+    info!("Cleaning up kind bootstrap cluster...");
     let _ = run_cmd_allow_fail(
         "kind",
-        &["delete", "cluster", "--name", "lattice-uninstall"],
+        &["delete", "cluster", "--name", "lattice-bootstrap"],
     );
 }
 
@@ -160,7 +159,6 @@ async fn run_upgrade_e2e() -> Result<(), String> {
         workload_cluster_name, workload_provider, workload_bootstrap, from_version
     );
     info!("Upgrade to:  v{}", to_version);
-    info!("");
 
     if mgmt_provider == InfraProvider::Docker {
         ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
@@ -186,7 +184,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
         .await
         .map_err(|e| format!("Installer failed: {}", e))?;
 
-    info!("\n  Management cluster installation complete!");
+    info!("Management cluster installation complete!");
 
     // =========================================================================
     // Phase 2: Create Workload Cluster at v{from_version}
@@ -207,7 +205,7 @@ async fn run_upgrade_e2e() -> Result<(), String> {
     info!("Workload LatticeCluster created");
 
     watch_cluster_phases(&mgmt_client, &workload_cluster_name, None).await?;
-    info!("\n  Workload cluster Ready at v{}!", from_version);
+    info!("Workload cluster Ready at v{}!", from_version);
 
     // Extract kubeconfig
     let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", workload_cluster_name);
