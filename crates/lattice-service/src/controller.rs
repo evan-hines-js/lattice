@@ -23,7 +23,7 @@ use mockall::automock;
 use crate::compiler::{CompiledService, ServiceCompiler};
 use crate::crd::{
     Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
-    LatticeService, LatticeServiceSpec, LatticeServiceStatus, ServicePhase,
+    LatticeService, LatticeServiceSpec, LatticeServiceStatus, ProviderType, ServicePhase,
 };
 use crate::graph::ServiceGraph;
 use crate::Error;
@@ -490,6 +490,8 @@ pub struct ServiceContext {
     pub graph: Arc<ServiceGraph>,
     /// SPIFFE trust domain for policy generation
     pub trust_domain: String,
+    /// Provider type for topology-aware scheduling (zone for cloud, hostname for on-prem)
+    pub provider_type: ProviderType,
 }
 
 impl ServiceContext {
@@ -498,11 +500,13 @@ impl ServiceContext {
         kube: Arc<dyn ServiceKubeClient>,
         graph: Arc<ServiceGraph>,
         trust_domain: impl Into<String>,
+        provider_type: ProviderType,
     ) -> Self {
         Self {
             kube,
             graph,
             trust_domain: trust_domain.into(),
+            provider_type,
         }
     }
 
@@ -510,11 +514,16 @@ impl ServiceContext {
     ///
     /// This creates a new ServiceGraph. For shared state, create the graph
     /// externally and pass it to the constructor.
-    pub fn from_client(client: Client, trust_domain: impl Into<String>) -> Self {
+    pub fn from_client(
+        client: Client,
+        trust_domain: impl Into<String>,
+        provider_type: ProviderType,
+    ) -> Self {
         Self {
             kube: Arc::new(ServiceKubeClientImpl::new(client)),
             graph: Arc::new(ServiceGraph::new()),
             trust_domain: trust_domain.into(),
+            provider_type,
         }
     }
 
@@ -525,6 +534,7 @@ impl ServiceContext {
             kube,
             graph: Arc::new(ServiceGraph::new()),
             trust_domain: "test.local".to_string(),
+            provider_type: ProviderType::Docker,
         }
     }
 }
@@ -613,7 +623,7 @@ pub async fn reconcile(
             );
 
             // Compile workloads and policies
-            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain);
+            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain, ctx.provider_type);
             let compiled = compiler.compile(&service)?;
 
             // Apply compiled resources to the cluster
@@ -653,7 +663,7 @@ pub async fn reconcile(
             // This is necessary because when a new service is added that depends on us,
             // or when a service we depend on changes its allowed callers, we need to
             // update our ingress/egress policies to reflect the new bilateral agreements.
-            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain);
+            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain, ctx.provider_type);
             let compiled = compiler.compile(&service)?;
 
             debug!(
@@ -1380,8 +1390,18 @@ mod tests {
         let mock_kube2 = Arc::new(mock_kube_success());
         let shared_graph = Arc::new(ServiceGraph::new());
 
-        let ctx1 = ServiceContext::new(mock_kube1, Arc::clone(&shared_graph), "test.local");
-        let ctx2 = ServiceContext::new(mock_kube2, Arc::clone(&shared_graph), "test.local");
+        let ctx1 = ServiceContext::new(
+            mock_kube1,
+            Arc::clone(&shared_graph),
+            "test.local",
+            ProviderType::Docker,
+        );
+        let ctx2 = ServiceContext::new(
+            mock_kube2,
+            Arc::clone(&shared_graph),
+            "test.local",
+            ProviderType::Docker,
+        );
 
         // Add service via ctx1
         ctx1.graph

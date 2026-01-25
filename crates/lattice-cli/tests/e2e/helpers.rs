@@ -602,6 +602,7 @@ pub fn cluster_fixtures_dir() -> PathBuf {
 
 /// Get the fixtures directory for service configs
 #[cfg(feature = "provider-e2e")]
+#[allow(dead_code)] // Used by media_server_e2e (currently disabled)
 pub fn service_fixtures_dir() -> PathBuf {
     workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/services")
 }
@@ -708,6 +709,7 @@ pub fn load_cluster_config(
 
 /// Load a LatticeService config from a fixture file
 #[cfg(feature = "provider-e2e")]
+#[allow(dead_code)] // Used by media_server_e2e (currently disabled)
 pub fn load_service_config(
     filename: &str,
 ) -> Result<lattice_operator::crd::LatticeService, String> {

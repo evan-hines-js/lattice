@@ -74,6 +74,18 @@ impl ProviderType {
         }
         annotations
     }
+
+    /// Returns the Kubernetes topology key for pod spread constraints.
+    ///
+    /// Cloud providers automatically set `topology.kubernetes.io/zone` on nodes.
+    /// On-prem providers (Docker, Proxmox) don't have zones, so we spread by hostname.
+    /// OpenStack supports availability zones like cloud providers.
+    pub fn topology_spread_key(&self) -> &'static str {
+        match self {
+            Self::Docker | Self::Proxmox => "kubernetes.io/hostname",
+            Self::Aws | Self::Gcp | Self::Azure | Self::OpenStack => "topology.kubernetes.io/zone",
+        }
+    }
 }
 
 impl std::str::FromStr for ProviderType {
@@ -779,6 +791,37 @@ mod tests {
             assert!(ProviderType::is_valid("DOCKER"));
             assert!(!ProviderType::is_valid("invalid"));
             assert!(!ProviderType::is_valid(""));
+        }
+
+        #[test]
+        fn test_topology_spread_key() {
+            // On-prem providers use hostname (no zones)
+            assert_eq!(
+                ProviderType::Docker.topology_spread_key(),
+                "kubernetes.io/hostname"
+            );
+            assert_eq!(
+                ProviderType::Proxmox.topology_spread_key(),
+                "kubernetes.io/hostname"
+            );
+
+            // Cloud providers use zones
+            assert_eq!(
+                ProviderType::Aws.topology_spread_key(),
+                "topology.kubernetes.io/zone"
+            );
+            assert_eq!(
+                ProviderType::Gcp.topology_spread_key(),
+                "topology.kubernetes.io/zone"
+            );
+            assert_eq!(
+                ProviderType::Azure.topology_spread_key(),
+                "topology.kubernetes.io/zone"
+            );
+            assert_eq!(
+                ProviderType::OpenStack.topology_spread_key(),
+                "topology.kubernetes.io/zone"
+            );
         }
     }
 

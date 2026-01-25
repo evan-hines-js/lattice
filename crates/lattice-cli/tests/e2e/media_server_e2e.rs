@@ -2,8 +2,11 @@
 //!
 //! Tests LatticeService with a media server stack (jellyfin, nzbget, sonarr).
 //! Verifies volume sharing, pod co-location, and bilateral agreements.
+//!
+//! NOTE: Currently disabled pending investigation of deployment issues.
 
 #![cfg(feature = "provider-e2e")]
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::time::Duration;
