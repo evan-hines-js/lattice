@@ -2,7 +2,7 @@
 //!
 //! This module contains tests for verifying the bilateral agreement pattern:
 //! - Fixed 9-service test: Deterministic test with known expected results
-//! - Randomized mesh test: 50-100 services with random bilateral agreements
+//! - Randomized mesh test: 20-30 services with random bilateral agreements
 //!
 //! Both tests run in parallel when enabled via LATTICE_ENABLE_MESH_TEST=true
 
@@ -946,7 +946,7 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
 }
 
 // =============================================================================
-// Randomized Large-Scale Mesh Test (10-20 services)
+// Randomized Large-Scale Mesh Test (20-30 services)
 // =============================================================================
 
 #[derive(Debug, Clone)]
@@ -967,8 +967,8 @@ struct RandomMeshConfig {
 impl Default for RandomMeshConfig {
     fn default() -> Self {
         Self {
-            min_services: 10,
-            max_services: 20,
+            min_services: 20,
+            max_services: 30,
             num_layers: 3,
             outbound_probability: 0.3,
             bilateral_probability: 0.6,
@@ -1745,7 +1745,7 @@ impl RandomMeshTestHandle {
 
 /// Start the randomized mesh test and return a handle
 pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshTestHandle, String> {
-    info!("\n[Mesh Test] Starting randomized large-scale mesh test (10-20 services)...");
+    info!("\n[Mesh Test] Starting randomized large-scale mesh test (20-30 services)...");
 
     let mesh = RandomMesh::generate(&RandomMeshConfig::default());
     info!("{}", mesh.stats());
@@ -1765,7 +1765,7 @@ pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshT
     })
 }
 
-/// Run the randomized 10-20 service mesh test
+/// Run the randomized 20-30 service mesh test
 pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let handle = start_random_mesh_test(kubeconfig_path).await?;
     // Additional wait for traffic patterns to stabilize
