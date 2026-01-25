@@ -56,7 +56,9 @@ spec:
       docker: {}  # No additional config needed
   nodes:
     controlPlane: 1
-    workers: 2
+    workerPools:
+      default:
+        replicas: 2
   endpoints:
     host: "127.0.0.1"
     grpcPort: 50051

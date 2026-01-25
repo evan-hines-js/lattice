@@ -7,9 +7,10 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 
 use super::{
-    build_post_kubeadm_commands, generate_bootstrap_config_template, generate_cluster,
-    generate_control_plane, generate_machine_deployment, BootstrapInfo, CAPIManifest,
-    ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider,
+    build_post_kubeadm_commands, generate_bootstrap_config_template_for_pool, generate_cluster,
+    generate_control_plane, generate_machine_deployment_for_pool, pool_resource_suffix,
+    BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider,
+    WorkerPoolConfig,
 };
 use crate::{Error, Result};
 use lattice_common::crd::{LatticeCluster, OpenStackConfig, ProviderSpec, ProviderType};
@@ -215,7 +216,7 @@ impl Provider for OpenStackProvider {
 
         let infra = self.infra_ref();
 
-        Ok(vec![
+        let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_openstack_cluster(cluster)?,
             generate_control_plane(&config, &infra, &cp_config),
@@ -228,18 +229,37 @@ impl Provider for OpenStackProvider {
                 availability_zone: cfg.cp_availability_zone.as_deref(),
                 suffix: "control-plane",
             }),
-            generate_machine_deployment(&config, &infra),
-            self.generate_machine_template(MachineTemplateConfig {
+        ];
+
+        // Generate worker pool resources
+        for (pool_id, pool_spec) in &spec.nodes.worker_pools {
+            let pool_config = WorkerPoolConfig {
+                pool_id,
+                spec: pool_spec,
+            };
+            let suffix = pool_resource_suffix(pool_id);
+
+            manifests.push(generate_machine_deployment_for_pool(
+                &config,
+                &infra,
+                &pool_config,
+            ));
+            manifests.push(self.generate_machine_template(MachineTemplateConfig {
                 name,
                 openstack_cfg: cfg,
                 flavor: &cfg.worker_flavor,
                 root_volume_size: cfg.worker_root_volume_size_gb,
                 root_volume_type: cfg.worker_root_volume_type.as_deref(),
                 availability_zone: cfg.worker_availability_zone.as_deref(),
-                suffix: "md-0",
-            }),
-            generate_bootstrap_config_template(&config),
-        ])
+                suffix: &suffix,
+            }));
+            manifests.push(generate_bootstrap_config_template_for_pool(
+                &config,
+                &pool_config,
+            ));
+        }
+
+        Ok(manifests)
     }
 
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()> {
@@ -294,7 +314,7 @@ mod tests {
     use kube::api::ObjectMeta;
     use lattice_common::crd::LatticeClusterSpec;
     use lattice_common::crd::{
-        BootstrapProvider, KubernetesSpec, NodeSpec, ProviderConfig, ProviderSpec,
+        BootstrapProvider, KubernetesSpec, NodeSpec, ProviderConfig, ProviderSpec, WorkerPoolSpec,
     };
 
     fn test_openstack_config() -> OpenStackConfig {
@@ -327,7 +347,13 @@ mod tests {
                 },
                 nodes: NodeSpec {
                     control_plane: 3,
-                    workers: 5,
+                    worker_pools: std::collections::BTreeMap::from([(
+                        "default".to_string(),
+                        WorkerPoolSpec {
+                            replicas: 5,
+                            ..Default::default()
+                        },
+                    )]),
                 },
                 parent_config: None,
                 networking: None,

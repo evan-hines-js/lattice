@@ -115,7 +115,9 @@ spec:
         #   - "pve2"
   nodes:
     controlPlane: 3
-    workers: 5
+    workerPools:
+      default:
+        replicas: 5
   endpoints:
     host: "10.0.0.99"  # kube-vip VIP address
     grpcPort: 50051

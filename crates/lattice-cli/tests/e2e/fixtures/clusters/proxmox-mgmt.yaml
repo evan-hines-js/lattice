@@ -36,7 +36,9 @@ spec:
         workerDiskSizeGb: 100
   nodes:
     controlPlane: 1
-    workers: 1
+    workerPools:
+      default:
+        replicas: 1
   parentConfig:
     # Must be in Cilium LB pool (auto-derived as 10.0.0.200/27 from gateway)
     host: "10.0.0.201"

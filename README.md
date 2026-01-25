@@ -80,12 +80,14 @@ spec:
       bootstrap: kubeadm  # or rke2 for FIPS
     config:
       proxmox:
-        template_id: 9000
-        cp_cores: 4
-        cp_memory_mib: 8192
+        templateId: 9000
+        cpCores: 4
+        cpMemoryMib: 8192
   nodes:
     controlPlane: 3
-    workers: 10
+    workerPools:
+      default:
+        replicas: 10
 ```
 
 ### Supported Providers

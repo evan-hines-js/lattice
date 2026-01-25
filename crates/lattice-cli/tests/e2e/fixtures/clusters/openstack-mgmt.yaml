@@ -27,7 +27,9 @@ spec:
         workerRootVolumeSizeGb: 50
   nodes:
     controlPlane: 1
-    workers: 1
+    workerPools:
+      default:
+        replicas: 1
   parentConfig:
     # host is auto-discovered from Octavia LB
     grpcPort: 50051

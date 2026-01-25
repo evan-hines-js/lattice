@@ -28,9 +28,9 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 use super::{
-    build_post_kubeadm_commands, generate_bootstrap_config_template, generate_cluster,
-    generate_control_plane, generate_machine_deployment, CAPIManifest, ClusterConfig,
-    ControlPlaneConfig, InfrastructureRef, Provider,
+    build_post_kubeadm_commands, generate_bootstrap_config_template_for_pool, generate_cluster,
+    generate_control_plane, generate_machine_deployment_for_pool, pool_resource_suffix,
+    CAPIManifest, ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, WorkerPoolConfig,
 };
 use crate::Result;
 use lattice_common::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
@@ -256,12 +256,17 @@ backend rke2-servers
         .with_spec(spec))
     }
 
-    /// Generate the DockerMachineTemplate for worker nodes (Docker-specific)
-    fn generate_worker_machine_template(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
+    /// Generate the DockerMachineTemplate for a worker pool (Docker-specific)
+    fn generate_worker_machine_template_for_pool(
+        &self,
+        cluster: &LatticeCluster,
+        pool_id: &str,
+    ) -> Result<CAPIManifest> {
         let name = Self::get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
         let labels = Self::create_labels(name);
-        let template_name = format!("{}-md-0", name);
+        let suffix = pool_resource_suffix(pool_id);
+        let template_name = format!("{}-{}", name, suffix);
         let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
 
         let spec = json!({
@@ -364,10 +369,23 @@ impl Provider for DockerProvider {
         manifests.push(generate_control_plane(&config, &infra, &cp_config));
         manifests.push(self.generate_control_plane_machine_template(cluster)?);
 
-        // Worker resources - use shared functions (replicas=0, scaling after pivot)
-        manifests.push(generate_machine_deployment(&config, &infra));
-        manifests.push(self.generate_worker_machine_template(cluster)?);
-        manifests.push(generate_bootstrap_config_template(&config));
+        // Worker pool resources - generate MachineDeployment, MachineTemplate, ConfigTemplate per pool
+        for (pool_id, pool_spec) in &cluster.spec.nodes.worker_pools {
+            let pool_config = WorkerPoolConfig {
+                pool_id,
+                spec: pool_spec,
+            };
+            manifests.push(generate_machine_deployment_for_pool(
+                &config,
+                &infra,
+                &pool_config,
+            ));
+            manifests.push(self.generate_worker_machine_template_for_pool(cluster, pool_id)?);
+            manifests.push(generate_bootstrap_config_template_for_pool(
+                &config,
+                &pool_config,
+            ));
+        }
 
         Ok(manifests)
     }
@@ -419,11 +437,23 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
         BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
-        ProviderConfig, ProviderSpec, ServiceSpec,
+        ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
     };
 
     /// Helper to create a sample LatticeCluster for testing
     fn sample_cluster(name: &str, workers: u32) -> LatticeCluster {
+        let worker_pools = if workers > 0 {
+            std::collections::BTreeMap::from([(
+                "default".to_string(),
+                WorkerPoolSpec {
+                    replicas: workers,
+                    ..Default::default()
+                },
+            )])
+        } else {
+            std::collections::BTreeMap::new()
+        };
+
         LatticeCluster {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
@@ -442,7 +472,7 @@ mod tests {
                 },
                 nodes: NodeSpec {
                     control_plane: 1,
-                    workers,
+                    worker_pools,
                 },
                 networking: None,
                 parent_config: None,
@@ -558,11 +588,10 @@ mod tests {
             assert_eq!(manifests.len(), 7);
         }
 
-        /// Story: A control-plane-only cluster still generates worker resources
-        /// (MachineDeployment, DockerMachineTemplate, KubeadmConfigTemplate) but with
-        /// replicas=0. This makes scaling workers a simple update operation.
+        /// Story: A control-plane-only cluster (no worker pools) generates only core resources.
+        /// Worker pool resources are only created when pools are defined.
         #[tokio::test]
-        async fn control_plane_only_cluster_generates_seven_manifests_with_zero_workers() {
+        async fn control_plane_only_cluster_generates_core_manifests_only() {
             let provider = DockerProvider::new();
             let cluster = sample_cluster("test-cluster", 0);
             let bootstrap = BootstrapInfo::default();
@@ -571,16 +600,16 @@ mod tests {
                 .await
                 .expect("manifest generation should succeed");
 
-            // Always 7 manifests - worker resources just have replicas=0
-            assert_eq!(manifests.len(), 7);
+            // 4 manifests: Cluster, DockerCluster, KubeadmControlPlane, DockerMachineTemplate (CP)
+            // No worker pool resources since no pools are defined
+            assert_eq!(manifests.len(), 4);
 
-            // Verify the MachineDeployment has 0 replicas
-            let deployment = manifests
-                .iter()
-                .find(|m| m.kind == "MachineDeployment")
-                .expect("should have MachineDeployment");
-            let spec = deployment.spec.as_ref().expect("spec should exist");
-            assert_eq!(spec.get("replicas").expect("replicas should exist"), 0);
+            // Verify no MachineDeployment
+            let deployment = manifests.iter().find(|m| m.kind == "MachineDeployment");
+            assert!(
+                deployment.is_none(),
+                "should not have MachineDeployment with no worker pools"
+            );
         }
 
         /// Story: The Cluster resource is the top-level CAPI object that ties
@@ -668,11 +697,11 @@ mod tests {
 
         /// Story: MachineDeployment is always created with replicas=0 during initial
         /// provisioning. After pivot, the cluster's local controller will scale up
-        /// to match spec.nodes.workers. This ensures fast cluster creation.
+        /// to match spec.nodes.worker_pools. This ensures fast cluster creation.
         #[tokio::test]
         async fn worker_deployment_starts_with_zero_replicas() {
             let provider = DockerProvider::new();
-            // Even with spec.nodes.workers=5, MachineDeployment starts at 0
+            // Even with spec.nodes.worker_pools[default].replicas=5, MachineDeployment starts at 0
             let cluster = sample_cluster("my-cluster", 5);
             let bootstrap = BootstrapInfo::default();
 
@@ -687,7 +716,7 @@ mod tests {
                 .expect("should have MachineDeployment manifest");
 
             assert_eq!(deployment.api_version, CAPI_CLUSTER_API_VERSION);
-            assert_eq!(deployment.metadata.name, "my-cluster-md-0");
+            assert_eq!(deployment.metadata.name, "my-cluster-pool-default");
 
             let spec = deployment.spec.as_ref().expect("spec should exist");
             // Always 0 - scaling happens after pivot
@@ -716,7 +745,7 @@ mod tests {
                 .filter(|m| m.kind == "DockerMachineTemplate")
                 .collect();
 
-            // Should have 2: one for control plane, one for workers
+            // Should have 2: one for control plane, one for workers (default pool)
             assert_eq!(machine_templates.len(), 2);
 
             let cp_template = machine_templates
@@ -730,7 +759,7 @@ mod tests {
 
             let worker_template = machine_templates
                 .iter()
-                .find(|m| m.metadata.name == "my-cluster-md-0")
+                .find(|m| m.metadata.name == "my-cluster-pool-default")
                 .expect("should have worker template");
             assert_eq!(
                 worker_template.api_version,
@@ -756,7 +785,7 @@ mod tests {
                 .expect("should have KubeadmConfigTemplate manifest");
 
             assert_eq!(config_template.api_version, CAPI_BOOTSTRAP_API_VERSION);
-            assert_eq!(config_template.metadata.name, "my-cluster-md-0");
+            assert_eq!(config_template.metadata.name, "my-cluster-pool-default");
         }
 
         /// Story: certSANs allow the API server certificate to be valid for
@@ -1111,6 +1140,7 @@ mod tests {
                 .await
                 .expect("manifest generation should succeed");
 
+            // 4 base + 3 per pool (1 pool = default) = 7
             assert_eq!(manifests.len(), 7);
 
             // Verify cluster reference in MachineDeployment
@@ -1254,7 +1284,7 @@ mod tests {
                 .await
                 .expect("manifest generation should succeed");
 
-            // Should be 7 manifests (no ConfigMap)
+            // 4 base + 3 per pool (1 pool = default) = 7 manifests (no ConfigMap)
             assert_eq!(manifests.len(), 7);
 
             // No ConfigMap

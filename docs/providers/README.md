@@ -58,7 +58,9 @@ spec:
       <provider>: {}         # Provider-specific config
   nodes:
     controlPlane: 3          # Number of control plane nodes
-    workers: 5               # Number of worker nodes
+    workerPools:             # Named worker pools
+      default:
+        replicas: 5          # Number of worker nodes in this pool
   endpoints:
     host: "..."              # Optional: auto-discovered for cloud providers
     grpcPort: 50051

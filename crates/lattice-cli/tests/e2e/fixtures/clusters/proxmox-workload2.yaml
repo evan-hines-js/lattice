@@ -37,6 +37,8 @@ spec:
         workerDiskSizeGb: 100
   nodes:
     controlPlane: 1
-    workers: 1
+    workerPools:
+      default:
+        replicas: 1
   environment: e2e-test
   region: proxmox

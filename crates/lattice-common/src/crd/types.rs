@@ -298,21 +298,98 @@ fn is_default_bootstrap(b: &BootstrapProvider) -> bool {
 // Node Configuration
 // =============================================================================
 
+/// Taint effect for node taints
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum TaintEffect {
+    /// Do not schedule new pods on this node
+    NoSchedule,
+    /// Prefer not to schedule new pods on this node
+    PreferNoSchedule,
+    /// Evict existing pods and do not schedule new ones
+    NoExecute,
+}
+
+impl std::fmt::Display for TaintEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSchedule => write!(f, "NoSchedule"),
+            Self::PreferNoSchedule => write!(f, "PreferNoSchedule"),
+            Self::NoExecute => write!(f, "NoExecute"),
+        }
+    }
+}
+
+/// Node taint specification
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct NodeTaint {
+    /// Taint key
+    pub key: String,
+
+    /// Taint value (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+
+    /// Taint effect
+    pub effect: TaintEffect,
+}
+
+/// Worker pool specification for named worker pools
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerPoolSpec {
+    /// Human-readable display name for the pool
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+
+    /// Number of worker nodes in this pool
+    pub replicas: u32,
+
+    /// Node class/size for this pool (provider-specific: instance type, flavor, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_class: Option<String>,
+
+    /// Labels to apply to nodes in this pool
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub labels: std::collections::BTreeMap<String, String>,
+
+    /// Taints to apply to nodes in this pool
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taints: Vec<NodeTaint>,
+
+    /// Minimum number of nodes (for autoscaling, future use)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<u32>,
+
+    /// Maximum number of nodes (for autoscaling, future use)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u32>,
+}
+
 /// Node topology specification
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeSpec {
     /// Number of control plane nodes (must be positive odd number for HA)
     #[serde(rename = "controlPlane")]
     pub control_plane: u32,
 
-    /// Number of worker nodes
-    pub workers: u32,
+    /// Named worker pools with independent scaling
+    ///
+    /// Keys are pool identifiers (e.g., "general", "gpu", "high-memory").
+    /// Each pool can have different sizes, labels, and taints.
+    #[serde(default)]
+    pub worker_pools: std::collections::BTreeMap<String, WorkerPoolSpec>,
 }
 
 impl NodeSpec {
-    /// Returns the total number of nodes
+    /// Returns the total number of worker nodes across all pools
+    pub fn total_workers(&self) -> u32 {
+        self.worker_pools.values().map(|p| p.replicas).sum()
+    }
+
+    /// Returns the total number of nodes (control plane + all workers)
     pub fn total_nodes(&self) -> u32 {
-        self.control_plane + self.workers
+        self.control_plane + self.total_workers()
     }
 
     /// Validates the node specification
@@ -327,8 +404,44 @@ impl NodeSpec {
                 "control plane count must be odd for HA (1, 3, 5, ...)",
             ));
         }
+
+        // Validate pool identifiers
+        for pool_id in self.worker_pools.keys() {
+            if !is_valid_pool_id(pool_id) {
+                return Err(crate::Error::validation(format!(
+                    "invalid worker pool id '{}': must be lowercase alphanumeric with hyphens, starting with a letter",
+                    pool_id
+                )));
+            }
+        }
+
         Ok(())
     }
+}
+
+/// Check if a pool ID is valid (lowercase alphanumeric + hyphens, starts with letter)
+fn is_valid_pool_id(id: &str) -> bool {
+    if id.is_empty() {
+        return false;
+    }
+
+    let mut chars = id.chars();
+
+    // First char must be a letter
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+
+    // Rest must be lowercase alphanumeric or hyphen
+    for c in chars {
+        if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-' {
+            return false;
+        }
+    }
+
+    // Cannot end with hyphen
+    !id.ends_with('-')
 }
 
 // =============================================================================
@@ -672,12 +785,43 @@ mod tests {
     mod node_spec {
         use super::*;
 
+        fn pool(replicas: u32) -> WorkerPoolSpec {
+            WorkerPoolSpec {
+                replicas,
+                ..Default::default()
+            }
+        }
+
         #[test]
-        fn test_total_nodes() {
+        fn test_total_nodes_single_pool() {
             let spec = NodeSpec {
                 control_plane: 1,
-                workers: 2,
+                worker_pools: std::collections::BTreeMap::from([("default".to_string(), pool(2))]),
             };
+            assert_eq!(spec.total_workers(), 2);
+            assert_eq!(spec.total_nodes(), 3);
+        }
+
+        #[test]
+        fn test_total_nodes_multiple_pools() {
+            let spec = NodeSpec {
+                control_plane: 1,
+                worker_pools: std::collections::BTreeMap::from([
+                    ("general".to_string(), pool(3)),
+                    ("gpu".to_string(), pool(2)),
+                ]),
+            };
+            assert_eq!(spec.total_workers(), 5);
+            assert_eq!(spec.total_nodes(), 6);
+        }
+
+        #[test]
+        fn test_total_nodes_no_pools() {
+            let spec = NodeSpec {
+                control_plane: 3,
+                worker_pools: std::collections::BTreeMap::new(),
+            };
+            assert_eq!(spec.total_workers(), 0);
             assert_eq!(spec.total_nodes(), 3);
         }
 
@@ -685,7 +829,7 @@ mod tests {
         fn test_validate_single_control_plane() {
             let spec = NodeSpec {
                 control_plane: 1,
-                workers: 0,
+                worker_pools: std::collections::BTreeMap::new(),
             };
             assert!(spec.validate().is_ok());
         }
@@ -694,13 +838,13 @@ mod tests {
         fn test_validate_ha_control_plane() {
             let spec = NodeSpec {
                 control_plane: 3,
-                workers: 2,
+                worker_pools: std::collections::BTreeMap::from([("default".to_string(), pool(2))]),
             };
             assert!(spec.validate().is_ok());
 
             let spec = NodeSpec {
                 control_plane: 5,
-                workers: 2,
+                worker_pools: std::collections::BTreeMap::from([("default".to_string(), pool(2))]),
             };
             assert!(spec.validate().is_ok());
         }
@@ -709,7 +853,7 @@ mod tests {
         fn test_validate_zero_control_plane_fails() {
             let spec = NodeSpec {
                 control_plane: 0,
-                workers: 2,
+                worker_pools: std::collections::BTreeMap::from([("default".to_string(), pool(2))]),
             };
             let result = spec.validate();
             assert!(result.is_err());
@@ -720,11 +864,116 @@ mod tests {
         fn test_validate_even_control_plane_fails() {
             let spec = NodeSpec {
                 control_plane: 2,
-                workers: 2,
+                worker_pools: std::collections::BTreeMap::from([("default".to_string(), pool(2))]),
             };
             let result = spec.validate();
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("odd"));
+        }
+
+        #[test]
+        fn test_validate_pool_id_valid() {
+            let spec = NodeSpec {
+                control_plane: 1,
+                worker_pools: std::collections::BTreeMap::from([
+                    ("general-purpose-pool".to_string(), pool(2)),
+                    ("gpu2".to_string(), pool(1)),
+                ]),
+            };
+            assert!(spec.validate().is_ok());
+        }
+
+        #[test]
+        fn test_validate_pool_id_invalid_uppercase() {
+            let spec = NodeSpec {
+                control_plane: 1,
+                worker_pools: std::collections::BTreeMap::from([("GPU".to_string(), pool(2))]),
+            };
+            let result = spec.validate();
+            assert!(result.is_err());
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid worker pool id"));
+        }
+
+        #[test]
+        fn test_validate_pool_id_invalid_starts_with_number() {
+            let spec = NodeSpec {
+                control_plane: 1,
+                worker_pools: std::collections::BTreeMap::from([("2gpu".to_string(), pool(2))]),
+            };
+            let result = spec.validate();
+            assert!(result.is_err());
+        }
+    }
+
+    mod worker_pool_spec {
+        use super::*;
+
+        #[test]
+        fn test_default() {
+            let pool = WorkerPoolSpec::default();
+            assert_eq!(pool.replicas, 0);
+            assert!(pool.display_name.is_none());
+            assert!(pool.node_class.is_none());
+            assert!(pool.labels.is_empty());
+            assert!(pool.taints.is_empty());
+        }
+
+        #[test]
+        fn test_serde_roundtrip() {
+            let pool = WorkerPoolSpec {
+                display_name: Some("GPU Workers".to_string()),
+                replicas: 3,
+                node_class: Some("gpu-large".to_string()),
+                labels: std::collections::BTreeMap::from([(
+                    "nvidia.com/gpu".to_string(),
+                    "true".to_string(),
+                )]),
+                taints: vec![NodeTaint {
+                    key: "nvidia.com/gpu".to_string(),
+                    value: None,
+                    effect: TaintEffect::NoSchedule,
+                }],
+                min: Some(1),
+                max: Some(10),
+            };
+            let json =
+                serde_json::to_string(&pool).expect("WorkerPoolSpec serialization should succeed");
+            let parsed: WorkerPoolSpec =
+                serde_json::from_str(&json).expect("WorkerPoolSpec deserialization should succeed");
+            assert_eq!(pool, parsed);
+        }
+    }
+
+    mod taint_effect {
+        use super::*;
+
+        #[test]
+        fn test_display() {
+            assert_eq!(TaintEffect::NoSchedule.to_string(), "NoSchedule");
+            assert_eq!(
+                TaintEffect::PreferNoSchedule.to_string(),
+                "PreferNoSchedule"
+            );
+            assert_eq!(TaintEffect::NoExecute.to_string(), "NoExecute");
+        }
+
+        #[test]
+        fn test_serde_roundtrip() {
+            let effects = [
+                TaintEffect::NoSchedule,
+                TaintEffect::PreferNoSchedule,
+                TaintEffect::NoExecute,
+            ];
+            for effect in effects {
+                let json = serde_json::to_string(&effect)
+                    .expect("TaintEffect serialization should succeed");
+                let parsed: TaintEffect = serde_json::from_str(&json)
+                    .expect("TaintEffect deserialization should succeed");
+                assert_eq!(effect, parsed);
+            }
         }
     }
 

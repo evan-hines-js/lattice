@@ -8,7 +8,7 @@ mod providers;
 mod service;
 mod types;
 
-pub use cluster::{LatticeCluster, LatticeClusterSpec, LatticeClusterStatus};
+pub use cluster::{LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, WorkerPoolStatus};
 pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,
@@ -25,6 +25,6 @@ pub use service::{
 pub use types::{
     AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig,
     EndpointsSpec, Ipv4PoolConfig, Ipv6PoolConfig, KubernetesSpec, NetworkPool, NetworkingSpec,
-    NodeSpec, OpenStackConfig, ProviderConfig, ProviderSpec, ProviderType, ProxmoxConfig,
-    SecretRef, ServiceRef, ServiceSpec, WorkloadSpec,
+    NodeSpec, NodeTaint, OpenStackConfig, ProviderConfig, ProviderSpec, ProviderType,
+    ProxmoxConfig, SecretRef, ServiceRef, ServiceSpec, TaintEffect, WorkerPoolSpec, WorkloadSpec,
 };
