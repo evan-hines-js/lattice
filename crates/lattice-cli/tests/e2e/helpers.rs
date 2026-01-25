@@ -259,39 +259,45 @@ pub fn extract_docker_cluster_kubeconfig(
         }
     }
 
-    // Write initial kubeconfig
-    std::fs::write(output_path, &kubeconfig)
-        .map_err(|e| format!("Failed to write kubeconfig to {}: {}", output_path, e))?;
-
     // Find the load balancer port mapping and patch the kubeconfig for localhost access
     let lb_container = format!("{}-lb", cluster_name);
     let port_output = run_cmd_allow_fail("docker", &["port", &lb_container, "6443/tcp"]);
 
-    if !port_output.trim().is_empty() {
+    let final_kubeconfig = if !port_output.trim().is_empty() {
         let parts: Vec<&str> = port_output.trim().split(':').collect();
         if parts.len() == 2 {
             let localhost_endpoint = format!("https://127.0.0.1:{}", parts[1]);
             info!("Patching kubeconfig server to {}", localhost_endpoint);
-            let patched = kubeconfig
-                .lines()
-                .map(|line| {
-                    if line.trim().starts_with("server:") {
-                        format!("  server: {}", localhost_endpoint)
-                    } else {
-                        line.to_string()
+
+            // Use proper YAML parsing to preserve structure
+            let mut config: serde_yaml::Value = serde_yaml::from_str(&kubeconfig)
+                .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
+
+            if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+                for cluster in clusters {
+                    if let Some(cluster_data) = cluster.get_mut("cluster") {
+                        if let Some(server) = cluster_data.get_mut("server") {
+                            *server = serde_yaml::Value::String(localhost_endpoint.clone());
+                        }
                     }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            std::fs::write(output_path, &patched)
-                .map_err(|e| format!("Failed to write patched kubeconfig: {}", e))?;
+                }
+            }
+
+            serde_yaml::to_string(&config)
+                .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))?
+        } else {
+            kubeconfig
         }
     } else {
         info!(
             "Warning: Could not find load balancer port mapping for {}",
             lb_container
         );
-    }
+        kubeconfig
+    };
+
+    std::fs::write(output_path, &final_kubeconfig)
+        .map_err(|e| format!("Failed to write kubeconfig to {}: {}", output_path, e))?;
 
     Ok(())
 }
@@ -750,17 +756,23 @@ pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
     }
 
     let localhost_endpoint = format!("https://127.0.0.1:{}", parts[1]);
-    let patched = kubeconfig
-        .lines()
-        .map(|line| {
-            if line.trim().starts_with("server:") {
-                format!("  server: {}", localhost_endpoint)
-            } else {
-                line.to_string()
+
+    // Use proper YAML parsing to preserve structure
+    let mut config: serde_yaml::Value = serde_yaml::from_str(&kubeconfig)
+        .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
+
+    if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+        for cluster in clusters {
+            if let Some(cluster_data) = cluster.get_mut("cluster") {
+                if let Some(server) = cluster_data.get_mut("server") {
+                    *server = serde_yaml::Value::String(localhost_endpoint.clone());
+                }
             }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+        }
+    }
+
+    let patched = serde_yaml::to_string(&config)
+        .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))?;
 
     let patched_path = format!("/tmp/{}-kubeconfig-local", cluster_name);
     std::fs::write(&patched_path, &patched)
