@@ -84,11 +84,7 @@ fn cluster_role() -> ClusterRole {
                     "persistentvolumes".to_string(),
                     "namespaces".to_string(),
                 ]),
-                verbs: vec![
-                    "get".to_string(),
-                    "list".to_string(),
-                    "watch".to_string(),
-                ],
+                verbs: vec!["get".to_string(), "list".to_string(), "watch".to_string()],
                 ..Default::default()
             },
             // Node management
@@ -110,22 +106,14 @@ fn cluster_role() -> ClusterRole {
                     "replicasets".to_string(),
                     "statefulsets".to_string(),
                 ]),
-                verbs: vec![
-                    "get".to_string(),
-                    "list".to_string(),
-                    "watch".to_string(),
-                ],
+                verbs: vec!["get".to_string(), "list".to_string(), "watch".to_string()],
                 ..Default::default()
             },
             // PDB
             PolicyRule {
                 api_groups: Some(vec!["policy".to_string()]),
                 resources: Some(vec!["poddisruptionbudgets".to_string()]),
-                verbs: vec![
-                    "get".to_string(),
-                    "list".to_string(),
-                    "watch".to_string(),
-                ],
+                verbs: vec!["get".to_string(), "list".to_string(), "watch".to_string()],
                 ..Default::default()
             },
             // Events
@@ -208,7 +196,10 @@ fn deployment(capi_namespace: &str) -> Deployment {
                         command: Some(vec![
                             "/cluster-autoscaler".to_string(),
                             "--cloud-provider=clusterapi".to_string(),
-                            format!("--node-group-auto-discovery=clusterapi:namespace={}", capi_namespace),
+                            format!(
+                                "--node-group-auto-discovery=clusterapi:namespace={}",
+                                capi_namespace
+                            ),
                             "--scale-down-delay-after-add=5m".to_string(),
                             "--scale-down-unneeded-time=5m".to_string(),
                             "--skip-nodes-with-local-storage=false".to_string(),
@@ -219,9 +210,10 @@ fn deployment(capi_namespace: &str) -> Deployment {
                                 ("cpu".to_string(), Quantity("100m".to_string())),
                                 ("memory".to_string(), Quantity("300Mi".to_string())),
                             ])),
-                            limits: Some(BTreeMap::from([
-                                ("memory".to_string(), Quantity("600Mi".to_string())),
-                            ])),
+                            limits: Some(BTreeMap::from([(
+                                "memory".to_string(),
+                                Quantity("600Mi".to_string()),
+                            )])),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -280,7 +272,10 @@ mod tests {
         let rules = role.rules.unwrap();
 
         let capi_rule = rules.iter().find(|r| {
-            r.api_groups.as_ref().map(|g| g.contains(&"cluster.x-k8s.io".to_string())).unwrap_or(false)
+            r.api_groups
+                .as_ref()
+                .map(|g| g.contains(&"cluster.x-k8s.io".to_string()))
+                .unwrap_or(false)
         });
 
         assert!(capi_rule.is_some());

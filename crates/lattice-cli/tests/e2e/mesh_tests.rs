@@ -114,7 +114,7 @@ fn generate_test_script(source_name: &str, targets: Vec<TestTarget>) -> String {
         .map(|(i, t)| {
             format!(
                 r#"
-    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 10 --max-time 15 {url} 2>/dev/null || echo "000")"#,
+    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5 {url} 2>/dev/null || echo "000")"#,
                 i = i,
                 url = t.url
             )
@@ -177,7 +177,7 @@ fi
 # Test {url} with 3 samples
 SUCCESS_COUNT=0
 for SAMPLE in 1 2 3; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 10 --max-time 15 {url} 2>/dev/null || echo "000")
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5 {url} 2>/dev/null || echo "000")
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     fi
@@ -759,21 +759,24 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
             let allowed_pattern = format!("{}: ALLOWED", target);
             let blocked_pattern = format!("{}: BLOCKED", target);
 
-            // Find the LAST occurrence to get the most recent test result
-            let last_allowed = logs.rfind(&allowed_pattern);
-            let last_blocked = logs.rfind(&blocked_pattern);
+            // Check for ANY occurrence (handles partial logs from in-progress runs)
+            let has_allowed = logs.contains(&allowed_pattern);
+            let has_blocked = logs.contains(&blocked_pattern);
 
-            let actual_str = match (last_allowed, last_blocked) {
-                (Some(a), Some(b)) => {
-                    if a > b {
+            let actual_str = match (has_allowed, has_blocked) {
+                (true, true) => {
+                    // Both found - use the LAST occurrence to get most recent result
+                    let last_allowed = logs.rfind(&allowed_pattern).unwrap();
+                    let last_blocked = logs.rfind(&blocked_pattern).unwrap();
+                    if last_allowed > last_blocked {
                         "ALLOWED"
                     } else {
                         "BLOCKED"
                     }
                 }
-                (Some(_), None) => "ALLOWED",
-                (None, Some(_)) => "BLOCKED",
-                (None, None) => "UNKNOWN",
+                (true, false) => "ALLOWED",
+                (false, true) => "BLOCKED",
+                (false, false) => "UNKNOWN",
             };
 
             let result_ok = actual_str == expected_str;
@@ -1641,20 +1644,22 @@ async fn verify_random_mesh_traffic(
             if src != source {
                 continue;
             }
-            // Find the LAST occurrence of ALLOWED or BLOCKED (most recent test result)
+            // Find ANY occurrence of ALLOWED or BLOCKED (accept results from any test run)
             let allowed_pattern = format!("{}->{}:ALLOWED", src, tgt);
             let blocked_pattern = format!("{}->{}:BLOCKED", src, tgt);
-            let last_allowed = logs.rfind(&allowed_pattern);
-            let last_blocked = logs.rfind(&blocked_pattern);
+            let has_allowed = logs.contains(&allowed_pattern);
+            let has_blocked = logs.contains(&blocked_pattern);
 
-            match (last_allowed, last_blocked) {
-                (Some(a), Some(b)) => {
-                    // Both found - use the one that appears LAST in the logs
-                    *actual = Some(a > b);
+            match (has_allowed, has_blocked) {
+                (true, true) => {
+                    // Both found - use the LAST occurrence to get most recent result
+                    let last_allowed = logs.rfind(&allowed_pattern).unwrap();
+                    let last_blocked = logs.rfind(&blocked_pattern).unwrap();
+                    *actual = Some(last_allowed > last_blocked);
                 }
-                (Some(_), None) => *actual = Some(true),
-                (None, Some(_)) => *actual = Some(false),
-                (None, None) => {} // No result found
+                (true, false) => *actual = Some(true),
+                (false, true) => *actual = Some(false),
+                (false, false) => {} // No result found
             }
         }
     }

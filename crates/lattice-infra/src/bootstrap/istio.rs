@@ -14,15 +14,16 @@ use super::charts_dir;
 pub struct IstioConfig {
     /// Istio version (pinned to Lattice release)
     pub version: &'static str,
+    /// Cluster name for trust domain (lattice.{cluster}.local)
+    pub cluster_name: String,
 }
 
-impl Default for IstioConfig {
-    /// Creates config with version from compile-time environment variable.
-    /// Cannot use #[derive(Default)] because &'static str defaults to "" not env!().
-    #[allow(clippy::derivable_impls)]
-    fn default() -> Self {
+impl IstioConfig {
+    /// Create a new config with the given cluster name
+    pub fn new(cluster_name: impl Into<String>) -> Self {
         Self {
             version: env!("ISTIO_VERSION"),
+            cluster_name: cluster_name.into(),
         }
     }
 }
@@ -34,15 +35,10 @@ pub struct IstioReconciler {
 }
 
 impl IstioReconciler {
-    /// Create with default config
-    pub fn new() -> Self {
-        Self::with_config(IstioConfig::default())
-    }
-
-    /// Create with custom config
-    pub fn with_config(config: IstioConfig) -> Self {
+    /// Create with the given cluster name
+    pub fn new(cluster_name: impl Into<String>) -> Self {
         Self {
-            config,
+            config: IstioConfig::new(cluster_name),
             manifests: OnceCell::new(),
         }
     }
@@ -233,6 +229,13 @@ spec:
                 "istio-system",
                 "--set",
                 "profile=ambient",
+                // Configure trust domain to match Lattice SPIFFE identity format
+                // Each cluster gets its own trust domain: lattice.{cluster}.local
+                "--set",
+                &format!(
+                    "meshConfig.trustDomain=lattice.{}.local",
+                    config.cluster_name
+                ),
                 "--set",
                 "pilot.resources.requests.cpu=100m",
                 "--set",
@@ -279,12 +282,6 @@ spec:
     }
 }
 
-impl Default for IstioReconciler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Parse YAML string into individual documents
 fn parse_yaml_documents(yaml_str: &str) -> Vec<String> {
     super::split_yaml_documents(yaml_str)
@@ -295,9 +292,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
-        let config = IstioConfig::default();
+    fn test_config_with_cluster_name() {
+        let config = IstioConfig::new("test-cluster");
         assert_eq!(config.version, env!("ISTIO_VERSION"));
+        assert_eq!(config.cluster_name, "test-cluster");
     }
 
     #[test]
@@ -309,14 +307,14 @@ mod tests {
 
     #[test]
     fn test_reconciler_version() {
-        let reconciler = IstioReconciler::new();
+        let reconciler = IstioReconciler::new("test-cluster");
         assert_eq!(reconciler.version(), env!("ISTIO_VERSION"));
     }
 
     #[tokio::test]
     async fn test_manifest_rendering() {
         // Only runs if helm is available with istio repo
-        let reconciler = IstioReconciler::new();
+        let reconciler = IstioReconciler::new("test-cluster");
         if let Ok(manifests) = reconciler.manifests().await {
             // Should have rendered some manifests
             assert!(!manifests.is_empty());

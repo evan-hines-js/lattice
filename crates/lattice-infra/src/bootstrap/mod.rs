@@ -29,6 +29,8 @@ pub struct InfrastructureConfig {
     pub provider: ProviderType,
     /// Bootstrap mechanism (kubeadm or rke2)
     pub bootstrap: BootstrapProvider,
+    /// Cluster name for trust domain (lattice.{cluster}.local)
+    pub cluster_name: String,
     /// Skip Cilium policies (true for kind/bootstrap clusters without Cilium)
     pub skip_cilium_policies: bool,
 }
@@ -38,11 +40,15 @@ pub struct InfrastructureConfig {
 /// Used by both operator startup and full cluster bootstrap.
 /// This is an async function to avoid blocking the tokio runtime during
 /// helm template execution.
-pub async fn generate_core(skip_cilium_policies: bool) -> Vec<String> {
+///
+/// # Arguments
+/// * `cluster_name` - Cluster name for trust domain (lattice.{cluster}.local)
+/// * `skip_cilium_policies` - Skip Cilium policies (true for kind/bootstrap clusters)
+pub async fn generate_core(cluster_name: &str, skip_cilium_policies: bool) -> Vec<String> {
     let mut manifests = Vec::new();
 
     // Istio ambient
-    manifests.extend(generate_istio(skip_cilium_policies).await);
+    manifests.extend(generate_istio(cluster_name, skip_cilium_policies).await);
 
     // Gateway API CRDs (required for Istio Gateway and waypoints)
     if let Ok(gw_api) = generate_gateway_api_crds() {
@@ -80,7 +86,7 @@ pub async fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     }
 
     // Core infrastructure (Istio, Gateway API)
-    manifests.extend(generate_core(config.skip_cilium_policies).await);
+    manifests.extend(generate_core(&config.cluster_name, config.skip_cilium_policies).await);
 
     info!(
         total = manifests.len(),
@@ -166,10 +172,14 @@ pub async fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String
 ///
 /// This is an async function to avoid blocking the tokio runtime during
 /// helm template execution.
-pub async fn generate_istio(skip_cilium_policies: bool) -> Vec<String> {
+///
+/// # Arguments
+/// * `cluster_name` - Cluster name for trust domain (lattice.{cluster}.local)
+/// * `skip_cilium_policies` - Skip Cilium policies (true for kind/bootstrap clusters)
+pub async fn generate_istio(cluster_name: &str, skip_cilium_policies: bool) -> Vec<String> {
     let mut manifests = vec![namespace_yaml("istio-system")];
 
-    let reconciler = IstioReconciler::new();
+    let reconciler = IstioReconciler::new(cluster_name);
     if let Ok(istio) = reconciler.manifests().await {
         manifests.extend(istio.iter().cloned());
     }

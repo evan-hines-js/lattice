@@ -270,7 +270,8 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
     if is_bootstrap_cluster {
         // Bootstrap cluster (KIND): Use generate_core() + clusterctl init
         // This is a temporary cluster that doesn't need full self-management infra
-        let manifests = bootstrap::generate_core(true).await;
+        // Use "bootstrap" as the cluster name for the trust domain
+        let manifests = bootstrap::generate_core("bootstrap", true).await;
         tracing::info!(count = manifests.len(), "applying core infrastructure");
         apply_manifests(client, &manifests).await?;
 
@@ -282,23 +283,30 @@ async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
         let clusters: kube::Api<LatticeCluster> = kube::Api::all(client.clone());
         let list = clusters.list(&ListParams::default()).await?;
 
-        let (provider, bootstrap) = if let Some(cluster) = list.items.first() {
+        let (provider, bootstrap, cluster_name) = if let Some(cluster) = list.items.first() {
             let p = cluster.spec.provider.provider_type();
             let b = cluster.spec.provider.kubernetes.bootstrap.clone();
-            tracing::info!(provider = ?p, bootstrap = ?b, "read config from LatticeCluster CRD");
-            (p, b)
+            let name = cluster
+                .metadata
+                .name
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            tracing::info!(provider = ?p, bootstrap = ?b, cluster = %name, "read config from LatticeCluster CRD");
+            (p, b, name)
         } else {
             // No LatticeCluster yet - use defaults (shouldn't happen on real clusters)
             tracing::warn!("no LatticeCluster found, using defaults");
             (
                 ProviderType::Docker,
                 lattice_operator::crd::BootstrapProvider::Kubeadm,
+                "default".to_string(),
             )
         };
 
         let config = InfrastructureConfig {
             provider,
             bootstrap,
+            cluster_name,
             skip_cilium_policies: false,
         };
 
@@ -955,13 +963,12 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     };
 
     // Create service context for service controllers
-    // Use lattice.local as the trust domain, with cluster name in the SPIFFE identity path
+    // Trust domain is derived from cluster name: lattice.{cluster}.local
     let cluster_name_for_service = self_cluster_name
         .clone()
         .unwrap_or_else(|| "default".to_string());
     let service_ctx = Arc::new(ServiceContext::from_client(
         client.clone(),
-        "lattice.local",
         cluster_name_for_service,
         provider_type,
     ));
