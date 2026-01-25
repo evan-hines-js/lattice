@@ -16,14 +16,15 @@ Services in one cluster can depend on services in other clusters. This design en
 ```
                     ┌─────────────────┐
                     │  Root Cluster   │
-                    │  (Catalog: B,C) │
+                    │ (Full Catalog)  │◄── Has ALL services from entire hierarchy
                     └────────┬────────┘
                              │
               ┌──────────────┴──────────────┐
               │                             │
      ┌────────▼────────┐          ┌────────▼────────┐
      │   Cluster B     │          │   Cluster C     │
-     │ (Catalog: B1,B2)│          │ (Catalog: C1)   │
+     │ (Catalog: B,B1, │          │ (Catalog: C,C1) │
+     │  B2 + subtree)  │          │                 │
      └────────┬────────┘          └────────┬────────┘
               │                             │
       ┌───────┴───────┐                     │
@@ -34,47 +35,68 @@ Services in one cluster can depend on services in other clusters. This design en
 └───────────┘  └───────────┘         └───────────┘
 ```
 
-Each cluster maintains a **ServiceCatalog** containing services announced by its direct children. Queries that can't be resolved locally are forwarded to the parent.
+**Key principle**: Announcements propagate UP to root (full catalog at each level). Route notifications fan DOWN to target clusters.
+
+Each cluster maintains a **ServiceCatalog** containing all services from its subtree. Announcements bubble up automatically so the root has visibility of all services.
 
 ## Data Flow
 
-### 1. Service Announcement (child → parent)
+### 1. Service Announcement (UP - child → root)
 
-When a LatticeService is created/updated/deleted, the agent announces it to the parent cell:
-
-```
-Child Agent ──ServiceAnnouncement──► Parent Cell
-                                         │
-                                         ▼
-                                   ServiceCatalog
-```
-
-Announcements propagate up automatically - when a parent's catalog changes, it announces the aggregate to its parent.
-
-### 2. Service Query (recursive up the tree)
-
-When a service has an Unknown dependency, the agent queries the parent:
+When a LatticeService is created/updated/deleted, the agent announces it to the parent, which forwards it to its parent, all the way to root:
 
 ```
-Child: "Where is service 'api' in namespace 'default'?"
+┌───────────┐    announce     ┌───────────┐    announce     ┌───────────┐
+│ Cluster C1│ ──────────────► │ Cluster C │ ──────────────► │   Root    │
+│ (db)      │                 │           │                 │           │
+└───────────┘                 └───────────┘                 └───────────┘
+                                    │                             │
+                                    ▼                             ▼
+                              ServiceCatalog                ServiceCatalog
+                              (has: db)                     (has: db, api, web, ...)
+```
+
+Every node in the path stores the announcement. Root has the complete catalog.
+
+### 2. Service Query (UP - requester → root)
+
+When a service has an Unknown dependency, the agent queries up the tree:
+
+```
+Cluster B1 (web needs api):
     │
-    ▼
-Parent: Check local catalog
+    ▼ query("api", requester="web")
+Cluster B: not found locally, forward up
     │
-    ├─► Found locally → Return endpoints + validate bilateral
+    ▼ query("api", requester="web")
+Root: found! api is in Cluster B2
     │
-    └─► Not found → Forward query to own parent (recursive)
-                         │
-                         ▼
-                    Eventually reaches a node that has it
-                         │
-                         ▼
-                    Response flows back down
+    ▼ validate bilateral, return response
+Response flows back down to B1
 ```
 
-### 3. Bilateral Agreement Validation
+### 3. Route Notification (DOWN - root → target)
 
-The node that owns the service info validates the bilateral agreement:
+When a cross-cluster dependency is approved, the target cluster needs to know so it can expose the service via Gateway API:
+
+```
+Root receives query: "B1/web wants B2/api"
+    │
+    ├─► Validate bilateral ✓
+    │
+    ├─► Send RouteNotification DOWN to Cluster B2:
+    │   "Cluster B1 will call your service 'api' from cluster B1"
+    │
+    └─► Return endpoints to B1
+```
+
+The target cluster (B2) creates:
+- Gateway API HTTPRoute to expose the service
+- Istio AuthorizationPolicy allowing the remote caller
+
+### 4. Bilateral Agreement Validation
+
+The node resolving the query (has service in catalog) validates the bilateral agreement:
 
 ```
 Query: { service: "api", requester: "web", requester_cluster: "B1" }
@@ -83,6 +105,7 @@ Catalog lookup: api.allowed_requesters = ["web", "frontend"]
 
 Check: "web" in allowed_requesters?
   → Yes: Return { found: true, access_allowed: true, endpoints: [...] }
+        + Send RouteNotification to target cluster
   → No:  Return { found: true, access_allowed: false }
 ```
 
@@ -115,6 +138,15 @@ message ServiceQueryResponse {
   string error = 5;              // if found=false, why
 }
 
+// Route notification - sent DOWN to target cluster when cross-cluster dependency approved
+message RouteNotification {
+  string target_namespace = 1;   // namespace of the service being called
+  string target_service = 2;     // service being called
+  string caller_cluster = 3;     // cluster that will call this service
+  string caller_service = 4;     // service that will call this
+  bool revoked = 5;              // true = remove the route (dependency removed)
+}
+
 // Extend existing messages:
 
 message AgentMessage {
@@ -130,6 +162,7 @@ message CellCommand {
     // ... existing ...
     ServiceQueryResponse service_query_response = 10;
     ServiceAnnouncement service_announcement = 11; // forwarded from children
+    RouteNotification route_notification = 12;     // tells cluster to expose service
   }
 }
 ```
@@ -140,6 +173,7 @@ message CellCommand {
 
 ```rust
 use dashmap::DashMap;
+use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct ServiceInfo {
@@ -153,11 +187,18 @@ pub struct ServiceInfo {
 pub struct ServiceCatalog {
     // Key: (namespace, name) - we track which cluster owns it
     services: DashMap<(String, String), ServiceInfo>,
+
+    // Track which clusters are in each direct child's subtree
+    // Key: direct child name, Value: all clusters in that subtree
+    subtree_clusters: DashMap<String, HashSet<String>>,
 }
 
 impl ServiceCatalog {
     pub fn new() -> Self {
-        Self { services: DashMap::new() }
+        Self {
+            services: DashMap::new(),
+            subtree_clusters: DashMap::new(),
+        }
     }
 
     pub fn upsert(&self, announcement: ServiceAnnouncement) {
@@ -165,8 +206,29 @@ impl ServiceCatalog {
         if announcement.deleted {
             self.services.remove(&key);
         } else {
+            // Track which subtree this cluster belongs to
+            self.track_cluster(&announcement.cluster);
             self.services.insert(key, ServiceInfo::from(announcement));
         }
+    }
+
+    fn track_cluster(&self, cluster: &str) {
+        // Called when we receive an announcement - cluster is now known
+        // The parent will track this in the appropriate subtree when forwarding
+    }
+
+    pub fn register_subtree_cluster(&self, direct_child: &str, cluster: &str) {
+        self.subtree_clusters
+            .entry(direct_child.to_string())
+            .or_default()
+            .insert(cluster.to_string());
+    }
+
+    pub fn cluster_in_subtree(&self, target: &str, direct_child: &str) -> bool {
+        self.subtree_clusters
+            .get(direct_child)
+            .map(|set| set.contains(target))
+            .unwrap_or(false)
     }
 
     pub fn query(&self, query: &ServiceQuery) -> Option<ServiceQueryResponse> {
@@ -201,28 +263,34 @@ impl CellServer {
                 // Store in local catalog
                 self.catalog.upsert(ann.clone());
 
-                // If we have a parent, forward the announcement up
+                // Forward announcement UP to parent (propagates to root)
                 if let Some(parent) = &self.parent_client {
                     parent.announce(ann).await;
                 }
             }
 
             Some(Payload::ServiceQuery(query)) => {
-                let response = self.resolve_service_query(query).await;
+                let response = self.resolve_service_query(&query).await;
+
+                // If access was granted, notify the target cluster
+                if response.found && response.access_allowed {
+                    self.send_route_notification(&query, &response).await;
+                }
+
                 self.send_to_agent(cluster_name, CellCommand::ServiceQueryResponse(response));
             }
         }
     }
 
-    async fn resolve_service_query(&self, query: ServiceQuery) -> ServiceQueryResponse {
+    async fn resolve_service_query(&self, query: &ServiceQuery) -> ServiceQueryResponse {
         // Check local catalog first
-        if let Some(response) = self.catalog.query(&query) {
+        if let Some(response) = self.catalog.query(query) {
             return response;
         }
 
         // Not found locally - forward to parent if we have one
         if let Some(parent) = &self.parent_client {
-            return parent.query(query).await;
+            return parent.query(query.clone()).await;
         }
 
         // No parent, service not found
@@ -232,6 +300,39 @@ impl CellServer {
             owner_cluster: String::new(),
             endpoints: vec![],
             error: "service not found in hierarchy".into(),
+        }
+    }
+
+    // Send route notification DOWN to the target cluster
+    async fn send_route_notification(&self, query: &ServiceQuery, response: &ServiceQueryResponse) {
+        let notification = RouteNotification {
+            target_namespace: query.namespace.clone(),
+            target_service: query.name.clone(),
+            caller_cluster: query.requester_cluster.clone(),
+            caller_service: query.requester_service.clone(),
+            revoked: false,
+        };
+
+        // Route notification to the cluster that owns the service
+        // This may need to traverse DOWN the tree to reach the target
+        self.route_to_cluster(&response.owner_cluster, CellCommand::RouteNotification(notification)).await;
+    }
+
+    // Route a command down to a specific cluster
+    async fn route_to_cluster(&self, target_cluster: &str, cmd: CellCommand) {
+        // Check if target is a direct child
+        if let Some(agent) = self.agents.get(target_cluster) {
+            agent.send(cmd).await;
+            return;
+        }
+
+        // Otherwise, find which child subtree contains the target
+        // and forward to that child (it will recursively route down)
+        for (child_name, agent) in self.agents.iter() {
+            if self.catalog.cluster_in_subtree(target_cluster, child_name) {
+                agent.send(cmd).await;
+                return;
+            }
         }
     }
 }
@@ -280,6 +381,97 @@ impl AgentClient {
         }
 
         response
+    }
+
+    // Handle incoming RouteNotification from parent
+    pub async fn handle_route_notification(&self, notification: RouteNotification) {
+        if notification.revoked {
+            // Remove the route
+            self.remove_cross_cluster_route(&notification).await;
+        } else {
+            // Create Gateway API route + AuthorizationPolicy
+            self.create_cross_cluster_route(&notification).await;
+        }
+    }
+
+    async fn create_cross_cluster_route(&self, notification: &RouteNotification) {
+        // 1. Create Gateway API HTTPRoute to expose the service
+        let route = generate_gateway_route(notification);
+        apply_resource(&self.client, &route).await;
+
+        // 2. Create Istio AuthorizationPolicy allowing the remote caller
+        let policy = generate_cross_cluster_auth_policy(notification);
+        apply_resource(&self.client, &policy).await;
+    }
+}
+```
+
+### Gateway Route Generation (target cluster)
+
+```rust
+fn generate_gateway_route(notification: &RouteNotification) -> HTTPRoute {
+    HTTPRoute {
+        metadata: ObjectMeta {
+            name: Some(format!(
+                "{}-{}-from-{}",
+                notification.target_namespace,
+                notification.target_service,
+                notification.caller_cluster
+            )),
+            namespace: Some(notification.target_namespace.clone()),
+            ..Default::default()
+        },
+        spec: HTTPRouteSpec {
+            parent_refs: vec![ParentReference {
+                name: "mesh-gateway".to_string(),
+                ..Default::default()
+            }],
+            hostnames: vec![format!(
+                "{}.{}.global",
+                notification.target_service,
+                notification.target_namespace
+            )],
+            rules: vec![HTTPRouteRule {
+                backend_refs: vec![BackendRef {
+                    name: notification.target_service.clone(),
+                    port: Some(80),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        },
+    }
+}
+
+fn generate_cross_cluster_auth_policy(notification: &RouteNotification) -> AuthorizationPolicy {
+    AuthorizationPolicy {
+        metadata: ObjectMeta {
+            name: Some(format!(
+                "{}-allow-{}",
+                notification.target_service,
+                notification.caller_cluster
+            )),
+            namespace: Some(notification.target_namespace.clone()),
+            ..Default::default()
+        },
+        spec: AuthorizationPolicySpec {
+            selector: LabelSelector {
+                match_labels: btreemap! {
+                    "app".to_string() => notification.target_service.clone(),
+                },
+            },
+            rules: vec![AuthRule {
+                from: vec![Source {
+                    // Trust the caller's SPIFFE identity from remote cluster
+                    principals: vec![format!(
+                        "cluster.local/ns/{}/sa/{}",
+                        notification.caller_cluster,
+                        notification.caller_service
+                    )],
+                }],
+                ..Default::default()
+            }],
+        },
     }
 }
 ```
@@ -368,28 +560,62 @@ fn generate_service_entry(dep: &Dependency, remote: &ServiceQueryResponse) -> Se
 | Failure | Behavior |
 |---------|----------|
 | Parent disconnected | Use cached data, queries return cached or "unavailable" |
-| Service deleted | Parent sends announcement with deleted=true, cache cleared |
+| Service deleted | Announcement with deleted=true propagates up; RouteNotification with revoked=true propagates down |
 | Circular dependency | Detected at query time, return error |
 | Root has no answer | Return "not found in hierarchy" |
+| RouteNotification lost | Target cluster won't have route; caller retries query on connection failure |
+| Target cluster offline | RouteNotification queued; route created when cluster reconnects |
+
+## Summary: Bidirectional Flow
+
+```
+                         ANNOUNCEMENTS (UP)
+                              ▲
+                              │
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│  Cluster A  │    │    Root     │    │  Cluster B  │
+│  (caller)   │◄───│  (catalog)  │───►│  (target)   │
+└─────────────┘    └─────────────┘    └─────────────┘
+       │                  │                  ▲
+       │                  │                  │
+       └──── QUERY ──────►│                  │
+                          │                  │
+       ◄─── RESPONSE ─────┘                  │
+                          │                  │
+                          └─ ROUTE NOTIFY ───┘
+                                   │
+                              (DOWN)
+```
+
+1. **UP**: Announcements bubble up so root knows all services
+2. **QUERY**: Caller asks "where is X?" - travels up until found
+3. **RESPONSE**: Endpoints + bilateral validation result flows back
+4. **DOWN**: RouteNotification tells target cluster to expose the service
 
 ## Testing
 
 E2E test flow:
 1. Create Cluster A with service "web" that depends on "api"
 2. Create Cluster B with service "api" that allows "web"
-3. Verify "web" can discover "api" via parent
-4. Verify ServiceEntry created in Cluster A
-5. Delete "api", verify cache cleared and "web" status updates
+3. Verify "web" can discover "api" via parent (ServiceQuery → ServiceQueryResponse)
+4. Verify ServiceEntry created in Cluster A (caller side)
+5. Verify HTTPRoute + AuthorizationPolicy created in Cluster B (target side, via RouteNotification)
+6. Delete "api", verify:
+   - Cache cleared in Cluster A
+   - Route removed in Cluster B (RouteNotification with revoked=true)
+   - "web" status updates to Unknown
 
 ## File Changes
 
 | File | Change |
 |------|--------|
-| `crates/lattice-proto/proto/agent.proto` | Add messages (~30 lines) |
-| `crates/lattice-cluster/src/catalog.rs` | New file (~100 lines) |
-| `crates/lattice-cluster/src/agent/server.rs` | Handle announcements/queries (~50 lines) |
-| `crates/lattice-cluster/src/agent/client.rs` | Announce/query methods (~50 lines) |
+| `crates/lattice-proto/proto/agent.proto` | Add messages (~40 lines) |
+| `crates/lattice-cluster/src/catalog.rs` | New file (~120 lines) |
+| `crates/lattice-cluster/src/agent/server.rs` | Handle announcements/queries/routing (~80 lines) |
+| `crates/lattice-cluster/src/agent/client.rs` | Announce/query/route handling (~80 lines) |
 | `crates/lattice-service/src/controller.rs` | Resolve unknown deps (~30 lines) |
 | `crates/lattice-service/src/resources/service_entry.rs` | Generate ServiceEntry (~50 lines) |
+| `crates/lattice-service/src/resources/gateway_route.rs` | Generate HTTPRoute (~40 lines) |
+| `crates/lattice-service/src/resources/cross_cluster_policy.rs` | Generate AuthorizationPolicy (~40 lines) |
 
-**Total: ~300 lines of new code**
+**Total: ~480 lines of new code**
