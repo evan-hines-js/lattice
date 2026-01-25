@@ -21,7 +21,7 @@ use mockall::automock;
 use lattice_common::clusterctl::unpause_capi_cluster;
 use lattice_common::crd::{
     BootstrapProvider, ClusterPhase, Condition, ConditionStatus, LatticeCluster,
-    LatticeClusterStatus,
+    LatticeClusterStatus, WorkerPoolStatus,
 };
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE};
@@ -1898,8 +1898,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             // Each cluster has its own CAPI namespace
             let capi_namespace = format!("capi-{}", name);
 
-            // Reconcile each worker pool
+            // Reconcile each worker pool and collect status
             let mut total_desired: u32 = 0;
+            let mut pool_statuses = std::collections::BTreeMap::new();
+
             for (pool_id, pool_spec) in &cluster.spec.nodes.worker_pools {
                 total_desired += pool_spec.replicas;
 
@@ -1909,6 +1911,15 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     .get_pool_replicas(&name, pool_id, &capi_namespace)
                     .await
                     .unwrap_or(None);
+
+                // Build pool status
+                let pool_status = WorkerPoolStatus {
+                    desired_replicas: pool_spec.replicas,
+                    current_replicas: current_replicas.unwrap_or(0),
+                    ready_replicas: 0, // Populated below after we count ready nodes
+                    message: None,
+                };
+                pool_statuses.insert(pool_id.clone(), pool_status);
 
                 // Scale MachineDeployment if replicas don't match spec
                 if let Some(replicas) = current_replicas {
@@ -1940,6 +1951,25 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             // Get current ready worker count (actual running nodes across all pools)
             let ready_workers = ctx.kube.get_ready_worker_count().await.unwrap_or(0);
+
+            // For single-pool clusters, set ready_replicas on the pool
+            // (Multi-pool would need per-pool node labels to distinguish)
+            if pool_statuses.len() == 1 {
+                if let Some(pool_status) = pool_statuses.values_mut().next() {
+                    pool_status.ready_replicas = ready_workers;
+                }
+            }
+
+            // Update status with worker pool information (preserves other fields)
+            let current_status = cluster.status.clone().unwrap_or_default();
+            let updated_status = LatticeClusterStatus {
+                worker_pools: pool_statuses,
+                ready_workers: Some(ready_workers),
+                ..current_status
+            };
+            if let Err(e) = ctx.kube.patch_status(&name, &updated_status).await {
+                warn!(error = %e, "Failed to update worker pool status");
+            }
 
             debug!(
                 desired = total_desired,
@@ -2235,13 +2265,26 @@ async fn update_cluster_status(
 
     let condition = Condition::new(condition_type, condition_status, reason, message);
 
-    let mut status = LatticeClusterStatus::with_phase(phase.clone())
-        .message(message)
-        .condition(condition);
+    // Preserve existing status fields (worker_pools, ready_workers, etc.)
+    let current_status = cluster.status.clone().unwrap_or_default();
+    let mut status = LatticeClusterStatus {
+        phase: phase.clone(),
+        message: Some(message.to_string()),
+        conditions: vec![condition],
+        // Preserve persistent fields
+        worker_pools: current_status.worker_pools,
+        ready_workers: current_status.ready_workers,
+        ready_control_plane: current_status.ready_control_plane,
+        endpoint: current_status.endpoint,
+        pivot_complete: current_status.pivot_complete,
+        bootstrap_complete: current_status.bootstrap_complete,
+        unpivot_pending: current_status.unpivot_pending,
+        observed_generation: current_status.observed_generation,
+    };
 
     // Set pivot_complete if requested (persists pivot completion across restarts)
     if set_pivot_complete {
-        status = status.pivot_complete(true);
+        status.pivot_complete = true;
     }
 
     ctx.kube.patch_status(&name, &status).await?;

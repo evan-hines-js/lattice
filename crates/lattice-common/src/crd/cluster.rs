@@ -194,29 +194,6 @@ impl LatticeClusterStatus {
         self
     }
 
-    /// Set pivot_complete and return self for chaining
-    pub fn pivot_complete(mut self, complete: bool) -> Self {
-        self.pivot_complete = complete;
-        self
-    }
-
-    /// Set whether bootstrap has completed
-    pub fn bootstrap_complete(mut self, complete: bool) -> Self {
-        self.bootstrap_complete = complete;
-        self
-    }
-
-    /// Set whether unpivot is pending
-    pub fn unpivot_pending(mut self, pending: bool) -> Self {
-        self.unpivot_pending = pending;
-        self
-    }
-
-    /// Set the observed generation
-    pub fn observed_generation(mut self, generation: i64) -> Self {
-        self.observed_generation = Some(generation);
-        self
-    }
 }
 
 impl LatticeCluster {
