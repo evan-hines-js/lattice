@@ -201,7 +201,7 @@ The E2E test (`pivot_e2e.rs`) validates:
 - Management → workload cluster provisioning and pivot
 - Workload cluster independence (delete parent, verify self-scaling)
 - Service mesh bilateral agreements (exact match verification)
-- Randomized large-scale mesh (50-100 services, 400+ connection tests)
+- Randomized large-scale mesh (20-30 services, 400+ connection tests)
 
 ---
 
