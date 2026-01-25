@@ -1962,7 +1962,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             let mut pool_statuses = std::collections::BTreeMap::new();
 
             for (pool_id, pool_spec) in &cluster.spec.nodes.worker_pools {
-                total_desired += pool_spec.replicas;
+                let autoscaling = pool_spec.is_autoscaling_enabled();
 
                 // Get current MachineDeployment replica count for this pool
                 let current_replicas = ctx
@@ -1971,16 +1971,45 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     .await
                     .unwrap_or(None);
 
-                // Build pool status
-                let pool_status = WorkerPoolStatus {
-                    desired_replicas: pool_spec.replicas,
+                // For total_desired: use current MD replicas when autoscaling (not spec)
+                let effective_desired = if autoscaling {
+                    current_replicas.unwrap_or(pool_spec.min.unwrap_or(0))
+                } else {
+                    pool_spec.replicas
+                };
+                total_desired += effective_desired;
+
+                // Build pool status - always reflect reality from MachineDeployment
+                let mut pool_status = WorkerPoolStatus {
+                    desired_replicas: current_replicas.unwrap_or(0),
                     current_replicas: current_replicas.unwrap_or(0),
                     ready_replicas: 0, // Populated below after we count ready nodes
+                    autoscaling_enabled: autoscaling,
                     message: None,
                 };
+
+                // Warn if replicas is outside [min, max] when autoscaling
+                if autoscaling {
+                    let min = pool_spec.min.unwrap();
+                    let max = pool_spec.max.unwrap();
+                    if pool_spec.replicas < min || pool_spec.replicas > max {
+                        let msg = format!(
+                            "replicas ({}) ignored, autoscaler manages within [{}, {}]",
+                            pool_spec.replicas, min, max
+                        );
+                        warn!(pool = %pool_id, "{}", msg);
+                        pool_status.message = Some(msg);
+                    }
+                }
+
                 pool_statuses.insert(pool_id.clone(), pool_status);
 
-                // Scale MachineDeployment if replicas don't match spec
+                // If autoscaling is enabled, hands-off - trust the autoscaler
+                if autoscaling {
+                    continue;
+                }
+
+                // Static scaling: reconcile replicas to match spec
                 if let Some(replicas) = current_replicas {
                     if replicas != pool_spec.replicas {
                         info!(

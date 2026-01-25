@@ -354,10 +354,14 @@ pub fn pool_resource_suffix(pool_id: &str) -> String {
     format!("pool-{}", pool_id)
 }
 
+/// Autoscaler annotation keys
+const AUTOSCALER_MIN_SIZE: &str = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size";
+const AUTOSCALER_MAX_SIZE: &str = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size";
+
 /// Generate a MachineDeployment manifest for a worker pool
 ///
-/// MachineDeployment is always created with replicas=0 during initial provisioning.
-/// After pivot, the cluster's local controller scales up to match spec.
+/// MachineDeployment is created with replicas=0 during initial provisioning.
+/// After pivot, the cluster's local controller scales up (or autoscaler manages it).
 pub fn generate_machine_deployment_for_pool(
     config: &ClusterConfig,
     infra: &InfrastructureRef,
@@ -382,7 +386,7 @@ pub fn generate_machine_deployment_for_pool(
 
     let spec = serde_json::json!({
         "clusterName": config.name,
-        "replicas": 0,  // ALWAYS 0 - scaling happens after pivot
+        "replicas": 0,  // Always 0 initially - scaling happens after pivot
         "selector": {
             "matchLabels": {}
         },
@@ -406,14 +410,27 @@ pub fn generate_machine_deployment_for_pool(
         }
     });
 
-    CAPIManifest::new(
+    // Build annotations for autoscaler if min/max are set
+    let mut annotations = std::collections::BTreeMap::new();
+    if let (Some(min), Some(max)) = (pool.spec.min, pool.spec.max) {
+        annotations.insert(AUTOSCALER_MIN_SIZE.to_string(), min.to_string());
+        annotations.insert(AUTOSCALER_MAX_SIZE.to_string(), max.to_string());
+    }
+
+    let mut manifest = CAPIManifest::new(
         CAPI_CLUSTER_API_VERSION,
         "MachineDeployment",
         &deployment_name,
         config.namespace,
     )
     .with_labels(config.labels.clone())
-    .with_spec(spec)
+    .with_spec(spec);
+
+    if !annotations.is_empty() {
+        manifest.metadata.annotations = Some(annotations);
+    }
+
+    manifest
 }
 
 /// Generate bootstrap config template for a worker pool
@@ -1434,6 +1451,50 @@ mod tests {
 
             assert_eq!(bootstrap_kind, "RKE2ConfigTemplate");
             assert_eq!(manifest.metadata.name, "test-cluster-pool-default");
+        }
+
+        #[test]
+        fn machine_deployment_has_autoscaler_annotations_when_min_max_set() {
+            use lattice_common::crd::WorkerPoolSpec;
+
+            let config = test_config(BootstrapProvider::Kubeadm);
+            let infra = test_infra();
+            let spec = Box::leak(Box::new(WorkerPoolSpec {
+                replicas: 3,
+                min: Some(1),
+                max: Some(10),
+                ..Default::default()
+            }));
+            let pool = WorkerPoolConfig {
+                pool_id: "autoscaled",
+                spec,
+            };
+
+            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool);
+
+            let annotations = manifest
+                .metadata
+                .annotations
+                .expect("should have annotations when autoscaling enabled");
+            assert_eq!(annotations.get(AUTOSCALER_MIN_SIZE), Some(&"1".to_string()));
+            assert_eq!(
+                annotations.get(AUTOSCALER_MAX_SIZE),
+                Some(&"10".to_string())
+            );
+        }
+
+        #[test]
+        fn machine_deployment_no_autoscaler_annotations_without_min_max() {
+            let config = test_config(BootstrapProvider::Kubeadm);
+            let infra = test_infra();
+            let pool = test_pool(); // No min/max set
+
+            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool);
+
+            assert!(
+                manifest.metadata.annotations.is_none(),
+                "should not have annotations when autoscaling disabled"
+            );
         }
 
         #[test]

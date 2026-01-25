@@ -630,7 +630,12 @@ pub async fn reconcile(
             );
 
             // Compile workloads and policies
-            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain, &ctx.cluster_name, ctx.provider_type);
+            let compiler = ServiceCompiler::new(
+                &ctx.graph,
+                &ctx.trust_domain,
+                &ctx.cluster_name,
+                ctx.provider_type,
+            );
             let compiled = compiler.compile(&service)?;
 
             // Apply compiled resources to the cluster
@@ -670,7 +675,12 @@ pub async fn reconcile(
             // This is necessary because when a new service is added that depends on us,
             // or when a service we depend on changes its allowed callers, we need to
             // update our ingress/egress policies to reflect the new bilateral agreements.
-            let compiler = ServiceCompiler::new(&ctx.graph, &ctx.trust_domain, &ctx.cluster_name, ctx.provider_type);
+            let compiler = ServiceCompiler::new(
+                &ctx.graph,
+                &ctx.trust_domain,
+                &ctx.cluster_name,
+                ctx.provider_type,
+            );
             let compiled = compiler.compile(&service)?;
 
             debug!(
@@ -1401,12 +1411,14 @@ mod tests {
             mock_kube1,
             Arc::clone(&shared_graph),
             "test.local",
+            "test-cluster",
             ProviderType::Docker,
         );
         let ctx2 = ServiceContext::new(
             mock_kube2,
             Arc::clone(&shared_graph),
             "test.local",
+            "test-cluster",
             ProviderType::Docker,
         );
 

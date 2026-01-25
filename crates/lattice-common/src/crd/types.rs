@@ -353,7 +353,7 @@ pub struct WorkerPoolSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
 
-    /// Number of worker nodes in this pool
+    /// Number of worker nodes in this pool (ignored when autoscaling is enabled)
     pub replicas: u32,
 
     /// Node class/size for this pool (provider-specific: instance type, flavor, etc.)
@@ -368,13 +368,41 @@ pub struct WorkerPoolSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub taints: Vec<NodeTaint>,
 
-    /// Minimum number of nodes (for autoscaling, future use)
+    /// Minimum number of nodes for cluster autoscaler.
+    /// When both min and max are set, the cluster autoscaler manages this pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<u32>,
 
-    /// Maximum number of nodes (for autoscaling, future use)
+    /// Maximum number of nodes for cluster autoscaler.
+    /// When both min and max are set, the cluster autoscaler manages this pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<u32>,
+}
+
+impl WorkerPoolSpec {
+    /// Returns true if autoscaling is enabled for this pool (both min and max are set)
+    pub fn is_autoscaling_enabled(&self) -> bool {
+        self.min.is_some() && self.max.is_some()
+    }
+
+    /// Validate autoscaling configuration
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.min, self.max) {
+            (Some(min), Some(max)) => {
+                if min > max {
+                    return Err(format!("min ({}) cannot exceed max ({})", min, max));
+                }
+                if min == 0 {
+                    return Err("scale-from-zero not supported (min must be >= 1)".into());
+                }
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                return Err("min and max must both be set or both unset".into());
+            }
+            (None, None) => {}
+        }
+        Ok(())
+    }
 }
 
 /// Node topology specification
@@ -417,12 +445,18 @@ impl NodeSpec {
             ));
         }
 
-        // Validate pool identifiers
-        for pool_id in self.worker_pools.keys() {
+        // Validate pool identifiers and autoscaling config
+        for (pool_id, pool_spec) in &self.worker_pools {
             if !is_valid_pool_id(pool_id) {
                 return Err(crate::Error::validation(format!(
                     "invalid worker pool id '{}': must be lowercase alphanumeric with hyphens, starting with a letter",
                     pool_id
+                )));
+            }
+            if let Err(e) = pool_spec.validate() {
+                return Err(crate::Error::validation(format!(
+                    "worker pool '{}': {}",
+                    pool_id, e
                 )));
             }
         }
@@ -987,6 +1021,94 @@ mod tests {
             let parsed: WorkerPoolSpec =
                 serde_json::from_str(&json).expect("WorkerPoolSpec deserialization should succeed");
             assert_eq!(pool, parsed);
+        }
+
+        #[test]
+        fn test_autoscaling_enabled() {
+            let pool = WorkerPoolSpec {
+                replicas: 3,
+                min: Some(1),
+                max: Some(10),
+                ..Default::default()
+            };
+            assert!(pool.is_autoscaling_enabled());
+        }
+
+        #[test]
+        fn test_autoscaling_disabled_without_min_max() {
+            let pool = WorkerPoolSpec {
+                replicas: 3,
+                ..Default::default()
+            };
+            assert!(!pool.is_autoscaling_enabled());
+        }
+
+        #[test]
+        fn test_autoscaling_disabled_with_only_min() {
+            let pool = WorkerPoolSpec {
+                replicas: 3,
+                min: Some(1),
+                ..Default::default()
+            };
+            assert!(!pool.is_autoscaling_enabled());
+        }
+
+        #[test]
+        fn test_validate_min_greater_than_max() {
+            let pool = WorkerPoolSpec {
+                replicas: 3,
+                min: Some(10),
+                max: Some(5),
+                ..Default::default()
+            };
+            let result = pool.validate();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("cannot exceed"));
+        }
+
+        #[test]
+        fn test_validate_min_zero() {
+            let pool = WorkerPoolSpec {
+                replicas: 3,
+                min: Some(0),
+                max: Some(10),
+                ..Default::default()
+            };
+            let result = pool.validate();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("scale-from-zero"));
+        }
+
+        #[test]
+        fn test_validate_only_min_set() {
+            let pool = WorkerPoolSpec {
+                replicas: 3,
+                min: Some(1),
+                ..Default::default()
+            };
+            let result = pool.validate();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("both be set"));
+        }
+
+        #[test]
+        fn test_validate_valid_autoscaling() {
+            let pool = WorkerPoolSpec {
+                replicas: 3,
+                min: Some(1),
+                max: Some(10),
+                ..Default::default()
+            };
+            assert!(pool.validate().is_ok());
+        }
+
+        #[test]
+        fn test_validate_static_scaling() {
+            let pool = WorkerPoolSpec {
+                replicas: 3,
+                ..Default::default()
+            };
+            assert!(pool.validate().is_ok());
         }
     }
 

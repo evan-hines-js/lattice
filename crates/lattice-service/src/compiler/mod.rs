@@ -171,7 +171,8 @@ impl<'a> ServiceCompiler<'a> {
         // Add PVCs to workloads
         workloads.pvcs = compiled_volumes.pvcs;
 
-        let policy_compiler = PolicyCompiler::new(self.graph, &self.trust_domain, &self.cluster_name);
+        let policy_compiler =
+            PolicyCompiler::new(self.graph, &self.trust_domain, &self.cluster_name);
         let mut policies = policy_compiler.compile(name, namespace);
 
         // Compile waypoint Gateway for east-west L7 policies (Istio ambient mesh)
@@ -406,7 +407,12 @@ mod tests {
         // Create LatticeService for api
         let service = make_service("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "lattice.local", "prod-cluster", ProviderType::Docker);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "lattice.local",
+            "prod-cluster",
+            ProviderType::Docker,
+        );
         let output = compiler.compile(&service).unwrap();
 
         // Should have workloads (from WorkloadCompiler)
@@ -434,7 +440,12 @@ mod tests {
         // Create LatticeService with staging label
         let service = make_service("my-app", "staging");
 
-        let compiler = ServiceCompiler::new(&graph, "lattice.local", "test-cluster", ProviderType::Docker);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "lattice.local",
+            "test-cluster",
+            ProviderType::Docker,
+        );
         let output = compiler.compile(&service).unwrap();
 
         // Should find service in graph and generate cilium policy
@@ -452,7 +463,12 @@ mod tests {
         // Create LatticeService without env label
         let service = make_service("my-app", "prod-ns");
 
-        let compiler = ServiceCompiler::new(&graph, "lattice.local", "test-cluster", ProviderType::Docker);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "lattice.local",
+            "test-cluster",
+            ProviderType::Docker,
+        );
         let output = compiler.compile(&service).unwrap();
 
         // Should find service using namespace as env
@@ -470,7 +486,12 @@ mod tests {
 
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "lattice.local", "test-cluster", ProviderType::Docker);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "lattice.local",
+            "test-cluster",
+            ProviderType::Docker,
+        );
         let output = compiler.compile(&service).unwrap();
 
         // Should still have workloads
@@ -493,7 +514,12 @@ mod tests {
 
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "lattice.local", "test-cluster", ProviderType::Docker);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "lattice.local",
+            "test-cluster",
+            ProviderType::Docker,
+        );
         let output = compiler.compile(&service).unwrap();
 
         // Deployment + Service + ServiceAccount + CiliumPolicy + WaypointGateway + WaypointAuthPolicy = 6
@@ -508,7 +534,12 @@ mod tests {
     #[test]
     fn story_mesh_default_deny() {
         let graph = ServiceGraph::new();
-        let compiler = ServiceCompiler::new(&graph, "lattice.local", "test-cluster", ProviderType::Docker);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "lattice.local",
+            "test-cluster",
+            ProviderType::Docker,
+        );
 
         let policy = compiler.compile_mesh_default_deny();
 
@@ -528,7 +559,12 @@ mod tests {
         let graph = ServiceGraph::new();
         let service = make_service("my-app", "default");
 
-        let compiler = ServiceCompiler::new(&graph, "lattice.local", "test-cluster", ProviderType::Docker);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "lattice.local",
+            "test-cluster",
+            ProviderType::Docker,
+        );
         let output = compiler.compile(&service).unwrap();
         assert!(!output.is_empty());
     }
@@ -545,7 +581,12 @@ mod tests {
 
         let service = make_service_with_ingress("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "lattice.local", "prod-cluster", ProviderType::Docker);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "lattice.local",
+            "prod-cluster",
+            ProviderType::Docker,
+        );
         let output = compiler.compile(&service).unwrap();
 
         // Should have ingress resources
@@ -584,7 +625,12 @@ mod tests {
 
         let service = make_service("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "lattice.local", "prod-cluster", ProviderType::Docker);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "lattice.local",
+            "prod-cluster",
+            ProviderType::Docker,
+        );
         let output = compiler.compile(&service).unwrap();
 
         // Should NOT have ingress resources
@@ -602,7 +648,12 @@ mod tests {
 
         let service = make_service_with_ingress("api", "prod");
 
-        let compiler = ServiceCompiler::new(&graph, "lattice.local", "prod-cluster", ProviderType::Docker);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "lattice.local",
+            "prod-cluster",
+            ProviderType::Docker,
+        );
         let output = compiler.compile(&service).unwrap();
 
         // Should include: Deployment + Service + ServiceAccount + CiliumPolicy +
