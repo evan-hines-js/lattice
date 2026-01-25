@@ -618,7 +618,7 @@ impl Installer {
             .as_ref()
             .map(|aws| aws.region.clone());
 
-        let cloud_provider = CloudProvider::new(
+        let mut cloud_provider = CloudProvider::new(
             &self.cluster.spec.provider_ref,
             CloudProviderSpec {
                 provider_type,
@@ -630,6 +630,7 @@ impl Installer {
                 labels: Default::default(),
             },
         );
+        cloud_provider.metadata.namespace = Some("lattice-system".to_string());
 
         serde_yaml::to_string(&cloud_provider).map_err(|e| Error::command_failed(e.to_string()))
     }
