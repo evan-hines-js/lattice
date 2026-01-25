@@ -986,6 +986,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         let infra_config = lattice_infra::InfrastructureConfig {
             provider: info.provider,
             bootstrap: info.bootstrap.clone(),
+            cluster_name: info.cluster_id.clone(),
             skip_cilium_policies: false, // Real clusters have Cilium
         };
         let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config).await;
