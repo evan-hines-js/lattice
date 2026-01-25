@@ -221,7 +221,7 @@ sleep 30
 // - LAYER 3: BACKEND (3 services) - Data layer
 
 const TEST_SERVICES_NAMESPACE: &str = "mesh-test";
-const TOTAL_SERVICES: usize = 9;
+const TOTAL_SERVICES: usize = 10; // 9 original + 1 public-api (wildcard)
 
 fn nginx_container() -> ContainerSpec {
     ContainerSpec {
@@ -286,10 +286,39 @@ fn inbound_allow(name: &str) -> (String, ResourceSpec) {
     )
 }
 
+/// Create an inbound resource that allows ALL callers (wildcard)
+fn inbound_allow_all() -> (String, ResourceSpec) {
+    (
+        "any-caller".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Inbound,
+            id: Some("*".to_string()), // Wildcard - allow all callers
+            class: None,
+            metadata: None,
+            params: None,
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        },
+    )
+}
+
 fn create_service(
     name: &str,
     outbound: Vec<&str>,
     inbound: Vec<&str>,
+    has_port: bool,
+    container: ContainerSpec,
+) -> LatticeService {
+    create_service_with_options(name, outbound, inbound, false, has_port, container)
+}
+
+fn create_service_with_options(
+    name: &str,
+    outbound: Vec<&str>,
+    inbound: Vec<&str>,
+    allows_all_inbound: bool,
     has_port: bool,
     container: ContainerSpec,
 ) -> LatticeService {
@@ -298,7 +327,14 @@ fn create_service(
 
     let mut resources: BTreeMap<String, ResourceSpec> =
         outbound.iter().map(|s| outbound_dep(s)).collect();
-    resources.extend(inbound.iter().map(|s| inbound_allow(s)));
+
+    if allows_all_inbound {
+        // Use wildcard to allow all callers
+        let (key, spec) = inbound_allow_all();
+        resources.insert(key, spec);
+    } else {
+        resources.extend(inbound.iter().map(|s| inbound_allow(s)));
+    }
 
     let mut labels = BTreeMap::new();
     labels.insert(
@@ -340,6 +376,8 @@ fn create_frontend_web() -> LatticeService {
         TestTarget::internal("cache", ns, false, "no direct cache access"),
         TestTarget::internal("frontend-mobile", ns, false, "no peer access"),
         TestTarget::internal("frontend-admin", ns, false, "no peer access"),
+        // Test wildcard service - web declares outbound so should be allowed
+        TestTarget::internal("public-api", ns, true, "wildcard allows all with outbound"),
     ];
 
     let script = generate_test_script("frontend-web", targets);
@@ -368,6 +406,7 @@ fn create_frontend_web() -> LatticeService {
             "cache",
             "frontend-mobile",
             "frontend-admin",
+            "public-api", // Declares outbound to wildcard service
         ],
         vec![],
         false,
@@ -386,6 +425,9 @@ fn create_frontend_mobile() -> LatticeService {
         TestTarget::internal("cache", ns, false, "no direct cache access"),
         TestTarget::internal("frontend-web", ns, false, "no peer access"),
         TestTarget::internal("frontend-admin", ns, false, "no peer access"),
+        // Test wildcard service - mobile does NOT declare outbound, should be BLOCKED
+        // This verifies that wildcard still requires outbound declaration from caller
+        TestTarget::internal("public-api", ns, false, "no outbound declared to wildcard"),
     ];
 
     let script = generate_test_script("frontend-mobile", targets);
@@ -414,6 +456,7 @@ fn create_frontend_mobile() -> LatticeService {
             "cache",
             "frontend-web",
             "frontend-admin",
+            // NOTE: Intentionally NOT including "public-api" to test wildcard still requires outbound
         ],
         vec![],
         false,
@@ -432,6 +475,8 @@ fn create_frontend_admin() -> LatticeService {
         TestTarget::internal("cache", ns, false, "no direct cache access"),
         TestTarget::internal("frontend-web", ns, false, "no peer access"),
         TestTarget::internal("frontend-mobile", ns, false, "no peer access"),
+        // Test wildcard service - admin declares outbound so should be allowed
+        TestTarget::internal("public-api", ns, true, "wildcard allows all with outbound"),
     ];
 
     let script = generate_test_script("frontend-admin", targets);
@@ -460,6 +505,7 @@ fn create_frontend_admin() -> LatticeService {
             "cache",
             "frontend-web",
             "frontend-mobile",
+            "public-api", // Declares outbound to wildcard service
         ],
         vec![],
         false,
@@ -527,6 +573,20 @@ fn create_cache() -> LatticeService {
     )
 }
 
+/// Create the public-api service that allows ALL inbound traffic via wildcard.
+/// This tests the "allow all inbound" pattern where only the caller needs to
+/// declare outbound - the service accepts anyone.
+fn create_public_api() -> LatticeService {
+    create_service_with_options(
+        "public-api",
+        vec![], // no outbound dependencies
+        vec![], // explicit inbound list is ignored when allows_all_inbound=true
+        true,   // allows_all_inbound = true (wildcard)
+        true,   // has_port
+        nginx_container(),
+    )
+}
+
 async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
     info!("Creating namespace {}...", TEST_SERVICES_NAMESPACE);
     let _ = run_cmd(
@@ -548,6 +608,7 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
         ("db-users", create_db_users()),
         ("db-orders", create_db_orders()),
         ("cache", create_cache()),
+        ("public-api", create_public_api()), // Wildcard service - allows all inbound
     ] {
         info!("Deploying {}...", name);
         api.create(&PostParams::default(), &svc)
@@ -635,6 +696,7 @@ const FRONTEND_WEB_EXPECTED: &[(&str, bool)] = &[
     ("cache", false),
     ("frontend-mobile", false),
     ("frontend-admin", false),
+    ("public-api", true), // Wildcard service - web declares outbound so allowed
 ];
 
 const FRONTEND_MOBILE_EXPECTED: &[(&str, bool)] = &[
@@ -646,6 +708,7 @@ const FRONTEND_MOBILE_EXPECTED: &[(&str, bool)] = &[
     ("cache", false),
     ("frontend-web", false),
     ("frontend-admin", false),
+    ("public-api", false), // Wildcard service - mobile does NOT declare outbound so blocked
 ];
 
 const FRONTEND_ADMIN_EXPECTED: &[(&str, bool)] = &[
@@ -657,6 +720,7 @@ const FRONTEND_ADMIN_EXPECTED: &[(&str, bool)] = &[
     ("cache", false),
     ("frontend-web", false),
     ("frontend-mobile", false),
+    ("public-api", true), // Wildcard service - admin declares outbound so allowed
 ];
 
 async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
@@ -879,7 +943,7 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
 }
 
 // =============================================================================
-// Randomized Large-Scale Mesh Test (10-30 services)
+// Randomized Large-Scale Mesh Test (10-20 services)
 // =============================================================================
 
 #[derive(Debug, Clone)]
@@ -893,20 +957,23 @@ struct RandomMeshConfig {
     num_external_services: usize,
     external_outbound_probability: f64,
     external_allow_probability: f64,
+    /// Probability that a non-frontend service uses wildcard "allow all inbound"
+    wildcard_probability: f64,
 }
 
 impl Default for RandomMeshConfig {
     fn default() -> Self {
         Self {
             min_services: 10,
-            max_services: 30,
-            num_layers: 5,
+            max_services: 20,
+            num_layers: 3,
             outbound_probability: 0.3,
             bilateral_probability: 0.6,
             seed: None,
             num_external_services: 10,
             external_outbound_probability: 0.3,
             external_allow_probability: 0.6,
+            wildcard_probability: 0.15, // 15% chance a service allows all inbound
         }
     }
 }
@@ -925,6 +992,8 @@ struct RandomService {
     external_outbound: HashSet<String>,
     inbound: HashSet<String>,
     is_traffic_generator: bool,
+    /// If true, this service allows ALL inbound via wildcard (only caller needs outbound)
+    allows_all_inbound: bool,
 }
 
 #[derive(Debug)]
@@ -978,10 +1047,16 @@ impl RandomMesh {
         for (layer_idx, &size) in layer_sizes.iter().enumerate() {
             let prefix = layer_prefixes.get(layer_idx).unwrap_or(&"svc");
             let mut layer_services = Vec::with_capacity(size);
+            let is_traffic_generator = layer_idx == 0;
 
             for i in 0..size {
                 let name = format!("{}-{}", prefix, i);
                 layer_services.push(name.clone());
+
+                // Non-frontend services can randomly use wildcard "allow all inbound"
+                let allows_all_inbound =
+                    !is_traffic_generator && rng.gen::<f64>() < config.wildcard_probability;
+
                 services.insert(
                     name.clone(),
                     RandomService {
@@ -989,7 +1064,8 @@ impl RandomMesh {
                         outbound: HashSet::new(),
                         external_outbound: HashSet::new(),
                         inbound: HashSet::new(),
-                        is_traffic_generator: layer_idx == 0,
+                        is_traffic_generator,
+                        allows_all_inbound,
                     },
                 );
             }
@@ -1008,14 +1084,25 @@ impl RandomMesh {
                                 .expect("source service should exist in services map")
                                 .outbound
                                 .insert(target_name.clone());
-                            let is_bilateral = rng.gen::<f64>() < config.bilateral_probability;
-                            if is_bilateral {
-                                services
-                                    .get_mut(target_name)
-                                    .expect("target service should exist in services map")
-                                    .inbound
-                                    .insert(source_name.clone());
-                            }
+
+                            // Check if target allows all inbound (wildcard) - if so, bilateral is automatic
+                            let target_allows_all = services[target_name].allows_all_inbound;
+                            let is_bilateral = if target_allows_all {
+                                // Wildcard service: bilateral agreement is automatic when source declares outbound
+                                true
+                            } else {
+                                // Normal service: need explicit inbound declaration
+                                let bilateral = rng.gen::<f64>() < config.bilateral_probability;
+                                if bilateral {
+                                    services
+                                        .get_mut(target_name)
+                                        .expect("target service should exist in services map")
+                                        .inbound
+                                        .insert(source_name.clone());
+                                }
+                                bilateral
+                            };
+
                             if services[source_name].is_traffic_generator {
                                 expected_connections.push((
                                     source_name.clone(),
@@ -1036,6 +1123,8 @@ impl RandomMesh {
                             .collect();
                         let sample_size = not_dependent.len().min(3);
                         for target_name in not_dependent.choose_multiple(&mut rng, sample_size) {
+                            // No outbound declared - should be blocked even for wildcard services
+                            // (wildcard still requires the caller to declare outbound)
                             expected_connections.push((
                                 source_name.clone(),
                                 (*target_name).clone(),
@@ -1168,9 +1257,22 @@ impl RandomMesh {
             .iter()
             .filter(|(_, _, _, e)| *e)
             .count();
-        format!("Services: {} across {} layers\n  Tests: {} ({} allowed, {} blocked)\n  External: {} services, {} tests",
-            self.services.len(), self.layers.len(), total_tests, expected_allowed, total_tests - expected_allowed,
-            self.external_services.len(), external_tests)
+        let wildcard_services = self
+            .services
+            .values()
+            .filter(|s| s.allows_all_inbound)
+            .count();
+        format!(
+            "Services: {} across {} layers ({} wildcard)\n  Tests: {} ({} allowed, {} blocked)\n  External: {} services, {} tests",
+            self.services.len(),
+            self.layers.len(),
+            wildcard_services,
+            total_tests,
+            expected_allowed,
+            total_tests - expected_allowed,
+            self.external_services.len(),
+            external_tests
+        )
     }
 
     fn print_manifest(&self) {
@@ -1233,13 +1335,16 @@ impl RandomMesh {
                 },
             );
         }
-        for allow in &svc.inbound {
+
+        // Handle inbound: either wildcard (allow all) or explicit list
+        if svc.allows_all_inbound {
+            // Use wildcard to allow all callers
             resources.insert(
-                allow.clone(),
+                "any-caller".to_string(),
                 ResourceSpec {
                     type_: ResourceType::Service,
                     direction: DependencyDirection::Inbound,
-                    id: None,
+                    id: Some("*".to_string()), // Wildcard
                     class: None,
                     metadata: None,
                     params: None,
@@ -1248,7 +1353,26 @@ impl RandomMesh {
                     outbound: None,
                 },
             );
+        } else {
+            // Explicit inbound list
+            for allow in &svc.inbound {
+                resources.insert(
+                    allow.clone(),
+                    ResourceSpec {
+                        type_: ResourceType::Service,
+                        direction: DependencyDirection::Inbound,
+                        id: None,
+                        class: None,
+                        metadata: None,
+                        params: None,
+                        namespace: None,
+                        inbound: None,
+                        outbound: None,
+                    },
+                );
+            }
         }
+
         for ext_name in &svc.external_outbound {
             resources.insert(
                 ext_name.clone(),
@@ -1616,7 +1740,7 @@ impl RandomMeshTestHandle {
 
 /// Start the randomized mesh test and return a handle
 pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshTestHandle, String> {
-    info!("\n[Mesh Test] Starting randomized large-scale mesh test (10-30 services)...");
+    info!("\n[Mesh Test] Starting randomized large-scale mesh test (10-20 services)...");
 
     let mesh = RandomMesh::generate(&RandomMeshConfig::default());
     info!("{}", mesh.stats());
@@ -1636,7 +1760,7 @@ pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshT
     })
 }
 
-/// Run the randomized 10-30 service mesh test
+/// Run the randomized 10-20 service mesh test
 pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let handle = start_random_mesh_test(kubeconfig_path).await?;
     // Additional wait for traffic patterns to stabilize

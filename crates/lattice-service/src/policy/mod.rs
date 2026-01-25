@@ -1833,4 +1833,231 @@ mod tests {
             .iter()
             .any(|p| p.starts_with("lattice.local/cluster/custom-cluster/")));
     }
+
+    // =========================================================================
+    // Story: Wildcard "Allow All Inbound" (One-Sided Policy Declaration)
+    // =========================================================================
+
+    #[test]
+    fn story_wildcard_inbound_generates_policy_for_any_caller() {
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        // api allows ALL inbound via wildcard - only needs callers to declare outbound
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service(ns, "api", &api_spec);
+
+        // gateway declares dependency on api (only outbound needed)
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "gateway", &gateway_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
+        let output = compiler.compile("api", ns);
+
+        // Should have AuthorizationPolicy for api allowing gateway
+        assert!(
+            !output.authorization_policies.is_empty(),
+            "wildcard service should generate auth policy"
+        );
+        let auth = &output.authorization_policies[0];
+        assert_eq!(auth.metadata.name, "allow-to-api");
+        assert!(auth.spec.rules[0].from[0]
+            .source
+            .principals
+            .iter()
+            .any(|p| p.contains("gateway")));
+    }
+
+    #[test]
+    fn story_wildcard_inbound_multiple_callers() {
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        // api allows ALL inbound via wildcard
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service(ns, "api", &api_spec);
+
+        // Multiple services declare dependency on api
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "gateway", &gateway_spec);
+
+        let frontend_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "frontend", &frontend_spec);
+
+        let worker_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "worker", &worker_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
+        let output = compiler.compile("api", ns);
+
+        // Should have all three callers in the policy
+        assert!(!output.authorization_policies.is_empty());
+        let principals = &output.authorization_policies[0].spec.rules[0].from[0]
+            .source
+            .principals;
+        assert_eq!(principals.len(), 3);
+        assert!(principals.iter().any(|p| p.contains("gateway")));
+        assert!(principals.iter().any(|p| p.contains("frontend")));
+        assert!(principals.iter().any(|p| p.contains("worker")));
+    }
+
+    #[test]
+    fn story_wildcard_still_requires_outbound_declaration() {
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        // api allows ALL inbound via wildcard
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service(ns, "api", &api_spec);
+
+        // frontend exists but does NOT declare dependency
+        let frontend_spec = make_service_spec(vec![], vec![]);
+        graph.put_service(ns, "frontend", &frontend_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
+        let output = compiler.compile("api", ns);
+
+        // No auth policy since no one declared outbound
+        assert!(
+            output.authorization_policies.is_empty(),
+            "wildcard without callers should not generate auth policy"
+        );
+
+        // Cilium policy still generated (always generated for local services)
+        assert!(!output.cilium_policies.is_empty());
+    }
+
+    #[test]
+    fn story_wildcard_cilium_policy_includes_all_callers() {
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        // api allows ALL inbound via wildcard
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service(ns, "api", &api_spec);
+
+        // Two services declare dependency
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "gateway", &gateway_spec);
+
+        let frontend_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "frontend", &frontend_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
+        let output = compiler.compile("api", ns);
+
+        // Cilium policy should have ingress rules for both callers
+        assert!(!output.cilium_policies.is_empty());
+        let cilium = &output.cilium_policies[0];
+
+        // Should have ingress rules
+        assert!(
+            !cilium.spec.ingress.is_empty(),
+            "should have ingress rules for callers"
+        );
+
+        // Check that we have endpoints for both callers
+        let ingress = &cilium.spec.ingress[0];
+        assert!(
+            !ingress.from_endpoints.is_empty(),
+            "should have from_endpoints"
+        );
+
+        // Should have 2 callers (plus potentially waypoint)
+        let caller_labels: Vec<_> = ingress
+            .from_endpoints
+            .iter()
+            .filter_map(|ep| ep.match_labels.get("k8s:app.kubernetes.io/name"))
+            .collect();
+        assert!(caller_labels.contains(&&"gateway".to_string()));
+        assert!(caller_labels.contains(&&"frontend".to_string()));
+    }
+
+    #[test]
+    fn story_external_service_wildcard_generates_policy() {
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        // External service with wildcard (allows any caller)
+        let ext_spec = make_external_spec(vec!["*"]);
+        graph.put_external_service(ns, "stripe", &ext_spec);
+
+        // api declares dependency on stripe
+        let api_spec = make_service_spec(vec!["stripe"], vec![]);
+        graph.put_service(ns, "api", &api_spec);
+
+        // worker also declares dependency on stripe
+        let worker_spec = make_service_spec(vec!["stripe"], vec![]);
+        graph.put_service(ns, "worker", &worker_spec);
+
+        // Compile for api - should have egress to stripe
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
+        let api_output = compiler.compile("api", ns);
+
+        // api should have Cilium egress to stripe
+        assert!(!api_output.cilium_policies.is_empty());
+        let api_cilium = &api_output.cilium_policies[0];
+        assert!(
+            !api_cilium.spec.egress.is_empty(),
+            "api should have egress rules"
+        );
+
+        // worker should also have Cilium egress to stripe
+        let worker_output = compiler.compile("worker", ns);
+        assert!(!worker_output.cilium_policies.is_empty());
+        let worker_cilium = &worker_output.cilium_policies[0];
+        assert!(
+            !worker_cilium.spec.egress.is_empty(),
+            "worker should have egress rules"
+        );
+    }
+
+    #[test]
+    fn story_mixed_wildcard_and_explicit() {
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        // api allows ALL inbound via wildcard
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service(ns, "api", &api_spec);
+
+        // db allows only api explicitly (no wildcard)
+        let db_spec = make_service_spec(vec![], vec!["api"]);
+        graph.put_service(ns, "db", &db_spec);
+
+        // api depends on db
+        let api_with_deps = make_service_spec(vec!["db"], vec!["*"]);
+        graph.put_service(ns, "api", &api_with_deps);
+
+        // gateway depends on api
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "gateway", &gateway_spec);
+
+        // frontend depends on both api and db
+        let frontend_spec = make_service_spec(vec!["api", "db"], vec![]);
+        graph.put_service(ns, "frontend", &frontend_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "lattice.local", "prod-cluster");
+
+        // api (wildcard) should accept both gateway and frontend
+        let api_output = compiler.compile("api", ns);
+        assert!(!api_output.authorization_policies.is_empty());
+        let api_principals = &api_output.authorization_policies[0].spec.rules[0].from[0]
+            .source
+            .principals;
+        assert!(api_principals.iter().any(|p| p.contains("gateway")));
+        assert!(api_principals.iter().any(|p| p.contains("frontend")));
+
+        // db (explicit) should only accept api, not frontend
+        let db_output = compiler.compile("db", ns);
+        assert!(!db_output.authorization_policies.is_empty());
+        let db_principals = &db_output.authorization_policies[0].spec.rules[0].from[0]
+            .source
+            .principals;
+        assert!(db_principals.iter().any(|p| p.contains("api")));
+        assert!(
+            !db_principals.iter().any(|p| p.contains("frontend")),
+            "db should not allow frontend (no explicit allow)"
+        );
+    }
 }

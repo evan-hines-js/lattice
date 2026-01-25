@@ -92,7 +92,7 @@ impl LatticeClusterSpec {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerPoolStatus {
-    /// Desired number of replicas (from spec)
+    /// Desired number of replicas (from MachineDeployment, not spec when autoscaling)
     #[serde(default)]
     pub desired_replicas: u32,
 
@@ -103,6 +103,10 @@ pub struct WorkerPoolStatus {
     /// Number of ready nodes in this pool
     #[serde(default)]
     pub ready_replicas: u32,
+
+    /// Whether cluster autoscaler manages this pool
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autoscaling_enabled: bool,
 
     /// Human-readable message about pool state
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -59,10 +59,15 @@ impl ServiceNode {
         let caller_refs = spec.allowed_callers(namespace);
         let allows_all = caller_refs.iter().any(|r| r.name == "*");
 
-        let allowed_callers: HashSet<QualifiedName> = caller_refs
-            .into_iter()
-            .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
-            .collect();
+        // When allows_all is true, the explicit caller list is irrelevant
+        let allowed_callers: HashSet<QualifiedName> = if allows_all {
+            HashSet::new()
+        } else {
+            caller_refs
+                .into_iter()
+                .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
+                .collect()
+        };
 
         let dependencies: Vec<QualifiedName> = spec
             .dependencies(namespace)
@@ -96,13 +101,16 @@ impl ServiceNode {
     ) -> Self {
         let allows_all = spec.allowed_requesters.iter().any(|c| c == "*");
 
-        // External services specify callers by name only - they're assumed to be in the same namespace
-        // unless using namespace/name syntax (future enhancement)
-        let allowed_callers: HashSet<QualifiedName> = spec
-            .allowed_requesters
-            .iter()
-            .map(|caller| (namespace.to_string(), caller.clone()))
-            .collect();
+        // When allows_all is true, the explicit caller list is irrelevant.
+        // External services specify callers by name only - assumed same namespace.
+        let allowed_callers: HashSet<QualifiedName> = if allows_all {
+            HashSet::new()
+        } else {
+            spec.allowed_requesters
+                .iter()
+                .map(|caller| (namespace.to_string(), caller.clone()))
+                .collect()
+        };
 
         Self {
             namespace: namespace.to_string(),
@@ -721,5 +729,243 @@ mod tests {
         graph.delete_service("prod", "api");
 
         assert!(graph.get_service("prod", "api").is_none());
+    }
+
+    // =========================================================================
+    // Wildcard "Allow All Inbound" Tests
+    // =========================================================================
+
+    #[test]
+    fn test_wildcard_allows_all_sets_flag() {
+        let graph = ServiceGraph::new();
+
+        // Service with wildcard inbound (allows all callers)
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        let node = graph
+            .get_service("prod", "api")
+            .expect("service should exist");
+        assert!(node.allows_all, "allows_all should be true for wildcard");
+    }
+
+    #[test]
+    fn test_wildcard_allows_any_caller() {
+        let graph = ServiceGraph::new();
+
+        // api allows all inbound via wildcard
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        let node = graph.get_service("prod", "api").unwrap();
+
+        // Should allow any caller
+        assert!(node.allows("prod", "gateway"));
+        assert!(node.allows("prod", "frontend"));
+        assert!(node.allows("other-ns", "random-service"));
+        assert!(node.allows("any", "thing"));
+    }
+
+    #[test]
+    fn test_wildcard_bilateral_agreement_single_caller() {
+        let graph = ServiceGraph::new();
+
+        // api allows all inbound via wildcard
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        // gateway depends on api (only needs outbound declaration)
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service("prod", "gateway", &gateway_spec);
+
+        // Should have active edge gateway -> api
+        let outbound = graph.get_active_outbound_edges("prod", "gateway");
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].callee_name, "api");
+
+        // api should see inbound from gateway
+        let inbound = graph.get_active_inbound_edges("prod", "api");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].caller_name, "gateway");
+    }
+
+    #[test]
+    fn test_wildcard_bilateral_agreement_multiple_callers() {
+        let graph = ServiceGraph::new();
+
+        // api allows all inbound via wildcard
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        // Multiple services depend on api
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service("prod", "gateway", &gateway_spec);
+
+        let frontend_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service("prod", "frontend", &frontend_spec);
+
+        let worker_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service("prod", "worker", &worker_spec);
+
+        // api should see inbound from all three
+        let inbound = graph.get_active_inbound_edges("prod", "api");
+        assert_eq!(inbound.len(), 3);
+
+        let caller_names: Vec<_> = inbound.iter().map(|e| e.caller_name.as_str()).collect();
+        assert!(caller_names.contains(&"gateway"));
+        assert!(caller_names.contains(&"frontend"));
+        assert!(caller_names.contains(&"worker"));
+    }
+
+    #[test]
+    fn test_wildcard_cross_namespace() {
+        use crate::crd::{
+            ContainerSpec, DependencyDirection, DeploySpec, PortSpec, ReplicaSpec, ResourceSpec,
+            ResourceType, ServicePortsSpec,
+        };
+
+        let graph = ServiceGraph::new();
+
+        // api in "backend" allows all inbound via wildcard
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service("backend", "api", &api_spec);
+
+        // frontend in different namespace depends on backend/api
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "api".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Outbound,
+                id: None,
+                class: None,
+                metadata: None,
+                params: None,
+                namespace: Some("backend".to_string()),
+                inbound: None,
+                outbound: None,
+            },
+        );
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "web:latest".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                resources: None,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+                security: None,
+            },
+        );
+
+        let frontend_spec = LatticeServiceSpec {
+            containers,
+            resources,
+            service: Some(ServicePortsSpec {
+                ports: BTreeMap::from([(
+                    "http".to_string(),
+                    PortSpec {
+                        port: 80,
+                        target_port: None,
+                        protocol: None,
+                    },
+                )]),
+            }),
+            replicas: ReplicaSpec::default(),
+            deploy: DeploySpec::default(),
+            ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
+        };
+
+        graph.put_service("frontend", "web", &frontend_spec);
+
+        // web should have active outbound to api (cross-namespace)
+        let outbound = graph.get_active_outbound_edges("frontend", "web");
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].callee_namespace, "backend");
+        assert_eq!(outbound[0].callee_name, "api");
+
+        // api should see inbound from web (cross-namespace)
+        let inbound = graph.get_active_inbound_edges("backend", "api");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].caller_namespace, "frontend");
+        assert_eq!(inbound[0].caller_name, "web");
+    }
+
+    #[test]
+    fn test_no_wildcard_requires_explicit_allow() {
+        let graph = ServiceGraph::new();
+
+        // api allows only gateway explicitly (no wildcard)
+        let api_spec = make_service_spec(vec![], vec!["gateway"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        let node = graph.get_service("prod", "api").unwrap();
+        assert!(
+            !node.allows_all,
+            "allows_all should be false without wildcard"
+        );
+
+        // gateway is allowed
+        assert!(node.allows("prod", "gateway"));
+        // frontend is NOT allowed
+        assert!(!node.allows("prod", "frontend"));
+    }
+
+    #[test]
+    fn test_wildcard_still_requires_outbound_declaration() {
+        let graph = ServiceGraph::new();
+
+        // api allows all inbound via wildcard
+        let api_spec = make_service_spec(vec![], vec!["*"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        // frontend exists but does NOT declare dependency on api
+        let frontend_spec = make_service_spec(vec![], vec![]);
+        graph.put_service("prod", "frontend", &frontend_spec);
+
+        // No active edges - bilateral agreement requires outbound declaration
+        let inbound = graph.get_active_inbound_edges("prod", "api");
+        assert!(
+            inbound.is_empty(),
+            "should have no inbound without outbound declaration"
+        );
+    }
+
+    #[test]
+    fn test_external_service_wildcard() {
+        let graph = ServiceGraph::new();
+
+        // External service with wildcard
+        let ext_spec = make_external_spec(vec!["*"]);
+        graph.put_external_service("prod", "stripe", &ext_spec);
+
+        let node = graph.get_service("prod", "stripe").unwrap();
+        assert!(node.allows_all, "external service should have allows_all");
+
+        // Any service declaring outbound should get through
+        let api_spec = make_service_spec(vec!["stripe"], vec![]);
+        graph.put_service("prod", "api", &api_spec);
+
+        let worker_spec = make_service_spec(vec!["stripe"], vec![]);
+        graph.put_service("prod", "worker", &worker_spec);
+
+        let outbound_api = graph.get_active_outbound_edges("prod", "api");
+        assert_eq!(outbound_api.len(), 1);
+        assert_eq!(outbound_api[0].callee_name, "stripe");
+
+        let outbound_worker = graph.get_active_outbound_edges("prod", "worker");
+        assert_eq!(outbound_worker.len(), 1);
+        assert_eq!(outbound_worker[0].callee_name, "stripe");
     }
 }
