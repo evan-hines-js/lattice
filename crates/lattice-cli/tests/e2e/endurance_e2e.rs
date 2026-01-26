@@ -284,14 +284,10 @@ async fn run_endurance_test() -> Result<(), String> {
     info!("[THREADS] Spawning cluster lifecycle threads...");
 
     let state1 = state.clone();
-    let workload_thread = tokio::spawn(async move {
-        workload_lifecycle_loop(state1).await
-    });
+    let workload_thread = tokio::spawn(async move { workload_lifecycle_loop(state1).await });
 
     let state2 = state.clone();
-    let workload2_thread = tokio::spawn(async move {
-        workload2_lifecycle_loop(state2).await
-    });
+    let workload2_thread = tokio::spawn(async move { workload2_lifecycle_loop(state2).await });
 
     // Spawn a status reporter thread
     let state3 = state.clone();
@@ -385,7 +381,9 @@ async fn workload_lifecycle_loop(state: Arc<EnduranceState>) -> Result<(), Strin
 
         // Add to chaos targets and make kubeconfig available to workload2
         if chaos_enabled() {
-            state.chaos_targets.add(WORKLOAD_CLUSTER_NAME, &kubeconfig_path);
+            state
+                .chaos_targets
+                .add(WORKLOAD_CLUSTER_NAME, &kubeconfig_path);
         }
         *state.workload_kubeconfig.write() = Some(kubeconfig_path.clone());
 
@@ -429,13 +427,19 @@ async fn workload2_lifecycle_loop(state: Arc<EnduranceState>) -> Result<(), Stri
         };
 
         let iteration = state.workload2_iterations.fetch_add(1, Ordering::Relaxed) + 1;
-        info!("[WORKLOAD2 #{}] Starting lifecycle (parent: workload)...", iteration);
+        info!(
+            "[WORKLOAD2 #{}] Starting lifecycle (parent: workload)...",
+            iteration
+        );
 
         // Try to create - if parent disappeared, just retry
         let workload_client = match client_from_kubeconfig(&parent_kubeconfig).await {
             Ok(c) => c,
             Err(e) => {
-                info!("[WORKLOAD2 #{}] Parent unavailable ({}), retrying...", iteration, e);
+                info!(
+                    "[WORKLOAD2 #{}] Parent unavailable ({}), retrying...",
+                    iteration, e
+                );
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 continue;
             }
@@ -453,7 +457,10 @@ async fn workload2_lifecycle_loop(state: Arc<EnduranceState>) -> Result<(), Stri
         if let Err(e) = create_result {
             // Parent might have been deleted - just retry
             if e.contains("refused") || e.contains("unreachable") {
-                info!("[WORKLOAD2 #{}] Parent gone during create ({}), retrying...", iteration, e);
+                info!(
+                    "[WORKLOAD2 #{}] Parent gone during create ({}), retrying...",
+                    iteration, e
+                );
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 continue;
             }
@@ -481,7 +488,10 @@ async fn workload2_lifecycle_loop(state: Arc<EnduranceState>) -> Result<(), Stri
         if let Err(e) = provision_result {
             // Check if it's a connectivity issue (parent deleted)
             if e.contains("refused") || e.contains("unreachable") || e.contains("no such host") {
-                info!("[WORKLOAD2 #{}] Parent gone during provision ({}), retrying...", iteration, e);
+                info!(
+                    "[WORKLOAD2 #{}] Parent gone during provision ({}), retrying...",
+                    iteration, e
+                );
                 // Try to clean up
                 let _ = force_delete_docker_cluster(WORKLOAD2_CLUSTER_NAME);
                 tokio::time::sleep(Duration::from_secs(10)).await;
@@ -497,7 +507,10 @@ async fn workload2_lifecycle_loop(state: Arc<EnduranceState>) -> Result<(), Stri
                 &state.workload2_config.bootstrap,
                 &kubeconfig_path,
             ) {
-                info!("[WORKLOAD2 #{}] Failed to extract kubeconfig ({}), cleaning up...", iteration, e);
+                info!(
+                    "[WORKLOAD2 #{}] Failed to extract kubeconfig ({}), cleaning up...",
+                    iteration, e
+                );
                 let _ = force_delete_docker_cluster(WORKLOAD2_CLUSTER_NAME);
                 continue;
             }
@@ -510,7 +523,10 @@ async fn workload2_lifecycle_loop(state: Arc<EnduranceState>) -> Result<(), Stri
         .await;
 
         if let Err(e) = verify_result {
-            info!("[WORKLOAD2 #{}] Verify failed ({}), cleaning up...", iteration, e);
+            info!(
+                "[WORKLOAD2 #{}] Verify failed ({}), cleaning up...",
+                iteration, e
+            );
             let _ = force_delete_docker_cluster(WORKLOAD2_CLUSTER_NAME);
             continue;
         }
@@ -534,7 +550,10 @@ async fn workload2_lifecycle_loop(state: Arc<EnduranceState>) -> Result<(), Stri
         if let Err(e) = delete_result {
             // Parent might be gone - force cleanup
             if e.contains("refused") || e.contains("unreachable") {
-                info!("[WORKLOAD2 #{}] Parent gone during delete ({}), force cleanup...", iteration, e);
+                info!(
+                    "[WORKLOAD2 #{}] Parent gone during delete ({}), force cleanup...",
+                    iteration, e
+                );
                 let _ = force_delete_docker_cluster(WORKLOAD2_CLUSTER_NAME);
                 continue;
             }
@@ -544,4 +563,3 @@ async fn workload2_lifecycle_loop(state: Arc<EnduranceState>) -> Result<(), Stri
         info!("[WORKLOAD2 #{}] Deleted!", iteration);
     }
 }
-

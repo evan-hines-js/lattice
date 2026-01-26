@@ -32,8 +32,8 @@ use super::{
     generate_control_plane, generate_machine_deployment_for_pool, pool_resource_suffix,
     CAPIManifest, ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, WorkerPoolConfig,
 };
-use crate::Result;
 use lattice_common::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
+use lattice_common::{Error, Result};
 
 /// Default namespace for CAPI resources
 const DEFAULT_NAMESPACE: &str = "default";
@@ -79,7 +79,7 @@ impl DockerProvider {
             .metadata
             .name
             .as_deref()
-            .ok_or_else(|| crate::Error::validation("cluster must have a name"))
+            .ok_or_else(|| Error::validation("cluster must have a name"))
     }
 
     /// Get the namespace for resources
@@ -398,16 +398,14 @@ impl Provider for DockerProvider {
         // Validate Kubernetes version format (basic check)
         let version = &spec.kubernetes.version;
         if version.is_empty() {
-            return Err(crate::Error::validation(
-                "kubernetes version must be specified",
-            ));
+            return Err(Error::validation("kubernetes version must be specified"));
         }
 
         // Check version format (should be like "1.31.0" or "v1.31.0")
         let version_clean = version.strip_prefix('v').unwrap_or(version);
         let parts: Vec<&str> = version_clean.split('.').collect();
         if parts.len() < 2 {
-            return Err(crate::Error::validation(format!(
+            return Err(Error::validation(format!(
                 "invalid kubernetes version format: {}, expected format like '1.31.0'",
                 version
             )));
@@ -416,7 +414,7 @@ impl Provider for DockerProvider {
         // Verify each part is a number
         for part in &parts {
             if part.parse::<u32>().is_err() {
-                return Err(crate::Error::validation(format!(
+                return Err(Error::validation(format!(
                     "invalid kubernetes version format: {}, version parts must be numbers",
                     version
                 )));
@@ -533,14 +531,13 @@ mod tests {
     /// Tests that verify the provider handles edge cases gracefully.
     mod manifest_generation_errors {
         use super::*;
+        use crate::provider::BootstrapInfo;
 
         /// Story: A LatticeCluster CRD must have a name to generate CAPI resources.
         /// If somehow a cluster without a name is submitted, we should fail with
         /// a clear validation error rather than generating invalid manifests.
         #[tokio::test]
         async fn cluster_without_name_fails_gracefully() {
-            use crate::provider::BootstrapInfo;
-
             let provider = DockerProvider::new();
             let cluster = LatticeCluster {
                 metadata: ObjectMeta {

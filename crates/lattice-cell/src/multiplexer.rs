@@ -136,13 +136,17 @@ impl RequestMultiplexer {
                     if let Some((_, PendingRequest::Single(tx))) = self.pending.remove(&request_id)
                     {
                         debug!(request_id = %request_id, "Dispatching single response");
-                        tx.send(response).map_err(|_| DispatchError::ReceiverDropped)
+                        tx.send(response)
+                            .map_err(|_| DispatchError::ReceiverDropped)
                     } else {
                         // Race condition - another task removed it
                         Err(DispatchError::NoPendingRequest)
                     }
                 }
-                PendingRequest::Streaming { sender, cancel_token } => {
+                PendingRequest::Streaming {
+                    sender,
+                    cancel_token,
+                } => {
                     // Clone what we need before dropping the guard
                     let sender = sender.clone();
                     let cancel_token = cancel_token.clone();

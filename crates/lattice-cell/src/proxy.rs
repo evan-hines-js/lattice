@@ -91,7 +91,10 @@ async fn handle_proxy_request(
         .join("&");
 
     // Determine if this is a watch request
-    let is_watch = query.params.get("watch").map_or(false, |v| v == "true" || v == "1");
+    let is_watch = query
+        .params
+        .get("watch")
+        .map_or(false, |v| v == "true" || v == "1");
 
     // Get content type from headers
     let content_type = headers
@@ -158,19 +161,17 @@ async fn handle_single_request(
                 builder = builder.header("content-type", &response.content_type);
             }
 
-            builder
-                .body(Body::from(response.body))
-                .unwrap_or_else(|_| {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-                })
+            builder.body(Body::from(response.body)).unwrap_or_else(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build response",
+                )
+                    .into_response()
+            })
         }
         Ok(Err(_)) => {
             // Sender dropped - agent disconnected
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Agent disconnected",
-            )
-                .into_response()
+            (StatusCode::SERVICE_UNAVAILABLE, "Agent disconnected").into_response()
         }
         Err(_) => {
             // Timeout

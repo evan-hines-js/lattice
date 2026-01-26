@@ -7,8 +7,8 @@ pub use lattice_cell::bootstrap;
 pub use lattice_cell::cilium;
 pub use lattice_cell::parent;
 
-// Re-export from lattice-cluster
-pub use lattice_cluster::provider;
+// Re-export from lattice-capi
+pub use lattice_capi::provider;
 
 // Re-export pivot from lattice-agent
 pub use lattice_agent::pivot;

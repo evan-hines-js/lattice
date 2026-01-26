@@ -203,7 +203,12 @@ fn kill_pod(cluster: &str, kubeconfig: &str) {
     info!("[Chaos] Pod on {}: {}", cluster, msg);
 }
 
-async fn cut_network(cluster: &str, kubeconfig: &str, cancel: &CancellationToken, blackout_secs: u64) {
+async fn cut_network(
+    cluster: &str,
+    kubeconfig: &str,
+    cancel: &CancellationToken,
+    blackout_secs: u64,
+) {
     let policy_file = format!("/tmp/chaos-{}.yaml", cluster);
 
     // Apply blackout policy
@@ -224,10 +229,7 @@ async fn cut_network(cluster: &str, kubeconfig: &str, cancel: &CancellationToken
         return;
     }
 
-    info!(
-        "[Chaos] Network on {}: cut for {}s",
-        cluster, blackout_secs
-    );
+    info!("[Chaos] Network on {}: cut for {}s", cluster, blackout_secs);
 
     // Wait for blackout (but respect cancellation)
     tokio::select! {
