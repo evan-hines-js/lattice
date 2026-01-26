@@ -644,7 +644,8 @@ impl Installer {
         bootstrap_client: &Client,
         mgmt_client: &Client,
     ) -> Result<()> {
-        use lattice_cluster::pivot::{apply_distributed_resources, fetch_distributable_resources};
+        use lattice_agent::apply_distributed_resources;
+        use lattice_cell::fetch_distributable_resources;
 
         // Fetch all distributable resources (CloudProviders, SecretsProviders, secrets)
         let resources = fetch_distributable_resources(bootstrap_client)

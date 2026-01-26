@@ -3,6 +3,7 @@
 //! When a cluster has parent configuration (can have children), it runs:
 //! - gRPC server: for child agent bidirectional streams
 //! - Bootstrap HTTP server: for kubeadm postKubeadmCommands webhook
+//! - K8s API proxy: for accessing child cluster APIs through the gRPC stream
 //!
 //! This module provides `ParentServers` which starts these servers on-demand.
 
@@ -22,14 +23,15 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use crate::agent::connection::{AgentRegistry, SharedAgentRegistry};
-use crate::agent::mtls::ServerMtlsConfig;
-use crate::agent::server::AgentServer;
 use crate::bootstrap::{
     bootstrap_router, BootstrapState, DefaultManifestGenerator, ManifestGenerator,
 };
-use crate::pivot::{fetch_distributable_resources, DistributableResources};
+use crate::connection::{AgentRegistry, SharedAgentRegistry};
+use crate::resources::fetch_distributable_resources;
+use crate::server::AgentServer;
 use lattice_common::crd::{CloudProvider, SecretsProvider};
+use lattice_common::DistributableResources;
+use lattice_infra::ServerMtlsConfig;
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_infra::pki::{CertificateAuthority, CertificateAuthorityBundle};
 use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};

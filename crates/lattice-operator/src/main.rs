@@ -11,7 +11,7 @@ use kube::runtime::Controller;
 use kube::{Api, Client, CustomResourceExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use lattice_operator::agent::client::{AgentClient, AgentClientConfig, AgentCredentials};
+use lattice_agent::{AgentClient, AgentClientConfig, AgentCredentials, ClientState};
 use lattice_operator::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
 use lattice_operator::cloud_provider::{
     self as cloud_provider_ctrl, Context as CloudProviderContext,
@@ -1219,8 +1219,8 @@ async fn start_agent_with_retry(
                         // Periodic connection check
                         _ = tokio::time::sleep(Duration::from_secs(5)) => {
                             let state = agent.state().await;
-                            if state == lattice_operator::agent::client::ClientState::Disconnected
-                                || state == lattice_operator::agent::client::ClientState::Failed
+                            if state == ClientState::Disconnected
+                                || state == ClientState::Failed
                             {
                                 tracing::warn!(
                                     state = ?state,

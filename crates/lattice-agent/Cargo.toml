@@ -1,0 +1,56 @@
+[package]
+name = "lattice-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Child cluster (agent) runtime for Lattice"
+
+[features]
+default = []
+fips = ["lattice-infra/fips", "lattice-common/fips"]
+
+[dependencies]
+# Internal
+lattice-proto = { workspace = true }
+lattice-infra = { workspace = true }
+lattice-common = { workspace = true }
+lattice-capi = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Concurrency
+dashmap = { workspace = true }
+
+# gRPC
+tonic = { workspace = true }
+prost-types = { workspace = true }
+
+# HTTP
+reqwest = { workspace = true }
+http = "1.0"
+
+# Encoding
+base64 = { workspace = true }
+serde_yaml = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

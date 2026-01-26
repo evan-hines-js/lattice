@@ -1,36 +1,23 @@
 //! Cluster lifecycle management for Lattice
 //!
-//! This crate provides Kubernetes cluster provisioning and management:
+//! This crate provides the Kubernetes controller for LatticeCluster CRDs.
 //!
-//! - **Provider**: Infrastructure providers (Docker, Proxmox, AWS, OpenStack)
-//! - **CAPI**: Cluster API integration for cluster lifecycle
-//! - **Agent**: gRPC agent for parent-child cluster communication
-//! - **Pivot**: CAPI resource transfer for self-management
-//! - **Controller**: Kubernetes controller for LatticeCluster CRD
+//! Related crates:
+//! - `lattice-cell`: Parent cluster infrastructure (servers, connections)
+//! - `lattice-agent`: Child cluster runtime (agent client)
+//! - `lattice-capi`: CAPI provider management
 
-pub mod agent;
-pub mod bootstrap;
-pub mod capi;
-pub mod cilium;
 pub mod controller;
-pub mod parent;
-pub mod pivot;
 pub mod provider;
 
-// Re-export key types
-pub use agent::client::{cleanup_stale_pivot_secrets, AgentClient, AgentClientConfig};
-pub use agent::server::cleanup_stale_unpivot_secrets;
-pub use bootstrap::{
-    BootstrapState, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
-};
-pub use capi::{CapiInstaller, CapiProviderConfig};
+// Re-export controller types
 pub use controller::{
     error_policy, reconcile, CAPIClient, CAPIClientImpl, Context, ContextBuilder, KubeClient,
     KubeClientImpl, PivotOperations, PivotOperationsImpl, UnpivotChannel, UnpivotRequest,
 };
-pub use parent::ParentServers;
+
+// Re-export provider types
 pub use provider::{create_provider, CAPIManifest, Provider};
 
-// Re-export from dependencies
-pub use lattice_common::{crd, error, Error, Result, DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT};
-pub use lattice_infra::{CertificateAuthority, PkiError};
+// Re-export common error types
+pub use lattice_common::{Error, Result};

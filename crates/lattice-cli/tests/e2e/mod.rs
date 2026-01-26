@@ -7,5 +7,6 @@ mod mesh_tests;
 mod providers;
 
 mod docker_independence_e2e;
+mod endurance_e2e;
 mod pivot_e2e;
 mod upgrade_e2e;

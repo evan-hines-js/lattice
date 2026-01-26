@@ -1,9 +1,13 @@
 [package]
-name = "lattice-infra"
+name = "lattice-capi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Infrastructure components for Lattice (PKI, bootstrap manifests)"
+description = "Cluster API provider management for Lattice"
+
+[features]
+default = []
+fips = ["lattice-common/fips"]
 
 [dependencies]
 # Internal
@@ -15,6 +19,7 @@ k8s-openapi = { workspace = true }
 
 # Async
 tokio = { workspace = true }
+async-trait = { workspace = true }
 futures = { workspace = true }
 
 # Serialization
@@ -22,32 +27,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 
-# HTTP
-axum = { workspace = true }
-axum-server = { workspace = true }
-
-# gRPC
-tonic = { workspace = true }
-
-# Crypto/PKI
-rustls = { workspace = true }
-aws-lc-rs = { workspace = true }
-rcgen = { workspace = true }
-x509-parser = { workspace = true }
-rustls-pemfile = { workspace = true }
-base64 = { workspace = true }
-pem = { workspace = true }
-
 # Error handling
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
-
-# Time
-chrono = { workspace = true }
-time = { workspace = true }
 
 [build-dependencies]
 toml.workspace = true
@@ -55,8 +39,4 @@ serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
-tempfile = { workspace = true }
-
-[features]
-default = []
-fips = ["aws-lc-rs/fips"]
+mockall = { workspace = true }

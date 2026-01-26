@@ -21,7 +21,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Endpoint;
 use tracing::{debug, error, info, warn};
 
-use crate::bootstrap::{CsrRequest, CsrResponse};
 use crate::pivot::{
     apply_distributed_resources, patch_kubeconfig_for_self_management, retry_with_backoff,
     AgentPivotHandler, DistributableResources, RetryConfig,
@@ -29,19 +28,21 @@ use crate::pivot::{
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
 use kube::Client;
+use lattice_capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller, copy_credentials_to_provider_namespace};
 use lattice_common::crd::{
-    LatticeCluster, PivotPhase as CrdPivotPhase, UnpivotPhase as CrdUnpivotPhase,
+    CloudProvider, LatticeCluster, PivotPhase as CrdPivotPhase, ProviderType, UnpivotPhase as CrdUnpivotPhase,
 };
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{CsrRequest, CsrResponse, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::pki::AgentCertRequest;
 use lattice_proto::lattice_agent_client::LatticeAgentClient;
 use lattice_proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
-    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, PivotComplete, PivotPhase,
-    StatusResponse,
+    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, KubernetesResponse,
+    PivotComplete, PivotPhase, StatusResponse,
 };
 
-use super::mtls::ClientMtlsConfig;
+use crate::watch::{execute_watch, WatchRegistry};
+use crate::{execute_k8s_request, is_watch_request, ClientMtlsConfig};
 
 /// Configuration for the agent client
 #[derive(Clone, Debug)]
@@ -132,6 +133,8 @@ pub struct AgentClient {
     heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
     /// Handle to command handler task for cleanup
     command_handler_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Registry for tracking active K8s API watches
+    watch_registry: Arc<WatchRegistry>,
 }
 
 impl AgentClient {
@@ -146,6 +149,7 @@ impl AgentClient {
             start_time: Instant::now(),
             heartbeat_handle: None,
             command_handler_handle: None,
+            watch_registry: Arc::new(WatchRegistry::new()),
         }
     }
 
@@ -495,6 +499,7 @@ impl AgentClient {
         let state = self.state.clone();
         let agent_state = self.agent_state.clone();
         let message_tx_clone = message_tx.clone();
+        let watch_registry = self.watch_registry.clone();
 
         // Spawn heartbeat task and store handle
         let heartbeat_interval = self.config.heartbeat_interval;
@@ -532,7 +537,7 @@ impl AgentClient {
                     Some(result) = inbound.next() => {
                         match result {
                             Ok(command) => {
-                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name).await;
+                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry).await;
                             }
                             Err(e) => {
                                 error!(error = %e, "Error receiving command");
@@ -547,6 +552,9 @@ impl AgentClient {
                     else => break,
                 }
             }
+
+            // Cancel all active watches on disconnect
+            watch_registry.cancel_all();
 
             // Reset agent state if we were mid-pivot - allows retry on reconnect
             let current_agent_state = *agent_state.read().await;
@@ -778,9 +786,7 @@ impl AgentClient {
     /// 2. Installs cert-manager from local helm chart
     /// 3. Runs clusterctl init with air-gapped config (kubeadm + RKE2 providers)
     async fn install_capi() -> Result<String, std::io::Error> {
-        use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
         use kube::api::ListParams;
-        use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
 
         let client = kube::Client::try_default()
             .await
@@ -823,15 +829,11 @@ impl AgentClient {
                 ))
             })?;
 
-            crate::capi::copy_credentials_to_provider_namespace(
-                &client,
-                infrastructure,
-                secret_ref,
-            )
-            .await
-            .map_err(|e| {
-                std::io::Error::other(format!("Failed to copy provider credentials: {}", e))
-            })?;
+            copy_credentials_to_provider_namespace(&client, infrastructure, secret_ref)
+                .await
+                .map_err(|e| {
+                    std::io::Error::other(format!("Failed to copy provider credentials: {}", e))
+                })?;
         }
 
         let config = CapiProviderConfig::new(infrastructure)
@@ -886,6 +888,7 @@ impl AgentClient {
         agent_state: &Arc<RwLock<AgentState>>,
         message_tx: &mpsc::Sender<AgentMessage>,
         cluster_name: &str,
+        watch_registry: &Arc<WatchRegistry>,
     ) {
         debug!(command_id = %command.command_id, "Received command");
 
@@ -1034,6 +1037,73 @@ impl AgentClient {
                         update_unpivot_phase(&cluster_name, CrdUnpivotPhase::Complete).await
                     {
                         error!(error = %e, "Failed to update unpivot_phase to Complete");
+                    }
+                });
+            }
+            Some(Command::KubernetesRequest(req)) => {
+                debug!(
+                    request_id = %req.request_id,
+                    verb = %req.verb,
+                    path = %req.path,
+                    "Received K8s API proxy request"
+                );
+
+                // Handle cancellation requests
+                if req.cancel {
+                    watch_registry.cancel(&req.request_id);
+                    let response = KubernetesResponse {
+                        request_id: req.request_id.clone(),
+                        status_code: 200,
+                        streaming: true,
+                        stream_end: true,
+                        ..Default::default()
+                    };
+                    let msg = AgentMessage {
+                        cluster_name: cluster_name.to_string(),
+                        payload: Some(Payload::KubernetesResponse(response)),
+                    };
+                    let _ = message_tx.send(msg).await;
+                    return;
+                }
+
+                let request_id = req.request_id.clone();
+                let cluster_name_clone = cluster_name.to_string();
+                let message_tx = message_tx.clone();
+                let req = req.clone();
+                let registry = watch_registry.clone();
+
+                tokio::spawn(async move {
+                    let client = match kube::Client::try_default().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!(error = %e, "Failed to create K8s client for proxy request");
+                            let response = KubernetesResponse {
+                                request_id: request_id.clone(),
+                                status_code: 500,
+                                error: format!("Failed to create K8s client: {}", e),
+                                ..Default::default()
+                            };
+                            let msg = AgentMessage {
+                                cluster_name: cluster_name_clone,
+                                payload: Some(Payload::KubernetesResponse(response)),
+                            };
+                            let _ = message_tx.send(msg).await;
+                            return;
+                        }
+                    };
+
+                    // Route watch requests to execute_watch, others to execute_k8s_request
+                    if is_watch_request(&req) {
+                        execute_watch(client, req, cluster_name_clone, message_tx, registry).await;
+                    } else {
+                        let response = execute_k8s_request(&client, &req).await;
+                        let msg = AgentMessage {
+                            cluster_name: cluster_name_clone,
+                            payload: Some(Payload::KubernetesResponse(response)),
+                        };
+                        if let Err(e) = message_tx.send(msg).await {
+                            error!(request_id = %request_id, error = %e, "Failed to send K8s response");
+                        }
                     }
                 });
             }
@@ -1858,7 +1928,7 @@ mod tests {
             })),
         };
 
-        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster").await;
+        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster", &Arc::new(WatchRegistry::new())).await;
         // ApplyManifests command doesn't change state - CAPI install is lazy
     }
 
@@ -1875,7 +1945,7 @@ mod tests {
             })),
         };
 
-        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster").await;
+        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster", &Arc::new(WatchRegistry::new())).await;
         // Status request doesn't change state (TODO in code)
     }
 
@@ -1889,7 +1959,7 @@ mod tests {
             command: None,
         };
 
-        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster").await;
+        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster", &Arc::new(WatchRegistry::new())).await;
         // Should log warning but not crash
     }
 
@@ -2314,7 +2384,7 @@ mod tests {
         };
 
         // Should not panic or error
-        AgentClient::handle_command(&command, &agent_state, &tx, "apply-cluster").await;
+        AgentClient::handle_command(&command, &agent_state, &tx, "apply-cluster", &Arc::new(WatchRegistry::new())).await;
 
         // State should not change (manifests applied, CAPI install is lazy)
         assert_eq!(*agent_state.read().await, AgentState::Provisioning);
@@ -2335,7 +2405,7 @@ mod tests {
         };
 
         // Should handle without error
-        AgentClient::handle_command(&command, &agent_state, &tx, "status-cluster").await;
+        AgentClient::handle_command(&command, &agent_state, &tx, "status-cluster", &Arc::new(WatchRegistry::new())).await;
 
         // State should remain unchanged
         assert_eq!(*agent_state.read().await, AgentState::Ready);
@@ -2355,7 +2425,7 @@ mod tests {
         };
 
         // Should not panic
-        AgentClient::handle_command(&command, &agent_state, &tx, "robust-cluster").await;
+        AgentClient::handle_command(&command, &agent_state, &tx, "robust-cluster", &Arc::new(WatchRegistry::new())).await;
 
         // State should remain unchanged
         assert_eq!(*agent_state.read().await, AgentState::Ready);
