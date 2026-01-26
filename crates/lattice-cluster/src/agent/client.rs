@@ -29,7 +29,9 @@ use crate::pivot::{
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
 use kube::Client;
-use lattice_common::crd::{LatticeCluster, PivotPhase as CrdPivotPhase, UnpivotPhase as CrdUnpivotPhase};
+use lattice_common::crd::{
+    LatticeCluster, PivotPhase as CrdPivotPhase, UnpivotPhase as CrdUnpivotPhase,
+};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_infra::pki::AgentCertRequest;
 use lattice_proto::lattice_agent_client::LatticeAgentClient;
@@ -1028,7 +1030,9 @@ impl AgentClient {
                 // Update unpivot_phase to Complete so controller can remove finalizer
                 let cluster_name = cluster_name.to_string();
                 tokio::spawn(async move {
-                    if let Err(e) = update_unpivot_phase(&cluster_name, CrdUnpivotPhase::Complete).await {
+                    if let Err(e) =
+                        update_unpivot_phase(&cluster_name, CrdUnpivotPhase::Complete).await
+                    {
                         error!(error = %e, "Failed to update unpivot_phase to Complete");
                     }
                 });
@@ -1502,12 +1506,11 @@ async fn send_pivot_failed(
 ///
 /// Returns true if the pivot is complete and the Secret is no longer needed.
 /// This is a pure function for easy testing.
-pub fn should_cleanup_pivot_state(status: Option<&lattice_common::crd::LatticeClusterStatus>) -> bool {
+pub fn should_cleanup_pivot_state(
+    status: Option<&lattice_common::crd::LatticeClusterStatus>,
+) -> bool {
     let pivot_complete = status.map(|s| s.pivot_complete).unwrap_or(false);
-    let pivot_phase = status
-        .map(|s| &s.pivot_phase)
-        .cloned()
-        .unwrap_or_default();
+    let pivot_phase = status.map(|s| &s.pivot_phase).cloned().unwrap_or_default();
     pivot_complete || matches!(pivot_phase, CrdPivotPhase::Complete | CrdPivotPhase::None)
 }
 

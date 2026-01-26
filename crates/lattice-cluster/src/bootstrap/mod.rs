@@ -61,7 +61,7 @@ use tracing::{debug, info, warn};
 
 use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
-use lattice_common::crd::{LatticeCluster, ProviderType};
+use lattice_common::crd::{LatticeCluster, LatticeClusterStatus, ProviderType};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 #[cfg(test)]
 use lattice_infra::pki::CertificateAuthority;
@@ -837,7 +837,10 @@ impl PersistedBootstrapInfo {
 }
 
 /// Persist bootstrap info to a Secret for crash recovery
-async fn persist_bootstrap_info(client: &Client, info: &ClusterBootstrapInfo) -> Result<(), String> {
+async fn persist_bootstrap_info(
+    client: &Client,
+    info: &ClusterBootstrapInfo,
+) -> Result<(), String> {
     use kube::api::PostParams;
 
     let secret_name = format!("{}{}", BOOTSTRAP_TOKEN_SECRET_PREFIX, info.cluster_id);
@@ -853,7 +856,10 @@ async fn persist_bootstrap_info(client: &Client, info: &ClusterBootstrapInfo) ->
             namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
             labels: Some(
                 [
-                    ("app.kubernetes.io/managed-by".to_string(), "lattice-operator".to_string()),
+                    (
+                        "app.kubernetes.io/managed-by".to_string(),
+                        "lattice-operator".to_string(),
+                    ),
                     ("lattice.io/cluster".to_string(), info.cluster_id.clone()),
                     ("lattice.io/type".to_string(), "bootstrap-token".to_string()),
                 ]
@@ -885,7 +891,10 @@ async fn delete_bootstrap_secret(client: &Client, cluster_id: &str) {
     let secret_name = format!("{}{}", BOOTSTRAP_TOKEN_SECRET_PREFIX, cluster_id);
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
-    match secret_api.delete(&secret_name, &DeleteParams::default()).await {
+    match secret_api
+        .delete(&secret_name, &DeleteParams::default())
+        .await
+    {
         Ok(_) => debug!(cluster = %cluster_id, "Deleted bootstrap token Secret"),
         Err(kube::Error::Api(ae)) if ae.code == 404 => {} // Already deleted
         Err(e) => warn!(cluster = %cluster_id, error = %e, "Failed to delete bootstrap Secret"),
@@ -1007,8 +1016,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             return Ok(0);
         };
 
-        let secret_api: Api<Secret> =
-            Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
         let cluster_api: Api<LatticeCluster> = Api::all(client.clone());
 
         // List all bootstrap token Secrets
@@ -1515,21 +1523,23 @@ mod tests {
     ) -> BootstrapToken {
         // Use a minimal test cluster manifest
         let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"test"}}"#.to_string();
-        state.register_cluster(
-            ClusterRegistration {
-                cluster_id: cluster_id.into(),
-                cell_endpoint: cell_endpoint.into(),
-                ca_certificate: ca_certificate.into(),
-                cluster_manifest,
-                networking: None,
-                proxmox_ipv4_pool: None,
-                provider: ProviderType::Docker,
-                bootstrap: lattice_common::crd::BootstrapProvider::default(),
-                k8s_version: "1.32.0".to_string(),
-                autoscaling_enabled: false,
-            },
-            false,
-        ).await
+        state
+            .register_cluster(
+                ClusterRegistration {
+                    cluster_id: cluster_id.into(),
+                    cell_endpoint: cell_endpoint.into(),
+                    ca_certificate: ca_certificate.into(),
+                    cluster_manifest,
+                    networking: None,
+                    proxmox_ipv4_pool: None,
+                    provider: ProviderType::Docker,
+                    bootstrap: lattice_common::crd::BootstrapProvider::default(),
+                    k8s_version: "1.32.0".to_string(),
+                    autoscaling_enabled: false,
+                },
+                false,
+            )
+            .await
     }
 
     #[tokio::test]
@@ -2874,5 +2884,30 @@ mod tests {
             !manifests_str.contains("ebs.csi.aws.com"),
             "Non-AWS clusters should not include EBS CSI driver"
         );
+    }
+
+    // --- should_restore_bootstrap_token tests ---
+
+    #[test]
+    fn should_restore_token_when_bootstrap_incomplete() {
+        let status = LatticeClusterStatus {
+            bootstrap_complete: false,
+            ..Default::default()
+        };
+        assert!(should_restore_bootstrap_token(Some(&status)));
+    }
+
+    #[test]
+    fn should_not_restore_token_when_bootstrap_complete() {
+        let status = LatticeClusterStatus {
+            bootstrap_complete: true,
+            ..Default::default()
+        };
+        assert!(!should_restore_bootstrap_token(Some(&status)));
+    }
+
+    #[test]
+    fn should_restore_token_when_no_status() {
+        assert!(should_restore_bootstrap_token(None));
     }
 }

@@ -380,4 +380,48 @@ mod tests {
             .expect("plain text should render successfully");
         assert_eq!(result, "plain-text-no-placeholders");
     }
+
+    #[test]
+    fn test_validate_syntax_valid_expression() {
+        let engine = TemplateEngine::new();
+        assert!(engine.validate_syntax("${metadata.name}").is_ok());
+    }
+
+    #[test]
+    fn test_validate_syntax_valid_block() {
+        let engine = TemplateEngine::new();
+        assert!(engine
+            .validate_syntax("{% if true %}yes{% endif %}")
+            .is_ok());
+    }
+
+    #[test]
+    fn test_validate_syntax_static_string() {
+        let engine = TemplateEngine::new();
+        assert!(engine.validate_syntax("plain text").is_ok());
+    }
+
+    #[test]
+    fn test_has_template_syntax_detects_variable() {
+        assert!(TemplateEngine::has_template_syntax("Hello ${name}"));
+        assert!(TemplateEngine::has_template_syntax("${foo}"));
+    }
+
+    #[test]
+    fn test_has_template_syntax_detects_block() {
+        assert!(TemplateEngine::has_template_syntax(
+            "{% if true %}{% endif %}"
+        ));
+    }
+
+    #[test]
+    fn test_has_template_syntax_detects_comment() {
+        assert!(TemplateEngine::has_template_syntax("{# comment #}"));
+    }
+
+    #[test]
+    fn test_has_template_syntax_false_for_plain() {
+        assert!(!TemplateEngine::has_template_syntax("plain text"));
+        assert!(!TemplateEngine::has_template_syntax(""));
+    }
 }
