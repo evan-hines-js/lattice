@@ -22,7 +22,7 @@ use tracing::{debug, error, info, instrument, warn};
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Patch, PatchParams, PostParams};
 use kube::{Api, Client};
-use lattice_common::crd::LatticeCluster;
+use lattice_common::crd::{LatticeCluster, LatticeClusterStatus};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
@@ -559,10 +559,7 @@ pub async fn cleanup_stale_unpivot_secrets(client: &Client) -> Result<usize, Str
         };
 
         if should_delete {
-            match secret_api
-                .delete(name, &DeleteParams::default())
-                .await
-            {
+            match secret_api.delete(name, &DeleteParams::default()).await {
                 Ok(_) => {
                     debug!(cluster = %cluster_name, "Cleaned up stale unpivot-manifests Secret");
                     cleaned += 1;
@@ -576,7 +573,10 @@ pub async fn cleanup_stale_unpivot_secrets(client: &Client) -> Result<usize, Str
     }
 
     if cleaned > 0 {
-        info!(count = cleaned, "Cleaned up stale unpivot-manifests Secrets");
+        info!(
+            count = cleaned,
+            "Cleaned up stale unpivot-manifests Secrets"
+        );
     }
 
     Ok(cleaned)

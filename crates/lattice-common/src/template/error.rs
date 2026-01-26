@@ -63,15 +63,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_error_display() {
-        let err = TemplateError::Undefined("foo.bar".to_string());
-        assert!(err.to_string().contains("undefined variable"));
-        assert!(err.to_string().contains("foo.bar"));
-    }
-
-    #[test]
-    fn test_syntax_error_display() {
-        let err = TemplateError::Syntax("unclosed brace".to_string());
-        assert!(err.to_string().contains("syntax error"));
+    fn test_missing_image_constructor() {
+        let err = TemplateError::missing_image("my-container");
+        let msg = err.to_string();
+        assert!(msg.contains("my-container"));
+        assert!(msg.contains("config.image.my-container"));
     }
 }

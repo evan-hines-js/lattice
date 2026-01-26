@@ -4453,5 +4453,55 @@ mod tests {
                 PivotAction::WaitForAgent
             );
         }
+
+        // --- is_etcd_node / has_etcd_taint tests ---
+
+        fn make_etcd_node(name: &str, has_label: bool, has_taint: bool) -> Node {
+            let mut labels = std::collections::BTreeMap::new();
+            if has_label {
+                labels.insert("node-role.kubernetes.io/etcd".to_string(), "".to_string());
+            }
+
+            let taints = if has_taint {
+                Some(vec![Taint {
+                    key: "node-role.kubernetes.io/etcd".to_string(),
+                    effect: "NoExecute".to_string(),
+                    ..Default::default()
+                }])
+            } else {
+                None
+            };
+
+            Node {
+                metadata: ObjectMeta {
+                    name: Some(name.to_string()),
+                    labels: Some(labels),
+                    ..Default::default()
+                },
+                spec: Some(NodeSpec {
+                    taints,
+                    ..Default::default()
+                }),
+                status: None,
+            }
+        }
+
+        #[test]
+        fn is_etcd_node_detects_etcd_label() {
+            let etcd = make_etcd_node("etcd-0", true, true);
+            let not_etcd = make_etcd_node("worker-0", false, false);
+
+            assert!(is_etcd_node(&etcd));
+            assert!(!is_etcd_node(&not_etcd));
+        }
+
+        #[test]
+        fn has_etcd_taint_detects_no_execute() {
+            let tainted = make_etcd_node("etcd-0", true, true);
+            let untainted = make_etcd_node("etcd-1", true, false);
+
+            assert!(has_etcd_taint(&tainted));
+            assert!(!has_etcd_taint(&untainted));
+        }
     }
 }
