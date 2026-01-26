@@ -19,9 +19,11 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, instrument, warn};
 
-use kube::api::{Patch, PatchParams};
+use k8s_openapi::api::core::v1::Secret;
+use kube::api::{Patch, PatchParams, PostParams};
 use kube::{Api, Client};
 use lattice_common::crd::LatticeCluster;
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
 use lattice_proto::{agent_message::Payload, AgentMessage, AgentState, CellCommand};
@@ -196,7 +198,7 @@ async fn handle_agent_message_impl(
                 "Cluster deletion requested by child with CAPI manifests"
             );
 
-            // Store CAPI manifests for the controller to import before cleanup
+            // Store CAPI manifests in memory for immediate use
             registry.set_unpivot_manifests(
                 cluster_name,
                 super::connection::UnpivotManifests {
@@ -205,8 +207,43 @@ async fn handle_agent_message_impl(
                 },
             );
 
-            // Persist immediately to Kubernetes to avoid crash orphans
-            // This ensures we don't lose the deletion request if operator crashes
+            // Persist manifests to a Secret so they survive operator restarts
+            let secret_name = format!("unpivot-manifests-{}", cluster_name);
+            let secret_api: Api<Secret> = Api::namespaced(kube_client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+            // Encode manifests as base64 JSON array
+            let manifests_json = serde_json::to_vec(&cd.capi_manifests).unwrap_or_default();
+            let mut data = std::collections::BTreeMap::new();
+            data.insert("manifests".to_string(), k8s_openapi::ByteString(manifests_json));
+            data.insert("namespace".to_string(), k8s_openapi::ByteString(cd.namespace.as_bytes().to_vec()));
+
+            let secret = Secret {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(secret_name.clone()),
+                    namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+                    labels: Some([
+                        ("app.kubernetes.io/managed-by".to_string(), "lattice-operator".to_string()),
+                        ("lattice.io/cluster".to_string(), cluster_name.to_string()),
+                    ].into()),
+                    ..Default::default()
+                },
+                data: Some(data),
+                ..Default::default()
+            };
+
+            // Create or update the Secret
+            match secret_api.create(&PostParams::default(), &secret).await {
+                Ok(_) => info!(cluster = %cluster_name, secret = %secret_name, "Unpivot manifests persisted to Secret"),
+                Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                    // Already exists, update it
+                    if let Err(e) = secret_api.replace(&secret_name, &PostParams::default(), &secret).await {
+                        error!(cluster = %cluster_name, error = %e, "Failed to update unpivot manifests Secret");
+                    }
+                }
+                Err(e) => error!(cluster = %cluster_name, error = %e, "Failed to create unpivot manifests Secret"),
+            }
+
+            // Update cluster status
             let api: Api<LatticeCluster> = Api::all(kube_client.clone());
             let patch = serde_json::json!({
                 "status": {
