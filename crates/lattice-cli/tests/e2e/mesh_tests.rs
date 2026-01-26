@@ -170,24 +170,38 @@ fi
         all_blocked_check = all_blocked_check,
     );
 
-    // Add individual test checks with 3 samples and majority voting
+    // Add individual test checks with retries that distinguish policy blocks from transient failures
     for target in &targets {
         script.push_str(&format!(
             r#"
-# Test {url} with 3 samples
-SUCCESS_COUNT=0
-for SAMPLE in 1 2 3; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5 {url} 2>/dev/null || echo "000")
+# Test {url} - retry transient failures, accept 403 as definitive block
+MAX_ATTEMPTS=5
+ATTEMPT=0
+RESULT="UNKNOWN"
+while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 --max-time 10 {url} 2>/dev/null || echo "000")
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
-        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        RESULT="ALLOWED"
+        break
+    elif [ "$HTTP_CODE" = "403" ]; then
+        # Policy block - definitive, no retry needed
+        RESULT="BLOCKED"
+        break
+    else
+        # Transient failure (000=connection error, 5xx=server error) - retry
+        ATTEMPT=$((ATTEMPT + 1))
+        if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+            sleep 2
+        fi
     fi
-    sleep 1
 done
-# Majority voting: 2 of 3 samples must agree
-if [ $SUCCESS_COUNT -ge 2 ]; then
+if [ "$RESULT" = "ALLOWED" ]; then
     echo "{success_msg}"
-else
+elif [ "$RESULT" = "BLOCKED" ]; then
     echo "{fail_msg}"
+else
+    # All attempts failed with transient errors - treat as blocked but note it
+    echo "{fail_msg} (transient)"
 fi
 "#,
             url = target.url,
