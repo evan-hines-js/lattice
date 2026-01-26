@@ -1328,28 +1328,25 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         csr_pem: &str,
     ) -> Result<CsrResponse, BootstrapError> {
         // Check if cluster has completed bootstrap
-        // After bootstrap, the token Secret is deleted, so we check CRD status as source of truth
+        // CRD status.bootstrap_complete is the source of truth (persists across restarts)
+        // In-memory token_used is only reliable if set during this operator session
         let is_bootstrapped = if let Some(entry) = self.clusters.get(cluster_id) {
-            // Fast path: check in-memory state
-            entry.token_used
-        } else {
-            // Check CRD status (source of truth after operator restart)
-            if let Some(client) = &self.kube_client {
-                let cluster_api: Api<LatticeCluster> = Api::all(client.clone());
-                match cluster_api.get(cluster_id).await {
-                    Ok(cluster) => cluster
-                        .status
-                        .as_ref()
-                        .map(|s| s.bootstrap_complete)
-                        .unwrap_or(false),
-                    Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                        return Err(BootstrapError::ClusterNotFound(cluster_id.to_string()));
-                    }
-                    Err(_) => false,
-                }
+            if entry.token_used {
+                // Token was consumed during this session - definitely bootstrapped
+                true
+            } else if self.kube_client.is_some() {
+                // In-memory says not used, but check CRD (may have been re-registered after restart)
+                self.check_bootstrap_complete_in_crd(cluster_id).await?
             } else {
-                return Err(BootstrapError::ClusterNotFound(cluster_id.to_string()));
+                // No kube client (tests) - trust in-memory state
+                false
             }
+        } else if self.kube_client.is_some() {
+            // Not in memory - check CRD status
+            self.check_bootstrap_complete_in_crd(cluster_id).await?
+        } else {
+            // No kube client, not in memory - cluster not found
+            return Err(BootstrapError::ClusterNotFound(cluster_id.to_string()));
         };
 
         if !is_bootstrapped {
@@ -1369,6 +1366,36 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     /// Check if a cluster is registered
     pub fn is_cluster_registered(&self, cluster_id: &str) -> bool {
         self.clusters.contains_key(cluster_id)
+    }
+
+    /// Check bootstrap_complete in CRD status (source of truth)
+    ///
+    /// Returns Ok(true) if bootstrapped, Ok(false) if not bootstrapped,
+    /// or Err(ClusterNotFound) if the cluster doesn't exist.
+    async fn check_bootstrap_complete_in_crd(
+        &self,
+        cluster_id: &str,
+    ) -> Result<bool, BootstrapError> {
+        let Some(client) = &self.kube_client else {
+            return Err(BootstrapError::ClusterNotFound(cluster_id.to_string()));
+        };
+
+        let cluster_api: Api<LatticeCluster> = Api::all(client.clone());
+        match cluster_api.get(cluster_id).await {
+            Ok(cluster) => Ok(cluster
+                .status
+                .as_ref()
+                .map(|s| s.bootstrap_complete)
+                .unwrap_or(false)),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                Err(BootstrapError::ClusterNotFound(cluster_id.to_string()))
+            }
+            Err(e) => {
+                debug!(cluster = %cluster_id, error = %e, "Failed to check bootstrap_complete in CRD");
+                // API error - conservatively return not bootstrapped
+                Ok(false)
+            }
+        }
     }
 }
 
