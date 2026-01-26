@@ -11,9 +11,13 @@
 //! with persistence handled at the operator level (e.g., CA secrets stored in K8s).
 
 pub mod bootstrap;
+pub mod mtls;
 pub mod pki;
 
 // Re-export main types
+pub use mtls::{
+    extract_cluster_id_from_cert, verify_cert_chain, ClientMtlsConfig, MtlsError, ServerMtlsConfig,
+};
 pub use bootstrap::cilium::{
     cilium_version, generate_cilium_manifests, generate_default_deny,
     generate_operator_network_policy, generate_waypoint_egress_policy, generate_ztunnel_allowlist,

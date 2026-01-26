@@ -24,11 +24,9 @@ use mockall::automock;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{ProviderType, SecretRef};
-use lattice_common::Error;
-
-use crate::bootstrap::{
-    AwsCredentials, CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET,
-    PROXMOX_CREDENTIALS_SECRET,
+use lattice_common::{
+    AwsCredentials, Error, CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE,
+    OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
 
 /// Copy credentials from CloudProvider's secret reference to the CAPI provider namespace.

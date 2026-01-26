@@ -1,13 +1,6 @@
 //! mTLS configuration for gRPC connections
 //!
 //! Configures TLS for both server (cell) and client (agent) sides.
-//!
-//! # Security Model
-//!
-//! - Server (cell) presents its certificate and verifies client certificates
-//! - Client (agent) presents its certificate and verifies server certificate
-//! - Both sides use the same CA for verification
-//! - Cluster ID is extracted from client certificate CN
 
 use thiserror::Error;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
@@ -55,7 +48,6 @@ impl ServerMtlsConfig {
     /// Build a tonic ServerTlsConfig
     pub fn to_tonic_config(&self) -> Result<ServerTlsConfig, MtlsError> {
         let identity = Identity::from_pem(&self.server_cert_pem, &self.server_key_pem);
-
         let ca_cert = Certificate::from_pem(&self.ca_cert_pem);
 
         Ok(ServerTlsConfig::new()
@@ -95,7 +87,6 @@ impl ClientMtlsConfig {
     /// Build a tonic ClientTlsConfig
     pub fn to_tonic_config(&self) -> Result<ClientTlsConfig, MtlsError> {
         let identity = Identity::from_pem(&self.client_cert_pem, &self.client_key_pem);
-
         let ca_cert = Certificate::from_pem(&self.ca_cert_pem);
 
         Ok(ClientTlsConfig::new()
@@ -142,7 +133,7 @@ pub fn extract_cluster_id_from_cert(cert_der: &[u8]) -> Result<String, MtlsError
 
 /// Verify a certificate chain against a CA
 pub fn verify_cert_chain(cert_der: &[u8], ca_cert_pem: &str) -> Result<bool, MtlsError> {
-    use lattice_infra::pki::verify_client_cert;
+    use crate::pki::verify_client_cert;
 
     match verify_client_cert(cert_der, ca_cert_pem) {
         Ok(result) => Ok(result.valid),
@@ -153,12 +144,10 @@ pub fn verify_cert_chain(cert_der: &[u8], ca_cert_pem: &str) -> Result<bool, Mtl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_infra::pki::{AgentCertRequest, CertificateAuthority};
+    use crate::pki::{AgentCertRequest, CertificateAuthority};
 
-    fn create_test_certs() -> (CertificateAuthority, String, String, String) {
+    fn create_test_certs() -> (CertificateAuthority, String, String) {
         let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
-
-        // Generate agent cert
         let agent_req =
             AgentCertRequest::new("test-cluster").expect("agent cert request should succeed");
         let agent_cert = ca
@@ -166,50 +155,42 @@ mod tests {
             .expect("CSR signing should succeed");
         let agent_key = agent_req.private_key_pem().to_string();
 
-        (ca, agent_cert, agent_key, "test-cluster".to_string())
+        (ca, agent_cert, agent_key)
     }
 
     #[test]
     fn test_extract_cluster_id() {
-        let (_ca, agent_cert, _, _) = create_test_certs();
+        let (_ca, agent_cert, _) = create_test_certs();
 
-        // Parse PEM to DER
-        let pem_obj = ::pem::parse(agent_cert.as_bytes()).expect("PEM parsing should succeed");
+        let pem_obj = pem::parse(agent_cert.as_bytes()).expect("PEM parsing should succeed");
         let cert_der = pem_obj.contents();
 
-        let cluster_id =
-            extract_cluster_id_from_cert(cert_der).expect("cluster ID extraction should succeed");
+        let cluster_id = extract_cluster_id_from_cert(cert_der).expect("extraction should succeed");
         assert_eq!(cluster_id, "test-cluster");
     }
 
     #[test]
     fn test_verify_cert_chain() {
-        let (ca, agent_cert, _, _) = create_test_certs();
+        let (ca, agent_cert, _) = create_test_certs();
 
-        // Parse PEM to DER
-        let pem_obj = ::pem::parse(agent_cert.as_bytes()).expect("PEM parsing should succeed");
+        let pem_obj = pem::parse(agent_cert.as_bytes()).expect("PEM parsing should succeed");
         let cert_der = pem_obj.contents();
 
-        let result = verify_cert_chain(cert_der, ca.ca_cert_pem())
-            .expect("cert chain verification should succeed");
+        let result = verify_cert_chain(cert_der, ca.ca_cert_pem()).expect("verification should succeed");
         assert!(result);
     }
 
     #[test]
     fn test_server_tls_config() {
-        let (ca, agent_cert, agent_key, _) = create_test_certs();
-
-        // For server, we'd use a server cert, but for testing use agent cert
+        let (ca, agent_cert, agent_key) = create_test_certs();
         let config = ServerMtlsConfig::new(agent_cert, agent_key, ca.ca_cert_pem().to_string());
 
-        let tonic_config = config.to_tonic_config();
-        assert!(tonic_config.is_ok());
+        assert!(config.to_tonic_config().is_ok());
     }
 
     #[test]
     fn test_client_tls_config() {
-        let (ca, agent_cert, agent_key, _) = create_test_certs();
-
+        let (ca, agent_cert, agent_key) = create_test_certs();
         let config = ClientMtlsConfig::new(
             agent_cert,
             agent_key,
@@ -217,13 +198,11 @@ mod tests {
             "cell.lattice.local".to_string(),
         );
 
-        let tonic_config = config.to_tonic_config();
-        assert!(tonic_config.is_ok());
+        assert!(config.to_tonic_config().is_ok());
     }
 
     #[test]
     fn test_invalid_cn_format_rejected() {
-        // Create a cert with wrong CN format
         use rcgen::{CertificateParams, DistinguishedName, DnType, DnValue, KeyPair};
 
         let mut params = CertificateParams::default();

@@ -70,10 +70,11 @@ use lattice_operator::crd::LatticeCluster;
 
 use super::chaos::{ChaosMonkey, ChaosTargets};
 use super::helpers::{
-    build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
-    extract_docker_cluster_kubeconfig, get_docker_kubeconfig, load_cluster_config,
-    load_registry_credentials, run_cmd, run_cmd_allow_fail, watch_cluster_phases,
-    watch_cluster_phases_with_kubeconfig, watch_worker_scaling,
+    build_and_push_lattice_image, client_from_kubeconfig, delete_cluster_and_wait,
+    ensure_docker_network, extract_docker_cluster_kubeconfig, get_docker_kubeconfig,
+    load_cluster_config, load_registry_credentials, run_cmd, run_cmd_allow_fail,
+    verify_cluster_capi_resources, watch_cluster_phases, watch_cluster_phases_with_kubeconfig,
+    watch_worker_scaling,
 };
 // Media server test disabled pending investigation
 #[allow(unused_imports)]
@@ -459,125 +460,6 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     info!("SUCCESS: Management cluster uninstalled!");
 
     info!("E2E test complete: full lifecycle verified");
-
-    Ok(())
-}
-
-/// Verify a cluster has its own CAPI resources after pivot
-async fn verify_cluster_capi_resources(kubeconfig: &str, cluster_name: &str) -> Result<(), String> {
-    let nodes_output = run_cmd(
-        "kubectl",
-        &["--kubeconfig", kubeconfig, "get", "nodes", "-o", "wide"],
-    )?;
-    info!("Cluster nodes:\n{}", nodes_output);
-
-    info!("Checking for CAPI resources...");
-    let capi_output = run_cmd(
-        "kubectl",
-        &["--kubeconfig", kubeconfig, "get", "clusters", "-A"],
-    )?;
-    info!("CAPI clusters:\n{}", capi_output);
-
-    if !capi_output.contains(cluster_name) {
-        return Err(format!(
-            "Cluster {} should have its own CAPI Cluster resource after pivot",
-            cluster_name
-        ));
-    }
-
-    Ok(())
-}
-
-/// Delete a cluster via kubectl and wait for cleanup
-async fn delete_cluster_and_wait(
-    cluster_kubeconfig: &str,
-    parent_kubeconfig: &str,
-    cluster_name: &str,
-    provider: InfraProvider,
-) -> Result<(), String> {
-    // Initiate deletion on the cluster itself
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            cluster_kubeconfig,
-            "delete",
-            "latticecluster",
-            cluster_name,
-            "--timeout=300s",
-        ],
-    )?;
-    info!("LatticeCluster deletion initiated");
-
-    // Wait for the LatticeCluster to be fully deleted from parent
-    info!("Waiting for LatticeCluster to be deleted from parent...");
-    for attempt in 1..=60 {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-
-        let check = run_cmd_allow_fail(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                parent_kubeconfig,
-                "get",
-                "latticecluster",
-                cluster_name,
-                "-o",
-                "name",
-            ],
-        );
-
-        if check.trim().is_empty() || check.contains("not found") {
-            info!("LatticeCluster deleted from parent");
-            break;
-        }
-
-        if attempt == 60 {
-            return Err(format!(
-                "Timeout waiting for {} deletion after 10 minutes",
-                cluster_name
-            ));
-        }
-
-        info!("Still waiting... (attempt {}/60)", attempt);
-    }
-
-    // For Docker, verify containers are cleaned up
-    if provider == InfraProvider::Docker {
-        info!("Waiting for Docker containers to be cleaned up...");
-        for attempt in 1..=30 {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-
-            let containers = run_cmd_allow_fail(
-                "docker",
-                &[
-                    "ps",
-                    "-a",
-                    "--filter",
-                    &format!("name={}", cluster_name),
-                    "-q",
-                ],
-            );
-
-            if containers.trim().is_empty() {
-                info!("Docker containers cleaned up by CAPI");
-                break;
-            }
-
-            if attempt == 30 {
-                return Err(format!(
-                    "Timeout waiting for {} containers to be deleted. Still running: {}",
-                    cluster_name,
-                    containers.trim()
-                ));
-            }
-
-            info!(
-                "  Still waiting for container cleanup... (attempt {}/30)",
-                attempt
-            );
-        }
-    }
 
     Ok(())
 }

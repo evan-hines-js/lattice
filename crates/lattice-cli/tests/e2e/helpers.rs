@@ -818,3 +818,118 @@ pub fn docker_containers_deleted(cluster_name: &str) -> bool {
     );
     containers.trim().is_empty()
 }
+
+// =============================================================================
+// Cluster Verification and Deletion
+// =============================================================================
+
+#[cfg(feature = "provider-e2e")]
+use super::providers::InfraProvider;
+
+/// Verify a cluster has its own CAPI resources after pivot
+#[cfg(feature = "provider-e2e")]
+pub async fn verify_cluster_capi_resources(kubeconfig: &str, cluster_name: &str) -> Result<(), String> {
+    let nodes_output = run_cmd(
+        "kubectl",
+        &["--kubeconfig", kubeconfig, "get", "nodes", "-o", "wide"],
+    )?;
+    info!("Cluster nodes:\n{}", nodes_output);
+
+    let capi_output = run_cmd(
+        "kubectl",
+        &["--kubeconfig", kubeconfig, "get", "clusters", "-A"],
+    )?;
+    info!("CAPI clusters:\n{}", capi_output);
+
+    if !capi_output.contains(cluster_name) {
+        return Err(format!(
+            "Cluster {} should have its own CAPI Cluster resource after pivot",
+            cluster_name
+        ));
+    }
+
+    Ok(())
+}
+
+/// Delete a cluster via kubectl and wait for cleanup
+#[cfg(feature = "provider-e2e")]
+pub async fn delete_cluster_and_wait(
+    cluster_kubeconfig: &str,
+    parent_kubeconfig: &str,
+    cluster_name: &str,
+    provider: InfraProvider,
+) -> Result<(), String> {
+    // Initiate deletion on the cluster itself
+    run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            cluster_kubeconfig,
+            "delete",
+            "latticecluster",
+            cluster_name,
+            "--timeout=300s",
+        ],
+    )?;
+    info!("LatticeCluster deletion initiated");
+
+    // Wait for the LatticeCluster to be fully deleted from parent
+    info!("Waiting for LatticeCluster to be deleted from parent...");
+    for attempt in 1..=60 {
+        sleep(Duration::from_secs(10)).await;
+
+        let check = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                parent_kubeconfig,
+                "get",
+                "latticecluster",
+                cluster_name,
+                "-o",
+                "name",
+            ],
+        );
+
+        if check.trim().is_empty() || check.contains("not found") {
+            info!("LatticeCluster deleted from parent");
+            break;
+        }
+
+        if attempt == 60 {
+            return Err(format!(
+                "Timeout waiting for {} deletion after 10 minutes",
+                cluster_name
+            ));
+        }
+
+        info!("Still waiting... (attempt {}/60)", attempt);
+    }
+
+    // For Docker, verify containers are cleaned up
+    if provider == InfraProvider::Docker {
+        info!("Waiting for Docker containers to be cleaned up...");
+        for attempt in 1..=30 {
+            sleep(Duration::from_secs(5)).await;
+
+            if docker_containers_deleted(cluster_name) {
+                info!("Docker containers cleaned up by CAPI");
+                break;
+            }
+
+            if attempt == 30 {
+                return Err(format!(
+                    "Timeout waiting for {} containers to be deleted",
+                    cluster_name
+                ));
+            }
+
+            info!(
+                "Still waiting for container cleanup... (attempt {}/30)",
+                attempt
+            );
+        }
+    }
+
+    Ok(())
+}

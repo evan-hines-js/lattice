@@ -67,7 +67,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_infra::pki::CertificateAuthority;
 use lattice_infra::pki::{CertificateAuthorityBundle, PkiError};
 
-use crate::pivot::fetch_distributable_resources;
+use crate::resources::fetch_distributable_resources;
 
 pub use token::BootstrapToken;
 

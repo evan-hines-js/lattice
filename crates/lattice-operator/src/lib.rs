@@ -2,18 +2,23 @@
 
 #![deny(missing_docs)]
 
-// Re-export cluster modules from lattice-cluster
-pub use lattice_cluster::agent;
-pub use lattice_cluster::bootstrap;
-pub use lattice_cluster::capi;
-pub use lattice_cluster::cilium;
-pub use lattice_cluster::parent;
-pub use lattice_cluster::pivot;
+// Re-export cell modules from lattice-cell
+pub use lattice_cell::bootstrap;
+pub use lattice_cell::cilium;
+pub use lattice_cell::parent;
+
+// Re-export from lattice-cluster
 pub use lattice_cluster::provider;
 
+// Re-export pivot from lattice-agent
+pub use lattice_agent::pivot;
+
+// Re-export CAPI from lattice-capi
+pub use lattice_capi as capi;
+
 // Re-export crash-resilient cleanup functions
-pub use lattice_cluster::cleanup_stale_pivot_secrets;
-pub use lattice_cluster::cleanup_stale_unpivot_secrets;
+pub use lattice_agent::cleanup_stale_pivot_secrets;
+pub use lattice_cell::cleanup_stale_unpivot_secrets;
 
 // Re-export service modules from lattice-service
 pub use lattice_service::compiler;

@@ -45,6 +45,7 @@ message AgentMessage {
     ClusterHealth cluster_health = 6;
     StatusResponse status_response = 7;
     ClusterDeleting cluster_deleting = 8;
+    KubernetesResponse kubernetes_response = 9;
   }
 }
 
@@ -191,6 +192,7 @@ message CellCommand {
     PivotManifestsCommand pivot_manifests = 4;
     SyncDistributedResourcesCommand sync_resources = 5;
     UnpivotAckCommand unpivot_ack = 6;
+    KubernetesRequest kubernetes_request = 7;
   }
 }
 
@@ -256,4 +258,68 @@ enum UnpivotPhase {
   UNPIVOT_PHASE_WAITING_FOR_ACK = 3;
   // Parent ACKed, complete
   UNPIVOT_PHASE_COMPLETE = 4;
+}
+
+// =============================================================================
+// K8s API Proxy Messages
+// =============================================================================
+
+// Cell → Agent: Request to execute against child's K8s API
+// Enables parent to access child cluster K8s API through the gRPC stream.
+message KubernetesRequest {
+  // Unique ID for correlation (UUID, never reused in session)
+  string request_id = 1;
+
+  // HTTP verb: GET, LIST, POST, PUT, PATCH, DELETE
+  // LIST is GET with collection path, WATCH is GET with ?watch=true
+  string verb = 2;
+
+  // API path: /api/v1/namespaces/default/pods/nginx
+  // /apis/apps/v1/namespaces/default/deployments
+  string path = 3;
+
+  // Query string (URL-encoded): watch=true&labelSelector=app%3Dnginx
+  string query = 4;
+
+  // Request body for POST/PUT/PATCH (JSON or YAML)
+  bytes body = 5;
+
+  // Content-Type: application/json, application/yaml,
+  // application/strategic-merge-patch+json, etc.
+  string content_type = 6;
+
+  // Timeout in milliseconds. 0 = default (30s for non-watch, none for watch)
+  uint32 timeout_ms = 7;
+
+  // Set to true to cancel an active watch by request_id
+  // Agent will stop the watch and send stream_end response
+  bool cancel = 8;
+}
+
+// Agent → Cell: Response from child's K8s API
+message KubernetesResponse {
+  // Correlates to KubernetesRequest.request_id
+  string request_id = 1;
+
+  // HTTP status code: 200, 201, 404, 500, etc.
+  uint32 status_code = 2;
+
+  // Response body (JSON)
+  // For watches: each event is a separate response message
+  bytes body = 3;
+
+  // Content-Type from K8s API response
+  string content_type = 4;
+
+  // True if this is a streaming watch response
+  // Client should expect multiple responses with same request_id
+  bool streaming = 5;
+
+  // True if this is the final message in a stream
+  // After this, no more responses for this request_id
+  bool stream_end = 6;
+
+  // Error message for internal errors (not K8s API errors)
+  // K8s API errors come through status_code + body
+  string error = 7;
 }

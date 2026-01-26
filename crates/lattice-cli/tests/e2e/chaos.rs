@@ -10,12 +10,42 @@ use tracing::info;
 
 use super::helpers::run_cmd_allow_fail;
 
-const POD_INTERVAL: (u64, u64) = (30, 90);
-const NET_INTERVAL: (u64, u64) = (60, 120);
-const NET_BLACKOUT_SECS: u64 = 3;
-
 const OPERATOR_NS: &str = "lattice-system";
 const OPERATOR_LABEL: &str = "app=lattice-operator";
+
+/// Configuration for chaos monkey behavior
+#[derive(Clone, Copy)]
+pub struct ChaosConfig {
+    /// Min/max seconds between pod kills
+    pub pod_interval: (u64, u64),
+    /// Min/max seconds between network cuts
+    pub net_interval: (u64, u64),
+    /// Duration of network blackouts in seconds
+    pub net_blackout_secs: u64,
+}
+
+impl Default for ChaosConfig {
+    fn default() -> Self {
+        Self {
+            pod_interval: (30, 90),
+            net_interval: (60, 120),
+            net_blackout_secs: 3,
+        }
+    }
+}
+
+impl ChaosConfig {
+    /// Aggressive chaos settings for endurance testing
+    /// Pod kills every 30-60s, network cuts every 45-90s for 3s
+    /// Still stressful but allows reconciliation loops to complete
+    pub fn aggressive() -> Self {
+        Self {
+            pod_interval: (30, 60),
+            net_interval: (45, 90),
+            net_blackout_secs: 3,
+        }
+    }
+}
 
 const NETWORK_BLACKOUT_POLICY: &str = r#"apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -65,16 +95,35 @@ pub struct ChaosMonkey {
 }
 
 impl ChaosMonkey {
+    /// Start chaos monkey with default configuration
     pub fn start(targets: Arc<ChaosTargets>) -> Self {
+        Self::start_with_config(targets, ChaosConfig::default())
+    }
+
+    /// Start chaos monkey with custom configuration
+    pub fn start_with_config(targets: Arc<ChaosTargets>, config: ChaosConfig) -> Self {
         info!(
             "[Chaos] Started (pod kills: {}-{}s, network cuts: {}-{}s for {}s)",
-            POD_INTERVAL.0, POD_INTERVAL.1, NET_INTERVAL.0, NET_INTERVAL.1, NET_BLACKOUT_SECS
+            config.pod_interval.0,
+            config.pod_interval.1,
+            config.net_interval.0,
+            config.net_interval.1,
+            config.net_blackout_secs
         );
 
         let cancel = CancellationToken::new();
 
-        let pod_task = tokio::spawn(pod_chaos_loop(targets.clone(), cancel.clone()));
-        let net_task = tokio::spawn(net_chaos_loop(targets, cancel.clone()));
+        let pod_task = tokio::spawn(pod_chaos_loop(
+            targets.clone(),
+            cancel.clone(),
+            config.pod_interval,
+        ));
+        let net_task = tokio::spawn(net_chaos_loop(
+            targets,
+            cancel.clone(),
+            config.net_interval,
+            config.net_blackout_secs,
+        ));
 
         Self {
             pod_task,
@@ -91,9 +140,13 @@ impl ChaosMonkey {
     }
 }
 
-async fn pod_chaos_loop(targets: Arc<ChaosTargets>, cancel: CancellationToken) {
+async fn pod_chaos_loop(
+    targets: Arc<ChaosTargets>,
+    cancel: CancellationToken,
+    interval: (u64, u64),
+) {
     loop {
-        let delay = rand::thread_rng().gen_range(POD_INTERVAL.0..=POD_INTERVAL.1);
+        let delay = rand::thread_rng().gen_range(interval.0..=interval.1);
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
@@ -104,15 +157,20 @@ async fn pod_chaos_loop(targets: Arc<ChaosTargets>, cancel: CancellationToken) {
     }
 }
 
-async fn net_chaos_loop(targets: Arc<ChaosTargets>, cancel: CancellationToken) {
+async fn net_chaos_loop(
+    targets: Arc<ChaosTargets>,
+    cancel: CancellationToken,
+    interval: (u64, u64),
+    blackout_secs: u64,
+) {
     loop {
-        let delay = rand::thread_rng().gen_range(NET_INTERVAL.0..=NET_INTERVAL.1);
+        let delay = rand::thread_rng().gen_range(interval.0..=interval.1);
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
         }
         if let Some((name, kubeconfig)) = targets.random() {
-            cut_network(&name, &kubeconfig, &cancel).await;
+            cut_network(&name, &kubeconfig, &cancel, blackout_secs).await;
         }
     }
 }
@@ -145,7 +203,7 @@ fn kill_pod(cluster: &str, kubeconfig: &str) {
     info!("[Chaos] Pod on {}: {}", cluster, msg);
 }
 
-async fn cut_network(cluster: &str, kubeconfig: &str, cancel: &CancellationToken) {
+async fn cut_network(cluster: &str, kubeconfig: &str, cancel: &CancellationToken, blackout_secs: u64) {
     let policy_file = format!("/tmp/chaos-{}.yaml", cluster);
 
     // Apply blackout policy
@@ -168,13 +226,13 @@ async fn cut_network(cluster: &str, kubeconfig: &str, cancel: &CancellationToken
 
     info!(
         "[Chaos] Network on {}: cut for {}s",
-        cluster, NET_BLACKOUT_SECS
+        cluster, blackout_secs
     );
 
     // Wait for blackout (but respect cancellation)
     tokio::select! {
         _ = cancel.cancelled() => {}
-        _ = tokio::time::sleep(Duration::from_secs(NET_BLACKOUT_SECS)) => {}
+        _ = tokio::time::sleep(Duration::from_secs(blackout_secs)) => {}
     }
 
     // Always restore network

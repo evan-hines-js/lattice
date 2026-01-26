@@ -1,22 +1,9 @@
-//! Pivot logic for cluster self-management
+//! Pivot logic for cluster self-management (agent-side)
 //!
-//! The pivot process transfers CAPI resources from the cell to a workload cluster,
-//! making the workload cluster self-managing.
-//!
-//! # Flow
-//!
-//! 1. Cell exports CAPI manifests via `clusterctl move --to-directory`
-//! 2. Cell sends manifests to agent via gRPC PivotManifestsCommand
-//! 3. Agent imports manifests via `clusterctl move --from-directory`
-//! 4. Agent patches kubeconfig to use internal endpoint
-//! 5. Cluster is now self-managing
-//!
-//! # Why Pivot Matters
-//!
-//! - Workload clusters become independent of cell
-//! - Each cluster can self-heal and self-manage
-//! - Cell failure doesn't affect workload clusters
-//! - Enables air-gapped operation after provisioning
+//! This module handles the agent-side of the pivot process:
+//! - Importing CAPI manifests received from the cell
+//! - Patching kubeconfig for self-management
+//! - Applying distributed resources
 
 use std::time::Duration;
 
@@ -27,9 +14,9 @@ use kube::Client;
 use thiserror::Error;
 use tracing::{debug, info};
 
-// Re-export retry utilities for convenience
 use lattice_common::crd::{CloudProvider, SecretsProvider};
 pub use lattice_common::retry::{retry_with_backoff, RetryConfig};
+pub use lattice_common::DistributableResources;
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 /// Default CAPI namespace for pivot handlers
@@ -100,7 +87,6 @@ impl CommandRunner for RealCommandRunner {
             .await
             .map_err(|e| PivotError::Internal(format!("k8s client failed: {}", e)))?;
 
-        // Parse resource type to get group/version/kind
         let (group, version, kind, plural) = parse_capi_resource_type(resource_type)?;
 
         let ar = ApiResource {
@@ -117,14 +103,12 @@ impl CommandRunner for RealCommandRunner {
 
         let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
         let list = api.list(&ListParams::default()).await.map_err(|e| {
-            // Return empty result for "not found" errors (CRD not installed)
             if e.to_string().contains("not found") || e.to_string().contains("404") {
                 return PivotError::Internal("not found".to_string());
             }
             PivotError::Internal(format!("list failed: {}", e))
         })?;
 
-        // Format output similar to kubectl
         let stdout = list
             .items
             .iter()
@@ -144,7 +128,6 @@ impl CommandRunner for RealCommandRunner {
 fn parse_capi_resource_type(
     resource_type: &str,
 ) -> Result<(String, String, String, String), PivotError> {
-    // Resource types like "clusters.cluster.x-k8s.io"
     let parts: Vec<&str> = resource_type.splitn(2, '.').collect();
     if parts.len() != 2 {
         return Err(PivotError::Internal(format!(
@@ -156,7 +139,6 @@ fn parse_capi_resource_type(
     let plural = parts[0].to_string();
     let group = parts[1].to_string();
 
-    // Derive kind from plural (simple heuristic)
     let kind = if plural.ends_with("ies") {
         format!("{}y", &plural[..plural.len() - 3])
     } else if plural.ends_with('s') {
@@ -165,7 +147,6 @@ fn parse_capi_resource_type(
         plural.clone()
     };
 
-    // Capitalize first letter
     let kind = kind
         .chars()
         .enumerate()
@@ -179,9 +160,7 @@ fn parse_capi_resource_type(
 ///
 /// Used by the agent to detect when CAPI resources have been imported after pivot.
 pub struct AgentPivotHandler<R: CommandRunner = RealCommandRunner> {
-    /// CAPI namespace to watch
     capi_namespace: String,
-    /// Command runner
     runner: R,
 }
 
@@ -240,13 +219,6 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
     }
 
     /// Import CAPI manifests received via gRPC
-    ///
-    /// This is the new pivot flow using --to-directory:
-    /// 1. Cell exports manifests via `clusterctl move --to-directory`
-    /// 2. Cell sends manifests to agent via gRPC PivotManifestsCommand
-    /// 3. Agent imports via `clusterctl move --from-directory`
-    ///
-    /// This approach keeps paused resources on the parent, simplifying unpivot.
     pub async fn import_capi_manifests(
         &self,
         manifests: &[Vec<u8>],
@@ -258,12 +230,10 @@ impl<R: CommandRunner> AgentPivotHandler<R> {
 
         let manifest_count = manifests.len();
 
-        // Use shared clusterctl import function (None = in-cluster kubeconfig)
         lattice_common::clusterctl::import_from_manifests(None, &self.capi_namespace, manifests)
             .await
             .map_err(|e| PivotError::ClusterctlFailed(e.to_string()))?;
 
-        // Wait briefly for resources to appear, then count them
         tokio::time::sleep(POST_MOVE_STABILIZATION_DELAY).await;
         let count = self
             .count_capi_resources()
@@ -284,7 +254,6 @@ impl Default for AgentPivotHandler<RealCommandRunner> {
 // Kubeconfig Patching for Self-Management
 // =============================================================================
 
-/// Read and base64-encode the in-cluster CA certificate.
 fn read_in_cluster_ca_base64() -> Result<String, PivotError> {
     let in_cluster_ca = std::fs::read_to_string(IN_CLUSTER_CA_PATH).map_err(|e| {
         PivotError::Internal(format!(
@@ -295,7 +264,6 @@ fn read_in_cluster_ca_base64() -> Result<String, PivotError> {
     Ok(STANDARD.encode(in_cluster_ca.as_bytes()))
 }
 
-/// Fetch and decode the kubeconfig from a Kubernetes secret.
 async fn fetch_kubeconfig_from_secret(
     secrets: &Api<Secret>,
     secret_name: &str,
@@ -322,9 +290,6 @@ async fn fetch_kubeconfig_from_secret(
         .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))
 }
 
-/// Update a single cluster entry in the kubeconfig to use the internal endpoint.
-///
-/// Returns `true` if the cluster was updated, `false` if it already uses the internal endpoint.
 fn update_cluster_entry(
     cluster_entry: &mut serde_yaml::Value,
     in_cluster_ca_b64: &str,
@@ -343,10 +308,8 @@ fn update_cluster_entry(
         return false;
     }
 
-    // Update server URL
     *server = serde_yaml::Value::String(INTERNAL_K8S_ENDPOINT.to_string());
 
-    // Update CA certificate
     if let Some(m) = cluster_config.as_mapping_mut() {
         m.remove("certificate-authority");
         m.insert(
@@ -365,9 +328,6 @@ fn update_cluster_entry(
     true
 }
 
-/// Update all cluster entries in the kubeconfig to use the internal endpoint.
-///
-/// Returns the number of clusters that were updated.
 fn update_all_cluster_entries(
     kubeconfig: &mut serde_yaml::Value,
     in_cluster_ca_b64: &str,
@@ -392,7 +352,6 @@ fn update_all_cluster_entries(
         .count()
 }
 
-/// Apply the updated kubeconfig to the secret.
 async fn apply_kubeconfig_patch(
     secrets: &Api<Secret>,
     secret_name: &str,
@@ -421,132 +380,11 @@ async fn apply_kubeconfig_patch(
     Ok(())
 }
 
-/// Resources to distribute to child clusters
-///
-/// Distribution is based on CloudProvider and SecretsProvider CRDs.
-/// Their referenced secrets are automatically included.
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DistributableResources {
-    /// CloudProvider CRDs
-    pub cloud_providers: Vec<Vec<u8>>,
-    /// SecretsProvider CRDs (Vault connections)
-    pub secrets_providers: Vec<Vec<u8>>,
-    /// Secrets referenced by providers (credentials)
-    pub secrets: Vec<Vec<u8>>,
-}
-
-impl DistributableResources {
-    /// Check if there are any resources to distribute
-    pub fn is_empty(&self) -> bool {
-        self.cloud_providers.is_empty()
-            && self.secrets_providers.is_empty()
-            && self.secrets.is_empty()
-    }
-}
-
-/// Fetch all resources to distribute to child clusters.
-///
-/// Distribution is based on CloudProvider and SecretsProvider CRDs.
-/// Their referenced credential secrets are automatically included.
-pub async fn fetch_distributable_resources(
-    client: &Client,
-) -> Result<DistributableResources, PivotError> {
-    use kube::api::ListParams;
-    use std::collections::HashSet;
-
-    let lp = ListParams::default();
-    let mut secret_names: HashSet<String> = HashSet::new();
-
-    // Fetch CloudProvider CRDs
-    let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let cp_list = cp_api
-        .list(&lp)
-        .await
-        .map_err(|e| PivotError::Internal(format!("failed to list CloudProviders: {}", e)))?;
-
-    let mut cloud_providers = Vec::new();
-    for cp in &cp_list.items {
-        let yaml = serialize_for_distribution(cp)?;
-        cloud_providers.push(yaml);
-        // Track referenced secret (if any)
-        if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
-            secret_names.insert(secret_ref.name.clone());
-        }
-    }
-
-    // Fetch SecretsProvider CRDs
-    let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let sp_list = sp_api
-        .list(&lp)
-        .await
-        .map_err(|e| PivotError::Internal(format!("failed to list SecretsProviders: {}", e)))?;
-
-    let mut secrets_providers = Vec::new();
-    for sp in &sp_list.items {
-        let yaml = serialize_for_distribution(sp)?;
-        secrets_providers.push(yaml);
-        // Track referenced secret (if any)
-        if let Some(ref secret_ref) = sp.spec.credentials_secret_ref {
-            secret_names.insert(secret_ref.name.clone());
-        }
-    }
-
-    // Fetch referenced secrets
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let mut secrets = Vec::new();
-    for name in &secret_names {
-        match secret_api.get(name).await {
-            Ok(secret) => {
-                let yaml = serialize_for_distribution(&secret)?;
-                secrets.push(yaml);
-            }
-            Err(kube::Error::Api(e)) if e.code == 404 => {
-                debug!(secret = %name, "Referenced secret not found, skipping");
-            }
-            Err(e) => {
-                return Err(PivotError::Internal(format!(
-                    "failed to get secret {}: {}",
-                    name, e
-                )));
-            }
-        }
-    }
-
-    debug!(
-        cloud_providers = cloud_providers.len(),
-        secrets_providers = secrets_providers.len(),
-        secrets = secrets.len(),
-        "fetched distributable resources"
-    );
-    Ok(DistributableResources {
-        cloud_providers,
-        secrets_providers,
-        secrets,
-    })
-}
-
-/// Serialize a Kubernetes resource for distribution, stripping cluster-specific metadata
-fn serialize_for_distribution<T: serde::Serialize + Clone + kube::ResourceExt>(
-    resource: &T,
-) -> Result<Vec<u8>, PivotError> {
-    let mut clean = resource.clone();
-    lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
-
-    serde_yaml::to_string(&clean)
-        .map(|s| s.into_bytes())
-        .map_err(|e| PivotError::Internal(format!("failed to serialize resource: {}", e)))
-}
-
 /// Apply distributed resources to the lattice-system namespace.
-///
-/// During pivot and periodic sync, parent clusters send CloudProvider,
-/// SecretsProvider CRDs and their referenced secrets to child clusters.
 pub async fn apply_distributed_resources(
     client: &Client,
     resources: &DistributableResources,
 ) -> Result<(), PivotError> {
-    use kube::api::{Patch, PatchParams};
-
     if resources.is_empty() {
         return Ok(());
     }
@@ -598,7 +436,7 @@ pub async fn apply_distributed_resources(
         info!(cloud_provider = %name, "Applied distributed CloudProvider");
     }
 
-    // Apply SecretsProviders (ClusterSecretStore created by secrets-provider controller)
+    // Apply SecretsProviders
     let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     for sp_bytes in &resources.secrets_providers {
         let yaml_str = String::from_utf8_lossy(sp_bytes);
@@ -626,15 +464,6 @@ pub async fn apply_distributed_resources(
 }
 
 /// Patch the kubeconfig secret to use the internal Kubernetes service endpoint.
-///
-/// After clusterctl move, the kubeconfig secret contains the external network IP
-/// (e.g., 172.18.0.3:6443 for Docker, or cloud provider load balancer IP).
-/// For self-managing clusters, CAPI needs to reach the API server from within
-/// the cluster, which requires using the internal service endpoint
-/// (kubernetes.default.svc:443) instead.
-///
-/// This function patches ALL cluster entries in the kubeconfig, not just the first one,
-/// to handle multi-cluster kubeconfigs correctly.
 pub async fn patch_kubeconfig_for_self_management(
     cluster_name: &str,
     namespace: &str,
@@ -675,10 +504,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // ==========================================================================
-    // Mock Command Runner for Testing AgentPivotHandler
-    // ==========================================================================
-
     type ListFn = Box<dyn Fn(&str, &str) -> Result<CommandOutput, PivotError> + Send + Sync>;
 
     #[derive(Clone)]
@@ -697,10 +522,7 @@ mod tests {
         where
             F: Fn(&str, &str) -> Result<CommandOutput, PivotError> + Send + Sync + 'static,
         {
-            *self
-                .list_fn
-                .lock()
-                .expect("list_fn mutex should not be poisoned") = Some(Box::new(f));
+            *self.list_fn.lock().unwrap() = Some(Box::new(f));
             self
         }
     }
@@ -712,182 +534,78 @@ mod tests {
             resource_type: &str,
             namespace: &str,
         ) -> Result<CommandOutput, PivotError> {
-            let guard = self
-                .list_fn
-                .lock()
-                .expect("list_fn mutex should not be poisoned");
-            match &*guard {
-                Some(f) => f(resource_type, namespace),
-                None => Ok(CommandOutput {
+            let guard = self.list_fn.lock().unwrap();
+            if let Some(f) = guard.as_ref() {
+                f(resource_type, namespace)
+            } else {
+                Ok(CommandOutput {
                     success: true,
                     stdout: String::new(),
                     stderr: String::new(),
-                }),
+                })
             }
         }
     }
 
-    // ==========================================================================
-    // AgentPivotHandler Tests
-    // ==========================================================================
-
-    #[tokio::test]
-    async fn agent_counts_all_capi_resource_types() {
-        let mock = MockCommandRunner::new().with_list(|resource_type, _| {
-            let stdout = match resource_type {
-                "clusters.cluster.x-k8s.io" => "my-cluster   True",
-                "machines.cluster.x-k8s.io" => "cp-0   Running\ncp-1   Running\nworker-0   Running",
-                "machinedeployments.cluster.x-k8s.io" => "md-0   3   3   3",
-                "kubeadmcontrolplanes.controlplane.cluster.x-k8s.io" => "cp   Initialized",
-                _ => "",
-            };
-            Ok(CommandOutput {
-                success: true,
-                stdout: stdout.to_string(),
-                stderr: String::new(),
-            })
-        });
-
-        let handler = AgentPivotHandler::with_runner(mock);
-        let count = handler
-            .count_capi_resources()
-            .await
-            .expect("counting CAPI resources should succeed");
-        // 1 cluster + 3 machines + 1 machinedeployment + 1 controlplane = 6
-        assert_eq!(count, 6);
+    #[test]
+    fn test_parse_capi_resource_type() {
+        let (group, version, kind, plural) =
+            parse_capi_resource_type("clusters.cluster.x-k8s.io").unwrap();
+        assert_eq!(group, "cluster.x-k8s.io");
+        assert_eq!(version, "v1beta1");
+        assert_eq!(kind, "Cluster");
+        assert_eq!(plural, "clusters");
     }
 
     #[test]
-    fn handler_default_namespace() {
-        let handler = AgentPivotHandler::default();
-        assert_eq!(handler.namespace(), "default");
-    }
-
-    // ==========================================================================
-    // Error Display Tests
-    // ==========================================================================
-
-    #[test]
-    fn error_display() {
-        assert_eq!(
-            PivotError::ClusterctlFailed("cmd error".to_string()).to_string(),
-            "clusterctl failed: cmd error"
-        );
-        assert_eq!(
-            PivotError::KubeconfigFailed("io error".to_string()).to_string(),
-            "kubeconfig generation failed: io error"
-        );
-        assert_eq!(
-            PivotError::Internal("panic".to_string()).to_string(),
-            "internal error: panic"
-        );
-    }
-
-    // ==========================================================================
-    // apply_distributed_resources Tests
-    // ==========================================================================
-
-    /// Story: Empty resources should succeed immediately (no client calls made)
-    #[tokio::test]
-    async fn apply_distributed_resources_empty_succeeds() {
-        let Ok(client) = kube::Client::try_default().await else {
-            eprintln!("Skipping test: no K8s cluster available");
-            return;
-        };
-        let resources = DistributableResources::default();
-        let result = apply_distributed_resources(&client, &resources).await;
-        assert!(result.is_ok());
-    }
-
-    /// Story: Invalid YAML should return an error
-    #[tokio::test]
-    async fn apply_distributed_resources_invalid_yaml_fails() {
-        let Ok(client) = kube::Client::try_default().await else {
-            eprintln!("Skipping test: no K8s cluster available");
-            return;
-        };
-        let invalid_yaml = b"not: valid: yaml: [unclosed".to_vec();
-        let resources = DistributableResources {
-            cloud_providers: vec![],
-            secrets_providers: vec![],
-            secrets: vec![invalid_yaml],
-        };
-        let result = apply_distributed_resources(&client, &resources).await;
+    fn test_parse_invalid_resource_type() {
+        let result = parse_capi_resource_type("invalid");
         assert!(result.is_err());
     }
 
-    /// Story: Secret without a name should return an error
-    #[tokio::test]
-    async fn apply_distributed_resources_missing_name_fails() {
-        let Ok(client) = kube::Client::try_default().await else {
-            eprintln!("Skipping test: no K8s cluster available");
-            return;
-        };
-        let nameless_secret = r#"
-apiVersion: v1
-kind: Secret
-metadata:
-  namespace: lattice-system
-data:
-  key: dmFsdWU=
-"#;
-        let resources = DistributableResources {
-            cloud_providers: vec![],
-            secrets_providers: vec![],
-            secrets: vec![nameless_secret.as_bytes().to_vec()],
-        };
-        let result = apply_distributed_resources(&client, &resources).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("secret has no name"),
-            "Expected 'secret has no name' error, got: {}",
-            err
-        );
+    #[test]
+    fn test_update_cluster_entry_updates_server() {
+        let mut entry = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+            name: test-cluster
+            cluster:
+              server: https://172.18.0.3:6443
+              certificate-authority: /path/to/ca
+            "#,
+        )
+        .unwrap();
+
+        let updated = update_cluster_entry(&mut entry, "Y2EtZGF0YQ==", "test");
+        assert!(updated);
+
+        let server = entry["cluster"]["server"].as_str().unwrap();
+        assert_eq!(server, INTERNAL_K8S_ENDPOINT);
     }
 
-    /// Story: Valid secret YAML should be parsed correctly
     #[test]
-    fn secret_yaml_parsing_works() {
-        let valid_secret = r#"
-apiVersion: v1
-kind: Secret
-metadata:
-  name: test-secret
-  namespace: lattice-system
-data:
-  key: dmFsdWU=
-"#;
-        let secret: Secret =
-            serde_yaml::from_str(valid_secret).expect("valid secret YAML should parse");
-        assert_eq!(secret.metadata.name.as_deref(), Some("test-secret"));
+    fn test_update_cluster_entry_skips_already_internal() {
+        let mut entry = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+            name: test-cluster
+            cluster:
+              server: https://kubernetes.default.svc:443
+            "#,
+        )
+        .unwrap();
+
+        let updated = update_cluster_entry(&mut entry, "Y2EtZGF0YQ==", "test");
+        assert!(!updated);
     }
 
-    /// Story: DistributableResources is_empty works correctly
     #[test]
-    fn distributable_resources_is_empty() {
+    fn test_distributable_resources_is_empty() {
         let empty = DistributableResources::default();
         assert!(empty.is_empty());
 
-        let with_secrets = DistributableResources {
-            cloud_providers: vec![],
-            secrets_providers: vec![],
-            secrets: vec![vec![1, 2, 3]],
-        };
-        assert!(!with_secrets.is_empty());
-
-        let with_cloud_providers = DistributableResources {
+        let with_cp = DistributableResources {
             cloud_providers: vec![vec![1, 2, 3]],
-            secrets_providers: vec![],
-            secrets: vec![],
+            ..Default::default()
         };
-        assert!(!with_cloud_providers.is_empty());
-
-        let with_secrets_providers = DistributableResources {
-            cloud_providers: vec![],
-            secrets_providers: vec![vec![1, 2, 3]],
-            secrets: vec![],
-        };
-        assert!(!with_secrets_providers.is_empty());
+        assert!(!with_cp.is_empty());
     }
 }

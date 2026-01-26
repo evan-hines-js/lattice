@@ -165,7 +165,7 @@ struct Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::NetworkPool;
+    use lattice_common::crd::NetworkPool;
 
     #[test]
     fn test_generate_ip_pool() {

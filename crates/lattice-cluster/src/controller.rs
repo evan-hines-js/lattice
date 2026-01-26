@@ -31,11 +31,12 @@ use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::generate_operator_network_policy;
 use lattice_proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand};
 
-use crate::agent::connection::SharedAgentRegistry;
-use crate::agent::server::UNPIVOT_MANIFESTS_SECRET_PREFIX;
-use crate::bootstrap::DefaultManifestGenerator;
-use crate::capi::{ensure_capi_installed, CapiInstaller, CapiProviderConfig};
-use crate::parent::ParentServers;
+use lattice_agent::patch_kubeconfig_for_self_management;
+use lattice_cell::{
+    fetch_distributable_resources, DefaultManifestGenerator, DistributableResources, ParentServers,
+    SharedAgentRegistry, UnpivotManifests, UNPIVOT_MANIFESTS_SECRET_PREFIX,
+};
+use lattice_capi::{ensure_capi_installed, CapiInstaller, CapiProviderConfig};
 use crate::provider::{
     create_provider, pool_resource_suffix, CAPIManifest, CAPI_CLUSTER_API_VERSION,
 };
@@ -1419,7 +1420,7 @@ pub trait PivotOperations: Send + Sync {
     fn take_unpivot_manifests(
         &self,
         cluster_name: &str,
-    ) -> Option<crate::agent::connection::UnpivotManifests>;
+    ) -> Option<UnpivotManifests>;
 }
 
 /// Request to trigger unpivot operation
@@ -1602,7 +1603,7 @@ impl ContextBuilder {
 
     /// Build the Context
     pub fn build(self) -> Context {
-        use crate::capi::ClusterctlInstaller;
+        use lattice_capi::ClusterctlInstaller;
 
         Context {
             kube: self
@@ -1827,7 +1828,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                             let cn = cluster_name.clone();
                             let ns = namespace.clone();
                             async move {
-                                crate::pivot::patch_kubeconfig_for_self_management(&cn, &ns).await
+                                patch_kubeconfig_for_self_management(&cn, &ns).await
                             }
                         },
                     )
@@ -1870,7 +1871,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             if let (Some(ref client), Some(ref secret_ref)) =
                 (&ctx.client, &cloud_provider.spec.credentials_secret_ref)
             {
-                crate::capi::copy_credentials_to_provider_namespace(
+                lattice_capi::copy_credentials_to_provider_namespace(
                     client,
                     provider_type,
                     secret_ref,
@@ -2309,7 +2310,7 @@ async fn generate_capi_manifests(
             .worker_pools
             .values()
             .any(|p| p.is_autoscaling_enabled());
-        let registration = crate::bootstrap::ClusterRegistration {
+        let registration = lattice_cell::ClusterRegistration {
             cluster_id: cluster_name.to_string(),
             cell_endpoint: cell_endpoint.clone(),
             ca_certificate: ca_cert.clone(),
@@ -2544,11 +2545,11 @@ impl PivotOperations for PivotOperationsImpl {
         let manifest_count = manifests.len();
 
         // Fetch resources for distribution (CloudProviders, SecretsProviders, and their secrets)
-        let resources = crate::pivot::fetch_distributable_resources(&self.client)
+        let resources = fetch_distributable_resources(&self.client)
             .await
             .unwrap_or_else(|e| {
                 warn!(error = %e, "failed to fetch distributable resources, continuing without");
-                crate::pivot::DistributableResources::default()
+                DistributableResources::default()
             });
         let cp_count = resources.cloud_providers.len();
         let sp_count = resources.secrets_providers.len();
@@ -2597,10 +2598,9 @@ impl PivotOperations for PivotOperationsImpl {
     }
 
     fn store_post_pivot_manifests(&self, cluster_name: &str, network_policy_yaml: Option<String>) {
-        use crate::agent::connection::PostPivotManifests;
         self.agent_registry.set_post_pivot_manifests(
             cluster_name,
-            PostPivotManifests {
+            lattice_cell::PostPivotManifests {
                 network_policy_yaml,
             },
         );
@@ -2609,7 +2609,7 @@ impl PivotOperations for PivotOperationsImpl {
     fn take_unpivot_manifests(
         &self,
         cluster_name: &str,
-    ) -> Option<crate::agent::connection::UnpivotManifests> {
+    ) -> Option<lattice_cell::UnpivotManifests> {
         self.agent_registry.take_unpivot_manifests(cluster_name)
     }
 }
@@ -2732,7 +2732,7 @@ async fn wait_for_cell_service_deleted(ctx: &Context) -> bool {
 async fn load_unpivot_manifests_from_secret(
     client: &Client,
     cluster_name: &str,
-) -> Option<crate::agent::connection::UnpivotManifests> {
+) -> Option<UnpivotManifests> {
     let secret_name = format!("{}{}", UNPIVOT_MANIFESTS_SECRET_PREFIX, cluster_name);
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
@@ -2775,7 +2775,7 @@ async fn load_unpivot_manifests_from_secret(
         "Loaded unpivot manifests from Secret (crash recovery)"
     );
 
-    Some(crate::agent::connection::UnpivotManifests {
+    Some(UnpivotManifests {
         capi_manifests,
         namespace,
     })
@@ -2987,7 +2987,7 @@ async fn handle_deletion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capi::CapiProviderConfig;
+    use lattice_capi::CapiProviderConfig;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
         BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
@@ -3986,7 +3986,7 @@ mod tests {
     /// clusterctl init is always called (it's idempotent).
     mod capi_installation_flow {
         use super::*;
-        use crate::crd::{CloudProvider, CloudProviderSpec, CloudProviderType};
+        use lattice_common::crd::{CloudProvider, CloudProviderSpec, CloudProviderType};
 
         use std::sync::{Arc as StdArc, Mutex};
 
@@ -4312,7 +4312,7 @@ mod tests {
     /// that uses the AgentRegistry for pivot orchestration.
     mod pivot_operations_tests {
         use super::*;
-        use crate::agent::connection::AgentRegistry;
+        use lattice_cell::AgentRegistry;
 
         /// Get a K8s client for tests, or skip if not available
         async fn test_client() -> Option<Client> {

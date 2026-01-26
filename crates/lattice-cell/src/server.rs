@@ -31,8 +31,8 @@ use lattice_proto::{
     PivotPhase, SyncDistributedResourcesCommand, UnpivotAckCommand, UnpivotPhase,
 };
 
-use super::connection::{AgentConnection, AgentRegistry, SharedAgentRegistry};
-use super::mtls::ServerMtlsConfig;
+use crate::{AgentConnection, AgentRegistry, SharedAgentRegistry};
+use lattice_infra::ServerMtlsConfig;
 
 /// gRPC server for agent communication
 pub struct AgentServer {
@@ -175,7 +175,7 @@ async fn handle_agent_message_impl(
                             // Restore manifests so they can be retried on next PivotComplete
                             registry.set_post_pivot_manifests(
                                 cluster_name,
-                                super::connection::PostPivotManifests {
+                                crate::PostPivotManifests {
                                     network_policy_yaml,
                                 },
                             );
@@ -226,7 +226,7 @@ async fn handle_agent_message_impl(
             // Store CAPI manifests in memory for immediate use
             registry.set_unpivot_manifests(
                 cluster_name,
-                super::connection::UnpivotManifests {
+                crate::UnpivotManifests {
                     capi_manifests: cd.capi_manifests.clone(),
                     namespace: cd.namespace.clone(),
                 },
@@ -357,6 +357,19 @@ async fn handle_agent_message_impl(
                 info!(cluster = %cluster_name, "UnpivotAck sent to child");
             }
         }
+        Some(Payload::KubernetesResponse(resp)) => {
+            debug!(
+                cluster = %cluster_name,
+                request_id = %resp.request_id,
+                status_code = resp.status_code,
+                streaming = resp.streaming,
+                stream_end = resp.stream_end,
+                "K8s API proxy response received"
+            );
+            // Response dispatching is handled by the RequestMultiplexer
+            // which is integrated at the HTTP proxy layer, not here.
+            // This log is for observability.
+        }
         None => {
             warn!(cluster = %cluster_name, "Received message with no payload");
         }
@@ -470,7 +483,7 @@ impl LatticeAgent for AgentServer {
 /// indicating it crashed after kubeconfig patch but before applying resources.
 async fn push_resources_for_recovery(kube_client: Client, command_tx: mpsc::Sender<CellCommand>) {
     // Fetch current distributed resources
-    let resources = match crate::pivot::fetch_distributable_resources(&kube_client).await {
+    let resources = match crate::resources::fetch_distributable_resources(&kube_client).await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "Failed to fetch resources for recovery push");
@@ -644,7 +657,7 @@ mod tests {
                             if command_tx.send(apply_cmd).await.is_err() {
                                 registry.set_post_pivot_manifests(
                                     cluster_name,
-                                    crate::agent::connection::PostPivotManifests {
+                                    crate::PostPivotManifests {
                                         network_policy_yaml,
                                     },
                                 );
@@ -660,9 +673,8 @@ mod tests {
             }
             Some(Payload::ClusterHealth(_)) => {}
             Some(Payload::StatusResponse(_)) => {}
-            Some(Payload::ClusterDeleting(_)) => {
-                // Skip persistence in tests
-            }
+            Some(Payload::ClusterDeleting(_)) => {}
+            Some(Payload::KubernetesResponse(_)) => {}
             None => {}
         }
     }
@@ -1057,7 +1069,7 @@ mod tests {
     /// Note: LatticeCluster CRD/instance are now delivered via bootstrap webhook.
     #[tokio::test]
     async fn test_pivot_complete_sends_post_pivot_manifests() {
-        use crate::agent::connection::PostPivotManifests;
+        use crate::PostPivotManifests;
 
         let registry = create_test_registry();
         let (tx, mut rx) = mpsc::channel::<CellCommand>(32);
@@ -1170,7 +1182,7 @@ mod tests {
     /// and state should transition to Failed.
     #[tokio::test]
     async fn test_pivot_failure_does_not_send_manifests() {
-        use crate::agent::connection::PostPivotManifests;
+        use crate::PostPivotManifests;
 
         let registry = create_test_registry();
         let (tx, mut rx) = mpsc::channel::<CellCommand>(32);
@@ -1234,7 +1246,7 @@ mod tests {
     /// (simulating disconnect) but we need to preserve manifests for retry.
     #[tokio::test]
     async fn test_pivot_complete_restores_manifests_on_send_failure() {
-        use crate::agent::connection::PostPivotManifests;
+        use crate::PostPivotManifests;
 
         let registry = create_test_registry();
         let (tx, rx) = mpsc::channel::<CellCommand>(32);
@@ -1295,7 +1307,7 @@ mod tests {
     /// should still be sent correctly.
     #[tokio::test]
     async fn test_pivot_complete_with_partial_manifests() {
-        use crate::agent::connection::PostPivotManifests;
+        use crate::PostPivotManifests;
 
         let registry = create_test_registry();
         let (tx, mut rx) = mpsc::channel::<CellCommand>(32);
