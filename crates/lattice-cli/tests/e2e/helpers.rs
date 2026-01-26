@@ -828,7 +828,10 @@ use super::providers::InfraProvider;
 
 /// Verify a cluster has its own CAPI resources after pivot
 #[cfg(feature = "provider-e2e")]
-pub async fn verify_cluster_capi_resources(kubeconfig: &str, cluster_name: &str) -> Result<(), String> {
+pub async fn verify_cluster_capi_resources(
+    kubeconfig: &str,
+    cluster_name: &str,
+) -> Result<(), String> {
     let nodes_output = run_cmd(
         "kubectl",
         &["--kubeconfig", kubeconfig, "get", "nodes", "-o", "wide"],

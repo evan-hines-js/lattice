@@ -10,10 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{
-    Api, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams, PostParams,
-};
-use kube::discovery::ApiResource;
+use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
@@ -32,13 +29,13 @@ use lattice_infra::generate_operator_network_policy;
 use lattice_proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand};
 
 use lattice_agent::patch_kubeconfig_for_self_management;
+use lattice_capi::{
+    create_provider, ensure_capi_installed, CAPIClient, CAPIClientImpl, CAPIManifest,
+    CapiInstaller, CapiProviderConfig,
+};
 use lattice_cell::{
     fetch_distributable_resources, DefaultManifestGenerator, DistributableResources, ParentServers,
     SharedAgentRegistry, UnpivotManifests, UNPIVOT_MANIFESTS_SECRET_PREFIX,
-};
-use lattice_capi::{ensure_capi_installed, CapiInstaller, CapiProviderConfig};
-use crate::provider::{
-    create_provider, pool_resource_suffix, CAPIManifest, CAPI_CLUSTER_API_VERSION,
 };
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
@@ -142,75 +139,6 @@ pub trait KubeClient: Send + Sync {
         &self,
         name: &str,
     ) -> Result<Option<lattice_common::crd::CloudProvider>, Error>;
-}
-
-/// Trait abstracting CAPI resource operations
-///
-/// This trait allows mocking CAPI operations in tests while using the
-/// real Kubernetes client for applying manifests in production.
-#[cfg_attr(test, automock)]
-#[async_trait]
-pub trait CAPIClient: Send + Sync {
-    /// Apply CAPI manifests to provision cluster infrastructure
-    ///
-    /// # Arguments
-    ///
-    /// * `manifests` - List of CAPI manifests to apply
-    /// * `namespace` - Namespace to apply manifests in
-    async fn apply_manifests(
-        &self,
-        manifests: &[CAPIManifest],
-        namespace: &str,
-    ) -> Result<(), Error>;
-
-    /// Check if CAPI infrastructure is ready for a cluster
-    ///
-    /// # Arguments
-    ///
-    /// * `cluster_name` - Name of the cluster to check
-    /// * `namespace` - Namespace where CAPI resources exist
-    /// * `bootstrap` - Bootstrap provider (kubeadm or rke2)
-    ///
-    /// # Returns
-    ///
-    /// True if infrastructure is ready, false otherwise
-    async fn is_infrastructure_ready(
-        &self,
-        cluster_name: &str,
-        namespace: &str,
-        bootstrap: BootstrapProvider,
-    ) -> Result<bool, Error>;
-
-    /// Get the current replica count of a pool's MachineDeployment
-    ///
-    /// Returns None if no MachineDeployment exists for the pool.
-    async fn get_pool_replicas(
-        &self,
-        cluster_name: &str,
-        pool_id: &str,
-        namespace: &str,
-    ) -> Result<Option<u32>, Error>;
-
-    /// Scale a pool's MachineDeployment to the desired replica count
-    ///
-    /// Creates the MachineDeployment if it doesn't exist.
-    async fn scale_pool(
-        &self,
-        cluster_name: &str,
-        pool_id: &str,
-        namespace: &str,
-        replicas: u32,
-    ) -> Result<(), Error>;
-
-    /// Delete a CAPI Cluster resource
-    async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
-
-    /// Check if a CAPI Cluster resource exists
-    async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str)
-        -> Result<bool, Error>;
-
-    /// Get the underlying kube Client for advanced operations
-    fn kube_client(&self) -> Client;
 }
 
 /// Real Kubernetes client implementation
@@ -704,476 +632,6 @@ impl KubeClient for KubeClientImpl {
     }
 }
 
-/// Real CAPI client implementation using DynamicObject for untyped resources
-pub struct CAPIClientImpl {
-    client: Client,
-}
-
-impl CAPIClientImpl {
-    /// Create a new CAPIClientImpl
-    pub fn new(client: Client) -> Self {
-        Self { client }
-    }
-
-    /// Discover the ApiResource for a given API version and kind using kube-rs discovery.
-    ///
-    /// This queries the API server to get the correct plural form and other metadata.
-    async fn discover_api_resource(
-        &self,
-        api_version: &str,
-        kind: &str,
-    ) -> Result<kube::discovery::ApiResource, Error> {
-        use kube::discovery::Discovery;
-
-        let (group, version) = parse_api_version(api_version);
-
-        // Run discovery to find the resource
-        let discovery = Discovery::new(self.client.clone())
-            .run()
-            .await
-            .map_err(|e| Error::serialization(format!("API discovery failed: {}", e)))?;
-
-        // Search for the matching kind in the discovered resources
-        for api_group in discovery.groups() {
-            // Check if this is the right group
-            let group_name = api_group.name();
-            if group_name != group {
-                continue;
-            }
-
-            // Get all resources in this group and search for our kind
-            for (ar, _caps) in api_group.recommended_resources() {
-                if ar.kind == kind && ar.version == version {
-                    return Ok(ar.clone());
-                }
-            }
-        }
-
-        // If not found via discovery, fall back to constructing it manually
-        // This can happen if the CRD was just installed and discovery cache is stale
-        debug!(
-            api_version = %api_version,
-            kind = %kind,
-            "Resource not found in discovery, using fallback pluralization"
-        );
-
-        Ok(kube::discovery::ApiResource {
-            group: group.to_string(),
-            version: version.to_string(),
-            api_version: api_version.to_string(),
-            kind: kind.to_string(),
-            plural: pluralize_kind(kind),
-        })
-    }
-
-    /// Get API for CAPI Cluster resources
-    fn capi_cluster_api(&self, namespace: &str) -> Api<kube::api::DynamicObject> {
-        use kube::discovery::ApiResource;
-        let ar = ApiResource {
-            group: "cluster.x-k8s.io".to_string(),
-            version: "v1beta2".to_string(),
-            api_version: CAPI_CLUSTER_API_VERSION.to_string(),
-            kind: "Cluster".to_string(),
-            plural: "clusters".to_string(),
-        };
-        Api::namespaced_with(self.client.clone(), namespace, &ar)
-    }
-}
-
-#[async_trait]
-impl CAPIClient for CAPIClientImpl {
-    async fn apply_manifests(
-        &self,
-        manifests: &[CAPIManifest],
-        namespace: &str,
-    ) -> Result<(), Error> {
-        use kube::api::DynamicObject;
-
-        for manifest in manifests {
-            // Discover the API resource from the API server
-            let ar = self
-                .discover_api_resource(&manifest.api_version, &manifest.kind)
-                .await?;
-
-            // Create dynamic object from manifest
-            // ConfigMaps use 'data' instead of 'spec'
-            let mut obj_value = serde_json::json!({
-                "apiVersion": manifest.api_version,
-                "kind": manifest.kind,
-                "metadata": {
-                    "name": manifest.metadata.name,
-                    "namespace": namespace,
-                    "labels": manifest.metadata.labels,
-                },
-            });
-
-            // Add spec or data depending on what the manifest has
-            if let Some(ref data) = manifest.data {
-                obj_value["data"] = data.clone();
-            }
-            if let Some(ref spec) = manifest.spec {
-                obj_value["spec"] = spec.clone();
-            }
-
-            let obj: DynamicObject = serde_json::from_value(obj_value)
-                .map_err(|e| Error::serialization(e.to_string()))?;
-
-            // Apply using server-side apply
-            let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-            api.patch(
-                &manifest.metadata.name,
-                &PatchParams::apply("lattice-controller").force(),
-                &Patch::Apply(&obj),
-            )
-            .await?;
-
-            info!(
-                kind = %manifest.kind,
-                name = %manifest.metadata.name,
-                namespace = %namespace,
-                "Applied CAPI manifest"
-            );
-        }
-
-        Ok(())
-    }
-
-    async fn is_infrastructure_ready(
-        &self,
-        cluster_name: &str,
-        namespace: &str,
-        bootstrap: BootstrapProvider,
-    ) -> Result<bool, Error> {
-        // Check 1: CAPI Cluster object is Ready/Provisioned
-        let cluster_api = self.capi_cluster_api(namespace);
-        let cluster_ready = match cluster_api.get(cluster_name).await {
-            Ok(cluster) => {
-                let mut ready = false;
-                if let Some(status) = cluster.data.get("status") {
-                    if let Some(phase) = status.get("phase").and_then(|p| p.as_str()) {
-                        if phase == "Provisioned" {
-                            ready = true;
-                        }
-                    }
-                    if !ready {
-                        if let Some(conditions) =
-                            status.get("conditions").and_then(|c| c.as_array())
-                        {
-                            for condition in conditions {
-                                if condition.get("type").and_then(|t| t.as_str()) == Some("Ready")
-                                    && condition.get("status").and_then(|s| s.as_str())
-                                        == Some("True")
-                                {
-                                    ready = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                ready
-            }
-            Err(kube::Error::Api(ae)) if ae.code == 404 => false,
-            Err(e) => return Err(e.into()),
-        };
-
-        if !cluster_ready {
-            debug!(cluster = %cluster_name, "CAPI Cluster not ready yet");
-            return Ok(false);
-        }
-
-        // Check 2: Control plane is Initialized (KubeadmControlPlane or RKE2ControlPlane)
-        // clusterctl move requires this before it will proceed
-        let (cp_kind, cp_group, cp_version) = match bootstrap {
-            BootstrapProvider::Kubeadm => (
-                "KubeadmControlPlane",
-                "controlplane.cluster.x-k8s.io",
-                "v1beta2",
-            ),
-            BootstrapProvider::Rke2 => (
-                "RKE2ControlPlane",
-                "controlplane.cluster.x-k8s.io",
-                "v1beta1",
-            ),
-        };
-
-        let cp_api: Api<DynamicObject> = Api::namespaced_with(
-            self.client.clone(),
-            namespace,
-            &ApiResource::from_gvk(&GroupVersionKind {
-                group: cp_group.to_string(),
-                version: cp_version.to_string(),
-                kind: cp_kind.to_string(),
-            }),
-        );
-
-        let cp_name = format!("{}-control-plane", cluster_name);
-        let cp_initialized = match cp_api.get(&cp_name).await {
-            Ok(cp) => {
-                if let Some(status) = cp.data.get("status") {
-                    // v1beta2 uses status.initialization.controlPlaneInitialized
-                    // v1beta1 used status.initialized
-                    status
-                        .get("initialization")
-                        .and_then(|init| init.get("controlPlaneInitialized"))
-                        .and_then(|i| i.as_bool())
-                        .unwrap_or(false)
-                } else {
-                    false
-                }
-            }
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                debug!(cluster = %cluster_name, cp_kind = %cp_kind, "ControlPlane not found");
-                false
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        if !cp_initialized {
-            debug!(cluster = %cluster_name, cp_kind = %cp_kind, "ControlPlane not initialized yet");
-            return Ok(false);
-        }
-
-        // Check 3: No machines are still provisioning
-        // clusterctl move will fail if any machines are in provisioning state
-        let machine_api: Api<DynamicObject> = Api::namespaced_with(
-            self.client.clone(),
-            namespace,
-            &ApiResource::from_gvk(&GroupVersionKind {
-                group: "cluster.x-k8s.io".to_string(),
-                version: "v1beta2".to_string(),
-                kind: "Machine".to_string(),
-            }),
-        );
-
-        let machines = machine_api
-            .list(
-                &ListParams::default()
-                    .labels(&format!("cluster.x-k8s.io/cluster-name={}", cluster_name)),
-            )
-            .await?;
-
-        for machine in &machines.items {
-            if let Some(status) = machine.data.get("status") {
-                if let Some(phase) = status.get("phase").and_then(|p| p.as_str()) {
-                    if phase == "Provisioning" || phase == "Pending" {
-                        debug!(
-                            cluster = %cluster_name,
-                            machine = ?machine.metadata.name,
-                            phase = %phase,
-                            "Machine still provisioning"
-                        );
-                        return Ok(false);
-                    }
-                }
-            }
-        }
-
-        info!(
-            cluster = %cluster_name,
-            cp_kind = %cp_kind,
-            "Infrastructure fully ready (Cluster ready, ControlPlane initialized, all machines running)"
-        );
-        Ok(true)
-    }
-
-    async fn get_pool_replicas(
-        &self,
-        cluster_name: &str,
-        pool_id: &str,
-        namespace: &str,
-    ) -> Result<Option<u32>, Error> {
-        let api: Api<DynamicObject> = Api::namespaced_with(
-            self.client.clone(),
-            namespace,
-            &ApiResource::from_gvk(&GroupVersionKind {
-                group: "cluster.x-k8s.io".to_string(),
-                version: "v1beta2".to_string(),
-                kind: "MachineDeployment".to_string(),
-            }),
-        );
-
-        let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
-
-        match api.get(&md_name).await {
-            Ok(md) => {
-                let replicas = md
-                    .data
-                    .get("spec")
-                    .and_then(|s: &serde_json::Value| s.get("replicas"))
-                    .and_then(|r: &serde_json::Value| r.as_i64())
-                    .map(|r| r as u32);
-                debug!(
-                    cluster = %cluster_name,
-                    pool = %pool_id,
-                    replicas = ?replicas,
-                    "Got MachineDeployment replicas for pool"
-                );
-                Ok(replicas)
-            }
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                debug!(cluster = %cluster_name, pool = %pool_id, "MachineDeployment not found for pool");
-                Ok(None)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    async fn scale_pool(
-        &self,
-        cluster_name: &str,
-        pool_id: &str,
-        namespace: &str,
-        replicas: u32,
-    ) -> Result<(), Error> {
-        use kube::api::{Patch, PatchParams};
-
-        let api: Api<DynamicObject> = Api::namespaced_with(
-            self.client.clone(),
-            namespace,
-            &ApiResource::from_gvk(&GroupVersionKind {
-                group: "cluster.x-k8s.io".to_string(),
-                version: "v1beta2".to_string(),
-                kind: "MachineDeployment".to_string(),
-            }),
-        );
-
-        let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
-
-        let patch = serde_json::json!({
-            "spec": { "replicas": replicas }
-        });
-
-        api.patch(&md_name, &PatchParams::default(), &Patch::Merge(&patch))
-            .await?;
-
-        info!(
-            cluster = %cluster_name,
-            pool = %pool_id,
-            replicas = replicas,
-            "Scaled MachineDeployment for pool"
-        );
-        Ok(())
-    }
-
-    async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error> {
-        let api = self.capi_cluster_api(namespace);
-        match api.delete(cluster_name, &Default::default()).await {
-            Ok(_) => Ok(()),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                debug!(cluster = %cluster_name, "CAPI Cluster not found (already deleted)");
-                Ok(())
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    async fn capi_cluster_exists(
-        &self,
-        cluster_name: &str,
-        namespace: &str,
-    ) -> Result<bool, Error> {
-        let api = self.capi_cluster_api(namespace);
-        match api.get(cluster_name).await {
-            Ok(_) => Ok(true),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    fn kube_client(&self) -> Client {
-        self.client.clone()
-    }
-}
-
-/// Parse API version into group and version components
-fn parse_api_version(api_version: &str) -> (&str, &str) {
-    if let Some(idx) = api_version.rfind('/') {
-        (&api_version[..idx], &api_version[idx + 1..])
-    } else {
-        // Core API (e.g., "v1")
-        ("", api_version)
-    }
-}
-
-/// Known CAPI resource pluralizations.
-///
-/// Kubernetes uses non-standard pluralization rules (all lowercase, no hyphens).
-/// We maintain this static map for known CAPI kinds to avoid runtime discovery
-/// overhead. All CAPI kinds we generate are well-known and listed here.
-///
-/// If a kind is not in this map, we fall back to standard pluralization rules
-/// (lowercase + 's'), which works for most Kubernetes resources.
-const CAPI_KIND_PLURALS: &[(&str, &str)] = &[
-    // Core CAPI types (cluster.x-k8s.io)
-    ("cluster", "clusters"),
-    ("machine", "machines"),
-    ("machinedeployment", "machinedeployments"),
-    ("machineset", "machinesets"),
-    ("machinepool", "machinepools"),
-    // Control plane provider (controlplane.cluster.x-k8s.io)
-    ("kubeadmcontrolplane", "kubeadmcontrolplanes"),
-    (
-        "kubeadmcontrolplanetemplate",
-        "kubeadmcontrolplanetemplates",
-    ),
-    // Bootstrap provider (bootstrap.cluster.x-k8s.io)
-    ("kubeadmconfig", "kubeadmconfigs"),
-    ("kubeadmconfigtemplate", "kubeadmconfigtemplates"),
-    // Docker infrastructure provider (infrastructure.cluster.x-k8s.io)
-    ("dockercluster", "dockerclusters"),
-    ("dockerclustertemplate", "dockerclustertemplates"),
-    ("dockermachine", "dockermachines"),
-    ("dockermachinetemplate", "dockermachinetemplates"),
-    ("dockermachinepool", "dockermachinepools"),
-    ("dockermachinepooltemplate", "dockermachinepooltemplates"),
-    // AWS infrastructure provider
-    ("awscluster", "awsclusters"),
-    ("awsmachine", "awsmachines"),
-    ("awsmachinetemplate", "awsmachinetemplates"),
-    ("awsmanagedcluster", "awsmanagedclusters"),
-    ("awsmanagedmachinepool", "awsmanagedmachinepools"),
-    // GCP infrastructure provider
-    ("gcpcluster", "gcpclusters"),
-    ("gcpmachine", "gcpmachines"),
-    ("gcpmachinetemplate", "gcpmachinetemplates"),
-    // Azure infrastructure provider
-    ("azurecluster", "azureclusters"),
-    ("azuremachine", "azuremachines"),
-    ("azuremachinetemplate", "azuremachinetemplates"),
-    ("azuremanagedcluster", "azuremanagedclusters"),
-    ("azuremanagedmachinepool", "azuremanagedmachinepools"),
-    // IPAddress management (ipam.cluster.x-k8s.io)
-    ("ipaddress", "ipaddresses"),
-    ("ipaddressclaim", "ipaddressclaims"),
-];
-
-/// Convert a Kind to its plural form for Kubernetes API resources.
-///
-/// Uses a static lookup for known CAPI kinds, falling back to standard
-/// pluralization (lowercase + 's') for unknown kinds.
-fn pluralize_kind(kind: &str) -> String {
-    let lower = kind.to_lowercase();
-
-    // Look up in known CAPI kinds
-    for (singular, plural) in CAPI_KIND_PLURALS {
-        if *singular == lower {
-            return (*plural).to_string();
-        }
-    }
-
-    // Fallback: simple pluralization (works for most K8s resources)
-    // Handles common patterns: deployment->deployments, service->services
-    if lower.ends_with('s') || lower.ends_with("ch") || lower.ends_with("sh") {
-        format!("{}es", lower)
-    } else if lower.ends_with('y') && !lower.ends_with("ay") && !lower.ends_with("ey") {
-        // policy -> policies, but not gateway -> gateways
-        format!("{}ies", &lower[..lower.len() - 1])
-    } else {
-        format!("{}s", lower)
-    }
-}
-
 // =============================================================================
 // Pure Functions - Extracted for Unit Testability
 // =============================================================================
@@ -1417,10 +875,7 @@ pub trait PivotOperations: Send + Sync {
     /// Called during unpivot cleanup to get CAPI manifests that the child
     /// exported and sent via ClusterDeleting message. Returns None if no
     /// manifests are available (child hasn't sent them yet).
-    fn take_unpivot_manifests(
-        &self,
-        cluster_name: &str,
-    ) -> Option<UnpivotManifests>;
+    fn take_unpivot_manifests(&self, cluster_name: &str) -> Option<UnpivotManifests>;
 }
 
 /// Request to trigger unpivot operation
@@ -1820,19 +1275,16 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 info!("CAPI resources found, patching kubeconfig for self-management");
                 let cluster_name = name.clone();
                 let namespace = capi_namespace.clone();
-                let patch_result =
-                    retry_with_backoff(
-                        &RetryConfig::with_max_attempts(10),
-                        "patch_kubeconfig_for_self_management",
-                        || {
-                            let cn = cluster_name.clone();
-                            let ns = namespace.clone();
-                            async move {
-                                patch_kubeconfig_for_self_management(&cn, &ns).await
-                            }
-                        },
-                    )
-                    .await;
+                let patch_result = retry_with_backoff(
+                    &RetryConfig::with_max_attempts(10),
+                    "patch_kubeconfig_for_self_management",
+                    || {
+                        let cn = cluster_name.clone();
+                        let ns = namespace.clone();
+                        async move { patch_kubeconfig_for_self_management(&cn, &ns).await }
+                    },
+                )
+                .await;
 
                 if let Err(e) = patch_result {
                     warn!(error = %e, "Failed to patch kubeconfig for self-management after retries");
@@ -2235,7 +1687,7 @@ async fn generate_capi_manifests(
     cluster: &LatticeCluster,
     ctx: &Context,
 ) -> Result<Vec<CAPIManifest>, Error> {
-    use crate::provider::BootstrapInfo;
+    use lattice_capi::BootstrapInfo;
 
     // Each cluster gets its own CAPI namespace for pivot isolation
     let cluster_name = cluster
@@ -2606,10 +2058,7 @@ impl PivotOperations for PivotOperationsImpl {
         );
     }
 
-    fn take_unpivot_manifests(
-        &self,
-        cluster_name: &str,
-    ) -> Option<lattice_cell::UnpivotManifests> {
+    fn take_unpivot_manifests(&self, cluster_name: &str) -> Option<lattice_cell::UnpivotManifests> {
         self.agent_registry.take_unpivot_manifests(cluster_name)
     }
 }
@@ -2987,22 +2436,37 @@ async fn handle_deletion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_capi::CapiProviderConfig;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use lattice_capi::CapiProviderConfig;
     use lattice_common::crd::{
         BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
         ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
     };
     use mockall::mock;
 
-    // Local mock for CapiInstaller since the mockall-generated mock is only
-    // available within the lattice-cluster crate's test configuration
+    // Local mocks for traits defined in other crates - the mockall-generated mocks
+    // are only available within those crates' test configurations
     mock! {
         pub CapiInstaller {}
 
         #[async_trait::async_trait]
         impl CapiInstaller for CapiInstaller {
             async fn ensure(&self, config: &CapiProviderConfig) -> Result<(), Error>;
+        }
+    }
+
+    mock! {
+        pub CAPIClient {}
+
+        #[async_trait::async_trait]
+        impl CAPIClient for CAPIClient {
+            async fn apply_manifests(&self, manifests: &[CAPIManifest], namespace: &str) -> Result<(), Error>;
+            async fn is_infrastructure_ready(&self, cluster_name: &str, namespace: &str, bootstrap: BootstrapProvider) -> Result<bool, Error>;
+            async fn get_pool_replicas(&self, cluster_name: &str, pool_id: &str, namespace: &str) -> Result<Option<u32>, Error>;
+            async fn scale_pool(&self, cluster_name: &str, pool_id: &str, namespace: &str, replicas: u32) -> Result<(), Error>;
+            async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error>;
+            async fn capi_cluster_exists(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
+            fn kube_client(&self) -> Client;
         }
     }
 
@@ -3613,70 +3077,6 @@ mod tests {
                 .contains("connection failed"));
         }
     }
-
-    /// Tests for CAPI resource API handling
-    ///
-    /// These tests verify that we correctly parse Kubernetes API versions and
-    /// generate resource plural names - essential for dynamically creating
-    /// CAPI resources. While these are internal helpers, they're tested
-    /// directly because the production code path (apply_manifests) requires
-    /// a live Kubernetes cluster.
-    mod capi_api_handling {
-        use super::*;
-
-        /// Story: When applying CAPI resources, we need to parse API versions like
-        /// "cluster.x-k8s.io/v1beta1" into group and version for the DynamicObject API.
-        #[test]
-        fn test_grouped_api_versions_are_parsed_correctly() {
-            let (group, version) = parse_api_version("cluster.x-k8s.io/v1beta1");
-            assert_eq!(group, "cluster.x-k8s.io");
-            assert_eq!(version, "v1beta1");
-        }
-
-        /// Story: Core Kubernetes resources use versions like "v1" without a group.
-        #[test]
-        fn test_core_api_versions_have_empty_group() {
-            let (group, version) = parse_api_version("v1");
-            assert_eq!(group, "");
-            assert_eq!(version, "v1");
-        }
-
-        /// Story: The Kubernetes API requires plural resource names. We must correctly
-        /// pluralize all CAPI resource kinds to construct valid API paths.
-        #[test]
-        fn test_all_capi_resource_kinds_are_pluralized_correctly() {
-            // Core CAPI kinds
-            assert_eq!(pluralize_kind("Cluster"), "clusters");
-            assert_eq!(pluralize_kind("Machine"), "machines");
-            assert_eq!(pluralize_kind("MachineSet"), "machinesets");
-            assert_eq!(pluralize_kind("MachineDeployment"), "machinedeployments");
-
-            // Control plane kinds
-            assert_eq!(
-                pluralize_kind("KubeadmControlPlane"),
-                "kubeadmcontrolplanes"
-            );
-            assert_eq!(
-                pluralize_kind("KubeadmConfigTemplate"),
-                "kubeadmconfigtemplates"
-            );
-
-            // Docker infrastructure kinds
-            assert_eq!(pluralize_kind("DockerCluster"), "dockerclusters");
-            assert_eq!(pluralize_kind("DockerMachine"), "dockermachines");
-            assert_eq!(
-                pluralize_kind("DockerMachineTemplate"),
-                "dockermachinetemplates"
-            );
-        }
-
-        /// Story: Unknown resource kinds should fall back to simple 's' suffix pluralization.
-        #[test]
-        fn test_unknown_kinds_use_fallback_pluralization() {
-            assert_eq!(pluralize_kind("CustomResource"), "customresources");
-        }
-    }
-
     mod generate_manifests_tests {
         use super::*;
 
@@ -3739,114 +3139,6 @@ mod tests {
             let manifests = result.expect("manifest generation should succeed");
             // Docker provider should generate manifests
             assert!(!manifests.is_empty());
-        }
-    }
-
-    /// API Version Parsing Tests
-    ///
-    /// These tests verify that Kubernetes API versions are correctly parsed
-    /// into group and version components for dynamic resource creation.
-    mod api_version_parsing {
-        use super::*;
-
-        /// Story: CAPI resources use grouped API versions like "cluster.x-k8s.io/v1beta1"
-        /// which need to be split into group="cluster.x-k8s.io" and version="v1beta1"
-        #[test]
-        fn story_capi_api_versions_split_correctly() {
-            let test_cases = vec![
-                ("cluster.x-k8s.io/v1beta1", "cluster.x-k8s.io", "v1beta1"),
-                (
-                    "infrastructure.cluster.x-k8s.io/v1beta1",
-                    "infrastructure.cluster.x-k8s.io",
-                    "v1beta1",
-                ),
-                (
-                    "controlplane.cluster.x-k8s.io/v1beta1",
-                    "controlplane.cluster.x-k8s.io",
-                    "v1beta1",
-                ),
-                (
-                    "bootstrap.cluster.x-k8s.io/v1beta1",
-                    "bootstrap.cluster.x-k8s.io",
-                    "v1beta1",
-                ),
-            ];
-
-            for (input, expected_group, expected_version) in test_cases {
-                let (group, version) = parse_api_version(input);
-                assert_eq!(group, expected_group, "group for {}", input);
-                assert_eq!(version, expected_version, "version for {}", input);
-            }
-        }
-
-        /// Story: Core Kubernetes resources use "v1" without a group prefix
-        #[test]
-        fn story_core_api_version_has_empty_group() {
-            let (group, version) = parse_api_version("v1");
-            assert_eq!(group, "");
-            assert_eq!(version, "v1");
-        }
-
-        /// Story: Apps API group resources like Deployments
-        #[test]
-        fn story_apps_api_version_parses_correctly() {
-            let (group, version) = parse_api_version("apps/v1");
-            assert_eq!(group, "apps");
-            assert_eq!(version, "v1");
-        }
-    }
-
-    /// Resource Pluralization Tests
-    ///
-    /// The Kubernetes API requires plural resource names when constructing
-    /// API paths. These tests verify all CAPI resource kinds are pluralized correctly.
-    mod resource_pluralization {
-        use super::*;
-
-        /// Story: All standard CAPI resource kinds must pluralize correctly
-        /// for the dynamic client to work with them.
-        #[test]
-        fn story_all_capi_kinds_have_correct_plurals() {
-            // Core CAPI resources
-            assert_eq!(pluralize_kind("Cluster"), "clusters");
-            assert_eq!(pluralize_kind("Machine"), "machines");
-            assert_eq!(pluralize_kind("MachineSet"), "machinesets");
-            assert_eq!(pluralize_kind("MachineDeployment"), "machinedeployments");
-
-            // Control plane resources
-            assert_eq!(
-                pluralize_kind("KubeadmControlPlane"),
-                "kubeadmcontrolplanes"
-            );
-            assert_eq!(
-                pluralize_kind("KubeadmConfigTemplate"),
-                "kubeadmconfigtemplates"
-            );
-
-            // Docker provider resources
-            assert_eq!(pluralize_kind("DockerCluster"), "dockerclusters");
-            assert_eq!(pluralize_kind("DockerMachine"), "dockermachines");
-            assert_eq!(
-                pluralize_kind("DockerMachineTemplate"),
-                "dockermachinetemplates"
-            );
-        }
-
-        /// Story: Unknown resource kinds should use simple 's' suffix fallback
-        /// so new resource types can still work without explicit mapping.
-        #[test]
-        fn story_unknown_kinds_use_fallback_pluralization() {
-            assert_eq!(pluralize_kind("CustomCluster"), "customclusters");
-            assert_eq!(pluralize_kind("MyResource"), "myresources");
-            assert_eq!(pluralize_kind("SomeNewKind"), "somenewkinds");
-        }
-
-        /// Story: Pluralization is case-insensitive (Kubernetes convention)
-        #[test]
-        fn story_pluralization_is_case_insensitive() {
-            assert_eq!(pluralize_kind("CLUSTER"), "clusters");
-            assert_eq!(pluralize_kind("cluster"), "clusters");
-            assert_eq!(pluralize_kind("Cluster"), "clusters");
         }
     }
 

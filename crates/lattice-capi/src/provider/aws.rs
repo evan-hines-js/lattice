@@ -12,8 +12,8 @@ use super::{
     BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider,
     WorkerPoolConfig,
 };
-use crate::{Error, Result};
 use lattice_common::crd::{AwsConfig, LatticeCluster, ProviderSpec, ProviderType};
+use lattice_common::{Error, Result};
 
 const AWS_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta2";
 

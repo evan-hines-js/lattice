@@ -12,8 +12,8 @@ use super::{
     BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider,
     WorkerPoolConfig,
 };
-use crate::{Error, Result};
 use lattice_common::crd::{LatticeCluster, OpenStackConfig, ProviderSpec, ProviderType};
+use lattice_common::{Error, Result};
 
 const OPENSTACK_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta1";
 const DEFAULT_NODE_CIDR: &str = "10.6.0.0/24";

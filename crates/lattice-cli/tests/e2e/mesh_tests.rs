@@ -1787,3 +1787,51 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     sleep(Duration::from_secs(120)).await;
     handle.stop_and_verify().await
 }
+
+// =============================================================================
+// Cleanup Functions
+// =============================================================================
+
+/// Clean up the fixed 9-service mesh test namespace
+pub fn cleanup_mesh_test(kubeconfig_path: &str) {
+    info!(
+        "[Mesh Cleanup] Deleting namespace {}...",
+        TEST_SERVICES_NAMESPACE
+    );
+    let _ = run_cmd_allow_fail(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "delete",
+            "namespace",
+            TEST_SERVICES_NAMESPACE,
+            "--wait=false",
+        ],
+    );
+}
+
+/// Clean up the random mesh test namespace
+pub fn cleanup_random_mesh_test(kubeconfig_path: &str) {
+    info!(
+        "[Mesh Cleanup] Deleting namespace {}...",
+        RANDOM_MESH_NAMESPACE
+    );
+    let _ = run_cmd_allow_fail(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "delete",
+            "namespace",
+            RANDOM_MESH_NAMESPACE,
+            "--wait=false",
+        ],
+    );
+}
+
+/// Clean up all mesh test namespaces
+pub fn cleanup_all_mesh_tests(kubeconfig_path: &str) {
+    cleanup_mesh_test(kubeconfig_path);
+    cleanup_random_mesh_test(kubeconfig_path);
+}

@@ -28,8 +28,8 @@ pub use proxmox::ProxmoxProvider;
 
 use async_trait::async_trait;
 
-use crate::Result;
 use lattice_common::crd::{LatticeCluster, ProviderSpec, ProviderType};
+use lattice_common::{Error, Result};
 
 /// A CAPI manifest represented as an untyped Kubernetes resource
 ///
@@ -95,7 +95,7 @@ impl CAPIManifest {
 
     /// Serialize the manifest to YAML
     pub fn to_yaml(&self) -> Result<String> {
-        serde_yaml::to_string(self).map_err(|e| crate::Error::serialization(e.to_string()))
+        serde_yaml::to_string(self).map_err(|e| Error::serialization(e.to_string()))
     }
 }
 
@@ -1078,9 +1078,9 @@ BOOTSTRAP_SCRIPT"#
 ///
 /// ```ignore
 /// use async_trait::async_trait;
-/// use lattice_operator::provider::{Provider, CAPIManifest, BootstrapInfo};
-/// use lattice_operator::crd::{LatticeCluster, ProviderSpec};
-/// use lattice_operator::Result;
+/// use lattice_capi::provider::{Provider, CAPIManifest, BootstrapInfo};
+/// use lattice_common::crd::{LatticeCluster, ProviderSpec};
+/// use lattice_common::Result;
 ///
 /// struct MyProvider;
 ///
@@ -1177,10 +1177,10 @@ pub fn create_provider(provider_type: ProviderType, namespace: &str) -> Result<B
         ProviderType::Docker => Ok(Box::new(DockerProvider::with_namespace(namespace))),
         ProviderType::OpenStack => Ok(Box::new(OpenStackProvider::with_namespace(namespace))),
         ProviderType::Proxmox => Ok(Box::new(ProxmoxProvider::with_namespace(namespace))),
-        ProviderType::Gcp => Err(crate::Error::provider(
+        ProviderType::Gcp => Err(Error::provider(
             "GCP provider not yet implemented".to_string(),
         )),
-        ProviderType::Azure => Err(crate::Error::provider(
+        ProviderType::Azure => Err(Error::provider(
             "Azure provider not yet implemented".to_string(),
         )),
     }

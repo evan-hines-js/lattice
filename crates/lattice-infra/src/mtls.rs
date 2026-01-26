@@ -176,7 +176,8 @@ mod tests {
         let pem_obj = pem::parse(agent_cert.as_bytes()).expect("PEM parsing should succeed");
         let cert_der = pem_obj.contents();
 
-        let result = verify_cert_chain(cert_der, ca.ca_cert_pem()).expect("verification should succeed");
+        let result =
+            verify_cert_chain(cert_der, ca.ca_cert_pem()).expect("verification should succeed");
         assert!(result);
     }
 

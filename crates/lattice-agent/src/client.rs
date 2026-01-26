@@ -28,17 +28,21 @@ use crate::pivot::{
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
 use kube::Client;
-use lattice_capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller, copy_credentials_to_provider_namespace};
+use lattice_capi::{
+    copy_credentials_to_provider_namespace, ensure_capi_installed, CapiProviderConfig,
+    ClusterctlInstaller,
+};
 use lattice_common::crd::{
-    CloudProvider, LatticeCluster, PivotPhase as CrdPivotPhase, ProviderType, UnpivotPhase as CrdUnpivotPhase,
+    CloudProvider, LatticeCluster, PivotPhase as CrdPivotPhase, ProviderType,
+    UnpivotPhase as CrdUnpivotPhase,
 };
 use lattice_common::{CsrRequest, CsrResponse, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::pki::AgentCertRequest;
 use lattice_proto::lattice_agent_client::LatticeAgentClient;
 use lattice_proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
-    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, KubernetesResponse,
-    PivotComplete, PivotPhase, StatusResponse,
+    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, KubernetesResponse, PivotComplete,
+    PivotPhase, StatusResponse,
 };
 
 use crate::watch::{execute_watch, WatchRegistry};
@@ -1928,7 +1932,14 @@ mod tests {
             })),
         };
 
-        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster", &Arc::new(WatchRegistry::new())).await;
+        AgentClient::handle_command(
+            &command,
+            &agent_state,
+            &tx,
+            "test-cluster",
+            &Arc::new(WatchRegistry::new()),
+        )
+        .await;
         // ApplyManifests command doesn't change state - CAPI install is lazy
     }
 
@@ -1945,7 +1956,14 @@ mod tests {
             })),
         };
 
-        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster", &Arc::new(WatchRegistry::new())).await;
+        AgentClient::handle_command(
+            &command,
+            &agent_state,
+            &tx,
+            "test-cluster",
+            &Arc::new(WatchRegistry::new()),
+        )
+        .await;
         // Status request doesn't change state (TODO in code)
     }
 
@@ -1959,7 +1977,14 @@ mod tests {
             command: None,
         };
 
-        AgentClient::handle_command(&command, &agent_state, &tx, "test-cluster", &Arc::new(WatchRegistry::new())).await;
+        AgentClient::handle_command(
+            &command,
+            &agent_state,
+            &tx,
+            "test-cluster",
+            &Arc::new(WatchRegistry::new()),
+        )
+        .await;
         // Should log warning but not crash
     }
 
@@ -2384,7 +2409,14 @@ mod tests {
         };
 
         // Should not panic or error
-        AgentClient::handle_command(&command, &agent_state, &tx, "apply-cluster", &Arc::new(WatchRegistry::new())).await;
+        AgentClient::handle_command(
+            &command,
+            &agent_state,
+            &tx,
+            "apply-cluster",
+            &Arc::new(WatchRegistry::new()),
+        )
+        .await;
 
         // State should not change (manifests applied, CAPI install is lazy)
         assert_eq!(*agent_state.read().await, AgentState::Provisioning);
@@ -2405,7 +2437,14 @@ mod tests {
         };
 
         // Should handle without error
-        AgentClient::handle_command(&command, &agent_state, &tx, "status-cluster", &Arc::new(WatchRegistry::new())).await;
+        AgentClient::handle_command(
+            &command,
+            &agent_state,
+            &tx,
+            "status-cluster",
+            &Arc::new(WatchRegistry::new()),
+        )
+        .await;
 
         // State should remain unchanged
         assert_eq!(*agent_state.read().await, AgentState::Ready);
@@ -2425,7 +2464,14 @@ mod tests {
         };
 
         // Should not panic
-        AgentClient::handle_command(&command, &agent_state, &tx, "robust-cluster", &Arc::new(WatchRegistry::new())).await;
+        AgentClient::handle_command(
+            &command,
+            &agent_state,
+            &tx,
+            "robust-cluster",
+            &Arc::new(WatchRegistry::new()),
+        )
+        .await;
 
         // State should remain unchanged
         assert_eq!(*agent_state.read().await, AgentState::Ready);

@@ -79,7 +79,7 @@ use super::helpers::{
 // Media server test disabled pending investigation
 #[allow(unused_imports)]
 use super::media_server_e2e::{cleanup_media_server_test, run_media_server_test};
-use super::mesh_tests::{run_mesh_test, run_random_mesh_test};
+use super::mesh_tests::{cleanup_all_mesh_tests, run_mesh_test, run_random_mesh_test};
 use super::providers::InfraProvider;
 
 // =============================================================================
@@ -393,7 +393,6 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     // =========================================================================
     info!("[Phase 7] Deleting workload2 cluster (unpivot flow)...");
     info!("CAPI resources will move back to workload cluster");
-    info!("(Mesh tests continue running in background)");
 
     delete_cluster_and_wait(
         &workload2_kubeconfig_path,
@@ -406,13 +405,17 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     info!("SUCCESS: Workload2 deleted and unpivoted!");
 
     // =========================================================================
-    // Phase 7b: Wait for mesh tests to complete
+    // Phase 7b: Wait for mesh tests to complete and clean up
     // =========================================================================
     if let Some(handle) = mesh_handle {
         info!("[Phase 7b] Waiting for mesh tests to complete...");
         handle
             .await
             .map_err(|e| format!("Mesh test task panicked: {}", e))??;
+
+        // Clean up mesh test namespaces (mesh tests run on workload cluster)
+        info!("[Phase 7c] Cleaning up mesh test services...");
+        cleanup_all_mesh_tests(&workload_kubeconfig_path);
     }
 
     info!("SUCCESS: All phase 6-7 tasks complete!");
