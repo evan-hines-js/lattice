@@ -11,6 +11,10 @@ pub use lattice_cluster::parent;
 pub use lattice_cluster::pivot;
 pub use lattice_cluster::provider;
 
+// Re-export crash-resilient cleanup functions
+pub use lattice_cluster::cleanup_stale_pivot_secrets;
+pub use lattice_cluster::cleanup_stale_unpivot_secrets;
+
 // Re-export service modules from lattice-service
 pub use lattice_service::compiler;
 pub use lattice_service::ingress;

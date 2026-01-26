@@ -76,7 +76,11 @@ impl ChaosMonkey {
         let pod_task = tokio::spawn(pod_chaos_loop(targets.clone(), cancel.clone()));
         let net_task = tokio::spawn(net_chaos_loop(targets, cancel.clone()));
 
-        Self { pod_task, net_task, cancel }
+        Self {
+            pod_task,
+            net_task,
+            cancel,
+        }
     }
 
     pub async fn stop(self) {
@@ -116,7 +120,17 @@ async fn net_chaos_loop(targets: Arc<ChaosTargets>, cancel: CancellationToken) {
 fn kill_pod(cluster: &str, kubeconfig: &str) {
     let output = run_cmd_allow_fail(
         "kubectl",
-        &["--kubeconfig", kubeconfig, "delete", "pod", "-n", OPERATOR_NS, "-l", OPERATOR_LABEL, "--wait=false"],
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "delete",
+            "pod",
+            "-n",
+            OPERATOR_NS,
+            "-l",
+            OPERATOR_LABEL,
+            "--wait=false",
+        ],
     );
 
     let msg = if output.contains("deleted") {
@@ -139,7 +153,10 @@ async fn cut_network(cluster: &str, kubeconfig: &str, cancel: &CancellationToken
         return;
     }
 
-    let output = run_cmd_allow_fail("kubectl", &["--kubeconfig", kubeconfig, "apply", "-f", &policy_file]);
+    let output = run_cmd_allow_fail(
+        "kubectl",
+        &["--kubeconfig", kubeconfig, "apply", "-f", &policy_file],
+    );
 
     if !output.contains("created") && !output.contains("configured") {
         let _ = std::fs::remove_file(&policy_file);
@@ -149,7 +166,10 @@ async fn cut_network(cluster: &str, kubeconfig: &str, cancel: &CancellationToken
         return;
     }
 
-    info!("[Chaos] Network on {}: cut for {}s", cluster, NET_BLACKOUT_SECS);
+    info!(
+        "[Chaos] Network on {}: cut for {}s",
+        cluster, NET_BLACKOUT_SECS
+    );
 
     // Wait for blackout (but respect cancellation)
     tokio::select! {
@@ -158,7 +178,17 @@ async fn cut_network(cluster: &str, kubeconfig: &str, cancel: &CancellationToken
     }
 
     // Always restore network
-    run_cmd_allow_fail("kubectl", &["--kubeconfig", kubeconfig, "delete", "-f", &policy_file, "--ignore-not-found"]);
+    run_cmd_allow_fail(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "delete",
+            "-f",
+            &policy_file,
+            "--ignore-not-found",
+        ],
+    );
     let _ = std::fs::remove_file(&policy_file);
     info!("[Chaos] Network on {}: restored", cluster);
 }

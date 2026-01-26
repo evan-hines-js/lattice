@@ -26,11 +26,17 @@ use crate::pivot::{
     apply_distributed_resources, patch_kubeconfig_for_self_management, retry_with_backoff,
     AgentPivotHandler, DistributableResources, RetryConfig,
 };
+use k8s_openapi::api::core::v1::Secret;
+use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
+use kube::Client;
+use lattice_common::crd::{LatticeCluster, PivotPhase as CrdPivotPhase, UnpivotPhase as CrdUnpivotPhase};
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_infra::pki::AgentCertRequest;
 use lattice_proto::lattice_agent_client::LatticeAgentClient;
 use lattice_proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
-    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, PivotComplete, StatusResponse,
+    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, PivotComplete, PivotPhase,
+    StatusResponse,
 };
 
 use super::mtls::ClientMtlsConfig;
@@ -157,6 +163,27 @@ impl AgentClient {
             .unwrap_or_default()
     }
 
+    /// Get current pivot and unpivot phases from LatticeCluster status
+    ///
+    /// Used to report phases to parent on reconnect, enabling crash recovery.
+    /// - If parent sees ApplyingResources, it will push distributed resources.
+    /// - If parent sees WaitingForAck, it will resend the UnpivotAck.
+    async fn get_phases(&self) -> (CrdPivotPhase, CrdUnpivotPhase) {
+        let client = match Client::try_default().await {
+            Ok(c) => c,
+            Err(_) => return (CrdPivotPhase::None, CrdUnpivotPhase::None),
+        };
+
+        let api: Api<LatticeCluster> = Api::all(client);
+        match api.get(&self.config.cluster_name).await {
+            Ok(cluster) => {
+                let status = cluster.status.unwrap_or_default();
+                (status.pivot_phase, status.unpivot_phase)
+            }
+            Err(_) => (CrdPivotPhase::None, CrdUnpivotPhase::None),
+        }
+    }
+
     /// Request a signed certificate from the cell
     ///
     /// This is the first step in connecting to the cell with mTLS.
@@ -278,6 +305,67 @@ impl AgentClient {
     /// Set agent state
     pub async fn set_agent_state(&self, state: AgentState) {
         *self.agent_state.write().await = state;
+    }
+
+    /// Check for incomplete pivot and resume if needed
+    ///
+    /// Called after connecting to check if a previous pivot was interrupted by crash.
+    /// If pivot_phase indicates incomplete pivot, loads state from Secret and resumes.
+    pub async fn check_and_resume_pivot(&self) -> Result<(), ClientError> {
+        let client = Client::try_default()
+            .await
+            .map_err(|e| ClientError::ConnectionFailed(format!("k8s client: {}", e)))?;
+
+        // Get current pivot phase
+        let (pivot_phase, _) = self.get_phases().await;
+
+        match pivot_phase {
+            CrdPivotPhase::None | CrdPivotPhase::Complete => {
+                // No recovery needed
+                Ok(())
+            }
+            phase => {
+                info!(phase = ?phase, "Detected incomplete pivot, attempting recovery");
+
+                // Load persisted state
+                let state = match load_pivot_state(&client, &self.config.cluster_name).await {
+                    Some(s) => s,
+                    None => {
+                        warn!("No pivot state Secret found, cannot recover");
+                        return Ok(());
+                    }
+                };
+
+                // Get message_tx for sending PivotComplete
+                let message_tx = match &self.message_tx {
+                    Some(tx) => tx.clone(),
+                    None => {
+                        warn!("Not connected, cannot resume pivot");
+                        return Ok(());
+                    }
+                };
+
+                // Resume pivot from the current phase
+                let agent_state = self.agent_state.clone();
+                let cluster_name = self.config.cluster_name.clone();
+                *agent_state.write().await = AgentState::Pivoting;
+
+                tokio::spawn(async move {
+                    execute_pivot(PivotContext {
+                        cluster_name,
+                        target_namespace: state.target_namespace,
+                        manifests: state.manifests,
+                        resources: state.resources,
+                        resume_from: phase,
+                        agent_state,
+                        message_tx,
+                    })
+                    .await;
+                });
+
+                Ok(())
+            }
+        }
     }
 
     /// Disconnect from the cell and clean up spawned tasks
@@ -483,6 +571,9 @@ impl AgentClient {
             Err(_) => "unknown".to_string(),
         };
 
+        // Get current phases from cluster status (for crash recovery signaling)
+        let (pivot_phase, unpivot_phase) = self.get_phases().await;
+
         let msg = AgentMessage {
             cluster_name: self.config.cluster_name.clone(),
             payload: Some(Payload::Ready(AgentReady {
@@ -490,6 +581,8 @@ impl AgentClient {
                 kubernetes_version: k8s_version,
                 state: (*self.agent_state.read().await).into(),
                 api_server_endpoint: Self::get_api_server_endpoint(),
+                pivot_phase: crd_to_proto_pivot_phase(&pivot_phase).into(),
+                unpivot_phase: crd_to_proto_unpivot_phase(&unpivot_phase).into(),
             })),
         };
 
@@ -849,121 +942,22 @@ impl AgentClient {
                 );
                 *agent_state.write().await = AgentState::Pivoting;
 
-                // Spawn background task to import manifests
-                let target_namespace = cmd.target_namespace.clone();
-                let manifests = cmd.manifests.clone();
-                let resources = DistributableResources {
-                    cloud_providers: cmd.cloud_providers.clone(),
-                    secrets_providers: cmd.secrets_providers.clone(),
-                    secrets: cmd.secrets.clone(),
+                let ctx = PivotContext {
+                    cluster_name: cmd.cluster_name.clone(),
+                    target_namespace: cmd.target_namespace.clone(),
+                    manifests: cmd.manifests.clone(),
+                    resources: DistributableResources {
+                        cloud_providers: cmd.cloud_providers.clone(),
+                        secrets_providers: cmd.secrets_providers.clone(),
+                        secrets: cmd.secrets.clone(),
+                    },
+                    resume_from: CrdPivotPhase::None,
+                    agent_state: agent_state.clone(),
+                    message_tx: message_tx.clone(),
                 };
-                let pivot_cluster_name = cmd.cluster_name.clone();
-                let agent_state_clone = agent_state.clone();
-                let message_tx_clone = message_tx.clone();
-                let cluster_name_clone = cluster_name.to_string();
 
                 tokio::spawn(async move {
-                    // Import CAPI resources via clusterctl move --from-directory
-                    let handler = AgentPivotHandler::new().with_capi_namespace(&target_namespace);
-
-                    match handler
-                        .import_capi_manifests(&manifests, &pivot_cluster_name)
-                        .await
-                    {
-                        Ok(resource_count) => {
-                            info!(
-                                resources = resource_count,
-                                "CAPI resources imported successfully"
-                            );
-
-                            // Apply distributed resources to lattice-system namespace
-                            if !resources.is_empty() {
-                                match kube::Client::try_default().await {
-                                    Ok(client) => {
-                                        if let Err(e) =
-                                            apply_distributed_resources(&client, &resources).await
-                                        {
-                                            warn!(error = %e, "Failed to apply distributed resources (non-fatal)");
-                                        } else {
-                                            info!(
-                                                cloud_providers = resources.cloud_providers.len(),
-                                                secrets_providers =
-                                                    resources.secrets_providers.len(),
-                                                secrets = resources.secrets.len(),
-                                                "Applied distributed resources"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "Failed to create k8s client for distributed resources");
-                                    }
-                                }
-                            }
-
-                            // Patch kubeconfig secret to use internal endpoint for self-management
-                            let cluster_name_for_patch = pivot_cluster_name.clone();
-                            let namespace_for_patch = target_namespace.clone();
-                            let patch_result =
-                                retry_with_backoff(
-                                    &RetryConfig::default(),
-                                    "patch_kubeconfig_for_self_management",
-                                    || {
-                                        let cn = cluster_name_for_patch.clone();
-                                        let ns = namespace_for_patch.clone();
-                                        async move {
-                                            patch_kubeconfig_for_self_management(&cn, &ns).await
-                                        }
-                                    },
-                                )
-                                .await;
-
-                            if let Err(e) = patch_result {
-                                error!(error = %e, "Failed to patch kubeconfig for self-management");
-                                *agent_state_clone.write().await = AgentState::Failed;
-
-                                let msg = AgentMessage {
-                                    cluster_name: cluster_name_clone,
-                                    payload: Some(Payload::PivotComplete(PivotComplete {
-                                        success: false,
-                                        error_message: format!("kubeconfig patch failed: {}", e),
-                                        resources_imported: resource_count as i32,
-                                    })),
-                                };
-                                let _ = message_tx_clone.send(msg).await;
-                                return;
-                            }
-
-                            info!(
-                                resources_imported = resource_count,
-                                "Pivot complete, cluster is now self-managing"
-                            );
-                            *agent_state_clone.write().await = AgentState::Ready;
-
-                            let msg = AgentMessage {
-                                cluster_name: cluster_name_clone,
-                                payload: Some(Payload::PivotComplete(PivotComplete {
-                                    success: true,
-                                    error_message: String::new(),
-                                    resources_imported: resource_count as i32,
-                                })),
-                            };
-                            let _ = message_tx_clone.send(msg).await;
-                        }
-                        Err(e) => {
-                            error!(error = %e, "Pivot failed, CAPI import failed");
-                            *agent_state_clone.write().await = AgentState::Failed;
-
-                            let msg = AgentMessage {
-                                cluster_name: cluster_name_clone,
-                                payload: Some(Payload::PivotComplete(PivotComplete {
-                                    success: false,
-                                    error_message: e.to_string(),
-                                    resources_imported: 0,
-                                })),
-                            };
-                            let _ = message_tx_clone.send(msg).await;
-                        }
-                    }
+                    execute_pivot(ctx).await;
                 });
             }
             Some(Command::StatusRequest(_)) => {
@@ -1021,6 +1015,21 @@ impl AgentClient {
                     // that are not in the provided list
                     if full_sync {
                         debug!("Full sync requested - cleanup of removed resources not yet implemented");
+                    }
+                });
+            }
+            Some(Command::UnpivotAck(ack)) => {
+                if ack.success {
+                    info!("Received UnpivotAck from parent - setting unpivot_phase to Complete");
+                } else {
+                    warn!(error = %ack.error_message, "Parent reported unpivot error");
+                }
+
+                // Update unpivot_phase to Complete so controller can remove finalizer
+                let cluster_name = cluster_name.to_string();
+                tokio::spawn(async move {
+                    if let Err(e) = update_unpivot_phase(&cluster_name, CrdUnpivotPhase::Complete).await {
+                        error!(error = %e, "Failed to update unpivot_phase to Complete");
                     }
                 });
             }
@@ -1103,6 +1112,463 @@ fn extract_domain(url: &str) -> Option<String> {
         .map(|s| s.to_string());
 
     domain.filter(|d| !d.is_empty())
+}
+
+// =============================================================================
+// Pivot State Persistence (for crash recovery)
+// =============================================================================
+
+const PIVOT_STATE_SECRET_PREFIX: &str = "pivot-state-";
+
+/// Pivot state persisted to Secret for crash recovery
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PivotState {
+    manifests: Vec<Vec<u8>>,
+    resources: DistributableResources,
+    target_namespace: String,
+}
+
+/// Persist pivot state to a Secret for crash recovery
+async fn persist_pivot_state(
+    client: &Client,
+    cluster_name: &str,
+    manifests: &[Vec<u8>],
+    resources: &DistributableResources,
+    target_namespace: &str,
+) -> Result<(), String> {
+    let secret_name = format!("{}{}", PIVOT_STATE_SECRET_PREFIX, cluster_name);
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    let state = PivotState {
+        manifests: manifests.to_vec(),
+        resources: resources.clone(),
+        target_namespace: target_namespace.to_string(),
+    };
+
+    let state_json = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
+
+    let secret = Secret {
+        metadata: kube::api::ObjectMeta {
+            name: Some(secret_name.clone()),
+            namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+            labels: Some(
+                [
+                    (
+                        "app.kubernetes.io/managed-by".to_string(),
+                        "lattice-agent".to_string(),
+                    ),
+                    ("lattice.io/cluster".to_string(), cluster_name.to_string()),
+                ]
+                .into(),
+            ),
+            ..Default::default()
+        },
+        data: Some([("state".to_string(), k8s_openapi::ByteString(state_json))].into()),
+        ..Default::default()
+    };
+
+    match secret_api.create(&PostParams::default(), &secret).await {
+        Ok(_) => {
+            info!(cluster = %cluster_name, "Pivot state persisted to Secret");
+            Ok(())
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 409 => {
+            // Already exists, replace it
+            secret_api
+                .replace(&secret_name, &PostParams::default(), &secret)
+                .await
+                .map_err(|e| e.to_string())?;
+            info!(cluster = %cluster_name, "Pivot state updated in Secret");
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Load pivot state from Secret (for crash recovery)
+async fn load_pivot_state(client: &Client, cluster_name: &str) -> Option<PivotState> {
+    let secret_name = format!("{}{}", PIVOT_STATE_SECRET_PREFIX, cluster_name);
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    let secret = match secret_api.get(&secret_name).await {
+        Ok(s) => s,
+        Err(kube::Error::Api(ae)) if ae.code == 404 => return None,
+        Err(e) => {
+            warn!(cluster = %cluster_name, error = %e, "Failed to load pivot state Secret");
+            return None;
+        }
+    };
+
+    let data = secret.data?;
+    let state_bytes = &data.get("state")?.0;
+
+    match serde_json::from_slice(state_bytes) {
+        Ok(state) => {
+            info!(cluster = %cluster_name, "Loaded pivot state from Secret");
+            Some(state)
+        }
+        Err(e) => {
+            warn!(cluster = %cluster_name, error = %e, "Failed to parse pivot state");
+            None
+        }
+    }
+}
+
+/// Delete pivot state Secret after successful pivot
+async fn delete_pivot_state(client: &Client, cluster_name: &str) {
+    let secret_name = format!("{}{}", PIVOT_STATE_SECRET_PREFIX, cluster_name);
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    match secret_api
+        .delete(&secret_name, &DeleteParams::default())
+        .await
+    {
+        Ok(_) => info!(cluster = %cluster_name, "Deleted pivot state Secret"),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+        Err(e) => warn!(cluster = %cluster_name, error = %e, "Failed to delete pivot state Secret"),
+    }
+}
+
+/// Update pivot phase in LatticeCluster status
+async fn update_pivot_phase(
+    client: &Client,
+    cluster_name: &str,
+    phase: CrdPivotPhase,
+) -> Result<(), String> {
+    let api: Api<LatticeCluster> = Api::all(client.clone());
+    let patch = serde_json::json!({
+        "status": {
+            "pivotPhase": phase
+        }
+    });
+
+    api.patch_status(
+        cluster_name,
+        &PatchParams::apply("lattice-agent"),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    info!(cluster = %cluster_name, phase = ?phase, "Updated pivot phase");
+    Ok(())
+}
+
+/// Update unpivot phase in LatticeCluster status
+async fn update_unpivot_phase(cluster_name: &str, phase: CrdUnpivotPhase) -> Result<(), String> {
+    let client = Client::try_default()
+        .await
+        .map_err(|e| format!("Failed to create k8s client: {}", e))?;
+
+    let api: Api<LatticeCluster> = Api::all(client);
+    let patch = serde_json::json!({
+        "status": {
+            "unpivotPhase": phase
+        }
+    });
+
+    api.patch_status(
+        cluster_name,
+        &PatchParams::apply("lattice-agent"),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    info!(cluster = %cluster_name, phase = ?phase, "Updated unpivot phase");
+    Ok(())
+}
+
+/// Convert CRD PivotPhase to proto PivotPhase
+fn crd_to_proto_pivot_phase(crd: &CrdPivotPhase) -> PivotPhase {
+    match crd {
+        CrdPivotPhase::None => PivotPhase::None,
+        CrdPivotPhase::Importing => PivotPhase::Importing,
+        CrdPivotPhase::PatchingKubeconfig => PivotPhase::PatchingKubeconfig,
+        CrdPivotPhase::ApplyingResources => PivotPhase::ApplyingResources,
+        CrdPivotPhase::Complete => PivotPhase::Complete,
+    }
+}
+
+/// Convert CRD UnpivotPhase to proto UnpivotPhase
+fn crd_to_proto_unpivot_phase(crd: &CrdUnpivotPhase) -> lattice_proto::UnpivotPhase {
+    match crd {
+        CrdUnpivotPhase::None => lattice_proto::UnpivotPhase::None,
+        CrdUnpivotPhase::Exporting => lattice_proto::UnpivotPhase::Exporting,
+        CrdUnpivotPhase::Sending => lattice_proto::UnpivotPhase::Sending,
+        CrdUnpivotPhase::WaitingForAck => lattice_proto::UnpivotPhase::WaitingForAck,
+        CrdUnpivotPhase::Complete => lattice_proto::UnpivotPhase::Complete,
+    }
+}
+
+/// Context for pivot execution
+struct PivotContext {
+    cluster_name: String,
+    target_namespace: String,
+    manifests: Vec<Vec<u8>>,
+    resources: DistributableResources,
+    resume_from: CrdPivotPhase,
+    agent_state: Arc<RwLock<AgentState>>,
+    message_tx: mpsc::Sender<AgentMessage>,
+}
+
+/// Execute pivot with crash-resilient state machine
+///
+/// Steps:
+/// 1. Persist state to Secret (unless resuming)
+/// 2. Import CAPI manifests
+/// 3. Patch kubeconfig for self-management
+/// 4. Apply distributed resources
+/// 5. Mark complete and cleanup
+///
+/// Each step updates pivot_phase in cluster status, allowing recovery on crash.
+async fn execute_pivot(ctx: PivotContext) {
+    let cluster_name = &ctx.cluster_name;
+    let target_namespace = &ctx.target_namespace;
+    let manifests = &ctx.manifests;
+    let resources = &ctx.resources;
+    let resume_from = ctx.resume_from.clone();
+    let message_tx = &ctx.message_tx;
+    let agent_state = &ctx.agent_state;
+
+    let client = match Client::try_default().await {
+        Ok(c) => c,
+        Err(e) => {
+            error!(error = %e, "Failed to create k8s client for pivot");
+            send_pivot_failed(message_tx, cluster_name, agent_state, e.to_string(), 0).await;
+            return;
+        }
+    };
+
+    // Step 1: Persist state (unless resuming from later phase)
+    if resume_from == CrdPivotPhase::None {
+        if let Err(e) = persist_pivot_state(
+            &client,
+            cluster_name,
+            manifests,
+            resources,
+            target_namespace,
+        )
+        .await
+        {
+            error!(error = %e, "Failed to persist pivot state");
+            send_pivot_failed(message_tx, cluster_name, agent_state, e, 0).await;
+            return;
+        }
+        if let Err(e) = update_pivot_phase(&client, cluster_name, CrdPivotPhase::Importing).await {
+            warn!(error = %e, "Failed to update pivot phase (continuing)");
+        }
+    }
+
+    // Step 2: Import CAPI (unless resuming from later phase)
+    let resource_count = if resume_from == CrdPivotPhase::None
+        || resume_from == CrdPivotPhase::Importing
+    {
+        let handler = AgentPivotHandler::new().with_capi_namespace(target_namespace);
+        match handler.import_capi_manifests(manifests, cluster_name).await {
+            Ok(count) => {
+                info!(resources = count, "CAPI resources imported successfully");
+                if let Err(e) =
+                    update_pivot_phase(&client, cluster_name, CrdPivotPhase::PatchingKubeconfig)
+                        .await
+                {
+                    warn!(error = %e, "Failed to update pivot phase (continuing)");
+                }
+                count
+            }
+            Err(e) => {
+                error!(error = %e, "Pivot failed: CAPI import failed");
+                send_pivot_failed(message_tx, cluster_name, agent_state, e.to_string(), 0).await;
+                return;
+            }
+        }
+    } else {
+        0 // Already imported, count unknown but not critical
+    };
+
+    // Step 3: Patch kubeconfig (unless resuming from later phase)
+    if resume_from != CrdPivotPhase::ApplyingResources && resume_from != CrdPivotPhase::Complete {
+        let patch_result = retry_with_backoff(
+            &RetryConfig::default(),
+            "patch_kubeconfig_for_self_management",
+            || {
+                let cn = cluster_name.to_string();
+                let ns = target_namespace.to_string();
+                async move { patch_kubeconfig_for_self_management(&cn, &ns).await }
+            },
+        )
+        .await;
+
+        if let Err(e) = patch_result {
+            error!(error = %e, "Failed to patch kubeconfig for self-management");
+            send_pivot_failed(
+                message_tx,
+                cluster_name,
+                agent_state,
+                format!("kubeconfig patch failed: {}", e),
+                resource_count as i32,
+            )
+            .await;
+            return;
+        }
+        info!("Kubeconfig patched for self-management");
+        if let Err(e) =
+            update_pivot_phase(&client, cluster_name, CrdPivotPhase::ApplyingResources).await
+        {
+            warn!(error = %e, "Failed to update pivot phase (continuing)");
+        }
+    }
+
+    // Step 4: Apply distributed resources (non-fatal, can recover via SyncResources)
+    if resume_from != CrdPivotPhase::Complete && !resources.is_empty() {
+        if let Err(e) = apply_distributed_resources(&client, resources).await {
+            warn!(error = %e, "Failed to apply distributed resources (non-fatal, will sync later)");
+        } else {
+            info!(
+                cloud_providers = resources.cloud_providers.len(),
+                secrets_providers = resources.secrets_providers.len(),
+                secrets = resources.secrets.len(),
+                "Applied distributed resources"
+            );
+        }
+    }
+
+    // Step 5: Mark complete
+    if let Err(e) = update_pivot_phase(&client, cluster_name, CrdPivotPhase::Complete).await {
+        warn!(error = %e, "Failed to update pivot phase to Complete (continuing)");
+    }
+
+    // Also set pivot_complete = true
+    let api: Api<LatticeCluster> = Api::all(client.clone());
+    let patch = serde_json::json!({
+        "status": {
+            "pivotComplete": true,
+            "pivotPhase": "complete"
+        }
+    });
+    if let Err(e) = api
+        .patch_status(
+            cluster_name,
+            &PatchParams::apply("lattice-agent"),
+            &Patch::Merge(&patch),
+        )
+        .await
+    {
+        warn!(error = %e, "Failed to set pivot_complete (continuing)");
+    }
+
+    // Cleanup: delete pivot state Secret
+    delete_pivot_state(&client, cluster_name).await;
+
+    // Success
+    info!(
+        resources_imported = resource_count,
+        "Pivot complete, cluster is now self-managing"
+    );
+    *agent_state.write().await = AgentState::Ready;
+
+    let msg = AgentMessage {
+        cluster_name: cluster_name.to_string(),
+        payload: Some(Payload::PivotComplete(PivotComplete {
+            success: true,
+            error_message: String::new(),
+            resources_imported: resource_count as i32,
+        })),
+    };
+    let _ = message_tx.send(msg).await;
+}
+
+/// Helper to send pivot failure message
+async fn send_pivot_failed(
+    message_tx: &mpsc::Sender<AgentMessage>,
+    cluster_name: &str,
+    agent_state: &Arc<RwLock<AgentState>>,
+    error: String,
+    resources_imported: i32,
+) {
+    *agent_state.write().await = AgentState::Failed;
+    let msg = AgentMessage {
+        cluster_name: cluster_name.to_string(),
+        payload: Some(Payload::PivotComplete(PivotComplete {
+            success: false,
+            error_message: error,
+            resources_imported,
+        })),
+    };
+    let _ = message_tx.send(msg).await;
+}
+
+/// Determine if pivot state should be cleaned up based on cluster status.
+///
+/// Returns true if the pivot is complete and the Secret is no longer needed.
+/// This is a pure function for easy testing.
+pub fn should_cleanup_pivot_state(status: Option<&lattice_common::crd::LatticeClusterStatus>) -> bool {
+    let pivot_complete = status.map(|s| s.pivot_complete).unwrap_or(false);
+    let pivot_phase = status
+        .map(|s| &s.pivot_phase)
+        .cloned()
+        .unwrap_or_default();
+    pivot_complete || matches!(pivot_phase, CrdPivotPhase::Complete | CrdPivotPhase::None)
+}
+
+/// Clean up stale pivot-state Secrets on operator startup.
+///
+/// Called during operator initialization to delete pivot-state Secrets for clusters
+/// that have already completed pivot (or been deleted). This handles the case where
+/// the operator crashed after pivot completed but before the Secret was deleted.
+pub async fn cleanup_stale_pivot_secrets(client: &Client) -> Result<usize, String> {
+    use kube::api::ListParams;
+
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let cluster_api: Api<LatticeCluster> = Api::all(client.clone());
+
+    // List all pivot-state Secrets
+    let secrets = secret_api
+        .list(&ListParams::default())
+        .await
+        .map_err(|e| format!("Failed to list secrets: {}", e))?;
+
+    let mut cleaned = 0;
+    for secret in secrets.items {
+        let Some(name) = secret.metadata.name.as_ref() else {
+            continue;
+        };
+
+        if !name.starts_with(PIVOT_STATE_SECRET_PREFIX) {
+            continue;
+        }
+
+        // Extract cluster name from secret name
+        let cluster_name = &name[PIVOT_STATE_SECRET_PREFIX.len()..];
+        if cluster_name.is_empty() {
+            continue;
+        }
+
+        // Check if cluster still needs pivot state
+        let should_delete = match cluster_api.get(cluster_name).await {
+            Ok(cluster) => should_cleanup_pivot_state(cluster.status.as_ref()),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                // Cluster doesn't exist - clean up stale Secret
+                true
+            }
+            Err(_) => {
+                // API error - keep the Secret to be safe
+                false
+            }
+        };
+
+        if should_delete {
+            delete_pivot_state(client, cluster_name).await;
+            debug!(cluster = %cluster_name, "Cleaned up stale pivot-state Secret");
+            cleaned += 1;
+        }
+    }
+
+    if cleaned > 0 {
+        info!(count = cleaned, "Cleaned up stale pivot-state Secrets");
+    }
+
+    Ok(cleaned)
 }
 
 #[cfg(test)]
@@ -2195,6 +2661,8 @@ mod tests {
                 kubernetes_version: "unknown".to_string(),
                 state: AgentState::Provisioning.into(),
                 api_server_endpoint: String::new(),
+                pivot_phase: PivotPhase::None.into(),
+                unpivot_phase: lattice_proto::UnpivotPhase::None.into(),
             })),
         };
 
@@ -2228,6 +2696,8 @@ mod tests {
                     kubernetes_version: "v1.28.0".to_string(),
                     state: state.into(),
                     api_server_endpoint: "https://127.0.0.1:6443".to_string(),
+                    pivot_phase: PivotPhase::None.into(),
+                    unpivot_phase: lattice_proto::UnpivotPhase::None.into(),
                 })),
             };
 
@@ -2575,5 +3045,55 @@ mod tests {
         if let Some(v) = orig_host {
             std::env::set_var("KUBERNETES_SERVICE_HOST", v);
         }
+    }
+
+    // =========================================================================
+    // Cleanup Decision Logic Tests
+    // =========================================================================
+
+    #[test]
+    fn should_cleanup_pivot_state_when_complete() {
+        use lattice_common::crd::{LatticeClusterStatus, PivotPhase};
+
+        // pivot_complete = true
+        let status = LatticeClusterStatus {
+            pivot_complete: true,
+            ..Default::default()
+        };
+        assert!(should_cleanup_pivot_state(Some(&status)));
+
+        // pivot_phase = Complete
+        let status = LatticeClusterStatus {
+            pivot_phase: PivotPhase::Complete,
+            ..Default::default()
+        };
+        assert!(should_cleanup_pivot_state(Some(&status)));
+
+        // pivot_phase = None (default, never pivoted)
+        let status = LatticeClusterStatus::default();
+        assert!(should_cleanup_pivot_state(Some(&status)));
+    }
+
+    #[test]
+    fn should_not_cleanup_pivot_state_when_in_progress() {
+        use lattice_common::crd::{LatticeClusterStatus, PivotPhase};
+
+        let status = LatticeClusterStatus {
+            pivot_phase: PivotPhase::Importing,
+            ..Default::default()
+        };
+        assert!(!should_cleanup_pivot_state(Some(&status)));
+
+        let status = LatticeClusterStatus {
+            pivot_phase: PivotPhase::ApplyingResources,
+            ..Default::default()
+        };
+        assert!(!should_cleanup_pivot_state(Some(&status)));
+    }
+
+    #[test]
+    fn should_cleanup_pivot_state_with_no_status() {
+        // No status means cluster just created, no pivot state needed
+        assert!(should_cleanup_pivot_state(None));
     }
 }

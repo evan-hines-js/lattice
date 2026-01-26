@@ -425,7 +425,7 @@ async fn apply_kubeconfig_patch(
 ///
 /// Distribution is based on CloudProvider and SecretsProvider CRDs.
 /// Their referenced secrets are automatically included.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DistributableResources {
     /// CloudProvider CRDs
     pub cloud_providers: Vec<Vec<u8>>,

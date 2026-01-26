@@ -662,7 +662,7 @@ async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestG
             autoscaling_enabled,
         };
 
-        bootstrap_state.register_cluster(registration, true);
+        bootstrap_state.register_cluster(registration, true).await;
         tracing::info!(cluster = %name, "re-registered cluster after operator restart");
     }
 }
@@ -930,6 +930,19 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
             &parent_servers,
         )
         .await;
+
+        // Load pending bootstrap registrations from Secrets (crash recovery)
+        if let Err(e) = bootstrap_state.load_pending_registrations().await {
+            tracing::warn!(error = %e, "Failed to load pending bootstrap registrations");
+        }
+    }
+
+    // Clean up stale Secrets from previous operator runs (crash recovery)
+    if let Err(e) = lattice_operator::cleanup_stale_pivot_secrets(&client).await {
+        tracing::warn!(error = %e, "Failed to clean up stale pivot-state Secrets");
+    }
+    if let Err(e) = lattice_operator::cleanup_stale_unpivot_secrets(&client).await {
+        tracing::warn!(error = %e, "Failed to clean up stale unpivot-manifests Secrets");
     }
 
     // Create controller context
@@ -1200,13 +1213,8 @@ async fn start_agent_with_retry(
                                 namespace = %request.namespace,
                                 "Received unpivot request"
                             );
-                            let result = handle_unpivot_request(&agent, &request).await;
-                            if request.completion_tx.send(result).is_err() {
-                                tracing::warn!(
-                                    cluster = %request.cluster_name,
-                                    "Unpivot completion receiver dropped - requester may have timed out"
-                                );
-                            }
+                            // Handle unpivot - updates status, doesn't block
+                            handle_unpivot_request(&agent, &request).await;
                         }
                         // Periodic connection check
                         _ = tokio::time::sleep(Duration::from_secs(5)) => {
@@ -1227,18 +1235,12 @@ async fn start_agent_with_retry(
             }
             Ok(None) => {
                 tracing::debug!("No parent cell configured, running as standalone");
-                // Still need to drain unpivot requests even if no parent
+                // Drain any unpivot requests - they'll fail since no parent
                 while let Some(request) = unpivot_rx.recv().await {
-                    if request
-                        .completion_tx
-                        .send(Err("No parent cell configured".to_string()))
-                        .is_err()
-                    {
-                        tracing::warn!(
-                            cluster = %request.cluster_name,
-                            "Unpivot completion receiver dropped while draining requests"
-                        );
-                    }
+                    tracing::warn!(
+                        cluster = %request.cluster_name,
+                        "Unpivot request received but no parent cell configured"
+                    );
                 }
                 return;
             }
@@ -1256,33 +1258,73 @@ async fn start_agent_with_retry(
     }
 }
 
-/// Handle an unpivot request by notifying the parent to clean up CAPI resources
+/// Handle an unpivot request by exporting CAPI and sending to parent
 ///
-/// With --to-directory pivot, parent keeps paused CAPI resources.
-/// Child just needs to notify parent to unpause and delete.
+/// This function:
+/// 1. Exports CAPI manifests via send_cluster_deleting
+/// 2. Updates unpivot_phase to WaitingForAck
+///
+/// The agent command handler will set unpivot_phase to Complete when
+/// the parent sends UnpivotAck.
 async fn handle_unpivot_request(
     agent: &AgentClient,
     request: &lattice_operator::controller::UnpivotRequest,
-) -> Result<(), String> {
+) {
+    use kube::api::{Api, Patch, PatchParams};
+    use lattice_common::crd::{LatticeCluster, UnpivotPhase};
+
     tracing::info!(
         cluster = %request.cluster_name,
         namespace = %request.namespace,
-        "Notifying parent of cluster deletion"
+        "Exporting CAPI and notifying parent of cluster deletion"
     );
 
-    // Notify parent that this cluster is being deleted
-    // Parent will unpause CAPI resources and trigger infrastructure cleanup
-    agent
-        .send_cluster_deleting(&request.namespace)
+    // Export and send to parent
+    if let Err(e) = agent.send_cluster_deleting(&request.namespace).await {
+        tracing::error!(
+            cluster = %request.cluster_name,
+            error = %e,
+            "Failed to send cluster deleting to parent"
+        );
+        return;
+    }
+
+    // Update status to WaitingForAck
+    let client = match kube::Client::try_default().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to create k8s client for status update");
+            return;
+        }
+    };
+
+    let api: Api<LatticeCluster> = Api::all(client);
+    let patch = serde_json::json!({
+        "status": {
+            "unpivotPhase": UnpivotPhase::WaitingForAck
+        }
+    });
+
+    if let Err(e) = api
+        .patch_status(
+            &request.cluster_name,
+            &PatchParams::apply("lattice-agent"),
+            &Patch::Merge(&patch),
+        )
         .await
-        .map_err(|e| format!("Failed to send cluster deleting: {}", e))?;
+    {
+        tracing::error!(
+            cluster = %request.cluster_name,
+            error = %e,
+            "Failed to update unpivot_phase to WaitingForAck"
+        );
+        return;
+    }
 
     tracing::info!(
         cluster = %request.cluster_name,
-        "Parent notified of cluster deletion"
+        "Unpivot manifests sent to parent, waiting for ACK"
     );
-
-    Ok(())
 }
 
 async fn start_agent_if_needed(

@@ -723,4 +723,56 @@ mod tests {
         let registry = AgentRegistry::default();
         assert!(registry.is_empty());
     }
+
+    // =========================================================================
+    // Unpivot Manifests Tests
+    // =========================================================================
+
+    #[test]
+    fn test_unpivot_manifests_store_and_retrieve() {
+        let registry = AgentRegistry::new();
+
+        let manifests = UnpivotManifests {
+            capi_manifests: vec![b"manifest1".to_vec(), b"manifest2".to_vec()],
+            namespace: "capi-system".to_string(),
+        };
+
+        registry.set_unpivot_manifests("test-cluster", manifests);
+
+        assert!(registry.has_unpivot_manifests("test-cluster"));
+
+        let retrieved = registry
+            .take_unpivot_manifests("test-cluster")
+            .expect("manifests should exist");
+        assert_eq!(retrieved.capi_manifests.len(), 2);
+        assert_eq!(retrieved.namespace, "capi-system");
+
+        // After take, should no longer exist
+        assert!(!registry.has_unpivot_manifests("test-cluster"));
+        assert!(registry.take_unpivot_manifests("test-cluster").is_none());
+    }
+
+    #[test]
+    fn test_unpivot_manifests_nonexistent() {
+        let registry = AgentRegistry::new();
+        assert!(!registry.has_unpivot_manifests("nonexistent"));
+        assert!(registry.take_unpivot_manifests("nonexistent").is_none());
+    }
+
+    // =========================================================================
+    // SendError Tests
+    // =========================================================================
+
+    #[test]
+    fn test_send_error_display() {
+        let err = SendError::ChannelClosed;
+        assert_eq!(format!("{}", err), "agent channel closed");
+    }
+
+    #[test]
+    fn test_send_error_is_error() {
+        let err = SendError::ChannelClosed;
+        // Verify it implements std::error::Error
+        let _: &dyn std::error::Error = &err;
+    }
 }

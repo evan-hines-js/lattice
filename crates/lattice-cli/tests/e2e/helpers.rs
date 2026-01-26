@@ -2,7 +2,6 @@
 //!
 //! Provides utilities for Docker-based cluster testing.
 
-#[cfg(feature = "provider-e2e")]
 use std::process::Command;
 #[cfg(feature = "provider-e2e")]
 use std::time::Duration;
@@ -164,7 +163,6 @@ pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
 }
 
 /// Run a shell command, allowing failure (returns empty string on error)
-#[cfg(feature = "provider-e2e")]
 pub fn run_cmd_allow_fail(cmd: &str, args: &[&str]) -> String {
     Command::new(cmd)
         .args(args)
