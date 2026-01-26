@@ -71,6 +71,23 @@ message AgentReady {
   AgentState state = 3;
   // API server endpoint (for informational purposes)
   string api_server_endpoint = 4;
+  // Current pivot phase (for crash recovery - parent sends resources if ApplyingResources)
+  PivotPhase pivot_phase = 5;
+  // Current unpivot phase (for crash recovery - parent resends ACK if WaitingForAck)
+  UnpivotPhase unpivot_phase = 6;
+}
+
+// Sub-phase of pivot process for crash recovery
+enum PivotPhase {
+  PIVOT_PHASE_NONE = 0;
+  // CAPI manifests received, import in progress
+  PIVOT_PHASE_IMPORTING = 1;
+  // CAPI imported, patching kubeconfig
+  PIVOT_PHASE_PATCHING_KUBECONFIG = 2;
+  // Kubeconfig patched, applying distributed resources
+  PIVOT_PHASE_APPLYING_RESOURCES = 3;
+  // All pivot steps complete
+  PIVOT_PHASE_COMPLETE = 4;
 }
 
 // Sent when agent has completed initial setup
@@ -173,6 +190,7 @@ message CellCommand {
     StatusRequest status_request = 3;
     PivotManifestsCommand pivot_manifests = 4;
     SyncDistributedResourcesCommand sync_resources = 5;
+    UnpivotAckCommand unpivot_ack = 6;
   }
 }
 
@@ -215,4 +233,27 @@ message StatusRequest {
   bool include_nodes = 1;
   // Whether to include CAPI resource status
   bool include_capi = 2;
+}
+
+// Acknowledge receipt of unpivot manifests from child
+// Sent by parent after persisting manifests and initiating deletion
+// Child can safely remove its finalizer after receiving this
+message UnpivotAckCommand {
+  // Whether the parent successfully received and persisted manifests
+  bool success = 1;
+  // Error message if success=false
+  string error_message = 2;
+}
+
+// Sub-phase of unpivot process (child → parent reporting)
+enum UnpivotPhase {
+  UNPIVOT_PHASE_NONE = 0;
+  // Exporting CAPI resources
+  UNPIVOT_PHASE_EXPORTING = 1;
+  // Sending manifests to parent
+  UNPIVOT_PHASE_SENDING = 2;
+  // Waiting for parent ACK
+  UNPIVOT_PHASE_WAITING_FOR_ACK = 3;
+  // Parent ACKed, complete
+  UNPIVOT_PHASE_COMPLETE = 4;
 }

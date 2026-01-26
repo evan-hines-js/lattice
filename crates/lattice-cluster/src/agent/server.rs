@@ -26,7 +26,10 @@ use lattice_common::crd::LatticeCluster;
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
-use lattice_proto::{agent_message::Payload, AgentMessage, AgentState, CellCommand};
+use lattice_proto::{
+    agent_message::Payload, cell_command::Command, AgentMessage, AgentState, CellCommand,
+    PivotPhase, SyncDistributedResourcesCommand, UnpivotAckCommand, UnpivotPhase,
+};
 
 use super::connection::{AgentConnection, AgentRegistry, SharedAgentRegistry};
 use super::mtls::ServerMtlsConfig;
@@ -54,6 +57,7 @@ async fn handle_agent_message_impl(
                 agent_version = %ready.agent_version,
                 k8s_version = %ready.kubernetes_version,
                 state = ?ready.state(),
+                pivot_phase = ?ready.pivot_phase(),
                 "Agent connected"
             );
 
@@ -70,6 +74,27 @@ async fn handle_agent_message_impl(
             // (Ready is only reached after successful CAPI import)
             if ready.state() == AgentState::Ready {
                 registry.set_pivot_complete(cluster_name, true);
+            }
+
+            // If agent crashed during resource application, push resources now
+            if ready.pivot_phase() == PivotPhase::ApplyingResources {
+                info!(cluster = %cluster_name, "Agent needs resources (crash recovery), pushing sync");
+                push_resources_for_recovery(kube_client.clone(), command_tx.clone()).await;
+            }
+
+            // If agent crashed waiting for unpivot ACK, resend it
+            if ready.unpivot_phase() == UnpivotPhase::WaitingForAck {
+                info!(cluster = %cluster_name, "Agent waiting for unpivot ACK (crash recovery), resending");
+                let ack = CellCommand {
+                    command_id: format!("unpivot-ack-recovery-{}", cluster_name),
+                    command: Some(Command::UnpivotAck(UnpivotAckCommand {
+                        success: true,
+                        error_message: String::new(),
+                    })),
+                };
+                if let Err(e) = command_tx.send(ack).await {
+                    error!(cluster = %cluster_name, error = %e, "Failed to resend UnpivotAck");
+                }
             }
         }
         Some(Payload::BootstrapComplete(bc)) => {
@@ -208,23 +233,36 @@ async fn handle_agent_message_impl(
             );
 
             // Persist manifests to a Secret so they survive operator restarts
-            let secret_name = format!("unpivot-manifests-{}", cluster_name);
-            let secret_api: Api<Secret> = Api::namespaced(kube_client.clone(), LATTICE_SYSTEM_NAMESPACE);
+            let secret_name = format!("{}{}", UNPIVOT_MANIFESTS_SECRET_PREFIX, cluster_name);
+            let secret_api: Api<Secret> =
+                Api::namespaced(kube_client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
             // Encode manifests as base64 JSON array
             let manifests_json = serde_json::to_vec(&cd.capi_manifests).unwrap_or_default();
             let mut data = std::collections::BTreeMap::new();
-            data.insert("manifests".to_string(), k8s_openapi::ByteString(manifests_json));
-            data.insert("namespace".to_string(), k8s_openapi::ByteString(cd.namespace.as_bytes().to_vec()));
+            data.insert(
+                "manifests".to_string(),
+                k8s_openapi::ByteString(manifests_json),
+            );
+            data.insert(
+                "namespace".to_string(),
+                k8s_openapi::ByteString(cd.namespace.as_bytes().to_vec()),
+            );
 
             let secret = Secret {
                 metadata: kube::api::ObjectMeta {
                     name: Some(secret_name.clone()),
                     namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-                    labels: Some([
-                        ("app.kubernetes.io/managed-by".to_string(), "lattice-operator".to_string()),
-                        ("lattice.io/cluster".to_string(), cluster_name.to_string()),
-                    ].into()),
+                    labels: Some(
+                        [
+                            (
+                                "app.kubernetes.io/managed-by".to_string(),
+                                "lattice-operator".to_string(),
+                            ),
+                            ("lattice.io/cluster".to_string(), cluster_name.to_string()),
+                        ]
+                        .into(),
+                    ),
                     ..Default::default()
                 },
                 data: Some(data),
@@ -233,18 +271,30 @@ async fn handle_agent_message_impl(
 
             // Create or update the Secret
             match secret_api.create(&PostParams::default(), &secret).await {
-                Ok(_) => info!(cluster = %cluster_name, secret = %secret_name, "Unpivot manifests persisted to Secret"),
+                Ok(_) => {
+                    info!(cluster = %cluster_name, secret = %secret_name, "Unpivot manifests persisted to Secret")
+                }
                 Err(kube::Error::Api(ae)) if ae.code == 409 => {
                     // Already exists, update it
-                    if let Err(e) = secret_api.replace(&secret_name, &PostParams::default(), &secret).await {
+                    if let Err(e) = secret_api
+                        .replace(&secret_name, &PostParams::default(), &secret)
+                        .await
+                    {
                         error!(cluster = %cluster_name, error = %e, "Failed to update unpivot manifests Secret");
                     }
                 }
-                Err(e) => error!(cluster = %cluster_name, error = %e, "Failed to create unpivot manifests Secret"),
+                Err(e) => {
+                    error!(cluster = %cluster_name, error = %e, "Failed to create unpivot manifests Secret")
+                }
             }
 
-            // Update cluster status
+            // Delete the parent's LatticeCluster to trigger proper cleanup flow
+            // The finalizer on the LatticeCluster ensures unpivot cleanup completes
+            // before the resource is removed. The persisted Secret contains manifests
+            // needed for crash recovery.
             let api: Api<LatticeCluster> = Api::all(kube_client.clone());
+
+            // First set unpivotPending to true (for controller to know unpivot is in progress)
             let patch = serde_json::json!({
                 "status": {
                     "unpivotPending": true
@@ -261,10 +311,50 @@ async fn handle_agent_message_impl(
                 error!(
                     cluster = %cluster_name,
                     error = %e,
-                    "Failed to persist deletion request to status"
+                    "Failed to set unpivotPending status"
+                );
+            }
+
+            // Now delete the LatticeCluster - finalizer ensures cleanup completes
+            let delete_result = match api.delete(cluster_name, &Default::default()).await {
+                Ok(_) => {
+                    info!(
+                        cluster = %cluster_name,
+                        "LatticeCluster deletion initiated (finalizer will ensure cleanup)"
+                    );
+                    Ok(())
+                }
+                Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                    // Already deleted or doesn't exist
+                    debug!(cluster = %cluster_name, "LatticeCluster already deleted");
+                    Ok(())
+                }
+                Err(e) => {
+                    error!(
+                        cluster = %cluster_name,
+                        error = %e,
+                        "Failed to delete LatticeCluster"
+                    );
+                    Err(e.to_string())
+                }
+            };
+
+            // Send ACK back to child so it can remove its finalizer
+            let ack = CellCommand {
+                command_id: format!("unpivot-ack-{}", cluster_name),
+                command: Some(Command::UnpivotAck(UnpivotAckCommand {
+                    success: delete_result.is_ok(),
+                    error_message: delete_result.err().unwrap_or_default(),
+                })),
+            };
+            if let Err(e) = command_tx.send(ack).await {
+                error!(
+                    cluster = %cluster_name,
+                    error = %e,
+                    "Failed to send UnpivotAck to child"
                 );
             } else {
-                info!(cluster = %cluster_name, "Deletion request persisted to cluster status");
+                info!(cluster = %cluster_name, "UnpivotAck sent to child");
             }
         }
         None => {
@@ -374,6 +464,124 @@ impl LatticeAgent for AgentServer {
     }
 }
 
+/// Push distributed resources to agent for crash recovery
+///
+/// Called when an agent reconnects with pivot_phase = ApplyingResources,
+/// indicating it crashed after kubeconfig patch but before applying resources.
+async fn push_resources_for_recovery(kube_client: Client, command_tx: mpsc::Sender<CellCommand>) {
+    // Fetch current distributed resources
+    let resources = match crate::pivot::fetch_distributable_resources(&kube_client).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "Failed to fetch resources for recovery push");
+            return;
+        }
+    };
+
+    if resources.is_empty() {
+        debug!("No resources to push for recovery");
+        return;
+    }
+
+    let cmd = CellCommand {
+        command_id: uuid::Uuid::new_v4().to_string(),
+        command: Some(Command::SyncResources(SyncDistributedResourcesCommand {
+            cloud_providers: resources.cloud_providers,
+            secrets_providers: resources.secrets_providers,
+            secrets: resources.secrets,
+            full_sync: true,
+        })),
+    };
+
+    if let Err(e) = command_tx.send(cmd).await {
+        warn!(error = %e, "Failed to send resources for recovery");
+    } else {
+        info!("Pushed resources to agent for crash recovery");
+    }
+}
+
+/// Prefix for unpivot manifests Secrets
+pub const UNPIVOT_MANIFESTS_SECRET_PREFIX: &str = "unpivot-manifests-";
+
+/// Determine if unpivot manifests should be cleaned up based on cluster status.
+///
+/// Returns true if unpivot is complete (unpivot_pending is false).
+/// This is a pure function for easy testing.
+pub fn should_cleanup_unpivot_manifests(status: Option<&LatticeClusterStatus>) -> bool {
+    let unpivot_pending = status.map(|s| s.unpivot_pending).unwrap_or(false);
+    !unpivot_pending
+}
+
+/// Clean up stale unpivot-manifests Secrets on operator startup.
+///
+/// Called during operator initialization to delete unpivot-manifests Secrets for clusters
+/// that have been deleted or no longer need them. This handles the case where the operator
+/// crashed after unpivot completed but before the Secret was deleted.
+pub async fn cleanup_stale_unpivot_secrets(client: &Client) -> Result<usize, String> {
+    use kube::api::{DeleteParams, ListParams};
+
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let cluster_api: Api<LatticeCluster> = Api::all(client.clone());
+
+    // List all unpivot-manifests Secrets
+    let secrets = secret_api
+        .list(&ListParams::default())
+        .await
+        .map_err(|e| format!("Failed to list secrets: {}", e))?;
+
+    let mut cleaned = 0;
+    for secret in secrets.items {
+        let Some(name) = secret.metadata.name.as_ref() else {
+            continue;
+        };
+
+        if !name.starts_with(UNPIVOT_MANIFESTS_SECRET_PREFIX) {
+            continue;
+        }
+
+        // Extract cluster name from secret name
+        let cluster_name = &name[UNPIVOT_MANIFESTS_SECRET_PREFIX.len()..];
+        if cluster_name.is_empty() {
+            continue;
+        }
+
+        // Check if cluster still needs unpivot manifests
+        let should_delete = match cluster_api.get(cluster_name).await {
+            Ok(cluster) => should_cleanup_unpivot_manifests(cluster.status.as_ref()),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                // Cluster doesn't exist - clean up stale Secret
+                true
+            }
+            Err(_) => {
+                // API error - keep the Secret to be safe
+                false
+            }
+        };
+
+        if should_delete {
+            match secret_api
+                .delete(name, &DeleteParams::default())
+                .await
+            {
+                Ok(_) => {
+                    debug!(cluster = %cluster_name, "Cleaned up stale unpivot-manifests Secret");
+                    cleaned += 1;
+                }
+                Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+                Err(e) => {
+                    warn!(cluster = %cluster_name, error = %e, "Failed to delete unpivot-manifests Secret");
+                }
+            }
+        }
+    }
+
+    if cleaned > 0 {
+        info!(count = cleaned, "Cleaned up stale unpivot-manifests Secrets");
+    }
+
+    Ok(cleaned)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -476,7 +684,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Provisioning.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
 
@@ -505,7 +715,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Provisioning.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &msg1, &tx).await;
@@ -517,7 +729,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Ready.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &msg2, &tx).await;
@@ -559,7 +773,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Pivoting.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -595,7 +811,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Pivoting.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -631,7 +849,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Ready.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -723,7 +943,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Ready.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.cluster1:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &msg1, &tx).await;
@@ -735,7 +957,9 @@ mod tests {
                 agent_version: "0.2.0".to_string(),
                 kubernetes_version: "1.29.0".to_string(),
                 state: AgentState::Provisioning.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.cluster2:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &msg2, &tx).await;
@@ -767,7 +991,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Provisioning.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &msg, &tx).await;
@@ -843,7 +1069,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Pivoting.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -910,7 +1138,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Pivoting.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -952,7 +1182,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Pivoting.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -1014,7 +1246,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Pivoting.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -1073,7 +1307,9 @@ mod tests {
                 agent_version: "0.1.0".to_string(),
                 kubernetes_version: "1.28.0".to_string(),
                 state: AgentState::Pivoting.into(),
+                pivot_phase: PivotPhase::None.into(),
                 api_server_endpoint: "https://api.test:6443".to_string(),
+                unpivot_phase: UnpivotPhase::None.into(),
             })),
         };
         test_handle_message(&registry, &ready_msg, &tx).await;
@@ -1111,5 +1347,38 @@ mod tests {
             }
             _ => panic!("expected ApplyManifestsCommand"),
         }
+    }
+
+    // =========================================================================
+    // Cleanup Decision Logic Tests
+    // =========================================================================
+
+    #[test]
+    fn should_cleanup_unpivot_when_not_pending() {
+        // unpivot_pending = false (default) -> should cleanup
+        let status = LatticeClusterStatus::default();
+        assert!(should_cleanup_unpivot_manifests(Some(&status)));
+
+        // Explicitly set to false
+        let status = LatticeClusterStatus {
+            unpivot_pending: false,
+            ..Default::default()
+        };
+        assert!(should_cleanup_unpivot_manifests(Some(&status)));
+    }
+
+    #[test]
+    fn should_not_cleanup_unpivot_when_pending() {
+        let status = LatticeClusterStatus {
+            unpivot_pending: true,
+            ..Default::default()
+        };
+        assert!(!should_cleanup_unpivot_manifests(Some(&status)));
+    }
+
+    #[test]
+    fn should_cleanup_unpivot_with_no_status() {
+        // No status means unpivot not in progress
+        assert!(should_cleanup_unpivot_manifests(None));
     }
 }

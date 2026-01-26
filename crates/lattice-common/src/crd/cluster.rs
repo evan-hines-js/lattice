@@ -174,6 +174,82 @@ pub struct LatticeClusterStatus {
     /// Cleared after CAPI cleanup is complete. Persists across operator restarts.
     #[serde(default, skip_serializing_if = "is_false")]
     pub unpivot_pending: bool,
+
+    /// Current sub-phase of the pivot process (for crash recovery)
+    ///
+    /// Tracks progress through pivot steps so agent can resume after crash:
+    /// - Importing: CAPI manifests received, import in progress
+    /// - PatchingKubeconfig: CAPI imported, patching kubeconfig for self-management
+    /// - ApplyingResources: Kubeconfig patched, applying distributed resources
+    /// - Complete: All pivot steps finished
+    #[serde(default, skip_serializing_if = "PivotPhase::is_none")]
+    pub pivot_phase: PivotPhase,
+
+    /// Current sub-phase of the unpivot process (for crash recovery)
+    ///
+    /// Tracks progress through unpivot steps so controller can resume after crash:
+    /// - Exporting: Exporting CAPI resources via clusterctl move --to-directory
+    /// - Sending: Sending manifests to parent
+    /// - WaitingForAck: Waiting for parent to ACK receipt
+    /// - Complete: Parent ACKed, safe to remove finalizer
+    #[serde(default, skip_serializing_if = "UnpivotPhase::is_none")]
+    pub unpivot_phase: UnpivotPhase,
+}
+
+/// Sub-phase of the pivot process for crash recovery
+///
+/// When a child cluster receives pivot manifests from parent, it progresses
+/// through these phases. On crash/restart, the agent checks this field to
+/// resume from the correct step.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum PivotPhase {
+    /// Not currently pivoting
+    #[default]
+    None,
+    /// Manifests received from parent, CAPI import in progress
+    Importing,
+    /// CAPI imported, patching kubeconfig for self-management
+    PatchingKubeconfig,
+    /// Kubeconfig patched, applying distributed resources (CloudProviders, etc.)
+    ApplyingResources,
+    /// All pivot steps complete
+    Complete,
+}
+
+impl PivotPhase {
+    /// Returns true if phase is None (for serde skip_serializing_if)
+    pub fn is_none(&self) -> bool {
+        matches!(self, PivotPhase::None)
+    }
+}
+
+/// Sub-phase of the unpivot process for crash recovery
+///
+/// When a child cluster initiates deletion (unpivot), it progresses through
+/// these phases. On crash/restart, the controller checks this field to resume
+/// from the correct step. The finalizer is only removed after parent ACKs.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum UnpivotPhase {
+    /// Not currently unpivoting
+    #[default]
+    None,
+    /// Exporting CAPI resources via clusterctl move --to-directory
+    Exporting,
+    /// CAPI exported, sending manifests to parent
+    Sending,
+    /// Manifests sent, waiting for parent to ACK receipt
+    WaitingForAck,
+    /// Parent ACKed, safe to remove finalizer
+    Complete,
+}
+
+impl UnpivotPhase {
+    /// Returns true if phase is None (for serde skip_serializing_if)
+    pub fn is_none(&self) -> bool {
+        matches!(self, UnpivotPhase::None)
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -206,6 +282,18 @@ impl LatticeClusterStatus {
         // Remove existing condition of the same type
         self.conditions.retain(|c| c.type_ != condition.type_);
         self.conditions.push(condition);
+        self
+    }
+
+    /// Set the pivot phase and return self for chaining
+    pub fn pivot_phase(mut self, pivot_phase: PivotPhase) -> Self {
+        self.pivot_phase = pivot_phase;
+        self
+    }
+
+    /// Set the unpivot phase and return self for chaining
+    pub fn unpivot_phase(mut self, unpivot_phase: UnpivotPhase) -> Self {
+        self.unpivot_phase = unpivot_phase;
         self
     }
 }
@@ -612,5 +700,96 @@ workload:
             serde_yaml::from_str(&yaml).expect("LatticeClusterSpec deserialization should succeed");
 
         assert_eq!(spec, parsed, "Spec should survive roundtrip");
+    }
+
+    // =========================================================================
+    // Status Builder Tests
+    // =========================================================================
+
+    #[test]
+    fn status_builder_pivot_phase() {
+        let status = LatticeClusterStatus::default().pivot_phase(PivotPhase::Importing);
+        assert_eq!(status.pivot_phase, PivotPhase::Importing);
+    }
+
+    #[test]
+    fn status_builder_unpivot_phase() {
+        let status = LatticeClusterStatus::default().unpivot_phase(UnpivotPhase::WaitingForAck);
+        assert_eq!(status.unpivot_phase, UnpivotPhase::WaitingForAck);
+    }
+
+    #[test]
+    fn status_builder_chaining() {
+        let status = LatticeClusterStatus::default()
+            .phase(ClusterPhase::Ready)
+            .pivot_phase(PivotPhase::Complete)
+            .unpivot_phase(UnpivotPhase::None);
+
+        assert_eq!(status.phase, ClusterPhase::Ready);
+        assert_eq!(status.pivot_phase, PivotPhase::Complete);
+        assert_eq!(status.unpivot_phase, UnpivotPhase::None);
+    }
+
+    // =========================================================================
+    // UnpivotPhase Tests
+    // =========================================================================
+
+    #[test]
+    fn unpivot_phase_default_is_none() {
+        assert_eq!(UnpivotPhase::default(), UnpivotPhase::None);
+    }
+
+    #[test]
+    fn unpivot_phase_serialization_roundtrip() {
+        for phase in [
+            UnpivotPhase::None,
+            UnpivotPhase::Exporting,
+            UnpivotPhase::Sending,
+            UnpivotPhase::WaitingForAck,
+            UnpivotPhase::Complete,
+        ] {
+            let json = serde_json::to_string(&phase).expect("serialization should succeed");
+            let parsed: UnpivotPhase =
+                serde_json::from_str(&json).expect("deserialization should succeed");
+            assert_eq!(phase, parsed);
+        }
+    }
+
+    // =========================================================================
+    // Export Tests
+    // =========================================================================
+
+    #[test]
+    fn for_export_strips_status() {
+        let cluster = LatticeCluster {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test-cluster".to_string()),
+                namespace: Some("default".to_string()),
+                uid: Some("abc-123".to_string()),
+                resource_version: Some("12345".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeClusterSpec {
+                provider_ref: "test".to_string(),
+                provider: sample_provider_spec(),
+                nodes: sample_node_spec(),
+                networking: None,
+                parent_config: None,
+                environment: None,
+                region: None,
+                workload: None,
+            },
+            status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
+        };
+
+        let exported = cluster.for_export();
+
+        // Status should be removed
+        assert!(exported.status.is_none());
+        // Name should be preserved
+        assert_eq!(exported.metadata.name, Some("test-cluster".to_string()));
+        // Server-managed fields should be stripped
+        assert!(exported.metadata.uid.is_none());
+        assert!(exported.metadata.resource_version.is_none());
     }
 }

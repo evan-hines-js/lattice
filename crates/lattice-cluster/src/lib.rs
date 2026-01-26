@@ -18,7 +18,8 @@ pub mod pivot;
 pub mod provider;
 
 // Re-export key types
-pub use agent::client::{AgentClient, AgentClientConfig};
+pub use agent::client::{cleanup_stale_pivot_secrets, AgentClient, AgentClientConfig};
+pub use agent::server::cleanup_stale_unpivot_secrets;
 pub use bootstrap::{
     BootstrapState, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
 };

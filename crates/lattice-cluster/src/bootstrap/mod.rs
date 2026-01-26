@@ -739,6 +739,18 @@ impl DefaultManifestGenerator {
     }
 }
 
+/// Secret prefix for persisting bootstrap tokens
+const BOOTSTRAP_TOKEN_SECRET_PREFIX: &str = "bootstrap-token-";
+
+/// Determine if bootstrap token should be restored based on cluster status.
+///
+/// Returns true if bootstrap is not yet complete and the token should be restored.
+/// This is a pure function for easy testing.
+pub fn should_restore_bootstrap_token(status: Option<&LatticeClusterStatus>) -> bool {
+    let bootstrap_complete = status.map(|s| s.bootstrap_complete).unwrap_or(false);
+    !bootstrap_complete
+}
+
 /// Cluster info stored in bootstrap state
 #[derive(Clone, Debug)]
 pub struct ClusterBootstrapInfo {
@@ -768,6 +780,116 @@ pub struct ClusterBootstrapInfo {
     pub k8s_version: String,
     /// Whether any worker pool has autoscaling enabled (min/max set)
     pub autoscaling_enabled: bool,
+}
+
+/// Serializable version of ClusterBootstrapInfo for Secret persistence
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedBootstrapInfo {
+    cluster_id: String,
+    cell_endpoint: String,
+    ca_certificate: String,
+    cluster_manifest: String,
+    token_hash: String,
+    networking: Option<lattice_common::crd::NetworkingSpec>,
+    proxmox_ipv4_pool: Option<lattice_common::crd::Ipv4PoolConfig>,
+    provider: ProviderType,
+    bootstrap: lattice_common::crd::BootstrapProvider,
+    k8s_version: String,
+    autoscaling_enabled: bool,
+}
+
+impl From<&ClusterBootstrapInfo> for PersistedBootstrapInfo {
+    fn from(info: &ClusterBootstrapInfo) -> Self {
+        Self {
+            cluster_id: info.cluster_id.clone(),
+            cell_endpoint: info.cell_endpoint.clone(),
+            ca_certificate: info.ca_certificate.clone(),
+            cluster_manifest: info.cluster_manifest.clone(),
+            token_hash: info.token_hash.clone(),
+            networking: info.networking.clone(),
+            proxmox_ipv4_pool: info.proxmox_ipv4_pool.clone(),
+            provider: info.provider.clone(),
+            bootstrap: info.bootstrap.clone(),
+            k8s_version: info.k8s_version.clone(),
+            autoscaling_enabled: info.autoscaling_enabled,
+        }
+    }
+}
+
+impl PersistedBootstrapInfo {
+    fn into_cluster_info(self) -> ClusterBootstrapInfo {
+        ClusterBootstrapInfo {
+            cluster_id: self.cluster_id,
+            cell_endpoint: self.cell_endpoint,
+            ca_certificate: self.ca_certificate,
+            cluster_manifest: self.cluster_manifest,
+            token_hash: self.token_hash,
+            token_created: Instant::now(), // Reset TTL on restore
+            token_used: false,
+            networking: self.networking,
+            proxmox_ipv4_pool: self.proxmox_ipv4_pool,
+            provider: self.provider,
+            bootstrap: self.bootstrap,
+            k8s_version: self.k8s_version,
+            autoscaling_enabled: self.autoscaling_enabled,
+        }
+    }
+}
+
+/// Persist bootstrap info to a Secret for crash recovery
+async fn persist_bootstrap_info(client: &Client, info: &ClusterBootstrapInfo) -> Result<(), String> {
+    use kube::api::PostParams;
+
+    let secret_name = format!("{}{}", BOOTSTRAP_TOKEN_SECRET_PREFIX, info.cluster_id);
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    let persisted = PersistedBootstrapInfo::from(info);
+    let info_json = serde_json::to_vec(&persisted)
+        .map_err(|e| format!("Failed to serialize bootstrap info: {}", e))?;
+
+    let secret = Secret {
+        metadata: ObjectMeta {
+            name: Some(secret_name.clone()),
+            namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+            labels: Some(
+                [
+                    ("app.kubernetes.io/managed-by".to_string(), "lattice-operator".to_string()),
+                    ("lattice.io/cluster".to_string(), info.cluster_id.clone()),
+                    ("lattice.io/type".to_string(), "bootstrap-token".to_string()),
+                ]
+                .into(),
+            ),
+            ..Default::default()
+        },
+        data: Some([("info".to_string(), ByteString(info_json))].into()),
+        ..Default::default()
+    };
+
+    match secret_api.create(&PostParams::default(), &secret).await {
+        Ok(_) => {
+            debug!(cluster = %info.cluster_id, "Persisted bootstrap token to Secret");
+            Ok(())
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 409 => {
+            // Already exists - this is fine (idempotent)
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to create bootstrap Secret: {}", e)),
+    }
+}
+
+/// Delete bootstrap token Secret after token is consumed
+async fn delete_bootstrap_secret(client: &Client, cluster_id: &str) {
+    use kube::api::DeleteParams;
+
+    let secret_name = format!("{}{}", BOOTSTRAP_TOKEN_SECRET_PREFIX, cluster_id);
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    match secret_api.delete(&secret_name, &DeleteParams::default()).await {
+        Ok(_) => debug!(cluster = %cluster_id, "Deleted bootstrap token Secret"),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {} // Already deleted
+        Err(e) => warn!(cluster = %cluster_id, error = %e, "Failed to delete bootstrap Secret"),
+    }
 }
 
 /// Bootstrap endpoint state
@@ -829,10 +951,14 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
     /// Register a cluster for bootstrap
     ///
+    /// Creates a bootstrap token and persists the registration to a Secret
+    /// for crash recovery. On operator restart, pending registrations are
+    /// reloaded from Secrets.
+    ///
     /// # Arguments
     /// * `registration` - Cluster registration configuration
     /// * `mark_used` - If true, mark token as already used (for restart recovery)
-    pub fn register_cluster(
+    pub async fn register_cluster(
         &self,
         registration: ClusterRegistration,
         mark_used: bool,
@@ -857,8 +983,103 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             autoscaling_enabled: registration.autoscaling_enabled,
         };
 
+        // Persist to Secret for crash recovery
+        if let Some(client) = &self.kube_client {
+            if let Err(e) = persist_bootstrap_info(client, &info).await {
+                warn!(cluster = %cluster_id, error = %e, "Failed to persist bootstrap token (will retry on next reconcile)");
+            }
+        }
+
         self.clusters.insert(cluster_id, info);
         token
+    }
+
+    /// Load pending registrations from Secrets on startup
+    ///
+    /// Called during operator initialization to restore bootstrap state
+    /// for clusters that were in the process of bootstrapping when the
+    /// operator crashed/restarted.
+    ///
+    /// Also cleans up stale Secrets for clusters that already completed bootstrap
+    /// (in case the operator crashed after token consumption but before Secret deletion).
+    pub async fn load_pending_registrations(&self) -> Result<usize, String> {
+        let Some(client) = &self.kube_client else {
+            return Ok(0);
+        };
+
+        let secret_api: Api<Secret> =
+            Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let cluster_api: Api<LatticeCluster> = Api::all(client.clone());
+
+        // List all bootstrap token Secrets
+        let secrets = secret_api
+            .list(&Default::default())
+            .await
+            .map_err(|e| format!("Failed to list secrets: {}", e))?;
+
+        let mut loaded = 0;
+        let mut cleaned = 0;
+        for secret in secrets.items {
+            let Some(name) = secret.metadata.name.as_ref() else {
+                continue;
+            };
+
+            if !name.starts_with(BOOTSTRAP_TOKEN_SECRET_PREFIX) {
+                continue;
+            }
+
+            // Parse the persisted info
+            let Some(data) = secret.data else {
+                continue;
+            };
+
+            let Some(info_bytes) = data.get("info") else {
+                continue;
+            };
+
+            match serde_json::from_slice::<PersistedBootstrapInfo>(&info_bytes.0) {
+                Ok(persisted) => {
+                    let cluster_id = persisted.cluster_id.clone();
+
+                    // Check if cluster still exists and hasn't completed bootstrap
+                    let should_restore = match cluster_api.get(&cluster_id).await {
+                        Ok(cluster) => should_restore_bootstrap_token(cluster.status.as_ref()),
+                        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                            // Cluster doesn't exist - clean up stale Secret
+                            false
+                        }
+                        Err(_) => {
+                            // API error - err on the side of restoring
+                            true
+                        }
+                    };
+
+                    if should_restore {
+                        let info = persisted.into_cluster_info();
+                        self.clusters.insert(cluster_id.clone(), info);
+                        info!(cluster = %cluster_id, "Restored bootstrap registration from Secret");
+                        loaded += 1;
+                    } else {
+                        // Clean up stale Secret
+                        delete_bootstrap_secret(client, &cluster_id).await;
+                        debug!(cluster = %cluster_id, "Cleaned up stale bootstrap Secret");
+                        cleaned += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!(secret = %name, error = %e, "Failed to parse bootstrap Secret");
+                }
+            }
+        }
+
+        if loaded > 0 {
+            info!(count = loaded, "Loaded pending bootstrap registrations");
+        }
+        if cleaned > 0 {
+            info!(count = cleaned, "Cleaned up stale bootstrap Secrets");
+        }
+
+        Ok(loaded)
     }
 
     /// Validate and consume a bootstrap token
@@ -910,6 +1131,11 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // Now mark as used
         if let Some(mut entry) = self.clusters.get_mut(cluster_id) {
             entry.value_mut().token_used = true;
+        }
+
+        // Delete the bootstrap Secret now that token is consumed
+        if let Some(client) = &self.kube_client {
+            delete_bootstrap_secret(client, cluster_id).await;
         }
 
         Ok(info)
@@ -1281,7 +1507,7 @@ mod tests {
     }
 
     /// Test helper to register cluster without networking config
-    fn register_test_cluster<G: ManifestGenerator>(
+    async fn register_test_cluster<G: ManifestGenerator>(
         state: &BootstrapState<G>,
         cluster_id: impl Into<String>,
         cell_endpoint: impl Into<String>,
@@ -1303,11 +1529,11 @@ mod tests {
                 autoscaling_enabled: false,
             },
             false,
-        )
+        ).await
     }
 
-    #[test]
-    fn cluster_can_be_registered() {
+    #[tokio::test]
+    async fn cluster_can_be_registered() {
         let state = test_state();
 
         let token = register_test_cluster(
@@ -1315,7 +1541,8 @@ mod tests {
             "test-cluster".to_string(),
             "cell.example.com:8443:50051".to_string(),
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
-        );
+        )
+        .await;
 
         assert!(!token.as_str().is_empty());
     }
@@ -1329,7 +1556,8 @@ mod tests {
             "test-cluster".to_string(),
             "cell.example.com:8443:50051".to_string(),
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
-        );
+        )
+        .await;
 
         let info = state
             .validate_and_consume("test-cluster", token.as_str())
@@ -1348,7 +1576,8 @@ mod tests {
             "test-cluster".to_string(),
             "cell.example.com:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         let result = state
             .validate_and_consume("test-cluster", "wrong-token")
@@ -1366,7 +1595,8 @@ mod tests {
             "test-cluster".to_string(),
             "cell.example.com:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         // First use succeeds
         let _ = state
@@ -1390,7 +1620,8 @@ mod tests {
             "test-cluster".to_string(),
             "cell.example.com:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         // Wait for token to expire
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1420,7 +1651,8 @@ mod tests {
             "test-cluster".to_string(),
             "cell.example.com:8443:50051".to_string(),
             "ca-cert".to_string(),
-        );
+        )
+        .await;
 
         let info = state
             .validate_and_consume("test-cluster", token.as_str())
@@ -1451,7 +1683,8 @@ mod tests {
             "not-bootstrapped".to_string(),
             "cell:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         let agent_req = AgentCertRequest::new("not-bootstrapped")
             .expect("agent cert request creation should succeed");
@@ -1487,7 +1720,8 @@ mod tests {
             "csr-test".to_string(),
             "cell:8443:50051".to_string(),
             ca_cert,
-        );
+        )
+        .await;
         state
             .validate_and_consume("csr-test", token.as_str())
             .await
@@ -1515,7 +1749,8 @@ mod tests {
             "cluster-xyz".to_string(),
             "cell:8443:50051".to_string(),
             ca_cert,
-        );
+        )
+        .await;
         state
             .validate_and_consume("cluster-xyz", token.as_str())
             .await
@@ -1666,7 +1901,8 @@ mod tests {
             "prod-us-west-001".to_string(),
             "cell.lattice.example.com:8443:50051".to_string(),
             ca_cert,
-        );
+        )
+        .await;
         assert!(state.is_cluster_registered("prod-us-west-001"));
 
         // Chapter 2: kubeadm runs postKubeadmCommands on the new cluster
@@ -1731,7 +1967,8 @@ mod tests {
             "secure-cluster".to_string(),
             "cell:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         // Legitimate bootstrap succeeds
         let _ = state
@@ -1764,7 +2001,8 @@ mod tests {
             "guarded-cluster".to_string(),
             "cell:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         // Wrong token
         let result = state
@@ -1778,7 +2016,8 @@ mod tests {
             "other-cluster".to_string(),
             "cell:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
         let cross_cluster_result = state
             .validate_and_consume("guarded-cluster", other_token.as_str())
             .await;
@@ -1802,7 +2041,8 @@ mod tests {
             "premature-cluster".to_string(),
             "cell:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         // Try to get CSR signed without completing bootstrap
         let agent_request = AgentCertRequest::new("premature-cluster")
@@ -1858,7 +2098,8 @@ mod tests {
             "slow-cluster".to_string(),
             "cell:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         // Simulate slow bootstrap by waiting
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2009,7 +2250,8 @@ mod tests {
             "malformed-csr-test".to_string(),
             "cell:8443:50051".to_string(),
             state.ca_trust_bundle_pem().await,
-        );
+        )
+        .await;
         state
             .validate_and_consume("malformed-csr-test", token.as_str())
             .await
@@ -2039,7 +2281,8 @@ mod tests {
             "ca-test".to_string(),
             "cell:8443:50051".to_string(),
             ca_cert.clone(),
-        );
+        )
+        .await;
         let info = state
             .validate_and_consume("ca-test", token.as_str())
             .await
@@ -2078,7 +2321,8 @@ mod tests {
             "http-test".to_string(),
             "cell:8443:50051".to_string(),
             "ca-cert".to_string(),
-        );
+        )
+        .await;
 
         let router = bootstrap_router(state);
 
@@ -2115,7 +2359,8 @@ mod tests {
             "auth-test".to_string(),
             "cell:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         let router = bootstrap_router(state);
 
@@ -2142,7 +2387,8 @@ mod tests {
             "token-test".to_string(),
             "cell:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         let router = bootstrap_router(state);
 
@@ -2191,7 +2437,8 @@ mod tests {
             "csr-http-test".to_string(),
             "cell:8443:50051".to_string(),
             state.ca_trust_bundle_pem().await,
-        );
+        )
+        .await;
         state
             .validate_and_consume("csr-http-test", token.as_str())
             .await
@@ -2245,7 +2492,8 @@ mod tests {
             "not-bootstrapped".to_string(),
             "cell:8443:50051".to_string(),
             "cert".to_string(),
-        );
+        )
+        .await;
 
         let agent_req = AgentCertRequest::new("not-bootstrapped")
             .expect("agent cert request creation should succeed");
@@ -2312,7 +2560,8 @@ mod tests {
             "full-flow-test".to_string(),
             "cell.example.com:8443:50051".to_string(),
             ca_cert.clone(),
-        );
+        )
+        .await;
 
         let router = bootstrap_router(state);
 

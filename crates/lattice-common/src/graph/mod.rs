@@ -968,4 +968,97 @@ mod tests {
         assert_eq!(outbound_worker.len(), 1);
         assert_eq!(outbound_worker[0].callee_name, "stripe");
     }
+
+    // =========================================================================
+    // Listing and Query Tests
+    // =========================================================================
+
+    #[test]
+    fn test_list_services_filters_local_only() {
+        let graph = ServiceGraph::new();
+
+        // Add local service
+        let local_spec = make_service_spec(vec![], vec![]);
+        graph.put_service("test-ns", "local-svc", &local_spec);
+
+        // Add external service
+        let ext_spec = make_external_spec(vec![]);
+        graph.put_external_service("test-ns", "ext-svc", &ext_spec);
+
+        let services = graph.list_services("test-ns");
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name, "local-svc");
+    }
+
+    #[test]
+    fn test_list_external_services_filters_external_only() {
+        let graph = ServiceGraph::new();
+
+        // Add local service
+        let local_spec = make_service_spec(vec![], vec![]);
+        graph.put_service("test-ns", "local-svc", &local_spec);
+
+        // Add external service
+        let ext_spec = make_external_spec(vec![]);
+        graph.put_external_service("test-ns", "ext-svc", &ext_spec);
+
+        let services = graph.list_external_services("test-ns");
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name, "ext-svc");
+    }
+
+    #[test]
+    fn test_list_services_empty_namespace() {
+        let graph = ServiceGraph::new();
+        let services = graph.list_services("nonexistent");
+        assert!(services.is_empty());
+    }
+
+    #[test]
+    fn test_list_external_services_empty_namespace() {
+        let graph = ServiceGraph::new();
+        let services = graph.list_external_services("nonexistent");
+        assert!(services.is_empty());
+    }
+
+    #[test]
+    fn test_list_namespaces() {
+        let graph = ServiceGraph::new();
+
+        let spec = make_service_spec(vec![], vec![]);
+        graph.put_service("ns1", "svc1", &spec);
+        graph.put_service("ns2", "svc2", &spec);
+        graph.put_service("ns3", "svc3", &spec);
+
+        let mut namespaces = graph.list_namespaces();
+        namespaces.sort();
+        assert_eq!(namespaces, vec!["ns1", "ns2", "ns3"]);
+    }
+
+    #[test]
+    fn test_list_namespaces_excludes_empty() {
+        let graph = ServiceGraph::new();
+
+        let spec = make_service_spec(vec![], vec![]);
+        graph.put_service("ns1", "svc1", &spec);
+        graph.delete_service("ns1", "svc1");
+
+        // ns1 should be excluded since it's now empty
+        let namespaces = graph.list_namespaces();
+        assert!(!namespaces.contains(&"ns1".to_string()));
+    }
+
+    #[test]
+    fn test_service_count() {
+        let graph = ServiceGraph::new();
+
+        let spec = make_service_spec(vec![], vec![]);
+        graph.put_service("ns1", "svc1", &spec);
+        graph.put_service("ns1", "svc2", &spec);
+        graph.put_service("ns2", "svc3", &spec);
+
+        assert_eq!(graph.service_count("ns1"), 2);
+        assert_eq!(graph.service_count("ns2"), 1);
+        assert_eq!(graph.service_count("nonexistent"), 0);
+    }
 }

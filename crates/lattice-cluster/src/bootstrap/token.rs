@@ -406,4 +406,15 @@ mod tests {
         let token = store.create_token("test-cluster");
         assert!(store.validate("test-cluster", token.as_str()));
     }
+
+    #[test]
+    fn token_display_shows_token_value() {
+        let store = TokenStore::default();
+        let token = store.create_token("display-test");
+
+        // Display should show the actual token value (used for embedding in commands)
+        let displayed = format!("{}", token);
+        assert_eq!(displayed, token.as_str());
+        assert!(!displayed.is_empty());
+    }
 }

@@ -32,7 +32,7 @@ pub mod connection;
 pub mod mtls;
 pub mod server;
 
-pub use client::AgentClient;
+pub use client::{cleanup_stale_pivot_secrets, AgentClient};
 pub use connection::{AgentConnection, AgentRegistry, PostPivotManifests};
 pub use mtls::{ClientMtlsConfig, MtlsError, ServerMtlsConfig};
-pub use server::AgentServer;
+pub use server::{cleanup_stale_unpivot_secrets, AgentServer, UNPIVOT_MANIFESTS_SECRET_PREFIX};
