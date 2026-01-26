@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams, PostParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
@@ -1621,8 +1622,16 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     client.clone(),
                 ));
 
-                // Import manifests from child if available (sent via ClusterDeleting)
-                if let Some(manifests) = pivot_ops.take_unpivot_manifests(&name) {
+                // Import manifests from child if available
+                // First check in-memory (gRPC message just received), then fallback to Secret (crash recovery)
+                let manifests = if let Some(m) = pivot_ops.take_unpivot_manifests(&name) {
+                    Some(m)
+                } else {
+                    // Fallback: check for persisted Secret (operator may have crashed after receiving manifests)
+                    load_unpivot_manifests_from_secret(client, &name).await
+                };
+
+                if let Some(manifests) = manifests {
                     info!(
                         cluster = %name,
                         manifest_count = manifests.capi_manifests.len(),
@@ -1640,6 +1649,9 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                         warn!(cluster = %name, error = %e, "Failed to import CAPI manifests from child");
                         // Continue anyway - manifests may already be imported
                     }
+
+                    // Delete the Secret now that manifests are imported
+                    delete_unpivot_manifests_secret(client, &name).await;
                 }
 
                 // Unpause CAPI resources so they can reconcile
@@ -2624,6 +2636,79 @@ async fn wait_for_cell_service_deleted(ctx: &Context) -> bool {
     }
 
     false
+}
+
+/// Load unpivot manifests from persisted Secret (crash recovery)
+///
+/// When the operator receives ClusterDeleting via gRPC, it persists the CAPI manifests
+/// to a Secret. If the operator crashes before importing them, this function retrieves
+/// them on restart.
+async fn load_unpivot_manifests_from_secret(
+    client: &Client,
+    cluster_name: &str,
+) -> Option<crate::agent::connection::UnpivotManifests> {
+    let secret_name = format!("unpivot-manifests-{}", cluster_name);
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    let secret = match secret_api.get(&secret_name).await {
+        Ok(s) => s,
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            debug!(cluster = %cluster_name, "No unpivot manifests Secret found");
+            return None;
+        }
+        Err(e) => {
+            warn!(cluster = %cluster_name, error = %e, "Failed to get unpivot manifests Secret");
+            return None;
+        }
+    };
+
+    let data = secret.data?;
+
+    let manifests_bytes = data.get("manifests")?.0.clone();
+    let namespace_bytes = data.get("namespace")?.0.clone();
+
+    let capi_manifests: Vec<Vec<u8>> = match serde_json::from_slice(&manifests_bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(cluster = %cluster_name, error = %e, "Failed to parse unpivot manifests from Secret");
+            return None;
+        }
+    };
+
+    let namespace = match String::from_utf8(namespace_bytes) {
+        Ok(n) => n,
+        Err(e) => {
+            warn!(cluster = %cluster_name, error = %e, "Failed to parse namespace from Secret");
+            return None;
+        }
+    };
+
+    info!(
+        cluster = %cluster_name,
+        manifest_count = capi_manifests.len(),
+        "Loaded unpivot manifests from Secret (crash recovery)"
+    );
+
+    Some(crate::agent::connection::UnpivotManifests {
+        capi_manifests,
+        namespace,
+    })
+}
+
+/// Delete the unpivot manifests Secret after successful import
+async fn delete_unpivot_manifests_secret(client: &Client, cluster_name: &str) {
+    let secret_name = format!("unpivot-manifests-{}", cluster_name);
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    match secret_api.delete(&secret_name, &DeleteParams::default()).await {
+        Ok(_) => info!(cluster = %cluster_name, "Deleted unpivot manifests Secret"),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            // Already deleted, that's fine
+        }
+        Err(e) => {
+            warn!(cluster = %cluster_name, error = %e, "Failed to delete unpivot manifests Secret");
+        }
+    }
 }
 
 /// Handle cluster deletion with unpivot logic
