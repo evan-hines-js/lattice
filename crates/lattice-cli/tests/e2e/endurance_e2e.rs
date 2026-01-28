@@ -3,7 +3,7 @@
 //! # Design
 //!
 //! Runs forever until failure. Each batch:
-//! 1. Create 4 clusters simultaneously
+//! 1. Create 3 clusters simultaneously
 //! 2. Wait for all to reach Running
 //! 3. Wait 20 seconds (chaos active)
 //! 4. Delete all clusters (chaos active during unpivot)
@@ -37,8 +37,8 @@ use lattice_operator::crd::LatticeCluster;
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
-    get_docker_kubeconfig, load_cluster_config, load_registry_credentials, run_cmd_allow_fail,
-    watch_cluster_phases,
+    force_delete_docker_cluster, get_docker_kubeconfig, load_cluster_config,
+    load_registry_credentials, run_cmd_allow_fail, watch_cluster_phases,
 };
 
 const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
@@ -46,12 +46,31 @@ const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 const BATCH_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes per batch
 const SETTLE_DELAY: Duration = Duration::from_secs(20);
 
-fn cleanup_bootstrap_clusters() {
-    info!("Cleaning up kind bootstrap cluster...");
+fn cleanup_all_clusters() {
+    info!("Cleaning up all test resources...");
+
+    // Clean up kind bootstrap cluster
     let _ = run_cmd_allow_fail(
         "kind",
         &["delete", "cluster", "--name", "lattice-bootstrap"],
     );
+
+    // Clean up management cluster
+    force_delete_docker_cluster(MGMT_CLUSTER_NAME);
+
+    // Clean up any endurance-* clusters (pattern matches all iterations)
+    // Get all containers with endurance- prefix
+    let containers = run_cmd_allow_fail(
+        "docker",
+        &["ps", "-a", "--filter", "name=endurance-", "-q"],
+    );
+    for id in containers.lines() {
+        if !id.trim().is_empty() {
+            let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
+        }
+    }
+
+    info!("Cleanup complete");
 }
 
 #[tokio::test]
@@ -69,19 +88,30 @@ async fn test_endurance_loop() {
     info!("ENDURANCE TEST - RUNS FOREVER (10 min timeout per batch)");
     info!("=========================================================");
 
-    cleanup_bootstrap_clusters();
+    // Clean up any leftover resources from previous runs
+    cleanup_all_clusters();
 
     if let Err(e) = build_and_push_lattice_image(LATTICE_IMAGE).await {
+        cleanup_all_clusters();
         panic!("Failed to build Lattice image: {}", e);
     }
 
     // This runs forever until failure
-    if let Err(e) = run_endurance_test().await {
-        error!("=========================================================");
-        error!("ENDURANCE TEST FAILED: {}", e);
-        error!("=========================================================");
-        cleanup_bootstrap_clusters();
-        panic!("Endurance test failed: {}", e);
+    let result = run_endurance_test().await;
+
+    match result {
+        Ok(()) => {
+            // Only clean up on success
+            cleanup_all_clusters();
+            info!("TEST PASSED");
+        }
+        Err(e) => {
+            error!("=========================================================");
+            error!("ENDURANCE TEST FAILED: {}", e);
+            error!("Clusters left running for debugging. Run cleanup manually.");
+            error!("=========================================================");
+            panic!("Endurance test failed: {}", e);
+        }
     }
 }
 
@@ -131,7 +161,7 @@ async fn run_endurance_test() -> Result<(), String> {
     let mut iteration = 0u64;
     let test_start = Instant::now();
 
-    info!("Starting batch iterations (runs forever, 10 min timeout per batch)...");
+    info!("Starting batch iterations (3 clusters per batch, runs forever, 10 min timeout per batch)...");
 
     // Loop forever until failure
     loop {
@@ -142,18 +172,43 @@ async fn run_endurance_test() -> Result<(), String> {
             iteration, test_start.elapsed()
         );
 
-        // Create cluster configs with unique names for this iteration
-        let cluster_names: Vec<String> = (0..4)
-            .map(|i| format!("endurance-{}-{}", iteration, i))
-            .collect();
+        // Create cluster configs with unique names and IPs for this iteration
+        let clusters: Vec<LatticeCluster> = (0..3)
+            .map(|i| {
+                let name = format!("endurance-{}-{}", iteration, i);
+                // Each cluster needs a unique IP: 172.18.255.{100 + offset}
+                let ip_offset = ((iteration - 1) * 3 + i) % 100 + 100;
+                let ip = format!("172.18.255.{}", ip_offset);
 
-        let clusters: Vec<LatticeCluster> = cluster_names
-            .iter()
-            .map(|name| {
                 let mut cluster = workload_template.clone();
-                cluster.metadata.name = Some(name.clone());
+                cluster.metadata.name = Some(name);
+
+                // Update networking CIDR
+                if let Some(ref mut networking) = cluster.spec.networking {
+                    if let Some(ref mut default) = networking.default {
+                        default.cidr = format!("{}/32", ip);
+                    }
+                }
+
+                // Update parent_config host
+                if let Some(ref mut parent_config) = cluster.spec.parent_config {
+                    parent_config.host = Some(ip.clone());
+                }
+
+                // Update cert SANs
+                cluster.spec.provider.kubernetes.cert_sans = Some(vec![
+                    "127.0.0.1".to_string(),
+                    "localhost".to_string(),
+                    ip,
+                ]);
+
                 cluster
             })
+            .collect();
+
+        let cluster_names: Vec<String> = clusters
+            .iter()
+            .filter_map(|c| c.metadata.name.clone())
             .collect();
 
         // Run batch with timeout
