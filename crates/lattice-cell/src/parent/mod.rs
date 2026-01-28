@@ -74,9 +74,28 @@ impl Default for ParentConfig {
             ],
             image: std::env::var("LATTICE_IMAGE")
                 .unwrap_or_else(|_| "ghcr.io/evan-hines-js/lattice:latest".to_string()),
-            registry_credentials: std::env::var("REGISTRY_CREDENTIALS_FILE")
-                .ok()
-                .and_then(|path| std::fs::read_to_string(&path).ok()),
+            registry_credentials: load_registry_credentials(),
+        }
+    }
+}
+
+/// Load registry credentials from file specified by REGISTRY_CREDENTIALS_FILE env var.
+/// Logs errors instead of silently returning None.
+fn load_registry_credentials() -> Option<String> {
+    let path = match std::env::var("REGISTRY_CREDENTIALS_FILE") {
+        Ok(p) => p,
+        Err(_) => return None, // Env var not set is expected, not an error
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Some(contents),
+        Err(e) => {
+            tracing::warn!(
+                path = %path,
+                error = %e,
+                "REGISTRY_CREDENTIALS_FILE is set but file could not be read"
+            );
+            None
         }
     }
 }

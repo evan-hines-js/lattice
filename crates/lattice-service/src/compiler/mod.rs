@@ -42,6 +42,9 @@ pub enum CompileError {
     /// LatticeService is missing required metadata
     #[error("LatticeService missing {field}")]
     MissingMetadata { field: &'static str },
+    /// Invalid volume resource configuration
+    #[error("invalid volume config: {0}")]
+    InvalidVolume(String),
 }
 
 impl From<CompileError> for crate::Error {
@@ -153,7 +156,8 @@ impl<'a> ServiceCompiler<'a> {
             .ok_or(CompileError::MissingMetadata { field: "namespace" })?;
 
         // Compile volumes first (PVCs must exist before Deployment references them)
-        let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec);
+        let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec)
+            .map_err(CompileError::InvalidVolume)?;
 
         // Delegate to specialized compilers
         let mut workloads = WorkloadCompiler::compile(

@@ -185,12 +185,12 @@ impl VolumeCompiler {
     ///
     /// # Returns
     /// Generated volume resources including PVCs, pod labels, affinity rules,
-    /// and volume mounts
+    /// and volume mounts, or an error if volume params are invalid.
     pub fn compile(
         service_name: &str,
         namespace: &str,
         spec: &LatticeServiceSpec,
-    ) -> GeneratedVolumes {
+    ) -> Result<GeneratedVolumes, String> {
         let mut output = GeneratedVolumes::new();
 
         // Collect all volume resources
@@ -201,7 +201,7 @@ impl VolumeCompiler {
             .collect();
 
         if volume_resources.is_empty() {
-            return output;
+            return Ok(output);
         }
 
         // Process each volume resource
@@ -212,7 +212,10 @@ impl VolumeCompiler {
 
             // Generate PVC for owned volumes (has size)
             if resource_spec.is_volume_owner() {
-                let params = resource_spec.volume_params().unwrap_or_default();
+                let params = resource_spec
+                    .volume_params()
+                    .map_err(|e| format!("resource '{}': {}", resource_name, e))?
+                    .unwrap_or_default();
                 let pvc = Self::compile_pvc(&pvc_name, namespace, &params);
                 output.pvcs.push(pvc);
 
@@ -326,7 +329,7 @@ impl VolumeCompiler {
             }
         }
 
-        output
+        Ok(output)
     }
 
     /// Compile a PVC from volume params
@@ -491,7 +494,7 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 
         assert_eq!(output.pvcs.len(), 1);
         let pvc = &output.pvcs[0];
@@ -509,7 +512,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec);
+        let output = VolumeCompiler::compile("nzbget", "media", &spec).unwrap();
 
         assert_eq!(output.pvcs.len(), 1);
         let pvc = &output.pvcs[0];
@@ -531,7 +534,7 @@ mod tests {
             }
         }
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 
         let pvc = &output.pvcs[0];
         assert_eq!(pvc.spec.storage_class_name, Some("local-path".to_string()));
@@ -550,7 +553,7 @@ mod tests {
             vec![("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("jellyfin", "media", &spec);
+        let output = VolumeCompiler::compile("jellyfin", "media", &spec).unwrap();
 
         let pvc = &output.pvcs[0];
         assert_eq!(pvc.spec.access_modes, vec!["ReadWriteMany"]);
@@ -568,7 +571,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec);
+        let output = VolumeCompiler::compile("sonarr", "media", &spec).unwrap();
 
         // No PVCs - this is a reference
         assert!(output.pvcs.is_empty());
@@ -603,7 +606,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec);
+        let output = VolumeCompiler::compile("nzbget", "media", &spec).unwrap();
 
         // Should have owner label for RWO volume
         assert_eq!(
@@ -627,7 +630,7 @@ mod tests {
             vec![("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("jellyfin", "media", &spec);
+        let output = VolumeCompiler::compile("jellyfin", "media", &spec).unwrap();
 
         // No owner label for RWX - no affinity needed
         assert!(output.pod_labels.is_empty());
@@ -645,7 +648,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec);
+        let output = VolumeCompiler::compile("sonarr", "media", &spec).unwrap();
 
         // Should have affinity to owner
         let affinity = output.affinity.expect("should have affinity");
@@ -671,7 +674,7 @@ mod tests {
             vec![("/downloads", "downloads"), ("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec);
+        let output = VolumeCompiler::compile("sonarr", "media", &spec).unwrap();
 
         let affinity = output.affinity.expect("should have affinity");
         let pod_affinity = affinity.pod_affinity.expect("should have pod affinity");
@@ -692,7 +695,7 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 
         let mounts = output
             .volume_mounts
@@ -711,7 +714,7 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 
         assert_eq!(output.volumes.len(), 1);
         assert_eq!(output.volumes[0].name, "config");
@@ -759,7 +762,7 @@ mod tests {
             share_process_namespace: None,
         };
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec);
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 
         assert!(output.is_empty());
     }
