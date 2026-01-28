@@ -366,24 +366,31 @@ pub enum VolumeAccessMode {
 impl ResourceSpec {
     /// Parse volume params from the generic Score `params` field
     ///
-    /// Returns None if this is not a volume resource.
-    /// Returns default VolumeParams if params is missing or empty.
-    pub fn volume_params(&self) -> Option<VolumeParams> {
+    /// Returns:
+    /// - `Ok(None)` if this is not a volume resource
+    /// - `Ok(Some(params))` if params parsed successfully (or defaults if missing)
+    /// - `Err(msg)` if JSON conversion failed (invalid params structure)
+    pub fn volume_params(&self) -> Result<Option<VolumeParams>, String> {
         if !self.type_.is_volume() {
-            return None;
+            return Ok(None);
         }
         match &self.params {
             Some(params) => {
-                let value = serde_json::to_value(params).ok()?;
-                serde_json::from_value(value).ok()
+                let value = serde_json::to_value(params)
+                    .map_err(|e| format!("failed to serialize volume params: {}", e))?;
+                let volume_params = serde_json::from_value(value)
+                    .map_err(|e| format!("invalid volume params: {}", e))?;
+                Ok(Some(volume_params))
             }
-            None => Some(VolumeParams::default()),
+            None => Ok(Some(VolumeParams::default())),
         }
     }
 
     /// Returns true if this is a volume resource that owns (creates) the PVC
     pub fn is_volume_owner(&self) -> bool {
         self.volume_params()
+            .ok()
+            .flatten()
             .map(|p| p.size.is_some())
             .unwrap_or(false)
     }
@@ -394,6 +401,8 @@ impl ResourceSpec {
             && self.id.is_some()
             && self
                 .volume_params()
+                .ok()
+                .flatten()
                 .map(|p| p.size.is_none())
                 .unwrap_or(true)
     }
@@ -2244,7 +2253,7 @@ resources:
         // Verify config volume
         let config = spec.resources.get("config").expect("config should exist");
         assert!(config.is_volume_owner());
-        let config_params = config.volume_params().expect("config volume params");
+        let config_params = config.volume_params().expect("config volume params").expect("should have params");
         assert_eq!(config_params.size, Some("10Gi".to_string()));
         assert_eq!(config_params.storage_class, Some("local-path".to_string()));
 
@@ -2252,7 +2261,7 @@ resources:
         let media = spec.resources.get("media").expect("media should exist");
         assert!(media.is_volume_owner());
         assert_eq!(media.id, Some("media-library".to_string()));
-        let media_params = media.volume_params().expect("media volume params");
+        let media_params = media.volume_params().expect("media volume params").expect("should have params");
         assert_eq!(media_params.size, Some("1Ti".to_string()));
         assert_eq!(
             media_params.access_mode,

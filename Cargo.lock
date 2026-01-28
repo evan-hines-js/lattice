@@ -1971,6 +1971,7 @@ dependencies = [
  "aws-lc-rs",
  "base64",
  "clap",
+ "futures",
  "k8s-openapi",
  "kube",
  "lattice-agent",

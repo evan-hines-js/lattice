@@ -45,6 +45,7 @@ rustls.workspace = true
 aws-lc-rs.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
 tokio-util.workspace = true

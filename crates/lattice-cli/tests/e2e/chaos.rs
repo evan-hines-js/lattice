@@ -78,6 +78,14 @@ impl ChaosTargets {
         }
     }
 
+    pub fn remove(&self, name: &str) {
+        let mut targets = self.0.write();
+        if let Some(idx) = targets.iter().position(|(n, _)| n == name) {
+            targets.remove(idx);
+            info!("[Chaos] Target removed: {}", name);
+        }
+    }
+
     fn random(&self) -> Option<(String, String)> {
         let targets = self.0.read();
         if targets.is_empty() {

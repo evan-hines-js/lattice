@@ -1385,7 +1385,8 @@ mod tests {
             .namespace
             .as_deref()
             .expect("test service must have a namespace");
-        let volumes = VolumeCompiler::compile(name, namespace, &service.spec);
+        let volumes = VolumeCompiler::compile(name, namespace, &service.spec)
+            .expect("test volume compilation should succeed");
         // Use Docker provider for tests (uses hostname-based spreading)
         WorkloadCompiler::compile(name, service, namespace, &volumes, ProviderType::Docker)
     }
