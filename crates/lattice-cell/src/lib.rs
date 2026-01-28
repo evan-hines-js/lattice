@@ -25,7 +25,4 @@ pub use connection::{
 };
 pub use parent::{load_or_create_ca, CellServerError, ParentConfig, ParentServers};
 pub use resources::{fetch_distributable_resources, DistributableResources, ResourceError};
-pub use server::{
-    cleanup_stale_unpivot_secrets, should_cleanup_unpivot_manifests, AgentServer,
-    UNPIVOT_MANIFESTS_SECRET_PREFIX,
-};
+pub use server::AgentServer;

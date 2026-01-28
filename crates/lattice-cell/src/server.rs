@@ -19,11 +19,10 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, instrument, warn};
 
-use k8s_openapi::api::core::v1::Secret;
-use kube::api::{Patch, PatchParams, PostParams};
+use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::{Api, Client};
-use lattice_common::crd::{LatticeCluster, LatticeClusterStatus};
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::clusterctl::{teardown_cluster, TeardownConfig};
+use lattice_common::crd::LatticeCluster;
 
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
 use lattice_proto::{
@@ -243,131 +242,50 @@ async fn handle_agent_message_impl(
                 cluster = %cluster_name,
                 namespace = %cd.namespace,
                 manifest_count = cd.capi_manifests.len(),
-                "Cluster deletion requested by child with CAPI manifests"
+                "Cluster deletion requested - starting synchronous teardown"
             );
 
-            // Store CAPI manifests in memory for immediate use
-            registry.set_unpivot_manifests(
-                cluster_name,
-                crate::UnpivotManifests {
-                    capi_manifests: cd.capi_manifests.clone(),
-                    namespace: cd.namespace.clone(),
-                },
-            );
+            // Convert manifests from Vec<Vec<u8>> to slice for teardown_cluster
+            let manifests: Vec<Vec<u8>> = cd.capi_manifests.clone();
+            let namespace = cd.namespace.clone();
+            let cluster = cluster_name.to_string();
+            let client = kube_client.clone();
 
-            // Persist manifests to a Secret so they survive operator restarts
-            let secret_name = format!("{}{}", UNPIVOT_MANIFESTS_SECRET_PREFIX, cluster_name);
-            let secret_api: Api<Secret> =
-                Api::namespaced(kube_client.clone(), LATTICE_SYSTEM_NAMESPACE);
-
-            // Encode manifests as base64 JSON array
-            let manifests_json = serde_json::to_vec(&cd.capi_manifests).unwrap_or_default();
-            let mut data = std::collections::BTreeMap::new();
-            data.insert(
-                "manifests".to_string(),
-                k8s_openapi::ByteString(manifests_json),
-            );
-            data.insert(
-                "namespace".to_string(),
-                k8s_openapi::ByteString(cd.namespace.as_bytes().to_vec()),
-            );
-
-            let secret = Secret {
-                metadata: kube::api::ObjectMeta {
-                    name: Some(secret_name.clone()),
-                    namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-                    labels: Some(
-                        [
-                            (
-                                "app.kubernetes.io/managed-by".to_string(),
-                                "lattice-operator".to_string(),
-                            ),
-                            ("lattice.io/cluster".to_string(), cluster_name.to_string()),
-                        ]
-                        .into(),
-                    ),
-                    ..Default::default()
-                },
-                data: Some(data),
-                ..Default::default()
-            };
-
-            // Create or update the Secret
-            match secret_api.create(&PostParams::default(), &secret).await {
-                Ok(_) => {
-                    info!(cluster = %cluster_name, secret = %secret_name, "Unpivot manifests persisted to Secret")
-                }
-                Err(kube::Error::Api(ae)) if ae.code == 409 => {
-                    // Already exists, update it
-                    if let Err(e) = secret_api
-                        .replace(&secret_name, &PostParams::default(), &secret)
-                        .await
-                    {
-                        error!(cluster = %cluster_name, error = %e, "Failed to update unpivot manifests Secret");
-                    }
-                }
-                Err(e) => {
-                    error!(cluster = %cluster_name, error = %e, "Failed to create unpivot manifests Secret")
-                }
-            }
-
-            // Delete the parent's LatticeCluster to trigger proper cleanup flow
-            // The finalizer on the LatticeCluster ensures unpivot cleanup completes
-            // before the resource is removed. The persisted Secret contains manifests
-            // needed for crash recovery.
-            let api: Api<LatticeCluster> = Api::all(kube_client.clone());
-
-            // First set unpivotPending to true (for controller to know unpivot is in progress)
-            let patch = serde_json::json!({
-                "status": {
-                    "unpivotPending": true
-                }
-            });
-            if let Err(e) = api
-                .patch_status(
-                    cluster_name,
-                    &PatchParams::apply("lattice-operator"),
-                    &Patch::Merge(&patch),
+            // Spawn teardown to avoid blocking the gRPC stream
+            // The child will keep retrying until CAPI deletes its infrastructure
+            tokio::spawn(async move {
+                // Teardown: import manifests, unpause CAPI, delete CAPI cluster
+                let config = TeardownConfig::default();
+                match teardown_cluster(
+                    &client,
+                    &namespace,
+                    &cluster,
+                    Some(&manifests),
+                    &config,
+                    None, // in-cluster kubeconfig
                 )
                 .await
-            {
-                error!(
-                    cluster = %cluster_name,
-                    error = %e,
-                    "Failed to set unpivotPending status"
-                );
-            }
+                {
+                    Ok(()) => {
+                        info!(cluster = %cluster, "CAPI teardown complete, deleting LatticeCluster");
 
-            // Now delete the LatticeCluster - finalizer ensures cleanup completes
-            match api.delete(cluster_name, &Default::default()).await {
-                Ok(_) => {
-                    info!(
-                        cluster = %cluster_name,
-                        "LatticeCluster deletion initiated (finalizer will ensure cleanup)"
-                    );
+                        // Now safe to delete the LatticeCluster
+                        let api: Api<LatticeCluster> = Api::all(client.clone());
+                        if let Err(e) = api.delete(&cluster, &DeleteParams::default()).await {
+                            if !matches!(&e, kube::Error::Api(ae) if ae.code == 404) {
+                                error!(cluster = %cluster, error = %e, "Failed to delete LatticeCluster");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            cluster = %cluster,
+                            error = %e,
+                            "CAPI teardown failed - child will retry"
+                        );
+                    }
                 }
-                Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                    // Already deleted or doesn't exist
-                    debug!(cluster = %cluster_name, "LatticeCluster already deleted");
-                }
-                Err(e) => {
-                    error!(
-                        cluster = %cluster_name,
-                        error = %e,
-                        "Failed to delete LatticeCluster"
-                    );
-                }
-            };
-
-            // The agent handles unpivot by continuously sending ClusterDeleting until
-            // the controller successfully imports and unpauses the CAPI resources.
-            // Sending ACK prematurely causes the child to remove its finalizer
-            // before the parent has actually taken ownership of the CAPI resources.
-            // If the parent crashes between ACK and unpause, the child's
-            // LatticeCluster gets deleted and the cluster becomes orphaned.
-            //
-            // The controller will send the ACK after unpause_capi_cluster succeeds.
-            info!(cluster = %cluster_name, "Unpivot manifests stored, waiting for controller to import and unpause before ACK");
+            });
         }
         Some(Payload::KubernetesResponse(resp)) => {
             debug!(
@@ -522,88 +440,6 @@ async fn push_resources_for_recovery(kube_client: Client, command_tx: mpsc::Send
     } else {
         info!("Pushed resources to agent for crash recovery");
     }
-}
-
-/// Prefix for unpivot manifests Secrets
-pub const UNPIVOT_MANIFESTS_SECRET_PREFIX: &str = "unpivot-manifests-";
-
-/// Determine if unpivot manifests should be cleaned up based on cluster status.
-///
-/// Returns true if unpivot is complete (unpivot_pending is false).
-/// This is a pure function for easy testing.
-pub fn should_cleanup_unpivot_manifests(status: Option<&LatticeClusterStatus>) -> bool {
-    let unpivot_pending = status.map(|s| s.unpivot_pending).unwrap_or(false);
-    !unpivot_pending
-}
-
-/// Clean up stale unpivot-manifests Secrets on operator startup.
-///
-/// Called during operator initialization to delete unpivot-manifests Secrets for clusters
-/// that have been deleted or no longer need them. This handles the case where the operator
-/// crashed after unpivot completed but before the Secret was deleted.
-pub async fn cleanup_stale_unpivot_secrets(client: &Client) -> Result<usize, String> {
-    use kube::api::{DeleteParams, ListParams};
-
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let cluster_api: Api<LatticeCluster> = Api::all(client.clone());
-
-    // List all unpivot-manifests Secrets
-    let secrets = secret_api
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| format!("Failed to list secrets: {}", e))?;
-
-    let mut cleaned = 0;
-    for secret in secrets.items {
-        let Some(name) = secret.metadata.name.as_ref() else {
-            continue;
-        };
-
-        if !name.starts_with(UNPIVOT_MANIFESTS_SECRET_PREFIX) {
-            continue;
-        }
-
-        // Extract cluster name from secret name
-        let cluster_name = &name[UNPIVOT_MANIFESTS_SECRET_PREFIX.len()..];
-        if cluster_name.is_empty() {
-            continue;
-        }
-
-        // Check if cluster still needs unpivot manifests
-        let should_delete = match cluster_api.get(cluster_name).await {
-            Ok(cluster) => should_cleanup_unpivot_manifests(cluster.status.as_ref()),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                // Cluster doesn't exist - clean up stale Secret
-                true
-            }
-            Err(_) => {
-                // API error - keep the Secret to be safe
-                false
-            }
-        };
-
-        if should_delete {
-            match secret_api.delete(name, &DeleteParams::default()).await {
-                Ok(_) => {
-                    debug!(cluster = %cluster_name, "Cleaned up stale unpivot-manifests Secret");
-                    cleaned += 1;
-                }
-                Err(kube::Error::Api(ae)) if ae.code == 404 => {}
-                Err(e) => {
-                    warn!(cluster = %cluster_name, error = %e, "Failed to delete unpivot-manifests Secret");
-                }
-            }
-        }
-    }
-
-    if cleaned > 0 {
-        info!(
-            count = cleaned,
-            "Cleaned up stale unpivot-manifests Secrets"
-        );
-    }
-
-    Ok(cleaned)
 }
 
 #[cfg(test)]
@@ -1356,38 +1192,5 @@ mod tests {
             }
             _ => panic!("expected ApplyManifestsCommand"),
         }
-    }
-
-    // =========================================================================
-    // Cleanup Decision Logic Tests
-    // =========================================================================
-
-    #[test]
-    fn should_cleanup_unpivot_when_not_pending() {
-        // unpivot_pending = false (default) -> should cleanup
-        let status = LatticeClusterStatus::default();
-        assert!(should_cleanup_unpivot_manifests(Some(&status)));
-
-        // Explicitly set to false
-        let status = LatticeClusterStatus {
-            unpivot_pending: false,
-            ..Default::default()
-        };
-        assert!(should_cleanup_unpivot_manifests(Some(&status)));
-    }
-
-    #[test]
-    fn should_not_cleanup_unpivot_when_pending() {
-        let status = LatticeClusterStatus {
-            unpivot_pending: true,
-            ..Default::default()
-        };
-        assert!(!should_cleanup_unpivot_manifests(Some(&status)));
-    }
-
-    #[test]
-    fn should_cleanup_unpivot_with_no_status() {
-        // No status means unpivot not in progress
-        assert!(should_cleanup_unpivot_manifests(None));
     }
 }
