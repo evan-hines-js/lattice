@@ -2,6 +2,10 @@
 
 #![deny(missing_docs)]
 
+// Startup and agent modules for main.rs
+pub mod agent;
+pub mod startup;
+
 // Re-export cell modules from lattice-cell
 pub use lattice_cell::bootstrap;
 pub use lattice_cell::cilium;
@@ -16,9 +20,8 @@ pub use lattice_agent::pivot;
 // Re-export CAPI from lattice-capi
 pub use lattice_capi as capi;
 
-// Re-export crash-resilient cleanup functions
+// Re-export crash-resilient cleanup function
 pub use lattice_agent::cleanup_stale_pivot_secrets;
-pub use lattice_cell::cleanup_stale_unpivot_secrets;
 
 // Re-export service modules from lattice-service
 pub use lattice_service::compiler;

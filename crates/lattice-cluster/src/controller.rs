@@ -8,9 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
@@ -18,10 +17,9 @@ use tracing::{debug, error, info, instrument, warn};
 #[cfg(test)]
 use mockall::automock;
 
-use lattice_common::clusterctl::unpause_capi_cluster;
 use lattice_common::crd::{
-    BootstrapProvider, ClusterPhase, Condition, ConditionStatus, LatticeCluster,
-    LatticeClusterStatus, WorkerPoolSpec, WorkerPoolStatus,
+    ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus, WorkerPoolSpec,
+    WorkerPoolStatus,
 };
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE};
@@ -35,7 +33,7 @@ use lattice_capi::{
 };
 use lattice_cell::{
     fetch_distributable_resources, DefaultManifestGenerator, DistributableResources, ParentServers,
-    SharedAgentRegistry, UnpivotManifests, UNPIVOT_MANIFESTS_SECRET_PREFIX,
+    SharedAgentRegistry,
 };
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
@@ -869,13 +867,6 @@ pub trait PivotOperations: Send + Sync {
     /// ApplyManifestsCommand after pivot succeeds.
     /// Note: LatticeCluster CRD and instance are delivered via bootstrap webhook.
     fn store_post_pivot_manifests(&self, cluster_name: &str, network_policy_yaml: Option<String>);
-
-    /// Take unpivot manifests received from child during deletion
-    ///
-    /// Called during unpivot cleanup to get CAPI manifests that the child
-    /// exported and sent via ClusterDeleting message. Returns None if no
-    /// manifests are available (child hasn't sent them yet).
-    fn take_unpivot_manifests(&self, cluster_name: &str) -> Option<UnpivotManifests>;
 }
 
 /// Shared context for the LatticeCluster controller
@@ -1123,73 +1114,6 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
         .await?;
         // Don't requeue for validation errors - they require spec changes
         return Ok(Action::await_change());
-    }
-
-    // Check if this child cluster is being unpivoted (child is being deleted)
-    // This only applies when we're the parent, not when reconciling our own cluster
-    // Unpivot flow: child exports CAPI → sends to parent → parent imports → unpauses → deletes
-    if !is_self {
-        if let Some(parent_servers) = &ctx.parent_servers {
-            let capi_namespace = format!("capi-{}", name);
-
-            // Check if unpivot is pending (set by gRPC server when ClusterDeleting received)
-            let unpivot_pending = cluster
-                .status
-                .as_ref()
-                .map(|s| s.unpivot_pending)
-                .unwrap_or(false);
-
-            if unpivot_pending {
-                let Some(ref client) = ctx.client else {
-                    return Err(Error::internal("client not available for pivot operations"));
-                };
-                let pivot_ops: Arc<dyn PivotOperations> = Arc::new(PivotOperationsImpl::new(
-                    parent_servers.agent_registry(),
-                    client.clone(),
-                ));
-
-                // Import manifests from child if available
-                // First check in-memory (gRPC message just received), then fallback to Secret (crash recovery)
-                let manifests = if let Some(m) = pivot_ops.take_unpivot_manifests(&name) {
-                    Some(m)
-                } else {
-                    // Fallback: check for persisted Secret (operator may have crashed after receiving manifests)
-                    load_unpivot_manifests_from_secret(client, &name).await
-                };
-
-                if let Some(manifests) = manifests {
-                    info!(
-                        cluster = %name,
-                        manifest_count = manifests.capi_manifests.len(),
-                        namespace = %manifests.namespace,
-                        "Importing CAPI manifests from child for unpivot"
-                    );
-
-                    if let Err(e) = lattice_common::clusterctl::import_from_manifests(
-                        None,
-                        &manifests.namespace,
-                        &manifests.capi_manifests,
-                    )
-                    .await
-                    {
-                        warn!(cluster = %name, error = %e, "Failed to import CAPI manifests from child");
-                        // Continue anyway - manifests may already be imported
-                    }
-
-                    // Delete the Secret now that manifests are imported
-                    delete_unpivot_manifests_secret(client, &name).await;
-                }
-
-                // Unpause CAPI resources so they can reconcile
-                if let Err(e) = unpause_capi_cluster(None, &capi_namespace, &name).await {
-                    debug!(cluster = %name, error = %e, "Failed to unpause CAPI (may already be unpaused)");
-                }
-
-                let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
-                info!(cluster = %name, "Unpivot in progress - waiting for CAPI ready then cleanup");
-                return handle_unpivot_cleanup(&cluster, &ctx, &capi_namespace, bootstrap).await;
-            }
-        }
     }
 
     // Get current status, defaulting to Pending if not set
@@ -2048,70 +1972,9 @@ impl PivotOperations for PivotOperationsImpl {
             },
         );
     }
-
-    fn take_unpivot_manifests(&self, cluster_name: &str) -> Option<lattice_cell::UnpivotManifests> {
-        self.agent_registry.take_unpivot_manifests(cluster_name)
-    }
 }
 
-/// Handle cleanup during unpivot
-///
-/// This follows the same logic as `lattice uninstall`:
-/// 1. Wait for CAPI to reconcile (InfrastructureReady)
-/// 2. Delete CAPI Cluster to trigger infrastructure cleanup
-/// 3. Wait for CAPI Cluster deletion (infrastructure cleanup complete)
-/// 4. Delete LatticeCluster
-///
-/// Uses requeue pattern for non-blocking waits.
-async fn handle_unpivot_cleanup(
-    cluster: &LatticeCluster,
-    ctx: &Context,
-    capi_namespace: &str,
-    bootstrap: BootstrapProvider,
-) -> Result<Action, Error> {
-    let name = cluster.name_any();
-
-    // Check if CAPI Cluster still exists
-    let capi_exists = ctx
-        .capi
-        .capi_cluster_exists(&name, capi_namespace)
-        .await
-        .unwrap_or(true); // Assume exists on error to avoid premature deletion
-
-    if capi_exists {
-        // Step 1: Wait for CAPI to reconcile (InfrastructureReady)
-        let capi_ready = ctx
-            .capi
-            .is_infrastructure_ready(&name, capi_namespace, bootstrap)
-            .await
-            .unwrap_or(false);
-
-        if !capi_ready {
-            debug!(cluster = %name, "CAPI not ready yet, waiting for reconciliation");
-            return Ok(Action::requeue(Duration::from_secs(5)));
-        }
-
-        // Step 2: Delete CAPI Cluster to trigger infrastructure cleanup
-        info!(cluster = %name, "CAPI ready, deleting Cluster to trigger infrastructure cleanup");
-        if let Err(e) = ctx.capi.delete_capi_cluster(&name, capi_namespace).await {
-            warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster");
-        }
-
-        // Step 3: Requeue to wait for CAPI Cluster deletion
-        info!(cluster = %name, "Waiting for infrastructure cleanup...");
-        return Ok(Action::requeue(Duration::from_secs(10)));
-    }
-
-    // Step 4: CAPI Cluster is gone (infrastructure cleanup complete), delete LatticeCluster
-    info!(cluster = %name, "Infrastructure cleanup complete, deleting LatticeCluster");
-    if let Err(e) = ctx.kube.delete_cluster(&name).await {
-        warn!(cluster = %name, error = %e, "Failed to delete LatticeCluster");
-    }
-
-    Ok(Action::await_change())
-}
-
-/// Check if a cluster has the unpivot finalizer
+/// Check if a cluster has the finalizer
 fn has_finalizer(cluster: &LatticeCluster) -> bool {
     cluster
         .metadata
@@ -2134,110 +1997,6 @@ async fn remove_finalizer(cluster: &LatticeCluster, ctx: &Context) -> Result<(),
     ctx.kube
         .remove_cluster_finalizer(&name, CLUSTER_FINALIZER)
         .await
-}
-
-/// Wait for the cell service to be fully deleted
-///
-/// Polls until the service is gone or timeout (60s). Returns true if deleted, false on timeout.
-async fn wait_for_cell_service_deleted(ctx: &Context) -> bool {
-    let timeout = Duration::from_secs(60);
-    let poll_interval = Duration::from_secs(2);
-    let start = std::time::Instant::now();
-
-    while start.elapsed() < timeout {
-        match ctx.kube.cell_service_exists().await {
-            Ok(false) => {
-                debug!("Cell service deleted");
-                return true;
-            }
-            Ok(true) => {
-                debug!("Cell service still exists, waiting...");
-            }
-            Err(e) => {
-                debug!(error = %e, "Error checking cell service, assuming deleted");
-                return true;
-            }
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
-
-    false
-}
-
-/// Load unpivot manifests from persisted Secret (crash recovery)
-///
-/// When the operator receives ClusterDeleting via gRPC, it persists the CAPI manifests
-/// to a Secret. If the operator crashes before importing them, this function retrieves
-/// them on restart.
-async fn load_unpivot_manifests_from_secret(
-    client: &Client,
-    cluster_name: &str,
-) -> Option<UnpivotManifests> {
-    let secret_name = format!("{}{}", UNPIVOT_MANIFESTS_SECRET_PREFIX, cluster_name);
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-
-    let secret = match secret_api.get(&secret_name).await {
-        Ok(s) => s,
-        Err(kube::Error::Api(ae)) if ae.code == 404 => {
-            debug!(cluster = %cluster_name, "No unpivot manifests Secret found");
-            return None;
-        }
-        Err(e) => {
-            warn!(cluster = %cluster_name, error = %e, "Failed to get unpivot manifests Secret");
-            return None;
-        }
-    };
-
-    let data = secret.data?;
-
-    let manifests_bytes = data.get("manifests")?.0.clone();
-    let namespace_bytes = data.get("namespace")?.0.clone();
-
-    let capi_manifests: Vec<Vec<u8>> = match serde_json::from_slice(&manifests_bytes) {
-        Ok(m) => m,
-        Err(e) => {
-            warn!(cluster = %cluster_name, error = %e, "Failed to parse unpivot manifests from Secret");
-            return None;
-        }
-    };
-
-    let namespace = match String::from_utf8(namespace_bytes) {
-        Ok(n) => n,
-        Err(e) => {
-            warn!(cluster = %cluster_name, error = %e, "Failed to parse namespace from Secret");
-            return None;
-        }
-    };
-
-    info!(
-        cluster = %cluster_name,
-        manifest_count = capi_manifests.len(),
-        "Loaded unpivot manifests from Secret (crash recovery)"
-    );
-
-    Some(UnpivotManifests {
-        capi_manifests,
-        namespace,
-    })
-}
-
-/// Delete the unpivot manifests Secret after successful import
-async fn delete_unpivot_manifests_secret(client: &Client, cluster_name: &str) {
-    let secret_name = format!("{}{}", UNPIVOT_MANIFESTS_SECRET_PREFIX, cluster_name);
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-
-    match secret_api
-        .delete(&secret_name, &DeleteParams::default())
-        .await
-    {
-        Ok(_) => info!(cluster = %cluster_name, "Deleted unpivot manifests Secret"),
-        Err(kube::Error::Api(ae)) if ae.code == 404 => {
-            // Already deleted, that's fine
-        }
-        Err(e) => {
-            warn!(cluster = %cluster_name, error = %e, "Failed to delete unpivot manifests Secret");
-        }
-    }
 }
 
 /// Handle cluster deletion with unpivot logic

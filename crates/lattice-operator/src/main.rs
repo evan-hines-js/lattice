@@ -1,39 +1,27 @@
 //! Lattice Operator - Kubernetes multi-cluster lifecycle management
+//!
+//! This is the main entry point. It handles CLI parsing and starts subsystems.
+//! All business logic lives in library modules.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use futures::StreamExt;
-use kube::runtime::reflector::ObjectRef;
-use kube::runtime::watcher::Config as WatcherConfig;
-use kube::runtime::Controller;
-use kube::{Api, Client, CustomResourceExt};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use kube::{Client, CustomResourceExt};
 
-use lattice_agent::{AgentClient, AgentClientConfig, AgentCredentials, ClientState};
-use lattice_operator::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
-use lattice_operator::cloud_provider::{
-    self as cloud_provider_ctrl, Context as CloudProviderContext,
-};
-use lattice_operator::controller::{
-    error_policy, error_policy_external, reconcile, reconcile_external, service_error_policy,
-    service_reconcile, Context, ServiceContext,
-};
-use lattice_operator::crd::{
-    CloudProvider, LatticeCluster, LatticeExternalService, LatticeService, ProviderType,
-    SecretsProvider,
-};
+use lattice_operator::agent::start_agent_with_retry;
+use lattice_operator::bootstrap::DefaultManifestGenerator;
+use lattice_operator::crd::LatticeCluster;
 use lattice_operator::parent::{ParentConfig, ParentServers};
-use lattice_operator::secrets_provider::{
-    self as secrets_provider_ctrl, Context as SecretsProviderContext,
+use lattice_operator::startup::{
+    ensure_crds_installed, ensure_infrastructure, get_cell_server_sans,
+    re_register_existing_clusters, start_ca_rotation, start_cedar_server, wait_for_api_ready,
 };
 
-/// Lattice - CRD-driven Kubernetes operator for multi-cluster lifecycle management
+mod controller_runner;
+
 #[derive(Parser, Debug)]
 #[command(name = "lattice", version, about, long_about = None)]
 struct Cli {
-    /// Generate CRD manifests and exit
     #[arg(long)]
     crd: bool,
 
@@ -41,38 +29,23 @@ struct Cli {
     command: Option<Commands>,
 }
 
-/// Controller mode selection
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 pub enum ControllerMode {
-    /// Run all controllers (cluster + service)
     #[default]
     All,
-    /// Run only cluster controller (LatticeCluster management)
     Cluster,
-    /// Run only service controller (LatticeService/ExternalService management)
     Service,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run as controller (default mode)
-    ///
-    /// Every Lattice instance runs as a controller that:
-    /// - Watches LatticeCluster CRDs and reconciles them
-    /// - If this cluster has a cellRef (parent), also connects as an agent
-    /// - If this cluster has a cell spec, starts cell servers for child clusters
-    ///
-    /// This unified mode means every cluster is self-managing.
     Controller {
-        /// Which controllers to run
         #[arg(long, short, value_enum, default_value = "all")]
         mode: ControllerMode,
 
-        /// Enable Cedar authorization server (ext_authz gRPC service)
         #[arg(long, env = "LATTICE_ENABLE_CEDAR_AUTHZ")]
         enable_cedar_authz: bool,
 
-        /// Cedar authorization server port
         #[arg(long, default_value = "50052", env = "LATTICE_CEDAR_PORT")]
         cedar_port: u16,
     },
@@ -80,54 +53,17 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Install crypto provider - FIPS-validated aws-lc-rs
-    // This MUST succeed for the application to operate securely.
-    // Failure here indicates a serious system configuration issue.
-    if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
-        eprintln!(
-            "CRITICAL: Failed to install FIPS-validated crypto provider: {:?}. \
-             The application cannot operate securely without a working TLS implementation. \
-             This may indicate aws-lc-rs was not compiled correctly or there is a \
-             conflict with another crypto provider.",
-            e
-        );
-        std::process::exit(1);
-    }
-
-    // When compiled with FIPS feature, verify FIPS mode is actually active
-    #[cfg(feature = "fips")]
-    {
-        if let Err(e) = aws_lc_rs::try_fips_mode() {
-            eprintln!(
-                "CRITICAL: FIPS feature is enabled but FIPS mode failed to initialize: {}. \
-                 This may indicate the aws-lc-rs FIPS module was not compiled correctly. \
-                 Ensure you're building with the correct toolchain and FIPS prerequisites.",
-                e
-            );
-            std::process::exit(1);
-        }
-        // Log FIPS status on startup
-        eprintln!("FIPS mode: ENABLED (aws-lc-rs FIPS 140-3 validated module)");
-    }
-
-    #[cfg(not(feature = "fips"))]
-    {
-        eprintln!("WARNING: Running without FIPS mode. For production, build with --features fips");
-    }
-
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(fmt::layer())
-        .with(EnvFilter::from_default_env())
-        .init();
+    init_crypto();
+    init_tracing();
 
     let cli = Cli::parse();
 
     if cli.crd {
-        // Generate CRD YAML
-        let crd = serde_yaml::to_string(&LatticeCluster::crd())
-            .map_err(|e| anyhow::anyhow!("Failed to serialize CRD: {}", e))?;
-        println!("{crd}");
+        println!(
+            "{}",
+            serde_yaml::to_string(&LatticeCluster::crd())
+                .map_err(|e| anyhow::anyhow!("Failed to serialize CRD: {}", e))?
+        );
         return Ok(());
     }
 
@@ -141,1346 +77,101 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Wait for the API server to be responsive after infrastructure installation
-///
-/// After installing CRDs, Istio, and CAPI, the API server needs time to:
-/// - Register webhooks
-/// - Process CRD schemas
-/// - Settle etcd writes
-///
-/// This function does a quick health check by listing our CRD and verifying
-/// the response time is reasonable. This prevents race conditions where
-/// controllers start before the API server is ready.
-async fn wait_for_api_ready(client: &Client) -> anyhow::Result<()> {
-    use kube::api::ListParams;
-    use std::time::Instant;
-
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-    let max_wait = Duration::from_secs(30);
-    let start = Instant::now();
-
-    tracing::info!("Waiting for API server to be ready...");
-
-    loop {
-        let op_start = Instant::now();
-        match tokio::time::timeout(Duration::from_secs(5), api.list(&ListParams::default())).await {
-            Ok(Ok(_)) => {
-                let elapsed = op_start.elapsed();
-                if elapsed < Duration::from_millis(500) {
-                    // API responded quickly - we're good to go
-                    tracing::info!(response_time_ms = elapsed.as_millis(), "API server ready");
-                    return Ok(());
-                }
-                // API is slow, wait a bit and retry
-                tracing::debug!(
-                    response_time_ms = elapsed.as_millis(),
-                    "API slow, waiting for it to settle..."
-                );
-            }
-            Ok(Err(e)) => {
-                tracing::debug!(error = %e, "API request failed, retrying...");
-            }
-            Err(_) => {
-                tracing::debug!("API request timed out, retrying...");
-            }
-        }
-
-        if start.elapsed() > max_wait {
-            tracing::warn!("API server still slow after 30s, proceeding anyway");
-            return Ok(());
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-}
-
-/// Ensure all Lattice CRDs are installed
-///
-/// The operator installs its own CRDs on startup using server-side apply.
-/// This ensures the CRD versions always match the operator version.
-async fn ensure_crds_installed(client: &Client) -> anyhow::Result<()> {
-    use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
-    use kube::api::{Patch, PatchParams};
-
-    let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
-    let params = PatchParams::apply("lattice-controller").force();
-
-    // Install LatticeCluster CRD
-    tracing::info!("Installing LatticeCluster CRD...");
-    crds.patch(
-        "latticeclusters.lattice.dev",
-        &params,
-        &Patch::Apply(&LatticeCluster::crd()),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to install LatticeCluster CRD: {}", e))?;
-
-    // Install LatticeService CRD
-    tracing::info!("Installing LatticeService CRD...");
-    crds.patch(
-        "latticeservices.lattice.dev",
-        &params,
-        &Patch::Apply(&LatticeService::crd()),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to install LatticeService CRD: {}", e))?;
-
-    // Install LatticeExternalService CRD
-    tracing::info!("Installing LatticeExternalService CRD...");
-    crds.patch(
-        "latticeexternalservices.lattice.dev",
-        &params,
-        &Patch::Apply(&LatticeExternalService::crd()),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to install LatticeExternalService CRD: {}", e))?;
-
-    // Install CloudProvider CRD
-    tracing::info!("Installing CloudProvider CRD...");
-    crds.patch(
-        "cloudproviders.lattice.dev",
-        &params,
-        &Patch::Apply(&CloudProvider::crd()),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to install CloudProvider CRD: {}", e))?;
-
-    // Install SecretsProvider CRD
-    tracing::info!("Installing SecretsProvider CRD...");
-    crds.patch(
-        "secretsproviders.lattice.dev",
-        &params,
-        &Patch::Apply(&SecretsProvider::crd()),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to install SecretsProvider CRD: {}", e))?;
-
-    tracing::info!("All Lattice CRDs installed/updated");
-    Ok(())
-}
-
-/// Reconcile infrastructure components
-///
-/// Ensures all infrastructure is installed. Server-side apply handles idempotency.
-/// This runs on every controller startup, applying the latest manifests.
-///
-/// IMPORTANT: Uses the SAME generate_all() function as the bootstrap webhook.
-/// This guarantees upgrades work by changing Lattice version - on restart,
-/// the operator re-applies identical infrastructure manifests.
-async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
-    use kube::api::ListParams;
-    use lattice_operator::crd::LatticeCluster;
-    use lattice_operator::infra::bootstrap::{self, InfrastructureConfig};
-
-    let is_bootstrap_cluster = std::env::var("LATTICE_ROOT_INSTALL").is_ok()
-        || std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-
-    tracing::info!("Applying infrastructure manifests (server-side apply)...");
-
-    if is_bootstrap_cluster {
-        // Bootstrap cluster (KIND): Use generate_core() + clusterctl init
-        // This is a temporary cluster that doesn't need full self-management infra
-        // Use "bootstrap" as the cluster name for the trust domain
-        let manifests = bootstrap::generate_core("bootstrap", true).await;
-        tracing::info!(count = manifests.len(), "applying core infrastructure");
-        apply_manifests(client, &manifests).await?;
-
-        tracing::info!("Installing CAPI on bootstrap cluster...");
-        ensure_capi_on_bootstrap(client).await?;
-    } else {
-        // Workload cluster: Read provider/bootstrap from LatticeCluster CRD
-        // This is the source of truth - same values used by bootstrap webhook
-        let clusters: kube::Api<LatticeCluster> = kube::Api::all(client.clone());
-        let list = clusters.list(&ListParams::default()).await?;
-
-        let (provider, bootstrap, cluster_name) = if let Some(cluster) = list.items.first() {
-            let p = cluster.spec.provider.provider_type();
-            let b = cluster.spec.provider.kubernetes.bootstrap.clone();
-            let name = cluster
-                .metadata
-                .name
-                .clone()
-                .unwrap_or_else(|| "default".to_string());
-            tracing::info!(provider = ?p, bootstrap = ?b, cluster = %name, "read config from LatticeCluster CRD");
-            (p, b, name)
-        } else {
-            // No LatticeCluster yet - use defaults (shouldn't happen on real clusters)
-            tracing::warn!("no LatticeCluster found, using defaults");
-            (
-                ProviderType::Docker,
-                lattice_operator::crd::BootstrapProvider::Kubeadm,
-                "default".to_string(),
-            )
-        };
-
-        let config = InfrastructureConfig {
-            provider,
-            bootstrap,
-            cluster_name,
-            skip_cilium_policies: false,
-        };
-
-        let manifests = bootstrap::generate_all(&config).await;
-        tracing::info!(
-            count = manifests.len(),
-            "applying all infrastructure (same as bootstrap webhook)"
-        );
-        apply_manifests(client, &manifests).await?;
+fn init_crypto() {
+    if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
+        eprintln!("CRITICAL: Failed to install crypto provider: {:?}", e);
+        std::process::exit(1);
     }
 
-    tracing::info!("Infrastructure installation complete");
-    Ok(())
-}
-
-/// Install CAPI on the bootstrap cluster.
-///
-/// The bootstrap cluster needs CAPI installed BEFORE a LatticeCluster is created,
-/// because the installer waits for CAPI CRDs to be available. Without this, the
-/// installer hangs in Phase 2 waiting for CRDs that would only be installed when
-/// a LatticeCluster is reconciled (Phase 3).
-///
-/// Uses LATTICE_PROVIDER env var to determine which infrastructure provider to install.
-/// Reads CloudProvider CRD (created by install command) for credentials.
-///
-/// NOTE: CloudProvider is created by the install command AFTER the operator starts,
-/// so this function waits for it to exist before proceeding.
-async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
-    use lattice_operator::capi::copy_credentials_to_provider_namespace;
-
-    let provider_str = std::env::var("LATTICE_PROVIDER").unwrap_or_else(|_| "docker".to_string());
-    let provider_ref =
-        std::env::var("LATTICE_PROVIDER_REF").unwrap_or_else(|_| provider_str.clone());
-
-    let infrastructure = match provider_str.to_lowercase().as_str() {
-        "docker" => ProviderType::Docker,
-        "proxmox" => ProviderType::Proxmox,
-        "openstack" => ProviderType::OpenStack,
-        "aws" => ProviderType::Aws,
-        "gcp" => ProviderType::Gcp,
-        "azure" => ProviderType::Azure,
-        other => return Err(anyhow::anyhow!("unknown LATTICE_PROVIDER: {}", other)),
-    };
-
-    tracing::info!(infrastructure = %provider_str, "Installing CAPI providers for bootstrap cluster");
-
-    // Wait for CloudProvider to be created by install command
-    let cloud_providers: Api<CloudProvider> = Api::namespaced(client.clone(), "lattice-system");
-    tracing::info!(provider_ref = %provider_ref, "Waiting for CloudProvider...");
-    let cp = loop {
-        match cloud_providers.get(&provider_ref).await {
-            Ok(cp) => break cp,
-            Err(kube::Error::Api(e)) if e.code == 404 => {
-                tracing::debug!(provider_ref = %provider_ref, "CloudProvider not found, waiting...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "Failed to get CloudProvider '{}': {}",
-                    provider_ref,
-                    e
-                ));
-            }
-        }
-    };
-    tracing::info!(provider_ref = %provider_ref, "CloudProvider found");
-
-    // Copy credentials to CAPI provider namespace if present
-    if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
-        copy_credentials_to_provider_namespace(client, infrastructure, secret_ref)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to copy provider credentials: {}", e))?;
-    }
-
-    let config = CapiProviderConfig::new(infrastructure)
-        .map_err(|e| anyhow::anyhow!("Failed to create CAPI config: {}", e))?;
-    ensure_capi_installed(&ClusterctlInstaller::new(), &config)
-        .await
-        .map_err(|e| anyhow::anyhow!("CAPI installation failed: {}", e))?;
-
-    tracing::info!(infrastructure = %provider_str, "CAPI providers installed successfully");
-    Ok(())
-}
-
-/// Get priority for a Kubernetes resource kind (lower = apply first)
-fn kind_priority(kind: &str) -> u8 {
-    match kind {
-        "Namespace" => 0,
-        "CustomResourceDefinition" => 1,
-        "ServiceAccount" => 2,
-        "ClusterRole" | "Role" => 3,
-        "ClusterRoleBinding" | "RoleBinding" => 4,
-        "ConfigMap" | "Secret" => 5,
-        "Service" => 6,
-        "Deployment" | "DaemonSet" | "StatefulSet" => 7,
-        "HorizontalPodAutoscaler" => 8,
-        _ => 10, // webhooks, policies, etc. come last
-    }
-}
-
-/// Extract kind from a YAML manifest
-fn extract_kind(manifest: &str) -> &str {
-    manifest
-        .lines()
-        .find(|line| line.starts_with("kind:"))
-        .and_then(|line| line.strip_prefix("kind:"))
-        .map(|k| k.trim())
-        .unwrap_or("")
-}
-
-/// Apply multiple YAML manifests to the cluster
-///
-/// Applies in two phases:
-/// 1. Namespaces and CRDs (foundational resources)
-/// 2. Re-run discovery to learn new CRD types
-/// 3. Everything else (sorted by kind priority)
-async fn apply_manifests(client: &Client, manifests: &[impl AsRef<str>]) -> anyhow::Result<()> {
-    use kube::api::PatchParams;
-    use kube::discovery::Discovery;
-
-    if manifests.is_empty() {
-        return Ok(());
-    }
-
-    // Split into foundational (Namespace, CRD) and rest
-    let (mut foundational, mut rest): (Vec<&str>, Vec<&str>) =
-        manifests.iter().map(|m| m.as_ref()).partition(|m| {
-            let kind = extract_kind(m);
-            kind == "Namespace" || kind == "CustomResourceDefinition"
-        });
-
-    // Sort each group by priority
-    foundational.sort_by_key(|m| kind_priority(extract_kind(m)));
-    rest.sort_by_key(|m| kind_priority(extract_kind(m)));
-
-    let params = PatchParams::apply("lattice").force();
-
-    // Phase 1: Apply foundational resources (Namespaces, CRDs)
-    if !foundational.is_empty() {
-        let discovery = Discovery::new(client.clone())
-            .run()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to run API discovery: {}", e))?;
-
-        for manifest in &foundational {
-            apply_single_manifest(client, &discovery, manifest, &params).await?;
-        }
-    }
-
-    // Phase 2: Re-run discovery to learn new CRD types, then apply rest
-    if !rest.is_empty() {
-        let discovery = Discovery::new(client.clone())
-            .run()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to refresh API discovery: {}", e))?;
-
-        for manifest in &rest {
-            apply_single_manifest(client, &discovery, manifest, &params).await?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Apply a single manifest using the provided discovery cache
-async fn apply_single_manifest(
-    client: &Client,
-    discovery: &kube::discovery::Discovery,
-    manifest: &str,
-    params: &kube::api::PatchParams,
-) -> anyhow::Result<()> {
-    use kube::api::{Api, DynamicObject, Patch};
-
-    let obj: serde_json::Value =
-        serde_yaml::from_str(manifest).map_err(|e| anyhow::anyhow!("Invalid YAML: {}", e))?;
-
-    let kind = obj
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing kind"))?;
-    let api_version = obj
-        .get("apiVersion")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing apiVersion"))?;
-    let name = obj
-        .pointer("/metadata/name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing metadata.name"))?;
-    let namespace = obj.pointer("/metadata/namespace").and_then(|v| v.as_str());
-
-    // Parse apiVersion into group/version
-    let (group, version) = if let Some((g, v)) = api_version.split_once('/') {
-        (g, v)
-    } else {
-        ("", api_version)
-    };
-
-    let gvk = kube::api::GroupVersionKind {
-        group: group.to_string(),
-        version: version.to_string(),
-        kind: kind.to_string(),
-    };
-
-    let (api_resource, _) = discovery
-        .resolve_gvk(&gvk)
-        .ok_or_else(|| anyhow::anyhow!("Unknown resource type: {}/{}", api_version, kind))?;
-
-    let api: Api<DynamicObject> = match namespace {
-        Some(ns) => Api::namespaced_with(client.clone(), ns, &api_resource),
-        None => Api::all_with(client.clone(), &api_resource),
-    };
-
-    api.patch(name, params, &Patch::Apply(&obj))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to apply {}/{}: {}", kind, name, e))?;
-
-    tracing::debug!(kind = %kind, name = %name, namespace = ?namespace, "Applied manifest");
-    Ok(())
-}
-
-/// Re-register clusters that completed bootstrap before operator restart
-///
-/// BootstrapState is in-memory and lost on restart. This reads status.bootstrap_complete
-/// from the CRD and re-registers clusters so CSR signing works immediately.
-async fn re_register_existing_clusters<G: lattice_operator::bootstrap::ManifestGenerator>(
-    client: &Client,
-    bootstrap_state: &std::sync::Arc<lattice_operator::bootstrap::BootstrapState<G>>,
-    self_cluster_name: &Option<String>,
-    parent_servers: &std::sync::Arc<lattice_operator::parent::ParentServers<G>>,
-) {
-    use kube::api::ListParams;
-
-    let clusters: Api<LatticeCluster> = Api::all(client.clone());
-    let list = match clusters.list(&ListParams::default()).await {
-        Ok(list) => list,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list clusters for re-registration");
-            return;
-        }
-    };
-
-    for cluster in list.items {
-        let name = match cluster.metadata.name.as_ref() {
-            Some(n) => n,
-            None => continue,
-        };
-
-        // Skip self-cluster
-        if self_cluster_name.as_ref() == Some(name) {
-            continue;
-        }
-
-        // Re-register clusters that need bootstrap (Provisioning, Pivoting, or bootstrap_complete)
-        // BootstrapState is in-memory, so we must re-register on operator restart
-        let phase = cluster
-            .status
-            .as_ref()
-            .map(|s| &s.phase)
-            .cloned()
-            .unwrap_or_default();
-
-        let needs_registration = matches!(
-            phase,
-            lattice_operator::crd::ClusterPhase::Provisioning
-                | lattice_operator::crd::ClusterPhase::Pivoting
-        ) || cluster
-            .status
-            .as_ref()
-            .map(|s| s.bootstrap_complete)
-            .unwrap_or(false);
-
-        if !needs_registration {
-            tracing::debug!(cluster = %name, phase = ?phase, "Skipping re-registration (not in Provisioning/Pivoting)");
-            continue;
-        }
-
-        // Skip if already registered
-        if bootstrap_state.is_cluster_registered(name) {
-            continue;
-        }
-
-        // Get self cluster for endpoints
-        let self_name = match self_cluster_name {
-            Some(n) => n,
-            None => {
-                tracing::warn!(cluster = %name, "Cannot re-register cluster: no self_cluster_name");
-                continue;
-            }
-        };
-
-        let self_cluster = match clusters.get(self_name).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to get self cluster for re-registration");
-                continue;
-            }
-        };
-
-        let endpoints = match self_cluster.spec.parent_config.as_ref() {
-            Some(e) => e,
-            None => {
-                tracing::warn!("Self cluster has no endpoints, cannot re-register");
-                continue;
-            }
-        };
-
-        let ca_cert = parent_servers.ca_trust_bundle_pem().await;
-
-        // Get the cell host from the LoadBalancer Service
-        let cell_host = match discover_cell_host(client).await {
-            Ok(Some(h)) => h,
-            Ok(None) => {
-                tracing::warn!(cluster = %name, "Cell host not yet assigned by cloud provider, cannot re-register");
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(cluster = %name, error = %e, "Failed to discover cell host, cannot re-register");
-                continue;
-            }
-        };
-        let cell_endpoint = format!(
-            "{}:{}:{}",
-            cell_host, endpoints.bootstrap_port, endpoints.grpc_port
-        );
-
-        // Serialize cluster manifest for export
-        let cluster_manifest = match serde_json::to_string(&cluster.for_export()) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(error = %e, cluster = %name, "Failed to serialize cluster for re-registration");
-                continue;
-            }
-        };
-
-        let autoscaling_enabled = cluster
-            .spec
-            .nodes
-            .worker_pools
-            .values()
-            .any(|p| p.is_autoscaling_enabled());
-        let registration = lattice_operator::bootstrap::ClusterRegistration {
-            cluster_id: name.clone(),
-            cell_endpoint,
-            ca_certificate: ca_cert,
-            cluster_manifest,
-            networking: cluster.spec.networking.clone(),
-            proxmox_ipv4_pool: cluster
-                .spec
-                .provider
-                .config
-                .proxmox
-                .as_ref()
-                .map(|p| p.ipv4_pool.clone()),
-            provider: cluster.spec.provider.provider_type(),
-            bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
-            k8s_version: cluster.spec.provider.kubernetes.version.clone(),
-            autoscaling_enabled,
-        };
-
-        bootstrap_state.register_cluster(registration).await;
-        tracing::info!(cluster = %name, "re-registered cluster after operator restart");
-    }
-}
-
-/// Ensure the cell LoadBalancer Service exists.
-///
-/// - Cloud providers: `load_balancer_ip` is None, cloud assigns address
-/// - On-prem: `load_balancer_ip` is set from parent_config.host, Cilium L2 announces it
-async fn ensure_cell_service_exists(
-    client: &Client,
-    load_balancer_ip: Option<String>,
-    bootstrap_port: u16,
-    grpc_port: u16,
-    provider_type: ProviderType,
-) -> anyhow::Result<()> {
-    use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-    use kube::api::PostParams;
-
-    let api: Api<Service> = Api::namespaced(client.clone(), "lattice-system");
-
-    // Check if it already exists
-    if api.get("lattice-cell").await.is_ok() {
-        tracing::debug!("lattice-cell Service already exists");
-        return Ok(());
-    }
-
-    let mut labels = std::collections::BTreeMap::new();
-    labels.insert("app".to_string(), "lattice-operator".to_string());
-
-    // Cloud-specific LoadBalancer annotations
-    let annotations = provider_type.load_balancer_annotations();
-
-    let service = Service {
-        metadata: ObjectMeta {
-            name: Some("lattice-cell".to_string()),
-            namespace: Some("lattice-system".to_string()),
-            labels: Some(labels.clone()),
-            annotations: if annotations.is_empty() {
-                None
-            } else {
-                Some(annotations)
-            },
-            ..Default::default()
-        },
-        spec: Some(ServiceSpec {
-            type_: Some("LoadBalancer".to_string()),
-            selector: Some(labels),
-            load_balancer_ip: load_balancer_ip.clone(),
-            ports: Some(vec![
-                ServicePort {
-                    name: Some("bootstrap".to_string()),
-                    port: bootstrap_port as i32,
-                    target_port: Some(IntOrString::Int(bootstrap_port as i32)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                },
-                ServicePort {
-                    name: Some("grpc".to_string()),
-                    port: grpc_port as i32,
-                    target_port: Some(IntOrString::Int(grpc_port as i32)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                },
-            ]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    api.create(&PostParams::default(), &service).await?;
-    tracing::info!(
-        load_balancer_ip = ?load_balancer_ip,
-        bootstrap_port,
-        grpc_port,
-        "Created lattice-cell LoadBalancer Service"
-    );
-
-    Ok(())
-}
-
-/// Discover the cell service host from the LoadBalancer Service.
-///
-/// Returns:
-/// - `Ok(Some(host))` - LoadBalancer has an assigned address
-/// - `Ok(None)` - Service exists but no address yet (waiting for cloud provider)
-/// - `Err(msg)` - API error (transient, should retry)
-async fn discover_cell_host(client: &Client) -> Result<Option<String>, String> {
-    use k8s_openapi::api::core::v1::Service;
-
-    let services: Api<Service> = Api::namespaced(client.clone(), "lattice-system");
-    let svc = services
-        .get("lattice-cell")
-        .await
-        .map_err(|e| format!("failed to get lattice-cell Service: {}", e))?;
-
-    let Some(status) = svc.status else {
-        return Ok(None);
-    };
-    let Some(lb) = status.load_balancer else {
-        return Ok(None);
-    };
-    let Some(ingress) = lb.ingress else {
-        return Ok(None);
-    };
-    let Some(first) = ingress.first() else {
-        return Ok(None);
-    };
-
-    // Prefer hostname (AWS NLB) over IP
-    Ok(first.hostname.clone().or_else(|| first.ip.clone()))
-}
-
-/// Get extra SANs for cell server TLS certificate.
-///
-/// If this cluster provisions children (has parent_config), creates the cell
-/// LoadBalancer Service and waits for an external address. Returns the address
-/// to include in TLS SANs so children can connect via HTTPS.
-async fn get_cell_server_sans(
-    client: &Client,
-    cluster_name: &Option<String>,
-    is_bootstrap_cluster: bool,
-) -> Vec<String> {
-    if is_bootstrap_cluster {
-        tracing::info!("Bootstrap cluster, using default SANs");
-        return vec![];
-    }
-
-    let Some(ref name) = cluster_name else {
-        return vec![];
-    };
-
-    // Wait for our LatticeCluster to exist
-    tracing::info!(cluster = %name, "Waiting for LatticeCluster...");
-    let clusters: Api<LatticeCluster> = Api::all(client.clone());
-    let cluster = loop {
-        match clusters.get(name).await {
-            Ok(c) => break c,
-            Err(e) => {
-                tracing::debug!(error = %e, "LatticeCluster not found, retrying...");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-        }
-    };
-    tracing::info!(cluster = %name, "LatticeCluster found");
-
-    // If we don't provision children, no need for cell host in SANs
-    let Some(ref parent_config) = cluster.spec.parent_config else {
-        tracing::info!("No parent_config, cluster doesn't provision children");
-        return vec![];
-    };
-
-    // Create the cell LoadBalancer Service
-    let provider_type = cluster.spec.provider.provider_type();
-    tracing::info!(?provider_type, "Creating cell LoadBalancer Service...");
-    if let Err(e) = ensure_cell_service_exists(
-        client,
-        parent_config.host.clone(),
-        parent_config.bootstrap_port,
-        parent_config.grpc_port,
-        provider_type,
-    )
-    .await
+    #[cfg(feature = "fips")]
     {
-        tracing::warn!(error = %e, "Failed to create cell Service");
+        if let Err(e) = aws_lc_rs::try_fips_mode() {
+            eprintln!("CRITICAL: FIPS mode failed: {}", e);
+            std::process::exit(1);
+        }
+        eprintln!("FIPS mode: ENABLED");
     }
 
-    // Wait for LoadBalancer to get external address
-    tracing::info!("Waiting for cell LoadBalancer address...");
-    loop {
-        match discover_cell_host(client).await {
-            Ok(Some(host)) => {
-                tracing::info!(host = %host, "Cell host discovered, adding to TLS SANs");
-                return vec![host];
-            }
-            Ok(None) => {
-                // Not yet assigned, keep waiting
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to discover cell host, retrying...");
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }
+    #[cfg(not(feature = "fips"))]
+    eprintln!("WARNING: Running without FIPS mode");
 }
 
-/// Run in controller mode - manages clusters and/or services
-///
-/// Cell servers (gRPC + bootstrap HTTP) start automatically when needed.
-/// Cell endpoint configuration is read from the local LatticeCluster CRD's spec.parent_config.
-///
-/// If this cluster has a cellRef (parent), the controller also connects as an agent
-/// to the parent cell for pivot coordination and health reporting.
+fn init_tracing() {
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(EnvFilter::from_default_env())
+        .init();
+}
+
 async fn run_controller(
     mode: ControllerMode,
     enable_cedar_authz: bool,
     cedar_port: u16,
 ) -> anyhow::Result<()> {
-    tracing::info!(
-        mode = ?mode,
-        cedar_authz = enable_cedar_authz,
-        "Lattice controller starting..."
-    );
+    tracing::info!(?mode, cedar_authz = enable_cedar_authz, "Starting...");
 
-    // Create Kubernetes client
-    let client = Client::try_default()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create Kubernetes client: {}", e))?;
+    let client = Client::try_default().await?;
 
-    // Operator installs its own CRDs on startup
+    // Install CRDs and infrastructure
     ensure_crds_installed(&client).await?;
-
-    // Ensure infrastructure (Istio, etc.) is installed
     ensure_infrastructure(&client).await?;
-
-    // Wait for API server to settle after infrastructure installation
-    // This prevents race conditions where controllers start before the API is fully ready
     wait_for_api_ready(&client).await?;
 
-    // Create cell servers (started later with correct TLS SANs)
-    let parent_servers = Arc::new(
-        ParentServers::new(ParentConfig::default(), &client)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create cell servers: {}", e))?,
-    );
+    // Create cell servers
+    let parent_servers = Arc::new(ParentServers::new(ParentConfig::default(), &client).await?);
 
     // Get cluster identity from environment
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
-    let is_bootstrap_cluster = std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
+    let is_bootstrap = std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
-    // Start agent (outbound to parent) before cell servers (inbound from children)
-    // The agent handles unpivot automatically by detecting deletion_timestamp on connect
-    let agent_cancel_token = tokio_util::sync::CancellationToken::new();
-    if let Some(ref cluster_name) = self_cluster_name {
-        let client_clone = client.clone();
-        let cluster_name_clone = cluster_name.clone();
-        let token = agent_cancel_token.clone();
+    // Start agent connection to parent (if we have one)
+    let agent_token = tokio_util::sync::CancellationToken::new();
+    if let Some(ref name) = self_cluster_name {
+        let client = client.clone();
+        let name = name.clone();
+        let token = agent_token.clone();
         tokio::spawn(async move {
             tokio::select! {
-                _ = token.cancelled() => {
-                    tracing::info!("Agent connection cancelled");
-                }
-                _ = start_agent_with_retry(&client_clone, &cluster_name_clone) => {}
+                _ = token.cancelled() => {}
+                _ = start_agent_with_retry(&client, &name) => {}
             }
         });
     }
 
-    // Determine which controllers to run
-    let run_cluster = matches!(mode, ControllerMode::All | ControllerMode::Cluster);
-    let run_service = matches!(mode, ControllerMode::All | ControllerMode::Service);
-
-    // Get TLS SANs (waits for LoadBalancer if needed)
-    let extra_sans = get_cell_server_sans(&client, &self_cluster_name, is_bootstrap_cluster).await;
-
-    let manifest_generator = lattice_operator::bootstrap::DefaultManifestGenerator::new();
+    // Start cell servers with TLS SANs from LoadBalancer
+    let extra_sans = get_cell_server_sans(&client, &self_cluster_name, is_bootstrap).await;
     parent_servers
-        .ensure_running(manifest_generator, &extra_sans, client.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to start cell servers: {}", e))?;
-
+        .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
+        .await?;
     tracing::info!("Cell servers started");
 
-    // Start Cedar authorization server if enabled
+    // Start optional Cedar authorization
     if enable_cedar_authz {
-        let cedar_client = client.clone();
-        let cedar_addr: std::net::SocketAddr = format!("0.0.0.0:{}", cedar_port)
-            .parse()
-            .expect("valid socket address");
-
-        tokio::spawn(async move {
-            tracing::info!(port = cedar_port, "Starting Cedar ExtAuth gRPC server");
-
-            let cedar_ctx = std::sync::Arc::new(lattice_cedar::Context::new(cedar_client.clone()));
-
-            // Run controller and server concurrently
-            tokio::select! {
-                result = lattice_cedar::controller::run_controller(cedar_ctx.clone()) => {
-                    if let Err(e) = result {
-                        tracing::error!(error = %e, "Cedar policy controller error");
-                    }
-                }
-                result = async {
-                    let server = lattice_cedar::CedarAuthzServer::new(cedar_ctx, cedar_addr);
-                    server.run().await
-                } => {
-                    if let Err(e) = result {
-                        tracing::error!(error = %e, "Cedar ExtAuth server error");
-                    }
-                }
-            }
-        });
+        start_cedar_server(client.clone(), cedar_port);
     }
 
-    // Start background CA rotation task (checks daily)
-    {
-        let parent_servers = parent_servers.clone();
-        tokio::spawn(async move {
-            // Check immediately on startup
-            if let Err(e) = parent_servers.rotate_ca_if_needed().await {
-                tracing::error!(error = %e, "CA rotation check failed on startup");
-            }
+    // Start CA rotation background task
+    start_ca_rotation(parent_servers.clone());
 
-            // Then check once per day
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-            interval.tick().await; // Skip first tick (we just checked)
-            loop {
-                interval.tick().await;
-                match parent_servers.rotate_ca_if_needed().await {
-                    Ok(true) => tracing::info!("CA rotated successfully"),
-                    Ok(false) => tracing::debug!("CA rotation not needed"),
-                    Err(e) => tracing::error!(error = %e, "CA rotation check failed"),
-                }
-            }
-        });
+    // Re-register clusters after restart (crash recovery)
+    if let Some(state) = parent_servers.bootstrap_state().await {
+        re_register_existing_clusters(&client, &state, &self_cluster_name, &parent_servers).await;
+        let _ = state.cleanup_stale_bootstrap_secrets().await;
     }
 
-    // Re-register any clusters that are past Pending phase (handles operator restarts)
-    if let Some(bootstrap_state) = parent_servers.bootstrap_state().await {
-        re_register_existing_clusters(
-            &client,
-            &bootstrap_state,
-            &self_cluster_name,
-            &parent_servers,
-        )
+    // Clean up stale pivot secrets from previous runs
+    let _ = lattice_operator::cleanup_stale_pivot_secrets(&client).await;
+
+    // Run controllers until shutdown
+    controller_runner::run_controllers(client, mode, self_cluster_name, parent_servers.clone())
         .await;
 
-        // Clean up stale bootstrap Secrets (for clusters that completed or were deleted)
-        if let Err(e) = bootstrap_state.cleanup_stale_bootstrap_secrets().await {
-            tracing::warn!(error = %e, "Failed to clean up stale bootstrap Secrets");
-        }
-    }
-
-    // Clean up stale Secrets from previous operator runs (crash recovery)
-    if let Err(e) = lattice_operator::cleanup_stale_pivot_secrets(&client).await {
-        tracing::warn!(error = %e, "Failed to clean up stale pivot-state Secrets");
-    }
-    if let Err(e) = lattice_operator::cleanup_stale_unpivot_secrets(&client).await {
-        tracing::warn!(error = %e, "Failed to clean up stale unpivot-manifests Secrets");
-    }
-
-    // Create controller context
-    let mut ctx_builder = Context::builder(client.clone()).parent_servers(parent_servers.clone());
-    if let Some(ref name) = self_cluster_name {
-        tracing::info!(cluster = %name, "Running as self-managed cluster");
-        ctx_builder = ctx_builder.self_cluster_name(name.clone());
-    }
-    let ctx = Arc::new(ctx_builder.build());
-
-    // Create APIs for all CRDs
-    let clusters: Api<LatticeCluster> = Api::all(client.clone());
-    let services: Api<LatticeService> = Api::all(client.clone());
-    let external_services: Api<LatticeExternalService> = Api::all(client.clone());
-    let cloud_providers: Api<CloudProvider> = Api::all(client.clone());
-    let secrets_providers: Api<SecretsProvider> = Api::all(client.clone());
-
-    // Read provider type from LatticeCluster for topology-aware scheduling
-    let provider_type = match clusters.list(&kube::api::ListParams::default()).await {
-        Ok(list) => list
-            .items
-            .first()
-            .map(|c| c.spec.provider.provider_type())
-            .unwrap_or(ProviderType::Docker),
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to read LatticeCluster, defaulting to Docker provider");
-            ProviderType::Docker
-        }
-    };
-
-    // Create service context for service controllers
-    // Trust domain is derived from cluster name: lattice.{cluster}.local
-    let cluster_name_for_service = self_cluster_name
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
-    let service_ctx = Arc::new(ServiceContext::from_client(
-        client.clone(),
-        cluster_name_for_service,
-        provider_type,
-    ));
-
-    tracing::info!("Starting Lattice controllers...");
-
-    if run_cluster {
-        tracing::info!("- LatticeCluster controller");
-    }
-    if run_service {
-        tracing::info!("- LatticeService controller");
-        tracing::info!("- LatticeExternalService controller");
-    }
-
-    // Create cluster controller if needed
-    let cluster_controller = if run_cluster {
-        Some(
-            Controller::new(clusters, WatcherConfig::default())
-                .shutdown_on_signal()
-                .run(reconcile, error_policy, ctx.clone())
-                .for_each(|result| async move {
-                    match result {
-                        Ok(action) => {
-                            tracing::debug!(?action, "Cluster reconciliation completed");
-                        }
-                        Err(e) => {
-                            tracing::error!(error = ?e, "Cluster reconciliation error");
-                        }
-                    }
-                }),
-        )
-    } else {
-        None
-    };
-
-    // Create service controllers if needed
-    let (service_controller, external_service_controller) = if run_service {
-        // Clone graph for the watch mapper closure
-        let graph_for_watch = service_ctx.graph.clone();
-
-        let svc_ctrl = Controller::new(services.clone(), WatcherConfig::default())
-            // Watch all LatticeService changes and trigger re-reconciliation of dependent services
-            // This enables eventual consistency: when service B is created, services that
-            // depend on B get re-reconciled to update their egress policies. When service A
-            // is created with deps, services that A depends on get re-reconciled to update
-            // their ingress policies (if they allow A).
-            .watches(services, WatcherConfig::default(), move |service| {
-                let graph = graph_for_watch.clone();
-                let namespace = match service.metadata.namespace.as_deref() {
-                    Some(ns) => ns,
-                    None => {
-                        tracing::warn!(
-                            service = ?service.metadata.name,
-                            "Service missing namespace, skipping dependency resolution"
-                        );
-                        return vec![];
-                    }
-                };
-                let name = service.metadata.name.as_deref().unwrap_or_default();
-
-                // Get services that this service depends on (they need to update ingress)
-                let dependencies = graph.get_dependencies(namespace, name);
-                // Get services that depend on this service (they need to update egress)
-                let dependents = graph.get_dependents(namespace, name);
-
-                // Combine and deduplicate
-                let mut affected: Vec<String> = dependencies;
-                affected.extend(dependents);
-                affected.sort();
-                affected.dedup();
-
-                tracing::debug!(
-                    service = %name,
-                    namespace = %namespace,
-                    affected_count = affected.len(),
-                    "Service changed, triggering re-reconciliation of affected services"
-                );
-
-                let ns = namespace.to_string();
-                affected
-                    .into_iter()
-                    .map(|dep_name| ObjectRef::<LatticeService>::new(&dep_name).within(&ns))
-                    .collect()
-            })
-            .shutdown_on_signal()
-            .run(service_reconcile, service_error_policy, service_ctx.clone())
-            .for_each(|result| async move {
-                match result {
-                    Ok(action) => {
-                        tracing::debug!(?action, "Service reconciliation completed");
-                    }
-                    Err(e) => {
-                        tracing::error!(error = ?e, "Service reconciliation error");
-                    }
-                }
-            });
-
-        let ext_ctrl = Controller::new(external_services, WatcherConfig::default())
-            .shutdown_on_signal()
-            .run(
-                reconcile_external,
-                error_policy_external,
-                service_ctx.clone(),
-            )
-            .for_each(|result| async move {
-                match result {
-                    Ok(action) => {
-                        tracing::debug!(?action, "External service reconciliation completed");
-                    }
-                    Err(e) => {
-                        tracing::error!(error = ?e, "External service reconciliation error");
-                    }
-                }
-            });
-
-        (Some(svc_ctrl), Some(ext_ctrl))
-    } else {
-        (None, None)
-    };
-
-    // Create provider controllers (always run)
-    let cloud_provider_ctx = Arc::new(CloudProviderContext::new(client.clone()));
-    let secrets_provider_ctx = Arc::new(SecretsProviderContext::new(client.clone()));
-
-    let cloud_provider_controller = Controller::new(cloud_providers, WatcherConfig::default())
-        .shutdown_on_signal()
-        .run(
-            cloud_provider_ctrl::reconcile,
-            cloud_provider_ctrl::error_policy,
-            cloud_provider_ctx,
-        )
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => {
-                    tracing::debug!(?action, "CloudProvider reconciliation completed");
-                }
-                Err(e) => {
-                    tracing::error!(error = ?e, "CloudProvider reconciliation error");
-                }
-            }
-        });
-
-    let secrets_provider_controller = Controller::new(secrets_providers, WatcherConfig::default())
-        .shutdown_on_signal()
-        .run(
-            secrets_provider_ctrl::reconcile,
-            secrets_provider_ctrl::error_policy,
-            secrets_provider_ctx,
-        )
-        .for_each(|result| async move {
-            match result {
-                Ok(action) => {
-                    tracing::debug!(?action, "SecretsProvider reconciliation completed");
-                }
-                Err(e) => {
-                    tracing::error!(error = ?e, "SecretsProvider reconciliation error");
-                }
-            }
-        });
-
-    tracing::info!("- CloudProvider controller");
-    tracing::info!("- SecretsProvider controller");
-
-    // Run all controllers concurrently
-    // Provider controllers always run; cluster/service controllers depend on mode
-    tokio::select! {
-        _ = cloud_provider_controller => tracing::info!("CloudProvider controller completed"),
-        _ = secrets_provider_controller => tracing::info!("SecretsProvider controller completed"),
-        _ = async {
-            if let Some(ctrl) = cluster_controller {
-                ctrl.await;
-                tracing::info!("Cluster controller completed");
-            } else {
-                std::future::pending::<()>().await;
-            }
-        } => {},
-        _ = async {
-            if let Some(ctrl) = service_controller {
-                ctrl.await;
-                tracing::info!("Service controller completed");
-            } else {
-                std::future::pending::<()>().await;
-            }
-        } => {},
-        _ = async {
-            if let Some(ctrl) = external_service_controller {
-                ctrl.await;
-                tracing::info!("External service controller completed");
-            } else {
-                std::future::pending::<()>().await;
-            }
-        } => {},
-    }
-
-    // Cancel agent background task and shutdown cell servers
-    agent_cancel_token.cancel();
+    // Shutdown
+    agent_token.cancel();
     parent_servers.shutdown().await;
-
-    tracing::info!("Lattice controller shutting down");
-    Ok(())
-}
-
-/// Supervise agent connection with automatic reconnection.
-/// If a parent cell is configured, maintains connection indefinitely with retries.
-/// The agent handles unpivot automatically by detecting deletion_timestamp on connect.
-async fn start_agent_with_retry(client: &Client, cluster_name: &str) {
-    let mut retry_delay = Duration::from_secs(1);
-    let max_retry_delay = Duration::from_secs(30);
-
-    loop {
-        match start_agent_if_needed(client, cluster_name).await {
-            Ok(Some(agent)) => {
-                tracing::info!("Agent connection to parent cell established");
-                retry_delay = Duration::from_secs(1);
-
-                // Monitor connection health
-                loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    let state = agent.state().await;
-                    if state == ClientState::Disconnected || state == ClientState::Failed {
-                        tracing::warn!(state = ?state, "Agent disconnected, will reconnect...");
-                        break;
-                    }
-                }
-            }
-            Ok(None) => {
-                tracing::debug!("No parent cell configured, running as standalone");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, retry_in = ?retry_delay, "Failed to connect to parent cell, retrying...");
-            }
-        }
-
-        tokio::time::sleep(retry_delay).await;
-        retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
-    }
-}
-
-async fn start_agent_if_needed(
-    client: &Client,
-    cluster_name: &str,
-) -> anyhow::Result<Option<AgentClient>> {
-    use k8s_openapi::api::core::v1::Secret;
-    use kube::api::Api;
-
-    // Check for lattice-parent-config secret - this is set by the bootstrap process
-    // and indicates we were provisioned by a parent cell and need to connect back.
-    // If a cluster has a cellRef, this secret will ALWAYS exist (created during bootstrap).
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), "lattice-system");
-    let parent_config = match secrets.get("lattice-parent-config").await {
-        Ok(config) => config,
-        Err(kube::Error::Api(e)) if e.code == 404 => {
-            tracing::debug!("No parent config secret, this is a root cluster");
-            return Ok(None);
-        }
-        Err(e) => return Err(anyhow::anyhow!("Failed to get parent config secret: {}", e)),
-    };
-
-    tracing::info!(
-        cluster = %cluster_name,
-        "Found parent config secret, starting agent connection to parent cell"
-    );
-
-    let data = parent_config
-        .data
-        .ok_or_else(|| anyhow::anyhow!("Parent config secret has no data"))?;
-
-    // Parse cell endpoint (format: "host:http_port:grpc_port")
-    let cell_endpoint = data
-        .get("cell_endpoint")
-        .ok_or_else(|| anyhow::anyhow!("Missing cell_endpoint in parent config"))?;
-    let cell_endpoint = String::from_utf8(cell_endpoint.0.clone())
-        .map_err(|e| anyhow::anyhow!("Invalid cell_endpoint encoding: {}", e))?;
-
-    let ca_cert = data
-        .get("ca.crt")
-        .ok_or_else(|| anyhow::anyhow!("Missing ca.crt in parent config"))?;
-    let ca_cert_pem = String::from_utf8(ca_cert.0.clone())
-        .map_err(|e| anyhow::anyhow!("Invalid CA cert encoding: {}", e))?;
-
-    // Parse endpoint parts
-    let parts: Vec<&str> = cell_endpoint.split(':').collect();
-    if parts.len() != 3 {
-        return Err(anyhow::anyhow!(
-            "Invalid cell_endpoint format, expected host:http_port:grpc_port"
-        ));
-    }
-    let host = parts[0];
-    let http_port: u16 = parts[1]
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid HTTP port: {}", e))?;
-    let grpc_port: u16 = parts[2]
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid gRPC port: {}", e))?;
-
-    let http_endpoint = format!("https://{}:{}", host, http_port);
-    let grpc_endpoint = format!("https://{}:{}", host, grpc_port);
-
-    tracing::info!(
-        http_endpoint = %http_endpoint,
-        grpc_endpoint = %grpc_endpoint,
-        "Connecting to parent cell"
-    );
-
-    // Try to load existing credentials from secret, or request new ones
-    let credentials = match load_agent_credentials(&secrets).await {
-        Ok(creds) => {
-            tracing::info!("Using existing agent credentials from secret");
-            creds
-        }
-        Err(_) => {
-            tracing::info!("No existing credentials, requesting new certificate from cell");
-            let creds =
-                AgentClient::request_certificate(&http_endpoint, cluster_name, &ca_cert_pem)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to get certificate: {}", e))?;
-
-            // Store credentials for future restarts
-            if let Err(e) = save_agent_credentials(&secrets, &creds).await {
-                tracing::warn!(error = %e, "Failed to save agent credentials to secret");
-            }
-            creds
-        }
-    };
-
-    // Create agent client config
-    let config = AgentClientConfig {
-        cluster_name: cluster_name.to_string(),
-        cell_grpc_endpoint: grpc_endpoint,
-        cell_http_endpoint: http_endpoint,
-        ca_cert_pem: Some(ca_cert_pem),
-        heartbeat_interval: Duration::from_secs(30),
-        ..Default::default()
-    };
-
-    // Create and connect agent
-    let mut agent = AgentClient::new(config);
-    agent
-        .connect_with_mtls(&credentials)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to cell: {}", e))?;
-
-    tracing::info!("Agent connected to parent cell");
-    Ok(Some(agent))
-}
-
-const AGENT_CREDENTIALS_SECRET: &str = "lattice-agent-credentials";
-
-/// Load agent credentials from Kubernetes secret
-async fn load_agent_credentials(
-    secrets: &Api<k8s_openapi::api::core::v1::Secret>,
-) -> anyhow::Result<AgentCredentials> {
-    let secret = secrets.get(AGENT_CREDENTIALS_SECRET).await?;
-    let data = secret
-        .data
-        .ok_or_else(|| anyhow::anyhow!("credentials secret has no data"))?;
-
-    let cert_pem = data
-        .get("tls.crt")
-        .ok_or_else(|| anyhow::anyhow!("missing tls.crt"))?;
-    let key_pem = data
-        .get("tls.key")
-        .ok_or_else(|| anyhow::anyhow!("missing tls.key"))?;
-    let ca_pem = data
-        .get("ca.crt")
-        .ok_or_else(|| anyhow::anyhow!("missing ca.crt"))?;
-
-    Ok(AgentCredentials {
-        cert_pem: String::from_utf8(cert_pem.0.clone())?,
-        key_pem: String::from_utf8(key_pem.0.clone())?,
-        ca_cert_pem: String::from_utf8(ca_pem.0.clone())?,
-    })
-}
-
-/// Save agent credentials to Kubernetes secret
-async fn save_agent_credentials(
-    secrets: &Api<k8s_openapi::api::core::v1::Secret>,
-    credentials: &AgentCredentials,
-) -> anyhow::Result<()> {
-    use k8s_openapi::api::core::v1::Secret;
-    use k8s_openapi::ByteString;
-    use kube::api::{ObjectMeta, PostParams};
-    use std::collections::BTreeMap;
-
-    let mut data = BTreeMap::new();
-    data.insert(
-        "tls.crt".to_string(),
-        ByteString(credentials.cert_pem.as_bytes().to_vec()),
-    );
-    data.insert(
-        "tls.key".to_string(),
-        ByteString(credentials.key_pem.as_bytes().to_vec()),
-    );
-    data.insert(
-        "ca.crt".to_string(),
-        ByteString(credentials.ca_cert_pem.as_bytes().to_vec()),
-    );
-
-    let secret = Secret {
-        metadata: ObjectMeta {
-            name: Some(AGENT_CREDENTIALS_SECRET.to_string()),
-            namespace: Some("lattice-system".to_string()),
-            ..Default::default()
-        },
-        data: Some(data),
-        type_: Some("kubernetes.io/tls".to_string()),
-        ..Default::default()
-    };
-
-    // Try to create, if exists then replace
-    match secrets.create(&PostParams::default(), &secret).await {
-        Ok(_) => {
-            tracing::info!("Created agent credentials secret");
-        }
-        Err(kube::Error::Api(e)) if e.code == 409 => {
-            // Already exists, replace it
-            secrets
-                .replace(AGENT_CREDENTIALS_SECRET, &PostParams::default(), &secret)
-                .await?;
-            tracing::info!("Updated agent credentials secret");
-        }
-        Err(e) => return Err(e.into()),
-    }
-
+    tracing::info!("Shutting down");
     Ok(())
 }
