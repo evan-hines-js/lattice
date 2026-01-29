@@ -21,7 +21,9 @@ use kube::Client;
 use tokio::process::Command;
 use tracing::{debug, info};
 
-use lattice_common::clusterctl::{export_for_pivot, teardown_cluster, TeardownConfig};
+use super::kind_utils;
+
+use lattice_common::clusterctl::{move_to_kubeconfig, teardown_cluster, TeardownConfig};
 use lattice_common::kube_utils;
 use lattice_common::AwsCredentials;
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
@@ -201,7 +203,8 @@ impl Uninstaller {
 
         // Step 1: Create kind cluster
         info!("Creating temporary kind cluster...");
-        self.create_kind_cluster().await?;
+        kind_utils::create_kind_cluster(UNINSTALL_CLUSTER_NAME, &self.bootstrap_kubeconfig_path())
+            .await?;
 
         let result = self.run_uninstall().await;
 
@@ -210,7 +213,7 @@ impl Uninstaller {
             info!("Keeping kind cluster for debugging (--keep-bootstrap-on-failure)");
         } else {
             info!("Deleting temporary kind cluster...");
-            if let Err(e) = self.delete_kind_cluster().await {
+            if let Err(e) = kind_utils::delete_kind_cluster(UNINSTALL_CLUSTER_NAME).await {
                 tracing::warn!("Failed to delete kind cluster: {}", e);
             }
         }
@@ -226,29 +229,30 @@ impl Uninstaller {
         self.install_capi_providers().await?;
 
         // Step 3: Delete LoadBalancer service to clean up cloud LB resources
-        // Must be done before export/teardown to give cloud provider time to cleanup
+        // Must be done before move to give cloud provider time to cleanup
         info!("Cleaning up LoadBalancer service...");
         self.delete_cell_service().await?;
 
-        // Step 4: Export CAPI resources from target cluster
-        info!("Exporting CAPI resources from target cluster...");
-        let manifests = export_for_pivot(
-            Some(&self.kubeconfig),
+        // Step 4: Move CAPI resources directly from target to kind cluster
+        // Uses --to-kubeconfig for single-step move (same approach as installer)
+        info!("Moving CAPI resources from target to kind cluster...");
+        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
+        move_to_kubeconfig(
+            &self.kubeconfig,
+            &bootstrap_kubeconfig,
             &self.capi_namespace,
             &self.cluster_name,
         )
         .await
         .map_err(|e| Error::command_failed(e.to_string()))?;
 
-        // Steps 5-7: Teardown cluster (import → unpause → wait ready → delete → wait deletion)
-        // This is the same logic used by the controller's unpivot flow
-        info!("Tearing down cluster on kind...");
-        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
+        // Step 5: Teardown cluster (unpause → wait ready → delete → wait deletion)
+        info!("Tearing down cluster...");
         teardown_cluster(
             &bootstrap_client,
             &self.capi_namespace,
             &self.cluster_name,
-            Some(&manifests),
+            None, // No manifests needed - move_to_kubeconfig already imported them
             &TeardownConfig::default(),
             Some(&bootstrap_kubeconfig),
         )
@@ -256,90 +260,6 @@ impl Uninstaller {
         .map_err(|e| Error::command_failed(e.to_string()))?;
 
         info!("Cluster '{}' successfully uninstalled", self.cluster_name);
-        Ok(())
-    }
-
-    async fn create_kind_cluster(&self) -> Result<()> {
-        // Delete any existing cluster with the same name
-        let _ = Command::new("kind")
-            .args(["delete", "cluster", "--name", UNINSTALL_CLUSTER_NAME])
-            .output()
-            .await;
-
-        let mut child = Command::new("kind")
-            .args([
-                "create",
-                "cluster",
-                "--name",
-                UNINSTALL_CLUSTER_NAME,
-                "--config",
-                "-",
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            stdin
-                .write_all(super::KIND_CONFIG_WITH_DOCKER.as_bytes())
-                .await?;
-        }
-
-        let output = child.wait_with_output().await?;
-
-        if !output.status.success() {
-            return Err(Error::command_failed(format!(
-                "kind create cluster failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        // Export kubeconfig
-        let kubeconfig_path = self.bootstrap_kubeconfig_path();
-        let export_output = Command::new("kind")
-            .args([
-                "export",
-                "kubeconfig",
-                "--name",
-                UNINSTALL_CLUSTER_NAME,
-                "--kubeconfig",
-                kubeconfig_path
-                    .to_str()
-                    .expect("temp dir path should be valid UTF-8"),
-            ])
-            .output()
-            .await?;
-
-        if !export_output.status.success() {
-            return Err(Error::command_failed(format!(
-                "kind export kubeconfig failed: {}",
-                String::from_utf8_lossy(&export_output.stderr)
-            )));
-        }
-
-        // Wait for nodes
-        let client = self.bootstrap_client().await?;
-        kube_utils::wait_for_nodes_ready(&client, Duration::from_secs(120))
-            .await
-            .map_err(|e| Error::command_failed(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn delete_kind_cluster(&self) -> Result<()> {
-        let output = Command::new("kind")
-            .args(["delete", "cluster", "--name", UNINSTALL_CLUSTER_NAME])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            return Err(Error::command_failed(format!(
-                "kind delete cluster failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
         Ok(())
     }
 

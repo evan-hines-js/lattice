@@ -20,6 +20,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::info;
 
+use super::kind_utils;
+
 use lattice_common::clusterctl::move_to_kubeconfig;
 use lattice_common::kube_utils;
 use lattice_common::AwsCredentials;
@@ -229,7 +231,7 @@ impl Installer {
 
         if bootstrap_result.is_err() && !self.keep_bootstrap_on_failure {
             info!("Deleting bootstrap cluster due to failure...");
-            let _ = self.delete_kind_cluster().await;
+            let _ = kind_utils::delete_kind_cluster(BOOTSTRAP_CLUSTER_NAME).await;
         }
 
         bootstrap_result?;
@@ -281,7 +283,8 @@ impl Installer {
 
     async fn run_bootstrap(&self) -> Result<()> {
         info!("[Phase 1/8] Creating kind bootstrap cluster...");
-        self.create_kind_cluster().await?;
+        kind_utils::create_kind_cluster(BOOTSTRAP_CLUSTER_NAME, &self.bootstrap_kubeconfig_path())
+            .await?;
 
         let bootstrap_client = self.bootstrap_client().await?;
 
@@ -312,7 +315,7 @@ impl Installer {
         self.pivot_capi_resources().await?;
 
         info!("[Phase 8/8] Deleting bootstrap cluster...");
-        self.delete_kind_cluster().await?;
+        kind_utils::delete_kind_cluster(BOOTSTRAP_CLUSTER_NAME).await?;
 
         Ok(())
     }
@@ -327,86 +330,6 @@ impl Installer {
         kube_utils::create_client(Some(&self.kubeconfig_path()))
             .await
             .cmd_err()
-    }
-
-    async fn create_kind_cluster(&self) -> Result<()> {
-        info!("Creating bootstrap cluster: {}", BOOTSTRAP_CLUSTER_NAME);
-
-        let mut child = Command::new("kind")
-            .args([
-                "create",
-                "cluster",
-                "--name",
-                BOOTSTRAP_CLUSTER_NAME,
-                "--config",
-                "-",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            stdin
-                .write_all(super::KIND_CONFIG_WITH_DOCKER.as_bytes())
-                .await?;
-        }
-
-        let output = child.wait_with_output().await?;
-        if !output.status.success() {
-            return Err(Error::command_failed(format!(
-                "kind create cluster failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        // Export kubeconfig
-        let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
-        let bootstrap_kubeconfig_str = bootstrap_kubeconfig.to_str().ok_or_else(|| {
-            Error::command_failed("bootstrap kubeconfig path contains invalid UTF-8")
-        })?;
-        let export_output = Command::new("kind")
-            .args([
-                "export",
-                "kubeconfig",
-                "--name",
-                BOOTSTRAP_CLUSTER_NAME,
-                "--kubeconfig",
-                bootstrap_kubeconfig_str,
-            ])
-            .output()
-            .await?;
-
-        if !export_output.status.success() {
-            return Err(Error::command_failed(format!(
-                "kind export kubeconfig failed: {}",
-                String::from_utf8_lossy(&export_output.stderr)
-            )));
-        }
-
-        // Wait for nodes using kube-rs
-        let client = self.bootstrap_client().await?;
-        kube_utils::wait_for_nodes_ready(&client, Duration::from_secs(120))
-            .await
-            .cmd_err()?;
-
-        Ok(())
-    }
-
-    async fn delete_kind_cluster(&self) -> Result<()> {
-        let output = Command::new("kind")
-            .args(["delete", "cluster", "--name", BOOTSTRAP_CLUSTER_NAME])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            return Err(Error::command_failed(format!(
-                "kind delete cluster failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-        Ok(())
     }
 
     async fn deploy_lattice_operator(&self, client: &Client) -> Result<()> {
