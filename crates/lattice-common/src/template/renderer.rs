@@ -459,7 +459,6 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
-            authorization: None,
         };
 
         graph.put_service(env, "postgres", &spec);
@@ -549,8 +548,7 @@ mod tests {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
-                authorization: None,
-            },
+                },
             status: None,
         }
     }
@@ -679,8 +677,7 @@ mod tests {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
-                authorization: None,
-            },
+                },
             status: None,
         };
 
@@ -771,8 +768,7 @@ mod tests {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
-                authorization: None,
-            },
+                },
             status: None,
         };
 
@@ -838,8 +834,7 @@ mod tests {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
-                authorization: None,
-            },
+                },
             status: None,
         };
 
@@ -998,8 +993,7 @@ mod tests {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
-                authorization: None,
-            },
+                },
             status: None,
         };
 
@@ -1072,8 +1066,7 @@ mod tests {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
-                authorization: None,
-            },
+                },
             status: None,
         };
 
@@ -1136,8 +1129,7 @@ mod tests {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
-                authorization: None,
-            },
+                },
             status: None,
         };
 
@@ -1194,8 +1186,7 @@ mod tests {
                 sysctls: BTreeMap::new(),
                 host_network: None,
                 share_process_namespace: None,
-                authorization: None,
-            },
+                },
             status: None,
         };
 

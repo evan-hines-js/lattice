@@ -154,13 +154,12 @@ async fn test_configurable_provider_pivot() {
 }
 
 async fn run_provider_e2e() -> Result<(), String> {
-    // Chaos disabled temporarily until distributed move is stable
     let chaos_targets = Arc::new(ChaosTargets::new());
-    // let chaos = ChaosMonkey::start(chaos_targets.clone());
+    let chaos = ChaosMonkey::start(chaos_targets.clone());
 
     let result = run_provider_e2e_inner(chaos_targets).await;
 
-    // chaos.stop().await;
+    chaos.stop().await;
     result
 }
 

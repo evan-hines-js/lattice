@@ -95,7 +95,6 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
         sysctls: BTreeMap::new(),
         host_network: None,
         share_process_namespace: None,
-        authorization: None,
     }
 }
 
