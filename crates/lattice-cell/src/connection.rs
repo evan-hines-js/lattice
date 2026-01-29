@@ -127,6 +127,8 @@ pub struct AgentRegistry {
     unpivot_manifests: DashMap<String, UnpivotManifests>,
     /// CAPI manifests exported during pivot (deleted after PivotComplete)
     pivot_source_manifests: DashMap<String, PivotSourceManifests>,
+    /// Clusters with teardown in progress (prevents concurrent teardown spawns)
+    teardown_in_progress: DashMap<String, ()>,
 }
 
 impl AgentRegistry {
@@ -283,6 +285,24 @@ impl AgentRegistry {
         self.pivot_source_manifests
             .remove(cluster_name)
             .map(|(_, m)| m)
+    }
+
+    /// Mark teardown as in progress for a cluster
+    ///
+    /// Returns true if we successfully started (wasn't already in progress).
+    pub fn start_teardown(&self, cluster_name: &str) -> bool {
+        if self.teardown_in_progress.contains_key(cluster_name) {
+            false
+        } else {
+            self.teardown_in_progress
+                .insert(cluster_name.to_string(), ());
+            true
+        }
+    }
+
+    /// Clear teardown in progress for a cluster
+    pub fn finish_teardown(&self, cluster_name: &str) {
+        self.teardown_in_progress.remove(cluster_name);
     }
 }
 

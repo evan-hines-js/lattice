@@ -16,10 +16,7 @@ pub mod executor;
 pub mod pivot;
 pub mod watch;
 
-pub use client::{
-    cleanup_stale_pivot_secrets, should_cleanup_pivot_state, AgentClient, AgentClientConfig,
-    AgentCredentials, CertificateError, ClientState,
-};
+pub use client::{AgentClient, AgentClientConfig, AgentCredentials, CertificateError, ClientState};
 
 // Re-export protocol types from lattice_common
 pub use executor::{execute_k8s_request, is_watch_request};

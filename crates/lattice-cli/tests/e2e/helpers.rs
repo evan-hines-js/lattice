@@ -862,7 +862,13 @@ pub async fn delete_cluster_and_wait(
     cluster_name: &str,
     provider: InfraProvider,
 ) -> Result<(), String> {
-    // Initiate deletion on the cluster itself
+    // Initiate deletion on the cluster itself with --wait=false
+    // We can't wait for completion because:
+    // 1. The finalizer (lattice.dev/unpivot) blocks deletion
+    // 2. The unpivot flow sends CAPI manifests to parent
+    // 3. Parent imports and deletes via CAPI, which kills the infrastructure
+    // 4. The cluster's API server dies before the finalizer is removed
+    // So we just initiate deletion and wait for parent confirmation
     run_cmd(
         "kubectl",
         &[
@@ -871,10 +877,10 @@ pub async fn delete_cluster_and_wait(
             "delete",
             "latticecluster",
             cluster_name,
-            "--timeout=300s",
+            "--wait=false",
         ],
     )?;
-    info!("LatticeCluster deletion initiated");
+    info!("LatticeCluster deletion initiated (async)");
 
     // Wait for the LatticeCluster to be fully deleted from parent
     info!("Waiting for LatticeCluster to be deleted from parent...");
