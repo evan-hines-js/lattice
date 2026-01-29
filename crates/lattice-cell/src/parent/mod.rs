@@ -51,6 +51,8 @@ pub struct ParentConfig {
     pub image: String,
     /// Registry credentials (optional)
     pub registry_credentials: Option<String>,
+    /// Enable Cedar ExtAuth for child clusters
+    pub cedar_enabled: bool,
 }
 
 impl Default for ParentConfig {
@@ -75,6 +77,17 @@ impl Default for ParentConfig {
             image: std::env::var("LATTICE_IMAGE")
                 .unwrap_or_else(|_| "ghcr.io/evan-hines-js/lattice:latest".to_string()),
             registry_credentials: load_registry_credentials(),
+            cedar_enabled: false,
+        }
+    }
+}
+
+impl ParentConfig {
+    /// Create config with Cedar ExtAuth enabled
+    pub fn with_cedar(cedar_enabled: bool) -> Self {
+        Self {
+            cedar_enabled,
+            ..Default::default()
         }
     }
 }
@@ -638,6 +651,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             self.config.image.clone(),
             self.config.registry_credentials.clone(),
             Some(kube_client.clone()),
+            self.config.cedar_enabled,
         ));
 
         // Store bootstrap state

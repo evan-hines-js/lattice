@@ -897,6 +897,8 @@ pub struct BootstrapState<G: ManifestGenerator = DefaultManifestGenerator> {
     ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
     /// Kubernetes client for updating CRD status and fetching distributed resources (None in tests)
     kube_client: Option<Client>,
+    /// Enable Cedar ExtAuth for child clusters
+    cedar_enabled: bool,
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
@@ -908,6 +910,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         image: String,
         registry_credentials: Option<String>,
         kube_client: Option<Client>,
+        cedar_enabled: bool,
     ) -> Self {
         Self {
             clusters: DashMap::new(),
@@ -917,6 +920,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             token_ttl,
             ca_bundle,
             kube_client,
+            cedar_enabled,
         }
     }
 
@@ -1213,7 +1217,8 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             provider: info.provider,
             bootstrap: info.bootstrap.clone(),
             cluster_name: info.cluster_id.clone(),
-            skip_cilium_policies: false, // Real clusters have Cilium
+            skip_cilium_policies: false,
+            cedar_enabled: self.cedar_enabled,
         };
         let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config).await;
         info!(
@@ -1536,7 +1541,8 @@ mod tests {
             test_ca_bundle(),
             "test:latest".to_string(),
             None,
-            None, // No kube client for tests
+            None,
+            false,
         )
     }
 
@@ -1547,7 +1553,8 @@ mod tests {
             test_ca_bundle(),
             "test:latest".to_string(),
             None,
-            None, // No kube client for tests
+            None,
+            false,
         )
     }
 
@@ -2685,7 +2692,8 @@ mod tests {
             test_ca_bundle(),
             "test:latest".to_string(),
             None,
-            None, // No kube client for tests
+            None,
+            false,
         );
 
         // Register cluster with kubeadm bootstrap
@@ -2741,7 +2749,8 @@ mod tests {
             test_ca_bundle(),
             "test:latest".to_string(),
             None,
-            None, // No kube client for tests
+            None,
+            false,
         );
 
         // Register cluster with RKE2 bootstrap
@@ -2810,7 +2819,8 @@ mod tests {
             test_ca_bundle(),
             "test:latest".to_string(),
             None,
-            None, // No kube client for tests
+            None,
+            false,
         );
 
         // Register AWS cluster
@@ -2873,7 +2883,8 @@ mod tests {
             test_ca_bundle(),
             "test:latest".to_string(),
             None,
-            None, // No kube client for tests
+            None,
+            false,
         );
 
         // Register Docker cluster
