@@ -252,7 +252,6 @@ impl Uninstaller {
             &bootstrap_client,
             &self.capi_namespace,
             &self.cluster_name,
-            None, // No manifests needed - move_to_kubeconfig already imported them
             &TeardownConfig::default(),
             Some(&bootstrap_kubeconfig),
         )

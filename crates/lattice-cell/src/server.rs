@@ -21,7 +21,6 @@ use tracing::{debug, error, info, instrument, warn};
 
 use kube::api::DeleteParams;
 use kube::{Api, Client};
-use lattice_common::clusterctl::{import_from_manifests, unpause_capi_cluster};
 use lattice_common::crd::LatticeCluster;
 
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
@@ -122,11 +121,32 @@ async fn handle_agent_message_impl(
             info!(
                 cluster = %cluster_name,
                 namespace = %cd.namespace,
-                manifest_count = cd.capi_manifests.len(),
+                object_count = cd.objects.len(),
                 "Cluster deletion requested - importing CAPI and initiating deletion"
             );
 
-            let manifests: Vec<Vec<u8>> = cd.capi_manifests.clone();
+            // Convert proto objects to MoveObjectInput
+            let objects: Vec<lattice_move::MoveObjectInput> = cd
+                .objects
+                .iter()
+                .map(|obj| lattice_move::MoveObjectInput {
+                    source_uid: obj.source_uid.clone(),
+                    manifest: obj.manifest.clone(),
+                    owners: obj
+                        .owners
+                        .iter()
+                        .map(|o| lattice_move::SourceOwnerRefInput {
+                            source_uid: o.source_uid.clone(),
+                            api_version: o.api_version.clone(),
+                            kind: o.kind.clone(),
+                            name: o.name.clone(),
+                            controller: o.controller,
+                            block_owner_deletion: o.block_owner_deletion,
+                        })
+                        .collect(),
+                })
+                .collect();
+
             let namespace = cd.namespace.clone();
             let cluster = cluster_name.to_string();
             let client = kube_client.clone();
@@ -135,23 +155,48 @@ async fn handle_agent_message_impl(
             // Spawn to avoid blocking the gRPC stream
             // This only does import/unpause/delete - controller handles the rest
             tokio::spawn(async move {
-                // Step 1: Import CAPI manifests from child
-                if !manifests.is_empty() {
+                // Step 1: Import CAPI objects from child using AgentMover (same as pivot receiver)
+                if !objects.is_empty() {
                     info!(
                         cluster = %cluster,
-                        manifest_count = manifests.len(),
-                        "Importing CAPI manifests from child"
+                        object_count = objects.len(),
+                        "Importing CAPI objects from child"
                     );
-                    if let Err(e) = import_from_manifests(None, &namespace, &manifests).await {
-                        error!(cluster = %cluster, error = %e, "Failed to import CAPI manifests");
+
+                    let mut mover = lattice_move::AgentMover::new(client.clone(), &namespace);
+
+                    // Ensure namespace exists
+                    if let Err(e) = mover.ensure_namespace().await {
+                        error!(cluster = %cluster, error = %e, "Failed to ensure namespace");
                         registry_for_task.finish_teardown(&cluster);
                         return;
                     }
+
+                    // Apply all objects (AgentMover handles UID remapping)
+                    let (mappings, errors) = mover.apply_batch(&objects).await;
+
+                    if !errors.is_empty() {
+                        for e in &errors {
+                            warn!(
+                                cluster = %cluster,
+                                source_uid = %e.source_uid,
+                                error = %e.message,
+                                "Failed to import object"
+                            );
+                        }
+                    }
+
+                    info!(
+                        cluster = %cluster,
+                        created = mappings.len(),
+                        errors = errors.len(),
+                        "CAPI objects imported"
+                    );
                 }
 
                 // Step 2: Unpause CAPI so it can reconcile
                 info!(cluster = %cluster, "Unpausing CAPI cluster");
-                if let Err(e) = unpause_capi_cluster(None, &namespace, &cluster).await {
+                if let Err(e) = lattice_move::unpause_cluster(&client, &namespace).await {
                     warn!(cluster = %cluster, error = %e, "Failed to unpause CAPI (may already be unpaused)");
                     // Continue anyway - might already be unpaused
                 }

@@ -54,6 +54,9 @@ mod utils;
 
 pub use agent::{AgentMover, MoveObjectError, MoveObjectInput, SourceOwnerRefInput, SOURCE_UID_ANNOTATION};
 pub use cell::{
+    // Standalone functions (used by both pivot and unpivot)
+    pause_cluster, prepare_move_objects, unpause_cluster,
+    // Data types
     BatchAck, CellMover, CellMoverConfig, CompleteAck, MoveBatch, MoveCommandSender,
     MoveCompleteInput, MoveObjectOutput, MoveResult, SourceOwnerRefOutput,
 };

@@ -4,7 +4,7 @@
 // parent cell (management cluster). All connections are initiated OUTBOUND
 // from workload clusters - cells never connect to agents.
 //
-// Pivot flow (distributed clusterctl move):
+// Pivot flow (Cell → Agent):
 // 1. Cell discovers CAPI CRDs, lists objects, builds ownership graph
 // 2. Cell computes move sequence (topological sort)
 // 3. Cell pauses Clusters/ClusterClasses on source
@@ -12,8 +12,13 @@
 // 5. Cell sends MoveComplete → Agent unpauses Clusters/ClusterClasses
 // 6. Cell deletes source objects (reverse order, with finalizer removal)
 //
-// Unpivot flow: Child pauses CAPI → exports via --to-directory → sends to parent
-//               → parent imports → parent unpauses → parent deletes
+// Unpivot flow (Agent → Cell) - same logic, reversed direction:
+// 1. Agent discovers CAPI CRDs, lists objects, builds ownership graph
+// 2. Agent pauses Clusters/ClusterClasses on source
+// 3. Agent sends ClusterDeleting with structured MoveObjects
+// 4. Cell creates objects with UID remapping (same as AgentMover)
+// 5. Cell unpauses, deletes LatticeCluster
+// 6. Agent source objects are garbage collected when cluster is deleted
 
 syntax = "proto3";
 package lattice.agent.v1;
@@ -60,15 +65,17 @@ message AgentMessage {
 
 // Sent when cluster deletion is initiated (unpivot)
 //
-// Unpivot is pivot in reverse: child pauses CAPI, exports via --to-directory,
-// sends manifests to parent. Parent imports, unpauses, then deletes.
-// This ensures parent has all resources including any nodes added post-pivot.
+// Unpivot is pivot in reverse: agent discovers CAPI resources, builds graph,
+// sends structured objects to cell. Cell creates them with UID remapping,
+// unpauses, then deletes. This ensures parent has all resources including
+// any nodes added post-pivot.
 message ClusterDeleting {
-  // Namespace where CAPI resources live
+  // Namespace where CAPI resources live (on child) / will be created (on parent)
   string namespace = 1;
-  // CAPI manifests exported via clusterctl move --to-directory
-  // Parent will import these before cleanup to get any new nodes/machines
-  repeated bytes capi_manifests = 2;
+  // CAPI objects to move (same format as MoveObject for consistency)
+  repeated MoveObject objects = 2;
+  // Cluster name being deleted
+  string cluster_name = 3;
 }
 
 // Sent when agent first connects to cell
