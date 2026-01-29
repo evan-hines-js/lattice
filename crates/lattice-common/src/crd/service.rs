@@ -1414,7 +1414,6 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
-            authorization: None,
         }
     }
 
@@ -1631,7 +1630,6 @@ mod tests {
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
-            authorization: None,
         };
 
         let result = spec.validate();
@@ -1823,7 +1821,6 @@ deploy:
             sysctls: BTreeMap::new(),
             host_network: None,
             share_process_namespace: None,
-            authorization: None,
         };
 
         assert_eq!(spec.primary_image(), Some("nginx:latest"));

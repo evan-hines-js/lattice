@@ -289,32 +289,28 @@ impl Uninstaller {
     }
 
     fn clusterctl_init_args(&self) -> Vec<String> {
-        let mut args = vec!["init".to_string()];
+        let infra_arg = match self.provider {
+            ProviderType::Docker => "--infrastructure=docker",
+            ProviderType::Proxmox => "--infrastructure=proxmox",
+            ProviderType::Aws => "--infrastructure=aws",
+            ProviderType::OpenStack => "--infrastructure=openstack",
+            ProviderType::Gcp => "--infrastructure=gcp",
+            ProviderType::Azure => "--infrastructure=azure",
+        };
 
-        match self.provider {
-            ProviderType::Docker => {
-                args.extend(["--infrastructure".to_string(), "docker".to_string()]);
-            }
-            ProviderType::Proxmox => {
-                args.extend([
-                    "--infrastructure".to_string(),
-                    "proxmox".to_string(),
-                    "--ipam".to_string(),
-                    "in-cluster".to_string(),
-                ]);
-            }
-            ProviderType::Aws => {
-                args.extend(["--infrastructure".to_string(), "aws".to_string()]);
-            }
-            ProviderType::OpenStack => {
-                args.extend(["--infrastructure".to_string(), "openstack".to_string()]);
-            }
-            ProviderType::Gcp => {
-                args.extend(["--infrastructure".to_string(), "gcp".to_string()]);
-            }
-            ProviderType::Azure => {
-                args.extend(["--infrastructure".to_string(), "azure".to_string()]);
-            }
+        let config_path = env!("CLUSTERCTL_CONFIG");
+
+        let mut args = vec![
+            "init".to_string(),
+            infra_arg.to_string(),
+            "--bootstrap=kubeadm,rke2".to_string(),
+            "--control-plane=kubeadm,rke2".to_string(),
+            format!("--config={}", config_path),
+            "--wait-providers".to_string(),
+        ];
+
+        if self.provider == ProviderType::Proxmox {
+            args.push("--ipam=in-cluster".to_string());
         }
 
         args
