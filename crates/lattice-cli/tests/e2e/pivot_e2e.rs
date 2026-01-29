@@ -389,36 +389,43 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     }
 
     // =========================================================================
-    // Phase 7: Delete Workload2 immediately (don't wait for mesh tests)
+    // Phase 7: Start workload2 deletion + wait for mesh tests (parallel)
     // =========================================================================
-    info!("[Phase 7] Deleting workload2 cluster (unpivot flow)...");
+    info!("[Phase 7] Starting workload2 deletion (unpivot flow)...");
     info!("CAPI resources will move back to workload cluster");
 
-    delete_cluster_and_wait(
-        &workload2_kubeconfig_path,
-        &workload_kubeconfig_path,
-        WORKLOAD2_CLUSTER_NAME,
-        workload_provider,
-    )
-    .await?;
+    // Start delete in background
+    let workload2_kc = workload2_kubeconfig_path.clone();
+    let workload_kc = workload_kubeconfig_path.clone();
+    let delete_handle = tokio::spawn(async move {
+        delete_cluster_and_wait(
+            &workload2_kc,
+            &workload_kc,
+            WORKLOAD2_CLUSTER_NAME,
+            workload_provider,
+        )
+        .await
+    });
 
-    info!("SUCCESS: Workload2 deleted and unpivoted!");
-
-    // =========================================================================
-    // Phase 7b: Wait for mesh tests to complete and clean up
-    // =========================================================================
+    // Wait for mesh tests and cleanup immediately (don't wait for delete)
     if let Some(handle) = mesh_handle {
-        info!("[Phase 7b] Waiting for mesh tests to complete...");
+        info!("[Phase 7] Waiting for mesh tests to complete...");
         handle
             .await
             .map_err(|e| format!("Mesh test task panicked: {}", e))??;
 
-        // Clean up mesh test namespaces (mesh tests run on workload cluster)
-        info!("[Phase 7c] Cleaning up mesh test services...");
+        info!("[Phase 7] Cleaning up mesh test services...");
         cleanup_all_mesh_tests(&workload_kubeconfig_path);
+        info!("SUCCESS: Mesh tests complete and cleaned up!");
     }
 
-    info!("SUCCESS: All phase 6-7 tasks complete!");
+    // Now wait for delete to complete
+    info!("[Phase 7] Waiting for workload2 deletion to complete...");
+    delete_handle
+        .await
+        .map_err(|e| format!("Delete task panicked: {}", e))??;
+
+    info!("SUCCESS: Workload2 deleted and unpivoted!");
 
     // =========================================================================
     // Phase 8: Delete Workload (unpivot to mgmt)

@@ -2,21 +2,20 @@
 //!
 //! Provides utilities for Docker-based cluster testing.
 
-use std::process::Command;
 #[cfg(feature = "provider-e2e")]
-use std::time::Duration;
+use std::{process::Command, time::Duration};
+
+#[cfg(feature = "provider-e2e")]
+use kube::{
+    config::{KubeConfigOptions, Kubeconfig},
+    Client,
+};
+#[cfg(feature = "provider-e2e")]
+use lattice_operator::crd::{BootstrapProvider, ClusterPhase};
 #[cfg(feature = "provider-e2e")]
 use tokio::time::sleep;
 #[cfg(feature = "provider-e2e")]
 use tracing::info;
-
-#[cfg(feature = "provider-e2e")]
-use kube::config::{KubeConfigOptions, Kubeconfig};
-#[cfg(feature = "provider-e2e")]
-use kube::Client;
-
-#[cfg(feature = "provider-e2e")]
-use lattice_operator::crd::{BootstrapProvider, ClusterPhase};
 
 // =============================================================================
 // Kubernetes Client
@@ -163,6 +162,7 @@ pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
 }
 
 /// Run a shell command, allowing failure (returns empty string on error)
+#[cfg(feature = "provider-e2e")]
 pub fn run_cmd_allow_fail(cmd: &str, args: &[&str]) -> String {
     Command::new(cmd)
         .args(args)
