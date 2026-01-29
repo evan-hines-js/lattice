@@ -24,7 +24,8 @@ use lattice_common::crd::{
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::generate_operator_network_policy;
-use lattice_proto::{cell_command, AgentState, CellCommand, PivotManifestsCommand};
+use lattice_move::{CellMover, CellMoverConfig};
+use lattice_proto::AgentState;
 
 use lattice_agent::patch_kubeconfig_for_self_management;
 use lattice_capi::{
@@ -716,9 +717,7 @@ pub fn has_etcd_taint(node: &k8s_openapi::api::core::v1::Node) -> bool {
 pub enum PivotAction {
     /// Pivot is complete, transition to Ready
     Complete,
-    /// Wait for agent to complete pivot (manifests sent)
-    WaitForPivotComplete,
-    /// Trigger pivot: export via --to-directory, send PivotManifestsCommand
+    /// Trigger pivot (trigger_pivot blocks until MoveCompleteAck)
     TriggerPivot,
     /// Wait for agent to connect
     WaitForAgent,
@@ -727,15 +726,10 @@ pub enum PivotAction {
 /// Determine what pivot action to take based on current state.
 ///
 /// This encapsulates the pivot state machine logic in a pure function.
-pub fn determine_pivot_action(
-    is_pivot_complete: bool,
-    is_pivot_in_progress: bool,
-    is_agent_connected: bool,
-) -> PivotAction {
+/// Note: trigger_pivot() is synchronous - it blocks until MoveCompleteAck.
+pub fn determine_pivot_action(is_pivot_complete: bool, is_agent_connected: bool) -> PivotAction {
     if is_pivot_complete {
         PivotAction::Complete
-    } else if is_pivot_in_progress {
-        PivotAction::WaitForPivotComplete
     } else if is_agent_connected {
         PivotAction::TriggerPivot
     } else {
@@ -855,17 +849,13 @@ pub trait PivotOperations: Send + Sync {
     /// Check if agent is ready for pivot
     fn is_agent_ready(&self, cluster_name: &str) -> bool;
 
-    /// Check if pivot is already in progress
-    fn is_pivot_in_progress(&self, cluster_name: &str) -> bool;
-
-    /// Check if pivot is complete (agent reports Ready state)
+    /// Check if pivot is complete
     fn is_pivot_complete(&self, cluster_name: &str) -> bool;
 
-    /// Store post-pivot manifests to send after PivotComplete
+    /// Store post-pivot manifests to include in MoveComplete
     ///
-    /// These manifests (network policy) will be sent to the agent via
-    /// ApplyManifestsCommand after pivot succeeds.
-    /// Note: LatticeCluster CRD and instance are delivered via bootstrap webhook.
+    /// These manifests (network policy) are sent to the agent as part of
+    /// MoveComplete which has an ack cycle.
     fn store_post_pivot_manifests(&self, cluster_name: &str, network_policy_yaml: Option<String>);
 }
 
@@ -1349,42 +1339,33 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 // Determine pivot action using pure function
                 let action = determine_pivot_action(
                     pivot_ops.is_pivot_complete(&name),
-                    pivot_ops.is_pivot_in_progress(&name),
                     pivot_ops.is_agent_ready(&name),
                 );
 
                 match action {
                     PivotAction::Complete => {
-                        // Agent reports pivot complete - try to transition to Ready
-                        info!("agent reports pivot complete");
+                        // Pivot complete - transition to Ready
+                        info!("pivot complete");
                         try_transition_to_ready(&cluster, &ctx, true).await
-                    }
-                    PivotAction::WaitForPivotComplete => {
-                        // Pivot in progress, waiting for agent to finish importing manifests
-                        debug!("pivot in progress, waiting for agent to complete");
-                        Ok(Action::requeue(Duration::from_secs(5)))
                     }
                     PivotAction::TriggerPivot => {
                         // Agent ready for pivot - trigger it
-                        // Store post-pivot manifests before triggering pivot
-                        // Note: LatticeCluster CRD/instance already delivered via bootstrap webhook
-
-                        // Generate CiliumNetworkPolicy for operator (requires Cilium CRDs)
+                        // Generate and store post-pivot manifests (included in MoveComplete)
                         let network_policy_yaml = generate_network_policy_for_child(&ctx).await?;
-
                         pivot_ops.store_post_pivot_manifests(&name, network_policy_yaml);
 
-                        // Trigger pivot: export CAPI manifests and send to agent
+                        // Trigger pivot - blocks until MoveCompleteAck received
                         info!("agent ready, triggering pivot");
                         match pivot_ops
                             .trigger_pivot(&name, &capi_namespace, &capi_namespace)
                             .await
                         {
                             Ok(()) => {
-                                debug!("pivot triggered successfully, waiting for agent to import manifests");
+                                info!("pivot completed successfully");
+                                // Requeue to transition to Ready phase
                             }
                             Err(e) => {
-                                error!(cluster = %name, error = %e, "pivot trigger failed, will retry");
+                                error!(cluster = %name, error = %e, "pivot failed, will retry");
                             }
                         }
                         Ok(Action::requeue(Duration::from_secs(5)))
@@ -1828,7 +1809,6 @@ async fn update_cluster_status(
         bootstrap_complete: current_status.bootstrap_complete,
         unpivot_pending: current_status.unpivot_pending,
         observed_generation: current_status.observed_generation,
-        pivot_phase: current_status.pivot_phase,
     };
 
     // Set pivot_complete if requested (persists pivot completion across restarts)
@@ -1871,10 +1851,6 @@ impl PivotOperations for PivotOperationsImpl {
         source_namespace: &str,
         target_namespace: &str,
     ) -> Result<(), Error> {
-        use lattice_common::clusterctl::{
-            export_for_pivot, is_capi_cluster_ready, pause_capi_cluster,
-        };
-
         // Check if agent is connected
         if self.agent_registry.get(cluster_name).is_none() {
             return Err(Error::pivot(format!(
@@ -1883,44 +1859,9 @@ impl PivotOperations for PivotOperationsImpl {
             )));
         }
 
-        // Check if CAPI cluster is ready before attempting export
-        match is_capi_cluster_ready(None, source_namespace, cluster_name).await {
-            Ok(true) => {}
-            Ok(false) => {
-                debug!(cluster = %cluster_name, namespace = %source_namespace, "CAPI cluster not ready yet");
-                return Err(Error::pivot("CAPI cluster not ready".to_string()));
-            }
-            Err(e) => {
-                warn!(cluster = %cluster_name, error = %e, "failed to check CAPI readiness");
-                return Err(Error::pivot(format!(
-                    "failed to check CAPI readiness: {}",
-                    e
-                )));
-            }
-        }
-
-        // Export CAPI resources via clusterctl move --to-directory
-        let manifests = export_for_pivot(None, source_namespace, cluster_name)
-            .await
-            .map_err(|e| Error::pivot(format!("clusterctl move --to-directory failed: {}", e)))?;
-        let manifest_count = manifests.len();
-
-        // Re-pause the CAPI cluster after export
-        // (clusterctl move --to-directory unpauses it, but we want it dormant until deletion)
-        pause_capi_cluster(None, source_namespace, cluster_name)
-            .await
-            .map_err(|e| {
-                Error::pivot(format!("failed to pause CAPI cluster after export: {}", e))
-            })?;
-
-        // Store manifests for deletion after PivotComplete
-        self.agent_registry.set_pivot_source_manifests(
-            cluster_name,
-            lattice_cell::PivotSourceManifests {
-                capi_manifests: manifests.clone(),
-                namespace: source_namespace.to_string(),
-            },
-        );
+        // Mark pivot in progress to prevent duplicate triggers
+        self.agent_registry
+            .update_state(cluster_name, AgentState::Pivoting);
 
         // Fetch resources for distribution (CloudProviders, SecretsProviders, and their secrets)
         let resources = fetch_distributable_resources(&self.client)
@@ -1929,35 +1870,68 @@ impl PivotOperations for PivotOperationsImpl {
                 warn!(error = %e, "failed to fetch distributable resources, continuing without");
                 DistributableResources::default()
             });
-        let cp_count = resources.cloud_providers.len();
-        let sp_count = resources.secrets_providers.len();
-        let secret_count = resources.secrets.len();
 
-        // Send PivotManifestsCommand to agent
-        let pivot_manifests_cmd = CellCommand {
-            command_id: uuid::Uuid::new_v4().to_string(),
-            command: Some(cell_command::Command::PivotManifests(
-                PivotManifestsCommand {
-                    manifests,
-                    target_namespace: target_namespace.to_string(),
-                    cluster_name: cluster_name.to_string(),
-                    cloud_providers: resources.cloud_providers,
-                    secrets_providers: resources.secrets_providers,
-                    secrets: resources.secrets,
-                },
-            )),
-        };
+        // Get post-pivot manifests (included in MoveComplete which has an ack)
+        let manifests: Vec<Vec<u8>> = self
+            .agent_registry
+            .take_post_pivot_manifests(cluster_name)
+            .and_then(|m| m.network_policy_yaml.map(|p| vec![p.into_bytes()]))
+            .unwrap_or_default();
 
-        self.agent_registry
-            .send_command(cluster_name, pivot_manifests_cmd)
+        // Configure the distributed move with all resources and manifests
+        let config = CellMoverConfig::new(source_namespace, target_namespace, cluster_name)
+            .with_resources(
+                resources.cloud_providers,
+                resources.secrets_providers,
+                resources.secrets,
+            )
+            .with_manifests(manifests);
+
+        // Create the gRPC command sender
+        let sender = std::sync::Arc::new(lattice_cell::GrpcMoveCommandSender::new(
+            self.agent_registry.clone(),
+            cluster_name.to_string(),
+        ));
+
+        // Execute the distributed move
+        // All resources and manifests are sent via MoveComplete which has an ack
+        let mut mover = CellMover::new(self.client.clone(), config, sender);
+        let result = mover.execute().await.map_err(|e| {
+            // Reset state on failure
+            self.agent_registry
+                .update_state(cluster_name, AgentState::Provisioning);
+            Error::pivot(format!("distributed move failed: {}", e))
+        })?;
+
+        info!(
+            cluster = %cluster_name,
+            objects_moved = result.objects_moved,
+            objects_deleted = result.objects_deleted,
+            "pivot completed via distributed move"
+        );
+
+        // Move completed successfully (MoveCompleteAck received) - mark state
+        self.agent_registry.update_state(cluster_name, AgentState::Ready);
+        self.agent_registry.set_pivot_complete(cluster_name, true);
+
+        // Persist pivot_complete to CRD status
+        let api: Api<LatticeCluster> = Api::all(self.client.clone());
+        let patch = serde_json::json!({
+            "status": {
+                "pivotComplete": true
+            }
+        });
+        if let Err(e) = api
+            .patch_status(
+                cluster_name,
+                &PatchParams::apply("lattice-operator"),
+                &Patch::Merge(&patch),
+            )
             .await
-            .map_err(|e| Error::pivot(format!("failed to send PivotManifestsCommand: {}", e)))?;
+        {
+            warn!(cluster = %cluster_name, error = %e, "Failed to persist pivot_complete to status");
+        }
 
-        // Mark pivot in progress to prevent duplicate triggers
-        self.agent_registry
-            .update_state(cluster_name, AgentState::Pivoting);
-
-        info!(cluster = %cluster_name, manifests = manifest_count, cloud_providers = cp_count, secrets_providers = sp_count, secrets = secret_count, "pivot triggered");
         Ok(())
     }
 
@@ -1965,12 +1939,6 @@ impl PivotOperations for PivotOperationsImpl {
         self.agent_registry
             .get(cluster_name)
             .is_some_and(|a| a.is_ready_for_pivot())
-    }
-
-    fn is_pivot_in_progress(&self, cluster_name: &str) -> bool {
-        self.agent_registry
-            .get(cluster_name)
-            .is_some_and(|a| matches!(a.state, AgentState::Pivoting))
     }
 
     fn is_pivot_complete(&self, cluster_name: &str) -> bool {
@@ -3512,34 +3480,17 @@ mod tests {
 
         #[test]
         fn pivot_action_complete_when_pivot_done() {
-            assert_eq!(
-                determine_pivot_action(true, false, false),
-                PivotAction::Complete
-            );
-        }
-
-        #[test]
-        fn pivot_action_wait_for_pivot_complete_when_in_progress() {
-            assert_eq!(
-                determine_pivot_action(false, true, true),
-                PivotAction::WaitForPivotComplete
-            );
+            assert_eq!(determine_pivot_action(true, false), PivotAction::Complete);
         }
 
         #[test]
         fn pivot_action_trigger_pivot_when_agent_connected() {
-            assert_eq!(
-                determine_pivot_action(false, false, true),
-                PivotAction::TriggerPivot
-            );
+            assert_eq!(determine_pivot_action(false, true), PivotAction::TriggerPivot);
         }
 
         #[test]
         fn pivot_action_wait_for_agent_when_nothing_ready() {
-            assert_eq!(
-                determine_pivot_action(false, false, false),
-                PivotAction::WaitForAgent
-            );
+            assert_eq!(determine_pivot_action(false, false), PivotAction::WaitForAgent);
         }
 
         // --- is_etcd_node / has_etcd_taint tests ---

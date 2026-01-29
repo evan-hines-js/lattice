@@ -32,7 +32,7 @@ pub use watch::{execute_watch, WatchRegistry};
 pub use lattice_proto::{
     agent_message, cell_command, AgentMessage, AgentReady, AgentState, BootstrapComplete,
     CellCommand, ClusterDeleting, ClusterHealth, Heartbeat, KubernetesRequest, KubernetesResponse,
-    PivotComplete, PivotPhase, StatusResponse,
+    StatusResponse,
 };
 
 // Re-export mTLS from infra

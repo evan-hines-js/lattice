@@ -2121,6 +2121,7 @@ dependencies = [
  "lattice-capi",
  "lattice-common",
  "lattice-infra",
+ "lattice-move",
  "lattice-proto",
  "prost-types",
  "reqwest",
@@ -2210,6 +2211,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-infra",
+ "lattice-move",
  "lattice-proto",
  "pem",
  "rstest",
@@ -2298,6 +2300,7 @@ dependencies = [
  "lattice-cell",
  "lattice-common",
  "lattice-infra",
+ "lattice-move",
  "lattice-proto",
  "minijinja",
  "mockall",
@@ -2383,6 +2386,29 @@ dependencies = [
  "tonic",
  "tracing",
  "x509-parser 0.16.0",
+]
+
+[[package]]
+name = "lattice-move"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-lc-rs",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-proto",
+ "mockall",
+ "rstest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -22,25 +22,20 @@ use tonic::transport::Endpoint;
 use tracing::{debug, error, info, warn};
 
 use crate::pivot::{
-    apply_distributed_resources, patch_kubeconfig_for_self_management, retry_with_backoff,
-    AgentPivotHandler, DistributableResources, RetryConfig,
+    apply_distributed_resources, patch_kubeconfig_for_self_management, DistributableResources,
 };
-use kube::api::{Api, Patch, PatchParams};
-use kube::Client;
 use lattice_capi::{
     copy_credentials_to_provider_namespace, ensure_capi_installed, CapiProviderConfig,
     ClusterctlInstaller,
 };
-use lattice_common::crd::{
-    CloudProvider, LatticeCluster, PivotPhase as CrdPivotPhase, ProviderType,
-};
+use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
 use lattice_common::{CsrRequest, CsrResponse};
 use lattice_infra::pki::AgentCertRequest;
 use lattice_proto::lattice_agent_client::LatticeAgentClient;
 use lattice_proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
-    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, KubernetesResponse, PivotComplete,
-    PivotPhase, StatusResponse,
+    BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, KubernetesResponse,
+    MoveCompleteAck, MoveObjectAck, MoveObjectError, StatusResponse, UidMapping,
 };
 
 use crate::watch::{execute_watch, WatchRegistry};
@@ -174,24 +169,6 @@ impl AgentClient {
             .unwrap_or_default()
     }
 }
-
-/// Get current pivot phase from LatticeCluster CRD
-///
-/// Used for crash recovery signaling and resuming interrupted pivots.
-/// Returns CrdPivotPhase::None on any error (k8s client, cluster not found, no status).
-async fn get_cluster_pivot_phase(cluster_name: &str) -> CrdPivotPhase {
-    let client = match Client::try_default().await {
-        Ok(c) => c,
-        Err(_) => return CrdPivotPhase::None,
-    };
-
-    let api: Api<LatticeCluster> = Api::all(client);
-    match api.get(cluster_name).await {
-        Ok(cluster) => cluster.status.map(|s| s.pivot_phase).unwrap_or_default(),
-        Err(_) => CrdPivotPhase::None,
-    }
-}
-
 impl AgentClient {
     /// Request a signed certificate from the cell
     ///
@@ -558,9 +535,6 @@ impl AgentClient {
             Err(_) => "unknown".to_string(),
         };
 
-        // Get current pivot phase for crash recovery signaling
-        let pivot_phase = get_cluster_pivot_phase(&self.config.cluster_name).await;
-
         let msg = AgentMessage {
             cluster_name: self.config.cluster_name.clone(),
             payload: Some(Payload::Ready(AgentReady {
@@ -568,7 +542,6 @@ impl AgentClient {
                 kubernetes_version: k8s_version,
                 state: (*self.agent_state.read().await).into(),
                 api_server_endpoint: Self::get_api_server_endpoint(),
-                pivot_phase: crd_to_proto_pivot_phase(&pivot_phase).into(),
             })),
         };
 
@@ -581,31 +554,6 @@ impl AgentClient {
             Some(tx) => tx.send(msg).await.map_err(|_| ClientError::ChannelClosed),
             None => Err(ClientError::NotConnected),
         }
-    }
-
-    /// Send pivot complete notification
-    pub async fn send_pivot_complete(
-        &self,
-        success: bool,
-        error_message: &str,
-        resources_imported: i32,
-    ) -> Result<(), ClientError> {
-        if success {
-            self.set_agent_state(AgentState::Ready).await;
-        } else {
-            self.set_agent_state(AgentState::Failed).await;
-        }
-
-        let msg = AgentMessage {
-            cluster_name: self.config.cluster_name.clone(),
-            payload: Some(Payload::PivotComplete(PivotComplete {
-                success,
-                error_message: error_message.to_string(),
-                resources_imported,
-            })),
-        };
-
-        self.send_message(msg).await
     }
 
     /// Send bootstrap complete notification
@@ -947,49 +895,6 @@ impl AgentClient {
                 // so ApplyManifestsCommand is only used for post-pivot manifests
                 // like LatticeCluster CRD and resource.
             }
-            Some(Command::PivotManifests(cmd)) => {
-                // Guard: Skip if already pivoting to prevent concurrent clusterctl processes
-                let current_state = *agent_state.read().await;
-                if current_state == AgentState::Pivoting {
-                    debug!(
-                        namespace = %cmd.target_namespace,
-                        "Ignoring pivot command - already pivoting"
-                    );
-                    return;
-                }
-
-                // Get current pivot phase to support resuming after crash/reconnect
-                let resume_from = get_cluster_pivot_phase(cluster_name).await;
-
-                info!(
-                    manifests = cmd.manifests.len(),
-                    cloud_providers = cmd.cloud_providers.len(),
-                    secrets_providers = cmd.secrets_providers.len(),
-                    secrets = cmd.secrets.len(),
-                    namespace = %cmd.target_namespace,
-                    ?resume_from,
-                    "pivot started"
-                );
-                *agent_state.write().await = AgentState::Pivoting;
-
-                let ctx = PivotContext {
-                    cluster_name: cmd.cluster_name.clone(),
-                    target_namespace: cmd.target_namespace.clone(),
-                    manifests: cmd.manifests.clone(),
-                    resources: DistributableResources {
-                        cloud_providers: cmd.cloud_providers.clone(),
-                        secrets_providers: cmd.secrets_providers.clone(),
-                        secrets: cmd.secrets.clone(),
-                    },
-                    resume_from,
-                    agent_state: agent_state.clone(),
-                    message_tx: message_tx.clone(),
-                };
-
-                tokio::spawn(async move {
-                    execute_pivot(ctx).await;
-                });
-            }
             Some(Command::StatusRequest(_)) => {
                 debug!("Received status request");
                 let current_state = *agent_state.read().await;
@@ -1115,6 +1020,167 @@ impl AgentClient {
                     }
                 });
             }
+            Some(Command::MoveBatch(batch)) => {
+                let request_id = command.command_id.clone();
+                let cluster_name_clone = cluster_name.to_string();
+                let message_tx = message_tx.clone();
+                let target_namespace = batch.target_namespace.clone();
+                let batch_index = batch.batch_index;
+                let total_batches = batch.total_batches;
+
+                // Convert proto objects to domain objects
+                let objects: Vec<lattice_move::MoveObjectInput> = batch
+                    .objects
+                    .iter()
+                    .map(|obj| lattice_move::MoveObjectInput {
+                        source_uid: obj.source_uid.clone(),
+                        manifest: obj.manifest.clone(),
+                        owners: obj.owners.iter().map(|o| lattice_move::SourceOwnerRefInput {
+                            source_uid: o.source_uid.clone(),
+                            api_version: o.api_version.clone(),
+                            kind: o.kind.clone(),
+                            name: o.name.clone(),
+                            controller: o.controller,
+                            block_owner_deletion: o.block_owner_deletion,
+                        }).collect(),
+                    })
+                    .collect();
+
+                info!(
+                    batch = %format!("{}/{}", batch_index + 1, total_batches),
+                    objects = objects.len(),
+                    namespace = %target_namespace,
+                    "Processing move batch"
+                );
+
+                tokio::spawn(async move {
+                    let client = match kube::Client::try_default().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!(error = %e, "Failed to create k8s client");
+                            send_batch_error(&message_tx, &cluster_name_clone, &request_id, &e.to_string()).await;
+                            return;
+                        }
+                    };
+
+                    let mut mover = lattice_move::AgentMover::new(client, &target_namespace);
+
+                    // Rebuild UID map from existing resources (idempotent - handles crash recovery)
+                    if let Err(e) = mover.rebuild_uid_map_from_resources().await {
+                        debug!(error = %e, "UID map rebuild found no existing resources");
+                    }
+
+                    // Ensure namespace exists
+                    if let Err(e) = mover.ensure_namespace().await {
+                        send_batch_error(&message_tx, &cluster_name_clone, &request_id, &e.to_string()).await;
+                        return;
+                    }
+
+                    // Apply batch (idempotent - handles already-exists)
+                    let (mappings, errors) = mover.apply_batch(&objects).await;
+
+                    // Send ack
+                    let ack = MoveObjectAck {
+                        request_id: request_id.clone(),
+                        mappings: mappings.into_iter().map(|(src, tgt)| UidMapping {
+                            source_uid: src,
+                            target_uid: tgt,
+                        }).collect(),
+                        errors: errors.into_iter().map(|e| MoveObjectError {
+                            source_uid: e.source_uid,
+                            message: e.message,
+                            retryable: e.retryable,
+                        }).collect(),
+                    };
+
+                    let msg = AgentMessage {
+                        cluster_name: cluster_name_clone,
+                        payload: Some(Payload::MoveAck(ack)),
+                    };
+                    if let Err(e) = message_tx.send(msg).await {
+                        error!(error = %e, "Failed to send move batch ack");
+                    }
+                });
+            }
+            Some(Command::MoveComplete(complete)) => {
+                let request_id = command.command_id.clone();
+                let agent_cluster_name = cluster_name.to_string();
+                let message_tx = message_tx.clone();
+                let capi_cluster_name = complete.cluster_name.clone();
+                let target_namespace = complete.target_namespace.clone();
+                let cloud_providers = complete.cloud_providers.clone();
+                let secrets_providers = complete.secrets_providers.clone();
+                let secrets = complete.secrets.clone();
+                let manifests = complete.manifests.clone();
+
+                info!(
+                    request_id = %request_id,
+                    cluster = %capi_cluster_name,
+                    namespace = %target_namespace,
+                    manifests = manifests.len(),
+                    "Processing move complete"
+                );
+
+                tokio::spawn(async move {
+                    let client = match kube::Client::try_default().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!(error = %e, "Failed to create k8s client");
+                            send_complete_error(&message_tx, &agent_cluster_name, &request_id, &e.to_string()).await;
+                            return;
+                        }
+                    };
+
+                    // Patch kubeconfig to use kubernetes.default.svc (avoids hairpinning)
+                    if let Err(e) = patch_kubeconfig_for_self_management(&capi_cluster_name, &target_namespace).await {
+                        warn!(error = %e, "Failed to patch kubeconfig for self-management");
+                    }
+
+                    let mover = lattice_move::AgentMover::new(client.clone(), &target_namespace);
+
+                    // Unpause resources
+                    if let Err(e) = mover.unpause_resources().await {
+                        warn!(error = %e, "Failed to unpause resources");
+                    }
+
+                    let resources_created = mover.resources_created() as i32;
+
+                    // Apply distributed resources
+                    let resources = DistributableResources {
+                        cloud_providers,
+                        secrets_providers,
+                        secrets,
+                    };
+                    if let Err(e) = apply_distributed_resources(&client, &resources).await {
+                        warn!(error = %e, "Failed to apply distributed resources");
+                    }
+
+                    // Apply additional manifests (e.g., CiliumNetworkPolicy)
+                    if !manifests.is_empty() {
+                        if let Err(e) = apply_manifests(&client, &manifests).await {
+                            warn!(error = %e, manifests = manifests.len(), "Failed to apply manifests");
+                        } else {
+                            info!(manifests = manifests.len(), "Applied post-pivot manifests");
+                        }
+                    }
+
+                    // Send success ack
+                    let ack = MoveCompleteAck {
+                        request_id: request_id.clone(),
+                        success: true,
+                        error: String::new(),
+                        resources_created,
+                    };
+
+                    let msg = AgentMessage {
+                        cluster_name: agent_cluster_name,
+                        payload: Some(Payload::MoveCompleteAck(ack)),
+                    };
+                    if let Err(e) = message_tx.send(msg).await {
+                        error!(error = %e, "Failed to send move complete ack");
+                    }
+                });
+            }
             None => {
                 warn!(command_id = %command.command_id, "Received command with no payload");
             }
@@ -1184,6 +1250,61 @@ impl Drop for AgentClient {
     }
 }
 
+/// Send batch error ack
+async fn send_batch_error(
+    tx: &mpsc::Sender<AgentMessage>,
+    cluster_name: &str,
+    request_id: &str,
+    error: &str,
+) {
+    let ack = MoveObjectAck {
+        request_id: request_id.to_string(),
+        mappings: vec![],
+        errors: vec![MoveObjectError {
+            source_uid: String::new(),
+            message: error.to_string(),
+            retryable: true,
+        }],
+    };
+    let msg = AgentMessage {
+        cluster_name: cluster_name.to_string(),
+        payload: Some(Payload::MoveAck(ack)),
+    };
+    let _ = tx.send(msg).await;
+}
+
+/// Send complete error ack
+async fn send_complete_error(
+    tx: &mpsc::Sender<AgentMessage>,
+    cluster_name: &str,
+    request_id: &str,
+    error: &str,
+) {
+    let ack = MoveCompleteAck {
+        request_id: request_id.to_string(),
+        success: false,
+        error: error.to_string(),
+        resources_created: 0,
+    };
+    let msg = AgentMessage {
+        cluster_name: cluster_name.to_string(),
+        payload: Some(Payload::MoveCompleteAck(ack)),
+    };
+    let _ = tx.send(msg).await;
+}
+
+/// Apply a list of manifests (bytes) using server-side apply
+async fn apply_manifests(_client: &kube::Client, manifests: &[Vec<u8>]) -> Result<(), String> {
+    for manifest_bytes in manifests {
+        let yaml = String::from_utf8(manifest_bytes.clone())
+            .map_err(|e| format!("Invalid UTF-8 in manifest: {}", e))?;
+        AgentClient::apply_manifest(&yaml)
+            .await
+            .map_err(|e| format!("Failed to apply manifest: {}", e))?;
+    }
+    Ok(())
+}
+
 /// Extract domain name from a URL for TLS verification
 fn extract_domain(url: &str) -> Result<String, String> {
     if url.is_empty() {
@@ -1205,223 +1326,6 @@ fn extract_domain(url: &str) -> Result<String, String> {
         .ok_or_else(|| format!("URL has no domain: {}", url))?;
 
     Ok(domain.to_string())
-}
-
-/// Update pivot phase in LatticeCluster status
-async fn update_pivot_phase(
-    client: &Client,
-    cluster_name: &str,
-    phase: CrdPivotPhase,
-) -> Result<(), String> {
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-    let patch = serde_json::json!({
-        "status": {
-            "pivotPhase": phase
-        }
-    });
-
-    api.patch_status(
-        cluster_name,
-        &PatchParams::apply("lattice-agent"),
-        &Patch::Merge(&patch),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    info!(cluster = %cluster_name, phase = ?phase, "Updated pivot phase");
-    Ok(())
-}
-
-/// Update unpivot phase in LatticeCluster status
-/// Convert CRD PivotPhase to proto PivotPhase
-fn crd_to_proto_pivot_phase(crd: &CrdPivotPhase) -> PivotPhase {
-    match crd {
-        CrdPivotPhase::None => PivotPhase::None,
-        CrdPivotPhase::Importing => PivotPhase::Importing,
-        CrdPivotPhase::PatchingKubeconfig => PivotPhase::PatchingKubeconfig,
-        CrdPivotPhase::ApplyingResources => PivotPhase::ApplyingResources,
-        CrdPivotPhase::Complete => PivotPhase::Complete,
-    }
-}
-
-/// Context for pivot execution
-struct PivotContext {
-    cluster_name: String,
-    target_namespace: String,
-    manifests: Vec<Vec<u8>>,
-    resources: DistributableResources,
-    resume_from: CrdPivotPhase,
-    agent_state: Arc<RwLock<AgentState>>,
-    message_tx: mpsc::Sender<AgentMessage>,
-}
-
-/// Execute pivot with crash-resilient state machine
-///
-/// Steps:
-/// 1. Import CAPI manifests via clusterctl move
-/// 2. Patch kubeconfig for self-management
-/// 3. Apply distributed resources (cloud providers, secrets)
-/// 4. Mark complete
-///
-/// Each step updates pivot_phase in LatticeCluster status, allowing recovery on crash.
-/// On reconnect after crash, parent re-sends PivotManifests and we resume from current phase.
-async fn execute_pivot(ctx: PivotContext) {
-    let cluster_name = &ctx.cluster_name;
-    let target_namespace = &ctx.target_namespace;
-    let manifests = &ctx.manifests;
-    let resources = &ctx.resources;
-    let resume_from = ctx.resume_from.clone();
-    let message_tx = &ctx.message_tx;
-    let agent_state = &ctx.agent_state;
-
-    let client = match Client::try_default().await {
-        Ok(c) => c,
-        Err(e) => {
-            error!(error = %e, "Failed to create k8s client for pivot");
-            send_pivot_failed(message_tx, cluster_name, agent_state, e.to_string(), 0).await;
-            return;
-        }
-    };
-
-    // Step 1: Import CAPI manifests (unless resuming from later phase)
-    // Set phase to Importing before starting
-    if resume_from == CrdPivotPhase::None {
-        if let Err(e) = update_pivot_phase(&client, cluster_name, CrdPivotPhase::Importing).await {
-            warn!(error = %e, "Failed to update pivot phase (continuing)");
-        }
-    }
-    let resource_count = if resume_from == CrdPivotPhase::None
-        || resume_from == CrdPivotPhase::Importing
-    {
-        let handler = AgentPivotHandler::new().with_capi_namespace(target_namespace);
-        match handler.import_capi_manifests(manifests, cluster_name).await {
-            Ok(count) => {
-                info!(resources = count, "CAPI resources imported successfully");
-                if let Err(e) =
-                    update_pivot_phase(&client, cluster_name, CrdPivotPhase::PatchingKubeconfig)
-                        .await
-                {
-                    warn!(error = %e, "Failed to update pivot phase (continuing)");
-                }
-                count
-            }
-            Err(e) => {
-                error!(error = %e, "Pivot failed: CAPI import failed");
-                send_pivot_failed(message_tx, cluster_name, agent_state, e.to_string(), 0).await;
-                return;
-            }
-        }
-    } else {
-        0 // Already imported, count unknown but not critical
-    };
-
-    // Step 3: Patch kubeconfig (unless resuming from later phase)
-    if resume_from != CrdPivotPhase::ApplyingResources && resume_from != CrdPivotPhase::Complete {
-        let patch_result = retry_with_backoff(
-            &RetryConfig::default(),
-            "patch_kubeconfig_for_self_management",
-            || {
-                let cn = cluster_name.to_string();
-                let ns = target_namespace.to_string();
-                async move { patch_kubeconfig_for_self_management(&cn, &ns).await }
-            },
-        )
-        .await;
-
-        if let Err(e) = patch_result {
-            error!(error = %e, "Failed to patch kubeconfig for self-management");
-            send_pivot_failed(
-                message_tx,
-                cluster_name,
-                agent_state,
-                format!("kubeconfig patch failed: {}", e),
-                resource_count as i32,
-            )
-            .await;
-            return;
-        }
-        info!("Kubeconfig patched for self-management");
-        if let Err(e) =
-            update_pivot_phase(&client, cluster_name, CrdPivotPhase::ApplyingResources).await
-        {
-            warn!(error = %e, "Failed to update pivot phase (continuing)");
-        }
-    }
-
-    // Step 4: Apply distributed resources (non-fatal, can recover via SyncResources)
-    if resume_from != CrdPivotPhase::Complete && !resources.is_empty() {
-        if let Err(e) = apply_distributed_resources(&client, resources).await {
-            warn!(error = %e, "Failed to apply distributed resources (non-fatal, will sync later)");
-        } else {
-            info!(
-                cloud_providers = resources.cloud_providers.len(),
-                secrets_providers = resources.secrets_providers.len(),
-                secrets = resources.secrets.len(),
-                "Applied distributed resources"
-            );
-        }
-    }
-
-    // Step 5: Mark complete
-    if let Err(e) = update_pivot_phase(&client, cluster_name, CrdPivotPhase::Complete).await {
-        warn!(error = %e, "Failed to update pivot phase to Complete (continuing)");
-    }
-
-    // Also set pivot_complete = true
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-    let patch = serde_json::json!({
-        "status": {
-            "pivotComplete": true,
-            "pivotPhase": "complete"
-        }
-    });
-    if let Err(e) = api
-        .patch_status(
-            cluster_name,
-            &PatchParams::apply("lattice-agent"),
-            &Patch::Merge(&patch),
-        )
-        .await
-    {
-        warn!(error = %e, "Failed to set pivot_complete (continuing)");
-    }
-
-    // Success
-    info!(
-        resources_imported = resource_count,
-        "Pivot complete, cluster is now self-managing"
-    );
-    *agent_state.write().await = AgentState::Ready;
-
-    let msg = AgentMessage {
-        cluster_name: cluster_name.to_string(),
-        payload: Some(Payload::PivotComplete(PivotComplete {
-            success: true,
-            error_message: String::new(),
-            resources_imported: resource_count as i32,
-        })),
-    };
-    let _ = message_tx.send(msg).await;
-}
-
-/// Helper to send pivot failure message
-async fn send_pivot_failed(
-    message_tx: &mpsc::Sender<AgentMessage>,
-    cluster_name: &str,
-    agent_state: &Arc<RwLock<AgentState>>,
-    error: String,
-    resources_imported: i32,
-) {
-    *agent_state.write().await = AgentState::Failed;
-    let msg = AgentMessage {
-        cluster_name: cluster_name.to_string(),
-        payload: Some(Payload::PivotComplete(PivotComplete {
-            success: false,
-            error_message: error,
-            resources_imported,
-        })),
-    };
-    let _ = message_tx.send(msg).await;
 }
 
 #[cfg(test)]
@@ -1663,28 +1567,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_pivot_complete_success_not_connected() {
-        let config = AgentClientConfig::default();
-        let client = AgentClient::new(config);
-
-        let result = client.send_pivot_complete(true, "", 5).await;
-        assert_eq!(result, Err(ClientError::NotConnected));
-        // State should change to Ready on success
-        assert_eq!(client.agent_state().await, AgentState::Ready);
-    }
-
-    #[tokio::test]
-    async fn test_send_pivot_complete_failure_not_connected() {
-        let config = AgentClientConfig::default();
-        let client = AgentClient::new(config);
-
-        let result = client.send_pivot_complete(false, "timeout", 0).await;
-        assert_eq!(result, Err(ClientError::NotConnected));
-        // State should change to Failed on failure
-        assert_eq!(client.agent_state().await, AgentState::Failed);
-    }
-
-    #[tokio::test]
     async fn test_send_bootstrap_complete_not_connected() {
         let config = AgentClientConfig::default();
         let client = AgentClient::new(config);
@@ -1788,32 +1670,6 @@ mod tests {
         // Verify message was received
         let received = rx.recv().await.expect("message should be received");
         assert_eq!(received.cluster_name, "test-cluster");
-    }
-
-    #[tokio::test]
-    async fn test_send_pivot_complete_with_channel() {
-        let config = AgentClientConfig {
-            cluster_name: "test-cluster".to_string(),
-            ..Default::default()
-        };
-        let mut client = AgentClient::new(config);
-
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-        client.message_tx = Some(tx);
-
-        let result = client.send_pivot_complete(true, "", 10).await;
-        assert!(result.is_ok());
-        assert_eq!(client.agent_state().await, AgentState::Ready);
-
-        let received = rx.recv().await.expect("message should be received");
-        match received.payload {
-            Some(Payload::PivotComplete(pc)) => {
-                assert!(pc.success);
-                assert_eq!(pc.resources_imported, 10);
-                assert!(pc.error_message.is_empty());
-            }
-            _ => panic!("Expected PivotComplete payload"),
-        }
     }
 
     #[tokio::test]
@@ -1947,83 +1803,6 @@ mod tests {
     // Story Tests: Message Sending When Connected
     // ==========================================================================
 
-    /// Story: When pivot completes successfully, agent becomes ready
-    ///
-    /// After CAPI resources are successfully imported, the agent sends
-    /// PivotComplete and transitions to Ready state.
-    #[tokio::test]
-    async fn story_successful_pivot_makes_agent_ready() {
-        let config = AgentClientConfig {
-            cluster_name: "pivot-success".to_string(),
-            ..Default::default()
-        };
-        let mut client = AgentClient::new(config);
-
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-        client.message_tx = Some(tx);
-
-        // Start in pivoting state
-        client.set_agent_state(AgentState::Pivoting).await;
-
-        // Pivot completes successfully with 15 resources imported
-        let result = client.send_pivot_complete(true, "", 15).await;
-        assert!(result.is_ok());
-
-        // Agent should now be Ready
-        assert_eq!(client.agent_state().await, AgentState::Ready);
-
-        // Verify the message
-        let msg = rx.recv().await.expect("message should be received");
-        match msg.payload {
-            Some(Payload::PivotComplete(pc)) => {
-                assert!(pc.success);
-                assert_eq!(pc.resources_imported, 15);
-                assert!(pc.error_message.is_empty());
-            }
-            _ => panic!("Expected PivotComplete payload"),
-        }
-    }
-
-    /// Story: When pivot fails, agent enters failed state with error details
-    #[tokio::test]
-    async fn story_failed_pivot_puts_agent_in_failed_state() {
-        let config = AgentClientConfig {
-            cluster_name: "pivot-failure".to_string(),
-            ..Default::default()
-        };
-        let mut client = AgentClient::new(config);
-
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-        client.message_tx = Some(tx);
-
-        // Start in pivoting state
-        client.set_agent_state(AgentState::Pivoting).await;
-
-        // Pivot fails with an error
-        let result = client
-            .send_pivot_complete(
-                false,
-                "CAPI resources could not be imported: timeout waiting for CRDs",
-                0,
-            )
-            .await;
-        assert!(result.is_ok());
-
-        // Agent should be in Failed state
-        assert_eq!(client.agent_state().await, AgentState::Failed);
-
-        // Verify error message is captured
-        let msg = rx.recv().await.expect("message should be received");
-        match msg.payload {
-            Some(Payload::PivotComplete(pc)) => {
-                assert!(!pc.success);
-                assert_eq!(pc.resources_imported, 0);
-                assert!(pc.error_message.contains("timeout waiting for CRDs"));
-            }
-            _ => panic!("Expected PivotComplete payload"),
-        }
-    }
-
     /// Story: Agent sends bootstrap complete after CAPI providers are installed
     #[tokio::test]
     async fn story_agent_reports_bootstrap_completion() {
@@ -2092,11 +1871,6 @@ mod tests {
         let client = AgentClient::new(config);
 
         assert_eq!(
-            client.send_pivot_complete(true, "", 0).await,
-            Err(ClientError::NotConnected)
-        );
-
-        assert_eq!(
             client.send_bootstrap_complete(true, vec![]).await,
             Err(ClientError::NotConnected)
         );
@@ -2117,7 +1891,7 @@ mod tests {
         drop(rx);
 
         assert_eq!(
-            client.send_pivot_complete(true, "", 0).await,
+            client.send_bootstrap_complete(true, vec![]).await,
             Err(ClientError::ChannelClosed)
         );
     }
@@ -2438,101 +2212,6 @@ mod tests {
     }
 
     // ==========================================================================
-    // Integration Tests: Message Flow
-    // ==========================================================================
-
-    /// Integration test: Full message flow through channel
-    #[tokio::test]
-    async fn integration_multiple_messages_through_channel() {
-        let config = AgentClientConfig {
-            cluster_name: "integration-test".to_string(),
-            ..Default::default()
-        };
-        let mut client = AgentClient::new(config);
-
-        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
-        client.message_tx = Some(tx);
-
-        // Send multiple messages in sequence
-        client
-            .send_bootstrap_complete(true, vec!["docker".to_string()])
-            .await
-            .expect("send_bootstrap_complete should succeed");
-        client
-            .send_pivot_complete(true, "", 5)
-            .await
-            .expect("send_pivot_complete should succeed");
-
-        // Verify all messages received in order
-        let msg1 = rx.recv().await.expect("first message should be received");
-        assert!(matches!(msg1.payload, Some(Payload::BootstrapComplete(_))));
-
-        let msg2 = rx.recv().await.expect("second message should be received");
-        assert!(matches!(msg2.payload, Some(Payload::PivotComplete(_))));
-    }
-
-    /// Integration test: State transitions during typical lifecycle
-    #[tokio::test]
-    async fn integration_complete_lifecycle_state_transitions() {
-        let config = AgentClientConfig {
-            cluster_name: "lifecycle-test".to_string(),
-            ..Default::default()
-        };
-        let mut client = AgentClient::new(config);
-
-        let (tx, _rx) = mpsc::channel::<AgentMessage>(32);
-        client.message_tx = Some(tx);
-
-        // 1. Start in Provisioning
-        assert_eq!(client.agent_state().await, AgentState::Provisioning);
-
-        // 2. Bootstrap complete (still provisioning until pivot)
-        client
-            .send_bootstrap_complete(true, vec!["docker".to_string()])
-            .await
-            .expect("send_bootstrap_complete should succeed");
-        assert_eq!(client.agent_state().await, AgentState::Provisioning);
-
-        // 3. Pivot starts (set state directly as handle_command does)
-        client.set_agent_state(AgentState::Pivoting).await;
-        assert_eq!(client.agent_state().await, AgentState::Pivoting);
-
-        // 4. Pivot completes - transitions to Ready
-        client
-            .send_pivot_complete(true, "", 10)
-            .await
-            .expect("send_pivot_complete should succeed");
-        assert_eq!(client.agent_state().await, AgentState::Ready);
-    }
-
-    /// Integration test: Error path lifecycle
-    #[tokio::test]
-    async fn integration_error_path_lifecycle() {
-        let config = AgentClientConfig {
-            cluster_name: "error-lifecycle".to_string(),
-            ..Default::default()
-        };
-        let mut client = AgentClient::new(config);
-
-        let (tx, _rx) = mpsc::channel::<AgentMessage>(32);
-        client.message_tx = Some(tx);
-
-        // 1. Start in Provisioning
-        assert_eq!(client.agent_state().await, AgentState::Provisioning);
-
-        // 2. Pivot starts
-        client.set_agent_state(AgentState::Pivoting).await;
-        assert_eq!(client.agent_state().await, AgentState::Pivoting);
-
-        // 3. Pivot fails - transitions to Failed
-        client
-            .send_pivot_complete(false, "CAPI CRDs not installed", 0)
-            .await
-            .expect("send_pivot_complete should succeed");
-        assert_eq!(client.agent_state().await, AgentState::Failed);
-    }
-
-    // ==========================================================================
     // Story Tests: AgentReady Message Format
     // ==========================================================================
 
@@ -2556,7 +2235,6 @@ mod tests {
                 kubernetes_version: "unknown".to_string(),
                 state: AgentState::Provisioning.into(),
                 api_server_endpoint: String::new(),
-                pivot_phase: PivotPhase::None.into(),
             })),
         };
 
@@ -2590,8 +2268,7 @@ mod tests {
                     kubernetes_version: "v1.28.0".to_string(),
                     state: state.into(),
                     api_server_endpoint: "https://127.0.0.1:6443".to_string(),
-                    pivot_phase: PivotPhase::None.into(),
-                })),
+                    })),
             };
 
             match msg.payload {

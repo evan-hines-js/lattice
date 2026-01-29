@@ -15,9 +15,7 @@ pub use cloud_provider::{
     AwsProviderConfig, CloudProvider, CloudProviderPhase, CloudProviderSpec, CloudProviderStatus,
     CloudProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
 };
-pub use cluster::{
-    LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, PivotPhase, WorkerPoolStatus,
-};
+pub use cluster::{LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, WorkerPoolStatus};
 pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,

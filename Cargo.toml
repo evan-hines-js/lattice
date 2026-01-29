@@ -14,6 +14,7 @@ members = [
     "crates/lattice-cedar",
     "crates/lattice-operator",
     "crates/lattice-cli",
+    "crates/lattice-move",
 ]
 
 [workspace.package]
@@ -34,6 +35,7 @@ lattice-capi = { path = "crates/lattice-capi" }
 lattice-cell = { path = "crates/lattice-cell" }
 lattice-secrets-provider = { path = "crates/lattice-secrets-provider" }
 lattice-cedar = { path = "crates/lattice-cedar" }
+lattice-move = { path = "crates/lattice-move" }
 
 # Kubernetes
 kube = { version = "0.98", features = ["runtime", "derive", "client", "rustls-tls", "admission"] }
