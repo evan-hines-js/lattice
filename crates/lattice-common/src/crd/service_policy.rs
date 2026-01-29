@@ -122,7 +122,7 @@ impl NamespaceSelector {
 
     /// Check if this selector is empty (matches everything)
     pub fn is_empty(&self) -> bool {
-        self.match_labels.as_ref().map_or(true, |m| m.is_empty())
+        self.match_labels.as_ref().is_none_or(|m| m.is_empty())
             && self.match_expressions.is_empty()
     }
 }
@@ -204,12 +204,12 @@ impl ServiceSelector {
 
     /// Check if this selector is empty (matches all services in the namespace)
     pub fn is_empty(&self) -> bool {
-        self.match_labels.as_ref().map_or(true, |m| m.is_empty())
+        self.match_labels.as_ref().is_none_or(|m| m.is_empty())
             && self.match_expressions.is_empty()
             && self
                 .namespace_selector
                 .as_ref()
-                .map_or(true, |ns| ns.is_empty())
+                .is_none_or(|ns| ns.is_empty())
     }
 }
 
