@@ -1,5 +1,6 @@
 //! End-to-end tests for Lattice CLI installation
 
+#[cfg(feature = "provider-e2e")]
 mod chaos;
 mod helpers;
 mod media_server_e2e;
