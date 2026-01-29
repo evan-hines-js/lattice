@@ -1328,9 +1328,15 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                             client.clone(),
                         )))
                     } else {
+                        warn!("parent_servers not running, skipping pivot");
                         None
                     }
                 } else {
+                    warn!(
+                        parent_servers = ctx.parent_servers.is_some(),
+                        client = ctx.client.is_some(),
+                        "missing parent_servers or client, skipping pivot"
+                    );
                     None
                 };
 
