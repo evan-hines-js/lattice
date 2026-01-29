@@ -20,7 +20,7 @@ pub use cilium::{
     cilium_version, generate_cilium_manifests, generate_default_deny,
     generate_operator_network_policy, generate_waypoint_egress_policy, generate_ztunnel_allowlist,
 };
-pub use istio::{IstioConfig, IstioReconciler};
+pub use istio::{IstioConfig, IstioReconciler, CEDAR_EXTAUTH_PORT};
 
 /// Configuration for infrastructure manifest generation
 #[derive(Debug, Clone)]
@@ -33,6 +33,8 @@ pub struct InfrastructureConfig {
     pub cluster_name: String,
     /// Skip Cilium policies (true for kind/bootstrap clusters without Cilium)
     pub skip_cilium_policies: bool,
+    /// Enable Cedar ExtAuth integration with Istio
+    pub cedar_enabled: bool,
 }
 
 /// Generate core infrastructure manifests (Istio, Gateway API)
@@ -44,11 +46,16 @@ pub struct InfrastructureConfig {
 /// # Arguments
 /// * `cluster_name` - Cluster name for trust domain (lattice.{cluster}.local)
 /// * `skip_cilium_policies` - Skip Cilium policies (true for kind/bootstrap clusters)
-pub async fn generate_core(cluster_name: &str, skip_cilium_policies: bool) -> Vec<String> {
+/// * `cedar_enabled` - Enable Cedar ExtAuth integration with Istio
+pub async fn generate_core(
+    cluster_name: &str,
+    skip_cilium_policies: bool,
+    cedar_enabled: bool,
+) -> Vec<String> {
     let mut manifests = Vec::new();
 
     // Istio ambient
-    manifests.extend(generate_istio(cluster_name, skip_cilium_policies).await);
+    manifests.extend(generate_istio(cluster_name, skip_cilium_policies, cedar_enabled).await);
 
     // Gateway API CRDs (required for Istio Gateway and waypoints)
     if let Ok(gw_api) = generate_gateway_api_crds() {
@@ -86,7 +93,14 @@ pub async fn generate_all(config: &InfrastructureConfig) -> Vec<String> {
     }
 
     // Core infrastructure (Istio, Gateway API)
-    manifests.extend(generate_core(&config.cluster_name, config.skip_cilium_policies).await);
+    manifests.extend(
+        generate_core(
+            &config.cluster_name,
+            config.skip_cilium_policies,
+            config.cedar_enabled,
+        )
+        .await,
+    );
 
     info!(
         total = manifests.len(),
@@ -176,10 +190,15 @@ pub async fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String
 /// # Arguments
 /// * `cluster_name` - Cluster name for trust domain (lattice.{cluster}.local)
 /// * `skip_cilium_policies` - Skip Cilium policies (true for kind/bootstrap clusters)
-pub async fn generate_istio(cluster_name: &str, skip_cilium_policies: bool) -> Vec<String> {
+/// * `cedar_enabled` - Enable Cedar ExtAuth integration with Istio
+pub async fn generate_istio(
+    cluster_name: &str,
+    skip_cilium_policies: bool,
+    cedar_enabled: bool,
+) -> Vec<String> {
     let mut manifests = vec![namespace_yaml("istio-system")];
 
-    let reconciler = IstioReconciler::new(cluster_name);
+    let reconciler = IstioReconciler::with_cedar(cluster_name, cedar_enabled);
     if let Ok(istio) = reconciler.manifests().await {
         manifests.extend(istio.iter().cloned());
     }
@@ -189,6 +208,11 @@ pub async fn generate_istio(cluster_name: &str, skip_cilium_policies: bool) -> V
     manifests.push(IstioReconciler::generate_default_deny());
     manifests.push(IstioReconciler::generate_waypoint_default_deny());
     manifests.push(IstioReconciler::generate_operator_allow_policy());
+
+    // Cedar ExtAuth policy (when enabled)
+    if cedar_enabled {
+        manifests.push(IstioReconciler::generate_cedar_extauth_policy());
+    }
 
     // Cilium policies (skip on kind/bootstrap clusters)
     if !skip_cilium_policies {

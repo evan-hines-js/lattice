@@ -115,11 +115,12 @@ async fn run_controller(
 
     // Install CRDs and infrastructure
     ensure_crds_installed(&client).await?;
-    ensure_infrastructure(&client).await?;
+    ensure_infrastructure(&client, enable_cedar_authz).await?;
     wait_for_api_ready(&client).await?;
 
     // Create cell servers
-    let parent_servers = Arc::new(ParentServers::new(ParentConfig::default(), &client).await?);
+    let parent_config = ParentConfig::with_cedar(enable_cedar_authz);
+    let parent_servers = Arc::new(ParentServers::new(parent_config, &client).await?);
 
     // Get cluster identity from environment
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
