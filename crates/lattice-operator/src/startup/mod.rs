@@ -3,7 +3,6 @@
 //! This module contains all startup and initialization logic extracted from main.rs.
 
 mod ca_rotation;
-mod cedar;
 mod cell;
 mod crds;
 mod infrastructure;
@@ -11,7 +10,6 @@ mod manifests;
 mod recovery;
 
 pub use ca_rotation::start_ca_rotation;
-pub use cedar::start_cedar_server;
 pub use cell::{discover_cell_host, ensure_cell_service_exists, get_cell_server_sans};
 pub use crds::ensure_crds_installed;
 pub use infrastructure::ensure_infrastructure;

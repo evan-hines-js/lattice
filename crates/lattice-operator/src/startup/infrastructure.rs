@@ -21,11 +21,7 @@ use super::manifests::apply_manifests;
 /// IMPORTANT: Uses the SAME generate_all() function as the bootstrap webhook.
 /// This guarantees upgrades work by changing Lattice version - on restart,
 /// the operator re-applies identical infrastructure manifests.
-///
-/// # Arguments
-/// * `client` - Kubernetes client
-/// * `cedar_enabled` - Enable Cedar ExtAuth integration with Istio
-pub async fn ensure_infrastructure(client: &Client, cedar_enabled: bool) -> anyhow::Result<()> {
+pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
     let is_bootstrap_cluster = std::env::var("LATTICE_ROOT_INSTALL").is_ok()
         || std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
             .map(|v| v == "true" || v == "1")
@@ -33,7 +29,6 @@ pub async fn ensure_infrastructure(client: &Client, cedar_enabled: bool) -> anyh
 
     tracing::info!(
         is_bootstrap_cluster,
-        cedar_enabled,
         "Applying infrastructure manifests (server-side apply)..."
     );
 
@@ -41,7 +36,7 @@ pub async fn ensure_infrastructure(client: &Client, cedar_enabled: bool) -> anyh
         // Bootstrap cluster (KIND): Use generate_core() + clusterctl init
         // This is a temporary cluster that doesn't need full self-management infra
         // Use "bootstrap" as the cluster name for the trust domain
-        let manifests = bootstrap::generate_core("bootstrap", true, cedar_enabled).await;
+        let manifests = bootstrap::generate_core("bootstrap", true).await;
         tracing::info!(count = manifests.len(), "applying core infrastructure");
         apply_manifests(client, &manifests).await?;
 
@@ -78,7 +73,6 @@ pub async fn ensure_infrastructure(client: &Client, cedar_enabled: bool) -> anyh
             bootstrap,
             cluster_name,
             skip_cilium_policies: false,
-            cedar_enabled,
         };
 
         let manifests = bootstrap::generate_all(&config).await;

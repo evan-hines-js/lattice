@@ -1,20 +1,7 @@
 //! LatticeServicePolicy Custom Resource Definition
 //!
-//! The LatticeServicePolicy CRD enables organization-wide Cedar authorization policies
-//! that apply to services via label selectors. This creates a two-tier policy model:
-//!
-//! 1. **LatticeServicePolicy** (selector-based, ~5-20 policies per cluster)
-//! 2. **LatticeService.authorization** (inline, service-specific)
-//!
-//! ## Evaluation Order
-//!
-//! 1. All matching LatticeServicePolicy `forbid` rules -> if ANY matches, DENY
-//! 2. LatticeService embedded Cedar policy -> if permit matches, ALLOW
-//! 3. All matching LatticeServicePolicy `permit` rules -> if ANY matches, ALLOW
-//! 4. Default: DENY
-//!
-//! **Key principle:** `forbid` rules from any matching policy are "sticky" - they
-//! cannot be overridden by service-level policies.
+//! The LatticeServicePolicy CRD enables organization-wide policies that apply
+//! to services via label selectors.
 
 use std::collections::BTreeMap;
 
@@ -22,7 +9,6 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::service::AuthorizationConfig;
 use super::types::Condition;
 
 /// Operator for label selector requirements
@@ -268,36 +254,7 @@ pub struct LatticeServicePolicyStatus {
 
 /// Specification for a LatticeServicePolicy
 ///
-/// LatticeServicePolicy applies Cedar authorization policies to services
-/// matching its selector. This enables organization-wide authorization
-/// baselines that combine with service-level policies.
-///
-/// ## Example
-///
-/// ```yaml
-/// apiVersion: lattice.dev/v1alpha1
-/// kind: LatticeServicePolicy
-/// metadata:
-///   name: pci-compliance
-///   namespace: lattice-system
-/// spec:
-///   selector:
-///     matchLabels:
-///       environment: production
-///     matchExpressions:
-///       - key: data-tier
-///         operator: In
-///         values: [critical, sensitive]
-///     namespaceSelector:
-///       matchLabels:
-///         compliance: pci
-///   authorization:
-///     cedar:
-///       policies: |
-///         forbid(principal, action, resource)
-///         when { !context.authenticated };
-///   description: "Require authentication for PCI-compliant production services"
-/// ```
+/// LatticeServicePolicy applies policies to services matching its selector.
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "lattice.dev",
@@ -318,13 +275,6 @@ pub struct LatticeServicePolicySpec {
     /// An empty selector `{}` matches all services (within namespace constraints).
     #[serde(default)]
     pub selector: ServiceSelector,
-
-    /// Authorization configuration (OIDC + Cedar policies)
-    ///
-    /// The Cedar policies in this configuration are applied to all matching services.
-    /// `forbid` rules take precedence and cannot be overridden by service-level policies.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authorization: Option<AuthorizationConfig>,
 
     /// Human-readable description of this policy's purpose
     #[serde(default, skip_serializing_if = "Option::is_none")]

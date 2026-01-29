@@ -79,9 +79,7 @@ use super::helpers::{
 // Media server test disabled pending investigation
 #[allow(unused_imports)]
 use super::media_server_e2e::{cleanup_media_server_test, run_media_server_test};
-use super::mesh_tests::{
-    cleanup_all_mesh_tests, run_cedar_authz_test, run_mesh_test, run_random_mesh_test,
-};
+use super::mesh_tests::{cleanup_all_mesh_tests, run_mesh_test, run_random_mesh_test};
 use super::providers::InfraProvider;
 
 // =============================================================================
@@ -221,7 +219,6 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
         true, // keep_bootstrap_on_failure
         registry_credentials,
         None, // bootstrap_override
-        true, // enable_cedar_authz
     )
     .map_err(|e| format!("Failed to create installer: {}", e))?;
     installer
@@ -321,15 +318,7 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     verify_cluster_capi_resources(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME).await?;
     watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 1).await?;
 
-    // Run Cedar ExtAuth test BEFORE chaos starts - it requires operator availability
-    // Cedar authorization depends on the operator's ExtAuth server being reachable
-    if mesh_test_enabled() {
-        info!("[Cedar] Running Cedar ExtAuth test (before chaos)...");
-        run_cedar_authz_test(&workload_kubeconfig_path).await?;
-        info!("[Cedar] Cedar ExtAuth test passed!");
-    }
-
-    // Add workload to chaos targets now that Cedar test is complete
+    // Add workload to chaos targets
     chaos_targets.add(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path);
 
     // =========================================================================
@@ -340,7 +329,6 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
 
     // Start mesh tests in background (runs on workload cluster, doesn't need workload2)
-    // Note: Cedar test already ran above (requires operator, can't run under chaos)
     let mesh_handle = if mesh_test_enabled() {
         let kubeconfig = workload_kubeconfig_path.clone();
         Some(tokio::spawn(async move {

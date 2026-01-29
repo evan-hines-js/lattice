@@ -216,7 +216,10 @@ impl<S: MoveCommandSender> CellMover<S> {
             "Starting distributed move"
         );
 
-        // Step 1: Discover and build graph
+        // Step 1: Pause source resources FIRST (so objects are captured with paused=true)
+        self.pause_source().await?;
+
+        // Step 2: Discover and build graph (now includes paused state)
         self.discover_and_build_graph().await?;
 
         let graph = self.graph.as_ref().ok_or_else(|| {
@@ -224,16 +227,15 @@ impl<S: MoveCommandSender> CellMover<S> {
         })?;
 
         if graph.is_empty() {
+            // Unpause before returning error
+            let _ = self.unpause_source().await;
             return Err(MoveError::Discovery("no objects to move".to_string()));
         }
 
-        // Step 2: Compute move sequence
+        // Step 4: Compute move sequence
         self.compute_sequence()?;
 
-        // Step 3: Pause source resources
-        self.pause_source().await?;
-
-        // Step 4: Stream batches to agent
+        // Step 5: Stream batches to agent
         let stream_result = self.stream_batches().await;
 
         // If streaming failed, unpause source and return error
@@ -243,7 +245,7 @@ impl<S: MoveCommandSender> CellMover<S> {
             return Err(e);
         }
 
-        // Step 5: Finalize (agent unpause)
+        // Step 6: Finalize (agent unpause)
         let complete_result = self.finalize().await?;
 
         if !complete_result.success {
@@ -252,7 +254,7 @@ impl<S: MoveCommandSender> CellMover<S> {
             return Err(MoveError::AgentCommunication(complete_result.error));
         }
 
-        // Step 6: Delete source resources
+        // Step 7: Delete source resources
         let deleted = self.delete_source().await?;
 
         let result = MoveResult {

@@ -83,10 +83,6 @@ pub struct InstallArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Enable Cedar ExtAuth for authorization
-    #[arg(long)]
-    pub enable_cedar_authz: bool,
-
     /// Write kubeconfig to this path after installation
     #[arg(long)]
     pub kubeconfig_out: Option<PathBuf>,
@@ -111,7 +107,6 @@ pub struct Installer {
     image: String,
     keep_bootstrap_on_failure: bool,
     registry_credentials: Option<String>,
-    enable_cedar_authz: bool,
 }
 
 /// Fixed bootstrap cluster name - concurrent installs are not supported
@@ -125,7 +120,6 @@ impl Installer {
         keep_bootstrap_on_failure: bool,
         registry_credentials: Option<String>,
         bootstrap_override: Option<BootstrapProvider>,
-        enable_cedar_authz: bool,
     ) -> Result<Self> {
         let mut cluster: LatticeCluster = serde_yaml::from_str(&cluster_yaml)?;
 
@@ -146,7 +140,6 @@ impl Installer {
             image,
             keep_bootstrap_on_failure,
             registry_credentials,
-            enable_cedar_authz,
         })
     }
 
@@ -164,7 +157,6 @@ impl Installer {
             args.keep_bootstrap_on_failure,
             registry_credentials,
             args.bootstrap.clone(),
-            args.enable_cedar_authz,
         )
     }
 
@@ -348,7 +340,6 @@ impl Installer {
                 self.registry_credentials.as_deref(),
                 Some("lattice-installer"),
                 None,
-                self.enable_cedar_authz,
             )
             .await;
 
@@ -447,7 +438,6 @@ impl Installer {
                 .bootstrap
                 .needs_fips_relax(),
             autoscaling_enabled,
-            cedar_enabled: self.enable_cedar_authz,
         };
 
         let all_manifests = generate_all_manifests(&generator, &config).await;

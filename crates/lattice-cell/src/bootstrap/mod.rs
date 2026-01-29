@@ -207,7 +207,6 @@ pub trait ManifestGenerator: Send + Sync {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
-        cedar_enabled: bool,
     ) -> Vec<String>;
 }
 
@@ -241,8 +240,6 @@ pub struct ManifestConfig<'a> {
     /// Whether cluster has autoscaling-enabled pools (min/max set)
     /// When true, deploys the CAPI cluster-autoscaler
     pub autoscaling_enabled: bool,
-    /// Enable Cedar ExtAuth for authorization
-    pub cedar_enabled: bool,
 }
 
 /// Generate all bootstrap manifests including provider-specific addons
@@ -268,7 +265,6 @@ pub async fn generate_all_manifests<G: ManifestGenerator>(
             config.registry_credentials,
             config.cluster_name,
             config.provider,
-            config.cedar_enabled,
         )
         .await;
 
@@ -424,14 +420,12 @@ impl DefaultManifestGenerator {
     /// - LATTICE_CLUSTER_NAME: So controller knows which cluster it's on
     /// - LATTICE_PROVIDER: So agent knows which infrastructure provider to install
     /// - LATTICE_BOOTSTRAP: So agent knows which bootstrap provider to use
-    /// - LATTICE_ENABLE_CEDAR_AUTHZ: Enable Cedar ExtAuth for authorization
     fn generate_operator_manifests(
         &self,
         image: &str,
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
-        cedar_enabled: bool,
     ) -> Result<Vec<String>, serde_json::Error> {
         let registry_creds = registry_credentials.map(|s| s.to_string());
 
@@ -567,13 +561,6 @@ impl DefaultManifestGenerator {
                                         ..Default::default()
                                     });
                                 }
-                                if cedar_enabled {
-                                    envs.push(EnvVar {
-                                        name: "LATTICE_ENABLE_CEDAR_AUTHZ".to_string(),
-                                        value: Some("true".to_string()),
-                                        ..Default::default()
-                                    });
-                                }
                                 envs
                             }),
                             // Mount registry credentials if available
@@ -654,16 +641,9 @@ impl ManifestGenerator for DefaultManifestGenerator {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
-        cedar_enabled: bool,
     ) -> Vec<String> {
         match self
-            .try_generate(
-                image,
-                registry_credentials,
-                cluster_name,
-                provider,
-                cedar_enabled,
-            )
+            .try_generate(image, registry_credentials, cluster_name, provider)
             .await
         {
             Ok(manifests) => manifests,
@@ -685,7 +665,6 @@ impl DefaultManifestGenerator {
         registry_credentials: Option<&str>,
         cluster_name: Option<&str>,
         provider: Option<ProviderType>,
-        cedar_enabled: bool,
     ) -> Result<Vec<String>, ManifestError> {
         let mut manifests = Vec::new();
 
@@ -699,13 +678,7 @@ impl DefaultManifestGenerator {
 
         // Then operator manifests
         let operator_manifests = self
-            .generate_operator_manifests(
-                image,
-                registry_credentials,
-                cluster_name,
-                provider,
-                cedar_enabled,
-            )
+            .generate_operator_manifests(image, registry_credentials, cluster_name, provider)
             .map_err(|e| ManifestError::Serialization {
                 resource: "operator manifests".to_string(),
                 message: e.to_string(),
@@ -924,8 +897,6 @@ pub struct BootstrapState<G: ManifestGenerator = DefaultManifestGenerator> {
     ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
     /// Kubernetes client for updating CRD status and fetching distributed resources (None in tests)
     kube_client: Option<Client>,
-    /// Enable Cedar ExtAuth for child clusters
-    cedar_enabled: bool,
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
@@ -937,7 +908,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         image: String,
         registry_credentials: Option<String>,
         kube_client: Option<Client>,
-        cedar_enabled: bool,
     ) -> Self {
         Self {
             clusters: DashMap::new(),
@@ -947,7 +917,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             token_ttl,
             ca_bundle,
             kube_client,
-            cedar_enabled,
         }
     }
 
@@ -1235,7 +1204,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             parent_grpc_port: grpc_port,
             relax_fips: info.bootstrap.needs_fips_relax(),
             autoscaling_enabled: info.autoscaling_enabled,
-            cedar_enabled: self.cedar_enabled,
         };
         let mut manifests = generate_all_manifests(&self.manifest_generator, &config).await;
 
@@ -1246,7 +1214,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             bootstrap: info.bootstrap.clone(),
             cluster_name: info.cluster_id.clone(),
             skip_cilium_policies: false,
-            cedar_enabled: self.cedar_enabled,
         };
         let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config).await;
         info!(
@@ -1552,7 +1519,6 @@ mod tests {
             _registry_credentials: Option<&str>,
             _cluster_name: Option<&str>,
             _provider: Option<ProviderType>,
-            _cedar_enabled: bool,
         ) -> Vec<String> {
             vec![format!("# Test manifest with image {}", image)]
         }
@@ -1571,7 +1537,6 @@ mod tests {
             "test:latest".to_string(),
             None,
             None,
-            false,
         )
     }
 
@@ -1583,7 +1548,6 @@ mod tests {
             "test:latest".to_string(),
             None,
             None,
-            false,
         )
     }
 
