@@ -1,6 +1,15 @@
 //! Envoy ext_authz gRPC server
 //!
 //! Implements the Envoy external authorization service using Cedar policies.
+//!
+//! ## Passthrough Architecture
+//!
+//! This server implements a generic passthrough architecture:
+//! - ALL request headers are passed to Cedar context
+//! - ALL JWT claims are passed as principal attributes
+//! - Response headers include diagnostics for debugging
+//!
+//! Customers define their own entity types, schemas, and policies.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,11 +22,11 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use crate::controller::Context;
-use crate::entity::{Action, EntityBuilder, Resource};
+use crate::entity::{build_context_from_request, Action, EntityBuilder, Resource};
 use crate::error::{CedarError, Result};
 use crate::jwt::{ValidatedToken, ValidationConfig};
 use crate::metrics::{CedarMetrics, Timer};
-use crate::policy::PolicyDecision;
+use crate::policy::{EvaluationResult, PolicyDecision};
 
 /// Cedar ExtAuth gRPC server
 pub struct CedarAuthzServer {
@@ -67,6 +76,7 @@ impl CedarAuthzServer {
 struct CedarAuthzService {
     ctx: Arc<Context>,
     metrics: Arc<CedarMetrics>,
+    /// Entity builder configured for passthrough mode
     entity_builder: EntityBuilder,
 }
 
@@ -81,15 +91,12 @@ impl CedarAuthzService {
         let address = dest.address.as_ref()?;
 
         // Extract from socket address
-        if let Some(socket) = &address.address {
-            if let envoy_types::pb::envoy::config::core::v3::address::Address::SocketAddress(sa) =
-                socket
-            {
-                // The address might be in format: service.namespace.svc.cluster.local
-                let parts: Vec<&str> = sa.address.split('.').collect();
-                if parts.len() >= 2 {
-                    return Some((parts[1].to_string(), parts[0].to_string()));
-                }
+        use envoy_types::pb::envoy::config::core::v3::address::Address::SocketAddress;
+        if let Some(SocketAddress(sa)) = &address.address {
+            // The address might be in format: service.namespace.svc.cluster.local
+            let parts: Vec<&str> = sa.address.split('.').collect();
+            if parts.len() >= 2 {
+                return Some((parts[1].to_string(), parts[0].to_string()));
             }
         }
 
@@ -171,14 +178,21 @@ impl CedarAuthzService {
         None
     }
 
-    /// Build an allow response
-    fn allow_response(&self) -> CheckResponse {
+    /// Build an allow response with optional diagnostics
+    fn allow_response(&self, result: &EvaluationResult) -> CheckResponse {
+        self.log_diagnostics(result);
         CheckResponse::with_status(Status::ok("authorized"))
     }
 
-    /// Build a deny response
-    fn deny_response(&self, message: &str) -> CheckResponse {
+    /// Build a deny response with diagnostics
+    fn deny_response(&self, message: &str, result: &EvaluationResult) -> CheckResponse {
+        self.log_diagnostics(result);
         CheckResponse::with_status(Status::permission_denied(message))
+    }
+
+    /// Build a deny response for internal errors (no diagnostics)
+    fn internal_error_response(&self) -> CheckResponse {
+        CheckResponse::with_status(Status::permission_denied("internal error"))
     }
 
     /// Build an unauthorized response (401)
@@ -186,7 +200,23 @@ impl CedarAuthzService {
         CheckResponse::with_status(Status::unauthenticated(message))
     }
 
+    /// Log diagnostics for debugging
+    fn log_diagnostics(&self, result: &EvaluationResult) {
+        debug!(
+            decision = %result.decision,
+            policies = ?result.determining_policies,
+            errors = ?result.errors,
+            duration_us = result.duration.as_micros(),
+            "Cedar evaluation diagnostics"
+        );
+    }
+
     /// Perform authorization check using the two-tier policy model
+    ///
+    /// Uses passthrough architecture:
+    /// - ALL request headers → Cedar context
+    /// - ALL JWT claims → principal attributes
+    /// - Response includes diagnostic headers
     ///
     /// Evaluation order:
     /// 1. All matching LatticeServicePolicy `forbid` rules -> if ANY matches, DENY
@@ -218,7 +248,14 @@ impl CedarAuthzService {
                 service = %service,
                 "No policy configured, allowing request"
             );
-            return Ok(self.allow_response());
+            // Create a dummy result for the no-policy case
+            let result = EvaluationResult {
+                decision: PolicyDecision::NoMatch,
+                determining_policies: vec![],
+                errors: vec![],
+                duration: timer.elapsed(),
+            };
+            return Ok(self.allow_response(&result));
         }
 
         self.metrics.record_cache_hit();
@@ -257,7 +294,10 @@ impl CedarAuthzService {
             None
         };
 
-        // Build Cedar request
+        // Build Cedar context from ALL request data (passthrough architecture)
+        let context = build_context_from_request(&request)?;
+
+        // Build Cedar request with passthrough context
         let method = self.extract_method(&request);
         let path = self.extract_path(&request);
         let headers = self.extract_headers(&request);
@@ -265,27 +305,31 @@ impl CedarAuthzService {
         let action = Action::from_method(&method);
         let resource = Resource::new(&path, &service, &namespace, &method).with_headers(headers);
 
-        let (cedar_request, entities) =
-            self.entity_builder
-                .build_request(validated_token.as_ref(), action, &resource)?;
+        let (cedar_request, entities) = self.entity_builder.build_request_with_context(
+            validated_token.as_ref(),
+            action,
+            &resource,
+            context,
+        )?;
 
-        // Evaluate using the two-tier policy model
-        let decision =
-            policies.evaluate_with_inherited(&namespace, &service, &cedar_request, &entities);
+        // Evaluate using the two-tier policy model with diagnostics
+        let result =
+            policies.evaluate_with_diagnostics(&namespace, &service, &cedar_request, &entities);
 
         let elapsed = timer.elapsed();
 
-        match decision {
+        match result.decision {
             PolicyDecision::Allow => {
                 self.metrics.record_allowed(elapsed);
                 debug!(
                     namespace = %namespace,
                     service = %service,
                     decision = "allow",
+                    policies = ?result.determining_policies,
                     elapsed_us = elapsed.as_micros(),
                     "Authorization decision"
                 );
-                Ok(self.allow_response())
+                Ok(self.allow_response(&result))
             }
             PolicyDecision::Deny => {
                 self.metrics.record_denied(elapsed);
@@ -293,10 +337,11 @@ impl CedarAuthzService {
                     namespace = %namespace,
                     service = %service,
                     decision = "deny",
+                    policies = ?result.determining_policies,
                     elapsed_us = elapsed.as_micros(),
                     "Authorization decision"
                 );
-                Ok(self.deny_response("access denied by policy"))
+                Ok(self.deny_response("access denied by policy", &result))
             }
             PolicyDecision::NoMatch => {
                 // No policies matched - this shouldn't happen if has_any_policy returned true
@@ -309,7 +354,7 @@ impl CedarAuthzService {
                     elapsed_us = elapsed.as_micros(),
                     "Authorization decision"
                 );
-                Ok(self.allow_response())
+                Ok(self.allow_response(&result))
             }
         }
     }
@@ -334,7 +379,7 @@ impl Authorization for CedarAuthzService {
                 if e.is_auth_failure() {
                     Ok(Response::new(self.unauthorized_response(&e.to_string())))
                 } else {
-                    Ok(Response::new(self.deny_response("internal error")))
+                    Ok(Response::new(self.internal_error_response()))
                 }
             }
         }

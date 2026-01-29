@@ -162,9 +162,6 @@ async fn run_controller(
         let _ = state.cleanup_stale_bootstrap_secrets().await;
     }
 
-    // Clean up stale pivot secrets from previous runs
-    let _ = lattice_operator::cleanup_stale_pivot_secrets(&client).await;
-
     // Run controllers until shutdown
     controller_runner::run_controllers(client, mode, self_cluster_name, parent_servers.clone())
         .await;

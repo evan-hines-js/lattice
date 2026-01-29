@@ -6,4 +6,4 @@ mod jwks;
 mod validator;
 
 pub use jwks::{Jwk, JwkSet, JwksCache};
-pub use validator::{Claims, JwtValidator, ValidatedToken, ValidationConfig};
+pub use validator::{Audience, Claims, JwtValidator, ValidatedToken, ValidationConfig};

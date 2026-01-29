@@ -7,4 +7,6 @@ mod compiler;
 mod store;
 
 pub use compiler::PolicyCompiler;
-pub use store::{InheritedPolicyEntry, PolicyDecision, PolicyEntry, PolicyKey, PolicyStore};
+pub use store::{
+    EvaluationResult, InheritedPolicyEntry, PolicyDecision, PolicyEntry, PolicyKey, PolicyStore,
+};

@@ -16,6 +16,7 @@
 //! 4. Default: DENY
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cedar_policy::{Decision, PolicySet};
 use dashmap::DashMap;
@@ -84,6 +85,32 @@ pub enum PolicyDecision {
     Deny,
     /// No policy matched (default deny applies)
     NoMatch,
+}
+
+impl std::fmt::Display for PolicyDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolicyDecision::Allow => write!(f, "allow"),
+            PolicyDecision::Deny => write!(f, "deny"),
+            PolicyDecision::NoMatch => write!(f, "no_match"),
+        }
+    }
+}
+
+/// Detailed evaluation result with diagnostics
+///
+/// Provides information about which policies contributed to the decision,
+/// any errors encountered, and timing information for debugging.
+#[derive(Debug, Clone)]
+pub struct EvaluationResult {
+    /// The authorization decision
+    pub decision: PolicyDecision,
+    /// Policy IDs that determined the decision (forbid or permit rules that matched)
+    pub determining_policies: Vec<String>,
+    /// Any errors encountered during evaluation
+    pub errors: Vec<String>,
+    /// Time taken for the evaluation
+    pub duration: Duration,
 }
 
 /// Concurrent policy store backed by DashMap
@@ -409,16 +436,9 @@ impl PolicyStore {
         Ok(response)
     }
 
-    /// Evaluate a request with the two-tier policy model
+    /// Evaluate a request with the two-tier policy model (simple decision only)
     ///
-    /// Evaluation order:
-    /// 1. All matching inherited policy `forbid` rules -> if ANY forbid matches, DENY
-    /// 2. Service-embedded policy -> if permit matches, ALLOW
-    /// 3. All matching inherited policy `permit` rules -> if ANY matches, ALLOW
-    /// 4. Default: DENY
-    ///
-    /// Note: Step 1 only triggers deny if there's an actual `forbid` rule that matched.
-    /// A policy with only permit rules that don't match won't cause a deny in step 1.
+    /// For detailed diagnostics, use `evaluate_with_diagnostics` instead.
     pub fn evaluate_with_inherited(
         &self,
         namespace: &str,
@@ -426,8 +446,35 @@ impl PolicyStore {
         request: &cedar_policy::Request,
         entities: &cedar_policy::Entities,
     ) -> PolicyDecision {
+        self.evaluate_with_diagnostics(namespace, service, request, entities)
+            .decision
+    }
+
+    /// Evaluate a request with the two-tier policy model and return diagnostics
+    ///
+    /// Evaluation order:
+    /// 1. All matching inherited policy `forbid` rules -> if ANY forbid matches, DENY
+    /// 2. Service-embedded policy -> if permit matches, ALLOW
+    /// 3. All matching inherited policy `permit` rules -> if ANY matches, ALLOW
+    /// 4. Default: DENY
+    ///
+    /// Returns an EvaluationResult with:
+    /// - The authorization decision
+    /// - Which policies determined the decision
+    /// - Any errors encountered
+    /// - Timing information
+    pub fn evaluate_with_diagnostics(
+        &self,
+        namespace: &str,
+        service: &str,
+        request: &cedar_policy::Request,
+        entities: &cedar_policy::Entities,
+    ) -> EvaluationResult {
+        let start = Instant::now();
         let authorizer = cedar_policy::Authorizer::new();
         let matching_policies = self.get_matches(namespace, service);
+        let mut determining_policies = Vec::new();
+        let mut errors = Vec::new();
 
         trace!(
             namespace = %namespace,
@@ -437,35 +484,38 @@ impl PolicyStore {
         );
 
         // Step 1: Check forbids from ALL matching inherited policies
-        // Only deny if an actual forbid rule matched (not just "no permit matched")
         for policy_name in &matching_policies {
             if let Some(entry) = self.inherited_policies.get(policy_name) {
                 let response = authorizer.is_authorized(request, &entry.policy_set, entities);
 
-                // Check if this is a deny due to an explicit forbid rule
-                // Cedar returns Deny if:
-                // a) A forbid rule matches (what we want to catch here)
-                // b) No permit rule matches (which is NOT a forbid match)
-                //
-                // We detect (a) by checking if there are any determining policies
-                // that caused the deny. If the response is Deny and there are
-                // determining policies, it means a forbid rule matched.
-                if response.decision() == Decision::Deny {
-                    // Check if any determining policy caused this deny
-                    // (if forbid matched, there will be determining policies)
-                    let has_determining_forbid = response.diagnostics().reason().next().is_some();
+                // Collect any errors
+                for err in response.diagnostics().errors() {
+                    errors.push(format!("{}: {}", policy_name, err));
+                }
 
-                    if has_determining_forbid {
+                // Check if this is a deny due to an explicit forbid rule
+                if response.decision() == Decision::Deny {
+                    let forbid_policies: Vec<String> = response
+                        .diagnostics()
+                        .reason()
+                        .map(|p| p.to_string())
+                        .collect();
+
+                    if !forbid_policies.is_empty() {
                         debug!(
                             namespace = %namespace,
                             service = %service,
                             policy = %policy_name,
                             "Request denied by inherited policy forbid rule"
                         );
-                        return PolicyDecision::Deny;
+                        determining_policies.extend(forbid_policies);
+                        return EvaluationResult {
+                            decision: PolicyDecision::Deny,
+                            determining_policies,
+                            errors,
+                            duration: start.elapsed(),
+                        };
                     }
-                    // If no determining policies, it's just "no permit matched"
-                    // which is not a forbid - continue checking
                 }
             }
         }
@@ -473,13 +523,30 @@ impl PolicyStore {
         // Step 2: Check service-level policy
         if let Some(svc_policy) = self.get(namespace, service) {
             let response = authorizer.is_authorized(request, &svc_policy, entities);
+
+            for err in response.diagnostics().errors() {
+                errors.push(format!("service/{}/{}: {}", namespace, service, err));
+            }
+
             if response.decision() == Decision::Allow {
+                let permit_policies: Vec<String> = response
+                    .diagnostics()
+                    .reason()
+                    .map(|p| p.to_string())
+                    .collect();
+                determining_policies.extend(permit_policies);
+
                 debug!(
                     namespace = %namespace,
                     service = %service,
                     "Request allowed by service-level policy"
                 );
-                return PolicyDecision::Allow;
+                return EvaluationResult {
+                    decision: PolicyDecision::Allow,
+                    determining_policies,
+                    errors,
+                    duration: start.elapsed(),
+                };
             }
         }
 
@@ -487,14 +554,31 @@ impl PolicyStore {
         for policy_name in &matching_policies {
             if let Some(entry) = self.inherited_policies.get(policy_name) {
                 let response = authorizer.is_authorized(request, &entry.policy_set, entities);
+
+                for err in response.diagnostics().errors() {
+                    errors.push(format!("{}: {}", policy_name, err));
+                }
+
                 if response.decision() == Decision::Allow {
+                    let permit_policies: Vec<String> = response
+                        .diagnostics()
+                        .reason()
+                        .map(|p| p.to_string())
+                        .collect();
+                    determining_policies.extend(permit_policies);
+
                     debug!(
                         namespace = %namespace,
                         service = %service,
                         policy = %policy_name,
                         "Request allowed by inherited policy permit rule"
                     );
-                    return PolicyDecision::Allow;
+                    return EvaluationResult {
+                        decision: PolicyDecision::Allow,
+                        determining_policies,
+                        errors,
+                        duration: start.elapsed(),
+                    };
                 }
             }
         }
@@ -507,7 +591,12 @@ impl PolicyStore {
                 service = %service,
                 "No policies configured"
             );
-            return PolicyDecision::NoMatch;
+            return EvaluationResult {
+                decision: PolicyDecision::NoMatch,
+                determining_policies,
+                errors,
+                duration: start.elapsed(),
+            };
         }
 
         // Default deny
@@ -516,7 +605,12 @@ impl PolicyStore {
             service = %service,
             "Request denied by default (no permit matched)"
         );
-        PolicyDecision::Deny
+        EvaluationResult {
+            decision: PolicyDecision::Deny,
+            determining_policies,
+            errors,
+            duration: start.elapsed(),
+        }
     }
 }
 

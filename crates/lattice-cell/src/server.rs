@@ -21,7 +21,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::{Api, Client};
-use lattice_common::clusterctl::{teardown_cluster, TeardownConfig};
+use lattice_common::clusterctl::{import_from_manifests, unpause_capi_cluster};
 use lattice_common::crd::LatticeCluster;
 
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
@@ -30,7 +30,7 @@ use lattice_proto::{
     PivotPhase, SyncDistributedResourcesCommand,
 };
 
-use crate::{AgentConnection, AgentRegistry, SharedAgentRegistry};
+use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::ServerMtlsConfig;
 
 /// gRPC server for agent communication
@@ -42,7 +42,7 @@ pub struct AgentServer {
 
 /// Handle an agent message (standalone function to avoid temporary object creation)
 async fn handle_agent_message_impl(
-    registry: &AgentRegistry,
+    registry: SharedAgentRegistry,
     msg: &AgentMessage,
     command_tx: &mpsc::Sender<CellCommand>,
     kube_client: &Client,
@@ -238,53 +238,65 @@ async fn handle_agent_message_impl(
             );
         }
         Some(Payload::ClusterDeleting(cd)) => {
+            // Guard against concurrent teardown spawns
+            if !registry.start_teardown(cluster_name) {
+                debug!(
+                    cluster = %cluster_name,
+                    "Teardown already in progress, ignoring duplicate ClusterDeleting"
+                );
+                return;
+            }
+
             info!(
                 cluster = %cluster_name,
                 namespace = %cd.namespace,
                 manifest_count = cd.capi_manifests.len(),
-                "Cluster deletion requested - starting synchronous teardown"
+                "Cluster deletion requested - importing CAPI and initiating deletion"
             );
 
-            // Convert manifests from Vec<Vec<u8>> to slice for teardown_cluster
             let manifests: Vec<Vec<u8>> = cd.capi_manifests.clone();
             let namespace = cd.namespace.clone();
             let cluster = cluster_name.to_string();
             let client = kube_client.clone();
+            let registry_for_task = registry.clone();
 
-            // Spawn teardown to avoid blocking the gRPC stream
-            // The child will keep retrying until CAPI deletes its infrastructure
+            // Spawn to avoid blocking the gRPC stream
+            // This only does import/unpause/delete - controller handles the rest
             tokio::spawn(async move {
-                // Teardown: import manifests, unpause CAPI, delete CAPI cluster
-                let config = TeardownConfig::default();
-                match teardown_cluster(
-                    &client,
-                    &namespace,
-                    &cluster,
-                    Some(&manifests),
-                    &config,
-                    None, // in-cluster kubeconfig
-                )
-                .await
-                {
-                    Ok(()) => {
-                        info!(cluster = %cluster, "CAPI teardown complete, deleting LatticeCluster");
-
-                        // Now safe to delete the LatticeCluster
-                        let api: Api<LatticeCluster> = Api::all(client.clone());
-                        if let Err(e) = api.delete(&cluster, &DeleteParams::default()).await {
-                            if !matches!(&e, kube::Error::Api(ae) if ae.code == 404) {
-                                error!(cluster = %cluster, error = %e, "Failed to delete LatticeCluster");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            cluster = %cluster,
-                            error = %e,
-                            "CAPI teardown failed - child will retry"
-                        );
+                // Step 1: Import CAPI manifests from child
+                if !manifests.is_empty() {
+                    info!(
+                        cluster = %cluster,
+                        manifest_count = manifests.len(),
+                        "Importing CAPI manifests from child"
+                    );
+                    if let Err(e) = import_from_manifests(None, &namespace, &manifests).await {
+                        error!(cluster = %cluster, error = %e, "Failed to import CAPI manifests");
+                        registry_for_task.finish_teardown(&cluster);
+                        return;
                     }
                 }
+
+                // Step 2: Unpause CAPI so it can reconcile
+                info!(cluster = %cluster, "Unpausing CAPI cluster");
+                if let Err(e) = unpause_capi_cluster(None, &namespace, &cluster).await {
+                    warn!(cluster = %cluster, error = %e, "Failed to unpause CAPI (may already be unpaused)");
+                    // Continue anyway - might already be unpaused
+                }
+
+                // Step 3: Delete LatticeCluster (adds deletionTimestamp)
+                // The finalizer keeps it around while controller handles CAPI cleanup
+                info!(cluster = %cluster, "Initiating LatticeCluster deletion");
+                let api: Api<LatticeCluster> = Api::all(client.clone());
+                if let Err(e) = api.delete(&cluster, &DeleteParams::default()).await {
+                    if !matches!(&e, kube::Error::Api(ae) if ae.code == 404) {
+                        error!(cluster = %cluster, error = %e, "Failed to delete LatticeCluster");
+                    }
+                }
+
+                // Clear teardown guard - controller takes over from here
+                registry_for_task.finish_teardown(&cluster);
+                info!(cluster = %cluster, "Teardown initiated - controller will handle cleanup");
             });
         }
         Some(Payload::KubernetesResponse(resp)) => {
@@ -383,8 +395,13 @@ impl LatticeAgent for AgentServer {
                         }
 
                         // Handle message directly using standalone function (no temp object)
-                        handle_agent_message_impl(&registry, &msg, &command_tx_clone, &kube_client)
-                            .await;
+                        handle_agent_message_impl(
+                            registry.clone(),
+                            &msg,
+                            &command_tx_clone,
+                            &kube_client,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         error!(error = %e, "Error receiving agent message");
@@ -447,6 +464,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::AgentRegistry;
     use lattice_proto::{
         agent_message::Payload, AgentReady, BootstrapComplete, ClusterHealth, Heartbeat,
         PivotComplete, StatusResponse,
@@ -488,7 +506,7 @@ mod tests {
                         let network_policy_yaml = manifests.network_policy_yaml.clone();
 
                         if let Some(ref policy) = network_policy_yaml {
-                            let manifest_bytes = vec![policy.clone().into_bytes()];
+                            let manifest_bytes: Vec<Vec<u8>> = vec![policy.clone().into_bytes()];
 
                             let apply_cmd = CellCommand {
                                 command_id: format!("post-pivot-apply-{}", cluster_name),
