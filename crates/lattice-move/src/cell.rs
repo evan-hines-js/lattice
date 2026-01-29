@@ -1,0 +1,707 @@
+//! Cell-side move orchestrator
+//!
+//! Orchestrates the distributed move operation from the parent cluster (cell).
+//! Discovers CAPI resources, computes move sequence, and streams batches to agent.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
+use kube::discovery::ApiResource;
+use kube::Client;
+use tracing::{debug, info, warn};
+
+use crate::error::MoveError;
+use crate::graph::{GraphNode, ObjectGraph};
+use crate::sequence::{extract_nodes_for_group, MoveSequence};
+use crate::DELETE_FOR_MOVE_ANNOTATION;
+
+/// Trait for sending move commands to the agent
+///
+/// This abstraction allows testing without actual gRPC.
+#[async_trait]
+pub trait MoveCommandSender: Send + Sync {
+    /// Send a batch of objects to the agent
+    async fn send_batch(&self, batch: MoveBatch) -> Result<BatchAck, MoveError>;
+
+    /// Send move complete signal
+    async fn send_complete(&self, complete: MoveCompleteInput) -> Result<CompleteAck, MoveError>;
+}
+
+/// A batch of objects to send to the agent
+#[derive(Debug, Clone)]
+pub struct MoveBatch {
+    /// Move operation ID
+    pub move_id: String,
+    /// Batch index
+    pub batch_index: u32,
+    /// Total batches
+    pub total_batches: u32,
+    /// Objects in this batch
+    pub objects: Vec<MoveObjectOutput>,
+    /// Target namespace
+    pub target_namespace: String,
+    /// Cluster name
+    pub cluster_name: String,
+}
+
+/// A single object to send
+#[derive(Debug, Clone)]
+pub struct MoveObjectOutput {
+    /// Source UID
+    pub source_uid: String,
+    /// Object manifest (JSON bytes)
+    pub manifest: Vec<u8>,
+    /// Owner references
+    pub owners: Vec<SourceOwnerRefOutput>,
+}
+
+/// Owner reference to send
+#[derive(Debug, Clone)]
+pub struct SourceOwnerRefOutput {
+    /// Source UID
+    pub source_uid: String,
+    /// API version
+    pub api_version: String,
+    /// Kind
+    pub kind: String,
+    /// Name
+    pub name: String,
+    /// Is controller
+    pub controller: bool,
+    /// Block owner deletion
+    pub block_owner_deletion: bool,
+}
+
+/// Acknowledgment for a batch
+#[derive(Debug, Clone)]
+pub struct BatchAck {
+    /// UID mappings (source_uid, target_uid)
+    pub mappings: Vec<(String, String)>,
+    /// Errors (source_uid, message, retryable)
+    pub errors: Vec<(String, String, bool)>,
+}
+
+/// Input for move complete
+#[derive(Debug, Clone)]
+pub struct MoveCompleteInput {
+    /// Move ID
+    pub move_id: String,
+    /// Cluster name
+    pub cluster_name: String,
+    /// Target namespace
+    pub target_namespace: String,
+    /// Cloud providers YAML
+    pub cloud_providers: Vec<Vec<u8>>,
+    /// Secrets providers YAML
+    pub secrets_providers: Vec<Vec<u8>>,
+    /// Secrets YAML
+    pub secrets: Vec<Vec<u8>>,
+    /// Additional manifests to apply (e.g., CiliumNetworkPolicy)
+    pub manifests: Vec<Vec<u8>>,
+}
+
+/// Acknowledgment for move complete
+#[derive(Debug, Clone)]
+pub struct CompleteAck {
+    /// Success
+    pub success: bool,
+    /// Error message if failed
+    pub error: String,
+    /// Resources created
+    pub resources_created: i32,
+}
+
+/// Configuration for the CellMover
+#[derive(Debug, Clone)]
+pub struct CellMoverConfig {
+    /// Source namespace
+    pub source_namespace: String,
+    /// Target namespace on agent
+    pub target_namespace: String,
+    /// Cluster name to move
+    pub cluster_name: String,
+    /// Move operation ID
+    pub move_id: String,
+    /// Timeout for batch operations
+    pub batch_timeout: Duration,
+    /// Distributable resources (CloudProviders, SecretsProviders, Secrets)
+    pub cloud_providers: Vec<Vec<u8>>,
+    pub secrets_providers: Vec<Vec<u8>>,
+    pub secrets: Vec<Vec<u8>>,
+    /// Additional manifests to apply (e.g., CiliumNetworkPolicy)
+    pub manifests: Vec<Vec<u8>>,
+}
+
+impl CellMoverConfig {
+    /// Create a new config
+    pub fn new(source_namespace: &str, target_namespace: &str, cluster_name: &str) -> Self {
+        Self {
+            source_namespace: source_namespace.to_string(),
+            target_namespace: target_namespace.to_string(),
+            cluster_name: cluster_name.to_string(),
+            move_id: uuid::Uuid::new_v4().to_string(),
+            batch_timeout: Duration::from_secs(60),
+            cloud_providers: Vec::new(),
+            secrets_providers: Vec::new(),
+            secrets: Vec::new(),
+            manifests: Vec::new(),
+        }
+    }
+
+    /// Set distributable resources
+    pub fn with_resources(
+        mut self,
+        cloud_providers: Vec<Vec<u8>>,
+        secrets_providers: Vec<Vec<u8>>,
+        secrets: Vec<Vec<u8>>,
+    ) -> Self {
+        self.cloud_providers = cloud_providers;
+        self.secrets_providers = secrets_providers;
+        self.secrets = secrets;
+        self
+    }
+
+    /// Set additional manifests to apply post-pivot
+    pub fn with_manifests(mut self, manifests: Vec<Vec<u8>>) -> Self {
+        self.manifests = manifests;
+        self
+    }
+}
+
+/// Cell-side orchestrator for distributed move operations
+pub struct CellMover<S: MoveCommandSender> {
+    /// Kubernetes client for source cluster
+    client: Client,
+    /// Configuration
+    config: CellMoverConfig,
+    /// Command sender for agent communication
+    sender: Arc<S>,
+    /// Object graph
+    graph: Option<ObjectGraph>,
+    /// Move sequence
+    sequence: Option<MoveSequence>,
+    /// Manifests for source deletion (stored after export)
+    source_manifests: Vec<Vec<u8>>,
+}
+
+impl<S: MoveCommandSender> CellMover<S> {
+    /// Create a new CellMover
+    pub fn new(client: Client, config: CellMoverConfig, sender: Arc<S>) -> Self {
+        Self {
+            client,
+            config,
+            sender,
+            graph: None,
+            sequence: None,
+            source_manifests: Vec::new(),
+        }
+    }
+
+    /// Execute the full move operation
+    ///
+    /// This is the main entry point that orchestrates:
+    /// 1. Discovery and graph building
+    /// 2. Pausing source resources
+    /// 3. Streaming batches to agent
+    /// 4. Finalizing (agent unpause)
+    /// 5. Deleting source resources
+    pub async fn execute(&mut self) -> Result<MoveResult, MoveError> {
+        info!(
+            move_id = %self.config.move_id,
+            cluster = %self.config.cluster_name,
+            source_ns = %self.config.source_namespace,
+            target_ns = %self.config.target_namespace,
+            "Starting distributed move"
+        );
+
+        // Step 1: Discover and build graph
+        self.discover_and_build_graph().await?;
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            MoveError::Discovery("graph not built".to_string())
+        })?;
+
+        if graph.is_empty() {
+            return Err(MoveError::Discovery("no objects to move".to_string()));
+        }
+
+        // Step 2: Compute move sequence
+        self.compute_sequence()?;
+
+        // Step 3: Pause source resources
+        self.pause_source().await?;
+
+        // Step 4: Stream batches to agent
+        let stream_result = self.stream_batches().await;
+
+        // If streaming failed, unpause source and return error
+        if let Err(e) = stream_result {
+            warn!(error = %e, "Batch streaming failed, unpausing source");
+            let _ = self.unpause_source().await;
+            return Err(e);
+        }
+
+        // Step 5: Finalize (agent unpause)
+        let complete_result = self.finalize().await?;
+
+        if !complete_result.success {
+            warn!(error = %complete_result.error, "Agent finalization failed, unpausing source");
+            let _ = self.unpause_source().await;
+            return Err(MoveError::AgentCommunication(complete_result.error));
+        }
+
+        // Step 6: Delete source resources
+        let deleted = self.delete_source().await?;
+
+        let result = MoveResult {
+            move_id: self.config.move_id.clone(),
+            objects_moved: complete_result.resources_created as u32,
+            objects_deleted: deleted,
+        };
+
+        info!(
+            move_id = %result.move_id,
+            moved = result.objects_moved,
+            deleted = result.objects_deleted,
+            "Distributed move complete"
+        );
+
+        Ok(result)
+    }
+
+    /// Discover CAPI CRDs and build the object graph
+    pub async fn discover_and_build_graph(&mut self) -> Result<(), MoveError> {
+        let mut graph = ObjectGraph::new(&self.config.source_namespace);
+        graph.discover(&self.client).await?;
+
+        // Filter to only the cluster being moved
+        graph.filter_by_cluster(&self.config.cluster_name);
+
+        // Store manifests for later deletion
+        self.source_manifests = graph
+            .nodes()
+            .values()
+            .filter_map(|n| serde_json::to_vec(&n.object).ok())
+            .collect();
+
+        info!(
+            namespace = %self.config.source_namespace,
+            cluster = %self.config.cluster_name,
+            objects = graph.len(),
+            "Built object graph"
+        );
+
+        self.graph = Some(graph);
+        Ok(())
+    }
+
+    /// Compute the move sequence from the graph
+    pub fn compute_sequence(&mut self) -> Result<(), MoveError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            MoveError::Discovery("graph not built".to_string())
+        })?;
+
+        let sequence = MoveSequence::from_graph(graph)?;
+
+        info!(
+            groups = sequence.num_groups(),
+            objects = sequence.total_objects(),
+            "Computed move sequence"
+        );
+
+        self.sequence = Some(sequence);
+        Ok(())
+    }
+
+    /// Pause Cluster and ClusterClass resources on source
+    pub async fn pause_source(&self) -> Result<(), MoveError> {
+        self.set_paused(true).await
+    }
+
+    /// Unpause Cluster and ClusterClass resources on source
+    pub async fn unpause_source(&self) -> Result<(), MoveError> {
+        self.set_paused(false).await
+    }
+
+    /// Set paused state on Cluster and ClusterClass resources
+    async fn set_paused(&self, paused: bool) -> Result<(), MoveError> {
+        let action = if paused { "Pausing" } else { "Unpausing" };
+
+        // Pause/unpause Cluster
+        if let Err(e) = self
+            .set_resource_paused(
+                "cluster.x-k8s.io/v1beta1",
+                "Cluster",
+                "clusters",
+                paused,
+            )
+            .await
+        {
+            return Err(MoveError::PauseFailed(format!(
+                "{} Cluster failed: {}",
+                action, e
+            )));
+        }
+
+        // Pause/unpause ClusterClass (might not exist)
+        if let Err(e) = self
+            .set_resource_paused(
+                "cluster.x-k8s.io/v1beta1",
+                "ClusterClass",
+                "clusterclasses",
+                paused,
+            )
+            .await
+        {
+            debug!(error = %e, "{} ClusterClass failed (may not exist)", action);
+        }
+
+        info!(
+            namespace = %self.config.source_namespace,
+            paused = paused,
+            "Source resources {}",
+            if paused { "paused" } else { "unpaused" }
+        );
+
+        Ok(())
+    }
+
+    /// Set paused on a specific resource type
+    async fn set_resource_paused(
+        &self,
+        api_version: &str,
+        kind: &str,
+        plural: &str,
+        paused: bool,
+    ) -> Result<(), MoveError> {
+        let (group, version) = parse_api_version(api_version);
+        let api_resource = ApiResource {
+            group,
+            version,
+            kind: kind.to_string(),
+            api_version: api_version.to_string(),
+            plural: plural.to_string(),
+        };
+
+        let api: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            &self.config.source_namespace,
+            &api_resource,
+        );
+
+        let list = api
+            .list(&Default::default())
+            .await
+            .map_err(MoveError::Kube)?;
+
+        for obj in list.items {
+            let name = match &obj.metadata.name {
+                Some(n) => n.clone(),
+                None => continue,
+            };
+
+            let patch = serde_json::json!({
+                "spec": {
+                    "paused": paused
+                }
+            });
+
+            api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await
+                .map_err(MoveError::Kube)?;
+
+            debug!(kind = %kind, name = %name, paused = paused, "Set paused state");
+        }
+
+        Ok(())
+    }
+
+    /// Stream batches to the agent
+    pub async fn stream_batches(&self) -> Result<(), MoveError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            MoveError::Discovery("graph not built".to_string())
+        })?;
+        let sequence = self.sequence.as_ref().ok_or_else(|| {
+            MoveError::Discovery("sequence not computed".to_string())
+        })?;
+
+        let total_batches = sequence.num_groups() as u32;
+
+        for (index, group) in sequence.iter_groups() {
+            let nodes = extract_nodes_for_group(graph, group);
+            let batch = self.build_batch(index as u32, total_batches, &nodes);
+
+            info!(
+                batch = index,
+                total = total_batches,
+                objects = batch.objects.len(),
+                "Sending batch"
+            );
+
+            let ack = self.sender.send_batch(batch).await?;
+
+            if !ack.errors.is_empty() {
+                // Log errors but continue - partial success is okay
+                for (uid, msg, retryable) in &ack.errors {
+                    warn!(
+                        source_uid = %uid,
+                        error = %msg,
+                        retryable = %retryable,
+                        "Object creation failed"
+                    );
+                }
+            }
+
+            debug!(
+                batch = index,
+                mappings = ack.mappings.len(),
+                errors = ack.errors.len(),
+                "Batch acknowledged"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Build a batch from graph nodes
+    fn build_batch(&self, index: u32, total: u32, nodes: &[&GraphNode]) -> MoveBatch {
+        let objects: Vec<MoveObjectOutput> = nodes
+            .iter()
+            .map(|node| {
+                let owners = self.extract_owner_refs(node);
+                MoveObjectOutput {
+                    source_uid: node.uid().to_string(),
+                    manifest: serde_json::to_vec(&node.object).unwrap_or_default(),
+                    owners,
+                }
+            })
+            .collect();
+
+        MoveBatch {
+            move_id: self.config.move_id.clone(),
+            batch_index: index,
+            total_batches: total,
+            objects,
+            target_namespace: self.config.target_namespace.clone(),
+            cluster_name: self.config.cluster_name.clone(),
+        }
+    }
+
+    /// Extract owner references from a node
+    fn extract_owner_refs(&self, node: &GraphNode) -> Vec<SourceOwnerRefOutput> {
+        let owner_refs = node
+            .object
+            .get("metadata")
+            .and_then(|m| m.get("ownerReferences"))
+            .and_then(|r| r.as_array());
+
+        match owner_refs {
+            Some(refs) => refs
+                .iter()
+                .filter_map(|r| {
+                    Some(SourceOwnerRefOutput {
+                        source_uid: r.get("uid")?.as_str()?.to_string(),
+                        api_version: r.get("apiVersion")?.as_str()?.to_string(),
+                        kind: r.get("kind")?.as_str()?.to_string(),
+                        name: r.get("name")?.as_str()?.to_string(),
+                        controller: r.get("controller").and_then(|v| v.as_bool()).unwrap_or(false),
+                        block_owner_deletion: r
+                            .get("blockOwnerDeletion")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Finalize the move (agent unpause and apply distributed resources)
+    pub async fn finalize(&self) -> Result<CompleteAck, MoveError> {
+        let complete = MoveCompleteInput {
+            move_id: self.config.move_id.clone(),
+            cluster_name: self.config.cluster_name.clone(),
+            target_namespace: self.config.target_namespace.clone(),
+            cloud_providers: self.config.cloud_providers.clone(),
+            secrets_providers: self.config.secrets_providers.clone(),
+            secrets: self.config.secrets.clone(),
+            manifests: self.config.manifests.clone(),
+        };
+
+        self.sender.send_complete(complete).await
+    }
+
+    /// Delete source resources after successful move
+    pub async fn delete_source(&self) -> Result<u32, MoveError> {
+        let sequence = self.sequence.as_ref().ok_or_else(|| {
+            MoveError::Discovery("sequence not computed".to_string())
+        })?;
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            MoveError::Discovery("graph not built".to_string())
+        })?;
+
+        // Delete in reverse order (dependents before owners)
+        let uids = sequence.all_uids_for_deletion();
+        let mut deleted = 0u32;
+
+        for uid in &uids {
+            let node = match graph.get(uid) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            match self.delete_single_resource(node).await {
+                Ok(_) => {
+                    deleted += 1;
+                }
+                Err(e) => {
+                    warn!(
+                        uid = %uid,
+                        kind = %node.identity.kind,
+                        name = %node.identity.name,
+                        error = %e,
+                        "Failed to delete source resource"
+                    );
+                }
+            }
+        }
+
+        info!(
+            deleted = deleted,
+            total = uids.len(),
+            "Source resources deleted"
+        );
+
+        Ok(deleted)
+    }
+
+    /// Delete a single resource with finalizer removal
+    async fn delete_single_resource(&self, node: &GraphNode) -> Result<(), MoveError> {
+        let api_resource = build_api_resource(
+            &node.identity.api_version,
+            &node.identity.kind,
+        );
+
+        let api: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            &self.config.source_namespace,
+            &api_resource,
+        );
+
+        // Check if resource still exists
+        let obj = match api.get(&node.identity.name).await {
+            Ok(o) => o,
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                debug!(
+                    kind = %node.identity.kind,
+                    name = %node.identity.name,
+                    "Resource already deleted"
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(MoveError::Kube(e)),
+        };
+
+        // Add delete-for-move annotation
+        let annotation_patch = serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    DELETE_FOR_MOVE_ANNOTATION: ""
+                }
+            }
+        });
+
+        if let Err(e) = api
+            .patch(
+                &node.identity.name,
+                &PatchParams::default(),
+                &Patch::Merge(&annotation_patch),
+            )
+            .await
+        {
+            warn!(
+                kind = %node.identity.kind,
+                name = %node.identity.name,
+                error = %e,
+                "Failed to add delete-for-move annotation"
+            );
+        }
+
+        // Remove finalizers to prevent infrastructure deletion
+        if !obj
+            .metadata
+            .finalizers
+            .as_ref()
+            .is_none_or(|f| f.is_empty())
+        {
+            let finalizer_patch = serde_json::json!({
+                "metadata": {
+                    "finalizers": null
+                }
+            });
+
+            if let Err(e) = api
+                .patch(
+                    &node.identity.name,
+                    &PatchParams::default(),
+                    &Patch::Merge(&finalizer_patch),
+                )
+                .await
+            {
+                warn!(
+                    kind = %node.identity.kind,
+                    name = %node.identity.name,
+                    error = %e,
+                    "Failed to remove finalizers"
+                );
+            }
+        }
+
+        // Delete the resource
+        match api
+            .delete(&node.identity.name, &DeleteParams::default())
+            .await
+        {
+            Ok(_) => {
+                debug!(
+                    kind = %node.identity.kind,
+                    name = %node.identity.name,
+                    "Deleted source resource"
+                );
+                Ok(())
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
+            Err(e) => Err(MoveError::Kube(e)),
+        }
+    }
+}
+
+/// Result of a move operation
+#[derive(Debug, Clone)]
+pub struct MoveResult {
+    /// Move operation ID
+    pub move_id: String,
+    /// Number of objects moved to target
+    pub objects_moved: u32,
+    /// Number of objects deleted from source
+    pub objects_deleted: u32,
+}
+
+// Use shared utility functions
+use crate::utils::{build_api_resource, parse_api_version};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cell_mover_config() {
+        let config = CellMoverConfig::new("source-ns", "target-ns", "test-cluster");
+        assert_eq!(config.source_namespace, "source-ns");
+        assert_eq!(config.target_namespace, "target-ns");
+        assert_eq!(config.cluster_name, "test-cluster");
+        assert!(!config.move_id.is_empty());
+    }
+}

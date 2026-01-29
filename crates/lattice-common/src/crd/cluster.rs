@@ -154,7 +154,7 @@ pub struct LatticeClusterStatus {
 
     /// Whether pivot has completed successfully
     ///
-    /// This is set to true when the agent confirms PivotComplete with success=true.
+    /// This is set to true when the agent confirms MoveCompleteAck with success=true.
     /// It's the authoritative source of truth for pivot completion, persisted in
     /// the cluster status to survive controller restarts.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -175,43 +175,6 @@ pub struct LatticeClusterStatus {
     #[serde(default, skip_serializing_if = "is_false")]
     pub unpivot_pending: bool,
 
-    /// Current sub-phase of the pivot process (for crash recovery)
-    ///
-    /// Tracks progress through pivot steps so agent can resume after crash:
-    /// - Importing: CAPI manifests received, import in progress
-    /// - PatchingKubeconfig: CAPI imported, patching kubeconfig for self-management
-    /// - ApplyingResources: Kubeconfig patched, applying distributed resources
-    /// - Complete: All pivot steps finished
-    #[serde(default, skip_serializing_if = "PivotPhase::is_none")]
-    pub pivot_phase: PivotPhase,
-}
-
-/// Sub-phase of the pivot process for crash recovery
-///
-/// When a child cluster receives pivot manifests from parent, it progresses
-/// through these phases. On crash/restart, the agent checks this field to
-/// resume from the correct step.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub enum PivotPhase {
-    /// Not currently pivoting
-    #[default]
-    None,
-    /// Manifests received from parent, CAPI import in progress
-    Importing,
-    /// CAPI imported, patching kubeconfig for self-management
-    PatchingKubeconfig,
-    /// Kubeconfig patched, applying distributed resources (CloudProviders, etc.)
-    ApplyingResources,
-    /// All pivot steps complete
-    Complete,
-}
-
-impl PivotPhase {
-    /// Returns true if phase is None (for serde skip_serializing_if)
-    pub fn is_none(&self) -> bool {
-        matches!(self, PivotPhase::None)
-    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -244,12 +207,6 @@ impl LatticeClusterStatus {
         // Remove existing condition of the same type
         self.conditions.retain(|c| c.type_ != condition.type_);
         self.conditions.push(condition);
-        self
-    }
-
-    /// Set the pivot phase and return self for chaining
-    pub fn pivot_phase(mut self, pivot_phase: PivotPhase) -> Self {
-        self.pivot_phase = pivot_phase;
         self
     }
 }
@@ -656,26 +613,6 @@ workload:
             serde_yaml::from_str(&yaml).expect("LatticeClusterSpec deserialization should succeed");
 
         assert_eq!(spec, parsed, "Spec should survive roundtrip");
-    }
-
-    // =========================================================================
-    // Status Builder Tests
-    // =========================================================================
-
-    #[test]
-    fn status_builder_pivot_phase() {
-        let status = LatticeClusterStatus::default().pivot_phase(PivotPhase::Importing);
-        assert_eq!(status.pivot_phase, PivotPhase::Importing);
-    }
-
-    #[test]
-    fn status_builder_chaining() {
-        let status = LatticeClusterStatus::default()
-            .phase(ClusterPhase::Ready)
-            .pivot_phase(PivotPhase::Complete);
-
-        assert_eq!(status.phase, ClusterPhase::Ready);
-        assert_eq!(status.pivot_phase, PivotPhase::Complete);
     }
 
     // =========================================================================

@@ -11,10 +11,11 @@ fips = ["lattice-infra/fips", "lattice-common/fips"]
 
 [dependencies]
 # Internal
-lattice-proto = { workspace = true }
-lattice-infra = { workspace = true }
-lattice-common = { workspace = true }
 lattice-capi = { workspace = true }
+lattice-common = { workspace = true }
+lattice-infra = { workspace = true }
+lattice-move = { workspace = true }
+lattice-proto = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

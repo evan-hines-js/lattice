@@ -1,0 +1,31 @@
+[package]
+name = "lattice-move"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Distributed clusterctl move implementation for CAPI pivot over gRPC"
+
+[features]
+default = []
+fips = ["aws-lc-rs/fips"]
+
+[dependencies]
+lattice-common = { workspace = true }
+lattice-proto = { workspace = true }
+kube.workspace = true
+k8s-openapi.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+uuid.workspace = true
+aws-lc-rs.workspace = true
+
+[dev-dependencies]
+tokio-test.workspace = true
+mockall.workspace = true
+rstest.workspace = true

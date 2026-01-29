@@ -6,10 +6,12 @@
 //! - **Bootstrap Server**: HTTP endpoints for kubeadm callbacks and CSR signing
 //! - **Connection Registry**: Tracks connected agents
 //! - **Resource Distribution**: Fetching resources to sync to children
+//! - **Move Sender**: gRPC-based move command sender for distributed pivot
 
 pub mod bootstrap;
 pub mod cilium;
 pub mod connection;
+pub mod move_sender;
 pub mod parent;
 pub mod resources;
 pub mod server;
@@ -23,6 +25,7 @@ pub use connection::{
     AgentConnection, AgentRegistry, PivotSourceManifests, PostPivotManifests, SendError,
     SharedAgentRegistry, UnpivotManifests,
 };
+pub use move_sender::GrpcMoveCommandSender;
 pub use parent::{load_or_create_ca, CellServerError, ParentConfig, ParentServers};
 pub use resources::{fetch_distributable_resources, DistributableResources, ResourceError};
 pub use server::AgentServer;

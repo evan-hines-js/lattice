@@ -6,8 +6,11 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use lattice_proto::{AgentState, CellCommand};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
+
+// Re-export from lattice_move to avoid duplicate type definitions
+pub use lattice_move::{BatchAck, CompleteAck};
 
 /// Represents a connected agent
 pub struct AgentConnection {
@@ -92,7 +95,7 @@ pub enum SendError {
     ChannelClosed,
 }
 
-/// Post-pivot manifests to send to an agent after PivotComplete
+/// Post-pivot manifests included in MoveComplete for acked delivery
 #[derive(Clone, Debug, Default)]
 pub struct PostPivotManifests {
     /// CiliumNetworkPolicy for the operator (applied after Cilium CRDs exist)
@@ -108,7 +111,7 @@ pub struct UnpivotManifests {
     pub namespace: String,
 }
 
-/// CAPI manifests exported during pivot (to be deleted after PivotComplete)
+/// CAPI manifests exported during pivot (deleted after MoveCompleteAck)
 #[derive(Clone, Debug, Default)]
 pub struct PivotSourceManifests {
     /// CAPI manifests exported via clusterctl move --to-directory
@@ -125,10 +128,14 @@ pub struct AgentRegistry {
     agents: DashMap<String, AgentConnection>,
     post_pivot_manifests: DashMap<String, PostPivotManifests>,
     unpivot_manifests: DashMap<String, UnpivotManifests>,
-    /// CAPI manifests exported during pivot (deleted after PivotComplete)
+    /// CAPI manifests exported during pivot (deleted after MoveCompleteAck)
     pivot_source_manifests: DashMap<String, PivotSourceManifests>,
     /// Clusters with teardown in progress (prevents concurrent teardown spawns)
     teardown_in_progress: DashMap<String, ()>,
+    /// Pending batch acks keyed by request_id (CellCommand.command_id)
+    pending_batch_acks: DashMap<String, oneshot::Sender<BatchAck>>,
+    /// Pending complete acks keyed by request_id (CellCommand.command_id)
+    pending_complete_acks: DashMap<String, oneshot::Sender<CompleteAck>>,
 }
 
 impl AgentRegistry {
@@ -268,7 +275,7 @@ impl AgentRegistry {
         self.unpivot_manifests.contains_key(cluster_name)
     }
 
-    /// Store CAPI manifests exported during pivot (to delete after PivotComplete)
+    /// Store CAPI manifests exported during pivot (to delete after MoveCompleteAck)
     pub fn set_pivot_source_manifests(&self, cluster_name: &str, manifests: PivotSourceManifests) {
         info!(
             cluster = %cluster_name,
@@ -303,6 +310,51 @@ impl AgentRegistry {
     /// Clear teardown in progress for a cluster
     pub fn finish_teardown(&self, cluster_name: &str) {
         self.teardown_in_progress.remove(cluster_name);
+    }
+
+    // =========================================================================
+    // Pending acknowledgment tracking (request-response correlation)
+    // =========================================================================
+
+    /// Register a pending batch ack channel
+    ///
+    /// The request_id should be the CellCommand.command_id.
+    pub fn register_pending_batch_ack(
+        &self,
+        request_id: &str,
+        sender: oneshot::Sender<BatchAck>,
+    ) {
+        self.pending_batch_acks
+            .insert(request_id.to_string(), sender);
+        debug!(request_id = %request_id, "Registered pending batch ack");
+    }
+
+    /// Take the pending batch ack sender
+    pub fn take_pending_batch_ack(&self, request_id: &str) -> Option<oneshot::Sender<BatchAck>> {
+        self.pending_batch_acks
+            .remove(request_id)
+            .map(|(_, sender)| sender)
+    }
+
+    /// Register a pending complete ack channel
+    pub fn register_pending_complete_ack(
+        &self,
+        request_id: &str,
+        sender: oneshot::Sender<CompleteAck>,
+    ) {
+        self.pending_complete_acks
+            .insert(request_id.to_string(), sender);
+        debug!(request_id = %request_id, "Registered pending complete ack");
+    }
+
+    /// Take the pending complete ack sender
+    pub fn take_pending_complete_ack(
+        &self,
+        request_id: &str,
+    ) -> Option<oneshot::Sender<CompleteAck>> {
+        self.pending_complete_acks
+            .remove(request_id)
+            .map(|(_, sender)| sender)
     }
 }
 
@@ -649,5 +701,65 @@ mod tests {
 
         conn.state = AgentState::Unknown;
         assert!(!conn.is_ready_for_pivot());
+    }
+
+    // =========================================================================
+    // Pending Ack Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_pending_batch_ack_roundtrip() {
+        let registry = AgentRegistry::new();
+        let (tx, rx) = oneshot::channel::<BatchAck>();
+
+        registry.register_pending_batch_ack("req-123", tx);
+
+        let sender = registry
+            .take_pending_batch_ack("req-123")
+            .expect("should have pending ack");
+
+        let ack = BatchAck {
+            mappings: vec![("src-1".to_string(), "tgt-1".to_string())],
+            errors: vec![],
+        };
+        sender.send(ack).expect("channel should be open");
+
+        let received = rx.await.expect("should receive ack");
+        assert_eq!(received.mappings.len(), 1);
+    }
+
+    #[test]
+    fn test_pending_batch_ack_take_nonexistent() {
+        let registry = AgentRegistry::new();
+        assert!(registry.take_pending_batch_ack("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pending_complete_ack_roundtrip() {
+        let registry = AgentRegistry::new();
+        let (tx, rx) = oneshot::channel::<CompleteAck>();
+
+        registry.register_pending_complete_ack("req-456", tx);
+
+        let sender = registry
+            .take_pending_complete_ack("req-456")
+            .expect("should have pending ack");
+
+        let ack = CompleteAck {
+            success: true,
+            error: String::new(),
+            resources_created: 42,
+        };
+        sender.send(ack).expect("channel should be open");
+
+        let received = rx.await.expect("should receive ack");
+        assert!(received.success);
+        assert_eq!(received.resources_created, 42);
+    }
+
+    #[test]
+    fn test_pending_complete_ack_take_nonexistent() {
+        let registry = AgentRegistry::new();
+        assert!(registry.take_pending_complete_ack("nonexistent").is_none());
     }
 }
