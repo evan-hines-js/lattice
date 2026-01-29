@@ -193,15 +193,22 @@ impl AgentMover {
                     let kind = &crd.spec.names.kind;
                     let plural = &crd.spec.names.plural;
 
-                    // Use latest version
-                    if let Some(version) = crd.spec.versions.first() {
+                    // Use the storage version (the one with storage: true)
+                    let storage_version = crd
+                        .spec
+                        .versions
+                        .iter()
+                        .find(|v| v.storage)
+                        .or_else(|| crd.spec.versions.first());
+
+                    if let Some(version) = storage_version {
                         let api_version = if group.is_empty() {
                             version.name.clone()
                         } else {
                             format!("{}/{}", group, version.name)
                         };
+                        debug!(kind = %kind, api_version = %api_version, "Discovered move type for UID rebuild");
                         types.push((api_version, kind.clone(), plural.clone()));
-                        debug!(kind = %kind, "Discovered move type for UID rebuild");
                     }
                 }
             }
