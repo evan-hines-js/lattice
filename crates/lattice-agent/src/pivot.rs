@@ -25,9 +25,6 @@ const DEFAULT_CAPI_NAMESPACE: &str = "default";
 /// Delay after clusterctl move to allow resources to appear in the API server
 const POST_MOVE_STABILIZATION_DELAY: Duration = Duration::from_secs(2);
 
-/// Path to the in-cluster CA certificate
-const IN_CLUSTER_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
-
 /// Internal Kubernetes service endpoint for self-management
 const INTERNAL_K8S_ENDPOINT: &str = "https://kubernetes.default.svc:443";
 
@@ -254,16 +251,6 @@ impl Default for AgentPivotHandler<RealCommandRunner> {
 // Kubeconfig Patching for Self-Management
 // =============================================================================
 
-fn read_in_cluster_ca_base64() -> Result<String, PivotError> {
-    let in_cluster_ca = std::fs::read_to_string(IN_CLUSTER_CA_PATH).map_err(|e| {
-        PivotError::Internal(format!(
-            "failed to read in-cluster CA from {}: {}",
-            IN_CLUSTER_CA_PATH, e
-        ))
-    })?;
-    Ok(STANDARD.encode(in_cluster_ca.as_bytes()))
-}
-
 async fn fetch_kubeconfig_from_secret(
     secrets: &Api<Secret>,
     secret_name: &str,
@@ -290,11 +277,7 @@ async fn fetch_kubeconfig_from_secret(
         .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))
 }
 
-fn update_cluster_entry(
-    cluster_entry: &mut serde_yaml::Value,
-    in_cluster_ca_b64: &str,
-    cluster_name: &str,
-) -> bool {
+fn update_cluster_entry(cluster_entry: &mut serde_yaml::Value, cluster_name: &str) -> bool {
     let Some(cluster_config) = cluster_entry.get_mut("cluster") else {
         return false;
     };
@@ -310,29 +293,23 @@ fn update_cluster_entry(
 
     *server = serde_yaml::Value::String(INTERNAL_K8S_ENDPOINT.to_string());
 
+    // Remove certificate-authority file path if present (won't work inside pod)
+    // Keep certificate-authority-data unchanged - it's already correct for this cluster
     if let Some(m) = cluster_config.as_mapping_mut() {
         m.remove("certificate-authority");
-        m.insert(
-            serde_yaml::Value::String("certificate-authority-data".to_string()),
-            serde_yaml::Value::String(in_cluster_ca_b64.to_string()),
-        );
     }
 
     info!(
         cluster = %cluster_name,
         old_server = %old_server,
         new_server = INTERNAL_K8S_ENDPOINT,
-        "Updated kubeconfig server URL and CA"
+        "Updated kubeconfig server URL"
     );
 
     true
 }
 
-fn update_all_cluster_entries(
-    kubeconfig: &mut serde_yaml::Value,
-    in_cluster_ca_b64: &str,
-    cluster_name: &str,
-) -> usize {
+fn update_all_cluster_entries(kubeconfig: &mut serde_yaml::Value, cluster_name: &str) -> usize {
     let Some(clusters) = kubeconfig
         .get_mut("clusters")
         .and_then(|c| c.as_sequence_mut())
@@ -343,7 +320,7 @@ fn update_all_cluster_entries(
     clusters
         .iter_mut()
         .filter_map(|entry| {
-            if update_cluster_entry(entry, in_cluster_ca_b64, cluster_name) {
+            if update_cluster_entry(entry, cluster_name) {
                 Some(())
             } else {
                 None
@@ -470,8 +447,6 @@ pub async fn patch_kubeconfig_for_self_management(
 ) -> Result<(), PivotError> {
     info!(cluster = %cluster_name, namespace = %namespace, "Patching kubeconfig for self-management");
 
-    let in_cluster_ca_b64 = read_in_cluster_ca_base64()?;
-
     let client = kube::Client::try_default()
         .await
         .map_err(|e| PivotError::Internal(format!("failed to create k8s client: {}", e)))?;
@@ -481,8 +456,7 @@ pub async fn patch_kubeconfig_for_self_management(
 
     let mut kubeconfig = fetch_kubeconfig_from_secret(&secrets, &secret_name).await?;
 
-    let updated_count =
-        update_all_cluster_entries(&mut kubeconfig, &in_cluster_ca_b64, cluster_name);
+    let updated_count = update_all_cluster_entries(&mut kubeconfig, cluster_name);
 
     if updated_count == 0 {
         debug!(cluster = %cluster_name, "Kubeconfig already uses internal endpoint, skipping patch");
@@ -575,11 +549,13 @@ mod tests {
         )
         .unwrap();
 
-        let updated = update_cluster_entry(&mut entry, "Y2EtZGF0YQ==", "test");
+        let updated = update_cluster_entry(&mut entry, "test");
         assert!(updated);
 
         let server = entry["cluster"]["server"].as_str().unwrap();
         assert_eq!(server, INTERNAL_K8S_ENDPOINT);
+        // certificate-authority file path should be removed
+        assert!(entry["cluster"]["certificate-authority"].is_null());
     }
 
     #[test]
@@ -593,7 +569,7 @@ mod tests {
         )
         .unwrap();
 
-        let updated = update_cluster_entry(&mut entry, "Y2EtZGF0YQ==", "test");
+        let updated = update_cluster_entry(&mut entry, "test");
         assert!(!updated);
     }
 
@@ -739,7 +715,7 @@ mod tests {
         )
         .unwrap();
 
-        let count = update_all_cluster_entries(&mut kubeconfig, "Y2EtZGF0YQ==", "test");
+        let count = update_all_cluster_entries(&mut kubeconfig, "test");
         assert_eq!(count, 2);
     }
 
@@ -758,7 +734,7 @@ mod tests {
         )
         .unwrap();
 
-        let count = update_all_cluster_entries(&mut kubeconfig, "Y2EtZGF0YQ==", "test");
+        let count = update_all_cluster_entries(&mut kubeconfig, "test");
         // Only the external one should be updated
         assert_eq!(count, 1);
     }
@@ -773,7 +749,7 @@ mod tests {
         )
         .unwrap();
 
-        let count = update_all_cluster_entries(&mut kubeconfig, "Y2EtZGF0YQ==", "test");
+        let count = update_all_cluster_entries(&mut kubeconfig, "test");
         assert_eq!(count, 0);
     }
 
@@ -786,7 +762,7 @@ mod tests {
         )
         .unwrap();
 
-        let updated = update_cluster_entry(&mut entry, "Y2EtZGF0YQ==", "test");
+        let updated = update_cluster_entry(&mut entry, "test");
         assert!(!updated);
     }
 
@@ -801,7 +777,7 @@ mod tests {
         )
         .unwrap();
 
-        let updated = update_cluster_entry(&mut entry, "Y2EtZGF0YQ==", "test");
+        let updated = update_cluster_entry(&mut entry, "test");
         assert!(!updated);
     }
 }

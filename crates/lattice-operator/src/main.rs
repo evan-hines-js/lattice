@@ -14,7 +14,7 @@ use lattice_operator::crd::LatticeCluster;
 use lattice_operator::parent::{ParentConfig, ParentServers};
 use lattice_operator::startup::{
     ensure_crds_installed, ensure_infrastructure, get_cell_server_sans,
-    re_register_existing_clusters, start_ca_rotation, start_cedar_server, wait_for_api_ready,
+    re_register_existing_clusters, start_ca_rotation, wait_for_api_ready,
 };
 
 mod controller_runner;
@@ -42,12 +42,6 @@ enum Commands {
     Controller {
         #[arg(long, short, value_enum, default_value = "all")]
         mode: ControllerMode,
-
-        #[arg(long, env = "LATTICE_ENABLE_CEDAR_AUTHZ")]
-        enable_cedar_authz: bool,
-
-        #[arg(long, default_value = "50052", env = "LATTICE_CEDAR_PORT")]
-        cedar_port: u16,
     },
 }
 
@@ -68,12 +62,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Controller {
-            mode,
-            enable_cedar_authz,
-            cedar_port,
-        }) => run_controller(mode, enable_cedar_authz, cedar_port).await,
-        None => run_controller(ControllerMode::All, false, 50052).await,
+        Some(Commands::Controller { mode }) => run_controller(mode).await,
+        None => run_controller(ControllerMode::All).await,
     }
 }
 
@@ -104,22 +94,18 @@ fn init_tracing() {
         .init();
 }
 
-async fn run_controller(
-    mode: ControllerMode,
-    enable_cedar_authz: bool,
-    cedar_port: u16,
-) -> anyhow::Result<()> {
-    tracing::info!(?mode, cedar_authz = enable_cedar_authz, "Starting...");
+async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
+    tracing::info!(?mode, "Starting...");
 
     let client = Client::try_default().await?;
 
     // Install CRDs and infrastructure
     ensure_crds_installed(&client).await?;
-    ensure_infrastructure(&client, enable_cedar_authz).await?;
+    ensure_infrastructure(&client).await?;
     wait_for_api_ready(&client).await?;
 
     // Create cell servers
-    let parent_config = ParentConfig::with_cedar(enable_cedar_authz);
+    let parent_config = ParentConfig::default();
     let parent_servers = Arc::new(ParentServers::new(parent_config, &client).await?);
 
     // Get cluster identity from environment
@@ -148,11 +134,6 @@ async fn run_controller(
         .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
         .await?;
     tracing::info!("Cell servers started");
-
-    // Start optional Cedar authorization
-    if enable_cedar_authz {
-        start_cedar_server(client.clone(), cedar_port);
-    }
 
     // Start CA rotation background task
     start_ca_rotation(parent_servers.clone());

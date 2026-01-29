@@ -9,9 +9,6 @@ use tracing::info;
 
 use super::charts_dir;
 
-/// Cedar ExtAuth gRPC server port
-pub const CEDAR_EXTAUTH_PORT: u16 = 50052;
-
 /// Istio configuration
 #[derive(Debug, Clone)]
 pub struct IstioConfig {
@@ -19,22 +16,14 @@ pub struct IstioConfig {
     pub version: &'static str,
     /// Cluster name for trust domain (lattice.{cluster}.local)
     pub cluster_name: String,
-    /// Enable Cedar ExtAuth integration
-    pub cedar_enabled: bool,
 }
 
 impl IstioConfig {
-    /// Create a new config with the given cluster name (Cedar disabled by default)
+    /// Create a new config with the given cluster name
     pub fn new(cluster_name: impl Into<String>) -> Self {
-        Self::with_cedar(cluster_name, false)
-    }
-
-    /// Create a new config with Cedar ExtAuth configuration
-    pub fn with_cedar(cluster_name: impl Into<String>, cedar_enabled: bool) -> Self {
         Self {
             version: env!("ISTIO_VERSION"),
             cluster_name: cluster_name.into(),
-            cedar_enabled,
         }
     }
 }
@@ -46,15 +35,10 @@ pub struct IstioReconciler {
 }
 
 impl IstioReconciler {
-    /// Create with the given cluster name (Cedar disabled by default)
+    /// Create with the given cluster name
     pub fn new(cluster_name: impl Into<String>) -> Self {
-        Self::with_cedar(cluster_name, false)
-    }
-
-    /// Create with the given cluster name and Cedar configuration
-    pub fn with_cedar(cluster_name: impl Into<String>, cedar_enabled: bool) -> Self {
         Self {
-            config: IstioConfig::with_cedar(cluster_name, cedar_enabled),
+            config: IstioConfig::new(cluster_name),
             manifests: OnceCell::new(),
         }
     }
@@ -170,33 +154,6 @@ spec:
         .to_string()
     }
 
-    /// Generate Cedar ExtAuth AuthorizationPolicy
-    ///
-    /// This creates a mesh-wide CUSTOM authorization policy that routes all
-    /// authorization decisions to the Cedar ExtAuth gRPC server running in
-    /// the lattice-operator.
-    ///
-    /// Requires the `cedar-ext-authz` extensionProvider to be configured in
-    /// the Istio mesh config (done via helm values).
-    pub fn generate_cedar_extauth_policy() -> String {
-        r#"---
-apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: cedar-ext-authz
-  namespace: istio-system
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  action: CUSTOM
-  provider:
-    name: cedar-ext-authz
-  rules:
-  - {}
-"#
-        .to_string()
-    }
-
     async fn render_manifests(config: &IstioConfig) -> Result<Vec<String>, String> {
         let mut all_manifests = Vec::new();
 
@@ -259,44 +216,26 @@ spec:
         )));
 
         // 3. Render istiod chart (control plane with ambient mode)
-        info!(
-            version = config.version,
-            cedar_enabled = config.cedar_enabled,
-            "Rendering Istiod chart with ambient mode"
-        );
-
-        let mut istiod_args = vec![
-            "template".to_string(),
-            "istiod".to_string(),
-            istiod_chart,
-            "--namespace".to_string(),
-            "istio-system".to_string(),
-            "--set".to_string(),
-            "profile=ambient".to_string(),
-            // Configure trust domain to match Lattice SPIFFE identity format
-            // Each cluster gets its own trust domain: lattice.{cluster}.local
-            "--set".to_string(),
-            format!(
-                "meshConfig.trustDomain=lattice.{}.local",
-                config.cluster_name
-            ),
-            "--set".to_string(),
-            "pilot.resources.requests.cpu=100m".to_string(),
-            "--set".to_string(),
-            "pilot.resources.requests.memory=128Mi".to_string(),
-        ];
-
-        // Add Cedar ExtAuth extension provider when enabled
-        if config.cedar_enabled {
-            istiod_args.push("--set-json".to_string());
-            istiod_args.push(format!(
-                r#"meshConfig.extensionProviders=[{{"name":"cedar-ext-authz","envoyExtAuthzGrpc":{{"service":"lattice-operator.lattice-system.svc.cluster.local","port":"{}"}}}}]"#,
-                CEDAR_EXTAUTH_PORT
-            ));
-        }
+        info!(version = config.version, "Rendering Istiod chart with ambient mode");
 
         let istiod_output = Command::new("helm")
-            .args(&istiod_args)
+            .args([
+                "template",
+                "istiod",
+                &istiod_chart,
+                "--namespace",
+                "istio-system",
+                "--set",
+                "profile=ambient",
+                // Configure trust domain to match Lattice SPIFFE identity format
+                // Each cluster gets its own trust domain: lattice.{cluster}.local
+                "--set",
+                &format!("meshConfig.trustDomain=lattice.{}.local", config.cluster_name),
+                "--set",
+                "pilot.resources.requests.cpu=100m",
+                "--set",
+                "pilot.resources.requests.memory=128Mi",
+            ])
             .output()
             .await
             .map_err(|e| format!("failed to run helm: {}", e))?;
@@ -456,39 +395,4 @@ mod tests {
         assert!(docs[0].starts_with("---"));
     }
 
-    #[test]
-    fn test_cedar_extauth_policy() {
-        let policy = IstioReconciler::generate_cedar_extauth_policy();
-        assert!(policy.contains("apiVersion: security.istio.io/v1"));
-        assert!(policy.contains("kind: AuthorizationPolicy"));
-        assert!(policy.contains("name: cedar-ext-authz"));
-        assert!(policy.contains("namespace: istio-system"));
-        assert!(policy.contains("app.kubernetes.io/managed-by: lattice"));
-        assert!(policy.contains("action: CUSTOM"));
-        assert!(policy.contains("provider:"));
-        assert!(policy.contains("name: cedar-ext-authz"));
-        // Empty rules means applies to all traffic
-        assert!(policy.contains("rules:"));
-        assert!(policy.contains("- {}"));
-    }
-
-    #[test]
-    fn test_config_with_cedar_enabled() {
-        let config = IstioConfig::with_cedar("test-cluster", true);
-        assert_eq!(config.version, env!("ISTIO_VERSION"));
-        assert_eq!(config.cluster_name, "test-cluster");
-        assert!(config.cedar_enabled);
-    }
-
-    #[test]
-    fn test_config_with_cedar_disabled() {
-        let config = IstioConfig::with_cedar("test-cluster", false);
-        assert!(!config.cedar_enabled);
-    }
-
-    #[test]
-    fn test_reconciler_with_cedar() {
-        let reconciler = IstioReconciler::with_cedar("test-cluster", true);
-        assert_eq!(reconciler.version(), env!("ISTIO_VERSION"));
-    }
 }

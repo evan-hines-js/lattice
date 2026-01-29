@@ -11,7 +11,6 @@ members = [
     "crates/lattice-service",
     "crates/lattice-cloud-provider",
     "crates/lattice-secrets-provider",
-    "crates/lattice-cedar",
     "crates/lattice-operator",
     "crates/lattice-cli",
     "crates/lattice-move",
@@ -34,7 +33,6 @@ lattice-cloud-provider = { path = "crates/lattice-cloud-provider" }
 lattice-capi = { path = "crates/lattice-capi" }
 lattice-cell = { path = "crates/lattice-cell" }
 lattice-secrets-provider = { path = "crates/lattice-secrets-provider" }
-lattice-cedar = { path = "crates/lattice-cedar" }
 lattice-move = { path = "crates/lattice-move" }
 
 # Kubernetes

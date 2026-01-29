@@ -25,14 +25,13 @@ pub use secrets_provider::{
     VaultAuthMethod,
 };
 pub use service::{
-    AuthorizationConfig, CedarConfig, CertIssuerRef, ClaimMappings, ContainerSpec,
-    DependencyDirection, DeploySpec, DeployStrategy, ExecProbe, FileMount, HttpGetProbe,
-    HttpHeader, InboundPolicy, IngressPath, IngressSpec, IngressTls, LatticeService,
-    LatticeServiceSpec, LatticeServiceStatus, OidcConfig, OutboundPolicy, PathMatchType, PortSpec,
-    Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec, ResourceMetadata, ResourceQuantity,
-    ResourceRequirements, ResourceSpec, ResourceType, RetryConfig, SecurityContext, ServicePhase,
-    ServicePortsSpec, SidecarSpec, TimeoutConfig, TlsMode, VolumeAccessMode, VolumeMount,
-    VolumeParams,
+    CertIssuerRef, ContainerSpec, DependencyDirection, DeploySpec, DeployStrategy, ExecProbe,
+    FileMount, HttpGetProbe, HttpHeader, InboundPolicy, IngressPath, IngressSpec, IngressTls,
+    LatticeService, LatticeServiceSpec, LatticeServiceStatus, OutboundPolicy, PathMatchType,
+    PortSpec, Probe, RateLimitConfig, RateLimitSpec, ReplicaSpec, ResourceMetadata,
+    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RetryConfig,
+    SecurityContext, ServicePhase, ServicePortsSpec, SidecarSpec, TimeoutConfig, TlsMode,
+    VolumeAccessMode, VolumeMount, VolumeParams,
 };
 pub use service_policy::{
     LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,

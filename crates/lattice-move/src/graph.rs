@@ -333,6 +333,7 @@ impl ObjectGraph {
                 Err(e) => {
                     // Not found is okay - type may not have any instances
                     if e.to_string().contains("404") || e.to_string().contains("not found") {
+                        debug!(kind = %discovered_type.api_resource.kind, "Type not found, skipping");
                         continue;
                     }
                     return Err(MoveError::Discovery(format!(
@@ -341,6 +342,11 @@ impl ObjectGraph {
                     )));
                 }
             };
+
+            if discovered_type.api_resource.kind == "Secret" {
+                let names: Vec<_> = list.items.iter().filter_map(|o| o.metadata.name.as_ref()).collect();
+                info!(namespace = %self.namespace, count = names.len(), names = ?names, "Listed secrets in namespace");
+            }
 
             for obj in list.items {
                 if let Some(mut node) = GraphNode::from_dynamic_object(
@@ -407,13 +413,21 @@ impl ObjectGraph {
         for (secret_uid, cluster_uid) in secret_owners {
             if let Some(node) = self.nodes.get_mut(&secret_uid) {
                 node.soft_owners.insert(cluster_uid.clone());
-                debug!(
+                info!(
                     secret = %node.identity.name,
                     cluster_uid = %cluster_uid,
-                    "Added soft ownership"
+                    "Added soft ownership for secret"
                 );
             }
         }
+
+        // Log all secrets found for debugging
+        let secret_count = self
+            .nodes
+            .values()
+            .filter(|n| n.identity.kind == "Secret")
+            .count();
+        info!(secrets_found = secret_count, "Secrets discovered in namespace");
     }
 
     /// Propagate force_move_hierarchy to all descendants
@@ -485,7 +499,23 @@ impl ObjectGraph {
         keep.extend(additional_keep);
 
         // Remove nodes not in keep set
+        let before = self.nodes.len();
         self.nodes.retain(|uid, _| keep.contains(uid));
+
+        // Log what we're keeping
+        let secrets_kept = self
+            .nodes
+            .values()
+            .filter(|n| n.identity.kind == "Secret")
+            .map(|n| n.identity.name.as_str())
+            .collect::<Vec<_>>();
+        info!(
+            cluster = %cluster_name,
+            before = before,
+            after = self.nodes.len(),
+            secrets_kept = ?secrets_kept,
+            "Filtered graph by cluster"
+        );
 
         debug!(
             cluster = %cluster_name,
