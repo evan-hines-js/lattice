@@ -51,9 +51,9 @@ pub async fn create_kind_cluster(name: &str, kubeconfig_path: &Path) -> Result<(
     }
 
     // Export kubeconfig
-    let kubeconfig_str = kubeconfig_path.to_str().ok_or_else(|| {
-        Error::command_failed("kubeconfig path contains invalid UTF-8")
-    })?;
+    let kubeconfig_str = kubeconfig_path
+        .to_str()
+        .ok_or_else(|| Error::command_failed("kubeconfig path contains invalid UTF-8"))?;
 
     let export_output = Command::new("kind")
         .args([

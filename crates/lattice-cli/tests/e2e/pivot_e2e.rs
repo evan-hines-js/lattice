@@ -319,7 +319,15 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     verify_cluster_capi_resources(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME).await?;
     watch_worker_scaling(&workload_kubeconfig_path, WORKLOAD_CLUSTER_NAME, 1).await?;
 
-    // Add workload to chaos targets now that it's verified
+    // Run Cedar ExtAuth test BEFORE chaos starts - it requires operator availability
+    // Cedar authorization depends on the operator's ExtAuth server being reachable
+    if mesh_test_enabled() {
+        info!("[Cedar] Running Cedar ExtAuth test (before chaos)...");
+        run_cedar_authz_test(&workload_kubeconfig_path).await?;
+        info!("[Cedar] Cedar ExtAuth test passed!");
+    }
+
+    // Add workload to chaos targets now that Cedar test is complete
     chaos_targets.add(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path);
 
     // =========================================================================
@@ -330,26 +338,23 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
 
     // Start mesh tests in background (runs on workload cluster, doesn't need workload2)
+    // Note: Cedar test already ran above (requires operator, can't run under chaos)
     let mesh_handle = if mesh_test_enabled() {
         let kubeconfig = workload_kubeconfig_path.clone();
         Some(tokio::spawn(async move {
             info!("[Mesh] Running service mesh tests...");
             let kubeconfig2 = kubeconfig.clone();
-            let kubeconfig3 = kubeconfig.clone();
 
-            // Run all mesh tests in parallel:
+            // Run mesh tests in parallel (these test policy enforcement, not operator availability):
             // - Fixed 10-service bilateral agreement test (includes wildcard)
             // - Randomized large-scale mesh test
-            // - Cedar ExtAuth authorization test (header-based policies)
-            let (r1, r2, r3) = tokio::join!(
+            let (r1, r2) = tokio::join!(
                 run_mesh_test(&kubeconfig),
-                run_random_mesh_test(&kubeconfig2),
-                run_cedar_authz_test(&kubeconfig3)
+                run_random_mesh_test(&kubeconfig2)
             );
 
             r1?;
             r2?;
-            r3?;
             info!("[Mesh] All tests complete!");
             Ok::<_, String>(())
         }))
