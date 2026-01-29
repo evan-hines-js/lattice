@@ -22,9 +22,8 @@ pub use client::{AgentClient, AgentClientConfig, AgentCredentials, CertificateEr
 pub use executor::{execute_k8s_request, is_watch_request};
 pub use lattice_common::{CsrRequest, CsrResponse};
 pub use pivot::{
-    apply_distributed_resources, patch_kubeconfig_for_self_management, retry_with_backoff,
-    AgentPivotHandler, CommandOutput, CommandRunner, DistributableResources, PivotError,
-    RealCommandRunner, RetryConfig,
+    apply_distributed_resources, patch_kubeconfig_for_self_management, DistributableResources,
+    PivotError,
 };
 pub use watch::{execute_watch, WatchRegistry};
 

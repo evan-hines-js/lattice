@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::time::Duration;
 
 use kube::api::{Api, DeleteParams, Patch, PatchParams};
@@ -24,12 +26,13 @@ const MAX_ATTEMPTS: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// RAII wrapper for temporary directories that ensures cleanup on drop.
-///
-/// This wrapper logs cleanup failures instead of silently ignoring them.
+/// Only used in tests now.
+#[cfg(test)]
 struct TempDir {
     path: PathBuf,
 }
 
+#[cfg(test)]
 impl TempDir {
     /// Create a new temporary directory with the given name prefix.
     fn new(prefix: &str) -> Result<Self, ClusterctlError> {
@@ -37,7 +40,7 @@ impl TempDir {
         // Clean up any stale directory from previous runs
         if path.exists() {
             if let Err(e) = std::fs::remove_dir_all(&path) {
-                warn!(path = %path.display(), error = %e, "failed to clean stale temp directory");
+                eprintln!("failed to clean stale temp directory {}: {}", path.display(), e);
             }
         }
         std::fs::create_dir_all(&path).map_err(|e| {
@@ -56,10 +59,11 @@ impl TempDir {
     }
 }
 
+#[cfg(test)]
 impl Drop for TempDir {
     fn drop(&mut self) {
         if let Err(e) = std::fs::remove_dir_all(&self.path) {
-            warn!(path = %self.path.display(), error = %e, "failed to clean up temp directory");
+            eprintln!("failed to clean up temp directory {}: {}", self.path.display(), e);
         }
     }
 }
@@ -82,8 +86,7 @@ struct RetryConfig<'a> {
 
 /// Execute an operation with retry logic.
 ///
-/// This is a generic retry wrapper that eliminates duplication between
-/// export_for_pivot and import_from_manifests.
+/// Generic retry wrapper for clusterctl operations that may fail transiently.
 async fn with_retry<T, F, Fut>(
     config: RetryConfig<'_>,
     mut operation_fn: F,
@@ -173,162 +176,6 @@ async fn run_command(cmd: &mut Command, description: &str) -> Result<(), String>
         warn!("{} failed: {}", description, err);
         Err(err)
     }
-}
-
-/// Export CAPI resources for pivot/unpivot
-pub async fn export_for_pivot(
-    kubeconfig: Option<&Path>,
-    namespace: &str,
-    cluster_name: &str,
-) -> Result<Vec<Vec<u8>>, ClusterctlError> {
-    let temp_dir = TempDir::new(&format!("lattice-export-{}", cluster_name))?;
-
-    // Clone values needed for the retry callback
-    let kubeconfig_path = kubeconfig.map(|p| p.to_path_buf());
-    let ns = namespace.to_string();
-    let cn = cluster_name.to_string();
-
-    let config = RetryConfig {
-        operation: "export",
-        context_name: cluster_name,
-        on_retry: Some(Box::new(move || {
-            let kc = kubeconfig_path.clone();
-            let ns = ns.clone();
-            let cn = cn.clone();
-            Box::pin(async move {
-                // Unpause CAPI cluster before retry to recover from partial move state
-                if let Err(e) = unpause_capi_cluster(kc.as_deref(), &ns, &cn).await {
-                    warn!(
-                        cluster = %cn,
-                        error = %e,
-                        "failed to unpause CAPI cluster before retry"
-                    );
-                }
-            })
-        })),
-        retry_delay: RETRY_DELAY,
-    };
-
-    with_retry(config, |_attempt| {
-        let export_path = temp_dir.path().to_path_buf();
-        let kubeconfig = kubeconfig.map(|p| p.to_path_buf());
-        let namespace = namespace.to_string();
-        let cluster_name = cluster_name.to_string();
-
-        async move {
-            // Reset directory for each attempt (using async I/O to avoid blocking)
-            if let Err(e) = tokio::fs::remove_dir_all(&export_path).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    warn!(path = %export_path.display(), error = %e, "failed to reset export directory");
-                }
-            }
-            tokio::fs::create_dir_all(&export_path)
-                .await
-                .map_err(|e| format!("failed to create export dir: {}", e))?;
-
-            let mut cmd = Command::new("clusterctl");
-            cmd.arg("move")
-                .arg("--to-directory")
-                .arg(&export_path)
-                .arg("--namespace")
-                .arg(&namespace);
-
-            if let Some(kc) = kubeconfig.as_ref() {
-                cmd.arg("--kubeconfig").arg(kc);
-            }
-
-            run_command(
-                &mut cmd,
-                &format!("clusterctl move --to-directory (cluster={})", cluster_name),
-            )
-            .await?;
-
-            let manifests = read_yaml_files(&export_path)
-                .await
-                .map_err(|e| format!("failed to read exported manifests: {}", e))?;
-
-            info!(
-                operation = "export",
-                cluster = %cluster_name,
-                manifest_count = manifests.len(),
-                "CAPI export complete"
-            );
-
-            Ok(manifests)
-        }
-    })
-    .await
-    // TempDir is dropped here, ensuring cleanup
-}
-
-/// Import CAPI resources from manifest bytes (used during unpivot)
-pub async fn import_from_manifests(
-    kubeconfig: Option<&Path>,
-    namespace: &str,
-    manifests: &[Vec<u8>],
-) -> Result<(), ClusterctlError> {
-    let temp_dir = TempDir::new(&format!("lattice-import-{}", namespace))?;
-
-    let config = RetryConfig {
-        operation: "import",
-        context_name: namespace,
-        on_retry: None, // No special action needed between import retries
-        retry_delay: RETRY_DELAY,
-    };
-
-    with_retry(config, |_attempt| {
-        let import_path = temp_dir.path().to_path_buf();
-        let kubeconfig = kubeconfig.map(|p| p.to_path_buf());
-        let namespace = namespace.to_string();
-        let manifests = manifests.to_vec();
-
-        async move {
-            // Reset directory for each attempt (using async I/O to avoid blocking)
-            if let Err(e) = tokio::fs::remove_dir_all(&import_path).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    warn!(path = %import_path.display(), error = %e, "failed to reset import directory");
-                }
-            }
-            tokio::fs::create_dir_all(&import_path)
-                .await
-                .map_err(|e| format!("failed to create import dir: {}", e))?;
-
-            // Write manifests to temporary files (using async I/O to avoid blocking)
-            for (i, manifest) in manifests.iter().enumerate() {
-                tokio::fs::write(import_path.join(format!("{}.yaml", i)), manifest)
-                    .await
-                    .map_err(|e| format!("failed to write manifest {}: {}", i, e))?;
-            }
-
-            let mut cmd = Command::new("clusterctl");
-            cmd.arg("move")
-                .arg("--from-directory")
-                .arg(&import_path)
-                .arg("--namespace")
-                .arg(&namespace);
-
-            if let Some(kc) = kubeconfig.as_ref() {
-                cmd.arg("--to-kubeconfig").arg(kc);
-            }
-
-            run_command(
-                &mut cmd,
-                &format!("clusterctl move --from-directory (namespace={})", namespace),
-            )
-            .await?;
-
-            info!(
-                operation = "import",
-                namespace = %namespace,
-                manifest_count = manifests.len(),
-                "CAPI import complete"
-            );
-
-            Ok(())
-        }
-    })
-    .await
-    // TempDir is dropped here, ensuring cleanup
 }
 
 /// Move CAPI resources directly between clusters using --to-kubeconfig
@@ -624,52 +471,37 @@ impl Default for TeardownConfig {
 ///
 /// This is the shared logic for both `lattice uninstall` (CLI) and unpivot (controller).
 /// The flow is:
-/// 1. Import manifests (if provided) via clusterctl move --from-directory
-/// 2. Unpause CAPI cluster to allow reconciliation
-/// 3. Wait for InfrastructureReady=True
-/// 4. Delete the Cluster resource
-/// 5. Wait for cluster deletion (infrastructure cleanup)
+/// 1. Unpause CAPI cluster to allow reconciliation
+/// 2. Wait for InfrastructureReady=True
+/// 3. Delete the Cluster resource
+/// 4. Wait for cluster deletion (infrastructure cleanup)
 ///
 /// # Arguments
 /// * `client` - Kubernetes client for the cluster where CAPI is running
 /// * `namespace` - CAPI namespace (e.g., "capi-{cluster_name}")
 /// * `cluster_name` - Name of the CAPI Cluster resource
-/// * `manifests` - Optional CAPI manifests to import before teardown
 /// * `config` - Teardown configuration (timeouts)
-/// * `kubeconfig` - Optional kubeconfig path for clusterctl commands (None = in-cluster)
+/// * `kubeconfig` - Optional kubeconfig path for kubectl/clusterctl commands (None = in-cluster)
 pub async fn teardown_cluster(
     client: &kube::Client,
     namespace: &str,
     cluster_name: &str,
-    manifests: Option<&[Vec<u8>]>,
     config: &TeardownConfig,
     kubeconfig: Option<&Path>,
 ) -> Result<(), ClusterctlError> {
-    // Step 1: Import manifests if provided
-    if let Some(manifests) = manifests {
-        if !manifests.is_empty() {
-            info!(
-                cluster = %cluster_name,
-                manifest_count = manifests.len(),
-                "Importing CAPI manifests"
-            );
-            import_from_manifests(kubeconfig, namespace, manifests).await?;
-        }
-    }
-
-    // Step 2: Unpause CAPI cluster to allow reconciliation
+    // Step 1: Unpause CAPI cluster to allow reconciliation
     info!(cluster = %cluster_name, "Unpausing CAPI cluster");
     unpause_capi_cluster(kubeconfig, namespace, cluster_name).await?;
 
-    // Step 3: Wait for infrastructure ready
+    // Step 2: Wait for infrastructure ready
     info!(cluster = %cluster_name, "Waiting for infrastructure ready");
     wait_for_infrastructure_ready(client, namespace, cluster_name, config.ready_timeout).await?;
 
-    // Step 4: Delete the Cluster resource
+    // Step 3: Delete the Cluster resource
     info!(cluster = %cluster_name, "Deleting CAPI Cluster resource");
     delete_cluster(client, namespace, cluster_name).await?;
 
-    // Step 5: Wait for cluster deletion (infrastructure cleanup)
+    // Step 4: Wait for cluster deletion (infrastructure cleanup)
     info!(cluster = %cluster_name, "Waiting for infrastructure cleanup");
     wait_for_cluster_deletion(client, namespace, cluster_name, config.deletion_timeout).await?;
 
@@ -967,32 +799,6 @@ pub async fn delete_pivoted_capi_resources(
         "CAPI resource deletion complete"
     );
     Ok(deleted)
-}
-
-async fn read_yaml_files(dir: &Path) -> Result<Vec<Vec<u8>>, ClusterctlError> {
-    let mut entries = tokio::fs::read_dir(dir)
-        .await
-        .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to read dir: {}", e)))?;
-
-    let mut manifests = Vec::new();
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| ClusterctlError::ExecutionFailed(format!("failed to read dir entry: {}", e)))?
-    {
-        let path = entry.path();
-        if path.extension().map(|e| e == "yaml").unwrap_or(false) {
-            let content = tokio::fs::read(&path).await.map_err(|e| {
-                ClusterctlError::ExecutionFailed(format!(
-                    "failed to read {}: {}",
-                    path.display(),
-                    e
-                ))
-            })?;
-            manifests.push(content);
-        }
-    }
-    Ok(manifests)
 }
 
 #[cfg(test)]

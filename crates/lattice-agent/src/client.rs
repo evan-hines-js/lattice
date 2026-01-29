@@ -35,7 +35,8 @@ use lattice_proto::lattice_agent_client::LatticeAgentClient;
 use lattice_proto::{
     agent_message::Payload, cell_command::Command, AgentMessage, AgentReady, AgentState,
     BootstrapComplete, CellCommand, ClusterDeleting, Heartbeat, KubernetesResponse,
-    MoveCompleteAck, MoveObjectAck, MoveObjectError, StatusResponse, UidMapping,
+    MoveCompleteAck, MoveObject, MoveObjectAck, MoveObjectError, SourceOwnerRef, StatusResponse,
+    UidMapping,
 };
 
 use crate::watch::{execute_watch, WatchRegistry};
@@ -597,8 +598,8 @@ impl AgentClient {
 
     /// Run the unpivot retry loop
     ///
-    /// Keeps exporting CAPI resources and sending ClusterDeleting to parent every 5s.
-    /// This continues until the parent imports/unpauses and CAPI deletes the cluster.
+    /// Uses native CAPI discovery (same logic as pivot) to export resources.
+    /// Keeps sending ClusterDeleting to parent every 5s until parent imports.
     /// No ACK is needed - the cluster will simply be deleted at the infrastructure level.
     async fn run_unpivot_loop(
         message_tx: mpsc::Sender<AgentMessage>,
@@ -608,22 +609,53 @@ impl AgentClient {
         let retry_interval = std::time::Duration::from_secs(5);
 
         loop {
-            // Export CAPI resources
-            match lattice_common::clusterctl::export_for_pivot(None, namespace, cluster_name).await
-            {
-                Ok(capi_manifests) => {
+            // Create k8s client for this iteration
+            let client = match kube::Client::try_default().await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "Failed to create k8s client for unpivot");
+                    tokio::time::sleep(retry_interval).await;
+                    continue;
+                }
+            };
+
+            // Discover and prepare CAPI resources (same logic as pivot)
+            match lattice_move::prepare_move_objects(&client, namespace, cluster_name).await {
+                Ok(objects) => {
                     info!(
                         cluster = %cluster_name,
                         namespace = %namespace,
-                        manifest_count = capi_manifests.len(),
-                        "Sending ClusterDeleting to parent (unpivot retry)"
+                        object_count = objects.len(),
+                        "Sending ClusterDeleting to parent (unpivot)"
                     );
+
+                    // Convert to proto format
+                    let proto_objects: Vec<MoveObject> = objects
+                        .into_iter()
+                        .map(|obj| MoveObject {
+                            source_uid: obj.source_uid,
+                            manifest: obj.manifest,
+                            owners: obj
+                                .owners
+                                .into_iter()
+                                .map(|o| SourceOwnerRef {
+                                    source_uid: o.source_uid,
+                                    api_version: o.api_version,
+                                    kind: o.kind,
+                                    name: o.name,
+                                    controller: o.controller,
+                                    block_owner_deletion: o.block_owner_deletion,
+                                })
+                                .collect(),
+                        })
+                        .collect();
 
                     let msg = AgentMessage {
                         cluster_name: cluster_name.to_string(),
                         payload: Some(Payload::ClusterDeleting(ClusterDeleting {
                             namespace: namespace.to_string(),
-                            capi_manifests,
+                            objects: proto_objects,
+                            cluster_name: cluster_name.to_string(),
                         })),
                     };
 
@@ -636,7 +668,7 @@ impl AgentClient {
                     warn!(
                         cluster = %cluster_name,
                         error = %e,
-                        "Failed to export CAPI for unpivot, will retry"
+                        "Failed to prepare CAPI for unpivot, will retry"
                     );
                 }
             }
