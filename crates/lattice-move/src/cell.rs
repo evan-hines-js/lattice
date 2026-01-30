@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
 use kube::discovery::ApiResource;
 use kube::Client;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::MoveError;
 use crate::graph::{GraphNode, ObjectGraph};
@@ -517,11 +517,20 @@ impl<S: MoveCommandSender> CellMover<S> {
 
             if !ack.errors.is_empty() {
                 for (uid, msg, retryable) in &ack.errors {
-                    warn!(source_uid = %uid, error = %msg, retryable = %retryable, "Object creation failed");
+                    error!(source_uid = %uid, error = %msg, retryable = %retryable, "Object creation failed");
                 }
+                let first_error = &ack.errors[0];
+                return Err(MoveError::BatchFailed {
+                    index: index as u32,
+                    message: format!(
+                        "{} objects failed, first: {}",
+                        ack.errors.len(),
+                        first_error.1
+                    ),
+                });
             }
 
-            debug!(batch = index, mappings = ack.mappings.len(), errors = ack.errors.len(), "Batch acknowledged");
+            debug!(batch = index, mappings = ack.mappings.len(), "Batch acknowledged");
         }
 
         Ok(())
