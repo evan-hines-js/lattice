@@ -40,7 +40,7 @@ use lattice_operator::crd::{ClusterPhase, LatticeCluster};
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
-    extract_docker_cluster_kubeconfig, get_docker_kubeconfig, load_cluster_config,
+    extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
     load_registry_credentials, run_cmd_allow_fail,
 };
 use super::mesh_tests::start_mesh_test;
@@ -172,7 +172,7 @@ async fn run_upgrade_test() -> Result<(), String> {
     info!("Workload cluster ready at v{}!", from_version);
 
     // Extract kubeconfig
-    let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
+    let workload_kubeconfig_path = kubeconfig_path(WORKLOAD_CLUSTER_NAME);
     if workload_provider == InfraProvider::Docker {
         extract_docker_cluster_kubeconfig(
             WORKLOAD_CLUSTER_NAME,

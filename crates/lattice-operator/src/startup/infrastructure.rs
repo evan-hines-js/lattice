@@ -7,6 +7,8 @@ use std::time::Duration;
 use kube::api::ListParams;
 use kube::{Api, Client};
 
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+
 use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
 use crate::crd::{CloudProvider, LatticeCluster, ProviderType};
 use crate::infra::bootstrap::{self, InfrastructureConfig};
@@ -109,7 +111,8 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
     tracing::info!(infrastructure = %provider_str, "Installing CAPI providers for bootstrap cluster");
 
     // Wait for CloudProvider to be created by install command
-    let cloud_providers: Api<CloudProvider> = Api::namespaced(client.clone(), "lattice-system");
+    let cloud_providers: Api<CloudProvider> =
+        Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     tracing::info!(provider_ref = %provider_ref, "Waiting for CloudProvider...");
     let cp = loop {
         match cloud_providers.get(&provider_ref).await {

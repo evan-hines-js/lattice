@@ -8,9 +8,11 @@ use rand::Rng;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+
 use super::helpers::run_cmd_allow_fail;
 
-const OPERATOR_NS: &str = "lattice-system";
+const OPERATOR_NS: &str = LATTICE_SYSTEM_NAMESPACE;
 const OPERATOR_LABEL: &str = "app=lattice-operator";
 
 /// Configuration for chaos monkey behavior

@@ -29,7 +29,7 @@ use lattice_capi::{
     ClusterctlInstaller,
 };
 use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
-use lattice_common::{CsrRequest, CsrResponse};
+use lattice_common::{CsrRequest, CsrResponse, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::pki::AgentCertRequest;
 use lattice_proto::lattice_agent_client::LatticeAgentClient;
 use lattice_proto::{
@@ -809,7 +809,7 @@ impl AgentClient {
         // Copy credentials from CloudProvider to CAPI provider namespace
         if infrastructure != ProviderType::Docker {
             let cloud_providers: kube::Api<CloudProvider> =
-                kube::Api::namespaced(client.clone(), "lattice-system");
+                kube::Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
             let cp = cloud_providers
                 .get(&cluster.spec.provider_ref)
                 .await

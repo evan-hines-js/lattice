@@ -4,11 +4,13 @@
 //! default-deny network policies. These are infrastructure namespaces
 //! that require unrestricted network access to function.
 
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+
 /// Core Kubernetes namespaces
 pub const CORE: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];
 
 /// Lattice operator namespace
-pub const LATTICE: &[&str] = &["lattice-system"];
+pub const LATTICE: &[&str] = &[LATTICE_SYSTEM_NAMESPACE];
 
 /// CNI (Cilium) namespace
 pub const CNI: &[&str] = &["cilium-system"];
@@ -76,7 +78,7 @@ mod tests {
         let namespaces = all();
 
         assert!(namespaces.contains(&"kube-system"));
-        assert!(namespaces.contains(&"lattice-system"));
+        assert!(namespaces.contains(&LATTICE_SYSTEM_NAMESPACE));
         assert!(namespaces.contains(&"cilium-system"));
         assert!(namespaces.contains(&"istio-system"));
         assert!(namespaces.contains(&"cert-manager"));

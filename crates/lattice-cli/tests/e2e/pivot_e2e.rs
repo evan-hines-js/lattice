@@ -72,7 +72,7 @@ use super::chaos::{ChaosMonkey, ChaosTargets};
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, delete_cluster_and_wait,
     ensure_docker_network, extract_docker_cluster_kubeconfig, get_docker_kubeconfig,
-    load_cluster_config, load_registry_credentials, run_cmd, run_cmd_allow_fail,
+    kubeconfig_path, load_cluster_config, load_registry_credentials, run_cmd, run_cmd_allow_fail,
     verify_cluster_capi_resources, watch_cluster_phases, watch_cluster_phases_with_kubeconfig,
     watch_worker_scaling,
 };
@@ -96,7 +96,7 @@ fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String,
     if provider == InfraProvider::Docker {
         get_docker_kubeconfig(cluster_name)
     } else {
-        Ok(format!("/tmp/{}-kubeconfig", cluster_name))
+        Ok(kubeconfig_path(cluster_name))
     }
 }
 
@@ -284,7 +284,7 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     // =========================================================================
     info!("[Phase 4] Watching workload cluster provisioning...");
 
-    let workload_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD_CLUSTER_NAME);
+    let workload_kubeconfig_path = kubeconfig_path(WORKLOAD_CLUSTER_NAME);
 
     if workload_provider == InfraProvider::Docker {
         watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME, None).await?;
@@ -352,7 +352,7 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     };
 
     // Create and verify workload2 (deep hierarchy test)
-    let workload2_kubeconfig_path = format!("/tmp/{}-kubeconfig", WORKLOAD2_CLUSTER_NAME);
+    let workload2_kubeconfig_path = kubeconfig_path(WORKLOAD2_CLUSTER_NAME);
     {
         let workload_api: Api<LatticeCluster> = Api::all(workload_client.clone());
         workload_api

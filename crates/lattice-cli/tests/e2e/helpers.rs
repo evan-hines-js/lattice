@@ -3,6 +3,8 @@
 //! Provides utilities for Docker-based cluster testing.
 
 #[cfg(feature = "provider-e2e")]
+use std::sync::OnceLock;
+#[cfg(feature = "provider-e2e")]
 use std::{process::Command, time::Duration};
 
 #[cfg(feature = "provider-e2e")]
@@ -16,6 +18,45 @@ use lattice_operator::crd::{BootstrapProvider, ClusterPhase};
 use tokio::time::sleep;
 #[cfg(feature = "provider-e2e")]
 use tracing::info;
+
+// =============================================================================
+// Unique Run ID for Parallel Test Execution
+// =============================================================================
+
+/// Unique run ID for this test process.
+/// Uses process ID and timestamp to ensure uniqueness across parallel runs.
+#[cfg(feature = "provider-e2e")]
+static RUN_ID: OnceLock<String> = OnceLock::new();
+
+/// Get the unique run ID for this test process.
+#[cfg(feature = "provider-e2e")]
+pub fn run_id() -> &'static str {
+    RUN_ID.get_or_init(|| {
+        format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                % 1_000_000
+        )
+    })
+}
+
+/// Generate a unique kubeconfig path for a cluster.
+///
+/// The path includes the run ID to allow parallel test execution.
+#[cfg(feature = "provider-e2e")]
+pub fn kubeconfig_path(cluster_name: &str) -> String {
+    format!("/tmp/{}-{}-kubeconfig", run_id(), cluster_name)
+}
+
+/// Generate a unique localhost-patched kubeconfig path for a cluster.
+#[cfg(feature = "provider-e2e")]
+pub fn kubeconfig_local_path(cluster_name: &str) -> String {
+    format!("/tmp/{}-{}-kubeconfig-local", run_id(), cluster_name)
+}
 
 // =============================================================================
 // Kubernetes Client
@@ -741,9 +782,9 @@ pub fn load_service_config(
 /// Get a localhost-accessible kubeconfig for a Docker cluster
 #[cfg(feature = "provider-e2e")]
 pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
-    let kubeconfig_path = format!("/tmp/{}-kubeconfig", cluster_name);
-    let kubeconfig = std::fs::read_to_string(&kubeconfig_path)
-        .map_err(|e| format!("Failed to read kubeconfig: {}", e))?;
+    let kc_path = kubeconfig_path(cluster_name);
+    let kubeconfig = std::fs::read_to_string(&kc_path)
+        .map_err(|e| format!("Failed to read kubeconfig {}: {}", kc_path, e))?;
 
     let lb_container = format!("{}-lb", cluster_name);
     let port_output = run_cmd_allow_fail("docker", &["port", &lb_container, "6443/tcp"]);
@@ -776,7 +817,7 @@ pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
     let patched = serde_json::to_string(&config)
         .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))?;
 
-    let patched_path = format!("/tmp/{}-kubeconfig-local", cluster_name);
+    let patched_path = kubeconfig_local_path(cluster_name);
     std::fs::write(&patched_path, &patched)
         .map_err(|e| format!("Failed to write kubeconfig: {}", e))?;
 

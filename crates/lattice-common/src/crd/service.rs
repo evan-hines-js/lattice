@@ -127,26 +127,7 @@ impl ResourceType {
 
 /// Validate custom type: lowercase alphanumeric with hyphens, starts with letter
 fn validate_custom_type(s: &str) -> Result<(), String> {
-    if s.is_empty() {
-        return Err("resource type cannot be empty".to_string());
-    }
-    // Safe: we checked s.is_empty() above
-    if !s.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
-        return Err(format!(
-            "resource type must start with lowercase letter: {}",
-            s
-        ));
-    }
-    if !s
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
-        return Err(format!(
-            "resource type must be lowercase alphanumeric with hyphens: {}",
-            s
-        ));
-    }
-    Ok(())
+    super::validate_dns_identifier(s, true).map_err(|e| e.replace("identifier", "resource type"))
 }
 
 impl<'de> Deserialize<'de> for ResourceType {

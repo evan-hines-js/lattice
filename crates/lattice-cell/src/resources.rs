@@ -132,7 +132,7 @@ mod tests {
             },
         );
         // Add metadata that should be stripped
-        cp.metadata.namespace = Some("lattice-system".to_string());
+        cp.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
         cp.metadata.uid = Some("test-uid-12345".to_string());
         cp.metadata.resource_version = Some("123456".to_string());
         cp.metadata.creation_timestamp =
@@ -199,7 +199,7 @@ mod tests {
 
         let mut secret = Secret::default();
         secret.metadata.name = Some("test-secret".to_string());
-        secret.metadata.namespace = Some("lattice-system".to_string());
+        secret.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
         secret.metadata.uid = Some("secret-uid".to_string());
         secret.metadata.resource_version = Some("999".to_string());
 
