@@ -21,6 +21,7 @@ pub async fn ensure_cell_service_exists(
     load_balancer_ip: Option<String>,
     bootstrap_port: u16,
     grpc_port: u16,
+    proxy_port: u16,
     provider_type: ProviderType,
 ) -> anyhow::Result<()> {
     let api: Api<Service> = Api::namespaced(client.clone(), "lattice-system");
@@ -68,6 +69,13 @@ pub async fn ensure_cell_service_exists(
                     protocol: Some("TCP".to_string()),
                     ..Default::default()
                 },
+                ServicePort {
+                    name: Some("proxy".to_string()),
+                    port: proxy_port as i32,
+                    target_port: Some(IntOrString::Int(proxy_port as i32)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                },
             ]),
             ..Default::default()
         }),
@@ -79,6 +87,7 @@ pub async fn ensure_cell_service_exists(
         load_balancer_ip = ?load_balancer_ip,
         bootstrap_port,
         grpc_port,
+        proxy_port,
         "Created lattice-cell LoadBalancer Service"
     );
 
@@ -162,6 +171,7 @@ pub async fn get_cell_server_sans(
         parent_config.host.clone(),
         parent_config.bootstrap_port,
         parent_config.grpc_port,
+        parent_config.proxy_port,
         provider_type,
     )
     .await

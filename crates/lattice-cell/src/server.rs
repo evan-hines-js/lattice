@@ -118,6 +118,24 @@ async fn handle_agent_message_impl(
                 return;
             }
 
+            // Log each object received for debugging
+            for obj in &cd.objects {
+                if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&obj.manifest) {
+                    let kind = parsed.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+                    let name = parsed.get("metadata")
+                        .and_then(|m| m.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    info!(
+                        cluster = %cluster_name,
+                        kind = %kind,
+                        name = %name,
+                        source_uid = %obj.source_uid,
+                        owners = obj.owners.len(),
+                        "Unpivot: received object"
+                    );
+                }
+            }
             info!(
                 cluster = %cluster_name,
                 namespace = %cd.namespace,
@@ -223,10 +241,50 @@ async fn handle_agent_message_impl(
                 status_code = resp.status_code,
                 streaming = resp.streaming,
                 stream_end = resp.stream_end,
-                "K8s API response received (not processed - future RPC support)"
+                body_len = resp.body.len(),
+                "K8s API response received"
             );
-            // K8s API proxy functionality not yet implemented.
-            // All interactions should use RPC commands, not HTTP proxying.
+
+            // Deliver response to waiting proxy handler
+            if resp.stream_end {
+                // Final message in stream - take the sender to remove it
+                if let Some(sender) = registry.take_pending_k8s_response(&resp.request_id) {
+                    if let Err(e) = sender.try_send(resp.clone()) {
+                        warn!(
+                            cluster = %cluster_name,
+                            request_id = %resp.request_id,
+                            error = %e,
+                            "Failed to deliver final K8s API response"
+                        );
+                    }
+                } else {
+                    debug!(
+                        cluster = %cluster_name,
+                        request_id = %resp.request_id,
+                        "Received K8s API response for unknown request (may have timed out)"
+                    );
+                }
+            } else {
+                // Streaming response - get sender but keep it registered
+                if let Some(sender) = registry.get_pending_k8s_response(&resp.request_id) {
+                    if let Err(e) = sender.try_send(resp.clone()) {
+                        warn!(
+                            cluster = %cluster_name,
+                            request_id = %resp.request_id,
+                            error = %e,
+                            "Failed to deliver streaming K8s API response"
+                        );
+                        // Channel is full or closed, clean up
+                        registry.take_pending_k8s_response(&resp.request_id);
+                    }
+                } else {
+                    debug!(
+                        cluster = %cluster_name,
+                        request_id = %resp.request_id,
+                        "Received K8s API response for unknown request"
+                    );
+                }
+            }
         }
         Some(Payload::MoveAck(ack)) => {
             if let Some(sender) = registry.take_pending_batch_ack(&ack.request_id) {

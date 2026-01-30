@@ -26,6 +26,9 @@ pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8443;
 /// Default port for the gRPC server (agent-cell communication)
 pub const DEFAULT_GRPC_PORT: u16 = 50051;
 
+/// Default port for the K8s API proxy server (CAPI controller access to child clusters)
+pub const DEFAULT_PROXY_PORT: u16 = 8081;
+
 /// Namespace for Lattice system resources (CA, credentials, operator)
 pub const LATTICE_SYSTEM_NAMESPACE: &str = "lattice-system";
 

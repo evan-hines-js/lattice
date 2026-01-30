@@ -268,6 +268,7 @@ mod tests {
             host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
+            proxy_port: 8081,
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },
