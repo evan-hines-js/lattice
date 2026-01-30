@@ -32,6 +32,20 @@ pub const DEFAULT_PROXY_PORT: u16 = 8081;
 /// Namespace for Lattice system resources (CA, credentials, operator)
 pub const LATTICE_SYSTEM_NAMESPACE: &str = "lattice-system";
 
+/// Environment variable to indicate this is a bootstrap cluster
+pub const BOOTSTRAP_CLUSTER_ENV: &str = "LATTICE_BOOTSTRAP_CLUSTER";
+
+/// Check if the current operator is running on a bootstrap cluster
+///
+/// Returns true if LATTICE_BOOTSTRAP_CLUSTER is set to "true" or "1".
+/// Bootstrap clusters are temporary clusters used during initial installation
+/// that don't need the full proxy/pivot setup.
+pub fn is_bootstrap_cluster() -> bool {
+    std::env::var(BOOTSTRAP_CLUSTER_ENV)
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
 // CAPI provider namespaces
 /// Target namespace for CAPA (AWS) provider
 pub const CAPA_NAMESPACE: &str = "capa-system";

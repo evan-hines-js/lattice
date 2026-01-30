@@ -216,7 +216,10 @@ spec:
         )));
 
         // 3. Render istiod chart (control plane with ambient mode)
-        info!(version = config.version, "Rendering Istiod chart with ambient mode");
+        info!(
+            version = config.version,
+            "Rendering Istiod chart with ambient mode"
+        );
 
         let istiod_output = Command::new("helm")
             .args([
@@ -230,7 +233,10 @@ spec:
                 // Configure trust domain to match Lattice SPIFFE identity format
                 // Each cluster gets its own trust domain: lattice.{cluster}.local
                 "--set",
-                &format!("meshConfig.trustDomain=lattice.{}.local", config.cluster_name),
+                &format!(
+                    "meshConfig.trustDomain=lattice.{}.local",
+                    config.cluster_name
+                ),
                 "--set",
                 "pilot.resources.requests.cpu=100m",
                 "--set",
@@ -394,5 +400,4 @@ mod tests {
         assert_eq!(docs.len(), 1);
         assert!(docs[0].starts_with("---"));
     }
-
 }

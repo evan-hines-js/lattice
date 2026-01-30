@@ -187,11 +187,7 @@ pub fn extract_nodes_for_group<'a>(
     graph: &'a ObjectGraph,
     group: &MoveGroup,
 ) -> Vec<&'a GraphNode> {
-    group
-        .uids
-        .iter()
-        .filter_map(|uid| graph.get(uid))
-        .collect()
+    group.uids.iter().filter_map(|uid| graph.get(uid)).collect()
 }
 
 #[cfg(test)]
@@ -288,10 +284,7 @@ mod tests {
     #[test]
     fn test_sequence_parallel_roots() {
         // a and b are independent roots
-        let nodes = vec![
-            make_test_node("a", vec![]),
-            make_test_node("b", vec![]),
-        ];
+        let nodes = vec![make_test_node("a", vec![]), make_test_node("b", vec![])];
         let graph = make_test_graph(nodes);
 
         let sequence = MoveSequence::from_graph(&graph).unwrap();
@@ -332,10 +325,7 @@ mod tests {
 
     #[test]
     fn test_extract_nodes_for_group() {
-        let nodes = vec![
-            make_test_node("a", vec![]),
-            make_test_node("b", vec![]),
-        ];
+        let nodes = vec![make_test_node("a", vec![]), make_test_node("b", vec![])];
         let graph = make_test_graph(nodes);
 
         let mut group = MoveGroup::new();

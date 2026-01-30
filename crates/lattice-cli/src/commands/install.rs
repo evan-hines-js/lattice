@@ -326,9 +326,21 @@ impl Installer {
     }
 
     async fn management_client(&self) -> Result<Client> {
-        kube_utils::create_client(Some(&self.kubeconfig_path()))
-            .await
-            .cmd_err()
+        let kubeconfig_path = self.kubeconfig_path();
+        info!("Creating management client from {:?}", kubeconfig_path);
+
+        // Use shorter timeout for management cluster connection to fail fast
+        // if the address is unreachable (e.g., connecting to internal Docker IP)
+        let connect_timeout = Duration::from_secs(10);
+        let read_timeout = Duration::from_secs(30);
+
+        kube_utils::create_client_with_timeout(
+            Some(&kubeconfig_path),
+            connect_timeout,
+            read_timeout,
+        )
+        .await
+        .cmd_err()
     }
 
     async fn deploy_lattice_operator(&self, client: &Client) -> Result<()> {
@@ -350,8 +362,7 @@ impl Installer {
             .map(|s| {
                 if fips::is_deployment(s) {
                     let with_fips = fips::add_fips_relax_env(s);
-                    let with_root = fips::add_root_install_env(&with_fips);
-                    add_bootstrap_env(&with_root, &provider_str, provider_ref)
+                    add_bootstrap_env(&with_fips, &provider_str, provider_ref)
                 } else {
                     s.to_string()
                 }
@@ -373,9 +384,6 @@ impl Installer {
         )
         .await
         .cmd_err()?;
-
-        // Note: For non-Docker providers, operator waits for CloudProvider before installing CAPI.
-        // CAPI CRDs are waited for after CloudProvider creation in run_bootstrap().
 
         Ok(())
     }
@@ -438,21 +446,27 @@ impl Installer {
 
     async fn apply_bootstrap_to_management(&self, bootstrap_client: &Client) -> Result<()> {
         // Fetch and prepare kubeconfig
+        info!("Fetching management cluster kubeconfig...");
         let kubeconfig = self.fetch_management_kubeconfig(bootstrap_client).await?;
         let kubeconfig_path = self.kubeconfig_path();
+        info!("Writing kubeconfig to {:?}", kubeconfig_path);
         tokio::fs::write(&kubeconfig_path, &kubeconfig).await?;
 
         // Wait for management cluster API server to be reachable
+        info!("Waiting for management cluster API server...");
         self.wait_for_api_server().await?;
 
+        info!("Creating management cluster client...");
         let mgmt_client = self.management_client().await?;
 
         // Wait for nodes to be ready
+        info!("Waiting for nodes to be ready...");
         kube_utils::wait_for_nodes_ready(&mgmt_client, Duration::from_secs(300))
             .await
             .cmd_err()?;
 
         // Generate all bootstrap manifests (operator + infrastructure + LatticeCluster)
+        info!("Generating bootstrap manifests...");
         let manifests = self.generate_bootstrap_manifests().await?;
         info!(
             "Applying {} bootstrap manifests to management cluster",
@@ -491,7 +505,6 @@ impl Installer {
     ///
     /// Uses the same shared code as the bootstrap webhook to ensure consistency.
     async fn generate_bootstrap_manifests(&self) -> Result<Vec<String>> {
-        info!("Generating bootstrap manifests...");
         let generator = DefaultManifestGenerator::new();
 
         let proxmox_ipv4_pool = self
@@ -514,7 +527,13 @@ impl Installer {
             k8s_version: &self.cluster.spec.provider.kubernetes.version,
             parent_host: None, // Management cluster has no parent
             parent_grpc_port: lattice_operator::DEFAULT_GRPC_PORT,
-            relax_fips: self.cluster.spec.provider.kubernetes.bootstrap.needs_fips_relax(),
+            relax_fips: self
+                .cluster
+                .spec
+                .provider
+                .kubernetes
+                .bootstrap
+                .needs_fips_relax(),
             autoscaling_enabled: self
                 .cluster
                 .spec
@@ -570,6 +589,7 @@ impl Installer {
         let namespace = self.capi_namespace();
         let secret_name = self.kubeconfig_secret_name();
 
+        info!("Fetching kubeconfig secret {}/{}", namespace, secret_name);
         let kubeconfig_bytes =
             kube_utils::get_secret_data(bootstrap_client, &secret_name, &namespace, "value")
                 .await
@@ -577,9 +597,11 @@ impl Installer {
 
         let kubeconfig = String::from_utf8(kubeconfig_bytes)
             .map_err(|e| Error::command_failed(format!("Invalid kubeconfig encoding: {}", e)))?;
+        info!("Kubeconfig fetched successfully");
 
         // Rewrite Docker provider kubeconfig to use localhost
         if self.provider() == ProviderType::Docker {
+            info!("Rewriting kubeconfig for Docker provider...");
             self.rewrite_docker_kubeconfig(&kubeconfig).await
         } else {
             Ok(kubeconfig)
@@ -590,14 +612,13 @@ impl Installer {
     /// Uses YAML parsing for safe manipulation instead of string replacement.
     async fn rewrite_docker_kubeconfig(&self, kubeconfig: &str) -> Result<String> {
         let lb_container = format!("{}-lb", self.cluster_name());
+        info!("Looking up Docker port for container: {}", lb_container);
 
         // Retry getting the docker port - LB container may not be ready immediately
         let retry_config = lattice_common::retry::RetryConfig::infinite();
         let container = lb_container.clone();
-        let port: String = lattice_common::retry::retry_with_backoff(
-            &retry_config,
-            "docker_port_lookup",
-            || {
+        let port: String =
+            lattice_common::retry::retry_with_backoff(&retry_config, "docker_port_lookup", || {
                 let c = container.clone();
                 async move {
                     let output = Command::new("docker")
@@ -618,11 +639,11 @@ impl Installer {
                         .map(|p| p.to_string())
                         .ok_or_else(|| "failed to parse port".to_string())
                 }
-            },
-        )
-        .await
-        .map_err(|e| Error::command_failed(format!("Failed to get Docker LB port: {}", e)))?;
+            })
+            .await
+            .map_err(|e| Error::command_failed(format!("Failed to get Docker LB port: {}", e)))?;
 
+        info!("Docker LB port found: {}", port);
         let localhost_url = format!("https://127.0.0.1:{}", port);
 
         // Parse kubeconfig as YAML and update the server URL

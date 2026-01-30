@@ -33,8 +33,8 @@ use lattice_capi::{
     CapiInstaller, CapiProviderConfig,
 };
 use lattice_cell::{
-    fetch_distributable_resources, generate_proxy_kubeconfig, DefaultManifestGenerator,
-    DistributableResources, ParentServers, SharedAgentRegistry,
+    fetch_distributable_resources, DefaultManifestGenerator, DistributableResources, ParentServers,
+    SharedAgentRegistry,
 };
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
@@ -1284,50 +1284,55 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
             if is_ready {
                 // Infrastructure is ready - patch kubeconfig to use proxy before pivoting
-                // This enables CAPI controllers to access the child cluster through the gRPC tunnel
-                if let (Some(ref parent_servers), Some(ref client)) =
-                    (&ctx.parent_servers, &ctx.client)
-                {
-                    // Build proxy URL from parent config
-                    let proxy_url = if let Some(ref endpoints) = cluster.spec.parent_config {
-                        if let Some(ref host) = endpoints.host {
-                            format!("https://{}:{}", host, endpoints.proxy_port)
-                        } else {
-                            // No explicit host - use in-cluster service DNS
-                            format!(
-                                "https://lattice-cell.lattice-system.svc:{}",
-                                endpoints.proxy_port
-                            )
-                        }
-                    } else {
-                        // Fallback to default
-                        "https://lattice-cell.lattice-system.svc:8081".to_string()
-                    };
-
-                    let ca_cert_pem = parent_servers.ca_trust_bundle_pem().await;
-
-                    match patch_kubeconfig_for_proxy(
-                        client,
-                        &name,
-                        &capi_namespace,
-                        &proxy_url,
-                        &ca_cert_pem,
-                    )
-                    .await
+                // Skip on bootstrap cluster - installer accesses cluster directly
+                if !lattice_common::is_bootstrap_cluster() {
+                    // Patch kubeconfig to use K8s API proxy for child cluster access
+                    if let (Some(ref parent_servers), Some(ref client)) =
+                        (&ctx.parent_servers, &ctx.client)
                     {
-                        Ok(true) => {
-                            info!("kubeconfig patched for proxy, transitioning to Pivoting");
-                        }
-                        Ok(false) => {
-                            // Kubeconfig Secret not ready yet, wait
-                            debug!("kubeconfig Secret not ready yet, waiting...");
-                            return Ok(Action::requeue(Duration::from_secs(5)));
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Failed to patch kubeconfig for proxy, will retry");
-                            return Ok(Action::requeue(Duration::from_secs(5)));
+                        // Build proxy URL from parent config
+                        let proxy_url = if let Some(ref endpoints) = cluster.spec.parent_config {
+                            if let Some(ref host) = endpoints.host {
+                                format!("https://{}:{}", host, endpoints.proxy_port)
+                            } else {
+                                // No explicit host - use in-cluster service DNS
+                                format!(
+                                    "https://lattice-cell.lattice-system.svc:{}",
+                                    endpoints.proxy_port
+                                )
+                            }
+                        } else {
+                            // Fallback to default
+                            "https://lattice-cell.lattice-system.svc:8081".to_string()
+                        };
+
+                        let ca_cert_pem = parent_servers.ca_trust_bundle_pem().await;
+
+                        match patch_kubeconfig_for_proxy(
+                            client,
+                            &name,
+                            &capi_namespace,
+                            &proxy_url,
+                            &ca_cert_pem,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                info!("kubeconfig patched for proxy, transitioning to Pivoting");
+                            }
+                            Ok(false) => {
+                                // Kubeconfig Secret not ready yet, wait
+                                debug!("kubeconfig Secret not ready yet, waiting...");
+                                return Ok(Action::requeue(Duration::from_secs(5)));
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to patch kubeconfig for proxy, will retry");
+                                return Ok(Action::requeue(Duration::from_secs(5)));
+                            }
                         }
                     }
+                } else {
+                    debug!("Skipping kubeconfig proxy patch on bootstrap cluster");
                 }
 
                 // Infrastructure is ready, transition to Pivoting
@@ -1634,9 +1639,8 @@ async fn generate_capi_manifests(
     let capi_namespace = format!("capi-{}", cluster_name);
 
     // Build bootstrap info - if parent_servers is running, we're a cell provisioning a cluster
-    // that needs to connect back to us. During root install, LATTICE_ROOT_INSTALL=true skips this.
-    let is_root_install = std::env::var("LATTICE_ROOT_INSTALL").is_ok();
-    let running_parent_servers = if is_root_install {
+    // that needs to connect back to us. Bootstrap clusters skip this since they don't provision children.
+    let running_parent_servers = if lattice_common::is_bootstrap_cluster() {
         None
     } else {
         ctx.parent_servers.as_ref().filter(|s| s.is_running())
@@ -1759,6 +1763,9 @@ async fn generate_network_policy_for_child(ctx: &Context) -> Result<Option<Strin
 /// Secret. It rewrites the Secret to point to the proxy URL with the operator's CA,
 /// enabling CAPI controllers to access the child cluster through the gRPC tunnel.
 ///
+/// This function modifies ONLY the server URL and CA certificate in the existing kubeconfig,
+/// preserving all user credentials (client-certificate-data, client-key-data, token, etc.).
+///
 /// # Arguments
 ///
 /// * `client` - Kubernetes client
@@ -1810,11 +1817,11 @@ async fn patch_kubeconfig_for_proxy(
         return Ok(false);
     };
 
-    // Parse the kubeconfig
+    // Parse the kubeconfig as YAML
     let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
         .map_err(|e| Error::internal(format!("kubeconfig is not valid UTF-8: {}", e)))?;
 
-    // Check if already patched (contains proxy URL)
+    // Check if already patched (contains proxy URL path)
     if kubeconfig_str.contains("/cluster/") {
         debug!(
             cluster = %cluster_name,
@@ -1823,11 +1830,44 @@ async fn patch_kubeconfig_for_proxy(
         return Ok(true);
     }
 
-    // Generate the proxy kubeconfig
-    let proxy_kubeconfig = generate_proxy_kubeconfig(cluster_name, proxy_url, ca_cert_pem);
+    // Parse the existing kubeconfig and modify only server + CA, preserving credentials
+    let mut config: serde_yaml::Value = serde_yaml::from_str(&kubeconfig_str)
+        .map_err(|e| Error::internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
+
+    // Build the new server URL with cluster path
+    let new_server = format!("{}/cluster/{}", proxy_url, cluster_name);
+    let ca_b64 = STANDARD.encode(ca_cert_pem.as_bytes());
+
+    // Update only the cluster server and CA, preserving everything else
+    if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+        for cluster in clusters {
+            if let Some(cluster_data) = cluster.get_mut("cluster") {
+                // Update server URL
+                if let Some(server) = cluster_data.get_mut("server") {
+                    *server = serde_yaml::Value::String(new_server.clone());
+                }
+                // Update CA certificate
+                if let Some(ca) = cluster_data.get_mut("certificate-authority-data") {
+                    *ca = serde_yaml::Value::String(ca_b64.clone());
+                } else {
+                    // Add CA if not present
+                    if let Some(map) = cluster_data.as_mapping_mut() {
+                        map.insert(
+                            serde_yaml::Value::String("certificate-authority-data".to_string()),
+                            serde_yaml::Value::String(ca_b64.clone()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Serialize the modified kubeconfig
+    let patched_kubeconfig = serde_yaml::to_string(&config)
+        .map_err(|e| Error::internal(format!("failed to serialize kubeconfig: {}", e)))?;
 
     // Encode and patch
-    let encoded = STANDARD.encode(proxy_kubeconfig.as_bytes());
+    let encoded = STANDARD.encode(patched_kubeconfig.as_bytes());
 
     let patch = serde_json::json!({
         "data": {
@@ -1846,7 +1886,7 @@ async fn patch_kubeconfig_for_proxy(
     info!(
         cluster = %cluster_name,
         proxy_url = %proxy_url,
-        "Patched kubeconfig Secret to use K8s API proxy"
+        "Patched kubeconfig Secret to use K8s API proxy (preserved credentials)"
     );
 
     Ok(true)
@@ -2063,7 +2103,8 @@ impl PivotOperations for PivotOperationsImpl {
         );
 
         // Move completed successfully (MoveCompleteAck received) - mark state
-        self.agent_registry.update_state(cluster_name, AgentState::Ready);
+        self.agent_registry
+            .update_state(cluster_name, AgentState::Ready);
         self.agent_registry.set_pivot_complete(cluster_name, true);
 
         // Persist pivot_complete to CRD status
@@ -3638,12 +3679,18 @@ mod tests {
 
         #[test]
         fn pivot_action_trigger_pivot_when_agent_connected() {
-            assert_eq!(determine_pivot_action(false, true), PivotAction::TriggerPivot);
+            assert_eq!(
+                determine_pivot_action(false, true),
+                PivotAction::TriggerPivot
+            );
         }
 
         #[test]
         fn pivot_action_wait_for_agent_when_nothing_ready() {
-            assert_eq!(determine_pivot_action(false, false), PivotAction::WaitForAgent);
+            assert_eq!(
+                determine_pivot_action(false, false),
+                PivotAction::WaitForAgent
+            );
         }
 
         // --- is_etcd_node / has_etcd_taint tests ---

@@ -122,7 +122,8 @@ async fn handle_agent_message_impl(
             for obj in &cd.objects {
                 if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&obj.manifest) {
                     let kind = parsed.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-                    let name = parsed.get("metadata")
+                    let name = parsed
+                        .get("metadata")
                         .and_then(|m| m.get("name"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("?");
