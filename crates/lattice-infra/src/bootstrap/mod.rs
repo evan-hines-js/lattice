@@ -10,7 +10,6 @@ pub mod cilium;
 pub mod eso;
 pub mod istio;
 
-use tokio::process::Command;
 use tracing::{debug, info};
 
 use lattice_common::crd::{BootstrapProvider, ProviderType};
@@ -63,114 +62,22 @@ pub async fn generate_core(
 
 /// Generate ALL infrastructure manifests for a self-managing cluster
 ///
-/// Includes: cert-manager, CAPI, plus core infrastructure (Istio, Gateway API)
-/// This is an async function to avoid blocking the tokio runtime during
-/// helm and clusterctl execution.
+/// Includes core infrastructure (Istio, Gateway API).
+/// NOTE: cert-manager and CAPI providers are installed via `clusterctl init`,
+/// which manages their lifecycle (including upgrades).
 ///
-/// Returns an error if any critical component (cert-manager, CAPI) fails to generate.
+/// This is an async function to avoid blocking the tokio runtime during
+/// helm execution.
 pub async fn generate_all(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
-    let mut manifests = Vec::new();
-
-    // cert-manager (CAPI prerequisite)
-    let cm = generate_certmanager().await?;
-    debug!(count = cm.len(), "generated cert-manager manifests");
-    manifests.extend(cm);
-
-    // CAPI providers
-    let capi = generate_capi(config.provider).await?;
-    debug!(count = capi.len(), "generated CAPI manifests");
-    manifests.extend(capi);
-
     // Core infrastructure (Istio, Gateway API)
-    manifests.extend(generate_core(&config.cluster_name, config.skip_cilium_policies).await?);
+    // cert-manager and CAPI are installed via clusterctl init
+    let manifests = generate_core(&config.cluster_name, config.skip_cilium_policies).await?;
 
     info!(
         total = manifests.len(),
         "generated infrastructure manifests"
     );
     Ok(manifests)
-}
-
-/// Generate cert-manager manifests
-///
-/// This is an async function to avoid blocking the tokio runtime during
-/// helm template execution.
-pub async fn generate_certmanager() -> Result<Vec<String>, String> {
-    let charts_dir = charts_dir();
-    let chart_path = find_chart(&charts_dir, "cert-manager")?;
-
-    let output = Command::new("helm")
-        .args([
-            "template",
-            "cert-manager",
-            &chart_path,
-            "--namespace",
-            "cert-manager",
-            "--set",
-            "crds.enabled=true",
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("helm: {}", e))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
-    let yaml = String::from_utf8_lossy(&output.stdout);
-    let mut manifests = vec![namespace_yaml("cert-manager")];
-    for m in split_yaml_documents(&yaml) {
-        manifests.push(inject_namespace(&m, "cert-manager"));
-    }
-    Ok(manifests)
-}
-
-/// Generate CAPI provider manifests
-///
-/// This is an async function to avoid blocking the tokio runtime during
-/// clusterctl execution.
-///
-/// Calls `clusterctl generate provider` separately for each provider type
-/// since clusterctl only accepts one provider type flag at a time.
-pub async fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String> {
-    let infra = match provider {
-        ProviderType::Docker => "docker",
-        ProviderType::Proxmox => "proxmox",
-        ProviderType::Aws => "aws",
-        ProviderType::Gcp => "gcp",
-        ProviderType::Azure => "azure",
-        ProviderType::OpenStack => "openstack",
-    };
-
-    let mut manifests = Vec::new();
-
-    // Infrastructure provider
-    manifests.extend(run_clusterctl_generate("--infrastructure", infra).await?);
-
-    // Bootstrap providers (kubeadm and rke2 for clusterctl move compatibility)
-    manifests.extend(run_clusterctl_generate("--bootstrap", "kubeadm").await?);
-    manifests.extend(run_clusterctl_generate("--bootstrap", "rke2").await?);
-
-    // Control-plane providers
-    manifests.extend(run_clusterctl_generate("--control-plane", "kubeadm").await?);
-    manifests.extend(run_clusterctl_generate("--control-plane", "rke2").await?);
-
-    Ok(manifests)
-}
-
-/// Run a single clusterctl generate provider command
-async fn run_clusterctl_generate(flag: &str, provider: &str) -> Result<Vec<String>, String> {
-    let output = Command::new("clusterctl")
-        .args(["generate", "provider", flag, provider])
-        .output()
-        .await
-        .map_err(|e| format!("clusterctl: {}", e))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
-    Ok(split_yaml_documents(&String::from_utf8_lossy(&output.stdout)))
 }
 
 /// Generate Istio manifests

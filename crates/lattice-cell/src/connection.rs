@@ -123,10 +123,21 @@ pub struct PivotSourceManifests {
 /// Sender type for streaming K8s API responses
 pub type K8sResponseSender = mpsc::Sender<KubernetesResponse>;
 
+/// Configuration for kubeconfig proxy patching
+///
+/// Contains the URL and CA certificate needed to patch kubeconfig Secrets
+/// to route through the K8s API proxy.
+#[derive(Clone, Debug)]
+pub struct KubeconfigProxyConfig {
+    /// Base URL of the proxy (e.g., "https://lattice-cell.lattice-system.svc:8081")
+    pub url: String,
+    /// PEM-encoded CA certificate for the proxy
+    pub ca_cert_pem: String,
+}
+
 /// Registry of connected agents
 ///
 /// Thread-safe registry using DashMap for concurrent access.
-#[derive(Default)]
 pub struct AgentRegistry {
     agents: DashMap<String, AgentConnection>,
     post_pivot_manifests: DashMap<String, PostPivotManifests>,
@@ -142,12 +153,42 @@ pub struct AgentRegistry {
     /// Pending K8s API proxy responses keyed by request_id
     /// Uses mpsc::Sender to support streaming responses (watches)
     pending_k8s_responses: DashMap<String, K8sResponseSender>,
+    /// Proxy configuration for kubeconfig patching
+    proxy_config: std::sync::RwLock<Option<KubeconfigProxyConfig>>,
+}
+
+impl Default for AgentRegistry {
+    fn default() -> Self {
+        Self {
+            agents: DashMap::new(),
+            post_pivot_manifests: DashMap::new(),
+            unpivot_manifests: DashMap::new(),
+            pivot_source_manifests: DashMap::new(),
+            teardown_in_progress: DashMap::new(),
+            pending_batch_acks: DashMap::new(),
+            pending_complete_acks: DashMap::new(),
+            pending_k8s_responses: DashMap::new(),
+            proxy_config: std::sync::RwLock::new(None),
+        }
+    }
 }
 
 impl AgentRegistry {
     /// Create a new empty registry
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the proxy configuration for kubeconfig patching
+    pub fn set_proxy_config(&self, config: KubeconfigProxyConfig) {
+        if let Ok(mut guard) = self.proxy_config.write() {
+            *guard = Some(config);
+        }
+    }
+
+    /// Get the proxy configuration
+    pub fn get_proxy_config(&self) -> Option<KubeconfigProxyConfig> {
+        self.proxy_config.read().ok().and_then(|g| g.clone())
     }
 
     /// Register a new agent connection
@@ -160,6 +201,8 @@ impl AgentRegistry {
     /// Unregister an agent
     pub fn unregister(&self, cluster_name: &str) {
         if self.agents.remove(cluster_name).is_some() {
+            // Clear teardown guard when agent disconnects
+            self.teardown_in_progress.remove(cluster_name);
             info!(cluster = %cluster_name, "Agent unregistered");
         }
     }
