@@ -650,9 +650,8 @@ impl Installer {
             }
         }
 
-        serde_json::to_string(&config).map_err(|e| {
-            Error::command_failed(format!("Failed to serialize kubeconfig: {}", e))
-        })
+        serde_json::to_string(&config)
+            .map_err(|e| Error::command_failed(format!("Failed to serialize kubeconfig: {}", e)))
     }
 
     /// Waits for the management cluster API server to become reachable.

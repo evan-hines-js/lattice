@@ -26,6 +26,7 @@ use lattice_common::crd::LatticeCluster;
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
 use lattice_proto::{agent_message::Payload, AgentMessage, AgentState, CellCommand};
 
+use crate::kubeconfig::patch_kubeconfig_for_proxy;
 use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::ServerMtlsConfig;
 
@@ -211,12 +212,48 @@ async fn handle_agent_message_impl(
                         errors = errors.len(),
                         "CAPI objects imported"
                     );
+
+                    // Step 1.5: Patch kubeconfig to route through proxy
+                    // This must happen BEFORE unpausing, otherwise CAPI can't reach the cluster
+                    let Some(proxy_config) = registry_for_task.get_proxy_config() else {
+                        error!(cluster = %cluster, "No proxy config available, cannot patch kubeconfig");
+                        registry_for_task.finish_teardown(&cluster);
+                        return;
+                    };
+
+                    match patch_kubeconfig_for_proxy(
+                        &client,
+                        &cluster,
+                        &namespace,
+                        &proxy_config.url,
+                        &proxy_config.ca_cert_pem,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            info!(cluster = %cluster, "Kubeconfig patched for proxy access");
+                        }
+                        Ok(false) => {
+                            error!(cluster = %cluster, "Kubeconfig Secret not found after import");
+                            registry_for_task.finish_teardown(&cluster);
+                            return;
+                        }
+                        Err(e) => {
+                            error!(cluster = %cluster, error = %e, "Failed to patch kubeconfig for proxy");
+                            registry_for_task.finish_teardown(&cluster);
+                            return;
+                        }
+                    }
+
+                    // Step 1.6: Unpause cluster - CAPI won't delete paused clusters
+                    if let Err(e) = mover.unpause_resources().await {
+                        warn!(cluster = %cluster, error = %e, "Failed to unpause cluster");
+                    }
                 }
 
                 // Step 2: Delete LatticeCluster (adds deletionTimestamp)
-                // Keep CAPI paused - controller will delete CAPI Cluster which triggers cleanup.
-                // CAPI can delete paused resources; unpausing would cause it to reconcile/scale.
-                // The finalizer keeps it around while controller handles CAPI cleanup
+                // Controller will delete CAPI Cluster which triggers infrastructure cleanup.
+                // The finalizer keeps it around while controller handles CAPI cleanup.
                 info!(cluster = %cluster, "Initiating LatticeCluster deletion");
                 let api: Api<LatticeCluster> = Api::all(client.clone());
                 if let Err(e) = api.delete(&cluster, &DeleteParams::default()).await {
@@ -225,8 +262,10 @@ async fn handle_agent_message_impl(
                     }
                 }
 
-                // Clear teardown guard - controller takes over from here
-                registry_for_task.finish_teardown(&cluster);
+                // NOTE: We intentionally do NOT call finish_teardown() here.
+                // The teardown guard stays in place to prevent duplicate ClusterDeleting
+                // messages from re-importing CAPI objects. The guard is cleared when
+                // the agent disconnects (unregister).
                 info!(cluster = %cluster, "Teardown initiated - controller will handle cleanup");
             });
         }

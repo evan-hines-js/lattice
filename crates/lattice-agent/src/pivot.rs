@@ -120,7 +120,10 @@ fn update_cluster_entry(cluster_entry: &mut serde_json::Value, cluster_name: &st
 }
 
 fn update_all_cluster_entries(kubeconfig: &mut serde_json::Value, cluster_name: &str) -> usize {
-    let Some(clusters) = kubeconfig.get_mut("clusters").and_then(|c| c.as_array_mut()) else {
+    let Some(clusters) = kubeconfig
+        .get_mut("clusters")
+        .and_then(|c| c.as_array_mut())
+    else {
         return 0;
     };
 

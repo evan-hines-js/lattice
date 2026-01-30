@@ -1245,27 +1245,6 @@ mod tests {
         }
 
         #[test]
-        fn test_to_yaml_produces_valid_yaml() {
-            let manifest = CAPIManifest::new(
-                "cluster.x-k8s.io/v1beta1",
-                "Cluster",
-                "test-cluster",
-                "default",
-            )
-            .with_spec(serde_json::json!({
-                "clusterNetwork": {
-                    "pods": { "cidrBlocks": ["192.168.0.0/16"] }
-                }
-            }));
-
-            let yaml = manifest.to_json().expect("should serialize to YAML");
-            assert!(yaml.contains("apiVersion: cluster.x-k8s.io/v1beta1"));
-            assert!(yaml.contains("kind: Cluster"));
-            assert!(yaml.contains("name: test-cluster"));
-            assert!(yaml.contains("namespace: default"));
-        }
-
-        #[test]
         fn test_manifest_serialization_roundtrip() {
             let manifest = CAPIManifest::new(
                 "cluster.x-k8s.io/v1beta1",

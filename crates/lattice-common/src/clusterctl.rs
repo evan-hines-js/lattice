@@ -288,7 +288,7 @@ pub async fn pause_capi_cluster(
     Ok(())
 }
 
-/// Unpause a CAPI cluster (call before retrying after failed move)
+/// Unpause a CAPI cluster (required before deletion - CAPI won't delete paused clusters)
 pub async fn unpause_capi_cluster(
     kubeconfig: Option<&Path>,
     namespace: &str,
@@ -300,14 +300,16 @@ pub async fn unpause_capi_cluster(
     let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &cluster_api_resource());
     let patch = serde_json::json!({"spec": {"paused": false}});
 
-    match api
-        .patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
+    api.patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
         .await
-    {
-        Ok(_) => info!(cluster = %cluster_name, "CAPI cluster unpaused"),
-        Err(e) => warn!(cluster = %cluster_name, error = %e, "unpause failed (may not exist)"),
-    }
+        .map_err(|e| {
+            ClusterctlError::ExecutionFailed(format!(
+                "failed to unpause cluster {}: {}",
+                cluster_name, e
+            ))
+        })?;
 
+    info!(cluster = %cluster_name, "CAPI cluster unpaused");
     Ok(())
 }
 

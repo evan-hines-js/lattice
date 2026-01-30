@@ -873,8 +873,7 @@ mod tests {
                 assert!(!json.is_empty(), "JSON should not be empty");
 
                 // Verify it can be parsed back
-                let parsed: CAPIManifest =
-                    serde_json::from_str(&json).expect("should parse back");
+                let parsed: CAPIManifest = serde_json::from_str(&json).expect("should parse back");
                 assert_eq!(parsed.kind, manifest.kind);
                 assert_eq!(parsed.metadata.name, manifest.metadata.name);
             }

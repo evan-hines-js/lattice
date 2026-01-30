@@ -3,7 +3,10 @@
 //! This crate provides shared infrastructure used by both cluster and service operators:
 //!
 //! - **PKI**: Certificate authority, certificate generation, CSR signing
-//! - **Bootstrap**: Manifest generation for Cilium, Istio, cert-manager, CAPI
+//! - **Bootstrap**: Manifest generation for Cilium, Istio, Gateway API
+//!
+//! Note: cert-manager and CAPI providers are installed via `clusterctl init`,
+//! which manages their lifecycle including upgrades.
 //!
 //! # Architecture
 //!
@@ -21,8 +24,8 @@ pub use bootstrap::cilium::{
 };
 pub use bootstrap::eso::generate_eso;
 pub use bootstrap::{
-    generate_all, generate_capi, generate_certmanager, generate_core, generate_gateway_api_crds,
-    generate_istio, split_yaml_documents, InfrastructureConfig, IstioConfig, IstioReconciler,
+    generate_all, generate_core, generate_gateway_api_crds, generate_istio, split_yaml_documents,
+    InfrastructureConfig, IstioConfig, IstioReconciler,
 };
 pub use mtls::{
     extract_cluster_id_from_cert, verify_cert_chain, ClientMtlsConfig, MtlsError, ServerMtlsConfig,

@@ -13,6 +13,7 @@ pub mod bootstrap;
 pub mod cilium;
 pub mod connection;
 pub mod k8s_proxy;
+pub mod kubeconfig;
 pub mod move_sender;
 pub mod parent;
 pub mod resources;
@@ -24,10 +25,11 @@ pub use bootstrap::{
     BootstrapState, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
 };
 pub use connection::{
-    AgentConnection, AgentRegistry, PivotSourceManifests, PostPivotManifests, SendError,
-    SharedAgentRegistry, UnpivotManifests,
+    AgentConnection, AgentRegistry, KubeconfigProxyConfig, PivotSourceManifests,
+    PostPivotManifests, SendError, SharedAgentRegistry, UnpivotManifests,
 };
 pub use k8s_proxy::{start_proxy_server, ProxyConfig, ProxyError};
+pub use kubeconfig::patch_kubeconfig_for_proxy;
 pub use move_sender::GrpcMoveCommandSender;
 pub use parent::{load_or_create_ca, CellServerError, ParentConfig, ParentServers};
 pub use resources::{fetch_distributable_resources, DistributableResources, ResourceError};

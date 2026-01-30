@@ -1750,8 +1750,8 @@ deploy:
     stepWeight: 10
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let spec: LatticeServiceSpec =
-            serde_json::from_value(value).expect("canary deployment YAML should parse successfully");
+        let spec: LatticeServiceSpec = serde_json::from_value(value)
+            .expect("canary deployment YAML should parse successfully");
 
         assert_eq!(spec.deploy.strategy, DeployStrategy::Canary);
         let canary = spec.deploy.canary.expect("canary config should be present");
@@ -1768,8 +1768,8 @@ deploy:
         let yaml =
             serde_json::to_string(&spec).expect("LatticeServiceSpec serialization should succeed");
         let value = crate::yaml::parse_yaml(&yaml).expect("parse yaml");
-        let parsed: LatticeServiceSpec =
-            serde_json::from_value(value).expect("LatticeServiceSpec deserialization should succeed");
+        let parsed: LatticeServiceSpec = serde_json::from_value(value)
+            .expect("LatticeServiceSpec deserialization should succeed");
         assert_eq!(spec, parsed);
     }
 
@@ -2006,8 +2006,8 @@ containers:
       STATIC: "plain-value"
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let spec: LatticeServiceSpec =
-            serde_json::from_value(value).expect("template variables YAML should parse successfully");
+        let spec: LatticeServiceSpec = serde_json::from_value(value)
+            .expect("template variables YAML should parse successfully");
         let vars = &spec.containers["main"].variables;
 
         assert!(vars["DB_HOST"].has_placeholders());

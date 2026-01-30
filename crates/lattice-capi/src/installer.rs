@@ -16,8 +16,6 @@ use async_trait::async_trait;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
-use kube::core::DynamicObject;
-use kube::discovery::ApiResource;
 use kube::Client as KubeClient;
 #[cfg(test)]
 use mockall::automock;
@@ -397,26 +395,6 @@ pub async fn ensure_capi_installed<I: CapiInstaller + ?Sized>(
     installer.ensure(config).await
 }
 
-/// Find a helm chart by prefix in the charts directory
-fn find_chart(charts_dir: &str, prefix: &str) -> Result<String, Error> {
-    let dir = std::fs::read_dir(charts_dir).map_err(|e| {
-        Error::capi_installation(format!("failed to read charts dir {}: {}", charts_dir, e))
-    })?;
-
-    for entry in dir.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(prefix) && name.ends_with(".tgz") {
-            return Ok(entry.path().to_string_lossy().to_string());
-        }
-    }
-
-    Err(Error::capi_installation(format!(
-        "no {} chart found in {}",
-        prefix, charts_dir
-    )))
-}
-
 /// CAPI installer using clusterctl
 pub struct ClusterctlInstaller;
 
@@ -591,198 +569,6 @@ impl ClusterctlInstaller {
         }
 
         actions
-    }
-
-    /// Install cert-manager from local helm chart (required before CAPI providers)
-    async fn install_cert_manager(client: &KubeClient) -> Result<(), Error> {
-        use std::time::Duration;
-
-        // Check if cert-manager is already installed and ready
-        let namespaces: Api<Namespace> = Api::all(client.clone());
-        if namespaces.get("cert-manager").await.is_ok() {
-            let deployments: Api<Deployment> = Api::namespaced(client.clone(), "cert-manager");
-            if let Ok(deploy) = deployments.get("cert-manager").await {
-                let available = deploy
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.available_replicas)
-                    .unwrap_or(0);
-                if available > 0 {
-                    info!("cert-manager already installed and ready");
-                    return Ok(());
-                }
-            }
-        }
-
-        info!("Installing cert-manager from local helm chart");
-
-        let charts_dir = std::env::var("LATTICE_CHARTS_DIR").unwrap_or_else(|_| {
-            option_env!("LATTICE_CHARTS_DIR")
-                .unwrap_or("/charts")
-                .to_string()
-        });
-
-        let chart_path = find_chart(&charts_dir, "cert-manager")?;
-
-        // Render manifests with helm template
-        let template_output = Command::new("helm")
-            .args([
-                "template",
-                "cert-manager",
-                &chart_path,
-                "--namespace",
-                "cert-manager",
-                "--set",
-                "crds.enabled=true",
-            ])
-            .output()
-            .map_err(|e| Error::capi_installation(format!("failed to run helm template: {}", e)))?;
-
-        if !template_output.status.success() {
-            return Err(Error::capi_installation(format!(
-                "helm template cert-manager failed: {}",
-                String::from_utf8_lossy(&template_output.stderr)
-            )));
-        }
-
-        // Create namespace using kube-rs
-        let ns = Namespace {
-            metadata: kube::core::ObjectMeta {
-                name: Some("cert-manager".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let _ = namespaces.create(&PostParams::default(), &ns).await;
-
-        // Parse and apply manifests in parallel for faster installation
-        let yaml_str = String::from_utf8_lossy(&template_output.stdout);
-        let docs: Vec<&str> = yaml_str
-            .split("\n---")
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty() && s.contains("kind:"))
-            .collect();
-
-        let manifest_count = docs.len();
-        debug!(
-            count = manifest_count,
-            "applying cert-manager manifests in parallel"
-        );
-
-        let futures: Vec<_> = docs
-            .into_iter()
-            .map(|doc| {
-                let client = client.clone();
-                let doc = doc.to_string();
-                async move {
-                    if let Err(e) = Self::apply_yaml_manifest(&client, &doc).await {
-                        warn!(error = %e, "Failed to apply cert-manager manifest, continuing...");
-                    }
-                }
-            })
-            .collect();
-
-        futures::future::join_all(futures).await;
-
-        // Wait for cert-manager deployments to be ready using kube-rs
-        info!("Waiting for cert-manager to be ready");
-        let deployments: Api<Deployment> = Api::namespaced(client.clone(), "cert-manager");
-        let required_deployments = [
-            "cert-manager",
-            "cert-manager-webhook",
-            "cert-manager-cainjector",
-        ];
-
-        let start = std::time::Instant::now();
-        let timeout = Duration::from_secs(300); // 5 min for slow image pulls (RKE2)
-
-        loop {
-            if start.elapsed() > timeout {
-                return Err(Error::capi_installation(
-                    "cert-manager not ready: timeout".to_string(),
-                ));
-            }
-
-            let all_ready = futures::future::try_join_all(
-                required_deployments
-                    .iter()
-                    .map(|name| deployments.get(name)),
-            )
-            .await
-            .map(|deps| {
-                deps.iter().all(|d| {
-                    d.status
-                        .as_ref()
-                        .and_then(|s| s.available_replicas)
-                        .unwrap_or(0)
-                        > 0
-                })
-            })
-            .unwrap_or(false);
-
-            if all_ready {
-                break;
-            }
-
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-
-        info!("cert-manager installed successfully");
-        Ok(())
-    }
-
-    /// Apply a single YAML manifest using kube-rs server-side apply
-    async fn apply_yaml_manifest(client: &KubeClient, yaml: &str) -> Result<(), String> {
-        let value =
-            lattice_common::yaml::parse_yaml(yaml).map_err(|e| format!("Invalid YAML: {}", e))?;
-
-        // Extract metadata as owned strings before consuming value
-        let api_version = value["apiVersion"]
-            .as_str()
-            .ok_or("Missing apiVersion")?
-            .to_string();
-        let kind = value["kind"].as_str().ok_or("Missing kind")?.to_string();
-        let name = value["metadata"]["name"]
-            .as_str()
-            .ok_or("Missing metadata.name")?
-            .to_string();
-        let namespace = value["metadata"]["namespace"]
-            .as_str()
-            .map(|s| s.to_string());
-
-        let (group, version) = if let Some((g, v)) = api_version.split_once('/') {
-            (g.to_string(), v.to_string())
-        } else {
-            (String::new(), api_version.clone())
-        };
-
-        let plural = format!("{}s", kind.to_lowercase());
-        let ar = ApiResource {
-            group,
-            version: version.clone(),
-            kind: kind.clone(),
-            api_version,
-            plural,
-        };
-
-        let obj: DynamicObject =
-            serde_json::from_value(value).map_err(|e| format!("Failed to parse: {}", e))?;
-
-        let api: Api<DynamicObject> = if let Some(ns) = &namespace {
-            Api::namespaced_with(client.clone(), ns, &ar)
-        } else {
-            Api::all_with(client.clone(), &ar)
-        };
-
-        api.patch(
-            &name,
-            &PatchParams::apply("lattice-operator").force(),
-            &Patch::Apply(&obj),
-        )
-        .await
-        .map_err(|e| format!("Apply failed: {}", e))?;
-
-        Ok(())
     }
 
     /// Get provider-specific environment variables for clusterctl template substitution
@@ -1059,8 +845,8 @@ impl CapiInstaller for ClusterctlInstaller {
                 .to_string()
         });
 
-        // Install cert-manager first (required by CAPI)
-        Self::install_cert_manager(&client).await?;
+        // Note: cert-manager is installed automatically by clusterctl init
+        // when not present. clusterctl manages its lifecycle including upgrades.
 
         // Handle installations first
         if needs_install {

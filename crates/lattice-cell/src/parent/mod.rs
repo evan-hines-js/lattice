@@ -695,11 +695,23 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             .map_err(|e| CellServerError::CertGeneration(e.to_string()))?;
 
         // Use trust bundle for verification (includes all CAs during rotation)
+        let ca_trust_bundle = ca_bundle.trust_bundle_pem();
         let mtls_config =
-            ServerMtlsConfig::new(grpc_cert_pem, grpc_key_pem, ca_bundle.trust_bundle_pem());
+            ServerMtlsConfig::new(grpc_cert_pem, grpc_key_pem, ca_trust_bundle.clone());
 
         // Drop the read lock before spawning tasks
         drop(ca_bundle);
+
+        // Set proxy config for kubeconfig patching during unpivot
+        let proxy_url = format!(
+            "https://lattice-cell.lattice-system.svc:{}",
+            self.config.proxy_addr.port()
+        );
+        self.agent_registry
+            .set_proxy_config(crate::connection::KubeconfigProxyConfig {
+                url: proxy_url,
+                ca_cert_pem: ca_trust_bundle,
+            });
 
         let grpc_addr = self.config.grpc_addr;
         let registry = self.agent_registry.clone();
