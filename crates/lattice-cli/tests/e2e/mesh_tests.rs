@@ -26,6 +26,41 @@ use lattice_operator::crd::{
 use super::helpers::{client_from_kubeconfig, run_cmd, run_cmd_allow_fail};
 
 // =============================================================================
+// Namespace Helpers
+// =============================================================================
+
+/// Create a namespace using kubectl
+fn create_namespace(kubeconfig_path: &str, namespace: &str) {
+    info!("Creating namespace {}...", namespace);
+    let _ = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "create",
+            "namespace",
+            namespace,
+        ],
+    );
+}
+
+/// Delete a namespace using kubectl (non-blocking)
+fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
+    info!("[Mesh Cleanup] Deleting namespace {}...", namespace);
+    let _ = run_cmd_allow_fail(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "delete",
+            "namespace",
+            namespace,
+            "--wait=false",
+        ],
+    );
+}
+
+// =============================================================================
 // Shared Test Script Generation
 // =============================================================================
 
@@ -602,17 +637,7 @@ fn create_public_api() -> LatticeService {
 }
 
 async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
-    info!("Creating namespace {}...", TEST_SERVICES_NAMESPACE);
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "create",
-            "namespace",
-            TEST_SERVICES_NAMESPACE,
-        ],
-    );
+    create_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE);
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<LatticeService> = Api::namespaced(client, TEST_SERVICES_NAMESPACE);
@@ -956,7 +981,10 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     // Additional wait for traffic patterns to stabilize
     info!("Waiting for traffic tests to complete (120s)...");
     sleep(Duration::from_secs(120)).await;
-    handle.stop_and_verify().await
+    let result = handle.stop_and_verify().await;
+    // Clean up immediately to free CPU resources
+    cleanup_mesh_test(kubeconfig_path);
+    result
 }
 
 // =============================================================================
@@ -1524,17 +1552,7 @@ impl RandomMesh {
 const RANDOM_MESH_NAMESPACE: &str = "random-mesh";
 
 async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<(), String> {
-    info!("Creating namespace {}...", RANDOM_MESH_NAMESPACE);
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "create",
-            "namespace",
-            RANDOM_MESH_NAMESPACE,
-        ],
-    );
+    create_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE);
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
 
@@ -1785,7 +1803,10 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     // Additional wait for traffic patterns to stabilize
     info!("Waiting for traffic tests to complete (120s)...");
     sleep(Duration::from_secs(120)).await;
-    handle.stop_and_verify().await
+    let result = handle.stop_and_verify().await;
+    // Clean up immediately to free CPU resources
+    cleanup_random_mesh_test(kubeconfig_path);
+    result
 }
 
 // =============================================================================
@@ -1793,45 +1814,11 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
 // =============================================================================
 
 /// Clean up the fixed 9-service mesh test namespace
-pub fn cleanup_mesh_test(kubeconfig_path: &str) {
-    info!(
-        "[Mesh Cleanup] Deleting namespace {}...",
-        TEST_SERVICES_NAMESPACE
-    );
-    let _ = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "delete",
-            "namespace",
-            TEST_SERVICES_NAMESPACE,
-            "--wait=false",
-        ],
-    );
+fn cleanup_mesh_test(kubeconfig_path: &str) {
+    delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE);
 }
 
 /// Clean up the random mesh test namespace
-pub fn cleanup_random_mesh_test(kubeconfig_path: &str) {
-    info!(
-        "[Mesh Cleanup] Deleting namespace {}...",
-        RANDOM_MESH_NAMESPACE
-    );
-    let _ = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "delete",
-            "namespace",
-            RANDOM_MESH_NAMESPACE,
-            "--wait=false",
-        ],
-    );
-}
-
-/// Clean up all mesh test namespaces
-pub fn cleanup_all_mesh_tests(kubeconfig_path: &str) {
-    cleanup_mesh_test(kubeconfig_path);
-    cleanup_random_mesh_test(kubeconfig_path);
+fn cleanup_random_mesh_test(kubeconfig_path: &str) {
+    delete_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE);
 }

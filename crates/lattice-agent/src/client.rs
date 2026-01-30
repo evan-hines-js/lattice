@@ -718,10 +718,9 @@ impl AgentClient {
     ///
     /// This is used to apply manifests received via ApplyManifestsCommand
     /// (e.g., LatticeCluster CRD and resource after pivot).
-    async fn apply_manifest(yaml: &str) -> Result<(), std::io::Error> {
+    async fn apply_manifest(client: &kube::Client, yaml: &str) -> Result<(), std::io::Error> {
         use kube::api::{Api, Patch, PatchParams};
         use kube::core::DynamicObject;
-        use kube::discovery::ApiResource;
 
         // Parse YAML to extract metadata first for better logging
         let value = lattice_common::yaml::parse_yaml(yaml)
@@ -752,36 +751,18 @@ impl AgentClient {
             "Applying manifest via kube-rs"
         );
 
-        // Parse group and version from apiVersion
-        let (group, version) = if let Some((g, v)) = api_version.split_once('/') {
-            (g.to_string(), v.to_string())
-        } else {
-            (String::new(), api_version.clone())
-        };
-
-        // Create ApiResource for dynamic access
-        let plural = format!("{}s", kind.to_lowercase());
-        let ar = ApiResource {
-            group,
-            version: version.clone(),
-            kind: kind.clone(),
-            api_version,
-            plural,
-        };
+        // Create ApiResource using shared utility (handles pluralization correctly)
+        let ar = lattice_common::kube_utils::build_api_resource(&api_version, &kind);
 
         // Parse into DynamicObject from the already-parsed JSON value
         let obj: DynamicObject = serde_json::from_value(value)
             .map_err(|e| std::io::Error::other(format!("Failed to parse manifest: {}", e)))?;
 
-        let client = kube::Client::try_default()
-            .await
-            .map_err(|e| std::io::Error::other(format!("Failed to create client: {}", e)))?;
-
         // Use server-side apply
         let api: Api<DynamicObject> = if let Some(ns) = &namespace {
-            Api::namespaced_with(client, ns, &ar)
+            Api::namespaced_with(client.clone(), ns, &ar)
         } else {
-            Api::all_with(client, &ar)
+            Api::all_with(client.clone(), &ar)
         };
 
         api.patch(
@@ -911,7 +892,23 @@ impl AgentClient {
 
         match &command.command {
             Some(Command::ApplyManifests(cmd)) => {
-                info!("Received apply manifests command");
+                info!(
+                    manifests = cmd.manifests.len(),
+                    "Received apply manifests command"
+                );
+
+                if cmd.manifests.is_empty() {
+                    info!("No manifests to apply");
+                    return;
+                }
+
+                let client = match kube::Client::try_default().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!(error = %e, "Failed to create k8s client for apply manifests");
+                        return;
+                    }
+                };
 
                 // Apply manifests (LatticeCluster CRD + resource)
                 let manifests_count = cmd.manifests.len();
@@ -923,7 +920,7 @@ impl AgentClient {
                         Ok(yaml) => {
                             // Extract kind/name for logging
                             let (kind, name) = Self::extract_manifest_info(&yaml);
-                            if let Err(e) = Self::apply_manifest(&yaml).await {
+                            if let Err(e) = Self::apply_manifest(&client, &yaml).await {
                                 error!(
                                     error = %e,
                                     manifest_index = i,
@@ -965,7 +962,9 @@ impl AgentClient {
                         capi_status: None,
                     })),
                 };
-                let _ = message_tx.send(msg).await;
+                if let Err(e) = message_tx.send(msg).await {
+                    error!(error = %e, "Failed to send status response");
+                }
             }
             Some(Command::SyncResources(cmd)) => {
                 info!(
@@ -1033,7 +1032,9 @@ impl AgentClient {
                         cluster_name: cluster_name.to_string(),
                         payload: Some(Payload::KubernetesResponse(response)),
                     };
-                    let _ = message_tx.send(msg).await;
+                    if let Err(e) = message_tx.send(msg).await {
+                        error!(error = %e, "Failed to send watch cancel response");
+                    }
                     return;
                 }
 
@@ -1058,7 +1059,9 @@ impl AgentClient {
                                 cluster_name: cluster_name_clone,
                                 payload: Some(Payload::KubernetesResponse(response)),
                             };
-                            let _ = message_tx.send(msg).await;
+                            if let Err(e) = message_tx.send(msg).await {
+                                error!(error = %e, "Failed to send K8s error response");
+                            }
                             return;
                         }
                     };
@@ -1120,11 +1123,16 @@ impl AgentClient {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create k8s client");
-                            send_batch_error(
+                            send_batch_ack(
                                 &message_tx,
                                 &cluster_name_clone,
                                 &request_id,
-                                &e.to_string(),
+                                vec![],
+                                vec![MoveObjectError {
+                                    source_uid: String::new(),
+                                    message: e.to_string(),
+                                    retryable: true,
+                                }],
                             )
                             .await;
                             return;
@@ -1140,11 +1148,16 @@ impl AgentClient {
 
                     // Ensure namespace exists
                     if let Err(e) = mover.ensure_namespace().await {
-                        send_batch_error(
+                        send_batch_ack(
                             &message_tx,
                             &cluster_name_clone,
                             &request_id,
-                            &e.to_string(),
+                            vec![],
+                            vec![MoveObjectError {
+                                source_uid: String::new(),
+                                message: e.to_string(),
+                                retryable: true,
+                            }],
                         )
                         .await;
                         return;
@@ -1154,16 +1167,18 @@ impl AgentClient {
                     let (mappings, errors) = mover.apply_batch(&objects).await;
 
                     // Send ack
-                    let ack = MoveObjectAck {
-                        request_id: request_id.clone(),
-                        mappings: mappings
+                    send_batch_ack(
+                        &message_tx,
+                        &cluster_name_clone,
+                        &request_id,
+                        mappings
                             .into_iter()
                             .map(|(src, tgt)| UidMapping {
                                 source_uid: src,
                                 target_uid: tgt,
                             })
                             .collect(),
-                        errors: errors
+                        errors
                             .into_iter()
                             .map(|e| MoveObjectError {
                                 source_uid: e.source_uid,
@@ -1171,15 +1186,8 @@ impl AgentClient {
                                 retryable: e.retryable,
                             })
                             .collect(),
-                    };
-
-                    let msg = AgentMessage {
-                        cluster_name: cluster_name_clone,
-                        payload: Some(Payload::MoveAck(ack)),
-                    };
-                    if let Err(e) = message_tx.send(msg).await {
-                        error!(error = %e, "Failed to send move batch ack");
-                    }
+                    )
+                    .await;
                 });
             }
             Some(Command::MoveComplete(complete)) => {
@@ -1201,16 +1209,26 @@ impl AgentClient {
                     "Processing move complete"
                 );
 
+                // Check if pivot already completed (handles re-sends after parent crash)
+                if Self::check_local_pivot_complete(&capi_cluster_name).await {
+                    info!(request_id = %request_id, "Pivot already complete, sending immediate ack");
+                    send_complete_ack(&message_tx, &agent_cluster_name, &request_id, true, "", 0)
+                        .await;
+                    return;
+                }
+
                 tokio::spawn(async move {
                     let client = match kube::Client::try_default().await {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create k8s client");
-                            send_complete_error(
+                            send_complete_ack(
                                 &message_tx,
                                 &agent_cluster_name,
                                 &request_id,
+                                false,
                                 &e.to_string(),
+                                0,
                             )
                             .await;
                             return;
@@ -1234,46 +1252,120 @@ impl AgentClient {
 
                     let resources_created = mover.resources_created() as i32;
 
-                    // Apply distributed resources
+                    // Apply distributed resources - fail pivot if this fails
                     let resources = DistributableResources {
                         cloud_providers,
                         secrets_providers,
                         secrets,
                     };
                     if let Err(e) = apply_distributed_resources(&client, &resources).await {
-                        warn!(error = %e, "Failed to apply distributed resources");
+                        error!(error = %e, "Failed to apply distributed resources");
+                        send_complete_ack(
+                            &message_tx,
+                            &agent_cluster_name,
+                            &request_id,
+                            false,
+                            &format!("failed to apply distributed resources: {}", e),
+                            0,
+                        )
+                        .await;
+                        return;
                     }
 
-                    // Apply additional manifests (e.g., CiliumNetworkPolicy)
+                    // Apply additional manifests (e.g., CiliumNetworkPolicy) - fail pivot if this fails
                     if !manifests.is_empty() {
                         if let Err(e) = apply_manifests(&client, &manifests).await {
-                            warn!(error = %e, manifests = manifests.len(), "Failed to apply manifests");
-                        } else {
-                            info!(manifests = manifests.len(), "Applied post-pivot manifests");
+                            error!(error = %e, manifests = manifests.len(), "Failed to apply manifests");
+                            send_complete_ack(
+                                &message_tx,
+                                &agent_cluster_name,
+                                &request_id,
+                                false,
+                                &format!("failed to apply manifests: {}", e),
+                                0,
+                            )
+                            .await;
+                            return;
                         }
+                        info!(manifests = manifests.len(), "Applied post-pivot manifests");
+                    }
+
+                    // Set local pivot_complete AFTER all resources are confirmed in etcd
+                    // If agent crashes after this but before ack, the status persists
+                    // and we'll send immediate ack on next MoveComplete re-send
+                    if let Err(e) = Self::set_local_pivot_complete(&capi_cluster_name).await {
+                        warn!(error = %e, "Failed to set local pivot_complete");
+                        // Continue anyway - all resources are applied successfully
                     }
 
                     // Send success ack
-                    let ack = MoveCompleteAck {
-                        request_id: request_id.clone(),
-                        success: true,
-                        error: String::new(),
+                    send_complete_ack(
+                        &message_tx,
+                        &agent_cluster_name,
+                        &request_id,
+                        true,
+                        "",
                         resources_created,
-                    };
-
-                    let msg = AgentMessage {
-                        cluster_name: agent_cluster_name,
-                        payload: Some(Payload::MoveCompleteAck(ack)),
-                    };
-                    if let Err(e) = message_tx.send(msg).await {
-                        error!(error = %e, "Failed to send move complete ack");
-                    }
+                    )
+                    .await;
                 });
             }
             None => {
                 warn!(command_id = %command.command_id, "Received command with no payload");
             }
         }
+    }
+
+    /// Check if the local LatticeCluster has pivot_complete=true
+    ///
+    /// Each workload cluster has exactly one LatticeCluster CRD (its own).
+    /// If pivot_complete is already true, duplicate MoveComplete commands
+    /// can be immediately acked without re-applying resources.
+    async fn check_local_pivot_complete(cluster_name: &str) -> bool {
+        let client = match kube::Client::try_default().await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "Failed to create k8s client for pivot check");
+                return false;
+            }
+        };
+        let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
+        match clusters.get(cluster_name).await {
+            Ok(cluster) => cluster
+                .status
+                .as_ref()
+                .map(|s| s.pivot_complete)
+                .unwrap_or(false),
+            Err(e) => {
+                warn!(cluster = %cluster_name, error = %e, "Failed to get LatticeCluster");
+                false
+            }
+        }
+    }
+
+    /// Set pivot_complete=true on the local LatticeCluster status
+    ///
+    /// Called after successfully applying pivot resources, before sending ack.
+    /// This ensures the agent remembers the pivot completed even if it crashes
+    /// after setting status but before the parent receives the ack.
+    async fn set_local_pivot_complete(cluster_name: &str) -> Result<(), kube::Error> {
+        let client = kube::Client::try_default().await?;
+        let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
+
+        let patch = serde_json::json!({
+            "status": {
+                "pivotComplete": true
+            }
+        });
+        clusters
+            .patch_status(
+                cluster_name,
+                &kube::api::PatchParams::apply("lattice-agent"),
+                &kube::api::Patch::Merge(&patch),
+            )
+            .await?;
+        info!(cluster = %cluster_name, "Set local pivot_complete=true");
+        Ok(())
     }
 
     /// Shutdown the client
@@ -1339,55 +1431,58 @@ impl Drop for AgentClient {
     }
 }
 
-/// Send batch error ack
-async fn send_batch_error(
+/// Send MoveObject batch ack
+async fn send_batch_ack(
     tx: &mpsc::Sender<AgentMessage>,
     cluster_name: &str,
     request_id: &str,
-    error: &str,
+    mappings: Vec<UidMapping>,
+    errors: Vec<MoveObjectError>,
 ) {
     let ack = MoveObjectAck {
         request_id: request_id.to_string(),
-        mappings: vec![],
-        errors: vec![MoveObjectError {
-            source_uid: String::new(),
-            message: error.to_string(),
-            retryable: true,
-        }],
+        mappings,
+        errors,
     };
     let msg = AgentMessage {
         cluster_name: cluster_name.to_string(),
         payload: Some(Payload::MoveAck(ack)),
     };
-    let _ = tx.send(msg).await;
+    if let Err(e) = tx.send(msg).await {
+        error!(error = %e, "Failed to send move batch ack");
+    }
 }
 
-/// Send complete error ack
-async fn send_complete_error(
+/// Send MoveComplete ack (success or error)
+async fn send_complete_ack(
     tx: &mpsc::Sender<AgentMessage>,
     cluster_name: &str,
     request_id: &str,
+    success: bool,
     error: &str,
+    resources_created: i32,
 ) {
     let ack = MoveCompleteAck {
         request_id: request_id.to_string(),
-        success: false,
+        success,
         error: error.to_string(),
-        resources_created: 0,
+        resources_created,
     };
     let msg = AgentMessage {
         cluster_name: cluster_name.to_string(),
         payload: Some(Payload::MoveCompleteAck(ack)),
     };
-    let _ = tx.send(msg).await;
+    if let Err(e) = tx.send(msg).await {
+        error!(error = %e, "Failed to send move complete ack");
+    }
 }
 
 /// Apply a list of manifests (bytes) using server-side apply
-async fn apply_manifests(_client: &kube::Client, manifests: &[Vec<u8>]) -> Result<(), String> {
+async fn apply_manifests(client: &kube::Client, manifests: &[Vec<u8>]) -> Result<(), String> {
     for manifest_bytes in manifests {
         let yaml = String::from_utf8(manifest_bytes.clone())
             .map_err(|e| format!("Invalid UTF-8 in manifest: {}", e))?;
-        AgentClient::apply_manifest(&yaml)
+        AgentClient::apply_manifest(client, &yaml)
             .await
             .map_err(|e| format!("Failed to apply manifest: {}", e))?;
     }
@@ -2035,6 +2130,8 @@ mod tests {
     /// which triggers lazy CAPI installation.
     #[tokio::test]
     async fn story_agent_handles_apply_manifests_command_from_cell() {
+        lattice_common::install_crypto_provider();
+
         let agent_state = Arc::new(RwLock::new(AgentState::Provisioning));
         let (tx, _rx) = mpsc::channel::<AgentMessage>(32);
 
@@ -2702,5 +2799,125 @@ mod tests {
         if let Some(v) = orig_host {
             std::env::set_var("KUBERNETES_SERVICE_HOST", v);
         }
+    }
+
+    // ==========================================================================
+    // Ack Helper Tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_send_batch_ack_success() {
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
+
+        send_batch_ack(
+            &tx,
+            "test-cluster",
+            "req-123",
+            vec![UidMapping {
+                source_uid: "src-1".to_string(),
+                target_uid: "tgt-1".to_string(),
+            }],
+            vec![],
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("should receive message");
+        assert_eq!(msg.cluster_name, "test-cluster");
+
+        match msg.payload {
+            Some(Payload::MoveAck(ack)) => {
+                assert_eq!(ack.request_id, "req-123");
+                assert_eq!(ack.mappings.len(), 1);
+                assert_eq!(ack.mappings[0].source_uid, "src-1");
+                assert!(ack.errors.is_empty());
+            }
+            _ => panic!("Expected MoveAck payload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_batch_ack_with_errors() {
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
+
+        send_batch_ack(
+            &tx,
+            "test-cluster",
+            "req-456",
+            vec![],
+            vec![MoveObjectError {
+                source_uid: "failed-uid".to_string(),
+                message: "something went wrong".to_string(),
+                retryable: true,
+            }],
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("should receive message");
+        match msg.payload {
+            Some(Payload::MoveAck(ack)) => {
+                assert_eq!(ack.request_id, "req-456");
+                assert!(ack.mappings.is_empty());
+                assert_eq!(ack.errors.len(), 1);
+                assert_eq!(ack.errors[0].message, "something went wrong");
+                assert!(ack.errors[0].retryable);
+            }
+            _ => panic!("Expected MoveAck payload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_complete_ack_success() {
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
+
+        send_complete_ack(&tx, "test-cluster", "req-789", true, "", 42).await;
+
+        let msg = rx.recv().await.expect("should receive message");
+        assert_eq!(msg.cluster_name, "test-cluster");
+
+        match msg.payload {
+            Some(Payload::MoveCompleteAck(ack)) => {
+                assert_eq!(ack.request_id, "req-789");
+                assert!(ack.success);
+                assert!(ack.error.is_empty());
+                assert_eq!(ack.resources_created, 42);
+            }
+            _ => panic!("Expected MoveCompleteAck payload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_complete_ack_error() {
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(32);
+
+        send_complete_ack(&tx, "test-cluster", "req-error", false, "pivot failed", 0).await;
+
+        let msg = rx.recv().await.expect("should receive message");
+        match msg.payload {
+            Some(Payload::MoveCompleteAck(ack)) => {
+                assert_eq!(ack.request_id, "req-error");
+                assert!(!ack.success);
+                assert_eq!(ack.error, "pivot failed");
+                assert_eq!(ack.resources_created, 0);
+            }
+            _ => panic!("Expected MoveCompleteAck payload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_complete_ack_channel_closed() {
+        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
+        drop(rx); // Close the channel
+
+        // Should not panic, just log error
+        send_complete_ack(&tx, "test-cluster", "req-closed", true, "", 0).await;
+    }
+
+    #[tokio::test]
+    async fn test_send_batch_ack_channel_closed() {
+        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
+        drop(rx); // Close the channel
+
+        // Should not panic, just log error
+        send_batch_ack(&tx, "test-cluster", "req-closed", vec![], vec![]).await;
     }
 }

@@ -69,7 +69,7 @@ fn cleanup_bootstrap_clusters() {
 
 #[tokio::test]
 async fn test_upgrade_with_mesh_traffic() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    lattice_common::install_crypto_provider();
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(

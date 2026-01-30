@@ -74,7 +74,7 @@ fn cleanup_all_clusters() {
 
 #[tokio::test]
 async fn test_endurance_loop() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    lattice_common::install_crypto_provider();
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(

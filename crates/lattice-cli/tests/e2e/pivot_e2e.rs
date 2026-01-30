@@ -79,7 +79,7 @@ use super::helpers::{
 // Media server test disabled pending investigation
 #[allow(unused_imports)]
 use super::media_server_e2e::{cleanup_media_server_test, run_media_server_test};
-use super::mesh_tests::{cleanup_all_mesh_tests, run_mesh_test, run_random_mesh_test};
+use super::mesh_tests::{run_mesh_test, run_random_mesh_test};
 use super::providers::InfraProvider;
 
 // =============================================================================
@@ -119,7 +119,7 @@ fn cleanup_bootstrap_clusters() {
 
 #[tokio::test]
 async fn test_configurable_provider_pivot() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    lattice_common::install_crypto_provider();
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -407,16 +407,13 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
         .await
     });
 
-    // Wait for mesh tests and cleanup immediately (don't wait for delete)
+    // Wait for mesh tests (they clean up after themselves to free CPU resources)
     if let Some(handle) = mesh_handle {
         info!("[Phase 7] Waiting for mesh tests to complete...");
         handle
             .await
             .map_err(|e| format!("Mesh test task panicked: {}", e))??;
-
-        info!("[Phase 7] Cleaning up mesh test services...");
-        cleanup_all_mesh_tests(&workload_kubeconfig_path);
-        info!("SUCCESS: Mesh tests complete and cleaned up!");
+        info!("SUCCESS: Mesh tests complete!");
     }
 
     // Now wait for delete to complete

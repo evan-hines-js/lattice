@@ -920,4 +920,24 @@ mod tests {
         let registry = AgentRegistry::new();
         assert!(!registry.has_pending_k8s_response("nonexistent"));
     }
+
+    #[test]
+    fn test_proxy_config_set_and_get() {
+        let registry = AgentRegistry::new();
+
+        // Initially no config
+        assert!(registry.get_proxy_config().is_none());
+
+        // Set config
+        let config = KubeconfigProxyConfig {
+            url: "https://proxy.example.com:8081".to_string(),
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
+        };
+        registry.set_proxy_config(config.clone());
+
+        // Get config
+        let retrieved = registry.get_proxy_config().expect("config should exist");
+        assert_eq!(retrieved.url, "https://proxy.example.com:8081");
+        assert!(retrieved.ca_cert_pem.contains("BEGIN CERTIFICATE"));
+    }
 }

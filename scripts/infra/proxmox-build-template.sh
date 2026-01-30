@@ -11,7 +11,8 @@
 #   PROXMOX_TOKEN    - API token ID (e.g., root@pam!lattice)
 #   PROXMOX_SECRET   - API token secret
 #   PROXMOX_NODE     - Proxmox node name
-#
+# root@pam!root
+# 3ecf222b-8d84-4166-8485-fb4934be60f0
 # Optional:
 #   PROXMOX_TEMPLATE_ID  - Template VM ID (default: 9000)
 #   PROXMOX_STORAGE      - Storage pool (default: local-lvm)
@@ -86,7 +87,7 @@ export PROXMOX_BRIDGE="$BRIDGE"
 export PROXMOX_STORAGE_POOL="$STORAGE"
 
 # Build packer flags
-K8S_SERIES="v${K8S_VERSION%.*}"# e.g., v1.31.0 -> v1.31
+K8S_SERIES="v${K8S_VERSION%.*}" # e.g., v1.31.0 -> v1.31
 K8S_DEB_VERSION="${K8S_VERSION}-1.1"
 PACKER_FLAGS="--var 'kubernetes_semver=v${K8S_VERSION}'"
 PACKER_FLAGS+=" --var 'kubernetes_series=${K8S_SERIES}'"
@@ -96,7 +97,7 @@ PACKER_FLAGS+=" --var 'memory=${MEMORY}'"
 PACKER_FLAGS+=" --var 'cores=${CORES}'"
 PACKER_FLAGS+=" --var 'sockets=${SOCKETS}'"
 # Use host CPU to ensure x86-64-v2+ instruction support (required by Istio CNI, modern glibc)
-PACKER_FLAGS+=" --var 'cpu_type=host'"
+PACKER_FLAGS+=" --var 'cpu_type=host' --var 'disk_format=raw'"
 
 [[ "$STORAGE" == *"lvm"* ]] && PACKER_FLAGS+=" --var 'disk_format=raw'"
 

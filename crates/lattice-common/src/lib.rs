@@ -16,6 +16,7 @@ pub mod yaml;
 
 pub use credentials::{AwsCredentials, CredentialError};
 pub use error::Error;
+pub use kube_utils::pluralize_kind;
 pub use protocol::{CsrRequest, CsrResponse, DistributableResources};
 
 /// Result type alias using our custom Error type
@@ -45,6 +46,16 @@ pub fn is_bootstrap_cluster() -> bool {
     std::env::var(BOOTSTRAP_CLUSTER_ENV)
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false)
+}
+
+/// Install the FIPS-validated crypto provider for rustls.
+///
+/// This must be called before creating any TLS connections (including kube clients).
+/// Safe to call multiple times - subsequent calls are no-ops.
+///
+/// Uses aws-lc-rs which provides FIPS 140-2/140-3 validated cryptography.
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 // CAPI provider namespaces

@@ -50,7 +50,6 @@ mod cell;
 mod error;
 mod graph;
 mod sequence;
-mod utils;
 
 pub use agent::{
     AgentMover, MoveObjectError, MoveObjectInput, SourceOwnerRefInput, SOURCE_UID_ANNOTATION,

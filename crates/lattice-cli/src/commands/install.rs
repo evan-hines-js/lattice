@@ -9,7 +9,6 @@
 //! 4. Pivoting CAPI resources to make it self-managing
 //! 5. Deleting the bootstrap cluster
 
-use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -35,21 +34,8 @@ use lattice_operator::crd::{
 };
 use lattice_operator::fips;
 
+use super::CommandErrorExt;
 use crate::{Error, Result};
-
-/// Extension trait to convert errors with Display to CLI Error::CommandFailed.
-///
-/// This reduces boilerplate for the common pattern of `.map_err(|e| Error::command_failed(e.to_string()))`.
-trait CommandErrorExt<T> {
-    /// Convert an error to `Error::CommandFailed` using its Display implementation.
-    fn cmd_err(self) -> Result<T>;
-}
-
-impl<T, E: Display> CommandErrorExt<T> for std::result::Result<T, E> {
-    fn cmd_err(self) -> Result<T> {
-        self.map_err(|e| Error::command_failed(e.to_string()))
-    }
-}
 
 /// Install a self-managing Lattice cluster from a LatticeCluster CRD
 #[derive(Args, Debug)]
@@ -408,9 +394,21 @@ impl Installer {
     }
 
     async fn create_management_cluster_crd(&self, client: &Client) -> Result<()> {
+        let cluster_name = self.cluster.metadata.name.as_deref().unwrap_or("unknown");
+        info!(
+            "Applying LatticeCluster '{}' (provider: {})",
+            cluster_name,
+            self.provider()
+        );
+
         kube_utils::apply_manifest_with_retry(client, &self.cluster_yaml, Duration::from_secs(120))
             .await
-            .cmd_err()?;
+            .map_err(|e| {
+                Error::command_failed(format!(
+                    "Failed to create LatticeCluster '{}': {}",
+                    cluster_name, e
+                ))
+            })?;
         Ok(())
     }
 
@@ -953,16 +951,9 @@ impl Installer {
 /// Get LatticeCluster phase using dynamic API
 async fn get_latticecluster_phase(client: &Client, name: &str) -> Result<String> {
     use kube::api::{Api, DynamicObject};
-    use kube::discovery::ApiResource;
 
-    let ar = ApiResource {
-        group: "lattice.dev".to_string(),
-        version: "v1alpha1".to_string(),
-        kind: "LatticeCluster".to_string(),
-        api_version: "lattice.dev/v1alpha1".to_string(),
-        plural: "latticeclusters".to_string(),
-    };
-
+    let ar =
+        lattice_common::kube_utils::build_api_resource("lattice.dev/v1alpha1", "LatticeCluster");
     let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
 
     match api.get(name).await {

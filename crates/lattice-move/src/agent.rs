@@ -7,7 +7,6 @@ use std::collections::HashMap;
 
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams, PostParams};
-use kube::discovery::ApiResource;
 use kube::Client;
 use serde_json::Value;
 use tracing::{debug, info, warn};
@@ -445,15 +444,17 @@ impl AgentMover {
         Ok(())
     }
 
-    /// Unpause Cluster and ClusterClass resources after all objects are created
+    /// Unpause Cluster and ClusterClass resources after all objects are created.
+    ///
+    /// This operation is critical - CAPI won't delete paused clusters, so failure
+    /// to unpause can lead to orphaned infrastructure.
     pub async fn unpause_resources(&self) -> Result<(), MoveError> {
-        // Unpause Cluster
-        self.unpause_resource("cluster.x-k8s.io/v1beta1", "Cluster", "clusters")
-            .await?;
+        // Unpause Cluster (required)
+        self.unpause_resource("cluster.x-k8s.io", "Cluster").await?;
 
-        // Unpause ClusterClass (if any)
+        // Unpause ClusterClass (optional - might not exist)
         if let Err(e) = self
-            .unpause_resource("cluster.x-k8s.io/v1beta1", "ClusterClass", "clusterclasses")
+            .unpause_resource("cluster.x-k8s.io", "ClusterClass")
             .await
         {
             // ClusterClass might not exist, that's okay
@@ -463,21 +464,18 @@ impl AgentMover {
         Ok(())
     }
 
-    /// Unpause a specific resource type
-    async fn unpause_resource(
-        &self,
-        api_version: &str,
-        kind: &str,
-        plural: &str,
-    ) -> Result<(), MoveError> {
-        let (group, version) = parse_api_version(api_version);
-        let api_resource = ApiResource {
+    /// Unpause a specific resource type using discovery
+    async fn unpause_resource(&self, group: &str, kind: &str) -> Result<(), MoveError> {
+        // Use discovery to find the correct API version
+        let api_resource = lattice_common::kube_utils::build_api_resource_with_discovery(
+            &self.client,
             group,
-            version,
-            kind: kind.to_string(),
-            api_version: api_version.to_string(),
-            plural: plural.to_string(),
-        };
+            kind,
+        )
+        .await
+        .map_err(|e| {
+            MoveError::Discovery(format!("Failed to discover {}/{}: {}", group, kind, e))
+        })?;
 
         let api: Api<DynamicObject> =
             Api::namespaced_with(self.client.clone(), &self.namespace, &api_resource);
@@ -494,24 +492,20 @@ impl AgentMover {
                 None => continue,
             };
 
-            // Patch to unpause
+            // Patch to unpause - this MUST succeed
             let patch = serde_json::json!({
                 "spec": {
                     "paused": false
                 }
             });
 
-            match api
-                .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+            api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
                 .await
-            {
-                Ok(_) => {
-                    info!(kind = %kind, name = %name, "Unpaused resource");
-                }
-                Err(e) => {
-                    warn!(kind = %kind, name = %name, error = %e, "Failed to unpause resource");
-                }
-            }
+                .map_err(|e| {
+                    MoveError::PauseFailed(format!("Failed to unpause {} {}: {}", kind, name, e))
+                })?;
+
+            info!(kind = %kind, name = %name, "Unpaused resource");
         }
 
         Ok(())
@@ -589,8 +583,8 @@ fn strip_transient_fields(obj: &mut Value) {
     }
 }
 
-// Use shared utility functions
-use crate::utils::{build_api_resource, parse_api_version};
+// Use shared utility function from lattice-common
+use lattice_common::kube_utils::build_api_resource;
 
 #[cfg(test)]
 mod tests {

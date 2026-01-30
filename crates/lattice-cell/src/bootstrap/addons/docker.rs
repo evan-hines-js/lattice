@@ -322,7 +322,7 @@ mod tests {
             .find(|r| {
                 r.resources
                     .as_ref()
-                    .map_or(false, |res| res.contains(&"persistentvolumes".to_string()))
+                    .is_some_and(|res| res.contains(&"persistentvolumes".to_string()))
             })
             .unwrap();
         assert!(pv_rule.verbs.contains(&"create".to_string()));

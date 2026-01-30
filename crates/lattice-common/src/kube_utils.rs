@@ -14,9 +14,97 @@ use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams, PostParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::discovery::ApiResource;
 use kube::{Client, Config};
-use tracing::{debug, info, trace};
+use tracing::{info, trace, warn};
 
 use crate::Error;
+
+/// Discover the API version for a resource group/kind.
+///
+/// Uses Kubernetes API discovery to find the resource. Searches all versions within
+/// the group, picking the highest stability version for each kind. This handles cases
+/// where different resources in the same group exist at different versions (e.g.,
+/// KubeadmControlPlane at v1beta2 and RKE2ControlPlane at v1beta1).
+///
+/// # Arguments
+/// * `client` - Kubernetes client
+/// * `group` - API group (e.g., "cluster.x-k8s.io")
+/// * `kind` - Resource kind (e.g., "Cluster")
+///
+/// # Returns
+/// The full api_version string (e.g., "cluster.x-k8s.io/v1beta2")
+pub async fn discover_api_version(
+    client: &Client,
+    group: &str,
+    kind: &str,
+) -> Result<String, Error> {
+    use kube::discovery::Discovery;
+
+    let discovery = Discovery::new(client.clone()).run().await.map_err(|e| {
+        Error::internal_with_context(
+            "discover_api_version",
+            format!("API discovery failed: {}", e),
+        )
+    })?;
+
+    // Find the group
+    for api_group in discovery.groups() {
+        if api_group.name() != group {
+            continue;
+        }
+
+        // Search ALL versions - resources_by_stability returns all resources across
+        // all versions, picking the highest stability version for each kind.
+        // This handles cases like RKE2ControlPlane at v1beta1 while the group's
+        // preferred version is v1beta2 (which only has KubeadmControlPlane).
+        for (ar, _caps) in api_group.resources_by_stability() {
+            if ar.kind == kind {
+                return Ok(ar.api_version.clone());
+            }
+        }
+    }
+
+    Err(Error::internal_with_context(
+        "discover_api_version",
+        format!("Resource {}/{} not found in API discovery", group, kind),
+    ))
+}
+
+/// Build an ApiResource using discovery to find the correct version.
+///
+/// This is the preferred way to build ApiResource for CAPI types since it
+/// automatically uses the storage version from the API server.
+pub async fn build_api_resource_with_discovery(
+    client: &Client,
+    group: &str,
+    kind: &str,
+) -> Result<ApiResource, Error> {
+    let api_version = discover_api_version(client, group, kind).await?;
+    let (group_str, version) = parse_api_version(&api_version);
+    let plural = pluralize_kind(kind);
+
+    Ok(ApiResource {
+        group: group_str,
+        version,
+        kind: kind.to_string(),
+        api_version,
+        plural,
+    })
+}
+
+/// Build an ApiResource from a known apiVersion and kind.
+///
+/// Use this when you have a specific apiVersion (e.g., from a manifest).
+/// For API queries where you want the storage version, use `build_api_resource_with_discovery`.
+pub fn build_api_resource(api_version: &str, kind: &str) -> ApiResource {
+    let (group, version) = parse_api_version(api_version);
+    ApiResource {
+        group,
+        version,
+        kind: kind.to_string(),
+        api_version: api_version.to_string(),
+        plural: pluralize_kind(kind),
+    }
+}
 
 // Kubernetes condition type constants
 /// The "Ready" condition type for nodes
@@ -451,19 +539,7 @@ pub fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Parse apiVersion into group and version
-    let (group, version) = parse_api_version(&api_version);
-
-    // Build the plural form
-    let plural = pluralize(&kind);
-
-    let api_resource = ApiResource {
-        group,
-        version,
-        kind,
-        api_version,
-        plural,
-    };
+    let api_resource = build_api_resource(&api_version, &kind);
 
     Ok(ManifestMetadata {
         value,
@@ -474,7 +550,20 @@ pub fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> {
 }
 
 /// Parse apiVersion into (group, version)
-fn parse_api_version(api_version: &str) -> (String, String) {
+///
+/// # Examples
+/// ```
+/// use lattice_common::kube_utils::parse_api_version;
+///
+/// let (group, version) = parse_api_version("apps/v1");
+/// assert_eq!(group, "apps");
+/// assert_eq!(version, "v1");
+///
+/// let (group, version) = parse_api_version("v1");
+/// assert_eq!(group, "");
+/// assert_eq!(version, "v1");
+/// ```
+pub fn parse_api_version(api_version: &str) -> (String, String) {
     if api_version.contains('/') {
         let parts: Vec<&str> = api_version.split('/').collect();
         (parts[0].to_string(), parts[1].to_string())
@@ -550,29 +639,49 @@ pub async fn apply_manifest_with_retry(
     manifest: &str,
     timeout: Duration,
 ) -> Result<(), Error> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
     let client_clone = client.clone();
     let manifest_owned = manifest.to_string();
+    let last_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let last_error_clone = last_error.clone();
 
-    poll_until(
+    let result = poll_until(
         timeout,
         APPLY_RETRY_INTERVAL,
         "Timeout waiting for apply",
         || {
             let client = client_clone.clone();
             let manifest = manifest_owned.clone();
+            let last_error = last_error_clone.clone();
             async move {
                 match apply_manifests(&client, &manifest).await {
                     Ok(()) => Ok(true),
                     Err(e) => {
-                        // Use debug! level since retries are expected behavior
-                        debug!("Apply failed (retrying): {}", e);
+                        let error_msg = e.to_string();
+                        // Log at warn level so errors are visible during install
+                        warn!("Apply failed (will retry): {}", error_msg);
+                        *last_error.lock().await = Some(error_msg);
                         Ok(false)
                     }
                 }
             }
         },
     )
-    .await
+    .await;
+
+    // If we timed out, include the last error in the message
+    if result.is_err() {
+        if let Some(err) = last_error.lock().await.take() {
+            return Err(Error::internal_with_context(
+                "apply_manifest_with_retry",
+                format!("Timeout applying manifest. Last error: {}", err),
+            ));
+        }
+    }
+
+    result
 }
 
 /// Get a secret data value
@@ -680,13 +789,7 @@ pub async fn get_dynamic_resource_status_field(
 
 /// Get machine phases in a namespace
 pub async fn get_machine_phases(client: &Client, namespace: &str) -> Result<Vec<String>, Error> {
-    let ar = ApiResource {
-        group: "cluster.x-k8s.io".to_string(),
-        version: "v1beta1".to_string(),
-        kind: "Machine".to_string(),
-        api_version: "cluster.x-k8s.io/v1beta1".to_string(),
-        plural: "machines".to_string(),
-    };
+    let ar = build_api_resource_with_discovery(client, "cluster.x-k8s.io", "Machine").await?;
 
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
 
@@ -741,12 +844,83 @@ pub async fn get_ready_worker_count(client: &Client) -> Result<usize, Error> {
     Ok(ready_workers.count())
 }
 
-/// Simple pluralization for Kubernetes resource kinds
-fn pluralize(kind: &str) -> String {
+/// Known Kubernetes/CAPI resource pluralizations
+const KIND_PLURALS: &[(&str, &str)] = &[
+    // Core CAPI types
+    ("cluster", "clusters"),
+    ("machine", "machines"),
+    ("machinedeployment", "machinedeployments"),
+    ("machineset", "machinesets"),
+    ("machinepool", "machinepools"),
+    // Control plane providers
+    ("kubeadmcontrolplane", "kubeadmcontrolplanes"),
+    (
+        "kubeadmcontrolplanetemplate",
+        "kubeadmcontrolplanetemplates",
+    ),
+    ("rke2controlplane", "rke2controlplanes"),
+    ("rke2controlplanetemplate", "rke2controlplanetemplates"),
+    // Bootstrap providers
+    ("kubeadmconfig", "kubeadmconfigs"),
+    ("kubeadmconfigtemplate", "kubeadmconfigtemplates"),
+    ("rke2config", "rke2configs"),
+    ("rke2configtemplate", "rke2configtemplates"),
+    // Docker provider
+    ("dockercluster", "dockerclusters"),
+    ("dockerclustertemplate", "dockerclustertemplates"),
+    ("dockermachine", "dockermachines"),
+    ("dockermachinetemplate", "dockermachinetemplates"),
+    ("dockermachinepool", "dockermachinepools"),
+    ("dockermachinepooltemplate", "dockermachinepooltemplates"),
+    // AWS provider
+    ("awscluster", "awsclusters"),
+    ("awsmachine", "awsmachines"),
+    ("awsmachinetemplate", "awsmachinetemplates"),
+    ("awsmanagedcluster", "awsmanagedclusters"),
+    ("awsmanagedmachinepool", "awsmanagedmachinepools"),
+    // GCP provider
+    ("gcpcluster", "gcpclusters"),
+    ("gcpmachine", "gcpmachines"),
+    ("gcpmachinetemplate", "gcpmachinetemplates"),
+    // Azure provider
+    ("azurecluster", "azureclusters"),
+    ("azuremachine", "azuremachines"),
+    ("azuremachinetemplate", "azuremachinetemplates"),
+    ("azuremanagedcluster", "azuremanagedclusters"),
+    ("azuremanagedmachinepool", "azuremanagedmachinepools"),
+    // Proxmox provider
+    ("proxmoxcluster", "proxmoxclusters"),
+    ("proxmoxmachine", "proxmoxmachines"),
+    ("proxmoxmachinetemplate", "proxmoxmachinetemplates"),
+    // OpenStack provider
+    ("openstackcluster", "openstackclusters"),
+    ("openstackmachine", "openstackmachines"),
+    ("openstackmachinetemplate", "openstackmachinetemplates"),
+    // IPAM
+    ("ipaddress", "ipaddresses"),
+    ("ipaddressclaim", "ipaddressclaims"),
+    // ClusterClass
+    ("clusterclass", "clusterclasses"),
+];
+
+/// Pluralize a Kubernetes resource kind
+///
+/// Uses a lookup table for known CAPI/Kubernetes types, falling back to
+/// simple pluralization rules for unknown types.
+pub fn pluralize_kind(kind: &str) -> String {
     let lower = kind.to_lowercase();
-    if lower.ends_with("s") {
+
+    // Look up in known kinds
+    for (singular, plural) in KIND_PLURALS {
+        if *singular == lower {
+            return (*plural).to_string();
+        }
+    }
+
+    // Fallback: simple pluralization
+    if lower.ends_with('s') || lower.ends_with("ch") || lower.ends_with("sh") {
         format!("{}es", lower)
-    } else if lower.ends_with("y") {
+    } else if lower.ends_with('y') && !lower.ends_with("ay") && !lower.ends_with("ey") {
         format!("{}ies", &lower[..lower.len() - 1])
     } else {
         format!("{}s", lower)
@@ -758,16 +932,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pluralize() {
-        assert_eq!(pluralize("Deployment"), "deployments");
-        assert_eq!(pluralize("Pod"), "pods");
-        assert_eq!(pluralize("Policy"), "policies");
-        assert_eq!(pluralize("ClusterResourceSet"), "clusterresourcesets");
-        assert_eq!(pluralize("Ingress"), "ingresses");
-        assert_eq!(pluralize("Service"), "services");
-        assert_eq!(pluralize("ConfigMap"), "configmaps");
-        assert_eq!(pluralize("Secret"), "secrets");
-        assert_eq!(pluralize("NetworkPolicy"), "networkpolicies");
+    fn test_pluralize_kind() {
+        // Core Kubernetes types
+        assert_eq!(pluralize_kind("Deployment"), "deployments");
+        assert_eq!(pluralize_kind("Pod"), "pods");
+        assert_eq!(pluralize_kind("Policy"), "policies");
+        assert_eq!(pluralize_kind("Ingress"), "ingresses");
+        assert_eq!(pluralize_kind("Service"), "services");
+        assert_eq!(pluralize_kind("ConfigMap"), "configmaps");
+        assert_eq!(pluralize_kind("Secret"), "secrets");
+        assert_eq!(pluralize_kind("NetworkPolicy"), "networkpolicies");
+
+        // CAPI types (lookup table)
+        assert_eq!(pluralize_kind("Cluster"), "clusters");
+        assert_eq!(pluralize_kind("MachineDeployment"), "machinedeployments");
+        assert_eq!(
+            pluralize_kind("KubeadmControlPlane"),
+            "kubeadmcontrolplanes"
+        );
+        assert_eq!(pluralize_kind("RKE2ControlPlane"), "rke2controlplanes");
+        assert_eq!(
+            pluralize_kind("DockerMachineTemplate"),
+            "dockermachinetemplates"
+        );
+        assert_eq!(pluralize_kind("ClusterClass"), "clusterclasses");
     }
 
     #[test]
