@@ -85,16 +85,41 @@ pub async fn unpause_cluster(client: &Client, namespace: &str) -> Result<(), Mov
     set_cluster_paused(client, namespace, false).await
 }
 
-async fn set_cluster_paused(client: &Client, namespace: &str, paused: bool) -> Result<(), MoveError> {
+async fn set_cluster_paused(
+    client: &Client,
+    namespace: &str,
+    paused: bool,
+) -> Result<(), MoveError> {
     let action = if paused { "Pausing" } else { "Unpausing" };
 
     // Pause/unpause Cluster
-    if let Err(e) = set_resource_paused(client, namespace, "cluster.x-k8s.io/v1beta1", "Cluster", "clusters", paused).await {
-        return Err(MoveError::PauseFailed(format!("{} Cluster failed: {}", action, e)));
+    if let Err(e) = set_resource_paused(
+        client,
+        namespace,
+        "cluster.x-k8s.io/v1beta1",
+        "Cluster",
+        "clusters",
+        paused,
+    )
+    .await
+    {
+        return Err(MoveError::PauseFailed(format!(
+            "{} Cluster failed: {}",
+            action, e
+        )));
     }
 
     // Pause/unpause ClusterClass (might not exist)
-    if let Err(e) = set_resource_paused(client, namespace, "cluster.x-k8s.io/v1beta1", "ClusterClass", "clusterclasses", paused).await {
+    if let Err(e) = set_resource_paused(
+        client,
+        namespace,
+        "cluster.x-k8s.io/v1beta1",
+        "ClusterClass",
+        "clusterclasses",
+        paused,
+    )
+    .await
+    {
         debug!(error = %e, "{} ClusterClass failed (may not exist)", action);
     }
 
@@ -120,7 +145,10 @@ async fn set_resource_paused(
     };
 
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &api_resource);
-    let list = api.list(&Default::default()).await.map_err(MoveError::Kube)?;
+    let list = api
+        .list(&Default::default())
+        .await
+        .map_err(MoveError::Kube)?;
 
     for obj in list.items {
         let name = match &obj.metadata.name {
@@ -166,8 +194,14 @@ fn extract_owner_refs(node: &GraphNode) -> Vec<SourceOwnerRefOutput> {
                     api_version: r.get("apiVersion")?.as_str()?.to_string(),
                     kind: r.get("kind")?.as_str()?.to_string(),
                     name: r.get("name")?.as_str()?.to_string(),
-                    controller: r.get("controller").and_then(|v| v.as_bool()).unwrap_or(false),
-                    block_owner_deletion: r.get("blockOwnerDeletion").and_then(|v| v.as_bool()).unwrap_or(false),
+                    controller: r
+                        .get("controller")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    block_owner_deletion: r
+                        .get("blockOwnerDeletion")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                 })
             })
             .collect(),
@@ -396,9 +430,10 @@ impl<S: MoveCommandSender> CellMover<S> {
         // Step 2: Discover and build graph (now includes paused state)
         self.discover_and_build_graph().await?;
 
-        let graph = self.graph.as_ref().ok_or_else(|| {
-            MoveError::Discovery("graph not built".to_string())
-        })?;
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| MoveError::Discovery("graph not built".to_string()))?;
 
         if graph.is_empty() {
             // Unpause before returning error
@@ -466,9 +501,10 @@ impl<S: MoveCommandSender> CellMover<S> {
 
     /// Compute the move sequence from the graph
     fn compute_sequence(&mut self) -> Result<(), MoveError> {
-        let graph = self.graph.as_ref().ok_or_else(|| {
-            MoveError::Discovery("graph not built".to_string())
-        })?;
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| MoveError::Discovery("graph not built".to_string()))?;
 
         let sequence = MoveSequence::from_graph(graph)?;
 
@@ -484,18 +520,21 @@ impl<S: MoveCommandSender> CellMover<S> {
 
     /// Stream batches to the agent
     async fn stream_batches(&self) -> Result<(), MoveError> {
-        let graph = self.graph.as_ref().ok_or_else(|| {
-            MoveError::Discovery("graph not built".to_string())
-        })?;
-        let sequence = self.sequence.as_ref().ok_or_else(|| {
-            MoveError::Discovery("sequence not computed".to_string())
-        })?;
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| MoveError::Discovery("graph not built".to_string()))?;
+        let sequence = self
+            .sequence
+            .as_ref()
+            .ok_or_else(|| MoveError::Discovery("sequence not computed".to_string()))?;
 
         let total_batches = sequence.num_groups() as u32;
 
         for (index, group) in sequence.iter_groups() {
             let nodes = extract_nodes_for_group(graph, group);
-            let objects: Vec<MoveObjectOutput> = nodes.iter().map(|n| build_move_object(n)).collect();
+            let objects: Vec<MoveObjectOutput> =
+                nodes.iter().map(|n| build_move_object(n)).collect();
 
             let batch = MoveBatch {
                 move_id: self.config.move_id.clone(),
@@ -530,7 +569,11 @@ impl<S: MoveCommandSender> CellMover<S> {
                 });
             }
 
-            debug!(batch = index, mappings = ack.mappings.len(), "Batch acknowledged");
+            debug!(
+                batch = index,
+                mappings = ack.mappings.len(),
+                "Batch acknowledged"
+            );
         }
 
         Ok(())
@@ -553,12 +596,14 @@ impl<S: MoveCommandSender> CellMover<S> {
 
     /// Delete source resources after successful move
     async fn delete_source(&self) -> Result<u32, MoveError> {
-        let sequence = self.sequence.as_ref().ok_or_else(|| {
-            MoveError::Discovery("sequence not computed".to_string())
-        })?;
-        let graph = self.graph.as_ref().ok_or_else(|| {
-            MoveError::Discovery("graph not built".to_string())
-        })?;
+        let sequence = self
+            .sequence
+            .as_ref()
+            .ok_or_else(|| MoveError::Discovery("sequence not computed".to_string()))?;
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| MoveError::Discovery("graph not built".to_string()))?;
 
         // Delete in reverse order (dependents before owners)
         let uids = sequence.all_uids_for_deletion();
@@ -570,7 +615,8 @@ impl<S: MoveCommandSender> CellMover<S> {
                 None => continue,
             };
 
-            match delete_resource_for_move(&self.client, &self.config.source_namespace, node).await {
+            match delete_resource_for_move(&self.client, &self.config.source_namespace, node).await
+            {
                 Ok(_) => deleted += 1,
                 Err(e) => {
                     warn!(
@@ -584,13 +630,21 @@ impl<S: MoveCommandSender> CellMover<S> {
             }
         }
 
-        info!(deleted = deleted, total = uids.len(), "Source resources deleted");
+        info!(
+            deleted = deleted,
+            total = uids.len(),
+            "Source resources deleted"
+        );
         Ok(deleted)
     }
 }
 
 /// Delete a single resource with finalizer removal
-async fn delete_resource_for_move(client: &Client, namespace: &str, node: &GraphNode) -> Result<(), MoveError> {
+async fn delete_resource_for_move(
+    client: &Client,
+    namespace: &str,
+    node: &GraphNode,
+) -> Result<(), MoveError> {
     let api_resource = build_api_resource(&node.identity.api_version, &node.identity.kind);
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &api_resource);
 
@@ -609,20 +663,42 @@ async fn delete_resource_for_move(client: &Client, namespace: &str, node: &Graph
         "metadata": { "annotations": { DELETE_FOR_MOVE_ANNOTATION: "" } }
     });
 
-    if let Err(e) = api.patch(&node.identity.name, &PatchParams::default(), &Patch::Merge(&annotation_patch)).await {
+    if let Err(e) = api
+        .patch(
+            &node.identity.name,
+            &PatchParams::default(),
+            &Patch::Merge(&annotation_patch),
+        )
+        .await
+    {
         warn!(kind = %node.identity.kind, name = %node.identity.name, error = %e, "Failed to add delete-for-move annotation");
     }
 
     // Remove finalizers to prevent infrastructure deletion
-    if !obj.metadata.finalizers.as_ref().is_none_or(|f| f.is_empty()) {
+    if !obj
+        .metadata
+        .finalizers
+        .as_ref()
+        .is_none_or(|f| f.is_empty())
+    {
         let finalizer_patch = serde_json::json!({ "metadata": { "finalizers": null } });
-        if let Err(e) = api.patch(&node.identity.name, &PatchParams::default(), &Patch::Merge(&finalizer_patch)).await {
+        if let Err(e) = api
+            .patch(
+                &node.identity.name,
+                &PatchParams::default(),
+                &Patch::Merge(&finalizer_patch),
+            )
+            .await
+        {
             warn!(kind = %node.identity.kind, name = %node.identity.name, error = %e, "Failed to remove finalizers");
         }
     }
 
     // Delete the resource
-    match api.delete(&node.identity.name, &DeleteParams::default()).await {
+    match api
+        .delete(&node.identity.name, &DeleteParams::default())
+        .await
+    {
         Ok(_) => {
             debug!(kind = %node.identity.kind, name = %node.identity.name, "Deleted source resource");
             Ok(())

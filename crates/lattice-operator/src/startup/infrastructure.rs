@@ -22,17 +22,14 @@ use super::manifests::apply_manifests;
 /// This guarantees upgrades work by changing Lattice version - on restart,
 /// the operator re-applies identical infrastructure manifests.
 pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
-    let is_bootstrap_cluster = std::env::var("LATTICE_ROOT_INSTALL").is_ok()
-        || std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+    let is_bootstrap = lattice_common::is_bootstrap_cluster();
 
     tracing::info!(
-        is_bootstrap_cluster,
+        is_bootstrap_cluster = is_bootstrap,
         "Applying infrastructure manifests (server-side apply)..."
     );
 
-    if is_bootstrap_cluster {
+    if is_bootstrap {
         // Bootstrap cluster (KIND): Use generate_core() + clusterctl init
         // This is a temporary cluster that doesn't need full self-management infra
         // Use "bootstrap" as the cluster name for the trust domain

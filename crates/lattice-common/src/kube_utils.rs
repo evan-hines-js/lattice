@@ -145,8 +145,22 @@ where
     }
 }
 
-/// Create a kube client from optional kubeconfig path
+/// Default connection timeout for kube clients
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default read timeout for kube clients
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Create a kube client from optional kubeconfig path with default timeouts
 pub async fn create_client(kubeconfig: Option<&Path>) -> Result<Client, Error> {
+    create_client_with_timeout(kubeconfig, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT).await
+}
+
+/// Create a kube client from optional kubeconfig path with custom timeouts
+pub async fn create_client_with_timeout(
+    kubeconfig: Option<&Path>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<Client, Error> {
     match kubeconfig {
         Some(path) => {
             let kubeconfig = Kubeconfig::read_from(path).map_err(|e| {
@@ -155,14 +169,17 @@ pub async fn create_client(kubeconfig: Option<&Path>) -> Result<Client, Error> {
                     format!("failed to read kubeconfig: {}", e),
                 )
             })?;
-            let config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
-                .await
-                .map_err(|e| {
-                    Error::internal_with_context(
-                        "create_client",
-                        format!("failed to load kubeconfig: {}", e),
-                    )
-                })?;
+            let mut config =
+                Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+                    .await
+                    .map_err(|e| {
+                        Error::internal_with_context(
+                            "create_client",
+                            format!("failed to load kubeconfig: {}", e),
+                        )
+                    })?;
+            config.connect_timeout = Some(connect_timeout);
+            config.read_timeout = Some(read_timeout);
             Client::try_from(config).map_err(|e| {
                 Error::internal_with_context(
                     "create_client",
@@ -170,9 +187,22 @@ pub async fn create_client(kubeconfig: Option<&Path>) -> Result<Client, Error> {
                 )
             })
         }
-        None => Client::try_default().await.map_err(|e| {
-            Error::internal_with_context("create_client", format!("failed to create client: {}", e))
-        }),
+        None => {
+            let mut config = Config::infer().await.map_err(|e| {
+                Error::internal_with_context(
+                    "create_client",
+                    format!("failed to infer config: {}", e),
+                )
+            })?;
+            config.connect_timeout = Some(connect_timeout);
+            config.read_timeout = Some(read_timeout);
+            Client::try_from(config).map_err(|e| {
+                Error::internal_with_context(
+                    "create_client",
+                    format!("failed to create client: {}", e),
+                )
+            })
+        }
     }
 }
 

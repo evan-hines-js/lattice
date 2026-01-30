@@ -44,7 +44,10 @@ pub struct InfrastructureConfig {
 /// # Arguments
 /// * `cluster_name` - Cluster name for trust domain (lattice.{cluster}.local)
 /// * `skip_cilium_policies` - Skip Cilium policies (true for kind/bootstrap clusters)
-pub async fn generate_core(cluster_name: &str, skip_cilium_policies: bool) -> Result<Vec<String>, String> {
+pub async fn generate_core(
+    cluster_name: &str,
+    skip_cilium_policies: bool,
+) -> Result<Vec<String>, String> {
     let mut manifests = Vec::new();
 
     // Istio ambient
@@ -169,7 +172,10 @@ pub async fn generate_capi(provider: ProviderType) -> Result<Vec<String>, String
 /// # Arguments
 /// * `cluster_name` - Cluster name for trust domain (lattice.{cluster}.local)
 /// * `skip_cilium_policies` - Skip Cilium policies (true for kind/bootstrap clusters)
-pub async fn generate_istio(cluster_name: &str, skip_cilium_policies: bool) -> Result<Vec<String>, String> {
+pub async fn generate_istio(
+    cluster_name: &str,
+    skip_cilium_policies: bool,
+) -> Result<Vec<String>, String> {
     let mut manifests = vec![namespace_yaml("istio-system")];
 
     let reconciler = IstioReconciler::new(cluster_name);

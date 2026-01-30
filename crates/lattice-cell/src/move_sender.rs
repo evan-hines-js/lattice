@@ -38,7 +38,11 @@ impl GrpcMoveCommandSender {
     }
 
     /// Create with custom timeout
-    pub fn with_timeout(registry: SharedAgentRegistry, cluster_name: String, timeout: Duration) -> Self {
+    pub fn with_timeout(
+        registry: SharedAgentRegistry,
+        cluster_name: String,
+        timeout: Duration,
+    ) -> Self {
         Self {
             registry,
             cluster_name,
@@ -74,7 +78,9 @@ impl MoveCommandSender for GrpcMoveCommandSender {
 
         tokio::time::timeout(self.timeout, rx)
             .await
-            .map_err(|_| MoveError::Timeout { seconds: self.timeout.as_secs() })?
+            .map_err(|_| MoveError::Timeout {
+                seconds: self.timeout.as_secs(),
+            })?
             .map_err(|_| MoveError::AgentCommunication("channel closed".to_string()))
     }
 
@@ -106,7 +112,9 @@ impl MoveCommandSender for GrpcMoveCommandSender {
 
         let ack = tokio::time::timeout(self.timeout, rx)
             .await
-            .map_err(|_| MoveError::Timeout { seconds: self.timeout.as_secs() })?
+            .map_err(|_| MoveError::Timeout {
+                seconds: self.timeout.as_secs(),
+            })?
             .map_err(|_| MoveError::AgentCommunication("channel closed".to_string()))?;
 
         if ack.success {

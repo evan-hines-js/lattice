@@ -174,7 +174,6 @@ pub struct LatticeClusterStatus {
     /// Cleared after CAPI cleanup is complete. Persists across operator restarts.
     #[serde(default, skip_serializing_if = "is_false")]
     pub unpivot_pending: bool,
-
 }
 
 fn is_false(b: &bool) -> bool {

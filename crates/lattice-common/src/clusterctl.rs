@@ -40,7 +40,11 @@ impl TempDir {
         // Clean up any stale directory from previous runs
         if path.exists() {
             if let Err(e) = std::fs::remove_dir_all(&path) {
-                eprintln!("failed to clean stale temp directory {}: {}", path.display(), e);
+                eprintln!(
+                    "failed to clean stale temp directory {}: {}",
+                    path.display(),
+                    e
+                );
             }
         }
         std::fs::create_dir_all(&path).map_err(|e| {
@@ -63,7 +67,11 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         if let Err(e) = std::fs::remove_dir_all(&self.path) {
-            eprintln!("failed to clean up temp directory {}: {}", self.path.display(), e);
+            eprintln!(
+                "failed to clean up temp directory {}: {}",
+                self.path.display(),
+                e
+            );
         }
     }
 }

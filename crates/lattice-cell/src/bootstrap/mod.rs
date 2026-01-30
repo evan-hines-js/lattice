@@ -388,7 +388,9 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
     };
     let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config)
         .await
-        .map_err(|e| BootstrapError::Internal(format!("failed to generate infrastructure: {}", e)))?;
+        .map_err(|e| {
+            BootstrapError::Internal(format!("failed to generate infrastructure: {}", e))
+        })?;
     info!(
         count = infra_manifests.len(),
         "generated infrastructure manifests"
@@ -396,8 +398,9 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
     manifests.extend(infra_manifests);
 
     // Add LatticeCluster CRD definition
-    let crd_definition = serde_yaml::to_string(&LatticeCluster::crd())
-        .map_err(|e| BootstrapError::Internal(format!("failed to serialize LatticeCluster CRD: {}", e)))?;
+    let crd_definition = serde_yaml::to_string(&LatticeCluster::crd()).map_err(|e| {
+        BootstrapError::Internal(format!("failed to serialize LatticeCluster CRD: {}", e))
+    })?;
     manifests.push(crd_definition);
 
     // Add LatticeCluster instance
@@ -1295,7 +1298,8 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             autoscaling_enabled: info.autoscaling_enabled,
             cluster_manifest: &info.cluster_manifest,
         };
-        let mut manifests = generate_bootstrap_bundle(&self.manifest_generator, &bundle_config).await?;
+        let mut manifests =
+            generate_bootstrap_bundle(&self.manifest_generator, &bundle_config).await?;
 
         // Add parent connection config Secret (webhook-specific, not needed for installer)
         let parent_config = Secret {
@@ -1889,9 +1893,7 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_namespace() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator
-            .generate("test:latest", None, None, None)
-            .await;
+        let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Operator manifests are JSON, check for JSON format
         let has_namespace = manifests
@@ -1903,9 +1905,7 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_operator_deployment() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator
-            .generate("test:latest", None, None, None)
-            .await;
+        let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Operator manifests are JSON, check for JSON format
         let has_deployment = manifests.iter().any(|m: &String| {
@@ -1917,9 +1917,7 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_service_account() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator
-            .generate("test:latest", None, None, None)
-            .await;
+        let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Should have ServiceAccount for operator
         let has_sa = manifests.iter().any(|m: &String| {
@@ -1931,9 +1929,7 @@ mod tests {
     #[tokio::test]
     async fn default_generator_creates_cilium_cni() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator
-            .generate("test:latest", None, None, None)
-            .await;
+        let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Should include Cilium DaemonSet (rendered from helm template)
         let has_cilium_daemonset = manifests
@@ -2232,9 +2228,7 @@ mod tests {
     #[tokio::test]
     async fn story_manifest_generation() {
         let generator = DefaultManifestGenerator::new();
-        let manifests = generator
-            .generate("test:latest", None, None, None)
-            .await;
+        let manifests = generator.generate("test:latest", None, None, None).await;
 
         // CRD must be first so it's applied before any CR instances
         let has_crd = manifests.iter().any(|m: &String| {

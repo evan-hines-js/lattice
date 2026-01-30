@@ -133,9 +133,10 @@ pub async fn start_proxy_server(
         .route("/healthz", axum::routing::get(|| async { "ok" }))
         .with_state(state);
 
-    let tls_config = RustlsConfig::from_pem(config.cert_pem.into_bytes(), config.key_pem.into_bytes())
-        .await
-        .map_err(|e| ProxyError::TlsConfig(e.to_string()))?;
+    let tls_config =
+        RustlsConfig::from_pem(config.cert_pem.into_bytes(), config.key_pem.into_bytes())
+            .await
+            .map_err(|e| ProxyError::TlsConfig(e.to_string()))?;
 
     info!(addr = %config.addr, "Starting K8s API proxy server");
 
@@ -231,12 +232,20 @@ async fn proxy_handler(
     // Build KubernetesRequest
     let k8s_request = KubernetesRequest {
         request_id: request_id.clone(),
-        verb: if is_watch { "GET".to_string() } else { method.to_string() },
+        verb: if is_watch {
+            "GET".to_string()
+        } else {
+            method.to_string()
+        },
         path: api_path,
         query: query.unwrap_or("").to_string(),
         body: Vec::new(), // Read-only, no body
         content_type: String::new(),
-        timeout_ms: if is_watch { 0 } else { DEFAULT_TIMEOUT.as_millis() as u32 },
+        timeout_ms: if is_watch {
+            0
+        } else {
+            DEFAULT_TIMEOUT.as_millis() as u32
+        },
         cancel: false,
     };
 
@@ -336,7 +345,8 @@ async fn handle_watch_response(
 ) -> Result<Response<Body>, ProxyError> {
     // For watch responses, we need to stream events back
     // Create a channel to stream the body
-    let (body_tx, body_rx) = mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(RESPONSE_CHANNEL_SIZE);
+    let (body_tx, body_rx) =
+        mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(RESPONSE_CHANNEL_SIZE);
 
     // Spawn a task to forward responses to the body stream
     let cluster_name = cluster_name.to_string();
@@ -361,7 +371,11 @@ async fn handle_watch_response(
                         // Add newline to separate JSON events
                         let mut body = response.body;
                         body.push(b'\n');
-                        if body_tx.send(Ok(axum::body::Bytes::from(body))).await.is_err() {
+                        if body_tx
+                            .send(Ok(axum::body::Bytes::from(body)))
+                            .await
+                            .is_err()
+                        {
                             // Client disconnected
                             debug!(
                                 cluster = %cluster_name,
@@ -436,44 +450,6 @@ fn build_http_response(response: &KubernetesResponse) -> Result<Response<Body>, 
         .map_err(|e| ProxyError::Server(e.to_string()))
 }
 
-/// Generate kubeconfig YAML pointing to the proxy
-///
-/// This kubeconfig is used to patch the CAPI-generated kubeconfig Secret
-/// so that CAPI controllers access the child cluster through the proxy.
-pub fn generate_proxy_kubeconfig(
-    cluster_name: &str,
-    proxy_url: &str,
-    ca_cert_pem: &str,
-) -> String {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    let ca_b64 = STANDARD.encode(ca_cert_pem.as_bytes());
-
-    format!(
-        r#"apiVersion: v1
-kind: Config
-clusters:
-- name: {cluster_name}
-  cluster:
-    server: {proxy_url}/cluster/{cluster_name}
-    certificate-authority-data: {ca_b64}
-contexts:
-- name: {cluster_name}
-  context:
-    cluster: {cluster_name}
-    user: {cluster_name}
-current-context: {cluster_name}
-users:
-- name: {cluster_name}
-  user:
-    client-certificate-data: ""
-    client-key-data: ""
-"#,
-        cluster_name = cluster_name,
-        proxy_url = proxy_url,
-        ca_b64 = ca_b64,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,19 +474,6 @@ mod tests {
         assert!(!is_watch_query(Some("watch=false")));
         assert!(!is_watch_query(Some("labelSelector=app")));
         assert!(!is_watch_query(None));
-    }
-
-    #[test]
-    fn test_generate_proxy_kubeconfig() {
-        let kubeconfig = generate_proxy_kubeconfig(
-            "test-cluster",
-            "https://lattice-cell.lattice-system.svc:8081",
-            "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----",
-        );
-
-        assert!(kubeconfig.contains("test-cluster"));
-        assert!(kubeconfig.contains("https://lattice-cell.lattice-system.svc:8081/cluster/test-cluster"));
-        assert!(kubeconfig.contains("certificate-authority-data:"));
     }
 
     #[test]

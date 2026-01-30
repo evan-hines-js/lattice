@@ -37,8 +37,8 @@ use lattice_operator::crd::LatticeCluster;
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, delete_cluster_and_wait,
-    ensure_docker_network, force_delete_docker_cluster, get_docker_kubeconfig,
-    load_cluster_config, load_registry_credentials, run_cmd_allow_fail, watch_cluster_phases,
+    ensure_docker_network, force_delete_docker_cluster, get_docker_kubeconfig, load_cluster_config,
+    load_registry_credentials, run_cmd_allow_fail, watch_cluster_phases,
 };
 use super::providers::InfraProvider;
 
@@ -334,4 +334,3 @@ async fn wait_all_running(client: &Client, cluster_names: &[String]) -> Result<(
     try_join_all(futures).await?;
     Ok(())
 }
-

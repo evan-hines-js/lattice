@@ -625,9 +625,12 @@ impl AgentClient {
                     // Log each object being sent for debugging
                     for obj in &objects {
                         // Parse manifest to get kind/name
-                        if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&obj.manifest) {
+                        if let Ok(parsed) =
+                            serde_json::from_slice::<serde_json::Value>(&obj.manifest)
+                        {
                             let kind = parsed.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-                            let name = parsed.get("metadata")
+                            let name = parsed
+                                .get("metadata")
                                 .and_then(|m| m.get("name"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("?");
@@ -1086,14 +1089,18 @@ impl AgentClient {
                     .map(|obj| lattice_move::MoveObjectInput {
                         source_uid: obj.source_uid.clone(),
                         manifest: obj.manifest.clone(),
-                        owners: obj.owners.iter().map(|o| lattice_move::SourceOwnerRefInput {
-                            source_uid: o.source_uid.clone(),
-                            api_version: o.api_version.clone(),
-                            kind: o.kind.clone(),
-                            name: o.name.clone(),
-                            controller: o.controller,
-                            block_owner_deletion: o.block_owner_deletion,
-                        }).collect(),
+                        owners: obj
+                            .owners
+                            .iter()
+                            .map(|o| lattice_move::SourceOwnerRefInput {
+                                source_uid: o.source_uid.clone(),
+                                api_version: o.api_version.clone(),
+                                kind: o.kind.clone(),
+                                name: o.name.clone(),
+                                controller: o.controller,
+                                block_owner_deletion: o.block_owner_deletion,
+                            })
+                            .collect(),
                     })
                     .collect();
 
@@ -1109,7 +1116,13 @@ impl AgentClient {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create k8s client");
-                            send_batch_error(&message_tx, &cluster_name_clone, &request_id, &e.to_string()).await;
+                            send_batch_error(
+                                &message_tx,
+                                &cluster_name_clone,
+                                &request_id,
+                                &e.to_string(),
+                            )
+                            .await;
                             return;
                         }
                     };
@@ -1123,7 +1136,13 @@ impl AgentClient {
 
                     // Ensure namespace exists
                     if let Err(e) = mover.ensure_namespace().await {
-                        send_batch_error(&message_tx, &cluster_name_clone, &request_id, &e.to_string()).await;
+                        send_batch_error(
+                            &message_tx,
+                            &cluster_name_clone,
+                            &request_id,
+                            &e.to_string(),
+                        )
+                        .await;
                         return;
                     }
 
@@ -1133,15 +1152,21 @@ impl AgentClient {
                     // Send ack
                     let ack = MoveObjectAck {
                         request_id: request_id.clone(),
-                        mappings: mappings.into_iter().map(|(src, tgt)| UidMapping {
-                            source_uid: src,
-                            target_uid: tgt,
-                        }).collect(),
-                        errors: errors.into_iter().map(|e| MoveObjectError {
-                            source_uid: e.source_uid,
-                            message: e.message,
-                            retryable: e.retryable,
-                        }).collect(),
+                        mappings: mappings
+                            .into_iter()
+                            .map(|(src, tgt)| UidMapping {
+                                source_uid: src,
+                                target_uid: tgt,
+                            })
+                            .collect(),
+                        errors: errors
+                            .into_iter()
+                            .map(|e| MoveObjectError {
+                                source_uid: e.source_uid,
+                                message: e.message,
+                                retryable: e.retryable,
+                            })
+                            .collect(),
                     };
 
                     let msg = AgentMessage {
@@ -1177,13 +1202,22 @@ impl AgentClient {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create k8s client");
-                            send_complete_error(&message_tx, &agent_cluster_name, &request_id, &e.to_string()).await;
+                            send_complete_error(
+                                &message_tx,
+                                &agent_cluster_name,
+                                &request_id,
+                                &e.to_string(),
+                            )
+                            .await;
                             return;
                         }
                     };
 
                     // Patch kubeconfig to use kubernetes.default.svc (avoids hairpinning)
-                    if let Err(e) = patch_kubeconfig_for_self_management(&capi_cluster_name, &target_namespace).await {
+                    if let Err(e) =
+                        patch_kubeconfig_for_self_management(&capi_cluster_name, &target_namespace)
+                            .await
+                    {
                         warn!(error = %e, "Failed to patch kubeconfig for self-management");
                     }
 
@@ -2319,7 +2353,7 @@ mod tests {
                     kubernetes_version: "v1.28.0".to_string(),
                     state: state.into(),
                     api_server_endpoint: "https://127.0.0.1:6443".to_string(),
-                    })),
+                })),
             };
 
             match msg.payload {

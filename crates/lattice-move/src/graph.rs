@@ -32,13 +32,7 @@ pub struct ObjectIdentity {
 
 impl ObjectIdentity {
     /// Create a new ObjectIdentity
-    pub fn new(
-        api_version: &str,
-        kind: &str,
-        namespace: &str,
-        name: &str,
-        uid: &str,
-    ) -> Self {
+    pub fn new(api_version: &str, kind: &str, namespace: &str, name: &str, uid: &str) -> Self {
         Self {
             api_version: api_version.to_string(),
             kind: kind.to_string(),
@@ -96,8 +90,14 @@ impl GraphNode {
         // DynamicObject doesn't include apiVersion/kind in serialization, so we add them
         let mut object = serde_json::to_value(obj).ok()?;
         if let Some(obj_map) = object.as_object_mut() {
-            obj_map.insert("apiVersion".to_string(), serde_json::Value::String(api_version.to_string()));
-            obj_map.insert("kind".to_string(), serde_json::Value::String(kind.to_string()));
+            obj_map.insert(
+                "apiVersion".to_string(),
+                serde_json::Value::String(api_version.to_string()),
+            );
+            obj_map.insert(
+                "kind".to_string(),
+                serde_json::Value::String(kind.to_string()),
+            );
         }
 
         Some(Self {
@@ -344,7 +344,11 @@ impl ObjectGraph {
             };
 
             if discovered_type.api_resource.kind == "Secret" {
-                let names: Vec<_> = list.items.iter().filter_map(|o| o.metadata.name.as_ref()).collect();
+                let names: Vec<_> = list
+                    .items
+                    .iter()
+                    .filter_map(|o| o.metadata.name.as_ref())
+                    .collect();
                 info!(namespace = %self.namespace, count = names.len(), names = ?names, "Listed secrets in namespace");
             }
 
@@ -427,7 +431,10 @@ impl ObjectGraph {
             .values()
             .filter(|n| n.identity.kind == "Secret")
             .count();
-        info!(secrets_found = secret_count, "Secrets discovered in namespace");
+        info!(
+            secrets_found = secret_count,
+            "Secrets discovered in namespace"
+        );
     }
 
     /// Propagate force_move_hierarchy to all descendants
@@ -560,7 +567,13 @@ mod tests {
         let id = ObjectIdentity::new("v1", "Secret", "default", "my-secret", "uid-1");
         assert_eq!(id.display(), "Secret/default/my-secret");
 
-        let cluster_id = ObjectIdentity::new("cluster.x-k8s.io/v1beta1", "Cluster", "", "my-cluster", "uid-2");
+        let cluster_id = ObjectIdentity::new(
+            "cluster.x-k8s.io/v1beta1",
+            "Cluster",
+            "",
+            "my-cluster",
+            "uid-2",
+        );
         assert_eq!(cluster_id.display(), "Cluster/my-cluster");
     }
 
@@ -597,7 +610,12 @@ mod tests {
 
         // Create a simple hierarchy: Cluster -> Machine -> DockerMachine
         let cluster = make_test_node("cluster-uid", "Cluster", "test-cluster", vec![]);
-        let machine = make_test_node("machine-uid", "Machine", "test-machine", vec!["cluster-uid"]);
+        let machine = make_test_node(
+            "machine-uid",
+            "Machine",
+            "test-machine",
+            vec!["cluster-uid"],
+        );
         let docker_machine = make_test_node(
             "docker-machine-uid",
             "DockerMachine",
@@ -624,9 +642,19 @@ mod tests {
 
         // Create two clusters with their own machines
         let cluster1 = make_test_node("cluster-1-uid", "Cluster", "cluster-1", vec![]);
-        let machine1 = make_test_node("machine-1-uid", "Machine", "machine-1", vec!["cluster-1-uid"]);
+        let machine1 = make_test_node(
+            "machine-1-uid",
+            "Machine",
+            "machine-1",
+            vec!["cluster-1-uid"],
+        );
         let cluster2 = make_test_node("cluster-2-uid", "Cluster", "cluster-2", vec![]);
-        let machine2 = make_test_node("machine-2-uid", "Machine", "machine-2", vec!["cluster-2-uid"]);
+        let machine2 = make_test_node(
+            "machine-2-uid",
+            "Machine",
+            "machine-2",
+            vec!["cluster-2-uid"],
+        );
 
         graph.insert(cluster1);
         graph.insert(machine1);

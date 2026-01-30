@@ -325,11 +325,7 @@ impl AgentRegistry {
     /// Register a pending batch ack channel
     ///
     /// The request_id should be the CellCommand.command_id.
-    pub fn register_pending_batch_ack(
-        &self,
-        request_id: &str,
-        sender: oneshot::Sender<BatchAck>,
-    ) {
+    pub fn register_pending_batch_ack(&self, request_id: &str, sender: oneshot::Sender<BatchAck>) {
         self.pending_batch_acks
             .insert(request_id.to_string(), sender);
         debug!(request_id = %request_id, "Registered pending batch ack");
@@ -371,11 +367,7 @@ impl AgentRegistry {
     ///
     /// The request_id should be the KubernetesRequest.request_id.
     /// Uses mpsc::Sender to support streaming responses (watches).
-    pub fn register_pending_k8s_response(
-        &self,
-        request_id: &str,
-        sender: K8sResponseSender,
-    ) {
+    pub fn register_pending_k8s_response(&self, request_id: &str, sender: K8sResponseSender) {
         self.pending_k8s_responses
             .insert(request_id.to_string(), sender);
         debug!(request_id = %request_id, "Registered pending K8s API response");
@@ -385,7 +377,9 @@ impl AgentRegistry {
     ///
     /// Returns a clone of the sender for streaming responses.
     pub fn get_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
-        self.pending_k8s_responses.get(request_id).map(|r| r.clone())
+        self.pending_k8s_responses
+            .get(request_id)
+            .map(|r| r.clone())
     }
 
     /// Remove and return the pending K8s response sender

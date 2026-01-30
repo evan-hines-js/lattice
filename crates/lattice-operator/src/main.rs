@@ -110,9 +110,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 
     // Get cluster identity from environment
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
-    let is_bootstrap = std::env::var("LATTICE_BOOTSTRAP_CLUSTER")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    let is_bootstrap = lattice_common::is_bootstrap_cluster();
 
     // Start agent connection to parent (if we have one)
     let agent_token = tokio_util::sync::CancellationToken::new();

@@ -94,8 +94,7 @@ impl AgentMover {
                 if let Some(annotations) = &obj.metadata.annotations {
                     if let Some(source_uid) = annotations.get(SOURCE_UID_ANNOTATION) {
                         if let Some(target_uid) = &obj.metadata.uid {
-                            self.uid_map
-                                .insert(source_uid.clone(), target_uid.clone());
+                            self.uid_map.insert(source_uid.clone(), target_uid.clone());
                             count += 1;
                             debug!(
                                 source_uid = %source_uid,
@@ -127,7 +126,10 @@ impl AgentMover {
     }
 
     /// Rebuild UID map for a core Kubernetes type
-    async fn rebuild_uid_map_for_core_type<T>(&mut self, type_name: &str) -> Result<usize, MoveError>
+    async fn rebuild_uid_map_for_core_type<T>(
+        &mut self,
+        type_name: &str,
+    ) -> Result<usize, MoveError>
     where
         T: kube::Resource<Scope = kube::core::NamespaceResourceScope>
             + Clone
@@ -152,8 +154,7 @@ impl AgentMover {
             if let Some(annotations) = &meta.annotations {
                 if let Some(source_uid) = annotations.get(SOURCE_UID_ANNOTATION) {
                     if let Some(target_uid) = &meta.uid {
-                        self.uid_map
-                            .insert(source_uid.clone(), target_uid.clone());
+                        self.uid_map.insert(source_uid.clone(), target_uid.clone());
                         count += 1;
                     }
                 }
@@ -182,8 +183,7 @@ impl AgentMover {
                 .labels
                 .as_ref()
                 .map(|l| {
-                    l.contains_key(crate::MOVE_LABEL)
-                        || l.contains_key(crate::MOVE_HIERARCHY_LABEL)
+                    l.contains_key(crate::MOVE_LABEL) || l.contains_key(crate::MOVE_HIERARCHY_LABEL)
                 })
                 .unwrap_or(false);
 
@@ -244,12 +244,13 @@ impl AgentMover {
             ..Default::default()
         };
 
-        ns_api.create(&PostParams::default(), &ns).await.map_err(|e| {
-            MoveError::NamespaceCreation {
+        ns_api
+            .create(&PostParams::default(), &ns)
+            .await
+            .map_err(|e| MoveError::NamespaceCreation {
                 namespace: self.namespace.clone(),
                 message: e.to_string(),
-            }
-        })?;
+            })?;
 
         info!(namespace = %self.namespace, "Created namespace");
         Ok(())
@@ -269,7 +270,8 @@ impl AgentMover {
         for obj in objects {
             match self.create_object(obj).await {
                 Ok(target_uid) => {
-                    self.uid_map.insert(obj.source_uid.clone(), target_uid.clone());
+                    self.uid_map
+                        .insert(obj.source_uid.clone(), target_uid.clone());
                     mappings.push((obj.source_uid.clone(), target_uid));
                     self.resources_created += 1;
                 }
@@ -320,7 +322,10 @@ impl AgentMover {
 
         // Ensure namespace is set and add source-uid annotation for crash recovery
         if let Some(metadata) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
-            metadata.insert("namespace".to_string(), Value::String(self.namespace.clone()));
+            metadata.insert(
+                "namespace".to_string(),
+                Value::String(self.namespace.clone()),
+            );
 
             // Add source-uid annotation for crash recovery (UID map rebuild)
             let annotations = metadata
@@ -341,8 +346,9 @@ impl AgentMover {
         let api_resource = build_api_resource(&api_version, &kind);
 
         // Create the object
-        let dyn_obj: DynamicObject = serde_json::from_value(obj.clone())
-            .map_err(|e| MoveError::Serialization(format!("failed to convert to DynamicObject: {}", e)))?;
+        let dyn_obj: DynamicObject = serde_json::from_value(obj.clone()).map_err(|e| {
+            MoveError::Serialization(format!("failed to convert to DynamicObject: {}", e))
+        })?;
 
         let api: Api<DynamicObject> =
             Api::namespaced_with(self.client.clone(), &self.namespace, &api_resource);
@@ -368,7 +374,8 @@ impl AgentMover {
                         retry = retries,
                         "Transient error, retrying"
                     );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500 * retries as u64)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500 * retries as u64))
+                        .await;
                     continue;
                 }
                 Err(e) => return Err(MoveError::Kube(e)),
@@ -408,12 +415,11 @@ impl AgentMover {
 
         for owner in source_owners {
             // Look up the new UID
-            let target_uid = self
-                .uid_map
-                .get(&owner.source_uid)
-                .ok_or_else(|| MoveError::UidMappingNotFound {
+            let target_uid = self.uid_map.get(&owner.source_uid).ok_or_else(|| {
+                MoveError::UidMappingNotFound {
                     source_uid: owner.source_uid.clone(),
-                })?;
+                }
+            })?;
 
             let mut ref_obj = serde_json::json!({
                 "apiVersion": owner.api_version,
@@ -447,11 +453,7 @@ impl AgentMover {
 
         // Unpause ClusterClass (if any)
         if let Err(e) = self
-            .unpause_resource(
-                "cluster.x-k8s.io/v1beta1",
-                "ClusterClass",
-                "clusterclasses",
-            )
+            .unpause_resource("cluster.x-k8s.io/v1beta1", "ClusterClass", "clusterclasses")
             .await
         {
             // ClusterClass might not exist, that's okay
@@ -570,7 +572,10 @@ fn strip_transient_fields(obj: &mut Value) {
         metadata.remove("ownerReferences");
 
         // Clean up annotations
-        if let Some(annotations) = metadata.get_mut("annotations").and_then(|a| a.as_object_mut()) {
+        if let Some(annotations) = metadata
+            .get_mut("annotations")
+            .and_then(|a| a.as_object_mut())
+        {
             // Remove kubectl last-applied-configuration
             annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
             // Remove helm annotations
@@ -623,7 +628,10 @@ mod tests {
         assert!(obj["status"].is_null());
         assert_eq!(obj["metadata"]["name"], "test-secret");
         assert_eq!(obj["metadata"]["annotations"]["custom-annotation"], "keep");
-        assert!(obj["metadata"]["annotations"]["kubectl.kubernetes.io/last-applied-configuration"].is_null());
+        assert!(
+            obj["metadata"]["annotations"]["kubectl.kubernetes.io/last-applied-configuration"]
+                .is_null()
+        );
     }
 
     #[test]
