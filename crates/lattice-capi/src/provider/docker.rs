@@ -25,12 +25,12 @@
 
 use async_trait::async_trait;
 use serde_json::json;
-use std::collections::BTreeMap;
 
 use super::{
-    build_post_kubeadm_commands, generate_bootstrap_config_template_for_pool, generate_cluster,
-    generate_control_plane, generate_machine_deployment_for_pool, pool_resource_suffix,
-    CAPIManifest, ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, WorkerPoolConfig,
+    build_cert_sans, build_post_kubeadm_commands, create_cluster_labels,
+    generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
+    generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix, CAPIManifest,
+    ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, WorkerPoolConfig,
 };
 use lattice_common::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result};
@@ -73,15 +73,6 @@ impl DockerProvider {
         }
     }
 
-    /// Get the cluster name from a LatticeCluster, or return an error
-    fn get_cluster_name(cluster: &LatticeCluster) -> Result<&str> {
-        cluster
-            .metadata
-            .name
-            .as_deref()
-            .ok_or_else(|| Error::validation("cluster must have a name"))
-    }
-
     /// Get the namespace for resources
     fn get_namespace(&self, cluster: &LatticeCluster) -> String {
         cluster
@@ -89,20 +80,6 @@ impl DockerProvider {
             .namespace
             .clone()
             .unwrap_or_else(|| self.namespace.clone())
-    }
-
-    /// Create standard labels for CAPI resources
-    fn create_labels(cluster_name: &str) -> BTreeMap<String, String> {
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            "cluster.x-k8s.io/cluster-name".to_string(),
-            cluster_name.to_string(),
-        );
-        labels.insert(
-            "app.kubernetes.io/managed-by".to_string(),
-            "lattice".to_string(),
-        );
-        labels
     }
 
     /// Get the Docker infrastructure API version based on bootstrap provider
@@ -118,9 +95,9 @@ impl DockerProvider {
 
     /// Generate the DockerCluster resource (Docker-specific)
     fn generate_docker_cluster(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
-        let name = Self::get_cluster_name(cluster)?;
+        let name = get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
-        let labels = Self::create_labels(name);
+        let labels = create_cluster_labels(name);
         let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
 
         // For RKE2, we need a custom HAProxy config that uses HTTP health checks
@@ -152,9 +129,9 @@ impl DockerProvider {
     /// 2. SSL verification must be disabled for backend connections
     /// 3. An additional frontend on port 9345 is needed for RKE2 supervisor/join
     fn generate_haproxy_configmap(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
-        let name = Self::get_cluster_name(cluster)?;
+        let name = get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
-        let labels = Self::create_labels(name);
+        let labels = create_cluster_labels(name);
         let configmap_name = format!("{}-lb-config", name);
 
         // HAProxy config template for RKE2 - uses Go template syntax for CAPD
@@ -229,9 +206,9 @@ backend rke2-servers
         &self,
         cluster: &LatticeCluster,
     ) -> Result<CAPIManifest> {
-        let name = Self::get_cluster_name(cluster)?;
+        let name = get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
-        let labels = Self::create_labels(name);
+        let labels = create_cluster_labels(name);
         let template_name = format!("{}-control-plane", name);
         let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
 
@@ -262,9 +239,9 @@ backend rke2-servers
         cluster: &LatticeCluster,
         pool_id: &str,
     ) -> Result<CAPIManifest> {
-        let name = Self::get_cluster_name(cluster)?;
+        let name = get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
-        let labels = Self::create_labels(name);
+        let labels = create_cluster_labels(name);
         let suffix = pool_resource_suffix(pool_id);
         let template_name = format!("{}-{}", name, suffix);
         let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
@@ -308,25 +285,15 @@ impl Provider for DockerProvider {
         cluster: &LatticeCluster,
         bootstrap: &super::BootstrapInfo,
     ) -> Result<Vec<CAPIManifest>> {
-        let name = Self::get_cluster_name(cluster)?;
+        let name = get_cluster_name(cluster)?;
         let namespace = self.get_namespace(cluster);
         let k8s_version = &cluster.spec.provider.kubernetes.version;
 
-        // Build certSANs - always include localhost/127.0.0.1 for local access
-        let mut cert_sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-        if let Some(ref user_sans) = cluster.spec.provider.kubernetes.cert_sans {
-            for san in user_sans {
-                if !cert_sans.contains(san) {
-                    cert_sans.push(san.clone());
-                }
-            }
-        }
-        // Auto-add endpoints.host to certSANs so users don't have to specify it twice
-        if let Some(ref endpoints) = cluster.spec.parent_config {
-            if let Some(ref host) = endpoints.host {
-                if !cert_sans.contains(host) {
-                    cert_sans.push(host.clone());
-                }
+        // Build certSANs - Docker always includes localhost/127.0.0.1 for local access
+        let mut cert_sans = build_cert_sans(cluster);
+        for local_san in ["localhost", "127.0.0.1"] {
+            if !cert_sans.iter().any(|s| s == local_san) {
+                cert_sans.insert(0, local_san.to_string());
             }
         }
 
@@ -335,7 +302,7 @@ impl Provider for DockerProvider {
             name,
             namespace: &namespace,
             k8s_version,
-            labels: Self::create_labels(name),
+            labels: create_cluster_labels(name),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             provider_type: ProviderType::Docker,
         };
@@ -352,7 +319,7 @@ impl Provider for DockerProvider {
         let cp_config = ControlPlaneConfig {
             replicas: cluster.spec.nodes.control_plane,
             cert_sans,
-            post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap),
+            post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
             vip: None,
             ssh_authorized_keys: vec![],
         };
@@ -553,7 +520,10 @@ mod tests {
             let result = provider.generate_capi_manifests(&cluster, &bootstrap).await;
 
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("must have a name"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("cluster name required"));
         }
     }
 
@@ -1021,7 +991,7 @@ mod tests {
         fn all_clusters_untaint_control_plane() {
             let bootstrap = BootstrapInfo::default();
 
-            let commands = build_post_kubeadm_commands("test", &bootstrap);
+            let commands = build_post_kubeadm_commands("test", &bootstrap).unwrap();
 
             assert!(!commands.is_empty());
             let commands_str = commands.join("\n");
@@ -1039,7 +1009,7 @@ mod tests {
                 "-----BEGIN CERTIFICATE-----\nTEST_CA_CERT\n-----END CERTIFICATE-----".to_string(),
             );
 
-            let commands = build_post_kubeadm_commands("workload-1", &bootstrap);
+            let commands = build_post_kubeadm_commands("workload-1", &bootstrap).unwrap();
 
             assert!(!commands.is_empty());
             let commands_str = commands.join("\n");
@@ -1059,7 +1029,7 @@ mod tests {
         fn cell_cluster_does_not_call_bootstrap() {
             let bootstrap = BootstrapInfo::default();
 
-            let commands = build_post_kubeadm_commands("mgmt", &bootstrap);
+            let commands = build_post_kubeadm_commands("mgmt", &bootstrap).unwrap();
 
             let commands_str = commands.join("\n");
             assert!(!commands_str.contains("/api/clusters"));
@@ -1072,7 +1042,7 @@ mod tests {
         fn standalone_cluster_only_untaints() {
             let bootstrap = BootstrapInfo::default();
 
-            let commands = build_post_kubeadm_commands("standalone", &bootstrap);
+            let commands = build_post_kubeadm_commands("standalone", &bootstrap).unwrap();
 
             assert_eq!(commands.len(), 1); // Just the untaint command
             assert!(commands[0].contains("taint"));

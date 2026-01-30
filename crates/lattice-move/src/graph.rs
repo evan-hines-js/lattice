@@ -294,27 +294,17 @@ impl ObjectGraph {
 
     /// Add core Kubernetes types that are commonly included in CAPI moves
     fn add_core_types(&mut self) {
+        use lattice_common::kube_utils::build_api_resource;
+
         // Secrets are often referenced by CAPI resources
         self.discovered_types.push(DiscoveredType {
-            api_resource: ApiResource {
-                group: String::new(),
-                version: "v1".to_string(),
-                kind: "Secret".to_string(),
-                api_version: "v1".to_string(),
-                plural: "secrets".to_string(),
-            },
+            api_resource: build_api_resource("v1", "Secret"),
             move_hierarchy: false,
         });
 
         // ConfigMaps may also be referenced
         self.discovered_types.push(DiscoveredType {
-            api_resource: ApiResource {
-                group: String::new(),
-                version: "v1".to_string(),
-                kind: "ConfigMap".to_string(),
-                api_version: "v1".to_string(),
-                plural: "configmaps".to_string(),
-            },
+            api_resource: build_api_resource("v1", "ConfigMap"),
             move_hierarchy: false,
         });
     }

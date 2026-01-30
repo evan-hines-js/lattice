@@ -11,14 +11,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
-use kube::discovery::ApiResource;
 use kube::Client;
 use tracing::{debug, error, info, warn};
+
+use lattice_common::kube_utils::build_api_resource;
 
 use crate::error::MoveError;
 use crate::graph::{GraphNode, ObjectGraph};
 use crate::sequence::{extract_nodes_for_group, MoveSequence};
-use crate::utils::{build_api_resource, parse_api_version};
 use crate::DELETE_FOR_MOVE_ANNOTATION;
 
 // =============================================================================
@@ -92,16 +92,9 @@ async fn set_cluster_paused(
 ) -> Result<(), MoveError> {
     let action = if paused { "Pausing" } else { "Unpausing" };
 
-    // Pause/unpause Cluster
-    if let Err(e) = set_resource_paused(
-        client,
-        namespace,
-        "cluster.x-k8s.io/v1beta1",
-        "Cluster",
-        "clusters",
-        paused,
-    )
-    .await
+    // Pause/unpause Cluster (required)
+    if let Err(e) =
+        set_resource_paused(client, namespace, "cluster.x-k8s.io", "Cluster", paused).await
     {
         return Err(MoveError::PauseFailed(format!(
             "{} Cluster failed: {}",
@@ -109,13 +102,12 @@ async fn set_cluster_paused(
         )));
     }
 
-    // Pause/unpause ClusterClass (might not exist)
+    // Pause/unpause ClusterClass (optional - might not exist)
     if let Err(e) = set_resource_paused(
         client,
         namespace,
-        "cluster.x-k8s.io/v1beta1",
+        "cluster.x-k8s.io",
         "ClusterClass",
-        "clusterclasses",
         paused,
     )
     .await
@@ -130,19 +122,17 @@ async fn set_cluster_paused(
 async fn set_resource_paused(
     client: &Client,
     namespace: &str,
-    api_version: &str,
+    group: &str,
     kind: &str,
-    plural: &str,
     paused: bool,
 ) -> Result<(), MoveError> {
-    let (group, version) = parse_api_version(api_version);
-    let api_resource = ApiResource {
-        group,
-        version,
-        kind: kind.to_string(),
-        api_version: api_version.to_string(),
-        plural: plural.to_string(),
-    };
+    // Use discovery to find the correct API version
+    let api_resource =
+        lattice_common::kube_utils::build_api_resource_with_discovery(client, group, kind)
+            .await
+            .map_err(|e| {
+                MoveError::Discovery(format!("Failed to discover {}/{}: {}", group, kind, e))
+            })?;
 
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &api_resource);
     let list = api

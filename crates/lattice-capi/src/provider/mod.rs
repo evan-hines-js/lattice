@@ -157,6 +157,77 @@ pub const RKE2_BOOTSTRAP_API_VERSION: &str = "bootstrap.cluster.x-k8s.io/v1beta1
 /// RKE2 Control Plane API version for RKE2ControlPlane
 pub const RKE2_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v1beta1";
 
+// ============================================================================
+// Shared Helper Functions
+// ============================================================================
+
+/// Create standard labels for CAPI resources
+///
+/// All CAPI resources should have these labels for proper resource tracking
+/// and cluster association.
+pub fn create_cluster_labels(name: &str) -> std::collections::BTreeMap<String, String> {
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert(
+        "cluster.x-k8s.io/cluster-name".to_string(),
+        name.to_string(),
+    );
+    labels.insert("lattice.dev/cluster".to_string(), name.to_string());
+    labels.insert(
+        "app.kubernetes.io/managed-by".to_string(),
+        "lattice".to_string(),
+    );
+    labels
+}
+
+/// Validate Kubernetes version format
+///
+/// Accepts versions in format "1.x.x" or "v1.x.x".
+pub fn validate_k8s_version(version: &str) -> Result<()> {
+    if !version.starts_with("1.") && !version.starts_with("v1.") {
+        return Err(Error::validation(format!(
+            "invalid kubernetes version: {version}, expected format: 1.x.x or v1.x.x"
+        )));
+    }
+    Ok(())
+}
+
+/// Build certSANs list from cluster spec
+///
+/// Starts with user-provided SANs and adds parent endpoint host if configured.
+pub fn build_cert_sans(cluster: &LatticeCluster) -> Vec<String> {
+    let mut cert_sans = cluster
+        .spec
+        .provider
+        .kubernetes
+        .cert_sans
+        .clone()
+        .unwrap_or_default();
+
+    // Add parent endpoint host if configured (for workload clusters connecting back to parent)
+    if let Some(ref endpoints) = cluster.spec.parent_config {
+        if let Some(ref host) = endpoints.host {
+            if !cert_sans.contains(host) {
+                cert_sans.push(host.clone());
+            }
+        }
+    }
+
+    cert_sans
+}
+
+/// Extract cluster name from metadata or return validation error
+pub fn get_cluster_name(cluster: &LatticeCluster) -> Result<&str> {
+    cluster
+        .metadata
+        .name
+        .as_deref()
+        .ok_or_else(|| Error::validation("cluster name required"))
+}
+
+// ============================================================================
+// Configuration Structs
+// ============================================================================
+
 /// Common cluster configuration for CAPI manifest generation
 #[derive(Clone, Debug)]
 pub struct ClusterConfig<'a> {
@@ -460,25 +531,16 @@ fn build_kubelet_extra_args(provider_type: ProviderType) -> Vec<serde_json::Valu
         "value": "nodefs.available<0%,imagefs.available<0%"
     })];
 
-    match provider_type {
-        ProviderType::Docker => {
-            // Docker provider doesn't need cloud provider settings
-        }
-        ProviderType::Aws => {
-            // AWS uses external cloud provider - CCM sets providerID with correct format
-            // Format: aws:///ZONE/INSTANCE_ID (e.g., aws:///us-west-2a/i-1234567890abcdef0)
-            args.push(serde_json::json!({
-                "name": "cloud-provider",
-                "value": "external"
-            }));
-        }
-        _ => {
-            // Other cloud providers use manual provider-id via cloud-init templating
-            args.push(serde_json::json!({
-                "name": "provider-id",
-                "value": format!("{}://{{{{ ds.meta_data.instance_id }}}}", provider_type)
-            }));
-        }
+    if uses_external_cloud_provider(provider_type) {
+        args.push(serde_json::json!({
+            "name": "cloud-provider",
+            "value": "external"
+        }));
+    } else if needs_manual_provider_id(provider_type) {
+        args.push(serde_json::json!({
+            "name": "provider-id",
+            "value": format!("{}://{{{{ ds.meta_data.instance_id }}}}", provider_type)
+        }));
     }
 
     args
@@ -492,21 +554,42 @@ fn build_kubelet_extra_args(provider_type: ProviderType) -> Vec<serde_json::Valu
 fn build_rke2_kubelet_extra_args(provider_type: ProviderType) -> Vec<String> {
     let mut args = vec!["eviction-hard=nodefs.available<0%,imagefs.available<0%".to_string()];
 
-    match provider_type {
-        ProviderType::Docker => {
-            // Docker provider doesn't need cloud provider settings
-        }
-        ProviderType::Aws => {
-            // AWS uses external cloud provider - CCM sets providerID with correct format
-            args.push("cloud-provider=external".to_string());
-        }
-        _ => {
-            // Other cloud providers use manual provider-id via cloud-init templating
-            args.push(format!(
-                "provider-id={}://{{{{ ds.meta_data.instance_id }}}}",
-                provider_type
-            ));
-        }
+    if uses_external_cloud_provider(provider_type) {
+        args.push("cloud-provider=external".to_string());
+    } else if needs_manual_provider_id(provider_type) {
+        args.push(format!(
+            "provider-id={}://{{{{ ds.meta_data.instance_id }}}}",
+            provider_type
+        ));
+    }
+
+    args
+}
+
+/// Build API server extra args for RKE2 based on provider type
+///
+/// RKE2 uses a different format: list of "key=value" strings instead of {name, value} objects.
+fn build_rke2_api_server_extra_args(provider_type: ProviderType) -> Vec<String> {
+    let mut args = vec![
+        "anonymous-auth=true".to_string(),
+        "tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
+    ];
+
+    if uses_external_cloud_provider(provider_type) {
+        args.push("cloud-provider=external".to_string());
+    }
+
+    args
+}
+
+/// Build controller manager extra args for RKE2 based on provider type
+///
+/// RKE2 uses a different format: list of "key=value" strings instead of {name, value} objects.
+fn build_rke2_controller_manager_extra_args(provider_type: ProviderType) -> Vec<String> {
+    let mut args = vec![];
+
+    if uses_external_cloud_provider(provider_type) {
+        args.push("cloud-provider=external".to_string());
     }
 
     args
@@ -515,11 +598,19 @@ fn build_rke2_kubelet_extra_args(provider_type: ProviderType) -> Vec<String> {
 /// Check if a provider uses external cloud controller manager
 ///
 /// Providers that use external CCM need `cloud-provider: external` in:
-/// - kubelet args (already handled in build_kubelet_extra_args)
+/// - kubelet args
 /// - API server extra args
 /// - Controller manager extra args
 fn uses_external_cloud_provider(provider_type: ProviderType) -> bool {
     matches!(provider_type, ProviderType::Aws)
+}
+
+/// Check if a provider needs manual provider-id via cloud-init templating
+///
+/// Providers without external CCM need manual provider-id to be set via cloud-init.
+/// Docker doesn't need this since there's no cloud provider involved.
+fn needs_manual_provider_id(provider_type: ProviderType) -> bool {
+    !matches!(provider_type, ProviderType::Docker | ProviderType::Aws)
 }
 
 /// Build API server extra args based on provider type
@@ -585,7 +676,7 @@ fn generate_kubeadm_config_template_for_pool(
             .collect();
         node_registration["kubeletExtraArgs"]
             .as_array_mut()
-            .unwrap()
+            .expect("kubeletExtraArgs was initialized as array")
             .push(serde_json::json!({"name": "node-labels", "value": labels_str.join(",")}));
     }
 
@@ -605,7 +696,7 @@ fn generate_kubeadm_config_template_for_pool(
             .collect();
         node_registration["kubeletExtraArgs"]
             .as_array_mut()
-            .unwrap()
+            .expect("kubeletExtraArgs was initialized as array")
             .push(
                 serde_json::json!({"name": "register-with-taints", "value": taints_str.join(",")}),
             );
@@ -914,8 +1005,10 @@ fn generate_rke2_control_plane(
         ));
     }
 
-    // Build kubelet extra args using the shared function
+    // Build extra args using the shared functions
     let kubelet_extra_args = build_rke2_kubelet_extra_args(config.provider_type);
+    let api_server_extra_args = build_rke2_api_server_extra_args(config.provider_type);
+    let controller_manager_extra_args = build_rke2_controller_manager_extra_args(config.provider_type);
 
     let mut spec = serde_json::json!({
         "replicas": cp_config.replicas,
@@ -940,10 +1033,7 @@ fn generate_rke2_control_plane(
                 "kubernetesComponents": ["cloudController"]
             },
             "kubeAPIServer": {
-                "extraArgs": [
-                    "anonymous-auth=true",
-                    "tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-                ]
+                "extraArgs": api_server_extra_args
             }
         },
         "rolloutStrategy": {
@@ -951,6 +1041,13 @@ fn generate_rke2_control_plane(
             "rollingUpdate": { "maxSurge": 1 }
         }
     });
+
+    // Add controller manager extra args if any (e.g., cloud-provider=external for AWS)
+    if !controller_manager_extra_args.is_empty() {
+        spec["serverConfig"]["kubeControllerManager"] = serde_json::json!({
+            "extraArgs": controller_manager_extra_args
+        });
+    }
 
     if !pre_rke2_commands.is_empty() {
         spec["preRKE2Commands"] = serde_json::json!(pre_rke2_commands);
@@ -994,21 +1091,19 @@ fn render_bootstrap_script(
     cluster_name: &str,
     token: &str,
     ca_cert_path: &str,
-) -> String {
+) -> Result<String> {
     let scripts_dir = get_scripts_dir();
     let script_path = format!("{}/bootstrap-cluster.sh", scripts_dir);
-    let template = std::fs::read_to_string(&script_path).unwrap_or_else(|e| {
-        // This is a deployment error - the script should be bundled with the operator
-        eprintln!(
+    let template = std::fs::read_to_string(&script_path).map_err(|e| {
+        Error::bootstrap(format!(
             "Failed to load bootstrap script from {}: {}. Set LATTICE_SCRIPTS_DIR env var.",
             script_path, e
-        );
-        std::process::exit(1);
-    });
+        ))
+    })?;
 
     let mut env = minijinja::Environment::new();
     env.add_template("bootstrap", &template)
-        .expect("Invalid bootstrap template");
+        .map_err(|e| Error::bootstrap(format!("Invalid bootstrap template: {}", e)))?;
 
     let ctx = minijinja::context! {
         endpoint => endpoint,
@@ -1018,9 +1113,9 @@ fn render_bootstrap_script(
     };
 
     env.get_template("bootstrap")
-        .expect("Template not found")
+        .map_err(|e| Error::bootstrap(format!("Template not found: {}", e)))?
         .render(ctx)
-        .expect("Failed to render bootstrap template")
+        .map_err(|e| Error::bootstrap(format!("Failed to render bootstrap template: {}", e)))
 }
 
 /// Build postKubeadmCommands for agent bootstrap
@@ -1030,7 +1125,10 @@ fn render_bootstrap_script(
 ///
 /// For RKE2, the same commands are used in postRKE2Commands.
 /// The commands handle "token already used" errors gracefully by continuing.
-pub fn build_post_kubeadm_commands(cluster_name: &str, bootstrap: &BootstrapInfo) -> Vec<String> {
+pub fn build_post_kubeadm_commands(
+    cluster_name: &str,
+    bootstrap: &BootstrapInfo,
+) -> Result<Vec<String>> {
     let mut commands = Vec::new();
 
     // If cluster has bootstrap info, embed the bootstrap script with substituted variables
@@ -1047,7 +1145,7 @@ CACERT"#
         ));
 
         // Render script template with variables
-        let script = render_bootstrap_script(endpoint, cluster_name, token, "/tmp/cell-ca.crt");
+        let script = render_bootstrap_script(endpoint, cluster_name, token, "/tmp/cell-ca.crt")?;
 
         // Embed the script as a heredoc and execute it
         commands.push(format!(
@@ -1066,7 +1164,7 @@ BOOTSTRAP_SCRIPT"#
         );
     }
 
-    commands
+    Ok(commands)
 }
 
 /// Infrastructure provider trait for generating CAPI manifests
@@ -1792,6 +1890,305 @@ mod tests {
                 .collect();
             assert!(paths.contains(&"/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml"));
             assert!(paths.contains(&"/root/.ssh/authorized_keys"));
+        }
+    }
+
+    mod shared_helpers {
+        use super::*;
+
+        #[test]
+        fn test_create_cluster_labels() {
+            let labels = create_cluster_labels("my-cluster");
+
+            assert_eq!(labels.len(), 3);
+            assert_eq!(
+                labels.get("cluster.x-k8s.io/cluster-name"),
+                Some(&"my-cluster".to_string())
+            );
+            assert_eq!(
+                labels.get("lattice.dev/cluster"),
+                Some(&"my-cluster".to_string())
+            );
+            assert_eq!(
+                labels.get("app.kubernetes.io/managed-by"),
+                Some(&"lattice".to_string())
+            );
+        }
+
+        #[test]
+        fn test_validate_k8s_version_valid() {
+            assert!(validate_k8s_version("1.32.0").is_ok());
+            assert!(validate_k8s_version("1.31.1").is_ok());
+            assert!(validate_k8s_version("v1.32.0").is_ok());
+            assert!(validate_k8s_version("v1.28.5").is_ok());
+        }
+
+        #[test]
+        fn test_validate_k8s_version_invalid() {
+            assert!(validate_k8s_version("2.0.0").is_err());
+            assert!(validate_k8s_version("invalid").is_err());
+            assert!(validate_k8s_version("").is_err());
+            assert!(validate_k8s_version("0.1.0").is_err());
+        }
+
+        #[test]
+        fn test_pool_resource_suffix() {
+            assert_eq!(pool_resource_suffix("default"), "pool-default");
+            assert_eq!(pool_resource_suffix("gpu"), "pool-gpu");
+            assert_eq!(pool_resource_suffix("memory-optimized"), "pool-memory-optimized");
+        }
+
+        #[test]
+        fn test_uses_external_cloud_provider() {
+            assert!(uses_external_cloud_provider(ProviderType::Aws));
+            assert!(!uses_external_cloud_provider(ProviderType::Docker));
+            assert!(!uses_external_cloud_provider(ProviderType::Proxmox));
+            assert!(!uses_external_cloud_provider(ProviderType::OpenStack));
+        }
+
+        #[test]
+        fn test_needs_manual_provider_id() {
+            // Docker and AWS don't need manual provider-id
+            assert!(!needs_manual_provider_id(ProviderType::Docker));
+            assert!(!needs_manual_provider_id(ProviderType::Aws));
+            // Other providers do
+            assert!(needs_manual_provider_id(ProviderType::Proxmox));
+            assert!(needs_manual_provider_id(ProviderType::OpenStack));
+        }
+
+        #[test]
+        fn test_get_node_name_template() {
+            // AWS uses cloud-init template for node name
+            assert_eq!(
+                get_node_name_template(ProviderType::Aws),
+                Some("{{ ds.meta_data.local_hostname }}")
+            );
+            // Other providers don't
+            assert_eq!(get_node_name_template(ProviderType::Docker), None);
+            assert_eq!(get_node_name_template(ProviderType::Proxmox), None);
+            assert_eq!(get_node_name_template(ProviderType::OpenStack), None);
+        }
+
+        #[test]
+        fn test_build_kubelet_extra_args_docker() {
+            let args = build_kubelet_extra_args(ProviderType::Docker);
+            // Docker only has eviction-hard
+            assert_eq!(args.len(), 1);
+            assert!(args[0]["name"].as_str().unwrap().contains("eviction-hard"));
+        }
+
+        #[test]
+        fn test_build_kubelet_extra_args_aws() {
+            let args = build_kubelet_extra_args(ProviderType::Aws);
+            // AWS has eviction-hard + cloud-provider=external
+            assert_eq!(args.len(), 2);
+            let cloud_provider_arg = args
+                .iter()
+                .find(|a| a["name"].as_str() == Some("cloud-provider"));
+            assert!(cloud_provider_arg.is_some());
+            assert_eq!(
+                cloud_provider_arg.unwrap()["value"].as_str(),
+                Some("external")
+            );
+        }
+
+        #[test]
+        fn test_build_kubelet_extra_args_proxmox() {
+            let args = build_kubelet_extra_args(ProviderType::Proxmox);
+            // Proxmox has eviction-hard + provider-id template
+            assert_eq!(args.len(), 2);
+            let provider_id_arg = args
+                .iter()
+                .find(|a| a["name"].as_str() == Some("provider-id"));
+            assert!(provider_id_arg.is_some());
+            assert!(provider_id_arg.unwrap()["value"]
+                .as_str()
+                .unwrap()
+                .contains("proxmox://"));
+        }
+
+        #[test]
+        fn test_build_rke2_kubelet_extra_args_docker() {
+            let args = build_rke2_kubelet_extra_args(ProviderType::Docker);
+            assert_eq!(args.len(), 1);
+            assert!(args[0].contains("eviction-hard"));
+        }
+
+        #[test]
+        fn test_build_rke2_kubelet_extra_args_aws() {
+            let args = build_rke2_kubelet_extra_args(ProviderType::Aws);
+            assert_eq!(args.len(), 2);
+            assert!(args.iter().any(|a| a == "cloud-provider=external"));
+        }
+
+        #[test]
+        fn test_build_api_server_extra_args_docker() {
+            let args = build_api_server_extra_args(ProviderType::Docker);
+            assert_eq!(args.len(), 1);
+            assert!(args[0]["name"].as_str() == Some("bind-address"));
+        }
+
+        #[test]
+        fn test_build_api_server_extra_args_aws() {
+            let args = build_api_server_extra_args(ProviderType::Aws);
+            assert_eq!(args.len(), 2);
+            let cloud_provider = args
+                .iter()
+                .find(|a| a["name"].as_str() == Some("cloud-provider"));
+            assert!(cloud_provider.is_some());
+        }
+
+        #[test]
+        fn test_build_controller_manager_extra_args_docker() {
+            let args = build_controller_manager_extra_args(ProviderType::Docker);
+            assert_eq!(args.len(), 1);
+            assert!(args[0]["name"].as_str() == Some("bind-address"));
+        }
+
+        #[test]
+        fn test_build_controller_manager_extra_args_aws() {
+            let args = build_controller_manager_extra_args(ProviderType::Aws);
+            assert_eq!(args.len(), 2);
+            assert!(args
+                .iter()
+                .any(|a| a["name"].as_str() == Some("cloud-provider")));
+        }
+
+        #[test]
+        fn test_build_rke2_api_server_extra_args_docker() {
+            let args = build_rke2_api_server_extra_args(ProviderType::Docker);
+            // Should have anonymous-auth and tls-cipher-suites
+            assert_eq!(args.len(), 2);
+            assert!(args.iter().any(|a| a.contains("anonymous-auth=true")));
+            assert!(args.iter().any(|a| a.contains("tls-cipher-suites")));
+        }
+
+        #[test]
+        fn test_build_rke2_api_server_extra_args_aws() {
+            let args = build_rke2_api_server_extra_args(ProviderType::Aws);
+            // AWS adds cloud-provider=external
+            assert_eq!(args.len(), 3);
+            assert!(args.iter().any(|a| a == "cloud-provider=external"));
+        }
+
+        #[test]
+        fn test_build_rke2_controller_manager_extra_args_docker() {
+            let args = build_rke2_controller_manager_extra_args(ProviderType::Docker);
+            assert!(args.is_empty());
+        }
+
+        #[test]
+        fn test_build_rke2_controller_manager_extra_args_aws() {
+            let args = build_rke2_controller_manager_extra_args(ProviderType::Aws);
+            assert_eq!(args.len(), 1);
+            assert!(args.iter().any(|a| a == "cloud-provider=external"));
+        }
+
+        #[test]
+        fn test_vip_config_new_with_defaults() {
+            let vip = VipConfig::new("10.0.0.100".to_string(), None, None);
+            assert_eq!(vip.address, "10.0.0.100");
+            assert_eq!(vip.interface, "eth0");
+            assert_eq!(vip.image, DEFAULT_KUBE_VIP_IMAGE);
+        }
+
+        #[test]
+        fn test_vip_config_new_with_custom_values() {
+            let vip = VipConfig::new(
+                "192.168.1.100".to_string(),
+                Some("ens192".to_string()),
+                Some("custom-image:v1".to_string()),
+            );
+            assert_eq!(vip.address, "192.168.1.100");
+            assert_eq!(vip.interface, "ens192");
+            assert_eq!(vip.image, "custom-image:v1");
+        }
+
+        #[test]
+        fn test_bootstrap_info_is_some() {
+            let empty = BootstrapInfo::default();
+            assert!(!empty.is_some());
+
+            let with_token = BootstrapInfo {
+                bootstrap_token: Some("token".to_string()),
+                ..Default::default()
+            };
+            assert!(with_token.is_some());
+        }
+
+        #[test]
+        fn test_bootstrap_info_new() {
+            let info = BootstrapInfo::new(
+                "https://cell:8080".to_string(),
+                "token123".to_string(),
+                "-----BEGIN CERTIFICATE-----".to_string(),
+            );
+            assert_eq!(
+                info.bootstrap_endpoint,
+                Some("https://cell:8080".to_string())
+            );
+            assert_eq!(info.bootstrap_token, Some("token123".to_string()));
+            assert_eq!(
+                info.ca_cert_pem,
+                Some("-----BEGIN CERTIFICATE-----".to_string())
+            );
+            assert!(info.is_some());
+        }
+
+        #[test]
+        fn test_capi_manifest_with_data() {
+            let data = serde_json::json!({"key": "value"});
+            let manifest = CAPIManifest::new("v1", "Secret", "my-secret", "default")
+                .with_data(data.clone());
+
+            assert_eq!(manifest.data, Some(data));
+            assert!(manifest.spec.is_none());
+        }
+    }
+
+    mod create_provider {
+        use super::*;
+
+        #[test]
+        fn test_create_provider_aws() {
+            let provider = create_provider(ProviderType::Aws, "capi-system");
+            assert!(provider.is_ok());
+        }
+
+        #[test]
+        fn test_create_provider_docker() {
+            let provider = create_provider(ProviderType::Docker, "capi-system");
+            assert!(provider.is_ok());
+        }
+
+        #[test]
+        fn test_create_provider_openstack() {
+            let provider = create_provider(ProviderType::OpenStack, "capi-system");
+            assert!(provider.is_ok());
+        }
+
+        #[test]
+        fn test_create_provider_proxmox() {
+            let provider = create_provider(ProviderType::Proxmox, "capi-system");
+            assert!(provider.is_ok());
+        }
+
+        #[test]
+        fn test_create_provider_gcp_not_implemented() {
+            let result = create_provider(ProviderType::Gcp, "capi-system");
+            match result {
+                Ok(_) => panic!("expected error"),
+                Err(e) => assert!(e.to_string().contains("GCP")),
+            }
+        }
+
+        #[test]
+        fn test_create_provider_azure_not_implemented() {
+            let result = create_provider(ProviderType::Azure, "capi-system");
+            match result {
+                Ok(_) => panic!("expected error"),
+                Err(e) => assert!(e.to_string().contains("Azure")),
+            }
         }
     }
 }

@@ -29,5 +29,4 @@ pub use installer::MockCapiInstaller;
 pub use provider::{
     create_provider, pool_resource_suffix, AwsProvider, BootstrapInfo, CAPIManifest,
     DockerProvider, ManifestMetadata, OpenStackProvider, Provider, ProxmoxProvider,
-    CAPI_CLUSTER_API_VERSION,
 };

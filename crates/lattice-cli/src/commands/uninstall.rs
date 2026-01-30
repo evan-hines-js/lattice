@@ -5,23 +5,27 @@
 //! This command safely destroys a self-managing Lattice cluster by:
 //! 1. Creating a temporary kind cluster
 //! 2. Installing CAPI providers matching the target cluster
-//! 3. Reverse-pivoting CAPI resources from target to kind
-//! 4. Waiting for CAPI to reconcile (InfrastructureReady)
-//! 5. Deleting the Cluster resource (triggers infrastructure cleanup)
-//! 6. Waiting for infrastructure deletion
-//! 7. Deleting the kind cluster
+//! 3. Deleting LatticeCluster (stops operator from recreating LoadBalancer)
+//! 4. Deleting the cell LoadBalancer service
+//! 5. Reverse-pivoting CAPI resources from target to kind
+//! 6. Patching kubeconfig to use external endpoint
+//! 7. Waiting for CAPI to reconcile (InfrastructureReady)
+//! 8. Deleting the Cluster resource (triggers infrastructure cleanup)
+//! 9. Waiting for infrastructure deletion
+//! 10. Deleting the kind cluster
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::Args;
-use k8s_openapi::api::core::v1::Service;
-use kube::api::{Api, DeleteParams};
+use k8s_openapi::api::core::v1::{Secret, Service};
+use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
 use kube::Client;
 use tokio::process::Command;
 use tracing::{debug, info};
 
-use super::kind_utils;
+use super::{kind_utils, CommandErrorExt};
 
 use lattice_common::clusterctl::{move_to_kubeconfig, teardown_cluster, TeardownConfig};
 use lattice_common::kube_utils;
@@ -64,12 +68,10 @@ pub struct Uninstaller {
 
 impl Uninstaller {
     pub async fn new(args: &UninstallArgs) -> Result<Self> {
-        // Connect to target cluster
         let client = kube_utils::create_client(Some(&args.kubeconfig))
             .await
             .map_err(|e| Error::command_failed(format!("Failed to create client: {}", e)))?;
 
-        // Find the LatticeCluster
         let clusters: Api<LatticeCluster> = Api::all(client);
         let cluster_list = clusters
             .list(&Default::default())
@@ -83,7 +85,6 @@ impl Uninstaller {
                 .find(|c| c.metadata.name.as_deref() == Some(name.as_str()))
                 .ok_or_else(|| Error::command_failed(format!("Cluster '{}' not found", name)))?
         } else if cluster_list.items.len() == 1 {
-            // Safe: we just checked len() == 1
             cluster_list
                 .items
                 .into_iter()
@@ -144,18 +145,76 @@ impl Uninstaller {
             .map_err(|e| Error::command_failed(format!("Failed to create bootstrap client: {}", e)))
     }
 
-    /// Delete the lattice-cell LoadBalancer service and wait for cleanup
+    /// Delete the LatticeCluster to stop the operator from reconciling
     ///
-    /// This prevents orphaning cloud LB resources when the cluster is deleted.
+    /// This must be called BEFORE deleting the cell service, otherwise the
+    /// operator will keep recreating the LoadBalancer service.
+    async fn delete_lattice_cluster(&self) -> Result<()> {
+        let client = self.target_client().await?;
+        let api: Api<LatticeCluster> = Api::all(client);
+
+        match api
+            .delete(&self.cluster_name, &DeleteParams::default())
+            .await
+        {
+            Ok(_) => info!(cluster = %self.cluster_name, "Deleted LatticeCluster"),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                debug!(cluster = %self.cluster_name, "LatticeCluster not found (already deleted)");
+            }
+            Err(e) => {
+                return Err(Error::command_failed(format!(
+                    "Failed to delete LatticeCluster: {}",
+                    e
+                )));
+            }
+        }
+
+        // Wait for LatticeCluster to be fully deleted (finalizers removed)
+        info!("Waiting for LatticeCluster deletion...");
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(120) {
+            match api.get(&self.cluster_name).await {
+                Ok(_) => {
+                    debug!("LatticeCluster still exists, waiting...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                    info!("LatticeCluster deleted");
+                    return Ok(());
+                }
+                Err(_) => return Ok(()),
+            }
+        }
+
+        // Timeout - try to remove finalizer manually
+        tracing::warn!("Timeout waiting for LatticeCluster deletion, removing finalizer...");
+        if let Ok(cluster) = api.get(&self.cluster_name).await {
+            if cluster.metadata.finalizers.is_some() {
+                let patch = serde_json::json!({
+                    "metadata": {
+                        "finalizers": null
+                    }
+                });
+                let _ = api
+                    .patch(
+                        &self.cluster_name,
+                        &PatchParams::default(),
+                        &Patch::Merge(&patch),
+                    )
+                    .await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Delete the lattice-cell LoadBalancer service and wait for cleanup
     async fn delete_cell_service(&self) -> Result<()> {
         let client = self.target_client().await?;
         let api: Api<Service> = Api::namespaced(client, LATTICE_SYSTEM_NAMESPACE);
 
-        // Delete the service
         match api.delete("lattice-cell", &DeleteParams::default()).await {
-            Ok(_) => {
-                info!("Deleted lattice-cell LoadBalancer service");
-            }
+            Ok(_) => info!("Deleted lattice-cell LoadBalancer service"),
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
                 debug!("lattice-cell service not found (already deleted)");
                 return Ok(());
@@ -168,31 +227,128 @@ impl Uninstaller {
             }
         }
 
-        // Wait for the service to be fully deleted
+        // Wait for deletion
         info!("Waiting for LoadBalancer cleanup...");
-        let timeout = Duration::from_secs(60);
-        let poll_interval = Duration::from_secs(2);
         let start = std::time::Instant::now();
-
-        while start.elapsed() < timeout {
+        while start.elapsed() < Duration::from_secs(60) {
             match api.get("lattice-cell").await {
-                Ok(_) => {
-                    debug!("Cell service still exists, waiting...");
-                }
-                Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                    debug!("Cell service deleted");
-                    return Ok(());
-                }
-                Err(e) => {
-                    debug!(error = %e, "Error checking cell service, assuming deleted");
-                    return Ok(());
-                }
+                Ok(_) => tokio::time::sleep(Duration::from_secs(2)).await,
+                Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(()),
+                Err(_) => return Ok(()),
             }
-            tokio::time::sleep(poll_interval).await;
         }
 
         tracing::warn!("Timeout waiting for cell service deletion, proceeding anyway");
         Ok(())
+    }
+
+    /// Patch the kubeconfig secret to use the external control plane endpoint.
+    ///
+    /// After `clusterctl move`, the kubeconfig secret points to the internal Kubernetes
+    /// endpoint (kubernetes.default.svc:443) which only works from inside the target cluster.
+    /// We patch it to use the external endpoint from the CAPI Cluster's controlPlaneEndpoint
+    /// so CAPI controllers on the kind cluster can reach the target for teardown.
+    async fn patch_kubeconfig_for_direct_access(&self, client: &Client) -> Result<()> {
+        let server_url = self.get_control_plane_endpoint(client).await?;
+
+        let secrets: Api<Secret> = Api::namespaced(client.clone(), &self.capi_namespace);
+        let secret_name = format!("{}-kubeconfig", self.cluster_name);
+
+        let secret = secrets.get(&secret_name).await.map_err(|e| {
+            Error::command_failed(format!("Failed to get kubeconfig secret: {}", e))
+        })?;
+
+        let data = secret
+            .data
+            .ok_or_else(|| Error::command_failed("Kubeconfig secret has no data"))?;
+
+        let kubeconfig_bytes = data
+            .get("value")
+            .ok_or_else(|| Error::command_failed("Kubeconfig secret missing 'value' key"))?;
+
+        let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
+            .map_err(|e| Error::command_failed(format!("Kubeconfig is not valid UTF-8: {}", e)))?;
+
+        // Skip if already pointing to the correct URL
+        if kubeconfig_str.contains(&server_url) {
+            debug!("Kubeconfig already points to {}", server_url);
+            return Ok(());
+        }
+
+        info!(
+            "Patching kubeconfig to use external endpoint {}",
+            server_url
+        );
+
+        let mut kubeconfig: serde_json::Value =
+            lattice_common::yaml::parse_yaml(&kubeconfig_str)
+                .map_err(|e| Error::command_failed(format!("Failed to parse kubeconfig: {}", e)))?;
+
+        // Update server URL in all cluster entries (keep existing CA - it's valid)
+        if let Some(clusters) = kubeconfig
+            .get_mut("clusters")
+            .and_then(|c| c.as_array_mut())
+        {
+            for cluster in clusters {
+                if let Some(server) = cluster.get_mut("cluster").and_then(|c| c.get_mut("server")) {
+                    *server = serde_json::Value::String(server_url.clone());
+                }
+            }
+        }
+
+        let encoded = STANDARD.encode(
+            serde_json::to_string(&kubeconfig)
+                .map_err(|e| Error::command_failed(format!("Failed to serialize: {}", e)))?
+                .as_bytes(),
+        );
+
+        secrets
+            .patch(
+                &secret_name,
+                &PatchParams::apply("lattice-uninstall"),
+                &Patch::Merge(&serde_json::json!({"data": {"value": encoded}})),
+            )
+            .await
+            .map_err(|e| Error::command_failed(format!("Failed to patch secret: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Get the control plane endpoint URL from the CAPI Cluster resource
+    async fn get_control_plane_endpoint(&self, client: &Client) -> Result<String> {
+        let api_resource = lattice_common::kube_utils::build_api_resource_with_discovery(
+            client,
+            "cluster.x-k8s.io",
+            "Cluster",
+        )
+        .await
+        .map_err(|e| Error::command_failed(format!("API discovery failed: {}", e)))?;
+
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(client.clone(), &self.capi_namespace, &api_resource);
+
+        let cluster = api
+            .get(&self.cluster_name)
+            .await
+            .map_err(|e| Error::command_failed(format!("Failed to get CAPI Cluster: {}", e)))?;
+
+        let endpoint = cluster
+            .data
+            .get("spec")
+            .and_then(|s| s.get("controlPlaneEndpoint"))
+            .ok_or_else(|| Error::command_failed("CAPI Cluster has no controlPlaneEndpoint"))?;
+
+        let host = endpoint
+            .get("host")
+            .and_then(|h| h.as_str())
+            .ok_or_else(|| Error::command_failed("controlPlaneEndpoint has no host"))?;
+
+        let port = endpoint
+            .get("port")
+            .and_then(|p| p.as_i64())
+            .unwrap_or(6443);
+
+        Ok(format!("https://{}:{}", host, port))
     }
 
     pub async fn run(&self) -> Result<()> {
@@ -201,14 +357,12 @@ impl Uninstaller {
             self.cluster_name, self.provider
         );
 
-        // Step 1: Create kind cluster
         info!("Creating temporary kind cluster...");
         kind_utils::create_kind_cluster(UNINSTALL_CLUSTER_NAME, &self.bootstrap_kubeconfig_path())
             .await?;
 
         let result = self.run_uninstall().await;
 
-        // Cleanup kind cluster
         if result.is_err() && self.keep_bootstrap_on_failure {
             info!("Keeping kind cluster for debugging (--keep-bootstrap-on-failure)");
         } else {
@@ -224,17 +378,17 @@ impl Uninstaller {
     async fn run_uninstall(&self) -> Result<()> {
         let bootstrap_client = self.bootstrap_client().await?;
 
-        // Step 2: Install CAPI providers (clusterctl init waits for components to be ready)
         info!("Installing CAPI providers on kind cluster...");
         self.install_capi_providers().await?;
 
-        // Step 3: Delete LoadBalancer service to clean up cloud LB resources
-        // Must be done before move to give cloud provider time to cleanup
+        // Delete LatticeCluster first to stop the operator from reconciling.
+        // This prevents the operator from recreating the LoadBalancer service.
+        info!("Deleting LatticeCluster to stop operator reconciliation...");
+        self.delete_lattice_cluster().await?;
+
         info!("Cleaning up LoadBalancer service...");
         self.delete_cell_service().await?;
 
-        // Step 4: Move CAPI resources directly from target to kind cluster
-        // Uses --to-kubeconfig for single-step move (same approach as installer)
         info!("Moving CAPI resources from target to kind cluster...");
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
         move_to_kubeconfig(
@@ -244,9 +398,12 @@ impl Uninstaller {
             &self.cluster_name,
         )
         .await
-        .map_err(|e| Error::command_failed(e.to_string()))?;
+        .cmd_err()?;
 
-        // Step 5: Teardown cluster (unpause → wait ready → delete → wait deletion)
+        info!("Patching kubeconfig for direct cluster access...");
+        self.patch_kubeconfig_for_direct_access(&bootstrap_client)
+            .await?;
+
         info!("Tearing down cluster...");
         teardown_cluster(
             &bootstrap_client,
@@ -256,7 +413,7 @@ impl Uninstaller {
             Some(&bootstrap_kubeconfig),
         )
         .await
-        .map_err(|e| Error::command_failed(e.to_string()))?;
+        .cmd_err()?;
 
         info!("Cluster '{}' successfully uninstalled", self.cluster_name);
         Ok(())
@@ -269,7 +426,6 @@ impl Uninstaller {
         let mut cmd = Command::new("clusterctl");
         cmd.args(&init_args).env("KUBECONFIG", &kubeconfig);
 
-        // Pass through provider credentials from environment
         if self.provider == ProviderType::Aws {
             if let Ok(creds) = AwsCredentials::from_env() {
                 cmd.env("AWS_B64ENCODED_CREDENTIALS", creds.to_b64_encoded());

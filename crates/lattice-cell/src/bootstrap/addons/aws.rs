@@ -1370,7 +1370,7 @@ mod tests {
             .find(|r| {
                 r.resources
                     .as_ref()
-                    .map_or(false, |res| res.contains(&"nodes".to_string()))
+                    .is_some_and(|res| res.contains(&"nodes".to_string()))
             })
             .unwrap();
         assert!(nodes_rule.verbs.contains(&"*".to_string()));

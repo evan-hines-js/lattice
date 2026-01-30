@@ -8,13 +8,13 @@
 //! - Cilium LB-IPAM pool is auto-derived from ipv4_pool gateway as .200/27
 
 use async_trait::async_trait;
-use std::collections::BTreeMap;
 
 use super::{
-    build_post_kubeadm_commands, generate_bootstrap_config_template_for_pool, generate_cluster,
-    generate_control_plane, generate_machine_deployment_for_pool, pool_resource_suffix,
-    BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider,
-    VipConfig, WorkerPoolConfig,
+    build_cert_sans, build_post_kubeadm_commands, create_cluster_labels,
+    generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
+    generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix,
+    validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
+    InfrastructureRef, Provider, VipConfig, WorkerPoolConfig,
 };
 use lattice_common::crd::{LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig};
 use lattice_common::{Error, Result};
@@ -59,11 +59,7 @@ impl ProxmoxProvider {
 
     /// Generate ProxmoxCluster manifest
     fn generate_proxmox_cluster(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
-        let name = cluster
-            .metadata
-            .name
-            .as_ref()
-            .ok_or_else(|| Error::validation("cluster name required"))?;
+        let name = get_cluster_name(cluster)?;
         let cfg = Self::get_config(cluster)
             .ok_or_else(|| Error::validation("proxmox config required"))?;
 
@@ -233,45 +229,24 @@ impl Provider for ProxmoxProvider {
         cluster: &LatticeCluster,
         bootstrap: &BootstrapInfo,
     ) -> Result<Vec<CAPIManifest>> {
-        let name = cluster
-            .metadata
-            .name
-            .as_ref()
-            .ok_or_else(|| Error::validation("cluster name required"))?;
+        let name = get_cluster_name(cluster)?;
         let spec = &cluster.spec;
         let cfg = Self::get_config(cluster)
             .ok_or_else(|| Error::validation("proxmox config required"))?;
-
-        // Build cluster config
-        let mut labels = BTreeMap::new();
-        labels.insert("cluster.x-k8s.io/cluster-name".to_string(), name.clone());
-        labels.insert("lattice.dev/cluster".to_string(), name.clone());
 
         let config = ClusterConfig {
             name,
             namespace: &self.namespace,
             k8s_version: &spec.provider.kubernetes.version,
-            labels,
+            labels: create_cluster_labels(name),
             bootstrap: spec.provider.kubernetes.bootstrap.clone(),
             provider_type: ProviderType::Proxmox,
         };
 
-        // Build certSANs - auto-add controlPlaneEndpoint and endpoints.host
-        let mut cert_sans = spec
-            .provider
-            .kubernetes
-            .cert_sans
-            .clone()
-            .unwrap_or_default();
+        // Build certSANs - also auto-add controlPlaneEndpoint for Proxmox
+        let mut cert_sans = build_cert_sans(cluster);
         if !cert_sans.contains(&cfg.control_plane_endpoint) {
             cert_sans.push(cfg.control_plane_endpoint.clone());
-        }
-        if let Some(ref endpoints) = cluster.spec.parent_config {
-            if let Some(ref host) = endpoints.host {
-                if !cert_sans.contains(host) {
-                    cert_sans.push(host.clone());
-                }
-            }
         }
 
         // Configure kube-vip for the K8s API server VIP (controlPlaneEndpoint)
@@ -289,7 +264,7 @@ impl Provider for ProxmoxProvider {
         let cp_config = ControlPlaneConfig {
             replicas: spec.nodes.control_plane,
             cert_sans,
-            post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap),
+            post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
             vip,
             ssh_authorized_keys: cfg.ssh_authorized_keys.clone().unwrap_or_default(),
         };
@@ -347,13 +322,7 @@ impl Provider for ProxmoxProvider {
     }
 
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()> {
-        let version = &spec.kubernetes.version;
-        if !version.starts_with("1.") && !version.starts_with("v1.") {
-            return Err(Error::validation(format!(
-                "invalid kubernetes version: {version}, expected format: 1.x.x or v1.x.x"
-            )));
-        }
-        Ok(())
+        validate_k8s_version(&spec.kubernetes.version)
     }
 
     fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {

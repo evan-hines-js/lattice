@@ -246,9 +246,13 @@ async fn handle_agent_message_impl(
                     }
 
                     // Step 1.6: Unpause cluster - CAPI won't delete paused clusters
+                    // This MUST succeed, otherwise infrastructure will be orphaned
                     if let Err(e) = mover.unpause_resources().await {
-                        warn!(cluster = %cluster, error = %e, "Failed to unpause cluster");
+                        error!(cluster = %cluster, error = %e, "Failed to unpause cluster - infrastructure may be orphaned");
+                        registry_for_task.finish_teardown(&cluster);
+                        return;
                     }
+                    info!(cluster = %cluster, "Cluster unpaused successfully");
                 }
 
                 // Step 2: Delete LatticeCluster (adds deletionTimestamp)

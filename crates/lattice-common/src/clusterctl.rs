@@ -12,6 +12,7 @@ use std::time::Duration;
 use kube::api::{Api, DeleteParams, Patch, PatchParams};
 use kube::core::DynamicObject;
 use kube::discovery::ApiResource;
+use kube::Client;
 use thiserror::Error;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -134,15 +135,11 @@ where
     })
 }
 
-/// CAPI Cluster resource definition
-fn cluster_api_resource() -> ApiResource {
-    ApiResource {
-        group: "cluster.x-k8s.io".into(),
-        version: "v1beta1".into(),
-        kind: "Cluster".into(),
-        api_version: "cluster.x-k8s.io/v1beta1".into(),
-        plural: "clusters".into(),
-    }
+/// Get CAPI Cluster resource definition using discovery
+async fn cluster_api_resource(client: &Client) -> Result<ApiResource, ClusterctlError> {
+    kube_utils::build_api_resource_with_discovery(client, "cluster.x-k8s.io", "Cluster")
+        .await
+        .map_err(|e| ClusterctlError::ExecutionFailed(format!("API discovery failed: {}", e)))
 }
 
 /// Errors from clusterctl move operations
@@ -272,7 +269,8 @@ pub async fn pause_capi_cluster(
     let client = kube_utils::create_client(kubeconfig)
         .await
         .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
-    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &cluster_api_resource());
+    let ar = cluster_api_resource(&client).await?;
+    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
     let patch = serde_json::json!({"spec": {"paused": true}});
 
     api.patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
@@ -297,7 +295,8 @@ pub async fn unpause_capi_cluster(
     let client = kube_utils::create_client(kubeconfig)
         .await
         .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
-    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &cluster_api_resource());
+    let ar = cluster_api_resource(&client).await?;
+    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
     let patch = serde_json::json!({"spec": {"paused": false}});
 
     api.patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
@@ -333,8 +332,8 @@ async fn is_cluster_ready(
     namespace: &str,
     cluster_name: &str,
 ) -> Result<bool, ClusterctlError> {
-    let api: Api<DynamicObject> =
-        Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
+    let ar = cluster_api_resource(client).await?;
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
 
     match api.get(cluster_name).await {
         Ok(cluster) => {
@@ -406,8 +405,8 @@ pub async fn delete_cluster(
 ) -> Result<(), ClusterctlError> {
     use kube::api::DeleteParams;
 
-    let api: Api<DynamicObject> =
-        Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
+    let ar = cluster_api_resource(client).await?;
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
 
     api.delete(cluster_name, &DeleteParams::default())
         .await
@@ -431,8 +430,8 @@ pub async fn wait_for_cluster_deletion(
 ) -> Result<(), ClusterctlError> {
     use std::time::Instant;
 
-    let api: Api<DynamicObject> =
-        Api::namespaced_with(client.clone(), namespace, &cluster_api_resource());
+    let ar = cluster_api_resource(client).await?;
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
     let start = Instant::now();
 
     loop {
@@ -611,36 +610,9 @@ fn parse_manifest_identities(manifests: &[Vec<u8>]) -> Vec<ResourceIdentity> {
     identities
 }
 
-/// Build ApiResource from apiVersion and kind
+/// Build ApiResource from identity
 fn api_resource_from_identity(identity: &ResourceIdentity) -> ApiResource {
-    let (group, version) = match identity.api_version.split_once('/') {
-        Some((g, v)) => (g.to_string(), v.to_string()),
-        None => (String::new(), identity.api_version.clone()), // core API group
-    };
-
-    // Pluralize kind (simple heuristic - works for CAPI resources)
-    let plural = pluralize_kind(&identity.kind);
-
-    ApiResource {
-        group,
-        version: version.clone(),
-        kind: identity.kind.clone(),
-        api_version: identity.api_version.clone(),
-        plural,
-    }
-}
-
-/// Simple pluralization for Kubernetes kinds
-fn pluralize_kind(kind: &str) -> String {
-    let lower = kind.to_lowercase();
-    if lower.ends_with("ss") {
-        // e.g., "ClusterClass" -> "clusterclasses"
-        format!("{}es", lower)
-    } else if lower.ends_with('s') {
-        lower
-    } else {
-        format!("{}s", lower)
-    }
+    kube_utils::build_api_resource(&identity.api_version, &identity.kind)
 }
 
 /// Delete a single resource with finalizer removal (force delete)
@@ -1021,19 +993,6 @@ mod tests {
         let unknown_priority = deletion_priority("SomeUnknownResource");
         assert!(unknown_priority < deletion_priority("Cluster"));
         assert!(unknown_priority > deletion_priority("Secret"));
-    }
-
-    #[test]
-    fn test_pluralize_kind_standard() {
-        assert_eq!(pluralize_kind("Cluster"), "clusters");
-        assert_eq!(pluralize_kind("Machine"), "machines");
-        assert_eq!(pluralize_kind("MachineDeployment"), "machinedeployments");
-    }
-
-    #[test]
-    fn test_pluralize_kind_ss_suffix() {
-        // Kinds ending in "ss" should get "es" suffix
-        assert_eq!(pluralize_kind("ClusterClass"), "clusterclasses");
     }
 
     #[test]

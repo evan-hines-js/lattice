@@ -818,7 +818,7 @@ mod tests {
 
     async fn test_parent_servers() -> Option<ParentServers<MockManifestGenerator>> {
         // Install crypto provider (ok if already installed)
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        lattice_common::install_crypto_provider();
 
         let client = try_test_client().await?;
         let config = ParentConfig {
@@ -851,7 +851,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parent_servers_creation() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        lattice_common::install_crypto_provider();
         let Some(client) = try_test_client().await else {
             return; // Skip if no kubeconfig available
         };
@@ -873,7 +873,7 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_running_starts_servers() {
         // Install crypto provider before creating kube client (which uses TLS)
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        lattice_common::install_crypto_provider();
 
         let Some(client) = try_test_client().await else {
             // Skip test if no kubeconfig available
@@ -932,7 +932,7 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_state_available_after_start() {
         // Install crypto provider before creating kube client (which uses TLS)
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        lattice_common::install_crypto_provider();
 
         let Some(servers) = test_parent_servers().await else {
             return; // Skip if no kubeconfig available
@@ -955,5 +955,35 @@ mod tests {
         // After shutdown, bootstrap state should be None again
         servers.shutdown().await;
         assert!(servers.bootstrap_state().await.is_none());
+    }
+
+    #[test]
+    fn test_load_registry_credentials_no_env_var() {
+        // Ensure env var is not set
+        std::env::remove_var("REGISTRY_CREDENTIALS_FILE");
+        let result = load_registry_credentials();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_registry_credentials_file_not_found() {
+        std::env::set_var("REGISTRY_CREDENTIALS_FILE", "/nonexistent/path/to/file");
+        let result = load_registry_credentials();
+        assert!(result.is_none());
+        std::env::remove_var("REGISTRY_CREDENTIALS_FILE");
+    }
+
+    #[test]
+    fn test_load_registry_credentials_file_exists() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!("test_creds_{}.txt", std::process::id()));
+        std::fs::write(&temp_file, "test-credentials").expect("write temp file");
+
+        std::env::set_var("REGISTRY_CREDENTIALS_FILE", temp_file.to_str().unwrap());
+        let result = load_registry_credentials();
+        assert_eq!(result, Some("test-credentials".to_string()));
+
+        std::env::remove_var("REGISTRY_CREDENTIALS_FILE");
+        std::fs::remove_file(&temp_file).ok();
     }
 }

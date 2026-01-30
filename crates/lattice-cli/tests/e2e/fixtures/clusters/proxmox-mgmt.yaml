@@ -12,9 +12,6 @@ spec:
       # certSANs auto-populated from controlPlaneEndpoint and endpoints.host
     config:
       proxmox:
-        secretRef:
-          name: proxmox-credentials
-          namespace: capmox-system
         sshAuthorizedKeys:
           - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1f8eVKp5YCAtis77YO/oHhWvzAiimDzlDqhtD+85YR evan.hines.dev@gmail.com"
         sourceNode: "poweredge-lg"

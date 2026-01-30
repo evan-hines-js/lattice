@@ -113,7 +113,7 @@ impl IntoResponse for ProxyError {
                 Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(Body::empty())
-                    .unwrap()
+                    .expect("empty body response should always build")
             })
     }
 }
@@ -430,7 +430,7 @@ async fn handle_watch_response(
         .header("Content-Type", "application/json")
         .header("Transfer-Encoding", "chunked")
         .body(body)
-        .unwrap())
+        .expect("streaming response with valid headers should always build"))
 }
 
 /// Build HTTP response from KubernetesResponse
@@ -493,5 +493,75 @@ mod tests {
         let error = ProxyError::Timeout;
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[test]
+    fn test_proxy_error_send_failed() {
+        let error = ProxyError::SendFailed("connection reset".to_string());
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn test_proxy_error_tls_config() {
+        let error = ProxyError::TlsConfig("invalid cert".to_string());
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn test_proxy_error_server() {
+        let error = ProxyError::Server("bind error".to_string());
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn test_build_http_response_ok() {
+        let response = KubernetesResponse {
+            request_id: "test".to_string(),
+            status_code: 200,
+            body: b"hello".to_vec(),
+            content_type: "application/json".to_string(),
+            error: String::new(),
+            streaming: false,
+            stream_end: false,
+        };
+
+        let http_response = build_http_response(&response).expect("should build response");
+        assert_eq!(http_response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_build_http_response_not_found() {
+        let response = KubernetesResponse {
+            request_id: "test".to_string(),
+            status_code: 404,
+            body: b"not found".to_vec(),
+            content_type: String::new(), // Test empty content type
+            error: String::new(),
+            streaming: false,
+            stream_end: false,
+        };
+
+        let http_response = build_http_response(&response).expect("should build response");
+        assert_eq!(http_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_build_http_response_with_invalid_status_defaults_to_ok() {
+        let response = KubernetesResponse {
+            request_id: "test".to_string(),
+            status_code: 9999, // Invalid status code
+            body: vec![],
+            content_type: String::new(),
+            error: String::new(),
+            streaming: false,
+            stream_end: false,
+        };
+
+        let http_response = build_http_response(&response).expect("should build response");
+        // Invalid status codes default to OK
+        assert_eq!(http_response.status(), StatusCode::OK);
     }
 }

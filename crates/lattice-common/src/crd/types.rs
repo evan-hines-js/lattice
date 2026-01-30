@@ -33,14 +33,6 @@ pub enum ProviderType {
 }
 
 impl ProviderType {
-    /// Returns true if this is a valid provider type string
-    pub fn is_valid(s: &str) -> bool {
-        matches!(
-            s.to_lowercase().as_str(),
-            "docker" | "proxmox" | "openstack" | "aws" | "gcp" | "azure"
-        )
-    }
-
     /// Returns true if this provider is for on-premises infrastructure
     pub fn is_on_prem(&self) -> bool {
         matches!(self, Self::Docker | Self::Proxmox | Self::OpenStack)
@@ -836,17 +828,6 @@ mod tests {
         }
 
         #[test]
-        fn test_is_valid() {
-            assert!(ProviderType::is_valid("docker"));
-            assert!(ProviderType::is_valid("aws"));
-            assert!(ProviderType::is_valid("gcp"));
-            assert!(ProviderType::is_valid("azure"));
-            assert!(ProviderType::is_valid("DOCKER"));
-            assert!(!ProviderType::is_valid("invalid"));
-            assert!(!ProviderType::is_valid(""));
-        }
-
-        #[test]
         fn test_topology_spread_key() {
             // On-prem providers use hostname (no zones)
             assert_eq!(
@@ -875,6 +856,57 @@ mod tests {
                 ProviderType::OpenStack.topology_spread_key(),
                 "topology.kubernetes.io/zone"
             );
+        }
+
+        #[test]
+        fn test_is_on_prem() {
+            // On-prem providers
+            assert!(ProviderType::Docker.is_on_prem());
+            assert!(ProviderType::Proxmox.is_on_prem());
+            assert!(ProviderType::OpenStack.is_on_prem());
+
+            // Cloud providers are NOT on-prem
+            assert!(!ProviderType::Aws.is_on_prem());
+            assert!(!ProviderType::Gcp.is_on_prem());
+            assert!(!ProviderType::Azure.is_on_prem());
+        }
+
+        #[test]
+        fn test_is_cloud() {
+            // Cloud providers
+            assert!(ProviderType::Aws.is_cloud());
+            assert!(ProviderType::Gcp.is_cloud());
+            assert!(ProviderType::Azure.is_cloud());
+
+            // On-prem providers are NOT cloud
+            assert!(!ProviderType::Docker.is_cloud());
+            assert!(!ProviderType::Proxmox.is_cloud());
+            assert!(!ProviderType::OpenStack.is_cloud());
+        }
+
+        #[test]
+        fn test_load_balancer_annotations_aws() {
+            let annotations = ProviderType::Aws.load_balancer_annotations();
+            assert_eq!(annotations.len(), 1);
+            assert_eq!(
+                annotations.get("service.beta.kubernetes.io/aws-load-balancer-type"),
+                Some(&"nlb".to_string())
+            );
+        }
+
+        #[test]
+        fn test_load_balancer_annotations_gcp_azure() {
+            // GCP and Azure don't need special annotations
+            assert!(ProviderType::Gcp.load_balancer_annotations().is_empty());
+            assert!(ProviderType::Azure.load_balancer_annotations().is_empty());
+        }
+
+        #[test]
+        fn test_load_balancer_annotations_on_prem() {
+            // On-prem providers use Cilium L2, no cloud LB annotations
+            assert!(ProviderType::Docker.load_balancer_annotations().is_empty());
+            assert!(ProviderType::Proxmox.load_balancer_annotations().is_empty());
+            assert!(ProviderType::OpenStack.load_balancer_annotations().is_empty());
         }
     }
 
@@ -1356,6 +1388,118 @@ mod tests {
             assert!(config.openstack.is_some());
             assert_eq!(config.provider_type(), ProviderType::OpenStack);
             assert!(config.validate().is_ok());
+        }
+    }
+
+    mod pool_id_validation {
+        use super::*;
+
+        #[test]
+        fn test_valid_simple() {
+            assert!(is_valid_pool_id("default"));
+            assert!(is_valid_pool_id("general"));
+            assert!(is_valid_pool_id("gpu"));
+        }
+
+        #[test]
+        fn test_valid_with_numbers() {
+            assert!(is_valid_pool_id("gpu1"));
+            assert!(is_valid_pool_id("pool123"));
+            assert!(is_valid_pool_id("a1b2c3"));
+        }
+
+        #[test]
+        fn test_valid_with_hyphens() {
+            assert!(is_valid_pool_id("high-memory"));
+            assert!(is_valid_pool_id("general-purpose"));
+            assert!(is_valid_pool_id("gpu-large-v2"));
+        }
+
+        #[test]
+        fn test_invalid_empty() {
+            assert!(!is_valid_pool_id(""));
+        }
+
+        #[test]
+        fn test_invalid_starts_with_number() {
+            assert!(!is_valid_pool_id("1pool"));
+            assert!(!is_valid_pool_id("2gpu"));
+        }
+
+        #[test]
+        fn test_invalid_starts_with_hyphen() {
+            assert!(!is_valid_pool_id("-pool"));
+        }
+
+        #[test]
+        fn test_invalid_ends_with_hyphen() {
+            assert!(!is_valid_pool_id("pool-"));
+            assert!(!is_valid_pool_id("general-"));
+        }
+
+        #[test]
+        fn test_invalid_uppercase() {
+            assert!(!is_valid_pool_id("GPU"));
+            assert!(!is_valid_pool_id("Pool"));
+            assert!(!is_valid_pool_id("highMemory"));
+        }
+
+        #[test]
+        fn test_invalid_special_chars() {
+            assert!(!is_valid_pool_id("pool_name"));
+            assert!(!is_valid_pool_id("pool.name"));
+            assert!(!is_valid_pool_id("pool@name"));
+        }
+    }
+
+    mod provider_config_validation {
+        use super::*;
+
+        #[test]
+        fn test_validate_no_provider() {
+            let config = ProviderConfig {
+                aws: None,
+                docker: None,
+                openstack: None,
+                proxmox: None,
+            };
+            let result = config.validate();
+            assert!(result.is_err());
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one provider"));
+        }
+
+        #[test]
+        fn test_validate_multiple_providers() {
+            let config = ProviderConfig {
+                aws: Some(AwsConfig {
+                    region: "us-west-2".to_string(),
+                    cp_instance_type: "m5.xlarge".to_string(),
+                    worker_instance_type: "m5.large".to_string(),
+                    ssh_key_name: "key".to_string(),
+                    ..Default::default()
+                }),
+                docker: Some(DockerConfig::default()),
+                openstack: None,
+                proxmox: None,
+            };
+            let result = config.validate();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("not multiple"));
+        }
+
+        #[test]
+        fn test_provider_type_defaults_to_docker() {
+            let config = ProviderConfig {
+                aws: None,
+                docker: None,
+                openstack: None,
+                proxmox: None,
+            };
+            // Even when no provider is set, provider_type returns Docker as default
+            assert_eq!(config.provider_type(), ProviderType::Docker);
         }
     }
 

@@ -8,6 +8,7 @@ use tracing::info;
 
 use lattice_common::kube_utils;
 
+use super::CommandErrorExt;
 use crate::{Error, Result};
 
 /// Kind cluster config with Docker socket mount for CAPD (Cluster API Provider Docker)
@@ -81,7 +82,7 @@ pub async fn create_kind_cluster(name: &str, kubeconfig_path: &Path) -> Result<(
 
     kube_utils::wait_for_nodes_ready(&client, Duration::from_secs(120))
         .await
-        .map_err(|e| Error::command_failed(e.to_string()))?;
+        .cmd_err()?;
 
     Ok(())
 }

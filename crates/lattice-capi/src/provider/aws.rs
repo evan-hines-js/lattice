@@ -4,13 +4,13 @@
 //! AWS using the CAPA provider. Uses NLB for API server load balancing.
 
 use async_trait::async_trait;
-use std::collections::BTreeMap;
 
 use super::{
-    build_post_kubeadm_commands, generate_bootstrap_config_template_for_pool, generate_cluster,
-    generate_control_plane, generate_machine_deployment_for_pool, pool_resource_suffix,
-    BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider,
-    WorkerPoolConfig,
+    build_cert_sans, build_post_kubeadm_commands, create_cluster_labels,
+    generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
+    generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix,
+    validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
+    InfrastructureRef, Provider, WorkerPoolConfig,
 };
 use lattice_common::crd::{AwsConfig, LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result};
@@ -165,19 +165,13 @@ impl Provider for AwsProvider {
         cluster: &LatticeCluster,
         bootstrap: &BootstrapInfo,
     ) -> Result<Vec<CAPIManifest>> {
-        let name = cluster
-            .metadata
-            .name
-            .as_ref()
-            .ok_or_else(|| Error::validation("cluster name required"))?;
+        let name = get_cluster_name(cluster)?;
         let spec = &cluster.spec;
         let cfg =
             Self::get_config(cluster).ok_or_else(|| Error::validation("aws config required"))?;
 
         // Build cluster config with AWS-specific labels for addon ClusterResourceSets
-        let mut labels = BTreeMap::new();
-        labels.insert("cluster.x-k8s.io/cluster-name".to_string(), name.clone());
-        labels.insert("lattice.dev/cluster".to_string(), name.clone());
+        let mut labels = create_cluster_labels(name);
         // AWS clusters use external cloud controller manager and EBS CSI driver
         labels.insert("ccm".to_string(), "external".to_string());
         labels.insert("csi".to_string(), "external".to_string());
@@ -191,28 +185,11 @@ impl Provider for AwsProvider {
             provider_type: ProviderType::Aws,
         };
 
-        // Build certSANs
-        let mut cert_sans = spec
-            .provider
-            .kubernetes
-            .cert_sans
-            .clone()
-            .unwrap_or_default();
-
-        // Add endpoints.host to SANs if configured
-        if let Some(ref endpoints) = cluster.spec.parent_config {
-            if let Some(ref host) = endpoints.host {
-                if !cert_sans.contains(host) {
-                    cert_sans.push(host.clone());
-                }
-            }
-        }
-
         // No kube-vip for AWS - we use NLB
         let cp_config = ControlPlaneConfig {
             replicas: spec.nodes.control_plane,
-            cert_sans,
-            post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap),
+            cert_sans: build_cert_sans(cluster),
+            post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
             vip: None,
             ssh_authorized_keys: cfg.ssh_authorized_keys.clone().unwrap_or_default(),
         };
@@ -276,12 +253,7 @@ impl Provider for AwsProvider {
     }
 
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()> {
-        let version = &spec.kubernetes.version;
-        if !version.starts_with("1.") && !version.starts_with("v1.") {
-            return Err(Error::validation(format!(
-                "invalid kubernetes version: {version}, expected format: 1.x.x or v1.x.x"
-            )));
-        }
+        validate_k8s_version(&spec.kubernetes.version)?;
 
         // Validate AWS-specific config
         if let Some(ref cfg) = spec.config.aws {

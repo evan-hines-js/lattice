@@ -164,10 +164,10 @@ name: third
 
     #[test]
     fn test_parse_yaml_float() {
-        let yaml = "pi: 3.14159";
+        let yaml = "value: 1.5";
         let result = parse_yaml(yaml).unwrap();
-        let pi = result["pi"].as_f64().unwrap();
-        assert!((pi - 3.14159).abs() < 0.0001);
+        let value = result["value"].as_f64().unwrap();
+        assert!((value - 1.5).abs() < 0.0001);
     }
 
     #[test]

@@ -58,7 +58,7 @@ fn cleanup_clusters(mgmt_name: &str, workload_name: &str) {
 
 #[tokio::test]
 async fn test_docker_independence() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    lattice_common::install_crypto_provider();
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
