@@ -33,8 +33,8 @@ use lattice_capi::{
     CapiInstaller, CapiProviderConfig,
 };
 use lattice_cell::{
-    fetch_distributable_resources, DefaultManifestGenerator, DistributableResources, ParentServers,
-    SharedAgentRegistry,
+    fetch_distributable_resources, generate_proxy_kubeconfig, DefaultManifestGenerator,
+    DistributableResources, ParentServers, SharedAgentRegistry,
 };
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
@@ -1283,6 +1283,53 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 .await?;
 
             if is_ready {
+                // Infrastructure is ready - patch kubeconfig to use proxy before pivoting
+                // This enables CAPI controllers to access the child cluster through the gRPC tunnel
+                if let (Some(ref parent_servers), Some(ref client)) =
+                    (&ctx.parent_servers, &ctx.client)
+                {
+                    // Build proxy URL from parent config
+                    let proxy_url = if let Some(ref endpoints) = cluster.spec.parent_config {
+                        if let Some(ref host) = endpoints.host {
+                            format!("https://{}:{}", host, endpoints.proxy_port)
+                        } else {
+                            // No explicit host - use in-cluster service DNS
+                            format!(
+                                "https://lattice-cell.lattice-system.svc:{}",
+                                endpoints.proxy_port
+                            )
+                        }
+                    } else {
+                        // Fallback to default
+                        "https://lattice-cell.lattice-system.svc:8081".to_string()
+                    };
+
+                    let ca_cert_pem = parent_servers.ca_trust_bundle_pem().await;
+
+                    match patch_kubeconfig_for_proxy(
+                        client,
+                        &name,
+                        &capi_namespace,
+                        &proxy_url,
+                        &ca_cert_pem,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            info!("kubeconfig patched for proxy, transitioning to Pivoting");
+                        }
+                        Ok(false) => {
+                            // Kubeconfig Secret not ready yet, wait
+                            debug!("kubeconfig Secret not ready yet, waiting...");
+                            return Ok(Action::requeue(Duration::from_secs(5)));
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to patch kubeconfig for proxy, will retry");
+                            return Ok(Action::requeue(Duration::from_secs(5)));
+                        }
+                    }
+                }
+
                 // Infrastructure is ready, transition to Pivoting
                 info!("infrastructure ready, transitioning to Pivoting phase");
                 update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None, false).await?;
@@ -1704,6 +1751,105 @@ async fn generate_network_policy_for_child(ctx: &Context) -> Result<Option<Strin
         Some(&cell_host),
         endpoints.grpc_port,
     )))
+}
+
+/// Patch the CAPI-generated kubeconfig Secret to use the K8s API proxy.
+///
+/// This is called during the Provisioning phase after CAPI creates the kubeconfig
+/// Secret. It rewrites the Secret to point to the proxy URL with the operator's CA,
+/// enabling CAPI controllers to access the child cluster through the gRPC tunnel.
+///
+/// # Arguments
+///
+/// * `client` - Kubernetes client
+/// * `cluster_name` - Name of the cluster
+/// * `namespace` - Namespace containing the kubeconfig Secret (capi-{cluster})
+/// * `proxy_url` - Base URL of the proxy (e.g., "https://lattice-cell.lattice-system.svc:8081")
+/// * `ca_cert_pem` - PEM-encoded CA certificate for the proxy
+async fn patch_kubeconfig_for_proxy(
+    client: &Client,
+    cluster_name: &str,
+    namespace: &str,
+    proxy_url: &str,
+    ca_cert_pem: &str,
+) -> Result<bool, Error> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use k8s_openapi::api::core::v1::Secret;
+
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let secret_name = format!("{}-kubeconfig", cluster_name);
+
+    // Check if the Secret exists
+    let secret = match secrets.get(&secret_name).await {
+        Ok(s) => s,
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            debug!(
+                cluster = %cluster_name,
+                secret = %secret_name,
+                "Kubeconfig Secret not found yet (CAPI still creating)"
+            );
+            return Ok(false);
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // Get the current kubeconfig data
+    let Some(data) = secret.data else {
+        debug!(
+            cluster = %cluster_name,
+            "Kubeconfig Secret has no data"
+        );
+        return Ok(false);
+    };
+
+    let Some(kubeconfig_bytes) = data.get("value") else {
+        debug!(
+            cluster = %cluster_name,
+            "Kubeconfig Secret missing 'value' key"
+        );
+        return Ok(false);
+    };
+
+    // Parse the kubeconfig
+    let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
+        .map_err(|e| Error::internal(format!("kubeconfig is not valid UTF-8: {}", e)))?;
+
+    // Check if already patched (contains proxy URL)
+    if kubeconfig_str.contains("/cluster/") {
+        debug!(
+            cluster = %cluster_name,
+            "Kubeconfig already patched for proxy"
+        );
+        return Ok(true);
+    }
+
+    // Generate the proxy kubeconfig
+    let proxy_kubeconfig = generate_proxy_kubeconfig(cluster_name, proxy_url, ca_cert_pem);
+
+    // Encode and patch
+    let encoded = STANDARD.encode(proxy_kubeconfig.as_bytes());
+
+    let patch = serde_json::json!({
+        "data": {
+            "value": encoded
+        }
+    });
+
+    secrets
+        .patch(
+            &secret_name,
+            &PatchParams::apply("lattice-proxy"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+    info!(
+        cluster = %cluster_name,
+        proxy_url = %proxy_url,
+        "Patched kubeconfig Secret to use K8s API proxy"
+    );
+
+    Ok(true)
 }
 
 /// Error policy for the controller
@@ -2207,6 +2353,7 @@ mod tests {
             host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
+            proxy_port: 8081,
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },

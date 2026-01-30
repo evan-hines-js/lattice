@@ -546,9 +546,13 @@ pub struct EndpointsSpec {
     #[serde(default = "default_grpc_port")]
     pub grpc_port: u16,
 
-    /// Bootstrap HTTPS port for kubeadm webhook (default: 443)
+    /// Bootstrap HTTPS port for kubeadm webhook (default: 8443)
     #[serde(default = "default_bootstrap_port")]
     pub bootstrap_port: u16,
+
+    /// K8s API proxy port for CAPI controller access to children (default: 8081)
+    #[serde(default = "default_proxy_port")]
+    pub proxy_port: u16,
 
     /// Service exposure configuration
     pub service: ServiceSpec,
@@ -560,6 +564,10 @@ fn default_grpc_port() -> u16 {
 
 fn default_bootstrap_port() -> u16 {
     crate::DEFAULT_BOOTSTRAP_PORT
+}
+
+fn default_proxy_port() -> u16 {
+    crate::DEFAULT_PROXY_PORT
 }
 
 impl EndpointsSpec {
@@ -585,6 +593,14 @@ impl EndpointsSpec {
         self.host
             .as_ref()
             .map(|h| format!("https://{}:{}", h, self.bootstrap_port))
+    }
+
+    /// Get the K8s API proxy endpoint URL for CAPI controller access
+    /// Returns None if host is not set
+    pub fn proxy_endpoint(&self) -> Option<String> {
+        self.host
+            .as_ref()
+            .map(|h| format!("https://{}:{}", h, self.proxy_port))
     }
 }
 
@@ -1394,6 +1410,7 @@ mod tests {
                 host: Some("172.18.255.1".to_string()),
                 grpc_port: 50051,
                 bootstrap_port: 8443,
+                proxy_port: 8081,
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
@@ -1406,6 +1423,10 @@ mod tests {
                 spec.bootstrap_endpoint(),
                 Some("https://172.18.255.1:8443".to_string())
             );
+            assert_eq!(
+                spec.proxy_endpoint(),
+                Some("https://172.18.255.1:8081".to_string())
+            );
             assert_eq!(spec.endpoint(), Some("172.18.255.1:8443:50051".to_string()));
         }
 
@@ -1415,12 +1436,14 @@ mod tests {
                 host: None,
                 grpc_port: 50051,
                 bootstrap_port: 8443,
+                proxy_port: 8081,
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
             };
             assert_eq!(spec.grpc_endpoint(), None);
             assert_eq!(spec.bootstrap_endpoint(), None);
+            assert_eq!(spec.proxy_endpoint(), None);
             assert_eq!(spec.endpoint(), None);
         }
     }

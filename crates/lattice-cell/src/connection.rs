@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use lattice_proto::{AgentState, CellCommand};
+use lattice_proto::{AgentState, CellCommand, KubernetesResponse};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -120,6 +120,9 @@ pub struct PivotSourceManifests {
     pub namespace: String,
 }
 
+/// Sender type for streaming K8s API responses
+pub type K8sResponseSender = mpsc::Sender<KubernetesResponse>;
+
 /// Registry of connected agents
 ///
 /// Thread-safe registry using DashMap for concurrent access.
@@ -136,6 +139,9 @@ pub struct AgentRegistry {
     pending_batch_acks: DashMap<String, oneshot::Sender<BatchAck>>,
     /// Pending complete acks keyed by request_id (CellCommand.command_id)
     pending_complete_acks: DashMap<String, oneshot::Sender<CompleteAck>>,
+    /// Pending K8s API proxy responses keyed by request_id
+    /// Uses mpsc::Sender to support streaming responses (watches)
+    pending_k8s_responses: DashMap<String, K8sResponseSender>,
 }
 
 impl AgentRegistry {
@@ -355,6 +361,45 @@ impl AgentRegistry {
         self.pending_complete_acks
             .remove(request_id)
             .map(|(_, sender)| sender)
+    }
+
+    // =========================================================================
+    // K8s API Proxy response tracking
+    // =========================================================================
+
+    /// Register a pending K8s API response channel
+    ///
+    /// The request_id should be the KubernetesRequest.request_id.
+    /// Uses mpsc::Sender to support streaming responses (watches).
+    pub fn register_pending_k8s_response(
+        &self,
+        request_id: &str,
+        sender: K8sResponseSender,
+    ) {
+        self.pending_k8s_responses
+            .insert(request_id.to_string(), sender);
+        debug!(request_id = %request_id, "Registered pending K8s API response");
+    }
+
+    /// Get the pending K8s response sender (does not remove)
+    ///
+    /// Returns a clone of the sender for streaming responses.
+    pub fn get_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
+        self.pending_k8s_responses.get(request_id).map(|r| r.clone())
+    }
+
+    /// Remove and return the pending K8s response sender
+    ///
+    /// Use this when the stream ends (stream_end=true) or for single responses.
+    pub fn take_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
+        self.pending_k8s_responses
+            .remove(request_id)
+            .map(|(_, sender)| sender)
+    }
+
+    /// Check if a K8s API request is pending
+    pub fn has_pending_k8s_response(&self, request_id: &str) -> bool {
+        self.pending_k8s_responses.contains_key(request_id)
     }
 }
 
@@ -761,5 +806,81 @@ mod tests {
     fn test_pending_complete_ack_take_nonexistent() {
         let registry = AgentRegistry::new();
         assert!(registry.take_pending_complete_ack("nonexistent").is_none());
+    }
+
+    // =========================================================================
+    // K8s API Proxy Response Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_pending_k8s_response_roundtrip() {
+        let registry = AgentRegistry::new();
+        let (tx, mut rx) = mpsc::channel::<KubernetesResponse>(16);
+
+        registry.register_pending_k8s_response("k8s-req-123", tx);
+        assert!(registry.has_pending_k8s_response("k8s-req-123"));
+
+        // Get sender and send a response
+        let sender = registry
+            .get_pending_k8s_response("k8s-req-123")
+            .expect("should have pending response");
+
+        let response = KubernetesResponse {
+            request_id: "k8s-req-123".to_string(),
+            status_code: 200,
+            body: b"{}".to_vec(),
+            ..Default::default()
+        };
+        sender.send(response).await.expect("channel should be open");
+
+        let received = rx.recv().await.expect("should receive response");
+        assert_eq!(received.request_id, "k8s-req-123");
+        assert_eq!(received.status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn test_pending_k8s_response_streaming() {
+        let registry = AgentRegistry::new();
+        let (tx, mut rx) = mpsc::channel::<KubernetesResponse>(16);
+
+        registry.register_pending_k8s_response("watch-123", tx);
+
+        // Send multiple streaming responses
+        for i in 0..3 {
+            let sender = registry
+                .get_pending_k8s_response("watch-123")
+                .expect("should have pending response");
+
+            let response = KubernetesResponse {
+                request_id: "watch-123".to_string(),
+                status_code: 200,
+                streaming: true,
+                stream_end: i == 2,
+                ..Default::default()
+            };
+            sender.send(response).await.expect("channel should be open");
+        }
+
+        // On stream end, take the sender to remove it
+        let _ = registry.take_pending_k8s_response("watch-123");
+        assert!(!registry.has_pending_k8s_response("watch-123"));
+
+        // Verify we received all responses
+        for i in 0..3 {
+            let received = rx.recv().await.expect("should receive response");
+            assert_eq!(received.stream_end, i == 2);
+        }
+    }
+
+    #[test]
+    fn test_pending_k8s_response_take_nonexistent() {
+        let registry = AgentRegistry::new();
+        assert!(registry.take_pending_k8s_response("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_pending_k8s_response_has_nonexistent() {
+        let registry = AgentRegistry::new();
+        assert!(!registry.has_pending_k8s_response("nonexistent"));
     }
 }

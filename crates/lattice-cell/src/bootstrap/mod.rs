@@ -1829,7 +1829,7 @@ mod tests {
     async fn default_generator_creates_namespace() {
         let generator = DefaultManifestGenerator::new();
         let manifests = generator
-            .generate("test:latest", None, None, None, false)
+            .generate("test:latest", None, None, None)
             .await;
 
         // Operator manifests are JSON, check for JSON format
@@ -1843,7 +1843,7 @@ mod tests {
     async fn default_generator_creates_operator_deployment() {
         let generator = DefaultManifestGenerator::new();
         let manifests = generator
-            .generate("test:latest", None, None, None, false)
+            .generate("test:latest", None, None, None)
             .await;
 
         // Operator manifests are JSON, check for JSON format
@@ -1857,7 +1857,7 @@ mod tests {
     async fn default_generator_creates_service_account() {
         let generator = DefaultManifestGenerator::new();
         let manifests = generator
-            .generate("test:latest", None, None, None, false)
+            .generate("test:latest", None, None, None)
             .await;
 
         // Should have ServiceAccount for operator
@@ -1871,7 +1871,7 @@ mod tests {
     async fn default_generator_creates_cilium_cni() {
         let generator = DefaultManifestGenerator::new();
         let manifests = generator
-            .generate("test:latest", None, None, None, false)
+            .generate("test:latest", None, None, None)
             .await;
 
         // Should include Cilium DaemonSet (rendered from helm template)
@@ -2172,7 +2172,7 @@ mod tests {
     async fn story_manifest_generation() {
         let generator = DefaultManifestGenerator::new();
         let manifests = generator
-            .generate("test:latest", None, None, None, false)
+            .generate("test:latest", None, None, None)
             .await;
 
         // CRD must be first so it's applied before any CR instances
@@ -2696,7 +2696,6 @@ mod tests {
             "test:latest".to_string(),
             None,
             None,
-            false,
         );
 
         // Register cluster with kubeadm bootstrap
@@ -2753,7 +2752,6 @@ mod tests {
             "test:latest".to_string(),
             None,
             None,
-            false,
         );
 
         // Register cluster with RKE2 bootstrap
@@ -2823,7 +2821,6 @@ mod tests {
             "test:latest".to_string(),
             None,
             None,
-            false,
         );
 
         // Register AWS cluster
@@ -2887,7 +2884,6 @@ mod tests {
             "test:latest".to_string(),
             None,
             None,
-            false,
         );
 
         // Register Docker cluster

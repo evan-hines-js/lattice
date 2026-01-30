@@ -622,6 +622,25 @@ impl AgentClient {
             // Discover and prepare CAPI resources (same logic as pivot)
             match lattice_move::prepare_move_objects(&client, namespace, cluster_name).await {
                 Ok(objects) => {
+                    // Log each object being sent for debugging
+                    for obj in &objects {
+                        // Parse manifest to get kind/name
+                        if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&obj.manifest) {
+                            let kind = parsed.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+                            let name = parsed.get("metadata")
+                                .and_then(|m| m.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
+                            info!(
+                                cluster = %cluster_name,
+                                kind = %kind,
+                                name = %name,
+                                source_uid = %obj.source_uid,
+                                owners = obj.owners.len(),
+                                "Unpivot: sending object"
+                            );
+                        }
+                    }
                     info!(
                         cluster = %cluster_name,
                         namespace = %namespace,

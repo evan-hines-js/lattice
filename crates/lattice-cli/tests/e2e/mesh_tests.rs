@@ -34,8 +34,6 @@ struct TestTarget {
     expected_allowed: bool,
     success_msg: String,
     fail_msg: String,
-    /// Optional headers to send with the request
-    headers: Vec<(String, String)>,
 }
 
 impl TestTarget {
@@ -57,49 +55,6 @@ impl TestTarget {
             expected_allowed: expected,
             success_msg,
             fail_msg,
-            headers: Vec::new(),
-        }
-    }
-
-    /// Create a test target with headers
-    fn with_headers(
-        name: &str,
-        namespace: &str,
-        expected: bool,
-        reason: &str,
-        headers: Vec<(&str, &str)>,
-    ) -> Self {
-        let header_desc = headers
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join(",");
-        let (success_msg, fail_msg) = if expected {
-            (
-                format!("{}[{}]: ALLOWED ({})", name, header_desc, reason),
-                format!(
-                    "{}[{}]: BLOCKED (UNEXPECTED - {})",
-                    name, header_desc, reason
-                ),
-            )
-        } else {
-            (
-                format!(
-                    "{}[{}]: ALLOWED (UNEXPECTED - {})",
-                    name, header_desc, reason
-                ),
-                format!("{}[{}]: BLOCKED ({})", name, header_desc, reason),
-            )
-        };
-        Self {
-            url: format!("http://{}.{}.svc.cluster.local/", name, namespace),
-            expected_allowed: expected,
-            success_msg,
-            fail_msg,
-            headers: headers
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
         }
     }
 
@@ -121,7 +76,6 @@ impl TestTarget {
             expected_allowed: expected,
             success_msg,
             fail_msg,
-            headers: Vec::new(),
         }
     }
 
@@ -143,18 +97,8 @@ impl TestTarget {
             expected_allowed: expected,
             success_msg,
             fail_msg,
-            headers: Vec::new(),
         }
     }
-}
-
-/// Generate curl header flags from a list of headers
-fn generate_header_flags(headers: &[(String, String)]) -> String {
-    headers
-        .iter()
-        .map(|(k, v)| format!("-H \"{}: {}\"", k, v))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Generate a traffic test script that waits for policies and tests connections
@@ -168,18 +112,11 @@ fn generate_test_script(source_name: &str, targets: Vec<TestTarget>) -> String {
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let header_flags = generate_header_flags(&t.headers);
-            let header_part = if header_flags.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", header_flags)
-            };
             format!(
                 r#"
-    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5{header_part} {url} 2>/dev/null || echo "000")"#,
+    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5 {url} 2>/dev/null || echo "000")"#,
                 i = i,
                 url = t.url,
-                header_part = header_part
             )
         })
         .collect();
@@ -235,12 +172,6 @@ fi
 
     // Add individual test checks with retries that distinguish policy blocks from transient failures
     for target in &targets {
-        let header_flags = generate_header_flags(&target.headers);
-        let header_part = if header_flags.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", header_flags)
-        };
         script.push_str(&format!(
             r#"
 # Test {url} - retry transient failures, accept 403 as definitive block
@@ -248,7 +179,7 @@ MAX_ATTEMPTS=5
 ATTEMPT=0
 RESULT="UNKNOWN"
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 --max-time 10{header_part} {url} 2>/dev/null || echo "000")
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 --max-time 10 {url} 2>/dev/null || echo "000")
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
         RESULT="ALLOWED"
         break
@@ -274,7 +205,6 @@ else
 fi
 "#,
             url = target.url,
-            header_part = header_part,
             success_msg = target.success_msg,
             fail_msg = target.fail_msg,
         ));

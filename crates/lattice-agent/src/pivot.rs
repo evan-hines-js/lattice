@@ -60,6 +60,9 @@ async fn fetch_kubeconfig_from_secret(
         .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))
 }
 
+/// Path to the cluster CA certificate (available in all pods via service account)
+const CLUSTER_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+
 fn update_cluster_entry(cluster_entry: &mut serde_yaml::Value, cluster_name: &str) -> bool {
     let Some(cluster_config) = cluster_entry.get_mut("cluster") else {
         return false;
@@ -77,9 +80,33 @@ fn update_cluster_entry(cluster_entry: &mut serde_yaml::Value, cluster_name: &st
     *server = serde_yaml::Value::String(INTERNAL_K8S_ENDPOINT.to_string());
 
     // Remove certificate-authority file path if present (won't work inside pod)
-    // Keep certificate-authority-data unchanged - it's already correct for this cluster
     if let Some(m) = cluster_config.as_mapping_mut() {
         m.remove("certificate-authority");
+    }
+
+    // Update certificate-authority-data with the cluster's CA
+    // This is necessary because during air-gapped pivot, the kubeconfig may have
+    // been patched to use the parent's proxy CA. After pivot, we need to use
+    // the cluster's own CA for self-management.
+    if let Ok(cluster_ca) = std::fs::read_to_string(CLUSTER_CA_PATH) {
+        let ca_b64 = STANDARD.encode(cluster_ca.as_bytes());
+        if let Some(m) = cluster_config.as_mapping_mut() {
+            m.insert(
+                serde_yaml::Value::String("certificate-authority-data".to_string()),
+                serde_yaml::Value::String(ca_b64),
+            );
+        }
+        debug!(
+            cluster = %cluster_name,
+            "Updated kubeconfig CA to cluster CA from service account"
+        );
+    } else {
+        // If we can't read the cluster CA, just leave certificate-authority-data as is
+        // This handles the case where we're running outside of a pod (e.g., tests)
+        debug!(
+            cluster = %cluster_name,
+            "Could not read cluster CA from service account, keeping existing CA"
+        );
     }
 
     info!(

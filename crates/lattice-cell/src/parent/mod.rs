@@ -27,6 +27,7 @@ use crate::bootstrap::{
     bootstrap_router, BootstrapState, DefaultManifestGenerator, ManifestGenerator,
 };
 use crate::connection::{AgentRegistry, SharedAgentRegistry};
+use crate::k8s_proxy::{start_proxy_server, ProxyConfig};
 use crate::resources::fetch_distributable_resources;
 use crate::server::AgentServer;
 use lattice_common::crd::{CloudProvider, SecretsProvider};
@@ -43,6 +44,8 @@ pub struct ParentConfig {
     pub bootstrap_addr: SocketAddr,
     /// Address for the gRPC server
     pub grpc_addr: SocketAddr,
+    /// Address for the K8s API proxy server
+    pub proxy_addr: SocketAddr,
     /// Bootstrap token TTL
     pub token_ttl: Duration,
     /// SANs for server certificates (hostnames/IPs that agents will use to connect)
@@ -62,6 +65,9 @@ impl Default for ParentConfig {
             grpc_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_GRPC_PORT)
                 .parse()
                 .expect("hardcoded socket address is valid"),
+            proxy_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_PROXY_PORT)
+                .parse()
+                .expect("hardcoded socket address is valid"),
             token_ttl: Duration::from_secs(3600),
             server_sans: vec![
                 "localhost".to_string(),
@@ -71,6 +77,8 @@ impl Default for ParentConfig {
                 "127.0.0.1".to_string(),
                 // Webhook service DNS name for in-cluster webhook calls
                 "lattice-webhook.lattice-system.svc".to_string(),
+                // Cell service DNS name for proxy access
+                "lattice-cell.lattice-system.svc".to_string(),
             ],
             image: std::env::var("LATTICE_IMAGE")
                 .unwrap_or_else(|_| "ghcr.io/evan-hines-js/lattice:latest".to_string()),
@@ -125,6 +133,7 @@ struct ServerHandles {
     bootstrap_handle: JoinHandle<()>,
     grpc_handle: JoinHandle<()>,
     secret_sync_handle: JoinHandle<()>,
+    proxy_handle: JoinHandle<()>,
 }
 
 /// Interval for periodic secret sync (safety net)
@@ -712,11 +721,33 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             run_resource_sync(sync_client, sync_registry).await;
         });
 
+        // Start K8s API proxy server
+        let proxy_addr = self.config.proxy_addr;
+        let proxy_registry = self.agent_registry.clone();
+        let ca_bundle_for_proxy = self.ca_bundle.read().await;
+        let (proxy_cert_pem, proxy_key_pem) = ca_bundle_for_proxy
+            .generate_server_cert(&sans)
+            .map_err(|e| CellServerError::CertGeneration(e.to_string()))?;
+        drop(ca_bundle_for_proxy);
+
+        info!(addr = %proxy_addr, "Starting K8s API proxy server");
+        let proxy_handle = tokio::spawn(async move {
+            let config = ProxyConfig {
+                addr: proxy_addr,
+                cert_pem: proxy_cert_pem,
+                key_pem: proxy_key_pem,
+            };
+            if let Err(e) = start_proxy_server(proxy_registry, config).await {
+                error!(error = %e, "K8s API proxy server error");
+            }
+        });
+
         // Store handles
         *self.handles.write().await = Some(ServerHandles {
             bootstrap_handle,
             grpc_handle,
             secret_sync_handle,
+            proxy_handle,
         });
 
         info!("Cell servers started successfully");
@@ -736,6 +767,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             handles.bootstrap_handle.abort();
             handles.grpc_handle.abort();
             handles.secret_sync_handle.abort();
+            handles.proxy_handle.abort();
         }
 
         *self.bootstrap_state.write().await = None;
