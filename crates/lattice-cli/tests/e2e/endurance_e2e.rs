@@ -37,8 +37,9 @@ use lattice_operator::crd::LatticeCluster;
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, delete_cluster_and_wait,
-    ensure_docker_network, force_delete_docker_cluster, get_docker_kubeconfig, load_cluster_config,
-    load_registry_credentials, run_cmd_allow_fail, watch_cluster_phases,
+    ensure_docker_network, force_delete_docker_cluster, get_docker_kubeconfig,
+    kubeconfig_path as kc_path, load_cluster_config, load_registry_credentials, run_cmd_allow_fail,
+    watch_cluster_phases,
 };
 use super::providers::InfraProvider;
 
@@ -143,7 +144,7 @@ async fn run_endurance_test() -> Result<(), String> {
         .await
         .map_err(|e| format!("Installer failed: {}", e))?;
 
-    let mgmt_kubeconfig_path = format!("/tmp/{}-kubeconfig", MGMT_CLUSTER_NAME);
+    let mgmt_kubeconfig_path = kc_path(MGMT_CLUSTER_NAME);
     let mgmt_kubeconfig = get_docker_kubeconfig(MGMT_CLUSTER_NAME)?;
     std::fs::write(&mgmt_kubeconfig_path, &mgmt_kubeconfig)
         .map_err(|e| format!("Failed to write mgmt kubeconfig: {}", e))?;
@@ -231,10 +232,10 @@ async fn run_endurance_test() -> Result<(), String> {
 
             // Add workload clusters to chaos targets
             for name in &cluster_names {
-                let kubeconfig_path = format!("/tmp/{}-kubeconfig", name);
+                let cluster_kc_path = kc_path(name);
                 if let Ok(kc) = get_docker_kubeconfig(name) {
-                    if std::fs::write(&kubeconfig_path, &kc).is_ok() {
-                        chaos_targets.add(name, &kubeconfig_path);
+                    if std::fs::write(&cluster_kc_path, &kc).is_ok() {
+                        chaos_targets.add(name, &cluster_kc_path);
                     }
                 }
             }
@@ -250,9 +251,9 @@ async fn run_endurance_test() -> Result<(), String> {
             // Delete all clusters (must delete from child cluster to trigger unpivot)
             info!("[ITERATION {}] Deleting all clusters...", iteration);
             for name in &cluster_names {
-                let cluster_kubeconfig_path = format!("/tmp/{}-kubeconfig", name);
+                let cluster_kc_path = kc_path(name);
                 delete_cluster_and_wait(
-                    &cluster_kubeconfig_path,
+                    &cluster_kc_path,
                     &mgmt_kubeconfig_path,
                     name,
                     InfraProvider::Docker,

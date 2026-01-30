@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::LATTICE_SYSTEM_NAMESPACE;
+
 // Re-export provider configs from the providers module
 pub use super::providers::{
     AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig, ProxmoxConfig,
@@ -459,27 +461,7 @@ impl NodeSpec {
 
 /// Check if a pool ID is valid (lowercase alphanumeric + hyphens, starts with letter)
 fn is_valid_pool_id(id: &str) -> bool {
-    if id.is_empty() {
-        return false;
-    }
-
-    let mut chars = id.chars();
-
-    // First char must be a letter
-    match chars.next() {
-        Some(c) if c.is_ascii_lowercase() => {}
-        _ => return false,
-    }
-
-    // Rest must be lowercase alphanumeric or hyphen
-    for c in chars {
-        if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-' {
-            return false;
-        }
-    }
-
-    // Cannot end with hyphen
-    !id.ends_with('-')
+    super::validate_dns_identifier(id, false).is_ok()
 }
 
 // =============================================================================
@@ -511,13 +493,13 @@ pub struct NetworkPool {
 pub struct SecretRef {
     /// Name of the Secret
     pub name: String,
-    /// Namespace of the Secret (default: "lattice-system")
+    /// Namespace of the Secret (default: LATTICE_SYSTEM_NAMESPACE)
     #[serde(default = "default_lattice_namespace")]
     pub namespace: String,
 }
 
 fn default_lattice_namespace() -> String {
-    "lattice-system".to_string()
+    LATTICE_SYSTEM_NAMESPACE.to_string()
 }
 
 // =============================================================================
@@ -906,7 +888,9 @@ mod tests {
             // On-prem providers use Cilium L2, no cloud LB annotations
             assert!(ProviderType::Docker.load_balancer_annotations().is_empty());
             assert!(ProviderType::Proxmox.load_balancer_annotations().is_empty());
-            assert!(ProviderType::OpenStack.load_balancer_annotations().is_empty());
+            assert!(ProviderType::OpenStack
+                .load_balancer_annotations()
+                .is_empty());
         }
     }
 

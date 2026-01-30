@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::{
     CloudProvider, CloudProviderPhase, CloudProviderStatus, CloudProviderType,
 };
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 /// Controller context
 pub struct Context {
@@ -130,7 +131,7 @@ async fn update_status(
     let name = cp.name_any();
     let namespace = cp
         .namespace()
-        .unwrap_or_else(|| "lattice-system".to_string());
+        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
 
     let status = CloudProviderStatus {
         phase,

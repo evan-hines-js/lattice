@@ -12,6 +12,7 @@ use kube::api::{Api, PostParams};
 use kube::Client;
 
 use lattice_agent::{AgentClient, AgentClientConfig, AgentCredentials, ClientState};
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 const AGENT_CREDENTIALS_SECRET: &str = "lattice-agent-credentials";
 
@@ -59,7 +60,7 @@ async fn start_agent_if_needed(
     // Check for lattice-parent-config secret - this is set by the bootstrap process
     // and indicates we were provisioned by a parent cell and need to connect back.
     // If a cluster has a cellRef, this secret will ALWAYS exist (created during bootstrap).
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), "lattice-system");
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let parent_config = match secrets.get("lattice-parent-config").await {
         Ok(config) => config,
         Err(kube::Error::Api(e)) if e.code == 404 => {
@@ -203,7 +204,7 @@ async fn save_agent_credentials(
     let secret = Secret {
         metadata: ObjectMeta {
             name: Some(AGENT_CREDENTIALS_SECRET.to_string()),
-            namespace: Some("lattice-system".to_string()),
+            namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
             ..Default::default()
         },
         data: Some(data),

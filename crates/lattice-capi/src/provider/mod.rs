@@ -1008,7 +1008,8 @@ fn generate_rke2_control_plane(
     // Build extra args using the shared functions
     let kubelet_extra_args = build_rke2_kubelet_extra_args(config.provider_type);
     let api_server_extra_args = build_rke2_api_server_extra_args(config.provider_type);
-    let controller_manager_extra_args = build_rke2_controller_manager_extra_args(config.provider_type);
+    let controller_manager_extra_args =
+        build_rke2_controller_manager_extra_args(config.provider_type);
 
     let mut spec = serde_json::json!({
         "replicas": cp_config.replicas,
@@ -1935,7 +1936,10 @@ mod tests {
         fn test_pool_resource_suffix() {
             assert_eq!(pool_resource_suffix("default"), "pool-default");
             assert_eq!(pool_resource_suffix("gpu"), "pool-gpu");
-            assert_eq!(pool_resource_suffix("memory-optimized"), "pool-memory-optimized");
+            assert_eq!(
+                pool_resource_suffix("memory-optimized"),
+                "pool-memory-optimized"
+            );
         }
 
         #[test]
@@ -2138,8 +2142,8 @@ mod tests {
         #[test]
         fn test_capi_manifest_with_data() {
             let data = serde_json::json!({"key": "value"});
-            let manifest = CAPIManifest::new("v1", "Secret", "my-secret", "default")
-                .with_data(data.clone());
+            let manifest =
+                CAPIManifest::new("v1", "Secret", "my-secret", "default").with_data(data.clone());
 
             assert_eq!(manifest.data, Some(data));
             assert!(manifest.spec.is_none());

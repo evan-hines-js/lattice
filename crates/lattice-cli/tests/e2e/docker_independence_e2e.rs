@@ -39,8 +39,8 @@ use lattice_operator::crd::LatticeCluster;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, docker_containers_deleted,
     ensure_docker_network, extract_docker_cluster_kubeconfig, force_delete_docker_cluster,
-    get_docker_kubeconfig, load_cluster_config, load_registry_credentials, run_cmd,
-    run_cmd_allow_fail, watch_cluster_phases, watch_worker_scaling,
+    get_docker_kubeconfig, kubeconfig_path, load_cluster_config, load_registry_credentials,
+    run_cmd, run_cmd_allow_fail, watch_cluster_phases, watch_worker_scaling,
 };
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -160,7 +160,7 @@ async fn run_independence_test(
     // =========================================================================
     info!("[Phase 3] Verifying workload cluster is self-managing...");
 
-    let workload_kubeconfig = format!("/tmp/{}-kubeconfig", workload_cluster_name);
+    let workload_kubeconfig = kubeconfig_path(&workload_cluster_name);
     extract_docker_cluster_kubeconfig(
         &workload_cluster_name,
         &workload_bootstrap,

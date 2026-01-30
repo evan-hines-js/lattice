@@ -10,6 +10,8 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, PostParams};
 use kube::Client;
 
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+
 use crate::crd::{LatticeCluster, ProviderType};
 
 /// Ensure the cell LoadBalancer Service exists.
@@ -24,7 +26,7 @@ pub async fn ensure_cell_service_exists(
     proxy_port: u16,
     provider_type: ProviderType,
 ) -> anyhow::Result<()> {
-    let api: Api<Service> = Api::namespaced(client.clone(), "lattice-system");
+    let api: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     // Check if it already exists
     if api.get("lattice-cell").await.is_ok() {
@@ -41,7 +43,7 @@ pub async fn ensure_cell_service_exists(
     let service = Service {
         metadata: ObjectMeta {
             name: Some("lattice-cell".to_string()),
-            namespace: Some("lattice-system".to_string()),
+            namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
             labels: Some(labels.clone()),
             annotations: if annotations.is_empty() {
                 None
@@ -101,7 +103,7 @@ pub async fn ensure_cell_service_exists(
 /// - `Ok(None)` - Service exists but no address yet (waiting for cloud provider)
 /// - `Err(msg)` - API error (transient, should retry)
 pub async fn discover_cell_host(client: &Client) -> Result<Option<String>, String> {
-    let services: Api<Service> = Api::namespaced(client.clone(), "lattice-system");
+    let services: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let svc = services
         .get("lattice-cell")
         .await

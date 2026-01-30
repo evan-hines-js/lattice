@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::{
     SecretsProvider, SecretsProviderPhase, SecretsProviderStatus, VaultAuthMethod,
 };
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 /// Controller context
 pub struct Context {
@@ -262,7 +263,7 @@ async fn update_status(
     let name = sp.name_any();
     let namespace = sp
         .namespace()
-        .unwrap_or_else(|| "lattice-system".to_string());
+        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
 
     let status = SecretsProviderStatus {
         phase,
@@ -316,7 +317,7 @@ mod tests {
                 auth_method: VaultAuthMethod::Token,
                 credentials_secret_ref: Some(SecretRef {
                     name: "vault-token".to_string(),
-                    namespace: "lattice-system".to_string(),
+                    namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
                 }),
                 kubernetes_mount_path: None,
                 kubernetes_role: None,
@@ -393,7 +394,7 @@ mod tests {
                 auth_method: VaultAuthMethod::AppRole,
                 credentials_secret_ref: Some(SecretRef {
                     name: "vault-approle".to_string(),
-                    namespace: "lattice-system".to_string(),
+                    namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
                 }),
                 kubernetes_mount_path: None,
                 kubernetes_role: None,

@@ -24,6 +24,7 @@ use super::kind_utils;
 use lattice_common::clusterctl::move_to_kubeconfig;
 use lattice_common::kube_utils;
 use lattice_common::AwsCredentials;
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_operator::bootstrap::{
     aws_credentials_manifests, generate_bootstrap_bundle, proxmox_credentials_manifests,
     BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
@@ -176,31 +177,7 @@ impl Installer {
     }
 
     fn clusterctl_init_args(&self) -> Vec<String> {
-        let infra_arg = match self.provider() {
-            ProviderType::Docker => "--infrastructure=docker",
-            ProviderType::Proxmox => "--infrastructure=proxmox",
-            ProviderType::OpenStack => "--infrastructure=openstack",
-            ProviderType::Aws => "--infrastructure=aws",
-            ProviderType::Gcp => "--infrastructure=gcp",
-            ProviderType::Azure => "--infrastructure=azure",
-        };
-
-        let config_path = env!("CLUSTERCTL_CONFIG");
-
-        let mut args = vec![
-            "init".to_string(),
-            infra_arg.to_string(),
-            "--bootstrap=kubeadm,rke2".to_string(),
-            "--control-plane=kubeadm,rke2".to_string(),
-            format!("--config={}", config_path),
-            "--wait-providers".to_string(),
-        ];
-
-        if self.provider() == ProviderType::Proxmox {
-            args.push("--ipam=in-cluster".to_string());
-        }
-
-        args
+        super::clusterctl_init_args(self.provider())
     }
 
     /// Run the installation
@@ -368,7 +345,7 @@ impl Installer {
         kube_utils::wait_for_deployment(
             client,
             "lattice-operator",
-            "lattice-system",
+            LATTICE_SYSTEM_NAMESPACE,
             Duration::from_secs(300),
         )
         .await
@@ -706,7 +683,7 @@ impl Installer {
         kube_utils::wait_for_deployment(
             mgmt_client,
             "lattice-operator",
-            "lattice-system",
+            LATTICE_SYSTEM_NAMESPACE,
             Duration::from_secs(120),
         )
         .await
@@ -808,7 +785,7 @@ impl Installer {
         } else {
             Some(SecretRef {
                 name: secret_name.to_string(),
-                namespace: "lattice-system".to_string(),
+                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
             })
         };
 
@@ -824,9 +801,9 @@ impl Installer {
                 labels: Default::default(),
             },
         );
-        cloud_provider.metadata.namespace = Some("lattice-system".to_string());
+        cloud_provider.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
 
-        let api: Api<CloudProvider> = Api::namespaced(client.clone(), "lattice-system");
+        let api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
         api.patch(
             provider_ref,
             &PatchParams::apply("lattice-cli").force(),

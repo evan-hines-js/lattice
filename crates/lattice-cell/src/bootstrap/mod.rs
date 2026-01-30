@@ -1291,7 +1291,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         let parent_config = Secret {
             metadata: ObjectMeta {
                 name: Some("lattice-parent-config".to_string()),
-                namespace: Some("lattice-system".to_string()),
+                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
             type_: Some("Opaque".to_string()),
@@ -1882,9 +1882,9 @@ mod tests {
         let manifests = generator.generate("test:latest", None, None, None).await;
 
         // Operator manifests are JSON, check for JSON format
-        let has_namespace = manifests
-            .iter()
-            .any(|m: &String| m.contains("\"kind\":\"Namespace\"") && m.contains("lattice-system"));
+        let has_namespace = manifests.iter().any(|m: &String| {
+            m.contains("\"kind\":\"Namespace\"") && m.contains(LATTICE_SYSTEM_NAMESPACE)
+        });
         assert!(has_namespace);
     }
 
@@ -2224,9 +2224,9 @@ mod tests {
         assert!(has_crd, "Should include LatticeCluster CRD definition");
 
         // Manifests create the lattice-system namespace (JSON format)
-        let has_namespace = manifests
-            .iter()
-            .any(|m: &String| m.contains("\"kind\":\"Namespace\"") && m.contains("lattice-system"));
+        let has_namespace = manifests.iter().any(|m: &String| {
+            m.contains("\"kind\":\"Namespace\"") && m.contains(LATTICE_SYSTEM_NAMESPACE)
+        });
         assert!(has_namespace, "Should create lattice-system namespace");
 
         // Manifests deploy the operator (JSON format)

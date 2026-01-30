@@ -159,7 +159,7 @@ impl ProxmoxProvider {
         if let Some(ref tags) = cfg.template_tags {
             spec["templateSelector"] = serde_json::json!({ "matchTags": tags });
         } else {
-            spec["templateID"] = serde_json::json!(cfg.template_id.unwrap_or(9000));
+            spec["templateID"] = serde_json::json!(cfg.template_id.unwrap_or(9001));
         }
         if let Some(ref snap) = cfg.snap_name {
             spec["snapName"] = serde_json::json!(snap);

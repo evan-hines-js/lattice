@@ -2,11 +2,45 @@
 
 use std::fmt::Display;
 
+use lattice_operator::crd::ProviderType;
+
 use crate::{Error, Result};
 
 pub mod install;
 pub mod kind_utils;
 pub mod uninstall;
+
+/// Build clusterctl init arguments for a given provider type.
+///
+/// Shared between install and uninstall commands to ensure consistent
+/// CAPI provider initialization.
+pub fn clusterctl_init_args(provider: ProviderType) -> Vec<String> {
+    let infra_arg = match provider {
+        ProviderType::Docker => "--infrastructure=docker",
+        ProviderType::Proxmox => "--infrastructure=proxmox",
+        ProviderType::OpenStack => "--infrastructure=openstack",
+        ProviderType::Aws => "--infrastructure=aws",
+        ProviderType::Gcp => "--infrastructure=gcp",
+        ProviderType::Azure => "--infrastructure=azure",
+    };
+
+    let config_path = env!("CLUSTERCTL_CONFIG");
+
+    let mut args = vec![
+        "init".to_string(),
+        infra_arg.to_string(),
+        "--bootstrap=kubeadm,rke2".to_string(),
+        "--control-plane=kubeadm,rke2".to_string(),
+        format!("--config={}", config_path),
+        "--wait-providers".to_string(),
+    ];
+
+    if provider == ProviderType::Proxmox {
+        args.push("--ipam=in-cluster".to_string());
+    }
+
+    args
+}
 
 /// Extension trait to convert errors with Display to CLI Error::CommandFailed.
 ///
