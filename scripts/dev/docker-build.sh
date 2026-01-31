@@ -36,6 +36,7 @@ CAPMOX_VERSION=$(get_version "providers" "infrastructure-proxmox")
 CAPA_VERSION=$(get_version "providers" "infrastructure-aws")
 CAPO_VERSION=$(get_version "providers" "infrastructure-openstack")
 IPAM_VERSION=$(get_version "providers" "ipam-in-cluster")
+CERTMANAGER_VERSION=$(get_version "providers" "cert-manager")
 
 echo "Building with versions from versions.toml:"
 echo "helm: $HELM_VERSION"
@@ -46,6 +47,7 @@ echo "capmox: $CAPMOX_VERSION"
 echo "capa: $CAPA_VERSION"
 echo "capo: $CAPO_VERSION"
 echo "ipam-in-cluster: $IPAM_VERSION"
+echo "cert-manager: $CERTMANAGER_VERSION"
 
 docker build \
     --build-arg HELM_VERSION="$HELM_VERSION" \
@@ -56,6 +58,7 @@ docker build \
     --build-arg CAPA_VERSION="$CAPA_VERSION" \
     --build-arg CAPO_VERSION="$CAPO_VERSION" \
     --build-arg IPAM_VERSION="$IPAM_VERSION" \
+    --build-arg CERTMANAGER_VERSION="$CERTMANAGER_VERSION" \
     --platform linux/amd64,linux/arm64 \
     --build-arg FIPS=false \
     "$@" \

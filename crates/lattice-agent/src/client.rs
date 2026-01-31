@@ -781,8 +781,7 @@ impl AgentClient {
     ///
     /// Reads provider type from LatticeCluster CRD, then:
     /// 1. Copies provider credentials from lattice-system to provider namespace
-    /// 2. Installs cert-manager from local helm chart
-    /// 3. Runs clusterctl init with air-gapped config (kubeadm + RKE2 providers)
+    /// 2. Runs clusterctl init (installs cert-manager + CAPI providers from bundled manifests)
     async fn install_capi() -> Result<String, std::io::Error> {
         use kube::api::ListParams;
 
