@@ -14,7 +14,7 @@
 use tracing::info;
 
 use super::super::context::{init_test_env, InfraContext};
-use super::super::helpers::{run_cmd, run_cmd_allow_fail, watch_worker_scaling};
+use super::super::helpers::{run_cmd, run_cmd_allow_fail, watch_worker_scaling, WORKLOAD_CLUSTER_NAME};
 
 /// Verify worker node count on workload cluster
 ///
@@ -146,7 +146,7 @@ pub async fn verify_total_nodes(kubeconfig: &str, expected_total: u32) -> Result
 async fn test_scaling_standalone() {
     let ctx = init_test_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone scaling tests");
     let cluster_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
-        .unwrap_or_else(|_| "e2e-workload".to_string());
+        .unwrap_or_else(|_| WORKLOAD_CLUSTER_NAME.to_string());
     let expected_workers: u32 = std::env::var("LATTICE_EXPECTED_WORKERS")
         .ok()
         .and_then(|v| v.parse().ok())

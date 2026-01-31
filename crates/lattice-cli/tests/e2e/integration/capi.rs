@@ -15,7 +15,9 @@
 use tracing::info;
 
 use super::super::context::{init_test_env, InfraContext};
-use super::super::helpers::{run_cmd, verify_cluster_capi_resources};
+use super::super::helpers::{
+    run_cmd, verify_cluster_capi_resources, MGMT_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+};
 
 /// Verify CAPI resources exist on management cluster
 ///
@@ -195,7 +197,7 @@ pub async fn verify_capi_machines_ready(
 async fn test_capi_standalone() {
     let ctx = init_test_env("Set LATTICE_MGMT_KUBECONFIG to run standalone CAPI tests");
     let cluster_name =
-        std::env::var("LATTICE_MGMT_CLUSTER_NAME").unwrap_or_else(|_| "e2e-mgmt".to_string());
+        std::env::var("LATTICE_MGMT_CLUSTER_NAME").unwrap_or_else(|_| MGMT_CLUSTER_NAME.to_string());
     verify_mgmt_capi_resources(&ctx, &cluster_name)
         .await
         .unwrap();
@@ -207,7 +209,7 @@ async fn test_capi_standalone() {
 async fn test_capi_workload_standalone() {
     let ctx = init_test_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone CAPI tests");
     let cluster_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
-        .unwrap_or_else(|_| "e2e-workload".to_string());
+        .unwrap_or_else(|_| WORKLOAD_CLUSTER_NAME.to_string());
     verify_workload_capi_resources(&ctx, &cluster_name)
         .await
         .unwrap();

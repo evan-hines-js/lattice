@@ -17,7 +17,9 @@
 use tracing::info;
 
 use super::super::context::{init_test_env, InfraContext};
-use super::super::helpers::{run_cmd, run_cmd_allow_fail};
+use super::super::helpers::{
+    run_cmd, run_cmd_allow_fail, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+};
 
 /// Test proxy access from management to workload cluster
 ///
@@ -208,7 +210,7 @@ pub async fn test_full_hierarchy_proxy(
 async fn test_proxy_standalone() {
     let ctx = init_test_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG");
     let workload_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
-        .unwrap_or_else(|_| "e2e-workload".to_string());
+        .unwrap_or_else(|_| WORKLOAD_CLUSTER_NAME.to_string());
     test_mgmt_to_workload_proxy(&ctx, &workload_name)
         .await
         .unwrap();
@@ -222,9 +224,9 @@ async fn test_proxy_hierarchy_standalone() {
         "Set LATTICE_MGMT_KUBECONFIG, LATTICE_WORKLOAD_KUBECONFIG, and LATTICE_WORKLOAD2_KUBECONFIG",
     );
     let workload_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
-        .unwrap_or_else(|_| "e2e-workload".to_string());
+        .unwrap_or_else(|_| WORKLOAD_CLUSTER_NAME.to_string());
     let workload2_name = std::env::var("LATTICE_WORKLOAD2_CLUSTER_NAME")
-        .unwrap_or_else(|_| "e2e-workload2".to_string());
+        .unwrap_or_else(|_| WORKLOAD2_CLUSTER_NAME.to_string());
     test_full_hierarchy_proxy(&ctx, &workload_name, &workload2_name)
         .await
         .unwrap();
