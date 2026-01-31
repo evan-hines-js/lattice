@@ -22,8 +22,8 @@ use lattice_common::crd::{
     WorkerPoolStatus,
 };
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::{lattice_svc_dns, Error, LATTICE_SYSTEM_NAMESPACE};
-use lattice_infra::generate_operator_network_policy;
+use lattice_common::{lattice_svc_dns, parse_cell_endpoint, Error, LATTICE_SYSTEM_NAMESPACE};
+use lattice_infra::InfrastructureConfig;
 use lattice_move::{CellMover, CellMoverConfig};
 use lattice_proto::AgentState;
 
@@ -851,12 +851,6 @@ pub trait PivotOperations: Send + Sync {
 
     /// Check if pivot is complete
     fn is_pivot_complete(&self, cluster_name: &str) -> bool;
-
-    /// Store post-pivot manifests to include in MoveComplete
-    ///
-    /// These manifests (network policy) are sent to the agent as part of
-    /// MoveComplete which has an ack cycle.
-    fn store_post_pivot_manifests(&self, cluster_name: &str, network_policy_yaml: Option<String>);
 }
 
 /// Shared context for the LatticeCluster controller
@@ -1413,11 +1407,8 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     }
                     PivotAction::TriggerPivot => {
                         // Agent ready for pivot - trigger it
-                        // Generate and store post-pivot manifests (included in MoveComplete)
-                        let network_policy_yaml = generate_network_policy_for_child(&ctx).await?;
-                        pivot_ops.store_post_pivot_manifests(&name, network_policy_yaml);
-
-                        // Trigger pivot - blocks until MoveCompleteAck received
+                        // Note: Infrastructure (including network policies) is reconciled
+                        // continuously by the child cluster's controller after pivot
                         info!("agent ready, triggering pivot");
                         match pivot_ops
                             .trigger_pivot(&name, &capi_namespace, &capi_namespace)
@@ -1454,8 +1445,17 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 return Ok(Action::requeue(Duration::from_secs(60)));
             }
 
-            // Self-cluster: reconcile worker pools and ensure control plane is tainted
-            debug!("cluster is ready, reconciling worker pools");
+            // Self-cluster: reconcile infrastructure and worker pools
+            debug!("cluster is ready, reconciling infrastructure and worker pools");
+
+            // Reconcile infrastructure (Cilium policies, Istio, etc.)
+            // This ensures policies can't be removed and are always in sync
+            if let Some(client) = &ctx.client {
+                if let Err(e) = reconcile_infrastructure(client, &cluster).await {
+                    warn!(error = %e, "failed to reconcile infrastructure, will retry");
+                    return Ok(Action::requeue(Duration::from_secs(30)));
+                }
+            }
 
             // Each cluster has its own CAPI namespace
             let capi_namespace = format!("capi-{}", name);
@@ -1731,38 +1731,56 @@ async fn generate_capi_manifests(
     provider.generate_capi_manifests(cluster, &bootstrap).await
 }
 
-/// Generate CiliumNetworkPolicy for child cluster's operator
+/// Reconcile infrastructure (Cilium policies, Istio policies, etc.)
 ///
-/// Gets the cell host from the LoadBalancer Service and generates a network policy
-/// that allows the child's operator to communicate with its parent cell.
-/// This is applied post-pivot when Cilium CRDs are available.
-async fn generate_network_policy_for_child(ctx: &Context) -> Result<Option<String>, Error> {
-    // Get parent cluster's endpoint config for the gRPC port
-    let Some(ref self_name) = ctx.self_cluster_name else {
-        return Ok(None);
-    };
+/// This ensures that infrastructure components can't be removed and are always in sync.
+/// Uses server-side apply for idempotency.
+async fn reconcile_infrastructure(client: &Client, cluster: &LatticeCluster) -> Result<(), Error> {
+    use k8s_openapi::api::core::v1::Secret;
+    use kube::Api;
 
-    let Some(parent_cluster) = ctx.kube.get_cluster(self_name).await? else {
-        return Ok(None);
-    };
+    let mut config = InfrastructureConfig::from(cluster);
 
-    let Some(ref endpoints) = parent_cluster.spec.parent_config else {
-        return Ok(None);
-    };
+    // Read parent address from lattice-parent-config secret if it exists
+    // This is the upstream parent cell this cluster connects to (not parent_config,
+    // which is for this cluster's own cell server endpoints)
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    if let Ok(parent_secret) = secrets.get("lattice-parent-config").await {
+        if let Some(data) = parent_secret.data {
+            if let Some(endpoint_bytes) = data.get("cell_endpoint") {
+                if let Ok(endpoint_str) = std::str::from_utf8(&endpoint_bytes.0) {
+                    // Parse endpoint like "https://172.18.255.10:50051"
+                    if let Some((host, port)) = parse_cell_endpoint(endpoint_str) {
+                        config.parent_host = Some(host);
+                        config.parent_grpc_port = port;
+                    }
+                }
+            }
+        }
+    }
 
-    // Get the cell host from the LoadBalancer Service
-    let Some(cell_host) = ctx.kube.get_cell_host().await? else {
-        // Host not yet available from Service
-        return Ok(None);
-    };
+    // Generate infrastructure manifests
+    let manifests = lattice_infra::generate_all(&config)
+        .await
+        .map_err(|e| Error::internal(format!("failed to generate infrastructure: {}", e)))?;
 
-    Ok(Some(
-        serde_json::to_string_pretty(&generate_operator_network_policy(
-            Some(&cell_host),
-            endpoints.grpc_port,
-        ))
-        .expect("CiliumNetworkPolicy serialization"),
-    ))
+    debug!(
+        cluster = %config.cluster_name,
+        parent_host = ?config.parent_host,
+        count = manifests.len(),
+        "reconciling infrastructure manifests"
+    );
+
+    // Apply manifests using server-side apply with skip_missing_crds
+    // This handles CRDs that aren't installed yet (e.g., Cilium, Istio)
+    let options = lattice_common::ApplyOptions {
+        skip_missing_crds: true,
+    };
+    lattice_common::apply_manifests_with_discovery(client, &manifests, &options)
+        .await
+        .map_err(|e| Error::internal(format!("failed to apply infrastructure: {}", e)))?;
+
+    Ok(())
 }
 
 /// Error policy for the controller
@@ -1936,21 +1954,15 @@ impl PivotOperations for PivotOperationsImpl {
                 DistributableResources::default()
             });
 
-        // Get post-pivot manifests (included in MoveComplete which has an ack)
-        let manifests: Vec<Vec<u8>> = self
-            .agent_registry
-            .take_post_pivot_manifests(cluster_name)
-            .and_then(|m| m.network_policy_yaml.map(|p| vec![p.into_bytes()]))
-            .unwrap_or_default();
-
-        // Configure the distributed move with all resources and manifests
+        // Configure the distributed move with resources
+        // Note: Infrastructure manifests (network policies, etc.) are reconciled
+        // continuously by the child cluster's controller after pivot
         let config = CellMoverConfig::new(source_namespace, target_namespace, cluster_name)
             .with_resources(
                 resources.cloud_providers,
                 resources.secrets_providers,
                 resources.secrets,
-            )
-            .with_manifests(manifests);
+            );
 
         // Create the gRPC command sender
         let sender = std::sync::Arc::new(lattice_cell::GrpcMoveCommandSender::new(
@@ -2011,15 +2023,6 @@ impl PivotOperations for PivotOperationsImpl {
         self.agent_registry
             .get(cluster_name)
             .is_some_and(|a| a.pivot_complete)
-    }
-
-    fn store_post_pivot_manifests(&self, cluster_name: &str, network_policy_yaml: Option<String>) {
-        self.agent_registry.set_post_pivot_manifests(
-            cluster_name,
-            lattice_cell::PostPivotManifests {
-                network_policy_yaml,
-            },
-        );
     }
 }
 

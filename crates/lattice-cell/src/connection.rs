@@ -95,13 +95,6 @@ pub enum SendError {
     ChannelClosed,
 }
 
-/// Post-pivot manifests included in MoveComplete for acked delivery
-#[derive(Clone, Debug, Default)]
-pub struct PostPivotManifests {
-    /// CiliumNetworkPolicy for the operator (applied after Cilium CRDs exist)
-    pub network_policy_yaml: Option<String>,
-}
-
 /// CAPI manifests received from child during unpivot
 #[derive(Clone, Debug, Default)]
 pub struct UnpivotManifests {
@@ -140,7 +133,6 @@ pub struct KubeconfigProxyConfig {
 /// Thread-safe registry using DashMap for concurrent access.
 pub struct AgentRegistry {
     agents: DashMap<String, AgentConnection>,
-    post_pivot_manifests: DashMap<String, PostPivotManifests>,
     unpivot_manifests: DashMap<String, UnpivotManifests>,
     /// CAPI manifests exported during pivot (deleted after MoveCompleteAck)
     pivot_source_manifests: DashMap<String, PivotSourceManifests>,
@@ -161,7 +153,6 @@ impl Default for AgentRegistry {
     fn default() -> Self {
         Self {
             agents: DashMap::new(),
-            post_pivot_manifests: DashMap::new(),
             unpivot_manifests: DashMap::new(),
             pivot_source_manifests: DashMap::new(),
             teardown_in_progress: DashMap::new(),
@@ -281,25 +272,6 @@ impl AgentRegistry {
             Some(agent) => agent.send_command(command).await,
             None => Err(SendError::ChannelClosed),
         }
-    }
-
-    /// Store manifests to send after pivot completes
-    pub fn set_post_pivot_manifests(&self, cluster_name: &str, manifests: PostPivotManifests) {
-        info!(cluster = %cluster_name, "Stored post-pivot manifests");
-        self.post_pivot_manifests
-            .insert(cluster_name.to_string(), manifests);
-    }
-
-    /// Get and remove post-pivot manifests for a cluster
-    pub fn take_post_pivot_manifests(&self, cluster_name: &str) -> Option<PostPivotManifests> {
-        self.post_pivot_manifests
-            .remove(cluster_name)
-            .map(|(_, m)| m)
-    }
-
-    /// Check if post-pivot manifests are stored for a cluster
-    pub fn has_post_pivot_manifests(&self, cluster_name: &str) -> bool {
-        self.post_pivot_manifests.contains_key(cluster_name)
     }
 
     /// Store CAPI manifests received from child during unpivot
@@ -675,36 +647,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Post-Pivot Manifests Tests
-    // =========================================================================
-
-    #[test]
-    fn test_post_pivot_manifests() {
-        let registry = AgentRegistry::new();
-
-        let manifests = PostPivotManifests {
-            network_policy_yaml: Some(
-                "apiVersion: cilium.io/v2\nkind: CiliumNetworkPolicy".to_string(),
-            ),
-        };
-
-        registry.set_post_pivot_manifests("test", manifests);
-        assert!(registry.has_post_pivot_manifests("test"));
-
-        let retrieved = registry.take_post_pivot_manifests("test").unwrap();
-        assert!(retrieved.network_policy_yaml.is_some());
-
-        assert!(!registry.has_post_pivot_manifests("test"));
-    }
-
-    #[test]
-    fn test_post_pivot_manifests_empty() {
-        let registry = AgentRegistry::new();
-        assert!(!registry.has_post_pivot_manifests("nonexistent"));
-        assert!(registry.take_post_pivot_manifests("nonexistent").is_none());
-    }
-
-    // =========================================================================
     // Pivot Source Manifests Tests
     // =========================================================================
 
@@ -734,12 +676,6 @@ mod tests {
     // =========================================================================
     // Struct Default Tests
     // =========================================================================
-
-    #[test]
-    fn test_post_pivot_manifests_default() {
-        let m = PostPivotManifests::default();
-        assert!(m.network_policy_yaml.is_none());
-    }
 
     #[test]
     fn test_unpivot_manifests_default() {
