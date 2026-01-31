@@ -80,7 +80,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
 }
 
 fn deployment_is_available(d: &Deployment) -> bool {
-    d.status.as_ref().map_or(false, |status| {
+    d.status.as_ref().is_some_and(|status| {
         let desired = status.replicas.unwrap_or(0);
         let available = status.available_replicas.unwrap_or(0);
         desired > 0 && available >= desired
