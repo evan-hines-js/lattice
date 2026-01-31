@@ -12,13 +12,37 @@ use super::PolicyMetadata;
 #[serde(rename_all = "camelCase")]
 pub struct ServiceEntry {
     /// API version
+    #[serde(default = "ServiceEntry::api_version")]
     pub api_version: String,
     /// Kind
+    #[serde(default = "ServiceEntry::kind")]
     pub kind: String,
     /// Metadata
     pub metadata: PolicyMetadata,
     /// Spec
     pub spec: ServiceEntrySpec,
+}
+
+impl ServiceEntry {
+    const API_VERSION: &'static str = "networking.istio.io/v1beta1";
+    const KIND: &'static str = "ServiceEntry";
+
+    fn api_version() -> String {
+        Self::API_VERSION.to_string()
+    }
+    fn kind() -> String {
+        Self::KIND.to_string()
+    }
+
+    /// Create a new ServiceEntry
+    pub fn new(metadata: PolicyMetadata, spec: ServiceEntrySpec) -> Self {
+        Self {
+            api_version: Self::API_VERSION.to_string(),
+            kind: Self::KIND.to_string(),
+            metadata,
+            spec,
+        }
+    }
 }
 
 /// ServiceEntry spec

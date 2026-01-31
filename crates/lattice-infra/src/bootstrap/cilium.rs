@@ -9,7 +9,14 @@ use tokio::process::Command;
 use tokio::sync::OnceCell;
 use tracing::info;
 
-use lattice_common::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT};
+use lattice_common::policy::{
+    CiliumClusterwideNetworkPolicy, CiliumClusterwideSpec, CiliumEgressRule, CiliumIngressRule,
+    CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule,
+    ClusterwideEgressRule, ClusterwideEndpointSelector, ClusterwideIngressRule,
+    ClusterwideMetadata, ClusterwidePortRule, DnsMatch, DnsRules, EnableDefaultDeny,
+    EndpointSelector, FqdnSelector, MatchExpression, PolicyMetadata,
+};
+use lattice_common::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE};
 
 use super::{charts_dir, split_yaml_documents};
 use crate::system_namespaces;
@@ -125,25 +132,26 @@ pub fn cilium_version() -> &'static str {
 /// - enableDefaultDeny: false for both egress/ingress to not interfere with other policies
 /// - endpointSelector: {} selects all pods
 /// - fromCIDR: allows health probes from ztunnel's link-local address
-pub fn generate_ztunnel_allowlist() -> String {
-    r#"---
-apiVersion: cilium.io/v2
-kind: CiliumClusterwideNetworkPolicy
-metadata:
-  name: allow-ambient-hostprobes
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  description: "Allows SNAT-ed kubelet health check probes into ambient pods"
-  enableDefaultDeny:
-    egress: false
-    ingress: false
-  endpointSelector: {}
-  ingress:
-    - fromCIDR:
-        - 169.254.7.127/32
-"#
-    .to_string()
+pub fn generate_ztunnel_allowlist() -> CiliumClusterwideNetworkPolicy {
+    CiliumClusterwideNetworkPolicy::new(
+        ClusterwideMetadata::new("allow-ambient-hostprobes"),
+        CiliumClusterwideSpec {
+            description: Some(
+                "Allows SNAT-ed kubelet health check probes into ambient pods".to_string(),
+            ),
+            enable_default_deny: Some(EnableDefaultDeny {
+                egress: false,
+                ingress: false,
+            }),
+            endpoint_selector: ClusterwideEndpointSelector::default(),
+            ingress: vec![ClusterwideIngressRule {
+                from_cidr: vec!["169.254.7.127/32".to_string()],
+                from_endpoints: vec![],
+                to_ports: vec![],
+            }],
+            egress: vec![],
+        },
+    )
 }
 
 /// Generate a CiliumClusterwideNetworkPolicy for mesh-wide default-deny.
@@ -155,49 +163,67 @@ spec:
 /// - No ingress rules = deny all ingress
 /// - Only allow DNS egress to kube-dns
 /// - Exclude system namespaces from policy
-pub fn generate_default_deny() -> String {
-    // Build the namespace exclusion list from centralized registry
-    let namespace_values: String = system_namespaces::all()
-        .iter()
-        .map(|ns| format!("          - {}", ns))
-        .collect::<Vec<_>>()
-        .join("\n");
+pub fn generate_default_deny() -> CiliumClusterwideNetworkPolicy {
+    use std::collections::BTreeMap;
 
-    format!(
-        r#"---
-apiVersion: cilium.io/v2
-kind: CiliumClusterwideNetworkPolicy
-metadata:
-  name: default-deny
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  description: "Block all ingress traffic by default, allow DNS and K8s API egress"
-  endpointSelector:
-    matchExpressions:
-      - key: k8s:io.kubernetes.pod.namespace
-        operator: NotIn
-        values:
-{namespace_values}
-  egress:
-    # Allow DNS to kube-dns
-    - toEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: kube-system
-            k8s:k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
-          rules:
-            dns:
-              - matchPattern: "*"
-    # Allow access to Kubernetes API server (required for all controllers)
-    - toEntities:
-        - kube-apiserver
-"#
+    CiliumClusterwideNetworkPolicy::new(
+        ClusterwideMetadata::new("default-deny"),
+        CiliumClusterwideSpec {
+            description: Some(
+                "Block all ingress traffic by default, allow DNS and K8s API egress".to_string(),
+            ),
+            enable_default_deny: None,
+            endpoint_selector: ClusterwideEndpointSelector {
+                match_labels: BTreeMap::new(),
+                match_expressions: vec![MatchExpression {
+                    key: "k8s:io.kubernetes.pod.namespace".to_string(),
+                    operator: "NotIn".to_string(),
+                    values: system_namespaces::all()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                }],
+            },
+            ingress: vec![],
+            egress: vec![
+                ClusterwideEgressRule {
+                    to_endpoints: vec![EndpointSelector {
+                        match_labels: BTreeMap::from([
+                            (
+                                "k8s:io.kubernetes.pod.namespace".to_string(),
+                                "kube-system".to_string(),
+                            ),
+                            ("k8s:k8s-app".to_string(), "kube-dns".to_string()),
+                        ]),
+                    }],
+                    to_entities: vec![],
+                    to_cidr: vec![],
+                    to_ports: vec![ClusterwidePortRule {
+                        ports: vec![
+                            CiliumPort {
+                                port: "53".to_string(),
+                                protocol: "UDP".to_string(),
+                            },
+                            CiliumPort {
+                                port: "53".to_string(),
+                                protocol: "TCP".to_string(),
+                            },
+                        ],
+                        rules: Some(DnsRules {
+                            dns: vec![DnsMatch {
+                                match_pattern: Some("*".to_string()),
+                            }],
+                        }),
+                    }],
+                },
+                ClusterwideEgressRule {
+                    to_endpoints: vec![],
+                    to_entities: vec!["kube-apiserver".to_string()],
+                    to_cidr: vec![],
+                    to_ports: vec![],
+                },
+            ],
+        },
     )
 }
 
@@ -210,43 +236,78 @@ spec:
 /// In Istio ambient mode, traffic flows: client -> ztunnel -> waypoint -> service
 /// The waypoint terminates HBONE, evaluates AuthorizationPolicy, then forwards to the service.
 /// L7 AuthorizationPolicy controls access - L4 just needs to allow the waypoint to forward.
-pub fn generate_waypoint_egress_policy() -> String {
-    r#"---
-apiVersion: cilium.io/v2
-kind: CiliumClusterwideNetworkPolicy
-metadata:
-  name: waypoint-egress
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  description: "Allow Istio waypoint proxies to reach istiod and forward to services"
-  endpointSelector:
-    matchLabels:
-      k8s:istio.io/waypoint-for: service
-  egress:
-    # Allow xDS and certificate signing to istiod
-    - toEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: istio-system
-            k8s:app: istiod
-      toPorts:
-        - ports:
-            - port: "15012"
-              protocol: TCP
-    # Allow HBONE traffic
-    - toPorts:
-        - ports:
-            - port: "15008"
-              protocol: TCP
-    # Allow waypoints to forward traffic to any internal endpoint on any port
-    # L7 AuthorizationPolicy controls actual access, L4 just allows forwarding
-    - toEndpoints:
-        - {}
-    # Allow waypoints to forward traffic to external services (ServiceEntry)
-    - toCIDR:
-        - "0.0.0.0/0"
-"#
-    .to_string()
+pub fn generate_waypoint_egress_policy() -> CiliumClusterwideNetworkPolicy {
+    use std::collections::BTreeMap;
+
+    CiliumClusterwideNetworkPolicy::new(
+        ClusterwideMetadata::new("waypoint-egress"),
+        CiliumClusterwideSpec {
+            description: Some(
+                "Allow Istio waypoint proxies to reach istiod and forward to services".to_string(),
+            ),
+            enable_default_deny: None,
+            endpoint_selector: ClusterwideEndpointSelector {
+                match_labels: BTreeMap::from([(
+                    "k8s:istio.io/waypoint-for".to_string(),
+                    "service".to_string(),
+                )]),
+                match_expressions: vec![],
+            },
+            ingress: vec![],
+            egress: vec![
+                // Allow xDS and certificate signing to istiod
+                ClusterwideEgressRule {
+                    to_endpoints: vec![EndpointSelector {
+                        match_labels: BTreeMap::from([
+                            (
+                                "k8s:io.kubernetes.pod.namespace".to_string(),
+                                "istio-system".to_string(),
+                            ),
+                            ("k8s:app".to_string(), "istiod".to_string()),
+                        ]),
+                    }],
+                    to_entities: vec![],
+                    to_cidr: vec![],
+                    to_ports: vec![ClusterwidePortRule {
+                        ports: vec![CiliumPort {
+                            port: "15012".to_string(),
+                            protocol: "TCP".to_string(),
+                        }],
+                        rules: None,
+                    }],
+                },
+                // Allow HBONE traffic
+                ClusterwideEgressRule {
+                    to_endpoints: vec![],
+                    to_entities: vec![],
+                    to_cidr: vec![],
+                    to_ports: vec![ClusterwidePortRule {
+                        ports: vec![CiliumPort {
+                            port: "15008".to_string(),
+                            protocol: "TCP".to_string(),
+                        }],
+                        rules: None,
+                    }],
+                },
+                // Allow waypoints to forward traffic to any internal endpoint
+                ClusterwideEgressRule {
+                    to_endpoints: vec![EndpointSelector {
+                        match_labels: BTreeMap::new(),
+                    }],
+                    to_entities: vec![],
+                    to_cidr: vec![],
+                    to_ports: vec![],
+                },
+                // Allow waypoints to forward traffic to external services
+                ClusterwideEgressRule {
+                    to_endpoints: vec![],
+                    to_entities: vec![],
+                    to_cidr: vec!["0.0.0.0/0".to_string()],
+                    to_ports: vec![],
+                },
+            ],
+        },
+    )
 }
 
 /// Generate a CiliumNetworkPolicy for the Lattice operator/agent.
@@ -258,87 +319,111 @@ spec:
 ///
 /// This follows the principle of least privilege - the agent should only
 /// be able to reach what it needs for normal operation.
-pub fn generate_operator_network_policy(parent_host: Option<&str>, parent_port: u16) -> String {
+pub fn generate_operator_network_policy(
+    parent_host: Option<&str>,
+    parent_port: u16,
+) -> CiliumNetworkPolicy {
+    use std::collections::BTreeMap;
+
     let mut egress_rules = vec![
         // DNS to kube-dns
-        r#"  - toEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: kube-system
-            k8s:k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP"#
-            .to_string(),
+        CiliumEgressRule {
+            to_endpoints: vec![EndpointSelector {
+                match_labels: BTreeMap::from([
+                    (
+                        "k8s:io.kubernetes.pod.namespace".to_string(),
+                        "kube-system".to_string(),
+                    ),
+                    ("k8s:k8s-app".to_string(), "kube-dns".to_string()),
+                ]),
+            }],
+            to_entities: vec![],
+            to_fqdns: vec![],
+            to_cidr: vec![],
+            to_ports: vec![CiliumPortRule {
+                ports: vec![
+                    CiliumPort {
+                        port: "53".to_string(),
+                        protocol: "UDP".to_string(),
+                    },
+                    CiliumPort {
+                        port: "53".to_string(),
+                        protocol: "TCP".to_string(),
+                    },
+                ],
+            }],
+        },
         // K8s API server
-        r#"  - toEntities:
-        - kube-apiserver"#
-            .to_string(),
+        CiliumEgressRule {
+            to_endpoints: vec![],
+            to_entities: vec!["kube-apiserver".to_string()],
+            to_fqdns: vec![],
+            to_cidr: vec![],
+            to_ports: vec![],
+        },
     ];
 
     // Add parent cell if specified
     if let Some(host) = parent_host {
-        // Check if host is an IP address or hostname
         let is_ip = host.parse::<std::net::IpAddr>().is_ok();
+        let parent_ports = vec![CiliumPortRule {
+            ports: vec![
+                CiliumPort {
+                    port: DEFAULT_BOOTSTRAP_PORT.to_string(),
+                    protocol: "TCP".to_string(),
+                },
+                CiliumPort {
+                    port: parent_port.to_string(),
+                    protocol: "TCP".to_string(),
+                },
+            ],
+        }];
 
         if is_ip {
-            // Use toCIDR for IP addresses
-            egress_rules.push(format!(
-                r#"  - toCIDR:
-        - {}/32
-      toPorts:
-        - ports:
-            - port: "{}"
-              protocol: TCP
-            - port: "{}"
-              protocol: TCP"#,
-                host, DEFAULT_BOOTSTRAP_PORT, parent_port
-            ));
+            egress_rules.push(CiliumEgressRule {
+                to_endpoints: vec![],
+                to_entities: vec![],
+                to_fqdns: vec![],
+                to_cidr: vec![format!("{}/32", host)],
+                to_ports: parent_ports,
+            });
         } else {
-            // Use toFQDNs for hostnames
-            egress_rules.push(format!(
-                r#"  - toFQDNs:
-        - matchName: {}
-      toPorts:
-        - ports:
-            - port: "{}"
-              protocol: TCP
-            - port: "{}"
-              protocol: TCP"#,
-                host, DEFAULT_BOOTSTRAP_PORT, parent_port
-            ));
+            egress_rules.push(CiliumEgressRule {
+                to_endpoints: vec![],
+                to_entities: vec![],
+                to_fqdns: vec![FqdnSelector {
+                    match_name: Some(host.to_string()),
+                    match_pattern: None,
+                }],
+                to_cidr: vec![],
+                to_ports: parent_ports,
+            });
         }
     }
 
-    format!(
-        r#"---
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: lattice-operator
-  namespace: lattice-system
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  endpointSelector:
-    matchLabels:
-      app: lattice-operator
-  egress:
-{egress}
-  ingress:
-    # Allow ingress for bootstrap webhook and gRPC
-    - toPorts:
-        - ports:
-            - port: "{bootstrap_port}"
-              protocol: TCP
-            - port: "{grpc_port}"
-              protocol: TCP
-"#,
-        egress = egress_rules.join("\n"),
-        bootstrap_port = DEFAULT_BOOTSTRAP_PORT,
-        grpc_port = DEFAULT_GRPC_PORT,
+    CiliumNetworkPolicy::new(
+        PolicyMetadata::new("lattice-operator", LATTICE_SYSTEM_NAMESPACE),
+        CiliumNetworkPolicySpec {
+            endpoint_selector: EndpointSelector {
+                match_labels: BTreeMap::from([("app".to_string(), "lattice-operator".to_string())]),
+            },
+            ingress: vec![CiliumIngressRule {
+                from_endpoints: vec![],
+                to_ports: vec![CiliumPortRule {
+                    ports: vec![
+                        CiliumPort {
+                            port: DEFAULT_BOOTSTRAP_PORT.to_string(),
+                            protocol: "TCP".to_string(),
+                        },
+                        CiliumPort {
+                            port: DEFAULT_GRPC_PORT.to_string(),
+                            protocol: "TCP".to_string(),
+                        },
+                    ],
+                }],
+            }],
+            egress: egress_rules,
+        },
     )
 }
 
@@ -367,26 +452,45 @@ mod tests {
     fn test_operator_network_policy_without_parent() {
         let policy = generate_operator_network_policy(None, 50051);
 
-        // Should be valid YAML
-        assert!(policy.contains("apiVersion: cilium.io/v2"));
-        assert!(policy.contains("kind: CiliumNetworkPolicy"));
-        assert!(policy.contains("name: lattice-operator"));
-        assert!(policy.contains("namespace: lattice-system"));
+        // Check metadata
+        assert_eq!(policy.metadata.name, "lattice-operator");
+        assert_eq!(policy.metadata.namespace, LATTICE_SYSTEM_NAMESPACE);
 
         // Should have DNS egress
-        assert!(policy.contains("kube-dns"));
-        assert!(policy.contains("port: \"53\""));
+        let dns_rule = policy.spec.egress.iter().find(|r| {
+            r.to_endpoints
+                .iter()
+                .any(|e| e.match_labels.get("k8s:k8s-app") == Some(&"kube-dns".to_string()))
+        });
+        assert!(dns_rule.is_some());
+        let dns_rule = dns_rule.unwrap();
+        assert!(dns_rule
+            .to_ports
+            .iter()
+            .any(|p| p.ports.iter().any(|port| port.port == "53")));
 
         // Should have API server egress
-        assert!(policy.contains("kube-apiserver"));
+        assert!(policy
+            .spec
+            .egress
+            .iter()
+            .any(|r| r.to_entities.contains(&"kube-apiserver".to_string())));
 
-        // Should NOT have parent rules
-        assert!(!policy.contains("toFQDNs"));
-        assert!(!policy.contains("toCIDR"));
+        // Should NOT have parent rules (no FQDN or CIDR)
+        assert!(policy.spec.egress.iter().all(|r| r.to_fqdns.is_empty()));
+        assert!(policy.spec.egress.iter().all(|r| r.to_cidr.is_empty()));
 
         // Should have ingress for cell ports
-        assert!(policy.contains("port: \"8443\""));
-        assert!(policy.contains("port: \"50051\""));
+        assert!(policy.spec.ingress.iter().any(|r| {
+            r.to_ports
+                .iter()
+                .any(|p| p.ports.iter().any(|port| port.port == "8443"))
+        }));
+        assert!(policy.spec.ingress.iter().any(|r| {
+            r.to_ports
+                .iter()
+                .any(|p| p.ports.iter().any(|port| port.port == "50051"))
+        }));
     }
 
     #[test]
@@ -394,18 +498,38 @@ mod tests {
         let policy = generate_operator_network_policy(Some("cell.example.com"), 50051);
 
         // Should have parent FQDN rule for hostname
-        assert!(policy.contains("toFQDNs"));
-        assert!(policy.contains("matchName: cell.example.com"));
+        let fqdn_rule = policy.spec.egress.iter().find(|r| !r.to_fqdns.is_empty());
+        assert!(fqdn_rule.is_some());
+        let fqdn_rule = fqdn_rule.unwrap();
+        assert!(fqdn_rule
+            .to_fqdns
+            .iter()
+            .any(|f| f.match_name == Some("cell.example.com".to_string())));
+
         // Should allow both bootstrap and gRPC ports
-        assert!(policy.contains("port: \"8443\""));
-        assert!(policy.contains("port: \"50051\""));
+        assert!(fqdn_rule
+            .to_ports
+            .iter()
+            .any(|p| p.ports.iter().any(|port| port.port == "8443")));
+        assert!(fqdn_rule
+            .to_ports
+            .iter()
+            .any(|p| p.ports.iter().any(|port| port.port == "50051")));
 
         // Should NOT use toCIDR for hostname
-        assert!(!policy.contains("toCIDR"));
+        assert!(fqdn_rule.to_cidr.is_empty());
 
         // Should still have DNS and API server
-        assert!(policy.contains("kube-dns"));
-        assert!(policy.contains("kube-apiserver"));
+        assert!(policy.spec.egress.iter().any(|r| {
+            r.to_endpoints
+                .iter()
+                .any(|e| e.match_labels.get("k8s:k8s-app") == Some(&"kube-dns".to_string()))
+        }));
+        assert!(policy
+            .spec
+            .egress
+            .iter()
+            .any(|r| r.to_entities.contains(&"kube-apiserver".to_string())));
     }
 
     #[test]
@@ -413,18 +537,35 @@ mod tests {
         let policy = generate_operator_network_policy(Some("172.18.255.10"), 50051);
 
         // Should have parent CIDR rule for IP address
-        assert!(policy.contains("toCIDR"));
-        assert!(policy.contains("172.18.255.10/32"));
+        let cidr_rule = policy.spec.egress.iter().find(|r| !r.to_cidr.is_empty());
+        assert!(cidr_rule.is_some());
+        let cidr_rule = cidr_rule.unwrap();
+        assert!(cidr_rule.to_cidr.contains(&"172.18.255.10/32".to_string()));
+
         // Should allow both bootstrap and gRPC ports
-        assert!(policy.contains("port: \"8443\""));
-        assert!(policy.contains("port: \"50051\""));
+        assert!(cidr_rule
+            .to_ports
+            .iter()
+            .any(|p| p.ports.iter().any(|port| port.port == "8443")));
+        assert!(cidr_rule
+            .to_ports
+            .iter()
+            .any(|p| p.ports.iter().any(|port| port.port == "50051")));
 
         // Should NOT use toFQDNs for IP
-        assert!(!policy.contains("toFQDNs"));
+        assert!(cidr_rule.to_fqdns.is_empty());
 
         // Should still have DNS and API server
-        assert!(policy.contains("kube-dns"));
-        assert!(policy.contains("kube-apiserver"));
+        assert!(policy.spec.egress.iter().any(|r| {
+            r.to_endpoints
+                .iter()
+                .any(|e| e.match_labels.get("k8s:k8s-app") == Some(&"kube-dns".to_string()))
+        }));
+        assert!(policy
+            .spec
+            .egress
+            .iter()
+            .any(|r| r.to_entities.contains(&"kube-apiserver".to_string())));
     }
 
     #[test]
@@ -432,55 +573,80 @@ mod tests {
         let policy = generate_operator_network_policy(Some("parent.local"), 4001);
 
         // Should use custom gRPC port and default bootstrap port
-        assert!(policy.contains("port: \"4001\""));
-        assert!(policy.contains("port: \"8443\""));
-        assert!(policy.contains("matchName: parent.local"));
+        let fqdn_rule = policy
+            .spec
+            .egress
+            .iter()
+            .find(|r| !r.to_fqdns.is_empty())
+            .unwrap();
+        assert!(fqdn_rule
+            .to_ports
+            .iter()
+            .any(|p| p.ports.iter().any(|port| port.port == "4001")));
+        assert!(fqdn_rule
+            .to_ports
+            .iter()
+            .any(|p| p.ports.iter().any(|port| port.port == "8443")));
+        assert!(fqdn_rule
+            .to_fqdns
+            .iter()
+            .any(|f| f.match_name == Some("parent.local".to_string())));
     }
 
     #[test]
     fn test_ztunnel_allowlist() {
         let policy = generate_ztunnel_allowlist();
 
-        // Should be a CiliumClusterwideNetworkPolicy
-        assert!(policy.contains("apiVersion: cilium.io/v2"));
-        assert!(policy.contains("kind: CiliumClusterwideNetworkPolicy"));
-        assert!(policy.contains("name: allow-ambient-hostprobes"));
+        // Check metadata
+        assert_eq!(policy.metadata.name, "allow-ambient-hostprobes");
 
         // Should allow ztunnel link-local address for health probes
-        assert!(policy.contains("169.254.7.127/32"));
+        assert!(policy
+            .spec
+            .ingress
+            .iter()
+            .any(|r| r.from_cidr.contains(&"169.254.7.127/32".to_string())));
 
         // Should have enableDefaultDeny set to false (per Istio docs)
-        assert!(policy.contains("enableDefaultDeny:"));
-        assert!(policy.contains("egress: false"));
-        assert!(policy.contains("ingress: false"));
+        let enable_deny = policy.spec.enable_default_deny.as_ref().unwrap();
+        assert!(!enable_deny.egress);
+        assert!(!enable_deny.ingress);
 
-        // Should have ingress rule
-        assert!(policy.contains("ingress:"));
-        assert!(policy.contains("fromCIDR:"));
+        // Should have ingress rule with fromCIDR
+        assert!(!policy.spec.ingress.is_empty());
+        assert!(policy.spec.ingress.iter().any(|r| !r.from_cidr.is_empty()));
     }
 
     #[test]
     fn test_default_deny() {
         let policy = generate_default_deny();
 
-        // Should be a CiliumClusterwideNetworkPolicy
-        assert!(policy.contains("apiVersion: cilium.io/v2"));
-        assert!(policy.contains("kind: CiliumClusterwideNetworkPolicy"));
-        assert!(policy.contains("name: default-deny"));
+        // Check metadata
+        assert_eq!(policy.metadata.name, "default-deny");
 
         // Should exclude system namespaces via matchExpressions
-        assert!(policy.contains("matchExpressions:"));
-        assert!(policy.contains("k8s:io.kubernetes.pod.namespace"));
-        assert!(policy.contains("operator: NotIn"));
-        assert!(policy.contains("kube-system"));
-        assert!(policy.contains("cert-manager"));
-        assert!(policy.contains("capi-system"));
+        assert!(!policy.spec.endpoint_selector.match_expressions.is_empty());
+        let expr = &policy.spec.endpoint_selector.match_expressions[0];
+        assert_eq!(expr.key, "k8s:io.kubernetes.pod.namespace");
+        assert_eq!(expr.operator, "NotIn");
+        assert!(expr.values.contains(&"kube-system".to_string()));
+        assert!(expr.values.contains(&"cert-manager".to_string()));
+        assert!(expr.values.contains(&"capi-system".to_string()));
 
-        // Should allow DNS and K8s API egress, NO ingress (implicit deny)
-        assert!(policy.contains("egress:"));
-        assert!(policy.contains("k8s:k8s-app: kube-dns"));
-        assert!(policy.contains("kube-apiserver")); // Allow K8s API access
-        assert!(!policy.contains("ingress:")); // No ingress = deny all
-        assert!(!policy.contains("fromEntities:")); // No fromEntities allow-all
+        // Should allow DNS and K8s API egress
+        assert!(!policy.spec.egress.is_empty());
+        assert!(policy.spec.egress.iter().any(|r| {
+            r.to_endpoints
+                .iter()
+                .any(|e| e.match_labels.get("k8s:k8s-app") == Some(&"kube-dns".to_string()))
+        }));
+        assert!(policy
+            .spec
+            .egress
+            .iter()
+            .any(|r| r.to_entities.contains(&"kube-apiserver".to_string())));
+
+        // NO ingress rules = implicit deny all
+        assert!(policy.spec.ingress.is_empty());
     }
 }

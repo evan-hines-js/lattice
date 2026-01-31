@@ -20,6 +20,7 @@
 //! During CA rotation, both old and new CA are trusted for verification.
 //! This allows time for all leaf certs to be re-issued with the new CA.
 
+use lattice_common::{lattice_svc_dns, lattice_svc_dns_fqdn};
 use rcgen::{
     string::Ia5String, BasicConstraints, CertificateParams, CertificateSigningRequestParams,
     DistinguishedName, DnType, DnValue, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
@@ -390,6 +391,8 @@ impl CertificateAuthority {
         // These are well-known DNS name patterns that should always be valid.
         // If they fail, it indicates a bug in the cluster_id format.
         let agent_dns = format!("lattice-agent-{}", cluster_id);
+        let svc_dns = lattice_svc_dns("lattice-agent");
+        let svc_dns_fqdn = lattice_svc_dns_fqdn("lattice-agent");
         csr_params.params.subject_alt_names = vec![
             SanType::DnsName(Ia5String::try_from(agent_dns.clone()).map_err(|e| {
                 PkiError::CertificateGenerationFailed(format!(
@@ -397,25 +400,18 @@ impl CertificateAuthority {
                     agent_dns, e
                 ))
             })?),
-            SanType::DnsName(
-                Ia5String::try_from("lattice-agent.lattice-system.svc".to_string()).map_err(
-                    |e| {
-                        PkiError::CertificateGenerationFailed(format!(
-                            "invalid DNS name 'lattice-agent.lattice-system.svc': {}",
-                            e
-                        ))
-                    },
-                )?,
-            ),
-            SanType::DnsName(
-                Ia5String::try_from("lattice-agent.lattice-system.svc.cluster.local".to_string())
-                    .map_err(|e| {
-                    PkiError::CertificateGenerationFailed(format!(
-                        "invalid DNS name 'lattice-agent.lattice-system.svc.cluster.local': {}",
-                        e
-                    ))
-                })?,
-            ),
+            SanType::DnsName(Ia5String::try_from(svc_dns.clone()).map_err(|e| {
+                PkiError::CertificateGenerationFailed(format!(
+                    "invalid DNS name '{}': {}",
+                    svc_dns, e
+                ))
+            })?),
+            SanType::DnsName(Ia5String::try_from(svc_dns_fqdn.clone()).map_err(|e| {
+                PkiError::CertificateGenerationFailed(format!(
+                    "invalid DNS name '{}': {}",
+                    svc_dns_fqdn, e
+                ))
+            })?),
         ];
 
         // Create the Issuer from our CA certificate and key

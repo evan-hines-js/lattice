@@ -3,6 +3,14 @@
 //! Generates Istio manifests using Helm charts with ambient mesh mode.
 //! Installs four charts: base (CRDs), istiod (control plane), istio-cni, and ztunnel.
 
+use std::collections::BTreeMap;
+
+use lattice_common::policy::{
+    AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
+    MtlsConfig, OperationSpec, PeerAuthentication, PeerAuthenticationSpec, PolicyMetadata,
+    TargetRef, WorkloadSelector,
+};
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 use tracing::info;
@@ -64,20 +72,15 @@ impl IstioReconciler {
     }
 
     /// Generate default PeerAuthentication for STRICT mTLS
-    pub fn generate_peer_authentication() -> String {
-        r#"---
-apiVersion: security.istio.io/v1
-kind: PeerAuthentication
-metadata:
-  name: default
-  namespace: istio-system
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  mtls:
-    mode: STRICT
-"#
-        .to_string()
+    pub fn generate_peer_authentication() -> PeerAuthentication {
+        PeerAuthentication::new(
+            PolicyMetadata::new("default", "istio-system"),
+            PeerAuthenticationSpec {
+                mtls: MtlsConfig {
+                    mode: "STRICT".to_string(),
+                },
+            },
+        )
     }
 
     /// Generate mesh-wide default-deny AuthorizationPolicy
@@ -85,19 +88,16 @@ spec:
     /// This is the security baseline for the mesh. With this policy in place,
     /// all traffic is denied unless explicitly allowed by service-specific policies.
     /// Must be deployed to istio-system to apply mesh-wide.
-    pub fn generate_default_deny() -> String {
-        r#"---
-apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: mesh-default-deny
-  namespace: istio-system
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  {}
-"#
-        .to_string()
+    pub fn generate_default_deny() -> AuthorizationPolicy {
+        AuthorizationPolicy::new(
+            PolicyMetadata::new("mesh-default-deny", "istio-system"),
+            AuthorizationPolicySpec {
+                target_refs: vec![],
+                selector: None,
+                action: String::new(),
+                rules: vec![],
+            },
+        )
     }
 
     /// Generate waypoint default-deny AuthorizationPolicy
@@ -107,22 +107,20 @@ spec:
     /// waypoint→target is allowed, the waypoint becomes permissive to all sources.
     ///
     /// See: https://github.com/istio/istio/issues/54696
-    pub fn generate_waypoint_default_deny() -> String {
-        r#"---
-apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: waypoint-default-deny
-  namespace: istio-system
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  targetRefs:
-  - kind: GatewayClass
-    group: gateway.networking.k8s.io
-    name: istio-waypoint
-"#
-        .to_string()
+    pub fn generate_waypoint_default_deny() -> AuthorizationPolicy {
+        AuthorizationPolicy::new(
+            PolicyMetadata::new("waypoint-default-deny", "istio-system"),
+            AuthorizationPolicySpec {
+                target_refs: vec![TargetRef {
+                    group: "gateway.networking.k8s.io".to_string(),
+                    kind: "GatewayClass".to_string(),
+                    name: "istio-waypoint".to_string(),
+                }],
+                selector: None,
+                action: String::new(),
+                rules: vec![],
+            },
+        )
     }
 
     /// Generate AuthorizationPolicy allowing traffic to lattice-operator
@@ -132,26 +130,29 @@ spec:
     /// - Workload cluster agents (gRPC on 50051)
     ///
     /// These connections come from outside the mesh, so we allow any source.
-    pub fn generate_operator_allow_policy() -> String {
-        r#"---
-apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: lattice-operator-allow
-  namespace: lattice-system
-  labels:
-    app.kubernetes.io/managed-by: lattice
-spec:
-  selector:
-    matchLabels:
-      app: lattice-operator
-  action: ALLOW
-  rules:
-  - to:
-    - operation:
-        ports: ["8443", "50051"]
-"#
-        .to_string()
+    pub fn generate_operator_allow_policy() -> AuthorizationPolicy {
+        AuthorizationPolicy::new(
+            PolicyMetadata::new("lattice-operator-allow", LATTICE_SYSTEM_NAMESPACE),
+            AuthorizationPolicySpec {
+                target_refs: vec![],
+                selector: Some(WorkloadSelector {
+                    match_labels: BTreeMap::from([(
+                        "app".to_string(),
+                        "lattice-operator".to_string(),
+                    )]),
+                }),
+                action: "ALLOW".to_string(),
+                rules: vec![AuthorizationRule {
+                    from: vec![],
+                    to: vec![AuthorizationOperation {
+                        operation: OperationSpec {
+                            ports: vec!["8443".to_string(), "50051".to_string()],
+                            hosts: vec![],
+                        },
+                    }],
+                }],
+            },
+        )
     }
 
     async fn render_manifests(config: &IstioConfig) -> Result<Vec<String>, String> {
@@ -302,8 +303,9 @@ mod tests {
     #[test]
     fn test_peer_authentication() {
         let policy = IstioReconciler::generate_peer_authentication();
-        assert!(policy.contains("kind: PeerAuthentication"));
-        assert!(policy.contains("mode: STRICT"));
+        assert_eq!(policy.metadata.name, "default");
+        assert_eq!(policy.metadata.namespace, "istio-system");
+        assert_eq!(policy.spec.mtls.mode, "STRICT");
     }
 
     #[test]
@@ -343,31 +345,49 @@ mod tests {
     #[test]
     fn test_default_deny_policy() {
         let policy = IstioReconciler::generate_default_deny();
-        assert!(policy.contains("apiVersion: security.istio.io/v1"));
-        assert!(policy.contains("kind: AuthorizationPolicy"));
-        assert!(policy.contains("name: mesh-default-deny"));
-        assert!(policy.contains("namespace: istio-system"));
-        assert!(policy.contains("app.kubernetes.io/managed-by: lattice"));
-        // Empty spec {} means deny all traffic
-        assert!(policy.contains("spec:"));
-        assert!(policy.contains("{}"));
+        assert_eq!(policy.metadata.name, "mesh-default-deny");
+        assert_eq!(policy.metadata.namespace, "istio-system");
+        assert!(policy
+            .metadata
+            .labels
+            .contains_key("app.kubernetes.io/managed-by"));
+        // Empty spec means deny all traffic (no rules, no action)
+        assert!(policy.spec.rules.is_empty());
+        assert!(policy.spec.action.is_empty());
         // No selector = mesh-wide
-        assert!(!policy.contains("selector:"));
+        assert!(policy.spec.selector.is_none());
     }
 
     #[test]
     fn test_operator_allow_policy() {
         let policy = IstioReconciler::generate_operator_allow_policy();
-        assert!(policy.contains("apiVersion: security.istio.io/v1"));
-        assert!(policy.contains("kind: AuthorizationPolicy"));
-        assert!(policy.contains("name: lattice-operator-allow"));
-        assert!(policy.contains("namespace: lattice-system"));
-        assert!(policy.contains("app.kubernetes.io/managed-by: lattice"));
-        assert!(policy.contains("selector:"));
-        assert!(policy.contains("app: lattice-operator"));
-        assert!(policy.contains("action: ALLOW"));
-        assert!(policy.contains("8443"));
-        assert!(policy.contains("50051"));
+        assert_eq!(policy.metadata.name, "lattice-operator-allow");
+        assert_eq!(policy.metadata.namespace, LATTICE_SYSTEM_NAMESPACE);
+        assert!(policy
+            .metadata
+            .labels
+            .contains_key("app.kubernetes.io/managed-by"));
+
+        // Has selector for lattice-operator
+        let selector = policy.spec.selector.as_ref().unwrap();
+        assert_eq!(
+            selector.match_labels.get("app"),
+            Some(&"lattice-operator".to_string())
+        );
+
+        assert_eq!(policy.spec.action, "ALLOW");
+
+        // Check ports are allowed
+        let ports: Vec<&str> = policy
+            .spec
+            .rules
+            .iter()
+            .flat_map(|r| r.to.iter())
+            .flat_map(|t| t.operation.ports.iter())
+            .map(|s| s.as_str())
+            .collect();
+        assert!(ports.contains(&"8443"));
+        assert!(ports.contains(&"50051"));
     }
 
     #[test]

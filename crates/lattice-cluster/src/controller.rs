@@ -22,7 +22,7 @@ use lattice_common::crd::{
     WorkerPoolStatus,
 };
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{lattice_svc_dns, Error, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::generate_operator_network_policy;
 use lattice_move::{CellMover, CellMoverConfig};
 use lattice_proto::AgentState;
@@ -1297,13 +1297,18 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                             } else {
                                 // No explicit host - use in-cluster service DNS
                                 format!(
-                                    "https://lattice-cell.lattice-system.svc:{}",
+                                    "https://{}:{}",
+                                    lattice_svc_dns("lattice-cell"),
                                     endpoints.proxy_port
                                 )
                             }
                         } else {
                             // Fallback to default
-                            "https://lattice-cell.lattice-system.svc:8081".to_string()
+                            format!(
+                                "https://{}:{}",
+                                lattice_svc_dns("lattice-cell"),
+                                lattice_common::DEFAULT_PROXY_PORT
+                            )
                         };
 
                         let ca_cert_pem = parent_servers.ca_trust_bundle_pem().await;
@@ -1751,10 +1756,13 @@ async fn generate_network_policy_for_child(ctx: &Context) -> Result<Option<Strin
         return Ok(None);
     };
 
-    Ok(Some(generate_operator_network_policy(
-        Some(&cell_host),
-        endpoints.grpc_port,
-    )))
+    Ok(Some(
+        serde_json::to_string_pretty(&generate_operator_network_policy(
+            Some(&cell_host),
+            endpoints.grpc_port,
+        ))
+        .expect("CiliumNetworkPolicy serialization"),
+    ))
 }
 
 /// Error policy for the controller

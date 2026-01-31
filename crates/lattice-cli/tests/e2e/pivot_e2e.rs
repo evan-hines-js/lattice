@@ -76,8 +76,6 @@ use super::helpers::{
     verify_cluster_capi_resources, watch_cluster_phases, watch_cluster_phases_with_kubeconfig,
     watch_worker_scaling,
 };
-// Media server test disabled pending investigation
-#[allow(unused_imports)]
 use super::media_server_e2e::{cleanup_media_server_test, run_media_server_test};
 use super::mesh_tests::{run_mesh_test, run_random_mesh_test};
 use super::providers::InfraProvider;
@@ -217,7 +215,8 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
         LATTICE_IMAGE.to_string(),
         true, // keep_bootstrap_on_failure
         registry_credentials,
-        None, // bootstrap_override
+        None,                                           // bootstrap_override
+        Some(format!("{}-", super::helpers::run_id())), // kubeconfig_prefix for parallel runs
     )
     .map_err(|e| format!("Failed to create installer: {}", e))?;
     installer
@@ -330,20 +329,34 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
     // Start mesh tests in background (runs on workload cluster, doesn't need workload2)
     let mesh_handle = if mesh_test_enabled() {
         let kubeconfig = workload_kubeconfig_path.clone();
+        let is_docker = workload_provider == InfraProvider::Docker;
         Some(tokio::spawn(async move {
             info!("[Mesh] Running service mesh tests...");
             let kubeconfig2 = kubeconfig.clone();
+            let kubeconfig3 = kubeconfig.clone();
 
             // Run mesh tests in parallel (these test policy enforcement, not operator availability):
             // - Fixed 10-service bilateral agreement test (includes wildcard)
             // - Randomized large-scale mesh test
-            let (r1, r2) = tokio::join!(
-                run_mesh_test(&kubeconfig),
-                run_random_mesh_test(&kubeconfig2)
-            );
+            // - Media server test (Docker only - tests LatticeService with volumes)
+            if is_docker {
+                let (r1, r2, r3) = tokio::join!(
+                    run_mesh_test(&kubeconfig),
+                    run_random_mesh_test(&kubeconfig2),
+                    run_media_server_test(&kubeconfig3)
+                );
+                r1?;
+                r2?;
+                r3?;
+            } else {
+                let (r1, r2) = tokio::join!(
+                    run_mesh_test(&kubeconfig),
+                    run_random_mesh_test(&kubeconfig2)
+                );
+                r1?;
+                r2?;
+            }
 
-            r1?;
-            r2?;
             info!("[Mesh] All tests complete!");
             Ok::<_, String>(())
         }))

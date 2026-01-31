@@ -9,6 +9,7 @@ pub mod error;
 pub mod fips;
 pub mod graph;
 pub mod kube_utils;
+pub mod policy;
 pub mod protocol;
 pub mod retry;
 pub mod template;
@@ -33,6 +34,20 @@ pub const DEFAULT_PROXY_PORT: u16 = 8081;
 
 /// Namespace for Lattice system resources (CA, credentials, operator)
 pub const LATTICE_SYSTEM_NAMESPACE: &str = "lattice-system";
+
+/// Construct a Kubernetes service DNS name for a Lattice service.
+///
+/// Returns `{service}.{LATTICE_SYSTEM_NAMESPACE}.svc`
+pub fn lattice_svc_dns(service: &str) -> String {
+    format!("{}.{}.svc", service, LATTICE_SYSTEM_NAMESPACE)
+}
+
+/// Construct a fully-qualified Kubernetes service DNS name for a Lattice service.
+///
+/// Returns `{service}.{LATTICE_SYSTEM_NAMESPACE}.svc.cluster.local`
+pub fn lattice_svc_dns_fqdn(service: &str) -> String {
+    format!("{}.{}.svc.cluster.local", service, LATTICE_SYSTEM_NAMESPACE)
+}
 
 /// Environment variable to indicate this is a bootstrap cluster
 pub const BOOTSTRAP_CLUSTER_ENV: &str = "LATTICE_BOOTSTRAP_CLUSTER";
