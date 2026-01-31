@@ -42,19 +42,15 @@ use super::helpers::{
     kubeconfig_path as kc_path, load_cluster_config, load_registry_credentials, run_cmd_allow_fail,
     watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
-use super::integration::setup::cleanup_bootstrap_clusters;
+use super::helpers::run_id;
+use super::integration::setup;
 use super::providers::InfraProvider;
 
 const BATCH_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes per batch
 const SETTLE_DELAY: Duration = Duration::from_secs(20);
 
-fn cleanup_all_clusters() {
-    info!("Cleaning up all test resources...");
-
-    cleanup_bootstrap_clusters();
-    force_delete_docker_cluster(MGMT_CLUSTER_NAME);
-
-    // Clean up any endurance-* clusters (pattern matches all iterations)
+/// Clean up endurance-* Docker containers
+fn cleanup_endurance_containers() {
     let containers =
         run_cmd_allow_fail("docker", &["ps", "-a", "--filter", "name=endurance-", "-q"]);
     for id in containers.lines() {
@@ -62,7 +58,23 @@ fn cleanup_all_clusters() {
             let _ = run_cmd_allow_fail("docker", &["rm", "-f", id.trim()]);
         }
     }
+}
 
+/// Clean up this run's resources
+fn cleanup_all_clusters() {
+    info!("Cleaning up all test resources...");
+    setup::cleanup_bootstrap_cluster(run_id());
+    force_delete_docker_cluster(MGMT_CLUSTER_NAME);
+    cleanup_endurance_containers();
+    info!("Cleanup complete");
+}
+
+/// Clean up orphans and all resources (opt-in via LATTICE_CLEANUP_ORPHANS)
+fn cleanup_orphans_and_all_clusters() {
+    info!("Cleaning up orphaned and all test resources...");
+    setup::cleanup_orphan_bootstrap_clusters();
+    force_delete_docker_cluster(MGMT_CLUSTER_NAME);
+    cleanup_endurance_containers();
     info!("Cleanup complete");
 }
 
@@ -74,8 +86,8 @@ async fn test_endurance_loop() {
     info!("ENDURANCE TEST - RUNS FOREVER (10 min timeout per batch)");
     info!("=========================================================");
 
-    // Clean up any leftover resources from previous runs
-    cleanup_all_clusters();
+    // Clean up any leftover resources from previous runs (opt-in via LATTICE_CLEANUP_ORPHANS)
+    cleanup_orphans_and_all_clusters();
 
     if let Err(e) = build_and_push_lattice_image(DEFAULT_LATTICE_IMAGE).await {
         cleanup_all_clusters();

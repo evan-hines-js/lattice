@@ -44,15 +44,29 @@ use super::helpers::{
     run_cmd, watch_cluster_phases, watch_worker_scaling, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
     WORKLOAD_CLUSTER_NAME,
 };
-use super::integration::setup::cleanup_bootstrap_clusters;
+use super::helpers::run_id;
+use super::integration::setup;
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
 
-fn cleanup_clusters(mgmt_name: &str, workload_name: &str) {
-    info!("Cleaning up all test resources...");
-    cleanup_bootstrap_clusters();
+/// Clean up Docker clusters used by this test
+fn cleanup_docker_clusters(mgmt_name: &str, workload_name: &str) {
     force_delete_docker_cluster(mgmt_name);
     force_delete_docker_cluster(workload_name);
+}
+
+/// Clean up this run's resources
+fn cleanup_clusters(mgmt_name: &str, workload_name: &str) {
+    info!("Cleaning up all test resources...");
+    setup::cleanup_bootstrap_cluster(run_id());
+    cleanup_docker_clusters(mgmt_name, workload_name);
+}
+
+/// Clean up orphans and all resources (opt-in via LATTICE_CLEANUP_ORPHANS)
+fn cleanup_orphans_and_clusters(mgmt_name: &str, workload_name: &str) {
+    info!("Cleaning up orphaned and test resources...");
+    setup::cleanup_orphan_bootstrap_clusters();
+    cleanup_docker_clusters(mgmt_name, workload_name);
 }
 
 #[tokio::test]
@@ -75,7 +89,8 @@ async fn test_docker_independence() {
         .as_deref()
         .unwrap_or(WORKLOAD_CLUSTER_NAME);
 
-    cleanup_clusters(mgmt_name, workload_name);
+    // Opt-in cleanup of orphaned clusters from previous failed runs
+    cleanup_orphans_and_clusters(mgmt_name, workload_name);
 
     if let Err(e) = build_and_push_lattice_image(DEFAULT_LATTICE_IMAGE).await {
         cleanup_clusters(mgmt_name, workload_name);

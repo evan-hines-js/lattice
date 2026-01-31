@@ -1699,42 +1699,63 @@ async fn generate_capi_manifests(
         );
         let bootstrap_endpoint = format!("https://{}:{}", cell_host, endpoints.bootstrap_port);
 
-        // Serialize the LatticeCluster CRD to pass to workload cluster
-        let cluster_manifest =
-            serde_json::to_string(&cluster.for_export()).map_err(|e| Error::Serialization {
-                message: format!("failed to serialize cluster: {}", e),
-                kind: Some("LatticeCluster".to_string()),
-            })?;
-
-        // Register cluster and get token
-        let proxmox_ipv4_pool = cluster
-            .spec
-            .provider
-            .config
-            .proxmox
+        // Get bootstrap token from LatticeCluster status (source of truth)
+        // The token is stored on the cluster itself and moves with it during pivot
+        let token = cluster
+            .status
             .as_ref()
-            .map(|p| p.ipv4_pool.clone());
-        let autoscaling_enabled = cluster
-            .spec
-            .nodes
-            .worker_pools
-            .values()
-            .any(|p| p.is_autoscaling_enabled());
-        let registration = lattice_cell::ClusterRegistration {
-            cluster_id: cluster_name.to_string(),
-            cell_endpoint: cell_endpoint.clone(),
-            ca_certificate: ca_cert.clone(),
-            cluster_manifest,
-            networking: cluster.spec.networking.clone(),
-            proxmox_ipv4_pool,
-            provider: cluster.spec.provider.provider_type(),
-            bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
-            k8s_version: cluster.spec.provider.kubernetes.version.clone(),
-            autoscaling_enabled,
-        };
-        let token = bootstrap_state.register_cluster(registration).await;
+            .and_then(|s| s.bootstrap_token.clone());
 
-        BootstrapInfo::new(bootstrap_endpoint, token.as_str().to_string(), ca_cert)
+        let token = if let Some(token) = token {
+            debug!(cluster = %cluster_name, "Using existing bootstrap token from LatticeCluster status");
+            token
+        } else {
+            // No existing token - generate new one and register cluster
+            let cluster_manifest =
+                serde_json::to_string(&cluster.for_export()).map_err(|e| Error::Serialization {
+                    message: format!("failed to serialize cluster: {}", e),
+                    kind: Some("LatticeCluster".to_string()),
+                })?;
+
+            let proxmox_ipv4_pool = cluster
+                .spec
+                .provider
+                .config
+                .proxmox
+                .as_ref()
+                .map(|p| p.ipv4_pool.clone());
+            let autoscaling_enabled = cluster
+                .spec
+                .nodes
+                .worker_pools
+                .values()
+                .any(|p| p.is_autoscaling_enabled());
+            let registration = lattice_cell::ClusterRegistration {
+                cluster_id: cluster_name.to_string(),
+                cell_endpoint: cell_endpoint.clone(),
+                ca_certificate: ca_cert.clone(),
+                cluster_manifest,
+                networking: cluster.spec.networking.clone(),
+                proxmox_ipv4_pool,
+                provider: cluster.spec.provider.provider_type(),
+                bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
+                k8s_version: cluster.spec.provider.kubernetes.version.clone(),
+                autoscaling_enabled,
+            };
+            let new_token = bootstrap_state.register_cluster(registration).await;
+            let token_str = new_token.as_str().to_string();
+
+            // Persist the token to LatticeCluster status immediately
+            // This ensures it survives operator restarts and moves with the cluster during pivot
+            let mut status = cluster.status.clone().unwrap_or_default();
+            status.bootstrap_token = Some(token_str.clone());
+            ctx.kube.patch_status(cluster_name, &status).await?;
+            debug!(cluster = %cluster_name, "Persisted new bootstrap token to LatticeCluster status");
+
+            token_str
+        };
+
+        BootstrapInfo::new(bootstrap_endpoint, token, ca_cert)
     } else {
         // No parent_servers - self-provisioning (management cluster bootstrap)
         BootstrapInfo::default()
@@ -1890,6 +1911,7 @@ async fn update_cluster_status(
         bootstrap_complete: current_status.bootstrap_complete,
         unpivot_pending: current_status.unpivot_pending,
         observed_generation: current_status.observed_generation,
+        bootstrap_token: current_status.bootstrap_token,
     };
 
     // Set pivot_complete if requested (persists pivot completion across restarts)

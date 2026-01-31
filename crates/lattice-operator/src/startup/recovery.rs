@@ -201,7 +201,15 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
             autoscaling_enabled,
         };
 
-        bootstrap_state.register_cluster(registration).await;
+        // Use token from LatticeCluster.status if available (source of truth)
+        let existing_token = cluster
+            .status
+            .as_ref()
+            .and_then(|s| s.bootstrap_token.as_deref());
+
+        bootstrap_state
+            .register_cluster_with_token(registration, existing_token)
+            .await;
         tracing::info!(cluster = %name, "re-registered cluster after operator restart");
     }
 }

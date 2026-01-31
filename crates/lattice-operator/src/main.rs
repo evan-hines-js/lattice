@@ -139,7 +139,6 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     // Re-register clusters after restart (crash recovery)
     if let Some(state) = parent_servers.bootstrap_state().await {
         re_register_existing_clusters(&client, &state, &self_cluster_name, &parent_servers).await;
-        let _ = state.cleanup_stale_bootstrap_secrets().await;
     }
 
     // Run controllers until shutdown
