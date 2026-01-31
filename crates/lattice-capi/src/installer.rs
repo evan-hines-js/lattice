@@ -843,8 +843,8 @@ impl CapiInstaller for ClusterctlInstaller {
                 .to_string()
         });
 
-        // Note: cert-manager is installed automatically by clusterctl init
-        // when not present. clusterctl manages its lifecycle including upgrades.
+        // Note: cert-manager is bundled in /providers/cert-manager and configured
+        // in clusterctl.yaml for air-gapped operation. clusterctl installs it automatically.
 
         // Handle installations first
         if needs_install {

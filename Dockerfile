@@ -88,6 +88,7 @@ ARG CAPMOX_VERSION
 ARG CAPA_VERSION
 ARG CAPO_VERSION
 ARG IPAM_VERSION
+ARG CERTMANAGER_VERSION
 
 # Install only CA certificates for TLS
 RUN apt-get update && apt-get install -y \
@@ -111,7 +112,12 @@ COPY test-providers /providers
 COPY scripts/runtime /scripts
 
 # Create clusterctl config with local provider repositories (all providers)
-RUN echo "providers:" > /providers/clusterctl.yaml && \
+# cert-manager config must be BEFORE providers section
+RUN echo "cert-manager:" > /providers/clusterctl.yaml && \
+    echo "  url: \"file:///providers/cert-manager/v${CERTMANAGER_VERSION}/cert-manager.yaml\"" >> /providers/clusterctl.yaml && \
+    echo "  version: \"v${CERTMANAGER_VERSION}\"" >> /providers/clusterctl.yaml && \
+    echo "" >> /providers/clusterctl.yaml && \
+    echo "providers:" >> /providers/clusterctl.yaml && \
     echo "- name: \"cluster-api\"" >> /providers/clusterctl.yaml && \
     echo "  url: \"file:///providers/cluster-api/v${CAPI_VERSION}/core-components.yaml\"" >> /providers/clusterctl.yaml && \
     echo "  type: \"CoreProvider\"" >> /providers/clusterctl.yaml && \
