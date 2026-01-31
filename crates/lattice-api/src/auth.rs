@@ -291,9 +291,7 @@ impl OidcValidator {
                 .map(|s| s.to_string()),
         };
 
-        value.ok_or_else(|| {
-            Error::Unauthorized(format!("Missing required claim: {}", claim_name))
-        })
+        value.ok_or_else(|| Error::Unauthorized(format!("Missing required claim: {}", claim_name)))
     }
 
     /// Extract groups from claims
@@ -348,10 +346,7 @@ impl OidcValidator {
         };
 
         key.ok_or_else(|| {
-            Error::Unauthorized(format!(
-                "No matching key found in JWKS for kid: {:?}",
-                kid
-            ))
+            Error::Unauthorized(format!("No matching key found in JWKS for kid: {:?}", kid))
         })
     }
 

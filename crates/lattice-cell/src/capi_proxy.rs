@@ -78,9 +78,13 @@ pub enum CapiProxyError {
 impl IntoResponse for CapiProxyError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            CapiProxyError::AgentNotConnected(_) => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
+            CapiProxyError::AgentNotConnected(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
             CapiProxyError::AlreadyPivoted(_) => (StatusCode::GONE, self.to_string()),
-            CapiProxyError::MethodNotAllowed(_) => (StatusCode::METHOD_NOT_ALLOWED, self.to_string()),
+            CapiProxyError::MethodNotAllowed(_) => {
+                (StatusCode::METHOD_NOT_ALLOWED, self.to_string())
+            }
             CapiProxyError::Tunnel(e) => (e.status_code(), self.to_string()),
             CapiProxyError::TlsConfig(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             CapiProxyError::Server(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),

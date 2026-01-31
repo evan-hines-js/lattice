@@ -111,7 +111,10 @@ pub async fn kubeconfig_handler(
     let subtree_clusters = state.subtree.all_clusters().await;
 
     // Update Cedar's known clusters and filter by authorization
-    state.cedar.set_known_clusters(subtree_clusters.clone()).await;
+    state
+        .cedar
+        .set_known_clusters(subtree_clusters.clone())
+        .await;
     let accessible_clusters = state.cedar.accessible_clusters(&identity).await;
 
     if accessible_clusters.is_empty() {
@@ -248,7 +251,10 @@ mod tests {
         let exec = config.users[0].user.exec.as_ref().unwrap();
         assert_eq!(exec.command, "kubectl");
         assert!(exec.args.contains(&"oidc-login".to_string()));
-        assert!(exec.args.iter().any(|a| a.contains("https://idp.example.com")));
+        assert!(exec
+            .args
+            .iter()
+            .any(|a| a.contains("https://idp.example.com")));
         assert!(exec.args.iter().any(|a| a.contains("lattice")));
     }
 

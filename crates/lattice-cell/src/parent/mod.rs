@@ -26,12 +26,12 @@ use tracing::{debug, error, info, warn};
 use crate::bootstrap::{
     bootstrap_router, BootstrapState, DefaultManifestGenerator, ManifestGenerator,
 };
-use crate::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::capi_proxy::{start_capi_proxy, CapiProxyConfig};
+use crate::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::resources::fetch_distributable_resources;
 use crate::server::{AgentServer, SharedSubtreeRegistry};
 use crate::subtree_registry::SubtreeRegistry;
-use lattice_common::crd::{CloudProvider, SecretsProvider};
+use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretsProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{
     lattice_svc_dns, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, CA_TRUST_KEY, CELL_SERVICE_NAME,
@@ -168,6 +168,8 @@ async fn push_resources_to_agents(
                 secrets_providers: resources.secrets_providers.clone(),
                 secrets: resources.secrets.clone(),
                 full_sync,
+                cedar_policies: resources.cedar_policies.clone(),
+                oidc_providers: resources.oidc_providers.clone(),
             },
         )),
     };
@@ -180,6 +182,8 @@ async fn push_resources_to_agents(
                 agent = %agent_name,
                 cloud_providers = resources.cloud_providers.len(),
                 secrets_providers = resources.secrets_providers.len(),
+                cedar_policies = resources.cedar_policies.len(),
+                oidc_providers = resources.oidc_providers.len(),
                 secrets = resources.secrets.len(),
                 "Pushed resources to agent"
             );
@@ -189,20 +193,26 @@ async fn push_resources_to_agents(
 
 /// Run the resource sync service
 ///
-/// Watches for changes to CloudProvider and SecretsProvider CRDs and:
+/// Watches for changes to CloudProvider, SecretsProvider, CedarPolicy, and OIDCProvider CRDs and:
 /// 1. Immediately pushes changes to all connected agents (watch-triggered)
 /// 2. Periodically does a full sync as a safety net
-async fn run_resource_sync(client: Client, registry: SharedAgentRegistry) {
+async fn run_resource_sync(client: Client, registry: SharedAgentRegistry, cluster_name: String) {
     let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let cedar_api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let oidc_api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
-    // Create watchers for provider CRDs
+    // Create watchers for all distributable CRDs
     let watcher_config = watcher::Config::default();
     let cp_watcher = watcher::watcher(cp_api, watcher_config.clone());
-    let sp_watcher = watcher::watcher(sp_api, watcher_config);
+    let sp_watcher = watcher::watcher(sp_api, watcher_config.clone());
+    let cedar_watcher = watcher::watcher(cedar_api, watcher_config.clone());
+    let oidc_watcher = watcher::watcher(oidc_api, watcher_config);
 
     let mut cp_watcher = std::pin::pin!(cp_watcher);
     let mut sp_watcher = std::pin::pin!(sp_watcher);
+    let mut cedar_watcher = std::pin::pin!(cedar_watcher);
+    let mut oidc_watcher = std::pin::pin!(oidc_watcher);
 
     // Periodic sync timer
     let mut sync_interval = tokio::time::interval(SECRET_SYNC_INTERVAL);
@@ -214,16 +224,24 @@ async fn run_resource_sync(client: Client, registry: SharedAgentRegistry) {
         tokio::select! {
             // Watch for CloudProvider changes
             Some(event) = cp_watcher.next() => {
-                handle_resource_event(&client, &registry, event, "CloudProvider").await;
+                handle_resource_event(&client, &registry, &cluster_name, event, "CloudProvider").await;
             }
             // Watch for SecretsProvider changes
             Some(event) = sp_watcher.next() => {
-                handle_resource_event(&client, &registry, event, "SecretsProvider").await;
+                handle_resource_event(&client, &registry, &cluster_name, event, "SecretsProvider").await;
+            }
+            // Watch for CedarPolicy changes
+            Some(event) = cedar_watcher.next() => {
+                handle_resource_event(&client, &registry, &cluster_name, event, "CedarPolicy").await;
+            }
+            // Watch for OIDCProvider changes
+            Some(event) = oidc_watcher.next() => {
+                handle_resource_event(&client, &registry, &cluster_name, event, "OIDCProvider").await;
             }
             // Periodic full sync
             _ = sync_interval.tick() => {
                 debug!("Running periodic resource sync");
-                match fetch_distributable_resources(&client).await {
+                match fetch_distributable_resources(&client, &cluster_name).await {
                     Ok(resources) if !resources.is_empty() => {
                         push_resources_to_agents(&registry, resources, true).await;
                     }
@@ -239,6 +257,7 @@ async fn run_resource_sync(client: Client, registry: SharedAgentRegistry) {
 async fn handle_resource_event<T>(
     client: &Client,
     registry: &SharedAgentRegistry,
+    cluster_name: &str,
     event: Result<Event<T>, watcher::Error>,
     resource_type: &str,
 ) where
@@ -248,7 +267,7 @@ async fn handle_resource_event<T>(
         Ok(Event::Apply(resource)) | Ok(Event::InitApply(resource)) => {
             let name = resource.name_any();
             info!(%resource_type, %name, "Distributable resource changed, pushing to agents");
-            match fetch_distributable_resources(client).await {
+            match fetch_distributable_resources(client, cluster_name).await {
                 Ok(resources) => push_resources_to_agents(registry, resources, false).await,
                 Err(e) => warn!(error = %e, "Failed to fetch resources for sync"),
             }
@@ -256,7 +275,7 @@ async fn handle_resource_event<T>(
         Ok(Event::Delete(resource)) => {
             let name = resource.name_any();
             info!(%resource_type, %name, "Distributable resource deleted, triggering full sync");
-            match fetch_distributable_resources(client).await {
+            match fetch_distributable_resources(client, cluster_name).await {
                 Ok(resources) => push_resources_to_agents(registry, resources, true).await,
                 Err(e) => warn!(error = %e, "Failed to fetch resources for sync"),
             }
@@ -329,7 +348,10 @@ pub async fn load_or_create_ca(
                 })
                 .and_then(|b| {
                     String::from_utf8(b.0.clone()).map_err(|e| {
-                        CellServerError::CaPersistence(format!("Invalid {} encoding: {}", CA_CERT_KEY, e))
+                        CellServerError::CaPersistence(format!(
+                            "Invalid {} encoding: {}",
+                            CA_CERT_KEY, e
+                        ))
                     })
                 })?;
 
@@ -340,7 +362,10 @@ pub async fn load_or_create_ca(
                 })
                 .and_then(|b| {
                     String::from_utf8(b.0.clone()).map_err(|e| {
-                        CellServerError::CaPersistence(format!("Invalid {} encoding: {}", CA_KEY_KEY, e))
+                        CellServerError::CaPersistence(format!(
+                            "Invalid {} encoding: {}",
+                            CA_KEY_KEY, e
+                        ))
                     })
                 })?;
 
@@ -749,11 +774,12 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             }
         });
 
-        // Start resource sync service (secrets + configmaps)
+        // Start resource sync service (secrets + configmaps + policies + providers)
         let sync_registry = self.agent_registry.clone();
+        let sync_cluster_name = self.config.cluster_name.clone();
         info!("Starting resource sync service");
         let secret_sync_handle = tokio::spawn(async move {
-            run_resource_sync(sync_client, sync_registry).await;
+            run_resource_sync(sync_client, sync_registry, sync_cluster_name).await;
         });
 
         // Start K8s API proxy server

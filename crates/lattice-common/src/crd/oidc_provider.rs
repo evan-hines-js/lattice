@@ -87,6 +87,20 @@ pub struct OIDCProviderSpec {
     /// JWKS refresh interval in seconds (default: 3600)
     #[serde(default = "default_jwks_refresh_interval")]
     pub jwks_refresh_interval_seconds: u32,
+
+    /// Whether to propagate this provider to child clusters
+    /// When true, provider is distributed down the hierarchy
+    #[serde(default = "default_true")]
+    pub propagate: bool,
+
+    /// Whether child clusters can define their own OIDC provider
+    /// When false (default), children must use inherited provider
+    #[serde(default)]
+    pub allow_child_override: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_username_claim() -> String {
@@ -220,5 +234,59 @@ spec:
         assert!(provider.spec.client_secret.is_some());
         let secret_ref = provider.spec.client_secret.unwrap();
         assert_eq!(secret_ref.name, "oidc-client-secret");
+    }
+
+    #[test]
+    fn oidc_provider_propagate_defaults_to_true() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: OIDCProvider
+metadata:
+  name: corporate-idp
+spec:
+  issuerUrl: https://idp.example.com
+  clientId: lattice
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: OIDCProvider = serde_json::from_value(value).expect("parse");
+        // propagate should default to true
+        assert!(provider.spec.propagate);
+        // allow_child_override should default to false
+        assert!(!provider.spec.allow_child_override);
+    }
+
+    #[test]
+    fn oidc_provider_propagate_false() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: OIDCProvider
+metadata:
+  name: local-idp
+spec:
+  issuerUrl: https://local-idp.example.com
+  clientId: local-lattice
+  propagate: false
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: OIDCProvider = serde_json::from_value(value).expect("parse");
+        assert!(!provider.spec.propagate);
+    }
+
+    #[test]
+    fn oidc_provider_allow_child_override() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: OIDCProvider
+metadata:
+  name: corporate-idp
+spec:
+  issuerUrl: https://idp.example.com
+  clientId: lattice
+  allowChildOverride: true
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: OIDCProvider = serde_json::from_value(value).expect("parse");
+        assert!(provider.spec.propagate); // still defaults to true
+        assert!(provider.spec.allow_child_override);
     }
 }

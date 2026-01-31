@@ -107,7 +107,10 @@ impl SubtreeSender {
     ///
     /// This spawns a task that watches for cluster changes and sends
     /// incremental updates. Returns the task handle for cleanup.
-    pub fn spawn_watcher(self, message_tx: mpsc::Sender<AgentMessage>) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_watcher(
+        self,
+        message_tx: mpsc::Sender<AgentMessage>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             self.watch_and_send_deltas(message_tx).await;
         })

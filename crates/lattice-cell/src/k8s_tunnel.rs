@@ -70,8 +70,7 @@ pub async fn tunnel_request(
     };
 
     // Create response channel
-    let (response_tx, mut response_rx) =
-        mpsc::channel::<KubernetesResponse>(RESPONSE_CHANNEL_SIZE);
+    let (response_tx, mut response_rx) = mpsc::channel::<KubernetesResponse>(RESPONSE_CHANNEL_SIZE);
 
     // Register pending response
     registry.register_pending_k8s_response(&request_id, response_tx);
@@ -320,7 +319,10 @@ mod tests {
             TunnelError::ChannelClosed.status_code(),
             StatusCode::BAD_GATEWAY
         );
-        assert_eq!(TunnelError::Timeout.status_code(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            TunnelError::Timeout.status_code(),
+            StatusCode::GATEWAY_TIMEOUT
+        );
         assert_eq!(
             TunnelError::AgentError("test".into()).status_code(),
             StatusCode::BAD_GATEWAY

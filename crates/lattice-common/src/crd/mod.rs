@@ -13,9 +13,7 @@ mod service;
 mod service_policy;
 mod types;
 
-pub use cedar_policy::{
-    CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus,
-};
+pub use cedar_policy::{CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus};
 pub use cloud_provider::{
     AwsProviderConfig, CloudProvider, CloudProviderPhase, CloudProviderSpec, CloudProviderStatus,
     CloudProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,

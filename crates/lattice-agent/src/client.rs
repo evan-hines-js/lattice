@@ -433,10 +433,7 @@ impl AgentClient {
         // This enables the parent cell to know about all clusters in our subtree
         // for routing K8s API requests and authorization decisions
         if let Ok(k8s_client) = kube::Client::try_default().await {
-            let subtree_sender = SubtreeSender::new(
-                self.config.cluster_name.clone(),
-                k8s_client,
-            );
+            let subtree_sender = SubtreeSender::new(self.config.cluster_name.clone(), k8s_client);
 
             // Send full state on connect
             subtree_sender.send_full_state(&message_tx).await;
@@ -997,6 +994,8 @@ impl AgentClient {
                 info!(
                     cloud_providers = cmd.cloud_providers.len(),
                     secrets_providers = cmd.secrets_providers.len(),
+                    cedar_policies = cmd.cedar_policies.len(),
+                    oidc_providers = cmd.oidc_providers.len(),
                     secrets = cmd.secrets.len(),
                     full_sync = cmd.full_sync,
                     "Received sync resources command"
@@ -1007,6 +1006,8 @@ impl AgentClient {
                     cloud_providers: cmd.cloud_providers.clone(),
                     secrets_providers: cmd.secrets_providers.clone(),
                     secrets: cmd.secrets.clone(),
+                    cedar_policies: cmd.cedar_policies.clone(),
+                    oidc_providers: cmd.oidc_providers.clone(),
                 };
                 let full_sync = cmd.full_sync;
 
@@ -1024,14 +1025,15 @@ impl AgentClient {
                         info!(
                             cloud_providers = resources.cloud_providers.len(),
                             secrets_providers = resources.secrets_providers.len(),
+                            cedar_policies = resources.cedar_policies.len(),
+                            oidc_providers = resources.oidc_providers.len(),
                             secrets = resources.secrets.len(),
                             full_sync,
                             "Synced resources applied"
                         );
                     }
 
-                    // TODO: If full_sync, delete CloudProviders/SecretsProviders/secrets
-                    // that are not in the provided list
+                    // TODO: If full_sync, delete resources that are not in the provided list
                     if full_sync {
                         debug!("Full sync requested - cleanup of removed resources not yet implemented");
                     }
@@ -1226,6 +1228,8 @@ impl AgentClient {
                 let cloud_providers = complete.cloud_providers.clone();
                 let secrets_providers = complete.secrets_providers.clone();
                 let secrets = complete.secrets.clone();
+                let cedar_policies = complete.cedar_policies.clone();
+                let oidc_providers = complete.oidc_providers.clone();
                 let manifests = complete.manifests.clone();
 
                 info!(
@@ -1233,6 +1237,8 @@ impl AgentClient {
                     cluster = %capi_cluster_name,
                     namespace = %target_namespace,
                     manifests = manifests.len(),
+                    cedar_policies = cedar_policies.len(),
+                    oidc_providers = oidc_providers.len(),
                     "Processing move complete"
                 );
 
@@ -1284,6 +1290,8 @@ impl AgentClient {
                         cloud_providers,
                         secrets_providers,
                         secrets,
+                        cedar_policies,
+                        oidc_providers,
                     };
                     if let Err(e) = apply_distributed_resources(&client, &resources).await {
                         error!(error = %e, "Failed to apply distributed resources");

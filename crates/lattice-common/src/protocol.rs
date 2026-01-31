@@ -23,16 +23,20 @@ pub struct CsrResponse {
 
 /// Resources distributed from parent cell to child clusters
 ///
-/// Used during pivot to sync CloudProviders, SecretsProviders, and their
-/// referenced secrets from the parent to the child cluster.
+/// Used during pivot to sync CloudProviders, SecretsProviders, CedarPolicies,
+/// OIDCProviders, and their referenced secrets from the parent to the child cluster.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DistributableResources {
-    /// Serialized CloudProvider CRDs (YAML bytes)
+    /// Serialized CloudProvider CRDs (JSON bytes)
     pub cloud_providers: Vec<Vec<u8>>,
-    /// Serialized SecretsProvider CRDs (YAML bytes)
+    /// Serialized SecretsProvider CRDs (JSON bytes)
     pub secrets_providers: Vec<Vec<u8>>,
-    /// Serialized Secret resources (YAML bytes)
+    /// Serialized Secret resources (JSON bytes)
     pub secrets: Vec<Vec<u8>>,
+    /// Serialized CedarPolicy CRDs (JSON bytes)
+    pub cedar_policies: Vec<Vec<u8>>,
+    /// Serialized OIDCProvider CRDs (JSON bytes)
+    pub oidc_providers: Vec<Vec<u8>>,
 }
 
 impl DistributableResources {
@@ -41,5 +45,7 @@ impl DistributableResources {
         self.cloud_providers.is_empty()
             && self.secrets_providers.is_empty()
             && self.secrets.is_empty()
+            && self.cedar_policies.is_empty()
+            && self.oidc_providers.is_empty()
     }
 }

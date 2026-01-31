@@ -420,7 +420,9 @@ async fn handle_agent_message_impl(
                     subtree_clusters = clusters.len(),
                     "Full sync: updating subtree registry"
                 );
-                subtree_registry.handle_full_sync(cluster_name, clusters).await;
+                subtree_registry
+                    .handle_full_sync(cluster_name, clusters)
+                    .await;
             } else {
                 // Delta: add/remove specific clusters
                 let added: Vec<ClusterInfo> = state
@@ -450,7 +452,9 @@ async fn handle_agent_message_impl(
                         "Delta: updating subtree registry"
                     );
                 }
-                subtree_registry.handle_delta(cluster_name, added, removed).await;
+                subtree_registry
+                    .handle_delta(cluster_name, added, removed)
+                    .await;
             }
         }
         None => {
@@ -635,7 +639,9 @@ mod tests {
                             labels: c.labels.clone(),
                         })
                         .collect();
-                    subtree_registry.handle_full_sync(cluster_name, clusters).await;
+                    subtree_registry
+                        .handle_full_sync(cluster_name, clusters)
+                        .await;
                 } else {
                     let added: Vec<ClusterInfo> = state
                         .clusters
@@ -654,7 +660,9 @@ mod tests {
                         .filter(|c| c.removed)
                         .map(|c| c.name.clone())
                         .collect();
-                    subtree_registry.handle_delta(cluster_name, added, removed).await;
+                    subtree_registry
+                        .handle_delta(cluster_name, added, removed)
+                        .await;
                 }
             }
             None => {}

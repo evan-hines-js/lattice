@@ -196,15 +196,19 @@ message ApplyManifestsCommand {
 // Sync distributable resources to child cluster
 // Used for both watch-triggered updates and periodic reconciliation
 message SyncDistributedResourcesCommand {
-  // CloudProvider CRDs (YAML)
+  // CloudProvider CRDs (JSON)
   repeated bytes cloud_providers = 1;
-  // SecretsProvider CRDs (YAML)
+  // SecretsProvider CRDs (JSON)
   repeated bytes secrets_providers = 2;
-  // Secrets referenced by providers (YAML)
+  // Secrets referenced by providers (JSON)
   repeated bytes secrets = 3;
   // If true, delete resources not in this list (full sync)
   // If false, only add/update (incremental)
   bool full_sync = 4;
+  // CedarPolicy CRDs (JSON) - inherited policies from ancestors
+  repeated bytes cedar_policies = 5;
+  // OIDCProvider CRDs (JSON) - inherited providers from ancestors
+  repeated bytes oidc_providers = 6;
 }
 
 // Request current cluster status
@@ -364,14 +368,18 @@ message MoveComplete {
   string cluster_name = 2;
   // Namespace where resources were created
   string target_namespace = 3;
-  // CloudProvider CRDs (YAML) - applied after CAPI resources
+  // CloudProvider CRDs (JSON) - applied after CAPI resources
   repeated bytes cloud_providers = 4;
-  // SecretsProvider CRDs (YAML)
+  // SecretsProvider CRDs (JSON)
   repeated bytes secrets_providers = 5;
-  // Secrets referenced by providers (YAML)
+  // Secrets referenced by providers (JSON)
   repeated bytes secrets = 6;
   // Additional manifests to apply (e.g., CiliumNetworkPolicy)
   repeated bytes manifests = 7;
+  // CedarPolicy CRDs (JSON) - inherited policies from ancestors
+  repeated bytes cedar_policies = 8;
+  // OIDCProvider CRDs (JSON) - inherited providers from ancestors
+  repeated bytes oidc_providers = 9;
 }
 
 // Agent → Cell: Unpause done, safe to delete source

@@ -209,9 +209,9 @@ async fn get_k8s_client() -> Result<&'static reqwest::Client, Error> {
     }
 
     // Read the in-cluster CA certificate
-    let ca_cert = tokio::fs::read(CA_CERT_PATH).await.map_err(|e| {
-        Error::Internal(format!("Failed to read in-cluster CA certificate: {}", e))
-    })?;
+    let ca_cert = tokio::fs::read(CA_CERT_PATH)
+        .await
+        .map_err(|e| Error::Internal(format!("Failed to read in-cluster CA certificate: {}", e)))?;
 
     let cert = reqwest::Certificate::from_pem(&ca_cert)
         .map_err(|e| Error::Internal(format!("Invalid CA certificate: {}", e)))?;
