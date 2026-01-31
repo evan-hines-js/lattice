@@ -4,7 +4,9 @@
 //! default-deny network policies. These are infrastructure namespaces
 //! that require unrestricted network access to function.
 
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{
+    CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, LATTICE_SYSTEM_NAMESPACE,
+};
 
 /// Core Kubernetes namespaces
 pub const CORE: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];
@@ -29,9 +31,9 @@ pub const CAPI: &[&str] = &[
     "rke2-bootstrap-system",
     "rke2-control-plane-system",
     "capd-system",
-    "capo-system",
-    "capa-system",
-    "capmox-system",
+    CAPO_NAMESPACE,
+    CAPA_NAMESPACE,
+    CAPMOX_NAMESPACE,
     "capi-ipam-in-cluster-system",
 ];
 
@@ -88,8 +90,8 @@ mod tests {
     #[test]
     fn capi_includes_all_providers() {
         assert!(CAPI.contains(&"capd-system")); // Docker
-        assert!(CAPI.contains(&"capa-system")); // AWS
-        assert!(CAPI.contains(&"capo-system")); // OpenStack
-        assert!(CAPI.contains(&"capmox-system")); // Proxmox
+        assert!(CAPI.contains(&CAPA_NAMESPACE)); // AWS
+        assert!(CAPI.contains(&CAPO_NAMESPACE)); // OpenStack
+        assert!(CAPI.contains(&CAPMOX_NAMESPACE)); // Proxmox
     }
 }

@@ -185,7 +185,7 @@ mod tests {
                 region: Some("us-east-1".to_string()),
                 credentials_secret_ref: Some(SecretRef {
                     name: "aws-creds".to_string(),
-                    namespace: "capa-system".to_string(),
+                    namespace: CAPA_NAMESPACE.to_string(),
                 }),
                 aws: None,
                 proxmox: None,
@@ -249,7 +249,7 @@ mod tests {
                 region: None,
                 credentials_secret_ref: Some(SecretRef {
                     name: "proxmox-creds".to_string(),
-                    namespace: "capmox-system".to_string(),
+                    namespace: CAPMOX_NAMESPACE.to_string(),
                 }),
                 aws: None,
                 proxmox: None,
@@ -291,7 +291,7 @@ mod tests {
                 region: Some("RegionOne".to_string()),
                 credentials_secret_ref: Some(SecretRef {
                     name: "openstack-creds".to_string(),
-                    namespace: "capo-system".to_string(),
+                    namespace: CAPO_NAMESPACE.to_string(),
                 }),
                 aws: None,
                 proxmox: None,

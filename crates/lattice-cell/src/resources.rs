@@ -181,7 +181,7 @@ mod tests {
         let mut cp = sample_cloud_provider();
         cp.spec.credentials_secret_ref = Some(SecretRef {
             name: "my-secret".to_string(),
-            namespace: "capa-system".to_string(),
+            namespace: CAPA_NAMESPACE.to_string(),
         });
 
         let result = serialize_for_distribution(&cp).unwrap();
@@ -189,7 +189,7 @@ mod tests {
 
         // Credentials ref should be preserved
         assert!(json.contains("my-secret"));
-        assert!(json.contains("capa-system"));
+        assert!(json.contains(CAPA_NAMESPACE));
     }
 
     #[test]
