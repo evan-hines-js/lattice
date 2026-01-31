@@ -57,10 +57,10 @@ use tracing::{debug, info, warn};
 
 use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
-use lattice_common::crd::{LatticeCluster, LatticeClusterStatus, ProviderType};
+use lattice_common::crd::{LatticeCluster, ProviderType};
 use lattice_common::{
-    CellEndpoint, LABEL_MANAGED_BY, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_CA_KEY,
-    PARENT_CONFIG_ENDPOINT_KEY, PARENT_CONFIG_SECRET, REGISTRY_CREDENTIALS_SECRET,
+    CellEndpoint, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_ENDPOINT_KEY,
+    PARENT_CONFIG_SECRET, REGISTRY_CREDENTIALS_SECRET,
 };
 #[cfg(test)]
 use lattice_infra::pki::CertificateAuthority;
@@ -689,18 +689,6 @@ impl DefaultManifestGenerator {
     }
 }
 
-/// Secret prefix for persisting bootstrap tokens
-const BOOTSTRAP_TOKEN_SECRET_PREFIX: &str = "bootstrap-token-";
-
-/// Determine if bootstrap token should be restored based on cluster status.
-///
-/// Returns true if bootstrap is not yet complete and the token should be restored.
-/// This is a pure function for easy testing.
-pub fn should_restore_bootstrap_token(status: Option<&LatticeClusterStatus>) -> bool {
-    let bootstrap_complete = status.map(|s| s.bootstrap_complete).unwrap_or(false);
-    !bootstrap_complete
-}
-
 /// Cluster info stored in bootstrap state
 #[derive(Clone, Debug)]
 pub struct ClusterBootstrapInfo {
@@ -730,152 +718,6 @@ pub struct ClusterBootstrapInfo {
     pub k8s_version: String,
     /// Whether any worker pool has autoscaling enabled (min/max set)
     pub autoscaling_enabled: bool,
-}
-
-/// Serializable version of ClusterBootstrapInfo for Secret persistence
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct PersistedBootstrapInfo {
-    cluster_id: String,
-    cell_endpoint: String,
-    ca_certificate: String,
-    cluster_manifest: String,
-    /// The bootstrap token (base64 string)
-    token: String,
-    networking: Option<lattice_common::crd::NetworkingSpec>,
-    proxmox_ipv4_pool: Option<lattice_common::crd::Ipv4PoolConfig>,
-    provider: ProviderType,
-    bootstrap: lattice_common::crd::BootstrapProvider,
-    k8s_version: String,
-    autoscaling_enabled: bool,
-}
-
-impl From<&ClusterBootstrapInfo> for PersistedBootstrapInfo {
-    fn from(info: &ClusterBootstrapInfo) -> Self {
-        Self {
-            cluster_id: info.cluster_id.clone(),
-            cell_endpoint: info.cell_endpoint.clone(),
-            ca_certificate: info.ca_certificate.clone(),
-            cluster_manifest: info.cluster_manifest.clone(),
-            token: info.token.clone(),
-            networking: info.networking.clone(),
-            proxmox_ipv4_pool: info.proxmox_ipv4_pool.clone(),
-            provider: info.provider,
-            bootstrap: info.bootstrap.clone(),
-            k8s_version: info.k8s_version.clone(),
-            autoscaling_enabled: info.autoscaling_enabled,
-        }
-    }
-}
-
-impl PersistedBootstrapInfo {
-    fn into_cluster_info(self) -> ClusterBootstrapInfo {
-        ClusterBootstrapInfo {
-            cluster_id: self.cluster_id,
-            cell_endpoint: self.cell_endpoint,
-            ca_certificate: self.ca_certificate,
-            cluster_manifest: self.cluster_manifest,
-            token: self.token,
-            token_created: Instant::now(), // Reset TTL on restore
-            token_used: false,
-            networking: self.networking,
-            proxmox_ipv4_pool: self.proxmox_ipv4_pool,
-            provider: self.provider,
-            bootstrap: self.bootstrap,
-            k8s_version: self.k8s_version,
-            autoscaling_enabled: self.autoscaling_enabled,
-        }
-    }
-}
-
-/// Persist bootstrap info to a Secret for crash recovery
-async fn persist_bootstrap_info(
-    client: &Client,
-    info: &ClusterBootstrapInfo,
-) -> Result<(), String> {
-    use kube::api::PostParams;
-
-    let secret_name = format!("{}{}", BOOTSTRAP_TOKEN_SECRET_PREFIX, info.cluster_id);
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-
-    let persisted = PersistedBootstrapInfo::from(info);
-    let info_json = serde_json::to_vec(&persisted)
-        .map_err(|e| format!("Failed to serialize bootstrap info: {}", e))?;
-
-    let secret = Secret {
-        metadata: ObjectMeta {
-            name: Some(secret_name.clone()),
-            namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-            labels: Some(
-                [
-                    (LABEL_MANAGED_BY.to_string(), "lattice-operator".to_string()),
-                    ("lattice.io/cluster".to_string(), info.cluster_id.clone()),
-                    ("lattice.io/type".to_string(), "bootstrap-token".to_string()),
-                ]
-                .into(),
-            ),
-            ..Default::default()
-        },
-        data: Some([("info".to_string(), ByteString(info_json))].into()),
-        ..Default::default()
-    };
-
-    match secret_api.create(&PostParams::default(), &secret).await {
-        Ok(_) => {
-            debug!(cluster = %info.cluster_id, "Persisted bootstrap token to Secret");
-            Ok(())
-        }
-        Err(kube::Error::Api(ae)) if ae.code == 409 => {
-            // Already exists - this is fine (idempotent)
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to create bootstrap Secret: {}", e)),
-    }
-}
-
-/// Load bootstrap info from Secret for a single cluster
-///
-/// Returns None if no Secret exists for this cluster.
-async fn load_bootstrap_info_from_secret(
-    client: &Client,
-    cluster_id: &str,
-) -> Option<PersistedBootstrapInfo> {
-    let secret_name = format!("{}{}", BOOTSTRAP_TOKEN_SECRET_PREFIX, cluster_id);
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-
-    let secret = match secret_api.get(&secret_name).await {
-        Ok(s) => s,
-        Err(kube::Error::Api(ae)) if ae.code == 404 => return None,
-        Err(e) => {
-            warn!(cluster = %cluster_id, error = %e, "Failed to read bootstrap Secret");
-            return None;
-        }
-    };
-
-    let info_bytes = secret.data?.get("info")?.clone();
-    match serde_json::from_slice::<PersistedBootstrapInfo>(&info_bytes.0) {
-        Ok(persisted) => Some(persisted),
-        Err(e) => {
-            warn!(cluster = %cluster_id, error = %e, "Failed to parse bootstrap Secret");
-            None
-        }
-    }
-}
-
-/// Delete bootstrap token Secret after token is consumed
-async fn delete_bootstrap_secret(client: &Client, cluster_id: &str) {
-    use kube::api::DeleteParams;
-
-    let secret_name = format!("{}{}", BOOTSTRAP_TOKEN_SECRET_PREFIX, cluster_id);
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-
-    match secret_api
-        .delete(&secret_name, &DeleteParams::default())
-        .await
-    {
-        Ok(_) => debug!(cluster = %cluster_id, "Deleted bootstrap token Secret"),
-        Err(kube::Error::Api(ae)) if ae.code == 404 => {} // Already deleted
-        Err(e) => warn!(cluster = %cluster_id, error = %e, "Failed to delete bootstrap Secret"),
-    }
 }
 
 /// Bootstrap endpoint state
@@ -937,20 +779,38 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
     /// Register a cluster for bootstrap
     ///
-    /// Creates a bootstrap token and persists the registration to a Secret
-    /// for crash recovery. On operator restart, pending registrations are
-    /// reloaded from Secrets.
+    /// Creates a bootstrap token and stores the registration in memory.
+    /// The token is persisted to LatticeCluster.status.bootstrap_token by the
+    /// controller, making it atomic with the cluster and moving with it during pivot.
     ///
-    /// This method is idempotent - if the cluster is already registered,
-    /// it returns the existing token (restored from Secret) to ensure
-    /// CAPI manifests always use the same token.
+    /// This method is idempotent - if the cluster is already registered in memory,
+    /// it returns the existing token.
     ///
     /// # Arguments
     /// * `registration` - Cluster registration configuration
     ///
     /// # Returns
-    /// The bootstrap token to embed in CAPI manifests
+    /// The bootstrap token (also persisted to LatticeCluster.status by controller)
     pub async fn register_cluster(&self, registration: ClusterRegistration) -> BootstrapToken {
+        self.register_cluster_with_token(registration, None).await
+    }
+
+    /// Register a cluster with an existing token (for recovery scenarios)
+    ///
+    /// Same as `register_cluster` but uses the provided token instead of generating
+    /// a new one. Used by recovery.rs to restore the token from LatticeCluster.status.
+    ///
+    /// # Arguments
+    /// * `registration` - Cluster registration configuration
+    /// * `existing_token` - Token from LatticeCluster.status.bootstrap_token
+    ///
+    /// # Returns
+    /// The bootstrap token
+    pub async fn register_cluster_with_token(
+        &self,
+        registration: ClusterRegistration,
+        existing_token: Option<&str>,
+    ) -> BootstrapToken {
         let cluster_id = registration.cluster_id.clone();
 
         // Fast path: check in-memory cache first
@@ -960,21 +820,14 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 .expect("stored token should be valid");
         }
 
-        // Source of truth: check Secret if not in memory
-        // This handles operator restarts where memory is empty but Secret exists
-        if let Some(client) = &self.kube_client {
-            if let Some(persisted) = load_bootstrap_info_from_secret(client, &cluster_id).await {
-                debug!(cluster = %cluster_id, "Cluster already registered (in Secret), restoring to memory");
-                let token = BootstrapToken::from_string(&persisted.token)
-                    .expect("persisted token should be valid");
-                let info = persisted.into_cluster_info();
-                self.clusters.insert(cluster_id, info);
-                return token;
-            }
-        }
-
-        // Not registered anywhere - generate new token
-        let token = BootstrapToken::generate();
+        // Use existing token if provided, otherwise generate new one
+        let token = match existing_token {
+            Some(t) => BootstrapToken::from_string(t).unwrap_or_else(|_| {
+                warn!(cluster = %cluster_id, "Invalid existing token, generating new one");
+                BootstrapToken::generate()
+            }),
+            None => BootstrapToken::generate(),
+        };
 
         let info = ClusterBootstrapInfo {
             cluster_id: cluster_id.clone(),
@@ -992,73 +845,8 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             autoscaling_enabled: registration.autoscaling_enabled,
         };
 
-        // Persist to Secret for crash recovery
-        if let Some(client) = &self.kube_client {
-            if let Err(e) = persist_bootstrap_info(client, &info).await {
-                warn!(cluster = %cluster_id, error = %e, "Failed to persist bootstrap token (will retry on next reconcile)");
-            }
-        }
-
         self.clusters.insert(cluster_id, info);
         token
-    }
-
-    /// Clean up stale bootstrap Secrets on startup
-    ///
-    /// Removes Secrets for clusters that:
-    /// - No longer exist (CRD deleted)
-    /// - Have already completed bootstrap
-    ///
-    /// Bootstrap info is loaded on-demand from Secrets when needed (in `register_cluster`
-    /// and `validate_and_consume`), so this only handles cleanup.
-    pub async fn cleanup_stale_bootstrap_secrets(&self) -> Result<usize, String> {
-        let Some(client) = &self.kube_client else {
-            return Ok(0);
-        };
-
-        let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        let cluster_api: Api<LatticeCluster> = Api::all(client.clone());
-
-        // List all bootstrap token Secrets
-        let secrets = secret_api
-            .list(&Default::default())
-            .await
-            .map_err(|e| format!("Failed to list secrets: {}", e))?;
-
-        let mut cleaned = 0;
-        for secret in secrets.items {
-            let Some(name) = secret.metadata.name.as_ref() else {
-                continue;
-            };
-
-            if !name.starts_with(BOOTSTRAP_TOKEN_SECRET_PREFIX) {
-                continue;
-            }
-
-            // Extract cluster_id from secret name
-            let cluster_id = name
-                .strip_prefix(BOOTSTRAP_TOKEN_SECRET_PREFIX)
-                .unwrap_or(name);
-
-            // Check if cluster still exists and needs this Secret
-            let should_keep = match cluster_api.get(cluster_id).await {
-                Ok(cluster) => should_restore_bootstrap_token(cluster.status.as_ref()),
-                Err(kube::Error::Api(ae)) if ae.code == 404 => false, // Cluster deleted
-                Err(_) => true, // API error - keep Secret to be safe
-            };
-
-            if !should_keep {
-                delete_bootstrap_secret(client, cluster_id).await;
-                debug!(cluster = %cluster_id, "Cleaned up stale bootstrap Secret");
-                cleaned += 1;
-            }
-        }
-
-        if cleaned > 0 {
-            info!(count = cleaned, "Cleaned up stale bootstrap Secrets");
-        }
-
-        Ok(cleaned)
     }
 
     /// Validate and consume a bootstrap token
@@ -1070,32 +858,12 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         cluster_id: &str,
         token: &str,
     ) -> Result<ClusterBootstrapInfo, BootstrapError> {
-        // First, validate without consuming
+        // Validate token from in-memory cache
+        // Note: On operator restart, recovery.rs re-registers clusters in Provisioning/Pivoting phase
         let info = {
-            // Try in-memory cache first
-            let entry = match self.clusters.get(cluster_id) {
-                Some(e) => e,
-                None => {
-                    // Not in memory - try loading from Secret (source of truth)
-                    // This handles operator restarts where memory is empty
-                    if let Some(client) = &self.kube_client {
-                        if let Some(persisted) =
-                            load_bootstrap_info_from_secret(client, cluster_id).await
-                        {
-                            debug!(cluster = %cluster_id, "Restoring bootstrap info from Secret for validation");
-                            let restored = persisted.into_cluster_info();
-                            self.clusters.insert(cluster_id.to_string(), restored);
-                            self.clusters.get(cluster_id).ok_or_else(|| {
-                                BootstrapError::ClusterNotFound(cluster_id.to_string())
-                            })?
-                        } else {
-                            return Err(BootstrapError::ClusterNotFound(cluster_id.to_string()));
-                        }
-                    } else {
-                        return Err(BootstrapError::ClusterNotFound(cluster_id.to_string()));
-                    }
-                }
-            };
+            let entry = self.clusters.get(cluster_id).ok_or_else(|| {
+                BootstrapError::ClusterNotFound(cluster_id.to_string())
+            })?;
 
             let info = entry.value();
 
@@ -1128,11 +896,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // Now mark as used
         if let Some(mut entry) = self.clusters.get_mut(cluster_id) {
             entry.value_mut().token_used = true;
-        }
-
-        // Delete the bootstrap Secret now that token is consumed
-        if let Some(client) = &self.kube_client {
-            delete_bootstrap_secret(client, cluster_id).await;
         }
 
         Ok(info)
@@ -2904,28 +2667,4 @@ mod tests {
         );
     }
 
-    // --- should_restore_bootstrap_token tests ---
-
-    #[test]
-    fn should_restore_token_when_bootstrap_incomplete() {
-        let status = LatticeClusterStatus {
-            bootstrap_complete: false,
-            ..Default::default()
-        };
-        assert!(should_restore_bootstrap_token(Some(&status)));
-    }
-
-    #[test]
-    fn should_not_restore_token_when_bootstrap_complete() {
-        let status = LatticeClusterStatus {
-            bootstrap_complete: true,
-            ..Default::default()
-        };
-        assert!(!should_restore_bootstrap_token(Some(&status)));
-    }
-
-    #[test]
-    fn should_restore_token_when_no_status() {
-        assert!(should_restore_bootstrap_token(None));
-    }
 }

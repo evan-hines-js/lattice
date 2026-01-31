@@ -47,11 +47,11 @@ async fn test_configurable_provider_pivot() {
             info!("TEST PASSED");
         }
         Ok(Err(e)) => {
-            setup::cleanup_bootstrap_clusters();
+            setup::cleanup_bootstrap_cluster(run_id());
             panic!("E2E test failed: {} (manual cleanup may be required)", e);
         }
         Err(_) => {
-            setup::cleanup_bootstrap_clusters();
+            setup::cleanup_bootstrap_cluster(run_id());
             panic!(
                 "E2E test timed out after {:?} (manual cleanup required)",
                 E2E_TIMEOUT

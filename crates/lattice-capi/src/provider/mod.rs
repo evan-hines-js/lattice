@@ -93,6 +93,22 @@ impl CAPIManifest {
         self
     }
 
+    /// Add annotations to the manifest
+    pub fn with_annotations(
+        mut self,
+        annotations: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        self.metadata.annotations = Some(annotations);
+        self
+    }
+
+    /// Add a single annotation to the manifest
+    pub fn with_annotation(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        let annotations = self.metadata.annotations.get_or_insert_with(Default::default);
+        annotations.insert(key.into(), value.into());
+        self
+    }
+
     /// Serialize the manifest to JSON
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string(self).map_err(|e| Error::serialization(e.to_string()))
@@ -156,6 +172,7 @@ pub const CAPI_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v
 pub const RKE2_BOOTSTRAP_API_VERSION: &str = "bootstrap.cluster.x-k8s.io/v1beta1";
 /// RKE2 Control Plane API version for RKE2ControlPlane
 pub const RKE2_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v1beta1";
+
 
 // ============================================================================
 // Shared Helper Functions
@@ -1911,6 +1928,7 @@ mod tests {
             assert!(paths.contains(&"/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml"));
             assert!(paths.contains(&"/root/.ssh/authorized_keys"));
         }
+
     }
 
     mod shared_helpers {

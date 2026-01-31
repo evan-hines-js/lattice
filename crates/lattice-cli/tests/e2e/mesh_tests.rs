@@ -290,10 +290,11 @@ async fn wait_for_cycles(
         }
 
         // Get all pods in the namespace with their labels
-        // Use bracket notation for labels with special characters (e.g., app.kubernetes.io/name)
+        // Use escaped dot notation for labels (bracket notation doesn't work with kubectl JSONPath)
+        let label_escaped = lattice_common::LABEL_NAME.replace('.', r"\.");
         let jsonpath = format!(
-            "{{range .items[*]}}{{.metadata.name}}:{{.metadata.labels['{}']}}{{\"\\n\"}}{{end}}",
-            lattice_common::LABEL_NAME
+            "{{range .items[*]}}{{.metadata.name}}:{{.metadata.labels.{}}}{{\"\\n\"}}{{end}}",
+            label_escaped
         );
         let pods_output = run_cmd_allow_fail(
             "kubectl",

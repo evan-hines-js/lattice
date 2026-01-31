@@ -4,6 +4,17 @@
 //! reused across different test scenarios. The setup functions create clusters
 //! and return an `InfraContext` with the kubeconfig paths.
 //!
+//! # Cleanup Strategy
+//!
+//! Each test run uses a unique `run_id` suffix for its bootstrap cluster, allowing
+//! parallel test execution without conflicts. Cleanup functions:
+//!
+//! - `cleanup_bootstrap_cluster(run_id)` - Clean up this run's bootstrap cluster (targeted)
+//! - `cleanup_orphan_bootstrap_clusters()` - Clean up ALL orphaned bootstrap clusters (opt-in)
+//!
+//! The orphan cleanup only runs when `LATTICE_CLEANUP_ORPHANS=1` is set, to avoid
+//! accidentally deleting clusters from parallel test runs.
+//!
 //! # Running Setup Only
 //!
 //! ```bash
@@ -13,6 +24,14 @@
 //! # Then run integration tests against the existing clusters
 //! LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_mesh_standalone -- --ignored --nocapture
+//! ```
+//!
+//! # Cleaning Up Orphaned Clusters
+//!
+//! If you have orphaned clusters from failed runs, use:
+//!
+//! ```bash
+//! LATTICE_CLEANUP_ORPHANS=1 cargo test --features provider-e2e --test e2e test_setup_hierarchy_only -- --ignored --nocapture
 //! ```
 
 #![cfg(feature = "provider-e2e")]
@@ -114,13 +133,35 @@ fn get_kubeconfig(cluster_name: &str, provider: InfraProvider) -> Result<String,
     }
 }
 
-/// Clean up kind bootstrap cluster used during install
-pub fn cleanup_bootstrap_clusters() {
-    info!("Cleaning up any existing bootstrap clusters...");
-    let _ = run_cmd_allow_fail(
-        "kind",
-        &["delete", "cluster", "--name", "lattice-bootstrap"],
-    );
+/// Clean up the bootstrap cluster for a specific run_id
+///
+/// This should be called at the end of a test run (success or failure) to clean up
+/// the bootstrap cluster created by this specific run.
+pub fn cleanup_bootstrap_cluster(run_id: &str) {
+    let cluster_name = format!("lattice-bootstrap-{}", run_id);
+    info!("Cleaning up bootstrap cluster '{}'...", cluster_name);
+    let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", &cluster_name]);
+}
+
+/// Clean up ALL orphaned bootstrap clusters (opt-in)
+///
+/// Cleans up all `lattice-bootstrap-*` clusters when `LATTICE_CLEANUP_ORPHANS=1` is set.
+/// Use this when you need to clean up stale clusters from previous failed runs.
+///
+/// **Warning**: This will delete bootstrap clusters from OTHER parallel test runs.
+/// Only use when you're sure no other tests are running.
+pub fn cleanup_orphan_bootstrap_clusters() {
+    if std::env::var("LATTICE_CLEANUP_ORPHANS").is_ok() {
+        info!("LATTICE_CLEANUP_ORPHANS is set - cleaning up ALL orphaned bootstrap clusters...");
+        let clusters = run_cmd_allow_fail("kind", &["get", "clusters"]);
+        for cluster in clusters.lines() {
+            let cluster = cluster.trim();
+            if cluster.starts_with("lattice-bootstrap-") {
+                info!("Deleting orphaned bootstrap cluster: {}", cluster);
+                let _ = run_cmd_allow_fail("kind", &["delete", "cluster", "--name", cluster]);
+            }
+        }
+    }
 }
 
 /// Set up the full 3-cluster hierarchy (mgmt -> workload -> workload2)
@@ -143,8 +184,8 @@ pub fn cleanup_bootstrap_clusters() {
 /// println!("Workload2: {:?}", result.ctx.workload2_kubeconfig);
 /// ```
 pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, String> {
-    // Clean up any leftover bootstrap clusters
-    cleanup_bootstrap_clusters();
+    // Opt-in cleanup of orphaned clusters from previous failed runs
+    cleanup_orphan_bootstrap_clusters();
 
     // Build image if configured
     if config.build_image {
@@ -410,7 +451,8 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 ///
 /// Useful when you only need a single self-managing cluster.
 pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String> {
-    cleanup_bootstrap_clusters();
+    // Opt-in cleanup of orphaned clusters from previous failed runs
+    cleanup_orphan_bootstrap_clusters();
 
     if config.build_image {
         info!("[Setup] Building and pushing Lattice image...");

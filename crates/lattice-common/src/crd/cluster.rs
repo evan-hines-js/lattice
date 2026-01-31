@@ -174,6 +174,14 @@ pub struct LatticeClusterStatus {
     /// Cleared after CAPI cleanup is complete. Persists across operator restarts.
     #[serde(default, skip_serializing_if = "is_false")]
     pub unpivot_pending: bool,
+
+    /// Bootstrap token for authenticating with the parent cell during bootstrap
+    ///
+    /// Generated once when the cluster is first provisioned and stored here
+    /// as the single source of truth. Used by the bootstrap webhook to validate
+    /// requests from new clusters. Moves with the LatticeCluster during pivot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_token: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {

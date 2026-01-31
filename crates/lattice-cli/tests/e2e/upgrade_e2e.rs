@@ -44,7 +44,8 @@ use super::helpers::{
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
     load_registry_credentials, run_cmd_allow_fail, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
-use super::integration::{pivot, setup::cleanup_bootstrap_clusters};
+use super::helpers::run_id;
+use super::integration::{pivot, setup};
 use super::mesh_tests::start_mesh_test;
 use super::providers::InfraProvider;
 
@@ -73,7 +74,8 @@ async fn test_upgrade_with_mesh_traffic() {
     );
     info!("=========================================================");
 
-    cleanup_bootstrap_clusters();
+    // Opt-in cleanup of orphaned clusters from previous failed runs
+    setup::cleanup_orphan_bootstrap_clusters();
 
     if let Err(e) = build_and_push_lattice_image(DEFAULT_LATTICE_IMAGE).await {
         panic!("Failed to build Lattice image: {}", e);
@@ -89,14 +91,14 @@ async fn test_upgrade_with_mesh_traffic() {
             error!("=========================================================");
             error!("UPGRADE TEST FAILED: {}", e);
             error!("=========================================================");
-            cleanup_bootstrap_clusters();
+            setup::cleanup_bootstrap_cluster(run_id());
             panic!("Upgrade test failed: {}", e);
         }
         Err(_) => {
             error!("=========================================================");
             error!("UPGRADE TEST TIMED OUT");
             error!("=========================================================");
-            cleanup_bootstrap_clusters();
+            setup::cleanup_bootstrap_cluster(run_id());
             panic!("Upgrade test timed out after {:?}", TEST_TIMEOUT);
         }
     }
