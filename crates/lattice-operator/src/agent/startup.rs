@@ -12,9 +12,10 @@ use kube::api::{Api, PostParams};
 use kube::Client;
 
 use lattice_agent::{AgentClient, AgentClientConfig, AgentCredentials, ClientState};
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
-
-const AGENT_CREDENTIALS_SECRET: &str = "lattice-agent-credentials";
+use lattice_common::{
+    ParentConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY, LATTICE_SYSTEM_NAMESPACE, TLS_CERT_KEY,
+    TLS_KEY_KEY,
+};
 
 /// Supervise agent connection with automatic reconnection.
 /// If a parent cell is configured, maintains connection indefinitely with retries.
@@ -57,66 +58,28 @@ async fn start_agent_if_needed(
     client: &Client,
     cluster_name: &str,
 ) -> anyhow::Result<Option<AgentClient>> {
-    // Check for lattice-parent-config secret - this is set by the bootstrap process
-    // and indicates we were provisioned by a parent cell and need to connect back.
-    // If a cluster has a cellRef, this secret will ALWAYS exist (created during bootstrap).
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let parent_config = match secrets.get("lattice-parent-config").await {
-        Ok(config) => config,
-        Err(kube::Error::Api(e)) if e.code == 404 => {
+    // Read parent config - if missing, this is a root cluster
+    let parent = match ParentConfig::read(client).await {
+        Ok(Some(config)) => config,
+        Ok(None) => {
             tracing::debug!("No parent config secret, this is a root cluster");
             return Ok(None);
         }
-        Err(e) => return Err(anyhow::anyhow!("Failed to get parent config secret: {}", e)),
+        Err(e) => return Err(anyhow::anyhow!("Failed to read parent config: {}", e)),
     };
+
+    let http_endpoint = parent.endpoint.https_url();
+    let grpc_endpoint = parent.endpoint.grpc_url();
 
     tracing::info!(
         cluster = %cluster_name,
-        "Found parent config secret, starting agent connection to parent cell"
-    );
-
-    let data = parent_config
-        .data
-        .ok_or_else(|| anyhow::anyhow!("Parent config secret has no data"))?;
-
-    // Parse cell endpoint (format: "host:http_port:grpc_port")
-    let cell_endpoint = data
-        .get("cell_endpoint")
-        .ok_or_else(|| anyhow::anyhow!("Missing cell_endpoint in parent config"))?;
-    let cell_endpoint = String::from_utf8(cell_endpoint.0.clone())
-        .map_err(|e| anyhow::anyhow!("Invalid cell_endpoint encoding: {}", e))?;
-
-    let ca_cert = data
-        .get("ca.crt")
-        .ok_or_else(|| anyhow::anyhow!("Missing ca.crt in parent config"))?;
-    let ca_cert_pem = String::from_utf8(ca_cert.0.clone())
-        .map_err(|e| anyhow::anyhow!("Invalid CA cert encoding: {}", e))?;
-
-    // Parse endpoint parts
-    let parts: Vec<&str> = cell_endpoint.split(':').collect();
-    if parts.len() != 3 {
-        return Err(anyhow::anyhow!(
-            "Invalid cell_endpoint format, expected host:http_port:grpc_port"
-        ));
-    }
-    let host = parts[0];
-    let http_port: u16 = parts[1]
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid HTTP port: {}", e))?;
-    let grpc_port: u16 = parts[2]
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid gRPC port: {}", e))?;
-
-    let http_endpoint = format!("https://{}:{}", host, http_port);
-    let grpc_endpoint = format!("https://{}:{}", host, grpc_port);
-
-    tracing::info!(
         http_endpoint = %http_endpoint,
         grpc_endpoint = %grpc_endpoint,
-        "Connecting to parent cell"
+        "Found parent config, connecting to parent cell"
     );
 
     // Try to load existing credentials from secret, or request new ones
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let credentials = match load_agent_credentials(&secrets).await {
         Ok(creds) => {
             tracing::info!("Using existing agent credentials from secret");
@@ -125,7 +88,7 @@ async fn start_agent_if_needed(
         Err(_) => {
             tracing::info!("No existing credentials, requesting new certificate from cell");
             let creds =
-                AgentClient::request_certificate(&http_endpoint, cluster_name, &ca_cert_pem)
+                AgentClient::request_certificate(&http_endpoint, cluster_name, &parent.ca_cert_pem)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to get certificate: {}", e))?;
 
@@ -142,7 +105,7 @@ async fn start_agent_if_needed(
         cluster_name: cluster_name.to_string(),
         cell_grpc_endpoint: grpc_endpoint,
         cell_http_endpoint: http_endpoint,
-        ca_cert_pem: Some(ca_cert_pem),
+        ca_cert_pem: Some(parent.ca_cert_pem),
         heartbeat_interval: Duration::from_secs(30),
         ..Default::default()
     };
@@ -166,14 +129,14 @@ async fn load_agent_credentials(secrets: &Api<Secret>) -> anyhow::Result<AgentCr
         .ok_or_else(|| anyhow::anyhow!("credentials secret has no data"))?;
 
     let cert_pem = data
-        .get("tls.crt")
-        .ok_or_else(|| anyhow::anyhow!("missing tls.crt"))?;
+        .get(TLS_CERT_KEY)
+        .ok_or_else(|| anyhow::anyhow!("missing {}", TLS_CERT_KEY))?;
     let key_pem = data
-        .get("tls.key")
-        .ok_or_else(|| anyhow::anyhow!("missing tls.key"))?;
+        .get(TLS_KEY_KEY)
+        .ok_or_else(|| anyhow::anyhow!("missing {}", TLS_KEY_KEY))?;
     let ca_pem = data
-        .get("ca.crt")
-        .ok_or_else(|| anyhow::anyhow!("missing ca.crt"))?;
+        .get(CA_CERT_KEY)
+        .ok_or_else(|| anyhow::anyhow!("missing {}", CA_CERT_KEY))?;
 
     Ok(AgentCredentials {
         cert_pem: String::from_utf8(cert_pem.0.clone())?,
@@ -189,15 +152,15 @@ async fn save_agent_credentials(
 ) -> anyhow::Result<()> {
     let mut data = BTreeMap::new();
     data.insert(
-        "tls.crt".to_string(),
+        TLS_CERT_KEY.to_string(),
         ByteString(credentials.cert_pem.as_bytes().to_vec()),
     );
     data.insert(
-        "tls.key".to_string(),
+        TLS_KEY_KEY.to_string(),
         ByteString(credentials.key_pem.as_bytes().to_vec()),
     );
     data.insert(
-        "ca.crt".to_string(),
+        CA_CERT_KEY.to_string(),
         ByteString(credentials.ca_cert_pem.as_bytes().to_vec()),
     );
 

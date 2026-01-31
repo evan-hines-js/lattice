@@ -58,7 +58,10 @@ use tracing::{debug, info, warn};
 use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
 use lattice_common::crd::{LatticeCluster, LatticeClusterStatus, ProviderType};
-use lattice_common::{LABEL_MANAGED_BY, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    CellEndpoint, LABEL_MANAGED_BY, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_CA_KEY,
+    PARENT_CONFIG_ENDPOINT_KEY, PARENT_CONFIG_SECRET, REGISTRY_CREDENTIALS_SECRET,
+};
 #[cfg(test)]
 use lattice_infra::pki::CertificateAuthority;
 use lattice_infra::pki::{CertificateAuthorityBundle, PkiError};
@@ -438,7 +441,7 @@ impl DefaultManifestGenerator {
         // 2. Registry credentials secret (if available)
         let registry_secret = registry_creds.as_ref().map(|creds| Secret {
             metadata: ObjectMeta {
-                name: Some("lattice-registry".to_string()),
+                name: Some(REGISTRY_CREDENTIALS_SECRET.to_string()),
                 namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
@@ -504,7 +507,7 @@ impl DefaultManifestGenerator {
                         service_account_name: Some("lattice-operator".to_string()),
                         image_pull_secrets: if registry_secret.is_some() {
                             Some(vec![LocalObjectReference {
-                                name: "lattice-registry".to_string(),
+                                name: REGISTRY_CREDENTIALS_SECRET.to_string(),
                             }])
                         } else {
                             None
@@ -514,7 +517,7 @@ impl DefaultManifestGenerator {
                             Some(vec![Volume {
                                 name: "registry-creds".to_string(),
                                 secret: Some(SecretVolumeSource {
-                                    secret_name: Some("lattice-registry".to_string()),
+                                    secret_name: Some(REGISTRY_CREDENTIALS_SECRET.to_string()),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
@@ -1183,7 +1186,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         info: &ClusterBootstrapInfo,
     ) -> Result<BootstrapResponse, BootstrapError> {
         // Parse parent endpoint for network policy
-        let (parent_host, grpc_port) = parse_parent_endpoint(&info.cell_endpoint);
+        let (parent_host, grpc_port) = CellEndpoint::parse(&info.cell_endpoint)
+            .map(|e| (Some(e.host), e.grpc_port))
+            .unwrap_or((None, lattice_common::DEFAULT_GRPC_PORT));
 
         // Generate the complete bootstrap bundle (operator, infra, LatticeCluster)
         let bundle_config = BootstrapBundleConfig {
@@ -1207,14 +1212,20 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // Add parent connection config Secret (webhook-specific, not needed for installer)
         let parent_config = Secret {
             metadata: ObjectMeta {
-                name: Some("lattice-parent-config".to_string()),
+                name: Some(PARENT_CONFIG_SECRET.to_string()),
                 namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
             type_: Some("Opaque".to_string()),
             string_data: Some(BTreeMap::from([
-                ("cell_endpoint".to_string(), info.cell_endpoint.clone()),
-                ("ca.crt".to_string(), info.ca_certificate.clone()),
+                (
+                    PARENT_CONFIG_ENDPOINT_KEY.to_string(),
+                    info.cell_endpoint.clone(),
+                ),
+                (
+                    PARENT_CONFIG_CA_KEY.to_string(),
+                    info.ca_certificate.clone(),
+                ),
             ])),
             ..Default::default()
         };
@@ -1313,21 +1324,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 Ok(false)
             }
         }
-    }
-}
-
-/// Parse parent endpoint into host and gRPC port
-/// Format: "host:http_port:grpc_port"
-fn parse_parent_endpoint(endpoint: &str) -> (Option<String>, u16) {
-    let parts: Vec<&str> = endpoint.split(':').collect();
-    match parts.as_slice() {
-        [host, _http_port, grpc_port] => {
-            let port = grpc_port
-                .parse()
-                .unwrap_or(lattice_common::DEFAULT_GRPC_PORT);
-            (Some((*host).to_string()), port)
-        }
-        _ => (None, lattice_common::DEFAULT_GRPC_PORT),
     }
 }
 

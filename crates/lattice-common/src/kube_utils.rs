@@ -673,21 +673,27 @@ pub async fn apply_manifest_with_discovery(
     options: &ApplyOptions,
 ) -> Result<(), Error> {
     let obj: serde_json::Value = crate::yaml::parse_yaml(manifest).map_err(|e| {
-        Error::internal_with_context("apply_manifest_with_discovery", format!("invalid YAML: {}", e))
+        Error::internal_with_context(
+            "apply_manifest_with_discovery",
+            format!("invalid YAML: {}", e),
+        )
     })?;
 
-    let kind = obj
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::internal_with_context("apply_manifest_with_discovery", "missing kind"))?;
+    let kind = obj.get("kind").and_then(|v| v.as_str()).ok_or_else(|| {
+        Error::internal_with_context("apply_manifest_with_discovery", "missing kind")
+    })?;
     let api_version = obj
         .get("apiVersion")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::internal_with_context("apply_manifest_with_discovery", "missing apiVersion"))?;
+        .ok_or_else(|| {
+            Error::internal_with_context("apply_manifest_with_discovery", "missing apiVersion")
+        })?;
     let name = obj
         .pointer("/metadata/name")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::internal_with_context("apply_manifest_with_discovery", "missing metadata.name"))?;
+        .ok_or_else(|| {
+            Error::internal_with_context("apply_manifest_with_discovery", "missing metadata.name")
+        })?;
     let namespace = obj.pointer("/metadata/namespace").and_then(|v| v.as_str());
 
     // Parse apiVersion into group/version
@@ -792,10 +798,12 @@ pub async fn apply_manifests_with_discovery(
 
     // Phase 1: Apply foundational resources (Namespaces, CRDs)
     if !foundational.is_empty() {
-        let discovery = Discovery::new(client.clone())
-            .run()
-            .await
-            .map_err(|e| Error::internal_with_context("apply_manifests_with_discovery", format!("API discovery failed: {}", e)))?;
+        let discovery = Discovery::new(client.clone()).run().await.map_err(|e| {
+            Error::internal_with_context(
+                "apply_manifests_with_discovery",
+                format!("API discovery failed: {}", e),
+            )
+        })?;
 
         for manifest in &foundational {
             apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
@@ -804,10 +812,12 @@ pub async fn apply_manifests_with_discovery(
 
     // Phase 2: Re-run discovery to learn new CRD types, then apply rest
     if !rest.is_empty() {
-        let discovery = Discovery::new(client.clone())
-            .run()
-            .await
-            .map_err(|e| Error::internal_with_context("apply_manifests_with_discovery", format!("API refresh failed: {}", e)))?;
+        let discovery = Discovery::new(client.clone()).run().await.map_err(|e| {
+            Error::internal_with_context(
+                "apply_manifests_with_discovery",
+                format!("API refresh failed: {}", e),
+            )
+        })?;
 
         for manifest in &rest {
             apply_manifest_with_discovery(client, &discovery, manifest, options).await?;

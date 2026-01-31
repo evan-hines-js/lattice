@@ -407,10 +407,7 @@ mod tests {
 
         let result = provider.validate_spec(&spec).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("externalNetwork"));
+        assert!(result.unwrap_err().to_string().contains("externalNetwork"));
     }
 
     #[tokio::test]
