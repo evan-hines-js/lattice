@@ -332,10 +332,7 @@ async fn wait_for_cycles(
 }
 
 /// Wait for N complete test cycles on traffic generator pods in the fixed mesh test
-async fn wait_for_mesh_test_cycles(
-    kubeconfig_path: &str,
-    min_cycles: usize,
-) -> Result<(), String> {
+async fn wait_for_mesh_test_cycles(kubeconfig_path: &str, min_cycles: usize) -> Result<(), String> {
     // Traffic generators are frontend-* pods
     wait_for_cycles(
         kubeconfig_path,
@@ -358,7 +355,13 @@ async fn wait_for_random_mesh_test_cycles(
         "lattice.dev/environment={},lattice.dev/name in ({})",
         RANDOM_MESH_NAMESPACE, names
     );
-    wait_for_cycles(kubeconfig_path, RANDOM_MESH_NAMESPACE, &selector, min_cycles).await
+    wait_for_cycles(
+        kubeconfig_path,
+        RANDOM_MESH_NAMESPACE,
+        &selector,
+        min_cycles,
+    )
+    .await
 }
 
 /// Generate a traffic test script that waits for policies and tests connections
