@@ -2,12 +2,13 @@
 //!
 //! This module provides:
 //! - Kubeconfig patching for self-management (internal K8s endpoint)
-//! - Distributed resource application (CloudProviders, SecretsProviders, Secrets)
+//! - Distributed resource application (CloudProviders, SecretsProviders, Secrets, etc.)
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, Patch, PatchParams};
-use kube::Client;
+use kube::{Client, Resource};
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::{debug, info};
 
@@ -199,6 +200,42 @@ pub async fn patch_kubeconfig_for_self_management(
 // Distributed Resources
 // =============================================================================
 
+/// Apply a list of serialized resources to the cluster using server-side apply.
+async fn apply_resources<T>(
+    api: &Api<T>,
+    resources_bytes: &[Vec<u8>],
+    params: &PatchParams,
+    resource_type: &str,
+) -> Result<(), PivotError>
+where
+    T: Resource<DynamicType = ()> + DeserializeOwned + Clone + std::fmt::Debug + serde::Serialize,
+{
+    for bytes in resources_bytes {
+        let json_str = String::from_utf8_lossy(bytes);
+        let value = lattice_common::yaml::parse_yaml(&json_str).map_err(|e| {
+            PivotError::Internal(format!("failed to parse {} JSON: {}", resource_type, e))
+        })?;
+        let resource: T = serde_json::from_value(value).map_err(|e| {
+            PivotError::Internal(format!("failed to deserialize {}: {}", resource_type, e))
+        })?;
+
+        let name = resource
+            .meta()
+            .name
+            .as_ref()
+            .ok_or_else(|| PivotError::Internal(format!("{} has no name", resource_type)))?;
+
+        api.patch(name, params, &Patch::Apply(&resource))
+            .await
+            .map_err(|e| {
+                PivotError::Internal(format!("failed to apply {} {}: {}", resource_type, name, e))
+            })?;
+
+        info!(%resource_type, %name, "Applied distributed resource");
+    }
+    Ok(())
+}
+
 /// Apply distributed resources to the lattice-system namespace.
 pub async fn apply_distributed_resources(
     client: &Client,
@@ -212,134 +249,47 @@ pub async fn apply_distributed_resources(
 
     // Apply secrets first (credentials needed by providers)
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    for secret_bytes in &resources.secrets {
-        let yaml_str = String::from_utf8_lossy(secret_bytes);
-        let value = lattice_common::yaml::parse_yaml(&yaml_str)
-            .map_err(|e| PivotError::Internal(format!("failed to parse secret YAML: {}", e)))?;
-        let secret: Secret = serde_json::from_value(value)
-            .map_err(|e| PivotError::Internal(format!("failed to deserialize secret: {}", e)))?;
-
-        let name = secret
-            .metadata
-            .name
-            .as_ref()
-            .ok_or_else(|| PivotError::Internal("secret has no name".to_string()))?;
-
-        secret_api
-            .patch(name, &params, &Patch::Apply(&secret))
-            .await
-            .map_err(|e| PivotError::Internal(format!("failed to apply secret {}: {}", name, e)))?;
-
-        info!(secret = %name, "Applied distributed secret");
-    }
+    apply_resources(&secret_api, &resources.secrets, &params, "Secret").await?;
 
     // Apply CloudProviders
     let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    for cp_bytes in &resources.cloud_providers {
-        let yaml_str = String::from_utf8_lossy(cp_bytes);
-        let value = lattice_common::yaml::parse_yaml(&yaml_str).map_err(|e| {
-            PivotError::Internal(format!("failed to parse CloudProvider YAML: {}", e))
-        })?;
-        let cp: CloudProvider = serde_json::from_value(value).map_err(|e| {
-            PivotError::Internal(format!("failed to deserialize CloudProvider: {}", e))
-        })?;
-
-        let name = cp
-            .metadata
-            .name
-            .as_ref()
-            .ok_or_else(|| PivotError::Internal("CloudProvider has no name".to_string()))?;
-
-        cp_api
-            .patch(name, &params, &Patch::Apply(&cp))
-            .await
-            .map_err(|e| {
-                PivotError::Internal(format!("failed to apply CloudProvider {}: {}", name, e))
-            })?;
-
-        info!(cloud_provider = %name, "Applied distributed CloudProvider");
-    }
+    apply_resources(
+        &cp_api,
+        &resources.cloud_providers,
+        &params,
+        "CloudProvider",
+    )
+    .await?;
 
     // Apply SecretsProviders
     let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    for sp_bytes in &resources.secrets_providers {
-        let yaml_str = String::from_utf8_lossy(sp_bytes);
-        let value = lattice_common::yaml::parse_yaml(&yaml_str).map_err(|e| {
-            PivotError::Internal(format!("failed to parse SecretsProvider YAML: {}", e))
-        })?;
-        let sp: SecretsProvider = serde_json::from_value(value).map_err(|e| {
-            PivotError::Internal(format!("failed to deserialize SecretsProvider: {}", e))
-        })?;
-
-        let name = sp
-            .metadata
-            .name
-            .as_ref()
-            .ok_or_else(|| PivotError::Internal("SecretsProvider has no name".to_string()))?;
-
-        sp_api
-            .patch(name, &params, &Patch::Apply(&sp))
-            .await
-            .map_err(|e| {
-                PivotError::Internal(format!("failed to apply SecretsProvider {}: {}", name, e))
-            })?;
-
-        info!(secrets_provider = %name, "Applied distributed SecretsProvider");
-    }
+    apply_resources(
+        &sp_api,
+        &resources.secrets_providers,
+        &params,
+        "SecretsProvider",
+    )
+    .await?;
 
     // Apply CedarPolicies (inherited from parent)
     let cedar_api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    for cedar_bytes in &resources.cedar_policies {
-        let json_str = String::from_utf8_lossy(cedar_bytes);
-        let value = lattice_common::yaml::parse_yaml(&json_str).map_err(|e| {
-            PivotError::Internal(format!("failed to parse CedarPolicy JSON: {}", e))
-        })?;
-        let policy: CedarPolicy = serde_json::from_value(value).map_err(|e| {
-            PivotError::Internal(format!("failed to deserialize CedarPolicy: {}", e))
-        })?;
-
-        let name = policy
-            .metadata
-            .name
-            .as_ref()
-            .ok_or_else(|| PivotError::Internal("CedarPolicy has no name".to_string()))?;
-
-        cedar_api
-            .patch(name, &params, &Patch::Apply(&policy))
-            .await
-            .map_err(|e| {
-                PivotError::Internal(format!("failed to apply CedarPolicy {}: {}", name, e))
-            })?;
-
-        info!(cedar_policy = %name, "Applied inherited CedarPolicy");
-    }
+    apply_resources(
+        &cedar_api,
+        &resources.cedar_policies,
+        &params,
+        "CedarPolicy",
+    )
+    .await?;
 
     // Apply OIDCProviders (inherited from parent)
     let oidc_api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    for oidc_bytes in &resources.oidc_providers {
-        let json_str = String::from_utf8_lossy(oidc_bytes);
-        let value = lattice_common::yaml::parse_yaml(&json_str).map_err(|e| {
-            PivotError::Internal(format!("failed to parse OIDCProvider JSON: {}", e))
-        })?;
-        let provider: OIDCProvider = serde_json::from_value(value).map_err(|e| {
-            PivotError::Internal(format!("failed to deserialize OIDCProvider: {}", e))
-        })?;
-
-        let name = provider
-            .metadata
-            .name
-            .as_ref()
-            .ok_or_else(|| PivotError::Internal("OIDCProvider has no name".to_string()))?;
-
-        oidc_api
-            .patch(name, &params, &Patch::Apply(&provider))
-            .await
-            .map_err(|e| {
-                PivotError::Internal(format!("failed to apply OIDCProvider {}: {}", name, e))
-            })?;
-
-        info!(oidc_provider = %name, "Applied inherited OIDCProvider");
-    }
+    apply_resources(
+        &oidc_api,
+        &resources.oidc_providers,
+        &params,
+        "OIDCProvider",
+    )
+    .await?;
 
     Ok(())
 }
