@@ -7,7 +7,8 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::{Client, CustomResourceExt};
 
 use crate::crd::{
-    CloudProvider, LatticeCluster, LatticeExternalService, LatticeService, SecretsProvider,
+    CedarPolicy, CloudProvider, LatticeCluster, LatticeExternalService, LatticeService,
+    OIDCProvider, SecretsProvider,
 };
 
 /// CRD definition with name and resource
@@ -38,6 +39,14 @@ fn all_crds() -> Vec<CrdDef> {
         CrdDef {
             name: "secretsproviders.lattice.dev",
             crd: SecretsProvider::crd(),
+        },
+        CrdDef {
+            name: "cedarpolicies.lattice.dev",
+            crd: CedarPolicy::crd(),
+        },
+        CrdDef {
+            name: "oidcproviders.lattice.dev",
+            crd: OIDCProvider::crd(),
         },
     ]
 }
