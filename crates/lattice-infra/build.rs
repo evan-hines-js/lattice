@@ -51,6 +51,10 @@ fn main() {
         "cargo:rustc-env=GATEWAY_API_VERSION={}",
         versions.resources["gateway-api"].version
     );
+    println!(
+        "cargo:rustc-env=EXTERNAL_SECRETS_VERSION={}",
+        versions.charts["external-secrets"].version
+    );
 
     let charts_dir = workspace_root.join("test-charts");
     println!(

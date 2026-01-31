@@ -5,6 +5,8 @@
 //!
 //! Also provides CiliumNetworkPolicy generation for Lattice components.
 
+use std::collections::BTreeMap;
+
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 use tracing::info;
@@ -164,8 +166,6 @@ pub fn generate_ztunnel_allowlist() -> CiliumClusterwideNetworkPolicy {
 /// - Only allow DNS egress to kube-dns
 /// - Exclude system namespaces from policy
 pub fn generate_default_deny() -> CiliumClusterwideNetworkPolicy {
-    use std::collections::BTreeMap;
-
     CiliumClusterwideNetworkPolicy::new(
         ClusterwideMetadata::new("default-deny"),
         CiliumClusterwideSpec {
@@ -237,8 +237,6 @@ pub fn generate_default_deny() -> CiliumClusterwideNetworkPolicy {
 /// The waypoint terminates HBONE, evaluates AuthorizationPolicy, then forwards to the service.
 /// L7 AuthorizationPolicy controls access - L4 just needs to allow the waypoint to forward.
 pub fn generate_waypoint_egress_policy() -> CiliumClusterwideNetworkPolicy {
-    use std::collections::BTreeMap;
-
     CiliumClusterwideNetworkPolicy::new(
         ClusterwideMetadata::new("waypoint-egress"),
         CiliumClusterwideSpec {
@@ -323,8 +321,6 @@ pub fn generate_operator_network_policy(
     parent_host: Option<&str>,
     parent_port: u16,
 ) -> CiliumNetworkPolicy {
-    use std::collections::BTreeMap;
-
     let mut egress_rules = vec![
         // DNS to kube-dns
         CiliumEgressRule {
