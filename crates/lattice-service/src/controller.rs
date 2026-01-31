@@ -571,13 +571,13 @@ pub async fn reconcile(
         }
     };
 
+    // Always ensure this service is in the graph (crash recovery)
+    // This is idempotent - put_service handles updates correctly
+    ctx.graph.put_service(namespace, &name, &service.spec);
+
     // State machine: transition based on current phase
     match current_phase {
         ServicePhase::Pending => {
-            // Update graph with this service's dependencies
-            info!(namespace = %namespace, "adding service to graph");
-            ctx.graph.put_service(namespace, &name, &service.spec);
-
             // Transition to Compiling
             update_service_status_compiling(&service, &ctx).await?;
             Ok(Action::requeue(Duration::from_secs(5)))
@@ -627,9 +627,6 @@ pub async fn reconcile(
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         ServicePhase::Ready => {
-            // Service is ready, ensure graph is up to date
-            ctx.graph.put_service(namespace, &name, &service.spec);
-
             // Check for any issues that would cause degradation
             let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
             if !missing_deps.is_empty() {
