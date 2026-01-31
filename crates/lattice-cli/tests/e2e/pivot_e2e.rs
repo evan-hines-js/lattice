@@ -29,6 +29,7 @@ use tracing::info;
 
 use lattice_cli::commands::uninstall::{UninstallArgs, Uninstaller};
 
+use super::context::init_e2e_test;
 use super::helpers::run_id;
 use super::integration::{self, setup};
 
@@ -39,12 +40,7 @@ const WORKLOAD2_CLUSTER_NAME: &str = "e2e-workload2";
 
 #[tokio::test]
 async fn test_configurable_provider_pivot() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-
+    init_e2e_test();
     info!("Starting E2E test: Full Lifecycle");
 
     let result = tokio::time::timeout(E2E_TIMEOUT, run_full_e2e()).await;

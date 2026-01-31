@@ -16,7 +16,7 @@
 
 use tracing::info;
 
-use super::super::context::InfraContext;
+use super::super::context::{init_test_env, InfraContext};
 use super::super::helpers::{delete_cluster_and_wait, watch_cluster_phases};
 use super::super::providers::InfraProvider;
 
@@ -148,15 +148,8 @@ pub fn start_cluster_deletion_async(
 #[tokio::test]
 #[ignore]
 async fn test_unpivot_standalone() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-
-    let ctx = InfraContext::from_env()
-        .expect("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG for unpivot test");
-
+    let ctx =
+        init_test_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG for unpivot test");
     let cluster_name =
         std::env::var("LATTICE_CLUSTER_TO_DELETE").expect("LATTICE_CLUSTER_TO_DELETE must be set");
 

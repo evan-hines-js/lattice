@@ -14,7 +14,7 @@
 
 use tracing::info;
 
-use super::super::context::InfraContext;
+use super::super::context::{init_test_env, InfraContext};
 use super::super::mesh_tests::{run_mesh_test, run_random_mesh_test, start_mesh_test};
 use super::super::providers::InfraProvider;
 
@@ -76,6 +76,8 @@ pub async fn run_randomized_mesh_test(ctx: &InfraContext) -> Result<(), String> 
 ///
 /// Use this when you want to run mesh tests concurrently with other operations.
 /// The returned handle can be used to wait for completion and get results.
+///
+/// If `is_docker` is true, also runs the media server test.
 pub async fn start_mesh_tests_async(
     ctx: &InfraContext,
     is_docker: bool,
@@ -86,27 +88,16 @@ pub async fn start_mesh_tests_async(
         info!("[Integration/Mesh] Running service mesh tests in background...");
 
         // Run mesh tests in parallel
-        if is_docker {
-            // Docker includes media server test
-            let kubeconfig2 = kubeconfig.clone();
-            let kubeconfig3 = kubeconfig.clone();
+        let (r1, r2) = tokio::join!(
+            run_mesh_test(&kubeconfig),
+            run_random_mesh_test(&kubeconfig)
+        );
+        r1?;
+        r2?;
 
-            let (r1, r2, r3) = tokio::join!(
-                run_mesh_test(&kubeconfig),
-                run_random_mesh_test(&kubeconfig2),
-                super::super::media_server_e2e::run_media_server_test(&kubeconfig3)
-            );
-            r1?;
-            r2?;
-            r3?;
-        } else {
-            let kubeconfig2 = kubeconfig.clone();
-            let (r1, r2) = tokio::join!(
-                run_mesh_test(&kubeconfig),
-                run_random_mesh_test(&kubeconfig2)
-            );
-            r1?;
-            r2?;
+        // Docker includes media server test
+        if is_docker {
+            super::super::media_server_e2e::run_media_server_test(&kubeconfig).await?;
         }
 
         info!("[Integration/Mesh] All background mesh tests complete!");
@@ -150,19 +141,7 @@ pub fn is_docker_provider(ctx: &InfraContext) -> bool {
 #[tokio::test]
 #[ignore]
 async fn test_mesh_standalone() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-
-    let ctx = InfraContext::from_env()
-        .expect("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone mesh tests");
-
-    if ctx.workload_kubeconfig.is_none() {
-        panic!("LATTICE_WORKLOAD_KUBECONFIG must be set for standalone mesh tests");
-    }
-
+    let ctx = init_test_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone mesh tests");
     run_mesh_tests(&ctx).await.unwrap();
 }
 
@@ -170,15 +149,7 @@ async fn test_mesh_standalone() {
 #[tokio::test]
 #[ignore]
 async fn test_fixed_mesh_standalone() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-
-    let ctx = InfraContext::from_env()
-        .expect("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone mesh tests");
-
+    let ctx = init_test_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone mesh tests");
     run_fixed_mesh_test(&ctx).await.unwrap();
 }
 
@@ -186,14 +157,6 @@ async fn test_fixed_mesh_standalone() {
 #[tokio::test]
 #[ignore]
 async fn test_random_mesh_standalone() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-
-    let ctx = InfraContext::from_env()
-        .expect("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone mesh tests");
-
+    let ctx = init_test_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone mesh tests");
     run_randomized_mesh_test(&ctx).await.unwrap();
 }

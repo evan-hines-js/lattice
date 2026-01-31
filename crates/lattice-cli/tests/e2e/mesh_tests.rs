@@ -1286,6 +1286,15 @@ struct RandomMesh {
 }
 
 impl RandomMesh {
+    /// Get names of all traffic generator services
+    fn traffic_generator_names(&self) -> Vec<String> {
+        self.services
+            .values()
+            .filter(|s| s.is_traffic_generator)
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
     fn generate(config: &RandomMeshConfig) -> Self {
         let mut rng = match config.seed {
             Some(seed) => StdRng::seed_from_u64(seed),
@@ -2043,20 +2052,11 @@ pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshT
 pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let handle = start_random_mesh_test(kubeconfig_path).await?;
 
-    // Get traffic generator names for cycle monitoring
-    let traffic_generators: Vec<String> = handle
-        .mesh
-        .services
-        .values()
-        .filter(|s| s.is_traffic_generator)
-        .map(|s| s.name.clone())
-        .collect();
-
     // Wait for 2 complete test cycles instead of flat time
+    let traffic_generators = handle.mesh.traffic_generator_names();
     wait_for_random_mesh_test_cycles(kubeconfig_path, &traffic_generators, 2).await?;
 
     let result = handle.stop_and_verify().await;
-    // Clean up immediately to free CPU resources
     cleanup_random_mesh_test(kubeconfig_path);
     result
 }
