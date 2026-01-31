@@ -7,7 +7,7 @@ use std::time::Duration;
 use kube::api::ListParams;
 use kube::{Api, Client};
 
-use lattice_common::{parse_cell_endpoint, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{ParentConfig, LATTICE_SYSTEM_NAMESPACE};
 
 use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
 use crate::crd::{CloudProvider, LatticeCluster, ProviderType};
@@ -62,22 +62,10 @@ pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
 
         let mut config = InfrastructureConfig::from(cluster);
 
-        // Read parent address from lattice-parent-config secret if it exists
-        // This is the upstream parent cell this cluster connects to
-        use k8s_openapi::api::core::v1::Secret;
-        let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        if let Ok(parent_secret) = secrets.get("lattice-parent-config").await {
-            if let Some(data) = parent_secret.data {
-                if let Some(endpoint_bytes) = data.get("cell_endpoint") {
-                    if let Ok(endpoint_str) = std::str::from_utf8(&endpoint_bytes.0) {
-                        // Parse endpoint like "https://172.18.255.10:50051"
-                        if let Some((host, port)) = parse_cell_endpoint(endpoint_str) {
-                            config.parent_host = Some(host);
-                            config.parent_grpc_port = port;
-                        }
-                    }
-                }
-            }
+        // Read parent config if it exists (indicates we have an upstream parent cell)
+        if let Ok(Some(parent)) = ParentConfig::read(client).await {
+            config.parent_host = Some(parent.endpoint.host);
+            config.parent_grpc_port = parent.endpoint.grpc_port;
         }
 
         tracing::info!(

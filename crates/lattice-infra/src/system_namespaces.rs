@@ -4,9 +4,7 @@
 //! default-deny network policies. These are infrastructure namespaces
 //! that require unrestricted network access to function.
 
-use lattice_common::{
-    CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, LATTICE_SYSTEM_NAMESPACE,
-};
+use lattice_common::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
 
 /// Core Kubernetes namespaces
 pub const CORE: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];

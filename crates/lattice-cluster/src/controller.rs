@@ -22,7 +22,10 @@ use lattice_common::crd::{
     WorkerPoolStatus,
 };
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::{lattice_svc_dns, parse_cell_endpoint, Error, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    lattice_svc_dns, Error, ParentConfig, CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE,
+    PARENT_CONFIG_SECRET,
+};
 use lattice_infra::InfrastructureConfig;
 use lattice_move::{CellMover, CellMoverConfig};
 use lattice_proto::AgentState;
@@ -115,7 +118,7 @@ pub trait KubeClient: Send + Sync {
 
     /// Get the cell host from the LoadBalancer Service status
     ///
-    /// Returns the hostname or IP from the lattice-cell Service's LoadBalancer ingress.
+    /// Returns the hostname or IP from the cell Service's LoadBalancer ingress.
     /// Returns None if the Service doesn't exist or has no ingress assigned yet.
     async fn get_cell_host(&self) -> Result<Option<String>, Error>;
 
@@ -434,7 +437,7 @@ impl KubeClient for KubeClientImpl {
 
         let service = Service {
             metadata: ObjectMeta {
-                name: Some("lattice-cell".to_string()),
+                name: Some(CELL_SERVICE_NAME.to_string()),
                 namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 labels: Some(labels.clone()),
                 ..Default::default()
@@ -467,7 +470,7 @@ impl KubeClient for KubeClientImpl {
         };
 
         // Check if service exists
-        match api.get("lattice-cell").await {
+        match api.get(CELL_SERVICE_NAME).await {
             Ok(_) => {
                 debug!("cell service already exists");
             }
@@ -563,7 +566,7 @@ impl KubeClient for KubeClientImpl {
         use k8s_openapi::api::core::v1::Service;
 
         let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        let svc = match api.get("lattice-cell").await {
+        let svc = match api.get(CELL_SERVICE_NAME).await {
             Ok(s) => s,
             Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -585,13 +588,13 @@ impl KubeClient for KubeClientImpl {
         use kube::api::DeleteParams;
 
         let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        match api.delete("lattice-cell", &DeleteParams::default()).await {
+        match api.delete(CELL_SERVICE_NAME, &DeleteParams::default()).await {
             Ok(_) => {
-                info!("Deleted lattice-cell LoadBalancer service");
+                info!(service = CELL_SERVICE_NAME, "Deleted cell LoadBalancer service");
                 Ok(())
             }
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                debug!("lattice-cell service not found (already deleted)");
+                debug!(service = CELL_SERVICE_NAME, "Cell service not found (already deleted)");
                 Ok(())
             }
             Err(e) => Err(e.into()),
@@ -602,7 +605,7 @@ impl KubeClient for KubeClientImpl {
         use k8s_openapi::api::core::v1::Service;
 
         let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        match api.get("lattice-cell").await {
+        match api.get(CELL_SERVICE_NAME).await {
             Ok(_) => Ok(true),
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
             Err(e) => Err(e.into()),
@@ -1065,10 +1068,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // 2. Non-self cluster (child) - needs CAPI cleanup (delete infrastructure)
     if !has_finalizer(&cluster) {
         if is_self {
-            // Check if lattice-parent-config secret exists (indicates we have a parent)
+            // Check if parent config secret exists (indicates we have a parent)
             let has_parent = ctx
                 .kube
-                .get_secret("lattice-parent-config", LATTICE_SYSTEM_NAMESPACE)
+                .get_secret(PARENT_CONFIG_SECRET, LATTICE_SYSTEM_NAMESPACE)
                 .await?
                 .is_some();
 
@@ -1292,7 +1295,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                                 // No explicit host - use in-cluster service DNS
                                 format!(
                                     "https://{}:{}",
-                                    lattice_svc_dns("lattice-cell"),
+                                    lattice_svc_dns(CELL_SERVICE_NAME),
                                     endpoints.proxy_port
                                 )
                             }
@@ -1300,7 +1303,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                             // Fallback to default
                             format!(
                                 "https://{}:{}",
-                                lattice_svc_dns("lattice-cell"),
+                                lattice_svc_dns(CELL_SERVICE_NAME),
                                 lattice_common::DEFAULT_PROXY_PORT
                             )
                         };
@@ -1736,27 +1739,12 @@ async fn generate_capi_manifests(
 /// This ensures that infrastructure components can't be removed and are always in sync.
 /// Uses server-side apply for idempotency.
 async fn reconcile_infrastructure(client: &Client, cluster: &LatticeCluster) -> Result<(), Error> {
-    use k8s_openapi::api::core::v1::Secret;
-    use kube::Api;
-
     let mut config = InfrastructureConfig::from(cluster);
 
-    // Read parent address from lattice-parent-config secret if it exists
-    // This is the upstream parent cell this cluster connects to (not parent_config,
-    // which is for this cluster's own cell server endpoints)
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    if let Ok(parent_secret) = secrets.get("lattice-parent-config").await {
-        if let Some(data) = parent_secret.data {
-            if let Some(endpoint_bytes) = data.get("cell_endpoint") {
-                if let Ok(endpoint_str) = std::str::from_utf8(&endpoint_bytes.0) {
-                    // Parse endpoint like "https://172.18.255.10:50051"
-                    if let Some((host, port)) = parse_cell_endpoint(endpoint_str) {
-                        config.parent_host = Some(host);
-                        config.parent_grpc_port = port;
-                    }
-                }
-            }
-        }
+    // Read parent config if it exists (indicates we have an upstream parent cell)
+    if let Some(parent) = ParentConfig::read(client).await? {
+        config.parent_host = Some(parent.endpoint.host);
+        config.parent_grpc_port = parent.endpoint.grpc_port;
     }
 
     // Generate infrastructure manifests
@@ -2139,7 +2127,7 @@ async fn handle_deletion(
     // For self clusters, check if we have a parent to unpivot to
     let has_parent = ctx
         .kube
-        .get_secret("lattice-parent-config", LATTICE_SYSTEM_NAMESPACE)
+        .get_secret(PARENT_CONFIG_SECRET, LATTICE_SYSTEM_NAMESPACE)
         .await?
         .is_some();
 
@@ -2167,7 +2155,7 @@ async fn handle_deletion(
     if current_phase != ClusterPhase::Unpivoting {
         info!(cluster = %name, "Starting unpivot - agent will send manifests to parent");
 
-        // Delete the lattice-cell LoadBalancer service to free the IP
+        // Delete the cell LoadBalancer service to free the IP
         ctx.kube.delete_cell_service().await?;
 
         // Set phase to Unpivoting

@@ -32,7 +32,10 @@ use crate::resources::fetch_distributable_resources;
 use crate::server::AgentServer;
 use lattice_common::crd::{CloudProvider, SecretsProvider};
 use lattice_common::DistributableResources;
-use lattice_common::{lattice_svc_dns, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    lattice_svc_dns, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, CA_TRUST_KEY, CELL_SERVICE_NAME,
+    LATTICE_SYSTEM_NAMESPACE,
+};
 use lattice_infra::pki::{CertificateAuthority, CertificateAuthorityBundle};
 use lattice_infra::ServerMtlsConfig;
 use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};
@@ -78,7 +81,7 @@ impl Default for ParentConfig {
                 // Webhook service DNS name for in-cluster webhook calls
                 lattice_svc_dns("lattice-webhook"),
                 // Cell service DNS name for proxy access
-                lattice_svc_dns("lattice-cell"),
+                lattice_svc_dns(CELL_SERVICE_NAME),
             ],
             image: std::env::var("LATTICE_IMAGE")
                 .unwrap_or_else(|_| "ghcr.io/evan-hines-js/lattice:latest".to_string()),
@@ -262,9 +265,6 @@ async fn handle_resource_event<T>(
     }
 }
 
-/// Secret name for persisting the CA
-const CA_SECRET_NAME: &str = "lattice-ca";
-
 /// Error type for cell server operations
 #[derive(Debug, thiserror::Error)]
 pub enum CellServerError {
@@ -309,7 +309,7 @@ pub async fn load_or_create_ca(
     let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     // Try to load existing CA from Secret
-    match secrets.get(CA_SECRET_NAME).await {
+    match secrets.get(CA_SECRET).await {
         Ok(secret) => {
             // CA Secret exists, load it
             let data = secret.data.ok_or_else(|| {
@@ -317,24 +317,24 @@ pub async fn load_or_create_ca(
             })?;
 
             let cert_pem = data
-                .get("ca.crt")
+                .get(CA_CERT_KEY)
                 .ok_or_else(|| {
-                    CellServerError::CaPersistence("CA secret missing ca.crt".to_string())
+                    CellServerError::CaPersistence(format!("CA secret missing {}", CA_CERT_KEY))
                 })
                 .and_then(|b| {
                     String::from_utf8(b.0.clone()).map_err(|e| {
-                        CellServerError::CaPersistence(format!("Invalid ca.crt encoding: {}", e))
+                        CellServerError::CaPersistence(format!("Invalid {} encoding: {}", CA_CERT_KEY, e))
                     })
                 })?;
 
             let key_pem = data
-                .get("ca.key")
+                .get(CA_KEY_KEY)
                 .ok_or_else(|| {
-                    CellServerError::CaPersistence("CA secret missing ca.key".to_string())
+                    CellServerError::CaPersistence(format!("CA secret missing {}", CA_KEY_KEY))
                 })
                 .and_then(|b| {
                     String::from_utf8(b.0.clone()).map_err(|e| {
-                        CellServerError::CaPersistence(format!("Invalid ca.key encoding: {}", e))
+                        CellServerError::CaPersistence(format!("Invalid {} encoding: {}", CA_KEY_KEY, e))
                     })
                 })?;
 
@@ -345,7 +345,7 @@ pub async fn load_or_create_ca(
             let mut cas = vec![active_ca];
 
             // Load additional trust CAs if present (for rotation transition)
-            if let Some(trust_pem) = data.get("ca-trust.crt") {
+            if let Some(trust_pem) = data.get(CA_TRUST_KEY) {
                 if let Ok(trust_str) = String::from_utf8(trust_pem.0.clone()) {
                     // Parse multiple PEM certificates from the trust bundle
                     for pem in pem::parse_many(trust_str.as_bytes())
@@ -383,7 +383,7 @@ pub async fn load_or_create_ca(
                 needs_rotation = bundle.needs_rotation().unwrap_or(false),
                 "Loaded CA bundle from Secret {}/{}",
                 LATTICE_SYSTEM_NAMESPACE,
-                CA_SECRET_NAME
+                CA_SECRET
             );
             Ok(bundle)
         }
@@ -397,18 +397,18 @@ pub async fn load_or_create_ca(
             // Create Secret with CA cert and key
             let secret = Secret {
                 metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
-                    name: Some(CA_SECRET_NAME.to_string()),
+                    name: Some(CA_SECRET.to_string()),
                     namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                     ..Default::default()
                 },
                 type_: Some("Opaque".to_string()),
                 data: Some(BTreeMap::from([
                     (
-                        "ca.crt".to_string(),
+                        CA_CERT_KEY.to_string(),
                         ByteString(ca.ca_cert_pem().as_bytes().to_vec()),
                     ),
                     (
-                        "ca.key".to_string(),
+                        CA_KEY_KEY.to_string(),
                         ByteString(ca.ca_key_pem().as_bytes().to_vec()),
                     ),
                 ])),
@@ -424,7 +424,7 @@ pub async fn load_or_create_ca(
 
             info!(
                 "Created and persisted new CA to Secret {}/{}",
-                LATTICE_SYSTEM_NAMESPACE, CA_SECRET_NAME
+                LATTICE_SYSTEM_NAMESPACE, CA_SECRET
             );
             Ok(CertificateAuthorityBundle::new(ca))
         }
@@ -447,26 +447,26 @@ async fn persist_ca_bundle(
     // Build data map
     let mut data = BTreeMap::new();
     data.insert(
-        "ca.crt".to_string(),
+        CA_CERT_KEY.to_string(),
         ByteString(active.ca_cert_pem().as_bytes().to_vec()),
     );
     data.insert(
-        "ca.key".to_string(),
+        CA_KEY_KEY.to_string(),
         ByteString(active.ca_key_pem().as_bytes().to_vec()),
     );
 
-    // If there are additional CAs in the bundle, store them in ca-trust.crt
+    // If there are additional CAs in the bundle, store them in trust bundle
     if bundle.len() > 1 {
         // The trust bundle contains all CA certs for verification
         data.insert(
-            "ca-trust.crt".to_string(),
+            CA_TRUST_KEY.to_string(),
             ByteString(bundle.trust_bundle_pem().as_bytes().to_vec()),
         );
     }
 
     let secret = Secret {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
-            name: Some(CA_SECRET_NAME.to_string()),
+            name: Some(CA_SECRET.to_string()),
             namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
             ..Default::default()
         },
@@ -478,7 +478,7 @@ async fn persist_ca_bundle(
     // Use patch to update (or create if missing)
     secrets
         .patch(
-            CA_SECRET_NAME,
+            CA_SECRET,
             &kube::api::PatchParams::apply("lattice-operator"),
             &kube::api::Patch::Apply(&secret),
         )
@@ -705,7 +705,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         // Set proxy config for kubeconfig patching during unpivot
         let proxy_url = format!(
             "https://{}:{}",
-            lattice_svc_dns("lattice-cell"),
+            lattice_svc_dns(CELL_SERVICE_NAME),
             self.config.proxy_addr.port()
         );
         self.agent_registry

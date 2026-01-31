@@ -18,7 +18,7 @@ pub mod yaml;
 pub use credentials::{AwsCredentials, CredentialError, OpenStackCredentials, ProxmoxCredentials};
 pub use error::Error;
 pub use kube_utils::{
-    apply_manifests_with_discovery, apply_manifest_with_discovery, kind_priority, pluralize_kind,
+    apply_manifest_with_discovery, apply_manifests_with_discovery, kind_priority, pluralize_kind,
     ApplyOptions,
 };
 pub use protocol::{CsrRequest, CsrResponse, DistributableResources};
@@ -76,30 +76,115 @@ pub fn install_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
-/// Parse a cell endpoint URL into (host, port)
-///
-/// Parses URLs like "https://172.18.255.10:50051" or "https://cell.example.com:50051"
-///
-/// # Examples
-/// ```
-/// use lattice_common::parse_cell_endpoint;
-///
-/// let result = parse_cell_endpoint("https://172.18.255.10:50051");
-/// assert_eq!(result, Some(("172.18.255.10".to_string(), 50051)));
-///
-/// let result = parse_cell_endpoint("https://cell.example.com:8443");
-/// assert_eq!(result, Some(("cell.example.com".to_string(), 8443)));
-/// ```
-pub fn parse_cell_endpoint(endpoint: &str) -> Option<(String, u16)> {
-    let url = endpoint.strip_prefix("https://").unwrap_or(endpoint);
-    let url = url.strip_prefix("http://").unwrap_or(url);
+/// Parsed cell endpoint containing host and ports
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellEndpoint {
+    /// Host (IP address or hostname)
+    pub host: String,
+    /// HTTP/HTTPS port for bootstrap webhook
+    pub http_port: u16,
+    /// gRPC port for agent-cell communication
+    pub grpc_port: u16,
+}
 
-    if let Some((host, port_str)) = url.rsplit_once(':') {
-        if let Ok(port) = port_str.parse::<u16>() {
-            return Some((host.to_string(), port));
+impl CellEndpoint {
+    /// Parse a cell endpoint string
+    ///
+    /// Format: "host:http_port:grpc_port" (e.g., "172.18.255.10:8443:50051")
+    ///
+    /// # Examples
+    /// ```
+    /// use lattice_common::CellEndpoint;
+    ///
+    /// let endpoint = CellEndpoint::parse("172.18.255.10:8443:50051").unwrap();
+    /// assert_eq!(endpoint.host, "172.18.255.10");
+    /// assert_eq!(endpoint.http_port, 8443);
+    /// assert_eq!(endpoint.grpc_port, 50051);
+    /// ```
+    pub fn parse(endpoint: &str) -> Option<Self> {
+        let parts: Vec<&str> = endpoint.split(':').collect();
+        match parts.as_slice() {
+            [host, http_port, grpc_port] => Some(Self {
+                host: (*host).to_string(),
+                http_port: http_port.parse().ok()?,
+                grpc_port: grpc_port.parse().ok()?,
+            }),
+            _ => None,
         }
     }
-    None
+
+    /// Get the HTTPS endpoint URL for the bootstrap webhook
+    pub fn https_url(&self) -> String {
+        format!("https://{}:{}", self.host, self.http_port)
+    }
+
+    /// Get the gRPC endpoint URL
+    pub fn grpc_url(&self) -> String {
+        format!("https://{}:{}", self.host, self.grpc_port)
+    }
+}
+
+/// Parent cell configuration read from the `lattice-parent-config` secret
+///
+/// This secret is created during bootstrap and contains the information
+/// needed to connect back to the parent cell.
+#[derive(Debug, Clone)]
+pub struct ParentConfig {
+    /// Parsed cell endpoint
+    pub endpoint: CellEndpoint,
+    /// CA certificate PEM for TLS verification
+    pub ca_cert_pem: String,
+}
+
+impl ParentConfig {
+    /// Read parent config from the Kubernetes secret
+    ///
+    /// Returns `None` if the secret doesn't exist (indicating this is a root cluster).
+    /// Returns `Err` if the secret exists but is malformed.
+    pub async fn read(client: &kube::Client) -> std::result::Result<Option<Self>, Error> {
+        use k8s_openapi::api::core::v1::Secret;
+        use kube::Api;
+
+        let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let secret = match secrets.get(PARENT_CONFIG_SECRET).await {
+            Ok(s) => s,
+            Err(kube::Error::Api(e)) if e.code == 404 => return Ok(None),
+            Err(e) => {
+                return Err(Error::internal(format!(
+                    "failed to get parent config secret: {}",
+                    e
+                )))
+            }
+        };
+
+        let data = secret
+            .data
+            .ok_or_else(|| Error::internal("parent config secret has no data"))?;
+
+        let endpoint_bytes = data
+            .get(PARENT_CONFIG_ENDPOINT_KEY)
+            .ok_or_else(|| Error::internal("missing cell_endpoint in parent config"))?;
+        let endpoint_str = std::str::from_utf8(&endpoint_bytes.0)
+            .map_err(|e| Error::internal(format!("invalid cell_endpoint encoding: {}", e)))?;
+        let endpoint = CellEndpoint::parse(endpoint_str).ok_or_else(|| {
+            Error::internal(format!(
+                "invalid cell_endpoint format '{}', expected host:http_port:grpc_port",
+                endpoint_str
+            ))
+        })?;
+
+        let ca_bytes = data
+            .get(PARENT_CONFIG_CA_KEY)
+            .ok_or_else(|| Error::internal("missing ca.crt in parent config"))?;
+        let ca_cert_pem = std::str::from_utf8(&ca_bytes.0)
+            .map_err(|e| Error::internal(format!("invalid CA cert encoding: {}", e)))?
+            .to_string();
+
+        Ok(Some(Self {
+            endpoint,
+            ca_cert_pem,
+        }))
+    }
 }
 
 // CAPI provider namespaces
@@ -122,6 +207,40 @@ pub const OPENSTACK_CREDENTIALS_SECRET: &str = "openstack-cloud-config";
 // These are the names expected by each CAPI provider
 /// AWS CAPA expects this specific secret name
 pub const AWS_CAPA_CREDENTIALS_SECRET: &str = "capa-manager-bootstrap-credentials";
+
+// Lattice system secrets
+/// Secret containing parent cell endpoint and CA certificate (created during bootstrap)
+pub const PARENT_CONFIG_SECRET: &str = "lattice-parent-config";
+/// Key for cell endpoint in parent config secret (format: "host:http_port:grpc_port")
+pub const PARENT_CONFIG_ENDPOINT_KEY: &str = "cell_endpoint";
+/// Key for CA certificate in parent config secret
+pub const PARENT_CONFIG_CA_KEY: &str = "ca.crt";
+/// Secret containing private registry credentials (Docker config)
+pub const REGISTRY_CREDENTIALS_SECRET: &str = "lattice-registry";
+/// Secret containing agent mTLS credentials (cert, key, CA)
+pub const AGENT_CREDENTIALS_SECRET: &str = "lattice-agent-credentials";
+/// Secret containing the Lattice CA certificate and key
+pub const CA_SECRET: &str = "lattice-ca";
+
+// TLS secret data keys (standard Kubernetes TLS secret format)
+/// Key for TLS certificate in secrets
+pub const TLS_CERT_KEY: &str = "tls.crt";
+/// Key for TLS private key in secrets
+pub const TLS_KEY_KEY: &str = "tls.key";
+
+// CA secret data keys
+/// Key for CA certificate in CA secrets
+pub const CA_CERT_KEY: &str = "ca.crt";
+/// Key for CA private key in CA secrets
+pub const CA_KEY_KEY: &str = "ca.key";
+/// Key for CA trust bundle (full chain)
+pub const CA_TRUST_KEY: &str = "ca-trust.crt";
+
+// Service and resource names
+/// Name of the Lattice cell service
+pub const CELL_SERVICE_NAME: &str = "lattice-cell";
+/// Name of the Lattice operator deployment and service account
+pub const OPERATOR_NAME: &str = "lattice-operator";
 
 /// Label key for provider identification on secrets
 pub const PROVIDER_LABEL: &str = "lattice.dev/provider";
