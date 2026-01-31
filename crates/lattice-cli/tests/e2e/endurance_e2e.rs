@@ -39,12 +39,11 @@ use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, delete_cluster_and_wait,
     ensure_docker_network, force_delete_docker_cluster, get_docker_kubeconfig,
     kubeconfig_path as kc_path, load_cluster_config, load_registry_credentials, run_cmd_allow_fail,
-    watch_cluster_phases,
+    watch_cluster_phases, DEFAULT_LATTICE_IMAGE,
 };
 use super::providers::InfraProvider;
 
 const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
-const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 const BATCH_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes per batch
 const SETTLE_DELAY: Duration = Duration::from_secs(20);
 
@@ -91,7 +90,7 @@ async fn test_endurance_loop() {
     // Clean up any leftover resources from previous runs
     cleanup_all_clusters();
 
-    if let Err(e) = build_and_push_lattice_image(LATTICE_IMAGE).await {
+    if let Err(e) = build_and_push_lattice_image(DEFAULT_LATTICE_IMAGE).await {
         cleanup_all_clusters();
         panic!("Failed to build Lattice image: {}", e);
     }
@@ -132,7 +131,7 @@ async fn run_endurance_test() -> Result<(), String> {
 
     let installer = Installer::new(
         mgmt_config_content,
-        LATTICE_IMAGE.to_string(),
+        DEFAULT_LATTICE_IMAGE.to_string(),
         true,
         registry_credentials,
         None,

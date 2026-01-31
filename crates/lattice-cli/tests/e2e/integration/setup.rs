@@ -40,10 +40,11 @@ use super::{capi, pivot, scaling};
 // Configuration
 // =============================================================================
 
+use super::super::helpers::DEFAULT_LATTICE_IMAGE;
+
 const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
 const WORKLOAD_CLUSTER_NAME: &str = "e2e-workload";
 const WORKLOAD2_CLUSTER_NAME: &str = "e2e-workload2";
-const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
 /// Configuration for infrastructure setup
 #[derive(Clone)]

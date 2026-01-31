@@ -20,6 +20,14 @@ use tokio::time::sleep;
 use tracing::info;
 
 // =============================================================================
+// Shared Constants
+// =============================================================================
+
+/// Default Lattice container image for E2E tests
+#[cfg(feature = "provider-e2e")]
+pub const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
+
+// =============================================================================
 // Unique Run ID for Parallel Test Execution
 // =============================================================================
 

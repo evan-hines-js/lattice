@@ -41,11 +41,10 @@ use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, docker_containers_deleted,
     ensure_docker_network, extract_docker_cluster_kubeconfig, force_delete_docker_cluster,
     get_docker_kubeconfig, kubeconfig_path, load_cluster_config, load_registry_credentials,
-    run_cmd, run_cmd_allow_fail, watch_cluster_phases, watch_worker_scaling,
+    run_cmd, run_cmd_allow_fail, watch_cluster_phases, watch_worker_scaling, DEFAULT_LATTICE_IMAGE,
 };
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
-const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
 fn cleanup_clusters(mgmt_name: &str, workload_name: &str) {
     info!("Cleaning up all test resources...");
@@ -75,7 +74,7 @@ async fn test_docker_independence() {
 
     cleanup_clusters(mgmt_name, workload_name);
 
-    if let Err(e) = build_and_push_lattice_image(LATTICE_IMAGE).await {
+    if let Err(e) = build_and_push_lattice_image(DEFAULT_LATTICE_IMAGE).await {
         cleanup_clusters(mgmt_name, workload_name);
         panic!("Failed to build image: {}", e);
     }
@@ -119,7 +118,7 @@ async fn run_independence_test(
 
     let installer = Installer::new(
         mgmt_config,
-        LATTICE_IMAGE.to_string(),
+        DEFAULT_LATTICE_IMAGE.to_string(),
         true,
         load_registry_credentials(),
         None,

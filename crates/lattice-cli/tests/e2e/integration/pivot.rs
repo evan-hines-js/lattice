@@ -148,8 +148,9 @@ pub fn start_cluster_deletion_async(
 #[tokio::test]
 #[ignore]
 async fn test_unpivot_standalone() {
-    let ctx =
-        init_test_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG for unpivot test");
+    let ctx = init_test_env(
+        "Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG for unpivot test",
+    );
     let cluster_name =
         std::env::var("LATTICE_CLUSTER_TO_DELETE").expect("LATTICE_CLUSTER_TO_DELETE must be set");
 

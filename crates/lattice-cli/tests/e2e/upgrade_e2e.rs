@@ -41,14 +41,14 @@ use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd_allow_fail,
+    load_registry_credentials, run_cmd_allow_fail, DEFAULT_LATTICE_IMAGE,
 };
+use super::integration::setup::cleanup_bootstrap_clusters;
 use super::mesh_tests::start_mesh_test;
 use super::providers::InfraProvider;
 
 const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
 const WORKLOAD_CLUSTER_NAME: &str = "e2e-upgrade";
-const LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 const TEST_TIMEOUT: Duration = Duration::from_secs(90 * 60); // 90 minutes
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(30 * 60); // 30 minutes for upgrade
 
@@ -57,14 +57,6 @@ fn get_upgrade_versions() -> (String, String) {
         std::env::var("LATTICE_UPGRADE_FROM_VERSION").unwrap_or_else(|_| "1.31.0".to_string());
     let to = std::env::var("LATTICE_UPGRADE_TO_VERSION").unwrap_or_else(|_| "1.32.0".to_string());
     (from, to)
-}
-
-fn cleanup_bootstrap_clusters() {
-    info!("Cleaning up kind bootstrap cluster...");
-    let _ = run_cmd_allow_fail(
-        "kind",
-        &["delete", "cluster", "--name", "lattice-bootstrap"],
-    );
 }
 
 #[tokio::test]
@@ -89,7 +81,7 @@ async fn test_upgrade_with_mesh_traffic() {
 
     cleanup_bootstrap_clusters();
 
-    if let Err(e) = build_and_push_lattice_image(LATTICE_IMAGE).await {
+    if let Err(e) = build_and_push_lattice_image(DEFAULT_LATTICE_IMAGE).await {
         panic!("Failed to build Lattice image: {}", e);
     }
 
@@ -141,7 +133,7 @@ async fn run_upgrade_test() -> Result<(), String> {
 
     let installer = Installer::new(
         mgmt_config_content,
-        LATTICE_IMAGE.to_string(),
+        DEFAULT_LATTICE_IMAGE.to_string(),
         true,
         registry_credentials,
         None,
