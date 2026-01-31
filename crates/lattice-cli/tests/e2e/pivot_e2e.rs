@@ -215,8 +215,8 @@ async fn run_provider_e2e_inner(chaos_targets: Arc<ChaosTargets>) -> Result<(), 
         LATTICE_IMAGE.to_string(),
         true, // keep_bootstrap_on_failure
         registry_credentials,
-        None,                                           // bootstrap_override
-        Some(format!("{}-", super::helpers::run_id())), // kubeconfig_prefix for parallel runs
+        None,                                       // bootstrap_override
+        Some(super::helpers::run_id().to_string()), // run_id for parallel runs
     )
     .map_err(|e| format!("Failed to create installer: {}", e))?;
     installer

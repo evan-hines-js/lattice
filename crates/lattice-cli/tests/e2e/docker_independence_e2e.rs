@@ -127,7 +127,7 @@ async fn run_independence_test(
         true,
         load_registry_credentials(),
         None,
-        Some(format!("{}-", super::helpers::run_id())),
+        Some(super::helpers::run_id().to_string()),
     )
     .map_err(|e| format!("Failed to create installer: {}", e))?;
 

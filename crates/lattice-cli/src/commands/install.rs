@@ -74,9 +74,10 @@ pub struct InstallArgs {
     #[arg(long)]
     pub kubeconfig_out: Option<PathBuf>,
 
-    /// Prefix for kubeconfig file paths (for parallel test runs)
-    #[arg(long, env = "LATTICE_KUBECONFIG_PREFIX")]
-    pub kubeconfig_prefix: Option<String>,
+    /// Run ID for this install session (auto-generated if not provided).
+    /// Used to create unique kind cluster names and temp files for parallel runs.
+    #[arg(long, env = "LATTICE_RUN_ID")]
+    pub run_id: Option<String>,
 }
 
 fn parse_bootstrap_provider(s: &str) -> std::result::Result<BootstrapProvider, String> {
@@ -98,12 +99,21 @@ pub struct Installer {
     image: String,
     keep_bootstrap_on_failure: bool,
     registry_credentials: Option<String>,
-    /// Optional prefix for kubeconfig paths (e.g., "12345-" for parallel test runs)
-    kubeconfig_prefix: String,
+    /// Run ID for this install session (used for kind cluster name and temp files)
+    run_id: String,
 }
 
-/// Fixed bootstrap cluster name - concurrent installs are not supported
-const BOOTSTRAP_CLUSTER_NAME: &str = "lattice-bootstrap";
+/// Generate a short readable run ID (6 hex chars from random bytes)
+fn generate_run_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u32;
+    let pid = std::process::id();
+    // Combine timestamp and pid, take 6 hex chars for readability
+    format!("{:06x}", (timestamp ^ pid) & 0xFFFFFF)
+}
 
 impl Installer {
     /// Create a new installer
@@ -114,14 +124,14 @@ impl Installer {
     /// * `keep_bootstrap_on_failure` - Keep kind cluster on failure for debugging
     /// * `registry_credentials` - Optional registry credentials (dockerconfigjson format)
     /// * `bootstrap_override` - Override bootstrap provider from config
-    /// * `kubeconfig_prefix` - Optional prefix for kubeconfig paths (for parallel test runs)
+    /// * `run_id` - Optional run ID for parallel runs (auto-generated if not provided)
     pub fn new(
         cluster_yaml: String,
         image: String,
         keep_bootstrap_on_failure: bool,
         registry_credentials: Option<String>,
         bootstrap_override: Option<BootstrapProvider>,
-        kubeconfig_prefix: Option<String>,
+        run_id: Option<String>,
     ) -> Result<Self> {
         let value = lattice_common::yaml::parse_yaml(&cluster_yaml)
             .map_err(|e| Error::validation(format!("Invalid YAML: {}", e)))?;
@@ -145,7 +155,7 @@ impl Installer {
             image,
             keep_bootstrap_on_failure,
             registry_credentials,
-            kubeconfig_prefix: kubeconfig_prefix.unwrap_or_default(),
+            run_id: run_id.unwrap_or_else(generate_run_id),
         })
     }
 
@@ -163,12 +173,17 @@ impl Installer {
             args.keep_bootstrap_on_failure,
             registry_credentials,
             args.bootstrap.clone(),
-            args.kubeconfig_prefix.clone(),
+            args.run_id.clone(),
         )
     }
 
     fn cluster_name(&self) -> &str {
         &self.cluster_name
+    }
+
+    /// Returns the run ID for this install session
+    pub fn run_id(&self) -> &str {
+        &self.run_id
     }
 
     /// Returns the CAPI namespace for this cluster (e.g., "capi-my-cluster")
@@ -181,18 +196,24 @@ impl Installer {
         format!("{}-kubeconfig", self.cluster_name)
     }
 
+    /// Returns the kind cluster name for this install session
+    /// Format: `lattice-bootstrap-{run_id}` (e.g., "lattice-bootstrap-a1b2c3")
+    fn bootstrap_cluster_name(&self) -> String {
+        format!("lattice-bootstrap-{}", self.run_id)
+    }
+
     fn bootstrap_kubeconfig_path(&self) -> PathBuf {
-        PathBuf::from(format!("/tmp/{}-kubeconfig", BOOTSTRAP_CLUSTER_NAME))
+        PathBuf::from(format!("/tmp/{}-kubeconfig", self.bootstrap_cluster_name()))
     }
 
     /// Returns the path where the management cluster kubeconfig is stored
     ///
-    /// Format: `/tmp/{prefix}{cluster_name}-kubeconfig`
-    /// If prefix is set (e.g., "12345-"), result is `/tmp/12345-my-cluster-kubeconfig`
+    /// Format: `/tmp/{run_id}-{cluster_name}-kubeconfig`
+    /// Example: `/tmp/a1b2c3-my-cluster-kubeconfig`
     pub fn kubeconfig_path(&self) -> PathBuf {
         PathBuf::from(format!(
-            "/tmp/{}{}-kubeconfig",
-            self.kubeconfig_prefix, self.cluster_name
+            "/tmp/{}-{}-kubeconfig",
+            self.run_id, self.cluster_name
         ))
     }
 
@@ -206,7 +227,10 @@ impl Installer {
 
     /// Run the installation
     pub async fn run(&self) -> Result<()> {
-        info!("Installing cluster: {}", self.cluster_name);
+        info!("=======================================================");
+        info!("LATTICE INSTALL - Run ID: {}", self.run_id);
+        info!("=======================================================");
+        info!("Cluster: {}", self.cluster_name);
         info!("Provider: {}", self.provider());
         info!(
             "Kubernetes version: {}",
@@ -220,7 +244,7 @@ impl Installer {
 
         if bootstrap_result.is_err() && !self.keep_bootstrap_on_failure {
             info!("Deleting bootstrap cluster due to failure...");
-            let _ = kind_utils::delete_kind_cluster(BOOTSTRAP_CLUSTER_NAME).await;
+            let _ = kind_utils::delete_kind_cluster(&self.bootstrap_cluster_name()).await;
         }
 
         bootstrap_result?;
@@ -271,9 +295,12 @@ impl Installer {
     }
 
     async fn run_bootstrap(&self) -> Result<()> {
-        info!("[Phase 1/8] Creating kind bootstrap cluster...");
-        kind_utils::create_kind_cluster(BOOTSTRAP_CLUSTER_NAME, &self.bootstrap_kubeconfig_path())
-            .await?;
+        let bootstrap_name = self.bootstrap_cluster_name();
+        info!(
+            "[Phase 1/8] Creating kind bootstrap cluster '{}'...",
+            bootstrap_name
+        );
+        kind_utils::create_kind_cluster(&bootstrap_name, &self.bootstrap_kubeconfig_path()).await?;
 
         let bootstrap_client = self.bootstrap_client().await?;
 
@@ -303,8 +330,11 @@ impl Installer {
         info!("[Phase 7/8] Pivoting CAPI resources to management cluster...");
         self.pivot_capi_resources().await?;
 
-        info!("[Phase 8/8] Deleting bootstrap cluster...");
-        kind_utils::delete_kind_cluster(BOOTSTRAP_CLUSTER_NAME).await?;
+        info!(
+            "[Phase 8/8] Deleting bootstrap cluster '{}'...",
+            bootstrap_name
+        );
+        kind_utils::delete_kind_cluster(&bootstrap_name).await?;
 
         Ok(())
     }
