@@ -220,6 +220,147 @@ impl TestTarget {
     }
 }
 
+// Markers for cycle detection in logs
+const CYCLE_START_MARKER: &str = "===CYCLE_START===";
+const CYCLE_END_MARKER: &str = "===CYCLE_END===";
+
+/// Wait for N complete test cycles across all traffic generator pods
+///
+/// Monitors logs for CYCLE_END markers and returns once all traffic generators
+/// have completed at least `min_cycles` cycles.
+async fn wait_for_cycles(
+    kubeconfig_path: &str,
+    namespace: &str,
+    pod_label_selector: &str,
+    min_cycles: usize,
+) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(600); // 10 minute max
+
+    info!(
+        "Waiting for {} complete test cycles on pods matching '{}'...",
+        min_cycles, pod_label_selector
+    );
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout waiting for {} test cycles after {:?}",
+                min_cycles,
+                start.elapsed()
+            ));
+        }
+
+        // Get all pods matching the label selector
+        let pods_output = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "pods",
+                "-n",
+                namespace,
+                "-l",
+                pod_label_selector,
+                "-o",
+                "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+            ],
+        );
+
+        let pods: Vec<&str> = pods_output
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        if pods.is_empty() {
+            info!("No pods found yet, waiting...");
+            sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        // Check cycle count for each pod
+        let mut all_pods_ready = true;
+        let mut min_cycles_found = usize::MAX;
+
+        for pod in &pods {
+            let logs = run_cmd_allow_fail(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "logs",
+                    "-n",
+                    namespace,
+                    pod,
+                    "--tail",
+                    "2000",
+                ],
+            );
+
+            let cycle_count = logs.matches(CYCLE_END_MARKER).count();
+            min_cycles_found = min_cycles_found.min(cycle_count);
+
+            if cycle_count < min_cycles {
+                all_pods_ready = false;
+            }
+        }
+
+        if min_cycles_found == usize::MAX {
+            min_cycles_found = 0;
+        }
+
+        info!(
+            "Cycle progress: {}/{} cycles complete (across {} pods)",
+            min_cycles_found,
+            min_cycles,
+            pods.len()
+        );
+
+        if all_pods_ready {
+            info!(
+                "All {} pods have completed {} cycles!",
+                pods.len(),
+                min_cycles
+            );
+            return Ok(());
+        }
+
+        sleep(Duration::from_secs(10)).await;
+    }
+}
+
+/// Wait for N complete test cycles on traffic generator pods in the fixed mesh test
+async fn wait_for_mesh_test_cycles(
+    kubeconfig_path: &str,
+    min_cycles: usize,
+) -> Result<(), String> {
+    // Traffic generators are frontend-* pods
+    wait_for_cycles(
+        kubeconfig_path,
+        TEST_SERVICES_NAMESPACE,
+        "lattice.dev/environment=mesh-test,lattice.dev/name in (frontend-web,frontend-mobile,frontend-admin)",
+        min_cycles,
+    )
+    .await
+}
+
+/// Wait for N complete test cycles on traffic generator pods in the random mesh test
+async fn wait_for_random_mesh_test_cycles(
+    kubeconfig_path: &str,
+    traffic_generators: &[String],
+    min_cycles: usize,
+) -> Result<(), String> {
+    // Build label selector for traffic generators
+    let names = traffic_generators.join(",");
+    let selector = format!(
+        "lattice.dev/environment={},lattice.dev/name in ({})",
+        RANDOM_MESH_NAMESPACE, names
+    );
+    wait_for_cycles(kubeconfig_path, RANDOM_MESH_NAMESPACE, &selector, min_cycles).await
+}
+
 /// Generate a traffic test script that waits for policies and tests connections
 fn generate_test_script(source_name: &str, targets: Vec<TestTarget>) -> String {
     // Separate blocked endpoints for policy wait check
@@ -259,17 +400,18 @@ fn generate_test_script(source_name: &str, targets: Vec<TestTarget>) -> String {
 
     let mut script = format!(
         r#"
-echo "=== {} Traffic Tests ==="
-echo "Testing {} endpoints..."
+echo "{cycle_start}"
+echo "=== {source} Traffic Tests ==="
+echo "Testing {num_targets} endpoints..."
 
 # Wait for blocked endpoints to NOT return 2xx (policy active or service not ready)
-echo "Waiting for policies on {} blocked endpoints..."
+echo "Waiting for policies on {num_blocked} blocked endpoints..."
 MAX_RETRIES=30
 RETRY=0
 while [ $RETRY -lt $MAX_RETRIES ]; do{endpoint_checks}
     if [ {all_blocked_check} ]; then
         echo "Blocked endpoints not returning 2xx - policies likely active"
-        sleep 5
+        sleep 2
         break
     fi
     RETRY=$((RETRY + 1))
@@ -282,9 +424,10 @@ if [ $RETRY -eq $MAX_RETRIES ]; then
 fi
 
 "#,
-        source_name,
-        targets.len(),
-        blocked_targets.len(),
+        cycle_start = CYCLE_START_MARKER,
+        source = source_name,
+        num_targets = targets.len(),
+        num_blocked = blocked_targets.len(),
         endpoint_checks = endpoint_checks,
         all_blocked_check = all_blocked_check,
     );
@@ -331,10 +474,12 @@ fi
 
     script.push_str(&format!(
         r#"
-echo "=== End {} Tests ==="
-sleep 30
+echo "=== End {source} Tests ==="
+echo "{cycle_end}"
+sleep 5
 "#,
-        source_name
+        source = source_name,
+        cycle_end = CYCLE_END_MARKER,
     ));
 
     // Loop forever
@@ -1044,6 +1189,7 @@ async fn check_no_incorrectly_allowed(
 /// Start the fixed 9-service mesh test and return a handle
 ///
 /// The test runs traffic generators continuously until `stop_and_verify()` is called.
+/// The test script handles policy propagation waiting internally via endpoint checks.
 pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, String> {
     info!("\n[Mesh Test] Starting service mesh bilateral agreement test...");
     deploy_test_services(kubeconfig_path).await?;
@@ -1054,9 +1200,8 @@ pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, St
     // Wait for pods to be running
     wait_for_service_pods(kubeconfig_path).await?;
 
-    // Wait for initial policy propagation
-    info!("Waiting for initial policy propagation (30s)...");
-    sleep(Duration::from_secs(30)).await;
+    // No flat wait needed - the test script handles policy propagation internally
+    // by checking that blocked endpoints don't return 2xx before running tests
 
     Ok(MeshTestHandle {
         kubeconfig_path: kubeconfig_path.to_string(),
@@ -1067,9 +1212,11 @@ pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, St
 /// Run the fixed 9-service mesh test
 pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let handle = start_mesh_test(kubeconfig_path).await?;
-    // Additional wait for traffic patterns to stabilize
-    info!("Waiting for traffic tests to complete (120s)...");
-    sleep(Duration::from_secs(120)).await;
+
+    // Wait for 2 complete test cycles instead of flat time
+    // This ensures all services have been tested at least twice
+    wait_for_mesh_test_cycles(kubeconfig_path, 2).await?;
+
     let result = handle.stop_and_verify().await;
     // Clean up immediately to free CPU resources
     cleanup_mesh_test(kubeconfig_path);
@@ -1865,6 +2012,8 @@ impl RandomMeshTestHandle {
 }
 
 /// Start the randomized mesh test and return a handle
+///
+/// The test script handles policy propagation waiting internally via endpoint checks.
 pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshTestHandle, String> {
     info!("\n[Mesh Test] Starting randomized large-scale mesh test (10-20 services)...");
 
@@ -1881,9 +2030,8 @@ pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshT
     info!("Waiting for pods...");
     wait_for_random_mesh_pods(&mesh, kubeconfig_path).await?;
 
-    // Wait for initial policy propagation
-    info!("Waiting for initial policy propagation (30s)...");
-    sleep(Duration::from_secs(30)).await;
+    // No flat wait needed - the test script handles policy propagation internally
+    // by checking that blocked endpoints don't return 2xx before running tests
 
     Ok(RandomMeshTestHandle {
         kubeconfig_path: kubeconfig_path.to_string(),
@@ -1894,9 +2042,19 @@ pub async fn start_random_mesh_test(kubeconfig_path: &str) -> Result<RandomMeshT
 /// Run the randomized 10-20 service mesh test
 pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let handle = start_random_mesh_test(kubeconfig_path).await?;
-    // Additional wait for traffic patterns to stabilize
-    info!("Waiting for traffic tests to complete (120s)...");
-    sleep(Duration::from_secs(120)).await;
+
+    // Get traffic generator names for cycle monitoring
+    let traffic_generators: Vec<String> = handle
+        .mesh
+        .services
+        .values()
+        .filter(|s| s.is_traffic_generator)
+        .map(|s| s.name.clone())
+        .collect();
+
+    // Wait for 2 complete test cycles instead of flat time
+    wait_for_random_mesh_test_cycles(kubeconfig_path, &traffic_generators, 2).await?;
+
     let result = handle.stop_and_verify().await;
     // Clean up immediately to free CPU resources
     cleanup_random_mesh_test(kubeconfig_path);
