@@ -350,24 +350,6 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
     Ok(())
 }
 
-async fn cleanup(kubeconfig_path: &str) {
-    let Ok(client) = client_from_kubeconfig(kubeconfig_path).await else {
-        return;
-    };
-
-    let api: Api<LatticeService> = Api::namespaced(client.clone(), NAMESPACE);
-    for name in ["sonarr", "nzbget", "jellyfin"] {
-        let _ = api.delete(name, &kube::api::DeleteParams::default()).await;
-    }
-
-    let ns_api: Api<Namespace> = Api::all(client);
-    let _ = ns_api
-        .delete(NAMESPACE, &kube::api::DeleteParams::default())
-        .await;
-
-    sleep(Duration::from_secs(30)).await;
-}
-
 // =============================================================================
 // Public API
 // =============================================================================
@@ -390,8 +372,4 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
     info!("========================================\n");
 
     Ok(())
-}
-
-pub async fn cleanup_media_server_test(kubeconfig_path: &str) {
-    cleanup(kubeconfig_path).await;
 }

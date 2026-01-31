@@ -67,6 +67,10 @@ pub struct SecretsProviderSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kubernetes_role: Option<String>,
 
+    /// AppRole auth mount path (default: "approle")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approle_mount_path: Option<String>,
+
     /// Vault namespace (enterprise feature)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -116,18 +120,6 @@ pub enum SecretsProviderPhase {
     Ready,
     /// Connection validation failed
     Failed,
-}
-
-impl SecretsProvider {
-    /// Get the credentials secret reference
-    pub fn credentials_secret_ref(&self) -> Option<&SecretRef> {
-        self.spec.credentials_secret_ref.as_ref()
-    }
-
-    /// Get the ESO ClusterSecretStore name (same as SecretsProvider name)
-    pub fn secret_store_name(&self) -> &str {
-        self.metadata.name.as_deref().unwrap_or("default")
-    }
 }
 
 #[cfg(test)]

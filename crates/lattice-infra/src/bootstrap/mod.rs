@@ -57,6 +57,9 @@ pub async fn generate_core(
     debug!(count = gw_api.len(), "generated Gateway API CRDs");
     manifests.extend(gw_api);
 
+    // External Secrets Operator (for Vault integration)
+    manifests.extend(eso::generate_eso().await?);
+
     Ok(manifests)
 }
 
@@ -158,25 +161,6 @@ pub fn charts_dir() -> String {
     })
 }
 
-pub(crate) fn find_chart(dir: &str, name: &str) -> Result<String, String> {
-    let exact = format!("{}/{}", dir, name);
-    if std::path::Path::new(&exact).exists() {
-        return Ok(exact);
-    }
-
-    // Try versioned (e.g., cert-manager-v1.14.0)
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let f = entry.file_name().to_string_lossy().to_string();
-            if f.starts_with(&format!("{}-", name)) || f == name {
-                return Ok(entry.path().to_string_lossy().to_string());
-            }
-        }
-    }
-
-    Err(format!("chart {} not found in {}", name, dir))
-}
-
 pub(crate) fn namespace_yaml(name: &str) -> String {
     format!(
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}",
@@ -206,66 +190,6 @@ pub fn split_yaml_documents(yaml: &str) -> Vec<String> {
         .collect()
 }
 
-/// Inject namespace into a manifest if it doesn't have one and is a namespaced resource
-pub(crate) fn inject_namespace(manifest: &str, namespace: &str) -> String {
-    if is_cluster_scoped(manifest) {
-        return manifest.to_string();
-    }
-
-    // Check if namespace already exists (skip helm templates with {{ }})
-    if manifest.lines().any(|line| {
-        let trimmed = line.trim();
-        trimmed.starts_with("namespace:") && !trimmed.contains("{{")
-    }) {
-        return manifest.to_string();
-    }
-
-    // Inject namespace after "metadata:"
-    let mut result = String::new();
-    let mut injected = false;
-
-    for line in manifest.lines() {
-        result.push_str(line);
-        result.push('\n');
-
-        if !injected && line.trim() == "metadata:" {
-            injected = true;
-            result.push_str(&format!("namespace: {}\n", namespace));
-        }
-    }
-
-    result
-}
-
-const CLUSTER_SCOPED_KINDS: &[&str] = &[
-    "Namespace",
-    "CustomResourceDefinition",
-    "ClusterRole",
-    "ClusterRoleBinding",
-    "PriorityClass",
-    "StorageClass",
-    "PersistentVolume",
-    "Node",
-    "APIService",
-    "ValidatingWebhookConfiguration",
-    "MutatingWebhookConfiguration",
-    "GatewayClass",
-];
-
-fn is_cluster_scoped(manifest: &str) -> bool {
-    let kind = extract_kind(manifest);
-    CLUSTER_SCOPED_KINDS.contains(&kind)
-}
-
-fn extract_kind(manifest: &str) -> &str {
-    manifest
-        .lines()
-        .find(|line| line.starts_with("kind:"))
-        .and_then(|line| line.strip_prefix("kind:"))
-        .map(|k| k.trim())
-        .unwrap_or("")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,47 +206,5 @@ mod tests {
         let ns = namespace_yaml("test");
         assert!(ns.contains("kind: Namespace"));
         assert!(ns.contains("name: test"));
-    }
-
-    #[test]
-    fn test_inject_namespace_adds_to_namespaced_resource() {
-        let manifest = "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: test-sa";
-        let result = inject_namespace(manifest, "my-namespace");
-        assert!(result.contains("namespace: my-namespace"));
-    }
-
-    #[test]
-    fn test_inject_namespace_preserves_existing() {
-        let manifest =
-            "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: test-sa\n  namespace: existing";
-        let result = inject_namespace(manifest, "my-namespace");
-        assert!(result.contains("namespace: existing"));
-        assert!(!result.contains("namespace: my-namespace"));
-    }
-
-    #[test]
-    fn test_inject_namespace_skips_cluster_scoped() {
-        let manifest = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: test-ns";
-        let result = inject_namespace(manifest, "my-namespace");
-        assert!(!result.contains("namespace: my-namespace"));
-    }
-
-    #[test]
-    fn test_is_cluster_scoped() {
-        assert!(is_cluster_scoped(
-            "kind: Namespace\nmetadata:\n  name: test"
-        ));
-        assert!(is_cluster_scoped(
-            "kind: ClusterRole\nmetadata:\n  name: test"
-        ));
-        assert!(is_cluster_scoped(
-            "kind: CustomResourceDefinition\nmetadata:\n  name: test"
-        ));
-        assert!(!is_cluster_scoped(
-            "kind: ServiceAccount\nmetadata:\n  name: test"
-        ));
-        assert!(!is_cluster_scoped(
-            "kind: Deployment\nmetadata:\n  name: test"
-        ));
     }
 }

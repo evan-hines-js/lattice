@@ -76,7 +76,7 @@ use super::helpers::{
     verify_cluster_capi_resources, watch_cluster_phases, watch_cluster_phases_with_kubeconfig,
     watch_worker_scaling,
 };
-use super::media_server_e2e::{cleanup_media_server_test, run_media_server_test};
+use super::media_server_e2e::run_media_server_test;
 use super::mesh_tests::{run_mesh_test, run_random_mesh_test};
 use super::providers::InfraProvider;
 

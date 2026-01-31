@@ -160,25 +160,32 @@ async fn ensure_cluster_secret_store(
 
 /// Build Vault provider spec for ClusterSecretStore
 fn build_vault_provider_spec(sp: &SecretsProvider) -> Result<serde_json::Value, ReconcileError> {
+    let auth = build_vault_auth(sp)?;
+
+    Ok(serde_json::json!({
+        "vault": {
+            "server": sp.spec.server,
+            "path": sp.spec.path.as_deref().unwrap_or("secret"),
+            "version": "v2",
+            "namespace": sp.spec.namespace,
+            "caBundle": sp.spec.ca_bundle,
+            "auth": auth
+        }
+    }))
+}
+
+/// Build Vault auth configuration based on auth method
+fn build_vault_auth(sp: &SecretsProvider) -> Result<serde_json::Value, ReconcileError> {
     match sp.spec.auth_method {
         VaultAuthMethod::Token => {
             let secret_ref = sp.spec.credentials_secret_ref.as_ref().ok_or_else(|| {
                 ReconcileError::Validation("Token auth requires credentialsSecretRef".to_string())
             })?;
             Ok(serde_json::json!({
-                "vault": {
-                    "server": sp.spec.server,
-                    "path": sp.spec.path.as_deref().unwrap_or("secret"),
-                    "version": "v2",
-                    "namespace": sp.spec.namespace,
-                    "caBundle": sp.spec.ca_bundle,
-                    "auth": {
-                        "tokenSecretRef": {
-                            "name": secret_ref.name,
-                            "namespace": &secret_ref.namespace,
-                            "key": "token"
-                        }
-                    }
+                "tokenSecretRef": {
+                    "name": secret_ref.name,
+                    "namespace": &secret_ref.namespace,
+                    "key": "token"
                 }
             }))
         }
@@ -194,21 +201,12 @@ fn build_vault_provider_spec(sp: &SecretsProvider) -> Result<serde_json::Value, 
                 .as_deref()
                 .unwrap_or("external-secrets");
             Ok(serde_json::json!({
-                "vault": {
-                    "server": sp.spec.server,
-                    "path": sp.spec.path.as_deref().unwrap_or("secret"),
-                    "version": "v2",
-                    "namespace": sp.spec.namespace,
-                    "caBundle": sp.spec.ca_bundle,
-                    "auth": {
-                        "kubernetes": {
-                            "mountPath": mount_path,
-                            "role": role,
-                            "serviceAccountRef": {
-                                "name": "external-secrets",
-                                "namespace": "external-secrets"
-                            }
-                        }
+                "kubernetes": {
+                    "mountPath": mount_path,
+                    "role": role,
+                    "serviceAccountRef": {
+                        "name": "external-secrets",
+                        "namespace": "external-secrets"
                     }
                 }
             }))
@@ -217,27 +215,19 @@ fn build_vault_provider_spec(sp: &SecretsProvider) -> Result<serde_json::Value, 
             let secret_ref = sp.spec.credentials_secret_ref.as_ref().ok_or_else(|| {
                 ReconcileError::Validation("AppRole auth requires credentialsSecretRef".to_string())
             })?;
+            let mount_path = sp.spec.approle_mount_path.as_deref().unwrap_or("approle");
             Ok(serde_json::json!({
-                "vault": {
-                    "server": sp.spec.server,
-                    "path": sp.spec.path.as_deref().unwrap_or("secret"),
-                    "version": "v2",
-                    "namespace": sp.spec.namespace,
-                    "caBundle": sp.spec.ca_bundle,
-                    "auth": {
-                        "appRole": {
-                            "path": "approle",
-                            "roleRef": {
-                                "name": secret_ref.name,
-                                "namespace": &secret_ref.namespace,
-                                "key": "role_id"
-                            },
-                            "secretRef": {
-                                "name": secret_ref.name,
-                                "namespace": &secret_ref.namespace,
-                                "key": "secret_id"
-                            }
-                        }
+                "appRole": {
+                    "path": mount_path,
+                    "roleRef": {
+                        "name": secret_ref.name,
+                        "namespace": &secret_ref.namespace,
+                        "key": "role_id"
+                    },
+                    "secretRef": {
+                        "name": secret_ref.name,
+                        "namespace": &secret_ref.namespace,
+                        "key": "secret_id"
                     }
                 }
             }))
@@ -321,6 +311,7 @@ mod tests {
                 }),
                 kubernetes_mount_path: None,
                 kubernetes_role: None,
+                approle_mount_path: None,
                 namespace: None,
                 ca_bundle: None,
             },
@@ -337,6 +328,7 @@ mod tests {
                 credentials_secret_ref: None,
                 kubernetes_mount_path: Some("kubernetes".to_string()),
                 kubernetes_role: Some("my-role".to_string()),
+                approle_mount_path: None,
                 namespace: None,
                 ca_bundle: None,
             },
@@ -398,6 +390,7 @@ mod tests {
                 }),
                 kubernetes_mount_path: None,
                 kubernetes_role: None,
+                approle_mount_path: None,
                 namespace: Some("my-vault-namespace".to_string()),
                 ca_bundle: Some("LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t".to_string()),
             },
@@ -443,6 +436,19 @@ mod tests {
             .contains("credentialsSecretRef"));
     }
 
+    #[test]
+    fn approle_auth_uses_custom_mount_path() {
+        let mut sp = sample_approle_provider();
+        sp.spec.approle_mount_path = Some("custom-approle".to_string());
+
+        let spec = build_vault_provider_spec(&sp).expect("should build spec");
+
+        let vault = spec.get("vault").expect("should have vault");
+        let auth = vault.get("auth").expect("should have auth");
+        let approle = auth.get("appRole").expect("should have appRole");
+        assert_eq!(approle.get("path").unwrap(), "custom-approle");
+    }
+
     // =========================================================================
     // Kubernetes Auth Default Tests
     // =========================================================================
@@ -458,6 +464,7 @@ mod tests {
                 credentials_secret_ref: None,
                 kubernetes_mount_path: None, // Should default to "kubernetes"
                 kubernetes_role: None,       // Should default to "external-secrets"
+                approle_mount_path: None,
                 namespace: None,
                 ca_bundle: None,
             },
@@ -523,6 +530,7 @@ mod tests {
                 }),
                 kubernetes_mount_path: None,
                 kubernetes_role: None,
+                approle_mount_path: None,
                 namespace: None,
                 ca_bundle: None,
             },
