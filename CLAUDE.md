@@ -180,21 +180,112 @@ async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Result<Ac
 
 ---
 
-## Testing Requirements
+## Testing Infrastructure
 
-### Coverage
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Test Infrastructure                          │
+├─────────────────────────────────────────────────────────────────┤
+│  INTEGRATION TESTS (assume cluster exists, can run standalone)  │
+│  ├─ integration/mesh.rs       - Mesh bilateral agreement tests  │
+│  ├─ integration/capi.rs       - CAPI resource verification      │
+│  ├─ integration/scaling.rs    - Worker scaling tests            │
+│  ├─ integration/proxy.rs      - K8s API proxy through hierarchy │
+│  └─ integration/pivot.rs      - Unpivot verification            │
+├─────────────────────────────────────────────────────────────────┤
+│  E2E TESTS (build everything, compose integration tests)        │
+│  ├─ pivot_e2e.rs          - Full lifecycle                      │
+│  ├─ upgrade_e2e.rs        - Upgrade with mesh traffic           │
+│  ├─ endurance_e2e.rs      - Infinite loop stress test           │
+│  └─ docker_independence_e2e.rs - Parent deletion survival       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Distinction
+
+- **Integration tests**: Assume infrastructure exists. Fast, reusable, can run repeatedly.
+- **E2E tests**: Build everything from scratch. Full flow, creates and destroys infrastructure.
+
+E2E tests **compose** integration test modules at appropriate phases. This allows:
+1. Fast iteration on specific test types (run mesh tests without 20-30 min setup)
+2. Same test coverage whether running standalone or as part of E2E
+3. Clear separation of concerns
+
+### Test Initialization Patterns
+
+```rust
+// E2E tests (create their own infrastructure)
+use super::context::init_e2e_test;
+use super::helpers::DEFAULT_LATTICE_IMAGE;
+
+#[tokio::test]
+async fn test_full_e2e() {
+    init_e2e_test();  // Sets up crypto provider + tracing
+    // ... create clusters, run tests, cleanup
+}
+
+// Integration tests (use existing infrastructure)
+use super::context::init_test_env;
+
+#[tokio::test]
+#[ignore]  // Run with --ignored flag
+async fn test_mesh_standalone() {
+    let ctx = init_test_env("Set LATTICE_WORKLOAD_KUBECONFIG");
+    // ... run tests against ctx.workload_kubeconfig
+}
+```
+
+### InfraContext Pattern
+
+All tests use `InfraContext` for cluster connection info:
+
+```rust
+pub struct InfraContext {
+    pub mgmt_kubeconfig: String,
+    pub workload_kubeconfig: Option<String>,
+    pub workload2_kubeconfig: Option<String>,
+    pub provider: InfraProvider,
+}
+
+// From environment (standalone tests)
+let ctx = InfraContext::from_env().expect("Set kubeconfig vars");
+
+// Programmatic (E2E tests)
+let ctx = InfraContext::new(mgmt, Some(workload), None, InfraProvider::Docker);
+```
+
+### Running Tests
+
+```bash
+# Full E2E (creates all infrastructure)
+cargo test --features provider-e2e --test e2e pivot_e2e -- --nocapture
+
+# Integration tests on existing clusters
+LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
+cargo test --features provider-e2e --test e2e test_mesh_standalone -- --ignored --nocapture
+
+# Setup infrastructure only (leave running for iteration)
+cargo test --features provider-e2e --test e2e test_setup_hierarchy_only -- --ignored --nocapture
+```
+
+### Centralized Constants
+
+All shared constants live in `helpers.rs`:
+
+```rust
+pub const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
+pub const DOCKER_KIND_SUBNET: &str = "172.18.0.0/16";
+```
+
+### Coverage Requirements
 
 - Target: 90%+ on all code
 - Hard stop: Work halts if coverage drops below 80%
 - Critical paths (pivot, provisioning): 95%+
 
-### Test Categories
-
-1. **Unit tests** (`#[cfg(test)]` modules) - Fast, mock dependencies
-2. **Integration tests** (`tests/`) - Module interactions
-3. **E2E tests** (`tests/kind_tests/`) - Full pivot flow against real clusters
-
-### E2E Test Expectations
+### E2E Test Coverage
 
 The E2E test (`pivot_e2e.rs`) validates:
 - Bootstrap → management cluster pivot
@@ -202,6 +293,31 @@ The E2E test (`pivot_e2e.rs`) validates:
 - Workload cluster independence (delete parent, verify self-scaling)
 - Service mesh bilateral agreements (exact match verification)
 - Randomized large-scale mesh (10-20 services, 400+ connection tests)
+
+### Mesh Test Patterns
+
+Mesh tests use **cycle-based waiting** instead of flat timeouts:
+
+```rust
+// Traffic generators emit cycle markers in their logs
+info!("===CYCLE_START===");
+// ... make all outbound connections
+info!("===CYCLE_END===");
+
+// Tests wait for N complete cycles, not arbitrary time
+wait_for_cycles(kubeconfig, namespace, &service_names, min_cycles).await?;
+```
+
+This approach:
+- Knows when traffic generators have actually run (vs just waiting)
+- Catches failures faster (don't wait full timeout on early failure)
+- Handles slow environments gracefully (waits for work, not time)
+
+Mesh bilateral agreements are verified by:
+1. Generating services with random inbound/outbound dependencies
+2. Running traffic generators that attempt all connections
+3. Verifying ALLOWED connections succeed
+4. Verifying DENIED connections fail (must be denied, not just timeout)
 
 ---
 
@@ -241,6 +357,54 @@ Parent can access child's K8s API through the gRPC stream:
 
 ---
 
+## Code Organization Principles
+
+### No Duplication
+
+- **One way to do things**: If two functions do similar work, consolidate them
+- **Centralized constants**: All shared values in one place (e.g., `helpers.rs`)
+- **Extract common patterns**: If code appears in 3+ places, extract it
+
+### No Dead Code
+
+- **Remove unused code immediately**: Don't comment out, delete
+- **No backwards compatibility shims**: If something is unused, delete it completely
+- **Clean as you go**: Every change should leave the codebase cleaner
+
+### Consistent Patterns
+
+- **Same initialization everywhere**: All tests use `init_e2e_test()` or `init_test_env()`
+- **Same context pattern everywhere**: All integration tests receive `InfraContext`
+- **Same helper functions**: Don't reinvent, use existing helpers
+
+### File Organization
+
+```
+crates/lattice-cli/tests/e2e/
+├── mod.rs              # Module declarations
+├── helpers.rs          # Shared utilities + constants
+├── providers.rs        # InfraProvider enum
+├── context.rs          # InfraContext + init helpers
+├── chaos.rs            # Chaos monkey for stress tests
+├── mesh_tests.rs       # Mesh bilateral agreement core
+│
+├── integration/        # Integration tests (assume infra exists)
+│   ├── mod.rs
+│   ├── mesh.rs         # Mesh tests (wraps mesh_tests.rs)
+│   ├── capi.rs         # CAPI resource verification
+│   ├── scaling.rs      # Worker scaling
+│   ├── proxy.rs        # K8s API proxy through hierarchy
+│   ├── pivot.rs        # Unpivot verification
+│   └── setup.rs        # Setup-only test + cleanup
+│
+├── pivot_e2e.rs        # Full lifecycle E2E
+├── upgrade_e2e.rs      # Upgrade with mesh traffic
+├── endurance_e2e.rs    # Infinite loop stress test
+└── docker_independence_e2e.rs  # Parent deletion survival
+```
+
+---
+
 ## Development Checklist
 
 Before merging:
@@ -251,3 +415,6 @@ Before merging:
 - [ ] All crypto uses FIPS implementations
 - [ ] No clippy warnings
 - [ ] Code formatted (`cargo fmt`)
+- [ ] No duplicate code (consolidate if similar)
+- [ ] No dead code (remove if unused)
+- [ ] Uses existing patterns (InfraContext, init helpers, etc.)
