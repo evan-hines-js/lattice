@@ -5,8 +5,9 @@
 //! origin cluster name for inherited policies/providers.
 
 use k8s_openapi::api::core::v1::Secret;
-use kube::api::{Api, ListParams};
+use kube::api::{Api, ListParams, ObjectList};
 use kube::{Client, Resource};
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::debug;
 
@@ -29,6 +30,29 @@ pub enum ResourceError {
     Internal(String),
 }
 
+/// List CRD resources with graceful 404 handling.
+/// Returns None if the CRD is not installed (common on bootstrap clusters).
+async fn list_crd_optional<T>(
+    api: &Api<T>,
+    lp: &ListParams,
+    crd_name: &str,
+) -> Result<Option<ObjectList<T>>, ResourceError>
+where
+    T: Clone + DeserializeOwned + std::fmt::Debug,
+{
+    match api.list(lp).await {
+        Ok(list) => Ok(Some(list)),
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            debug!("{} CRD not installed, skipping", crd_name);
+            Ok(None)
+        }
+        Err(e) => Err(ResourceError::Internal(format!(
+            "failed to list {}s: {}",
+            crd_name, e
+        ))),
+    }
+}
+
 /// Fetch all resources to distribute to child clusters.
 ///
 /// # Arguments
@@ -44,106 +68,59 @@ pub async fn fetch_distributable_resources(
     let mut secret_names: HashSet<String> = HashSet::new();
 
     // Fetch CloudProvider CRDs
-    // Handle 404 gracefully - CRD may not be installed on bootstrap clusters
     let cp_api: Api<CloudProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let mut cloud_providers = Vec::new();
-    match cp_api.list(&lp).await {
-        Ok(cp_list) => {
-            for cp in &cp_list.items {
-                let json = serialize_for_distribution(cp)?;
-                cloud_providers.push(json);
-                if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
-                    secret_names.insert(secret_ref.name.clone());
-                }
+    if let Some(cp_list) = list_crd_optional(&cp_api, &lp, "CloudProvider").await? {
+        for cp in &cp_list.items {
+            cloud_providers.push(serialize_for_distribution(cp)?);
+            if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
+                secret_names.insert(secret_ref.name.clone());
             }
-        }
-        Err(kube::Error::Api(e)) if e.code == 404 => {
-            debug!("CloudProvider CRD not installed, skipping");
-        }
-        Err(e) => {
-            return Err(ResourceError::Internal(format!(
-                "failed to list CloudProviders: {}",
-                e
-            )));
         }
     }
 
     // Fetch SecretsProvider CRDs
-    // Handle 404 gracefully - CRD may not be installed on bootstrap clusters
     let sp_api: Api<SecretsProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let mut secrets_providers = Vec::new();
-    match sp_api.list(&lp).await {
-        Ok(sp_list) => {
-            for sp in &sp_list.items {
-                let json = serialize_for_distribution(sp)?;
-                secrets_providers.push(json);
-                if let Some(ref secret_ref) = sp.spec.credentials_secret_ref {
-                    secret_names.insert(secret_ref.name.clone());
-                }
+    if let Some(sp_list) = list_crd_optional(&sp_api, &lp, "SecretsProvider").await? {
+        for sp in &sp_list.items {
+            secrets_providers.push(serialize_for_distribution(sp)?);
+            if let Some(ref secret_ref) = sp.spec.credentials_secret_ref {
+                secret_names.insert(secret_ref.name.clone());
             }
-        }
-        Err(kube::Error::Api(e)) if e.code == 404 => {
-            debug!("SecretsProvider CRD not installed, skipping");
-        }
-        Err(e) => {
-            return Err(ResourceError::Internal(format!(
-                "failed to list SecretsProviders: {}",
-                e
-            )));
         }
     }
 
     // Fetch CedarPolicy CRDs (skip disabled or non-propagating)
-    // Handle 404 gracefully - CRD may not be installed on bootstrap clusters
     let cedar_api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let mut cedar_policies = Vec::new();
-    match cedar_api.list(&lp).await {
-        Ok(cedar_list) => {
-            for policy in &cedar_list.items {
-                if !policy.spec.enabled || !policy.spec.propagate {
-                    continue;
-                }
-                let json = serialize_policy_for_distribution(policy, cluster_name)?;
-                cedar_policies.push(json);
-            }
-        }
-        Err(kube::Error::Api(e)) if e.code == 404 => {
-            debug!("CedarPolicy CRD not installed, skipping");
-        }
-        Err(e) => {
-            return Err(ResourceError::Internal(format!(
-                "failed to list CedarPolicies: {}",
-                e
-            )));
+    if let Some(cedar_list) = list_crd_optional(&cedar_api, &lp, "CedarPolicy").await? {
+        for policy in cedar_list
+            .items
+            .iter()
+            .filter(|p| p.spec.enabled && p.spec.propagate)
+        {
+            cedar_policies.push(serialize_inherited_resource(
+                policy,
+                cluster_name,
+                "CedarPolicy",
+            )?);
         }
     }
 
     // Fetch OIDCProvider CRDs (skip non-propagating)
-    // Handle 404 gracefully - CRD may not be installed on bootstrap clusters
     let oidc_api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let mut oidc_providers = Vec::new();
-    match oidc_api.list(&lp).await {
-        Ok(oidc_list) => {
-            for provider in &oidc_list.items {
-                if !provider.spec.propagate {
-                    continue;
-                }
-                let json = serialize_provider_for_distribution(provider, cluster_name)?;
-                oidc_providers.push(json);
-                // Collect client_secret reference if present
-                if let Some(ref secret_ref) = provider.spec.client_secret {
-                    secret_names.insert(secret_ref.name.clone());
-                }
+    if let Some(oidc_list) = list_crd_optional(&oidc_api, &lp, "OIDCProvider").await? {
+        for provider in oidc_list.items.iter().filter(|p| p.spec.propagate) {
+            oidc_providers.push(serialize_inherited_resource(
+                provider,
+                cluster_name,
+                "OIDCProvider",
+            )?);
+            if let Some(ref secret_ref) = provider.spec.client_secret {
+                secret_names.insert(secret_ref.name.clone());
             }
-        }
-        Err(kube::Error::Api(e)) if e.code == 404 => {
-            debug!("OIDCProvider CRD not installed, skipping");
-        }
-        Err(e) => {
-            return Err(ResourceError::Internal(format!(
-                "failed to list OIDCProviders: {}",
-                e
-            )));
         }
     }
 
@@ -152,10 +129,7 @@ pub async fn fetch_distributable_resources(
     let mut secrets = Vec::new();
     for name in &secret_names {
         match secret_api.get(name).await {
-            Ok(secret) => {
-                let json = serialize_for_distribution(&secret)?;
-                secrets.push(json);
-            }
+            Ok(secret) => secrets.push(serialize_for_distribution(&secret)?),
             Err(kube::Error::Api(e)) if e.code == 404 => {
                 debug!(secret = %name, "Referenced secret not found, skipping");
             }
@@ -187,9 +161,10 @@ pub async fn fetch_distributable_resources(
 }
 
 /// Serialize a Kubernetes resource for distribution, stripping cluster-specific metadata
-fn serialize_for_distribution<T: serde::Serialize + Clone + kube::ResourceExt>(
-    resource: &T,
-) -> Result<Vec<u8>, ResourceError> {
+fn serialize_for_distribution<T>(resource: &T) -> Result<Vec<u8>, ResourceError>
+where
+    T: serde::Serialize + Clone + Resource<DynamicType = ()>,
+{
     let mut clean = resource.clone();
     lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
 
@@ -198,56 +173,36 @@ fn serialize_for_distribution<T: serde::Serialize + Clone + kube::ResourceExt>(
         .map_err(|e| ResourceError::Internal(format!("failed to serialize resource: {}", e)))
 }
 
-/// Serialize a CedarPolicy for distribution with origin cluster prefix and labels
-fn serialize_policy_for_distribution(
-    policy: &CedarPolicy,
+/// Serialize a resource for distribution with origin cluster prefix and labels.
+/// Used for inherited CedarPolicy and OIDCProvider resources.
+fn serialize_inherited_resource<T>(
+    resource: &T,
     cluster_name: &str,
-) -> Result<Vec<u8>, ResourceError> {
-    let mut clean = policy.clone();
-    let original_name = clean.metadata.name.clone().unwrap_or_default();
+    resource_type: &str,
+) -> Result<Vec<u8>, ResourceError>
+where
+    T: serde::Serialize + Clone + Resource<DynamicType = ()>,
+{
+    let mut clean = resource.clone();
+    let original_name = clean.meta().name.clone().unwrap_or_default();
 
     // Prefix name with origin cluster: "global-root--admin-access"
-    let prefixed_name = format!("{}--{}", cluster_name, original_name);
-    clean.metadata.name = Some(prefixed_name);
+    clean.meta_mut().name = Some(format!("{}--{}", cluster_name, original_name));
 
     // Strip cluster-specific metadata
     lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
 
     // Add origin labels
-    let labels = clean.metadata.labels.get_or_insert_with(Default::default);
+    let labels = clean.meta_mut().labels.get_or_insert_with(Default::default);
     labels.insert(ORIGIN_CLUSTER_LABEL.to_string(), cluster_name.to_string());
     labels.insert(ORIGINAL_NAME_LABEL.to_string(), original_name);
     labels.insert(INHERITED_LABEL.to_string(), "true".to_string());
 
     serde_json::to_string(&clean)
         .map(|s| s.into_bytes())
-        .map_err(|e| ResourceError::Internal(format!("failed to serialize CedarPolicy: {}", e)))
-}
-
-/// Serialize an OIDCProvider for distribution with origin cluster prefix and labels
-fn serialize_provider_for_distribution(
-    provider: &OIDCProvider,
-    cluster_name: &str,
-) -> Result<Vec<u8>, ResourceError> {
-    let mut clean = provider.clone();
-    let original_name = clean.metadata.name.clone().unwrap_or_default();
-
-    // Prefix name with origin cluster: "global-root--corporate-idp"
-    let prefixed_name = format!("{}--{}", cluster_name, original_name);
-    clean.metadata.name = Some(prefixed_name);
-
-    // Strip cluster-specific metadata
-    lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
-
-    // Add origin labels
-    let labels = clean.metadata.labels.get_or_insert_with(Default::default);
-    labels.insert(ORIGIN_CLUSTER_LABEL.to_string(), cluster_name.to_string());
-    labels.insert(ORIGINAL_NAME_LABEL.to_string(), original_name);
-    labels.insert(INHERITED_LABEL.to_string(), "true".to_string());
-
-    serde_json::to_string(&clean)
-        .map(|s| s.into_bytes())
-        .map_err(|e| ResourceError::Internal(format!("failed to serialize OIDCProvider: {}", e)))
+        .map_err(|e| {
+            ResourceError::Internal(format!("failed to serialize {}: {}", resource_type, e))
+        })
 }
 
 #[cfg(test)]
@@ -425,7 +380,7 @@ mod tests {
     }
 
     // =========================================================================
-    // CedarPolicy Serialization Tests
+    // Inherited Resource Serialization Tests
     // =========================================================================
 
     fn sample_cedar_policy() -> CedarPolicy {
@@ -445,46 +400,6 @@ mod tests {
         policy.metadata.uid = Some("policy-uid-12345".to_string());
         policy
     }
-
-    #[test]
-    fn test_serialize_policy_for_distribution_prefixes_name() {
-        let policy = sample_cedar_policy();
-        let result = serialize_policy_for_distribution(&policy, "global-root").unwrap();
-        let json = String::from_utf8(result).unwrap();
-
-        // Name should be prefixed with cluster name
-        assert!(json.contains("global-root--admin-access"));
-        // Original name should not be the resource name
-        assert!(!json.contains(r#""name":"admin-access""#));
-    }
-
-    #[test]
-    fn test_serialize_policy_for_distribution_adds_origin_labels() {
-        let policy = sample_cedar_policy();
-        let result = serialize_policy_for_distribution(&policy, "global-root").unwrap();
-        let json = String::from_utf8(result).unwrap();
-
-        // Should have origin labels
-        assert!(json.contains(ORIGIN_CLUSTER_LABEL));
-        assert!(json.contains("global-root"));
-        assert!(json.contains(ORIGINAL_NAME_LABEL));
-        assert!(json.contains(INHERITED_LABEL));
-        assert!(json.contains("\"true\""));
-    }
-
-    #[test]
-    fn test_serialize_policy_for_distribution_strips_metadata() {
-        let policy = sample_cedar_policy();
-        let result = serialize_policy_for_distribution(&policy, "global-root").unwrap();
-        let json = String::from_utf8(result).unwrap();
-
-        // UID should be stripped
-        assert!(!json.contains("policy-uid-12345"));
-    }
-
-    // =========================================================================
-    // OIDCProvider Serialization Tests
-    // =========================================================================
 
     fn sample_oidc_provider() -> OIDCProvider {
         use lattice_common::crd::OIDCProviderSpec;
@@ -513,34 +428,47 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_provider_for_distribution_prefixes_name() {
-        let provider = sample_oidc_provider();
-        let result = serialize_provider_for_distribution(&provider, "global-root").unwrap();
+    fn test_serialize_inherited_resource_prefixes_name() {
+        let policy = sample_cedar_policy();
+        let result = serialize_inherited_resource(&policy, "global-root", "CedarPolicy").unwrap();
         let json = String::from_utf8(result).unwrap();
 
-        // Name should be prefixed with cluster name
-        assert!(json.contains("global-root--corporate-idp"));
+        assert!(json.contains("global-root--admin-access"));
+        assert!(!json.contains(r#""name":"admin-access""#));
     }
 
     #[test]
-    fn test_serialize_provider_for_distribution_adds_origin_labels() {
-        let provider = sample_oidc_provider();
-        let result = serialize_provider_for_distribution(&provider, "global-root").unwrap();
+    fn test_serialize_inherited_resource_adds_origin_labels() {
+        let policy = sample_cedar_policy();
+        let result = serialize_inherited_resource(&policy, "global-root", "CedarPolicy").unwrap();
         let json = String::from_utf8(result).unwrap();
 
-        // Should have origin labels
         assert!(json.contains(ORIGIN_CLUSTER_LABEL));
+        assert!(json.contains("global-root"));
         assert!(json.contains(ORIGINAL_NAME_LABEL));
         assert!(json.contains(INHERITED_LABEL));
+        assert!(json.contains("\"true\""));
     }
 
     #[test]
-    fn test_serialize_provider_for_distribution_strips_metadata() {
-        let provider = sample_oidc_provider();
-        let result = serialize_provider_for_distribution(&provider, "global-root").unwrap();
+    fn test_serialize_inherited_resource_strips_metadata() {
+        let policy = sample_cedar_policy();
+        let result = serialize_inherited_resource(&policy, "global-root", "CedarPolicy").unwrap();
         let json = String::from_utf8(result).unwrap();
 
-        // UID should be stripped
+        assert!(!json.contains("policy-uid-12345"));
+    }
+
+    #[test]
+    fn test_serialize_inherited_resource_works_for_oidc_provider() {
+        let provider = sample_oidc_provider();
+        let result =
+            serialize_inherited_resource(&provider, "global-root", "OIDCProvider").unwrap();
+        let json = String::from_utf8(result).unwrap();
+
+        assert!(json.contains("global-root--corporate-idp"));
+        assert!(json.contains(ORIGIN_CLUSTER_LABEL));
+        assert!(json.contains(INHERITED_LABEL));
         assert!(!json.contains("provider-uid-12345"));
     }
 }
