@@ -1,6 +1,17 @@
 //! Cedar policy authorization
 //!
 //! Uses Cedar for fine-grained access control to clusters.
+//!
+//! # Policy Inheritance
+//!
+//! Policies are loaded in two phases:
+//! 1. **Inherited policies** (labeled `lattice.dev/inherited: true`) - from parent clusters
+//! 2. **Local policies** - defined directly on this cluster
+//!
+//! Within each phase, policies are sorted by priority (higher first). Inherited
+//! policies are loaded first to ensure parent policies take precedence (parent's
+//! word is law). Cedar's default-deny semantics mean any `forbid` policy will
+//! override `permit` policies.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -9,6 +20,7 @@ use cedar_policy::{
     Authorizer, Context, Decision, Entities, Entity, EntityId, EntityTypeName, EntityUid,
     PolicySet, Request,
 };
+use kube::api::ListParams;
 use kube::{Api, Client};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -16,6 +28,9 @@ use tracing::{debug, info, warn};
 use crate::auth::UserIdentity;
 use crate::error::{Error, Result};
 use lattice_common::crd::CedarPolicy;
+
+/// Label indicating this resource was inherited from a parent cluster
+const INHERITED_LABEL: &str = "lattice.dev/inherited";
 
 /// Lattice Cedar schema namespace
 const NAMESPACE: &str = "Lattice";
@@ -45,65 +60,123 @@ impl PolicyEngine {
     /// Create policy engine from CedarPolicy CRDs
     ///
     /// Loads all enabled CedarPolicy resources from lattice-system namespace.
+    /// Inherited policies (from parent clusters) are loaded first, then local policies.
     pub async fn from_crds(client: &Client) -> Result<Self> {
-        let api: Api<CedarPolicy> = Api::namespaced(client.clone(), "lattice-system");
-        let policies = api.list(&Default::default()).await?;
-
-        let mut policy_set = PolicySet::new();
-        let mut loaded_count = 0;
-        let mut error_count = 0;
-
-        // Sort policies by priority (higher first)
-        let mut sorted_policies: Vec<_> = policies.items.into_iter().collect();
-        sorted_policies.sort_by(|a, b| b.spec.priority.cmp(&a.spec.priority));
-
-        for crd in sorted_policies {
-            if !crd.spec.enabled {
-                debug!(
-                    name = ?crd.metadata.name,
-                    "Skipping disabled CedarPolicy"
-                );
-                continue;
-            }
-
-            match PolicySet::from_str(&crd.spec.policies) {
-                Ok(parsed) => {
-                    // Merge policies into the main set
-                    for policy in parsed.policies() {
-                        if let Err(e) = policy_set.add(policy.clone()) {
-                            warn!(
-                                name = ?crd.metadata.name,
-                                error = %e,
-                                "Failed to add policy (duplicate ID?)"
-                            );
-                            error_count += 1;
-                        } else {
-                            loaded_count += 1;
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        name = ?crd.metadata.name,
-                        error = %e,
-                        "Failed to parse CedarPolicy"
-                    );
-                    error_count += 1;
-                }
-            }
-        }
-
-        info!(
-            loaded = loaded_count,
-            errors = error_count,
-            "Loaded Cedar policies from CRDs"
-        );
+        let policy_set = Self::load_policies_from_crds(client).await?;
 
         Ok(Self {
             authorizer: Authorizer::new(),
             policy_set: Arc::new(RwLock::new(policy_set)),
             known_clusters: Arc::new(RwLock::new(Vec::new())),
         })
+    }
+
+    /// Load policies from CRDs, respecting inheritance order
+    ///
+    /// Inherited policies are loaded first (parent's word is law), then local policies.
+    /// Within each category, policies are sorted by priority (higher first).
+    async fn load_policies_from_crds(client: &Client) -> Result<PolicySet> {
+        let api: Api<CedarPolicy> = Api::namespaced(client.clone(), "lattice-system");
+
+        // Fetch inherited policies (from parent clusters)
+        let inherited_lp = ListParams::default().labels(&format!("{}=true", INHERITED_LABEL));
+        let inherited_policies: Vec<CedarPolicy> = api
+            .list(&inherited_lp)
+            .await
+            .map(|list| list.items)
+            .unwrap_or_default();
+
+        // Fetch local policies (not inherited)
+        let all_policies = api.list(&Default::default()).await?;
+        let local_policies: Vec<_> = all_policies
+            .items
+            .into_iter()
+            .filter(|p| {
+                p.metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get(INHERITED_LABEL))
+                    .map(|v| v != "true")
+                    .unwrap_or(true)
+            })
+            .collect();
+
+        let mut policy_set = PolicySet::new();
+        let mut inherited_count = 0;
+        let mut local_count = 0;
+        let mut error_count = 0;
+
+        // Load inherited policies first (parent's word is law)
+        let mut sorted_inherited = inherited_policies;
+        sorted_inherited.sort_by(|a, b| b.spec.priority.cmp(&a.spec.priority));
+
+        for crd in sorted_inherited {
+            let (loaded, errors) = Self::add_policy_to_set(&mut policy_set, &crd);
+            inherited_count += loaded;
+            error_count += errors;
+        }
+
+        // Load local policies second
+        let mut sorted_local: Vec<_> = local_policies;
+        sorted_local.sort_by(|a, b| b.spec.priority.cmp(&a.spec.priority));
+
+        for crd in sorted_local {
+            let (loaded, errors) = Self::add_policy_to_set(&mut policy_set, &crd);
+            local_count += loaded;
+            error_count += errors;
+        }
+
+        info!(
+            inherited = inherited_count,
+            local = local_count,
+            errors = error_count,
+            "Loaded Cedar policies from CRDs"
+        );
+
+        Ok(policy_set)
+    }
+
+    /// Add policies from a CedarPolicy CRD to the policy set
+    ///
+    /// Returns (loaded_count, error_count)
+    fn add_policy_to_set(policy_set: &mut PolicySet, crd: &CedarPolicy) -> (usize, usize) {
+        if !crd.spec.enabled {
+            debug!(
+                name = ?crd.metadata.name,
+                "Skipping disabled CedarPolicy"
+            );
+            return (0, 0);
+        }
+
+        let mut loaded = 0;
+        let mut errors = 0;
+
+        match PolicySet::from_str(&crd.spec.policies) {
+            Ok(parsed) => {
+                for policy in parsed.policies() {
+                    if let Err(e) = policy_set.add(policy.clone()) {
+                        warn!(
+                            name = ?crd.metadata.name,
+                            error = %e,
+                            "Failed to add policy (duplicate ID?)"
+                        );
+                        errors += 1;
+                    } else {
+                        loaded += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    name = ?crd.metadata.name,
+                    error = %e,
+                    "Failed to parse CedarPolicy"
+                );
+                errors += 1;
+            }
+        }
+
+        (loaded, errors)
     }
 
     /// Create policy engine with explicit policies (for testing)
@@ -230,27 +303,10 @@ impl PolicyEngine {
     }
 
     /// Reload policies from CRDs
+    ///
+    /// Reloads all policies, respecting inheritance order (inherited first, then local).
     pub async fn reload(&self, client: &Client) -> Result<()> {
-        let api: Api<CedarPolicy> = Api::namespaced(client.clone(), "lattice-system");
-        let policies = api.list(&Default::default()).await?;
-
-        let mut new_policy_set = PolicySet::new();
-
-        // Sort policies by priority (higher first)
-        let mut sorted_policies: Vec<_> = policies.items.into_iter().collect();
-        sorted_policies.sort_by(|a, b| b.spec.priority.cmp(&a.spec.priority));
-
-        for crd in sorted_policies {
-            if !crd.spec.enabled {
-                continue;
-            }
-
-            if let Ok(parsed) = PolicySet::from_str(&crd.spec.policies) {
-                for policy in parsed.policies() {
-                    let _ = new_policy_set.add(policy.clone());
-                }
-            }
-        }
+        let new_policy_set = Self::load_policies_from_crds(client).await?;
 
         let mut policy_set = self.policy_set.write().await;
         *policy_set = new_policy_set;

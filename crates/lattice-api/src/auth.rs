@@ -1,6 +1,13 @@
 //! OIDC authentication
 //!
 //! Validates OIDC tokens and extracts user identity for Cedar authorization.
+//!
+//! # Provider Inheritance
+//!
+//! OIDC providers can be inherited from parent clusters:
+//! - If an inherited provider exists (labeled `lattice.dev/inherited: true`), it's used by default
+//! - Local providers only take effect if `allow_child_override: true` on the inherited provider
+//! - This ensures authentication cannot be bypassed by child clusters
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
 use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
+use kube::api::ListParams;
 use kube::{Api, Client};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -15,6 +23,9 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 use lattice_common::crd::OIDCProvider;
+
+/// Label indicating this resource was inherited from a parent cluster
+const INHERITED_LABEL: &str = "lattice.dev/inherited";
 
 /// Validated user identity from OIDC token
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,16 +174,63 @@ impl OidcValidator {
 
     /// Create validator from OIDCProvider CRD
     ///
-    /// Loads the first OIDCProvider from lattice-system namespace.
+    /// Loads the appropriate OIDCProvider from lattice-system namespace,
+    /// respecting inheritance rules:
+    /// - Inherited providers take precedence by default
+    /// - Local providers only used if inherited provider has `allow_child_override: true`
     pub async fn from_crd(client: &Client) -> Result<Self> {
         let api: Api<OIDCProvider> = Api::namespaced(client.clone(), "lattice-system");
-        let providers = api.list(&Default::default()).await?;
 
-        let provider = providers
-            .items
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::Config("No OIDCProvider found in lattice-system".into()))?;
+        // Fetch inherited providers (from parent clusters)
+        let inherited_lp = ListParams::default().labels(&format!("{}=true", INHERITED_LABEL));
+        let inherited: Option<OIDCProvider> = api
+            .list(&inherited_lp)
+            .await
+            .ok()
+            .and_then(|list| list.items.into_iter().next());
+
+        // Fetch local providers (not inherited)
+        let all_providers = api.list(&Default::default()).await?;
+        let local: Option<OIDCProvider> = all_providers.items.into_iter().find(|p| {
+            p.metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(INHERITED_LABEL))
+                .map(|v| v != "true")
+                .unwrap_or(true)
+        });
+
+        // Determine which provider to use
+        let (provider, source) = match (inherited, local) {
+            // Both exist: use inherited unless allow_child_override is true
+            (Some(inherited_provider), Some(local_provider)) => {
+                if inherited_provider.spec.allow_child_override {
+                    info!(
+                        inherited_issuer = %inherited_provider.spec.issuer_url,
+                        local_issuer = %local_provider.spec.issuer_url,
+                        "Using local OIDC provider (child override allowed)"
+                    );
+                    (local_provider, "local")
+                } else {
+                    debug!(
+                        inherited_issuer = %inherited_provider.spec.issuer_url,
+                        local_issuer = %local_provider.spec.issuer_url,
+                        "Ignoring local OIDC provider (child override not allowed)"
+                    );
+                    (inherited_provider, "inherited")
+                }
+            }
+            // Only inherited exists
+            (Some(inherited_provider), None) => (inherited_provider, "inherited"),
+            // Only local exists
+            (None, Some(local_provider)) => (local_provider, "local"),
+            // None exist
+            (None, None) => {
+                return Err(Error::Config(
+                    "No OIDCProvider found in lattice-system".into(),
+                ));
+            }
+        };
 
         let spec = &provider.spec;
 
@@ -196,6 +254,7 @@ impl OidcValidator {
         info!(
             issuer = %config.issuer_url,
             client_id = %config.client_id,
+            source = source,
             "Loaded OIDC configuration from CRD"
         );
 
