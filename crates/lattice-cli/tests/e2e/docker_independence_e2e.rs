@@ -41,17 +41,15 @@ use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, docker_containers_deleted,
     ensure_docker_network, extract_docker_cluster_kubeconfig, force_delete_docker_cluster,
     get_docker_kubeconfig, kubeconfig_path, load_cluster_config, load_registry_credentials,
-    run_cmd, run_cmd_allow_fail, watch_cluster_phases, watch_worker_scaling, DEFAULT_LATTICE_IMAGE,
+    run_cmd, watch_cluster_phases, watch_worker_scaling, DEFAULT_LATTICE_IMAGE,
 };
+use super::integration::setup::cleanup_bootstrap_clusters;
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
 
 fn cleanup_clusters(mgmt_name: &str, workload_name: &str) {
     info!("Cleaning up all test resources...");
-    let _ = run_cmd_allow_fail(
-        "kind",
-        &["delete", "cluster", "--name", "lattice-bootstrap"],
-    );
+    cleanup_bootstrap_clusters();
     force_delete_docker_cluster(mgmt_name);
     force_delete_docker_cluster(workload_name);
 }

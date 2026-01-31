@@ -35,32 +35,26 @@ use lattice_cli::commands::install::Installer;
 use lattice_operator::crd::LatticeCluster;
 
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
+use super::context::init_e2e_test;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, delete_cluster_and_wait,
     ensure_docker_network, force_delete_docker_cluster, get_docker_kubeconfig,
     kubeconfig_path as kc_path, load_cluster_config, load_registry_credentials, run_cmd_allow_fail,
-    watch_cluster_phases, DEFAULT_LATTICE_IMAGE,
+    watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
+use super::integration::setup::cleanup_bootstrap_clusters;
 use super::providers::InfraProvider;
 
-const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
 const BATCH_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes per batch
 const SETTLE_DELAY: Duration = Duration::from_secs(20);
 
 fn cleanup_all_clusters() {
     info!("Cleaning up all test resources...");
 
-    // Clean up kind bootstrap cluster
-    let _ = run_cmd_allow_fail(
-        "kind",
-        &["delete", "cluster", "--name", "lattice-bootstrap"],
-    );
-
-    // Clean up management cluster
+    cleanup_bootstrap_clusters();
     force_delete_docker_cluster(MGMT_CLUSTER_NAME);
 
     // Clean up any endurance-* clusters (pattern matches all iterations)
-    // Get all containers with endurance- prefix
     let containers =
         run_cmd_allow_fail("docker", &["ps", "-a", "--filter", "name=endurance-", "-q"]);
     for id in containers.lines() {
@@ -74,14 +68,7 @@ fn cleanup_all_clusters() {
 
 #[tokio::test]
 async fn test_endurance_loop() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
+    init_e2e_test();
 
     info!("=========================================================");
     info!("ENDURANCE TEST - RUNS FOREVER (10 min timeout per batch)");

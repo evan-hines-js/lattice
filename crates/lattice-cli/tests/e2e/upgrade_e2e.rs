@@ -38,17 +38,18 @@ use lattice_cli::commands::install::Installer;
 use lattice_operator::crd::{ClusterPhase, LatticeCluster};
 
 use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
+use super::context::init_e2e_test;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd_allow_fail, DEFAULT_LATTICE_IMAGE,
+    load_registry_credentials, run_cmd_allow_fail, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
 use super::integration::setup::cleanup_bootstrap_clusters;
 use super::mesh_tests::start_mesh_test;
 use super::providers::InfraProvider;
 
-const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
-const WORKLOAD_CLUSTER_NAME: &str = "e2e-upgrade";
+/// Different from standard e2e-workload - tests Kubernetes version upgrades
+const UPGRADE_WORKLOAD_CLUSTER_NAME: &str = "e2e-upgrade";
 const TEST_TIMEOUT: Duration = Duration::from_secs(90 * 60); // 90 minutes
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(30 * 60); // 30 minutes for upgrade
 
@@ -61,14 +62,7 @@ fn get_upgrade_versions() -> (String, String) {
 
 #[tokio::test]
 async fn test_upgrade_with_mesh_traffic() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
+    init_e2e_test();
 
     let (from_version, to_version) = get_upgrade_versions();
 
@@ -123,7 +117,7 @@ async fn run_upgrade_test() -> Result<(), String> {
 
     // Override to start at from_version
     workload_cluster.spec.provider.kubernetes.version = from_version.clone();
-    workload_cluster.metadata.name = Some(WORKLOAD_CLUSTER_NAME.to_string());
+    workload_cluster.metadata.name = Some(UPGRADE_WORKLOAD_CLUSTER_NAME.to_string());
 
     ensure_docker_network().map_err(|e| format!("Failed to setup Docker network: {}", e))?;
 
@@ -161,14 +155,14 @@ async fn run_upgrade_test() -> Result<(), String> {
         .map_err(|e| format!("Failed to create workload cluster: {}", e))?;
 
     // Wait for cluster to be ready
-    wait_for_cluster_ready(&mgmt_client, WORKLOAD_CLUSTER_NAME).await?;
+    wait_for_cluster_ready(&mgmt_client, UPGRADE_WORKLOAD_CLUSTER_NAME).await?;
     info!("Workload cluster ready at v{}!", from_version);
 
     // Extract kubeconfig
-    let workload_kubeconfig_path = kubeconfig_path(WORKLOAD_CLUSTER_NAME);
+    let workload_kubeconfig_path = kubeconfig_path(UPGRADE_WORKLOAD_CLUSTER_NAME);
     if workload_provider == InfraProvider::Docker {
         extract_docker_cluster_kubeconfig(
-            WORKLOAD_CLUSTER_NAME,
+            UPGRADE_WORKLOAD_CLUSTER_NAME,
             &workload_bootstrap,
             &workload_kubeconfig_path,
         )?;
@@ -187,7 +181,7 @@ async fn run_upgrade_test() -> Result<(), String> {
     info!("[Phase 4] Starting chaos monkey...");
     let chaos_targets = Arc::new(ChaosTargets::new());
     chaos_targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig);
-    chaos_targets.add(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path);
+    chaos_targets.add(UPGRADE_WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path);
 
     let _chaos = ChaosMonkey::start_with_config(chaos_targets, ChaosConfig::aggressive());
 
@@ -209,7 +203,7 @@ async fn run_upgrade_test() -> Result<(), String> {
 
     workload_api
         .patch(
-            WORKLOAD_CLUSTER_NAME,
+            UPGRADE_WORKLOAD_CLUSTER_NAME,
             &PatchParams::apply("lattice-e2e"),
             &Patch::Merge(&patch),
         )
@@ -229,9 +223,9 @@ async fn run_upgrade_test() -> Result<(), String> {
     // Cleanup
     info!("[Cleanup] Deleting workload cluster...");
     let _ = workload_api
-        .delete(WORKLOAD_CLUSTER_NAME, &DeleteParams::default())
+        .delete(UPGRADE_WORKLOAD_CLUSTER_NAME, &DeleteParams::default())
         .await;
-    wait_for_cluster_deleted(&mgmt_client, WORKLOAD_CLUSTER_NAME).await?;
+    wait_for_cluster_deleted(&mgmt_client, UPGRADE_WORKLOAD_CLUSTER_NAME).await?;
 
     // Force cleanup Docker containers
     let _ = run_cmd_allow_fail(
@@ -239,12 +233,12 @@ async fn run_upgrade_test() -> Result<(), String> {
         &[
             "rm",
             "-f",
-            &format!("{}-control-plane", WORKLOAD_CLUSTER_NAME),
+            &format!("{}-control-plane", UPGRADE_WORKLOAD_CLUSTER_NAME),
         ],
     );
     let _ = run_cmd_allow_fail(
         "docker",
-        &["rm", "-f", &format!("{}-worker", WORKLOAD_CLUSTER_NAME)],
+        &["rm", "-f", &format!("{}-worker", UPGRADE_WORKLOAD_CLUSTER_NAME)],
     );
 
     info!(

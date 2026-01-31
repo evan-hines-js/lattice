@@ -27,6 +27,14 @@ use tracing::info;
 #[cfg(feature = "provider-e2e")]
 pub const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
+/// Standard cluster names for E2E tests
+#[cfg(feature = "provider-e2e")]
+pub const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
+#[cfg(feature = "provider-e2e")]
+pub const WORKLOAD_CLUSTER_NAME: &str = "e2e-workload";
+#[cfg(feature = "provider-e2e")]
+pub const WORKLOAD2_CLUSTER_NAME: &str = "e2e-workload2";
+
 // =============================================================================
 // Unique Run ID for Parallel Test Execution
 // =============================================================================
