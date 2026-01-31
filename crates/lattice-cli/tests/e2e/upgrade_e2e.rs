@@ -145,6 +145,7 @@ async fn run_upgrade_test() -> Result<(), String> {
         true,
         registry_credentials,
         None,
+        Some(format!("{}-", super::helpers::run_id())),
     )
     .map_err(|e| format!("Failed to create installer: {}", e))?;
 

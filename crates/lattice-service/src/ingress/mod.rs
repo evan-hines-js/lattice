@@ -15,6 +15,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use lattice_common::crd::{IngressSpec, IngressTls, PathMatchType, TlsMode};
+use lattice_common::policy::{
+    AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
+    OperationSpec, PolicyMetadata, WorkloadSelector,
+};
 
 use crate::mesh;
 
@@ -312,7 +316,7 @@ pub struct GeneratedWaypoint {
     /// Waypoint Gateway (uses istio-waypoint GatewayClass)
     pub gateway: Option<Gateway>,
     /// AuthorizationPolicy allowing traffic TO the waypoint on HBONE port
-    pub allow_to_waypoint_policy: Option<WaypointAuthorizationPolicy>,
+    pub allow_to_waypoint_policy: Option<AuthorizationPolicy>,
 }
 
 impl GeneratedWaypoint {
@@ -341,80 +345,6 @@ impl GeneratedWaypoint {
 // =============================================================================
 // Waypoint AuthorizationPolicy Types
 // =============================================================================
-
-/// AuthorizationPolicy for waypoint ingress
-///
-/// This is a simplified version of AuthorizationPolicy specifically for
-/// the `allow-to-waypoint` policy that allows any authenticated traffic
-/// to reach the waypoint on port 15008 (HBONE).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct WaypointAuthorizationPolicy {
-    /// API version
-    pub api_version: String,
-    /// Kind
-    pub kind: String,
-    /// Metadata
-    pub metadata: WaypointPolicyMetadata,
-    /// Spec
-    pub spec: WaypointAuthorizationPolicySpec,
-}
-
-/// Metadata for waypoint policy
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct WaypointPolicyMetadata {
-    /// Resource name
-    pub name: String,
-    /// Resource namespace
-    pub namespace: String,
-    /// Labels
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
-
-/// Spec for waypoint authorization policy
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct WaypointAuthorizationPolicySpec {
-    /// Selector for workloads (targets waypoint pods)
-    pub selector: WaypointSelector,
-    /// Action: ALLOW
-    pub action: String,
-    /// Rules defining access
-    pub rules: Vec<WaypointAuthorizationRule>,
-}
-
-/// Workload selector for waypoint policy
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct WaypointSelector {
-    /// Match labels
-    pub match_labels: BTreeMap<String, String>,
-}
-
-/// Authorization rule for waypoint
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct WaypointAuthorizationRule {
-    /// Source conditions (empty = any authenticated source)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub from: Vec<()>,
-    /// Destination conditions (port 15008)
-    pub to: Vec<WaypointOperation>,
-}
-
-/// Operation for waypoint authorization
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct WaypointOperation {
-    /// Operation specification
-    pub operation: WaypointOperationSpec,
-}
-
-/// Operation spec for waypoint
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct WaypointOperationSpec {
-    /// Allowed ports
-    pub ports: Vec<String>,
-}
 
 // =============================================================================
 // Waypoint Compiler (Istio Native)
@@ -493,40 +423,30 @@ impl WaypointCompiler {
     /// 1. Source pod → ztunnel → waypoint:15008 (this policy allows this)
     /// 2. Waypoint evaluates L7 AuthorizationPolicy (allow-to-{service})
     /// 3. Waypoint → ztunnel → destination pod (allow-waypoint-to-{service})
-    fn compile_allow_to_waypoint_policy(namespace: &str) -> WaypointAuthorizationPolicy {
-        let mut labels = BTreeMap::new();
-        labels.insert(
-            "app.kubernetes.io/managed-by".to_string(),
-            "lattice".to_string(),
-        );
-
+    fn compile_allow_to_waypoint_policy(namespace: &str) -> AuthorizationPolicy {
         let mut match_labels = BTreeMap::new();
         match_labels.insert(
             mesh::WAYPOINT_FOR_LABEL.to_string(),
             mesh::WAYPOINT_FOR_SERVICE.to_string(),
         );
 
-        WaypointAuthorizationPolicy {
-            api_version: "security.istio.io/v1beta1".to_string(),
-            kind: "AuthorizationPolicy".to_string(),
-            metadata: WaypointPolicyMetadata {
-                name: "allow-to-waypoint".to_string(),
-                namespace: namespace.to_string(),
-                labels,
-            },
-            spec: WaypointAuthorizationPolicySpec {
-                selector: WaypointSelector { match_labels },
+        AuthorizationPolicy::new(
+            PolicyMetadata::new("allow-to-waypoint", namespace),
+            AuthorizationPolicySpec {
+                target_refs: vec![],
+                selector: Some(WorkloadSelector { match_labels }),
                 action: "ALLOW".to_string(),
-                rules: vec![WaypointAuthorizationRule {
+                rules: vec![AuthorizationRule {
                     from: vec![], // Empty = any authenticated source
-                    to: vec![WaypointOperation {
-                        operation: WaypointOperationSpec {
+                    to: vec![AuthorizationOperation {
+                        operation: OperationSpec {
                             ports: vec![mesh::HBONE_PORT.to_string()],
+                            hosts: vec![],
                         },
                     }],
                 }],
             },
-        }
+        )
     }
 }
 
@@ -881,12 +801,9 @@ mod tests {
         let output = WaypointCompiler::compile("prod");
 
         let policy = output.allow_to_waypoint_policy.expect("should have policy");
+        let selector = policy.spec.selector.as_ref().expect("should have selector");
         assert_eq!(
-            policy
-                .spec
-                .selector
-                .match_labels
-                .get("istio.io/waypoint-for"),
+            selector.match_labels.get("istio.io/waypoint-for"),
             Some(&"service".to_string())
         );
     }

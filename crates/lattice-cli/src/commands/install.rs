@@ -72,6 +72,10 @@ pub struct InstallArgs {
     /// Write kubeconfig to this path after installation
     #[arg(long)]
     pub kubeconfig_out: Option<PathBuf>,
+
+    /// Prefix for kubeconfig file paths (for parallel test runs)
+    #[arg(long, env = "LATTICE_KUBECONFIG_PREFIX")]
+    pub kubeconfig_prefix: Option<String>,
 }
 
 fn parse_bootstrap_provider(s: &str) -> std::result::Result<BootstrapProvider, String> {
@@ -93,6 +97,8 @@ pub struct Installer {
     image: String,
     keep_bootstrap_on_failure: bool,
     registry_credentials: Option<String>,
+    /// Optional prefix for kubeconfig paths (e.g., "12345-" for parallel test runs)
+    kubeconfig_prefix: String,
 }
 
 /// Fixed bootstrap cluster name - concurrent installs are not supported
@@ -100,12 +106,21 @@ const BOOTSTRAP_CLUSTER_NAME: &str = "lattice-bootstrap";
 
 impl Installer {
     /// Create a new installer
+    ///
+    /// # Arguments
+    /// * `cluster_yaml` - The LatticeCluster YAML content
+    /// * `image` - Lattice container image
+    /// * `keep_bootstrap_on_failure` - Keep kind cluster on failure for debugging
+    /// * `registry_credentials` - Optional registry credentials (dockerconfigjson format)
+    /// * `bootstrap_override` - Override bootstrap provider from config
+    /// * `kubeconfig_prefix` - Optional prefix for kubeconfig paths (for parallel test runs)
     pub fn new(
         cluster_yaml: String,
         image: String,
         keep_bootstrap_on_failure: bool,
         registry_credentials: Option<String>,
         bootstrap_override: Option<BootstrapProvider>,
+        kubeconfig_prefix: Option<String>,
     ) -> Result<Self> {
         let value = lattice_common::yaml::parse_yaml(&cluster_yaml)
             .map_err(|e| Error::validation(format!("Invalid YAML: {}", e)))?;
@@ -129,6 +144,7 @@ impl Installer {
             image,
             keep_bootstrap_on_failure,
             registry_credentials,
+            kubeconfig_prefix: kubeconfig_prefix.unwrap_or_default(),
         })
     }
 
@@ -146,6 +162,7 @@ impl Installer {
             args.keep_bootstrap_on_failure,
             registry_credentials,
             args.bootstrap.clone(),
+            args.kubeconfig_prefix.clone(),
         )
     }
 
@@ -168,8 +185,14 @@ impl Installer {
     }
 
     /// Returns the path where the management cluster kubeconfig is stored
+    ///
+    /// Format: `/tmp/{prefix}{cluster_name}-kubeconfig`
+    /// If prefix is set (e.g., "12345-"), result is `/tmp/12345-my-cluster-kubeconfig`
     pub fn kubeconfig_path(&self) -> PathBuf {
-        PathBuf::from(format!("/tmp/{}-kubeconfig", self.cluster_name))
+        PathBuf::from(format!(
+            "/tmp/{}{}-kubeconfig",
+            self.kubeconfig_prefix, self.cluster_name
+        ))
     }
 
     fn provider(&self) -> ProviderType {

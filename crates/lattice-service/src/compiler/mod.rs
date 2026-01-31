@@ -28,7 +28,7 @@
 use crate::crd::{LatticeService, ProviderType};
 use crate::graph::ServiceGraph;
 use crate::ingress::{GeneratedIngress, GeneratedWaypoint, IngressCompiler, WaypointCompiler};
-use crate::policy::{AuthorizationPolicy, GeneratedPolicies, PolicyCompiler};
+use crate::policy::{GeneratedPolicies, PolicyCompiler};
 use crate::workload::{GeneratedWorkloads, VolumeCompiler, WorkloadCompiler};
 
 // Re-export types for convenience
@@ -213,13 +213,6 @@ impl<'a> ServiceCompiler<'a> {
             ingress,
             waypoint,
         })
-    }
-
-    /// Compile the mesh-wide default-deny AuthorizationPolicy
-    ///
-    /// This should be applied once per cluster in istio-system namespace.
-    pub fn compile_mesh_default_deny(&self) -> AuthorizationPolicy {
-        PolicyCompiler::compile_mesh_default_deny()
     }
 }
 
@@ -499,21 +492,6 @@ mod tests {
         // Deployment + Service + ServiceAccount + CiliumPolicy + WaypointGateway + WaypointAuthPolicy = 6
         // (VirtualService is generated per dependency, not per service)
         assert_eq!(output.resource_count(), 6);
-    }
-
-    // =========================================================================
-    // Story: Mesh Default Deny
-    // =========================================================================
-
-    #[test]
-    fn story_mesh_default_deny() {
-        let graph = ServiceGraph::new();
-        let compiler = ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker);
-
-        let policy = compiler.compile_mesh_default_deny();
-
-        assert_eq!(policy.metadata.name, "mesh-default-deny");
-        assert_eq!(policy.metadata.namespace, "istio-system");
     }
 
     // =========================================================================

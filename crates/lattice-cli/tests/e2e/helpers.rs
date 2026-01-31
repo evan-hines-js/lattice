@@ -225,6 +225,40 @@ pub fn get_kubeconfig_path_for_bootstrap(bootstrap: &BootstrapProvider) -> &'sta
     }
 }
 
+/// Patch a kubeconfig's server URL to use localhost with the given endpoint
+#[cfg(feature = "provider-e2e")]
+fn patch_kubeconfig_server(kubeconfig: &str, endpoint: &str) -> Result<String, String> {
+    let mut config: serde_json::Value = lattice_common::yaml::parse_yaml(kubeconfig)
+        .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
+
+    if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_array_mut()) {
+        for cluster in clusters {
+            if let Some(cluster_data) = cluster.get_mut("cluster") {
+                if let Some(server) = cluster_data.get_mut("server") {
+                    *server = serde_json::Value::String(endpoint.to_string());
+                }
+            }
+        }
+    }
+
+    serde_json::to_string(&config).map_err(|e| format!("Failed to serialize kubeconfig: {}", e))
+}
+
+/// Parse docker port output (e.g., "0.0.0.0:12345") into a localhost endpoint
+#[cfg(feature = "provider-e2e")]
+fn parse_lb_port(port_output: &str) -> Option<String> {
+    let trimmed = port_output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    if parts.len() == 2 {
+        Some(format!("https://127.0.0.1:{}", parts[1]))
+    } else {
+        None
+    }
+}
+
 /// Extract and patch kubeconfig for a Docker-based (CAPD) cluster
 ///
 /// This function:
@@ -302,31 +336,9 @@ pub fn extract_docker_cluster_kubeconfig(
     let lb_container = format!("{}-lb", cluster_name);
     let port_output = run_cmd_allow_fail("docker", &["port", &lb_container, "6443/tcp"]);
 
-    let final_kubeconfig = if !port_output.trim().is_empty() {
-        let parts: Vec<&str> = port_output.trim().split(':').collect();
-        if parts.len() == 2 {
-            let localhost_endpoint = format!("https://127.0.0.1:{}", parts[1]);
-            info!("Patching kubeconfig server to {}", localhost_endpoint);
-
-            // Use proper YAML parsing to preserve structure
-            let mut config: serde_json::Value = lattice_common::yaml::parse_yaml(&kubeconfig)
-                .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
-
-            if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_array_mut()) {
-                for cluster in clusters {
-                    if let Some(cluster_data) = cluster.get_mut("cluster") {
-                        if let Some(server) = cluster_data.get_mut("server") {
-                            *server = serde_json::Value::String(localhost_endpoint.clone());
-                        }
-                    }
-                }
-            }
-
-            serde_json::to_string(&config)
-                .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))?
-        } else {
-            kubeconfig
-        }
+    let final_kubeconfig = if let Some(endpoint) = parse_lb_port(&port_output) {
+        info!("Patching kubeconfig server to {}", endpoint);
+        patch_kubeconfig_server(&kubeconfig, &endpoint)?
     } else {
         info!(
             "Warning: Could not find load balancer port mapping for {}",
@@ -789,33 +801,10 @@ pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
     let lb_container = format!("{}-lb", cluster_name);
     let port_output = run_cmd_allow_fail("docker", &["port", &lb_container, "6443/tcp"]);
 
-    if port_output.trim().is_empty() {
-        return Err(format!("LB container {} not found", lb_container));
-    }
+    let endpoint = parse_lb_port(&port_output)
+        .ok_or_else(|| format!("LB container {} not found or invalid port", lb_container))?;
 
-    let parts: Vec<&str> = port_output.trim().split(':').collect();
-    if parts.len() != 2 {
-        return Err(format!("Failed to parse LB port: {}", port_output));
-    }
-
-    let localhost_endpoint = format!("https://127.0.0.1:{}", parts[1]);
-
-    // Use proper YAML parsing to preserve structure
-    let mut config: serde_json::Value = lattice_common::yaml::parse_yaml(&kubeconfig)
-        .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
-
-    if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_array_mut()) {
-        for cluster in clusters {
-            if let Some(cluster_data) = cluster.get_mut("cluster") {
-                if let Some(server) = cluster_data.get_mut("server") {
-                    *server = serde_json::Value::String(localhost_endpoint.clone());
-                }
-            }
-        }
-    }
-
-    let patched = serde_json::to_string(&config)
-        .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))?;
+    let patched = patch_kubeconfig_server(&kubeconfig, &endpoint)?;
 
     let patched_path = kubeconfig_local_path(cluster_name);
     std::fs::write(&patched_path, &patched)

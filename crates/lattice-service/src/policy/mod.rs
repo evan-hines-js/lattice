@@ -1,16 +1,13 @@
 //! Network policy types and compilation for Lattice services
 //!
-//! This module provides policy types and compilation logic implementing a defense-in-depth model:
+//! This module provides policy compilation logic implementing a defense-in-depth model:
 //!
 //! - **L7 (Istio AuthorizationPolicy)**: mTLS identity-based access control using SPIFFE principals
 //! - **L4 (CiliumNetworkPolicy)**: eBPF-based network enforcement at the kernel level
 //!
 //! For policy generation, use [`PolicyCompiler`].
 
-mod types;
-
-// Re-export all types for backwards compatibility
-pub use types::{
+pub use lattice_common::policy::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
     AuthorizationSource, CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy,
     CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule, EndpointSelector, FqdnSelector,
@@ -161,24 +158,6 @@ impl<'a> PolicyCompiler<'a> {
         output
     }
 
-    /// Compile the mesh-wide default-deny AuthorizationPolicy
-    ///
-    /// Per Istio best practices: https://istio.io/latest/docs/ops/best-practices/security/
-    /// An empty spec `{}` denies all traffic by default.
-    pub fn compile_mesh_default_deny() -> AuthorizationPolicy {
-        AuthorizationPolicy {
-            api_version: "security.istio.io/v1".to_string(),
-            kind: "AuthorizationPolicy".to_string(),
-            metadata: PolicyMetadata::new("mesh-default-deny", "istio-system"),
-            spec: AuthorizationPolicySpec {
-                target_refs: vec![],
-                selector: None,
-                action: String::new(), // Empty = implicit deny-all
-                rules: vec![],         // Empty = no traffic allowed
-            },
-        }
-    }
-
     /// Check if a string is an IP address (IPv4 or IPv6)
     fn is_ip_address(host: &str) -> bool {
         use std::net::IpAddr;
@@ -215,11 +194,9 @@ impl<'a> PolicyCompiler<'a> {
             return None;
         }
 
-        Some(AuthorizationPolicy {
-            api_version: "security.istio.io/v1beta1".to_string(),
-            kind: "AuthorizationPolicy".to_string(),
-            metadata: PolicyMetadata::new(format!("allow-to-{}", service.name), namespace),
-            spec: AuthorizationPolicySpec {
+        Some(AuthorizationPolicy::new(
+            PolicyMetadata::new(format!("allow-to-{}", service.name), namespace),
+            AuthorizationPolicySpec {
                 target_refs: vec![TargetRef {
                     group: String::new(),
                     kind: "Service".to_string(),
@@ -239,7 +216,7 @@ impl<'a> PolicyCompiler<'a> {
                     }],
                 }],
             },
-        })
+        ))
     }
 
     fn compile_waypoint_policy(
@@ -256,11 +233,9 @@ impl<'a> PolicyCompiler<'a> {
         let mut match_labels = BTreeMap::new();
         match_labels.insert("app.kubernetes.io/name".to_string(), service.name.clone());
 
-        Some(AuthorizationPolicy {
-            api_version: "security.istio.io/v1beta1".to_string(),
-            kind: "AuthorizationPolicy".to_string(),
-            metadata: PolicyMetadata::new(format!("allow-waypoint-to-{}", service.name), namespace),
-            spec: AuthorizationPolicySpec {
+        Some(AuthorizationPolicy::new(
+            PolicyMetadata::new(format!("allow-waypoint-to-{}", service.name), namespace),
+            AuthorizationPolicySpec {
                 target_refs: vec![],
                 selector: Some(WorkloadSelector { match_labels }),
                 action: "ALLOW".to_string(),
@@ -278,7 +253,7 @@ impl<'a> PolicyCompiler<'a> {
                     }],
                 }],
             },
-        })
+        ))
     }
 
     fn compile_cilium_policy(
@@ -383,6 +358,7 @@ impl<'a> PolicyCompiler<'a> {
             to_endpoints: vec![EndpointSelector {
                 match_labels: kube_dns_labels,
             }],
+            to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
             to_ports: vec![CiliumPortRule {
@@ -409,6 +385,7 @@ impl<'a> PolicyCompiler<'a> {
             to_endpoints: vec![EndpointSelector {
                 match_labels: waypoint_egress_labels,
             }],
+            to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
             to_ports: vec![CiliumPortRule {
@@ -464,6 +441,7 @@ impl<'a> PolicyCompiler<'a> {
                             to_endpoints: vec![EndpointSelector {
                                 match_labels: dep_labels,
                             }],
+                            to_entities: vec![],
                             to_fqdns: vec![],
                             to_cidr: vec![],
                             to_ports,
@@ -502,6 +480,7 @@ impl<'a> PolicyCompiler<'a> {
                         if !fqdns.is_empty() {
                             egress_rules.push(CiliumEgressRule {
                                 to_endpoints: vec![],
+                                to_entities: vec![],
                                 to_fqdns: fqdns,
                                 to_cidr: vec![],
                                 to_ports: to_ports.clone(),
@@ -511,6 +490,7 @@ impl<'a> PolicyCompiler<'a> {
                         if !cidrs.is_empty() {
                             egress_rules.push(CiliumEgressRule {
                                 to_endpoints: vec![],
+                                to_entities: vec![],
                                 to_fqdns: vec![],
                                 to_cidr: cidrs,
                                 to_ports,
@@ -522,18 +502,16 @@ impl<'a> PolicyCompiler<'a> {
             }
         }
 
-        CiliumNetworkPolicy {
-            api_version: "cilium.io/v2".to_string(),
-            kind: "CiliumNetworkPolicy".to_string(),
-            metadata: PolicyMetadata::new(format!("policy-{}", service.name), namespace),
-            spec: CiliumNetworkPolicySpec {
+        CiliumNetworkPolicy::new(
+            PolicyMetadata::new(format!("policy-{}", service.name), namespace),
+            CiliumNetworkPolicySpec {
                 endpoint_selector: EndpointSelector {
                     match_labels: endpoint_labels,
                 },
                 ingress: ingress_rules,
                 egress: egress_rules,
             },
-        }
+        )
     }
 
     /// Compile an AuthorizationPolicy to allow Envoy Gateway to reach a service
@@ -546,11 +524,9 @@ impl<'a> PolicyCompiler<'a> {
         let gateway_principal = mesh::trust_domain::gateway_principal(&self.cluster_name);
         let port_strings: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
 
-        AuthorizationPolicy {
-            api_version: "security.istio.io/v1beta1".to_string(),
-            kind: "AuthorizationPolicy".to_string(),
-            metadata: PolicyMetadata::new(format!("allow-gateway-to-{}", service_name), namespace),
-            spec: AuthorizationPolicySpec {
+        AuthorizationPolicy::new(
+            PolicyMetadata::new(format!("allow-gateway-to-{}", service_name), namespace),
+            AuthorizationPolicySpec {
                 target_refs: vec![TargetRef {
                     group: String::new(),
                     kind: "Service".to_string(),
@@ -576,7 +552,7 @@ impl<'a> PolicyCompiler<'a> {
                     },
                 }],
             },
-        }
+        )
     }
 
     fn compile_service_entry(
@@ -617,25 +593,21 @@ impl<'a> PolicyCompiler<'a> {
             .unwrap_or("DNS")
             .to_string();
 
-        Some(ServiceEntry {
-            api_version: "networking.istio.io/v1beta1".to_string(),
-            kind: "ServiceEntry".to_string(),
+        Some(ServiceEntry::new(
             metadata,
-            spec: ServiceEntrySpec {
+            ServiceEntrySpec {
                 hosts,
                 ports,
                 location: "MESH_EXTERNAL".to_string(),
                 resolution,
             },
-        })
+        ))
     }
 
     fn compile_external_default_deny(external_name: &str, namespace: &str) -> AuthorizationPolicy {
-        AuthorizationPolicy {
-            api_version: "security.istio.io/v1beta1".to_string(),
-            kind: "AuthorizationPolicy".to_string(),
-            metadata: PolicyMetadata::new(format!("deny-all-to-{}", external_name), namespace),
-            spec: AuthorizationPolicySpec {
+        AuthorizationPolicy::new(
+            PolicyMetadata::new(format!("deny-all-to-{}", external_name), namespace),
+            AuthorizationPolicySpec {
                 target_refs: vec![TargetRef {
                     group: "networking.istio.io".to_string(),
                     kind: "ServiceEntry".to_string(),
@@ -645,7 +617,7 @@ impl<'a> PolicyCompiler<'a> {
                 action: String::new(),
                 rules: vec![],
             },
-        }
+        )
     }
 
     fn compile_external_access_policy(
@@ -660,14 +632,12 @@ impl<'a> PolicyCompiler<'a> {
             .map(|ep| ep.port.to_string())
             .collect();
 
-        AuthorizationPolicy {
-            api_version: "security.istio.io/v1beta1".to_string(),
-            kind: "AuthorizationPolicy".to_string(),
-            metadata: PolicyMetadata::new(
+        AuthorizationPolicy::new(
+            PolicyMetadata::new(
                 format!("allow-{}-to-{}", caller, external_service.name),
                 namespace,
             ),
-            spec: AuthorizationPolicySpec {
+            AuthorizationPolicySpec {
                 target_refs: vec![TargetRef {
                     group: "networking.istio.io".to_string(),
                     kind: "ServiceEntry".to_string(),
@@ -693,7 +663,7 @@ impl<'a> PolicyCompiler<'a> {
                     },
                 }],
             },
-        }
+        )
     }
 }
 
@@ -929,16 +899,6 @@ mod tests {
     }
 
     #[test]
-    fn story_mesh_default_deny() {
-        let policy = PolicyCompiler::compile_mesh_default_deny();
-
-        assert_eq!(policy.metadata.name, "mesh-default-deny");
-        assert_eq!(policy.metadata.namespace, "istio-system");
-        assert!(policy.spec.action.is_empty());
-        assert!(policy.spec.rules.is_empty());
-    }
-
-    #[test]
     fn story_total_count() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
@@ -961,6 +921,7 @@ mod tests {
     fn story_cilium_fqdn_field_serializes_correctly() {
         let rule = CiliumEgressRule {
             to_endpoints: vec![],
+            to_entities: vec![],
             to_fqdns: vec![FqdnSelector {
                 match_name: Some("api.example.com".to_string()),
                 match_pattern: None,

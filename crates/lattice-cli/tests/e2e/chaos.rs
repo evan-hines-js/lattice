@@ -231,7 +231,12 @@ async fn cut_network(
         &["--kubeconfig", kubeconfig, "apply", "-f", &policy_file],
     );
 
-    if !output.contains("created") && !output.contains("configured") {
+    // Accept "created", "configured", or "unchanged" as success
+    // "unchanged" means policy already exists from a previous interrupted run
+    let policy_applied =
+        output.contains("created") || output.contains("configured") || output.contains("unchanged");
+
+    if !policy_applied {
         let _ = std::fs::remove_file(&policy_file);
         if !is_unreachable(&output) {
             info!("[Chaos] Network on {}: {}", cluster, output.trim());
@@ -239,7 +244,15 @@ async fn cut_network(
         return;
     }
 
-    info!("[Chaos] Network on {}: cut for {}s", cluster, blackout_secs);
+    let status = if output.contains("unchanged") {
+        "cut (clearing stale policy)"
+    } else {
+        "cut"
+    };
+    info!(
+        "[Chaos] Network on {}: {} for {}s",
+        cluster, status, blackout_secs
+    );
 
     // Wait for blackout (but respect cancellation)
     tokio::select! {
@@ -247,18 +260,41 @@ async fn cut_network(
         _ = tokio::time::sleep(Duration::from_secs(blackout_secs)) => {}
     }
 
-    // Always restore network
-    run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "-f",
-            &policy_file,
-            "--ignore-not-found",
-        ],
-    );
+    // Always restore network - retry on transient failures
+    for attempt in 1..=5 {
+        let output = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig,
+                "delete",
+                "-f",
+                &policy_file,
+                "--ignore-not-found",
+            ],
+        );
+
+        if output.contains("deleted") || output.contains("not found") || output.is_empty() {
+            break;
+        }
+
+        if is_unreachable(&output) && attempt < 5 {
+            // API server temporarily unavailable, retry after short delay
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+
+        // Log unexpected errors
+        if !is_unreachable(&output) {
+            info!(
+                "[Chaos] Network restore on {} failed: {}",
+                cluster,
+                output.trim()
+            );
+        }
+        break;
+    }
+
     let _ = std::fs::remove_file(&policy_file);
     info!("[Chaos] Network on {}: restored", cluster);
 }

@@ -1,7 +1,8 @@
-//! Istio AuthorizationPolicy types
+//! Istio policy types
 //!
-//! Types for generating Istio AuthorizationPolicy resources used in
-//! ambient mode L7 mTLS identity-based access control.
+//! Types for generating Istio policy resources:
+//! - AuthorizationPolicy: L7 mTLS identity-based access control
+//! - PeerAuthentication: mTLS mode configuration
 
 use std::collections::BTreeMap;
 
@@ -15,13 +16,37 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct AuthorizationPolicy {
     /// API version
+    #[serde(default = "AuthorizationPolicy::api_version")]
     pub api_version: String,
     /// Kind
+    #[serde(default = "AuthorizationPolicy::kind")]
     pub kind: String,
     /// Metadata
     pub metadata: PolicyMetadata,
     /// Spec
     pub spec: AuthorizationPolicySpec,
+}
+
+impl AuthorizationPolicy {
+    const API_VERSION: &'static str = "security.istio.io/v1";
+    const KIND: &'static str = "AuthorizationPolicy";
+
+    fn api_version() -> String {
+        Self::API_VERSION.to_string()
+    }
+    fn kind() -> String {
+        Self::KIND.to_string()
+    }
+
+    /// Create a new AuthorizationPolicy
+    pub fn new(metadata: PolicyMetadata, spec: AuthorizationPolicySpec) -> Self {
+        Self {
+            api_version: Self::API_VERSION.to_string(),
+            kind: Self::KIND.to_string(),
+            metadata,
+            spec,
+        }
+    }
 }
 
 /// Metadata for policy resources
@@ -136,4 +161,56 @@ pub struct OperationSpec {
     /// Allowed hosts (for external services)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
+}
+
+/// Istio PeerAuthentication for mTLS configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerAuthentication {
+    /// API version
+    #[serde(default = "PeerAuthentication::api_version")]
+    pub api_version: String,
+    /// Kind
+    #[serde(default = "PeerAuthentication::kind")]
+    pub kind: String,
+    /// Metadata
+    pub metadata: PolicyMetadata,
+    /// Spec
+    pub spec: PeerAuthenticationSpec,
+}
+
+impl PeerAuthentication {
+    const API_VERSION: &'static str = "security.istio.io/v1";
+    const KIND: &'static str = "PeerAuthentication";
+
+    fn api_version() -> String {
+        Self::API_VERSION.to_string()
+    }
+    fn kind() -> String {
+        Self::KIND.to_string()
+    }
+
+    /// Create a new PeerAuthentication
+    pub fn new(metadata: PolicyMetadata, spec: PeerAuthenticationSpec) -> Self {
+        Self {
+            api_version: Self::API_VERSION.to_string(),
+            kind: Self::KIND.to_string(),
+            metadata,
+            spec,
+        }
+    }
+}
+
+/// PeerAuthentication spec
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PeerAuthenticationSpec {
+    /// mTLS configuration
+    pub mtls: MtlsConfig,
+}
+
+/// mTLS configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MtlsConfig {
+    /// mTLS mode: STRICT, PERMISSIVE, DISABLE
+    pub mode: String,
 }

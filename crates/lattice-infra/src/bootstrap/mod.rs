@@ -98,17 +98,38 @@ pub async fn generate_istio(
     let istio = reconciler.manifests().await?;
     manifests.extend(istio.iter().cloned());
 
-    // Istio policies
-    manifests.push(IstioReconciler::generate_peer_authentication());
-    manifests.push(IstioReconciler::generate_default_deny());
-    manifests.push(IstioReconciler::generate_waypoint_default_deny());
-    manifests.push(IstioReconciler::generate_operator_allow_policy());
+    // Istio policies - serialize typed structs to JSON
+    manifests.push(
+        serde_json::to_string_pretty(&IstioReconciler::generate_peer_authentication())
+            .expect("PeerAuthentication serialization"),
+    );
+    manifests.push(
+        serde_json::to_string_pretty(&IstioReconciler::generate_default_deny())
+            .expect("AuthorizationPolicy serialization"),
+    );
+    manifests.push(
+        serde_json::to_string_pretty(&IstioReconciler::generate_waypoint_default_deny())
+            .expect("AuthorizationPolicy serialization"),
+    );
+    manifests.push(
+        serde_json::to_string_pretty(&IstioReconciler::generate_operator_allow_policy())
+            .expect("AuthorizationPolicy serialization"),
+    );
 
-    // Cilium policies (skip on kind/bootstrap clusters)
+    // Cilium policies (skip on kind/bootstrap clusters) - serialize typed structs to JSON
     if !skip_cilium_policies {
-        manifests.push(cilium::generate_ztunnel_allowlist());
-        manifests.push(cilium::generate_default_deny());
-        manifests.push(cilium::generate_waypoint_egress_policy());
+        manifests.push(
+            serde_json::to_string_pretty(&cilium::generate_ztunnel_allowlist())
+                .expect("CiliumClusterwideNetworkPolicy serialization"),
+        );
+        manifests.push(
+            serde_json::to_string_pretty(&cilium::generate_default_deny())
+                .expect("CiliumClusterwideNetworkPolicy serialization"),
+        );
+        manifests.push(
+            serde_json::to_string_pretty(&cilium::generate_waypoint_egress_policy())
+                .expect("CiliumClusterwideNetworkPolicy serialization"),
+        );
     }
 
     Ok(manifests)
@@ -165,8 +186,12 @@ pub(crate) fn namespace_yaml(name: &str) -> String {
 
 /// Split a multi-document YAML string into individual documents.
 ///
-/// Filters out empty documents and documents without a `kind:` field.
+/// Only used for parsing external YAML sources (helm output, CRD files).
+/// Filters out empty documents and comment-only blocks.
 /// Normalizes output to always have `---` prefix for kubectl apply compatibility.
+///
+/// Note: JSON policies from our typed generators are added directly to manifest
+/// lists and never go through this function.
 pub fn split_yaml_documents(yaml: &str) -> Vec<String> {
     yaml.split("\n---")
         .map(|doc| doc.trim())

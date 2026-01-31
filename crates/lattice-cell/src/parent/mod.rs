@@ -32,7 +32,7 @@ use crate::resources::fetch_distributable_resources;
 use crate::server::AgentServer;
 use lattice_common::crd::{CloudProvider, SecretsProvider};
 use lattice_common::DistributableResources;
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{lattice_svc_dns, LATTICE_SYSTEM_NAMESPACE};
 use lattice_infra::pki::{CertificateAuthority, CertificateAuthorityBundle};
 use lattice_infra::ServerMtlsConfig;
 use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};
@@ -76,9 +76,9 @@ impl Default for ParentConfig {
                 "172.17.0.1".to_string(),
                 "127.0.0.1".to_string(),
                 // Webhook service DNS name for in-cluster webhook calls
-                "lattice-webhook.lattice-system.svc".to_string(),
+                lattice_svc_dns("lattice-webhook"),
                 // Cell service DNS name for proxy access
-                "lattice-cell.lattice-system.svc".to_string(),
+                lattice_svc_dns("lattice-cell"),
             ],
             image: std::env::var("LATTICE_IMAGE")
                 .unwrap_or_else(|_| "ghcr.io/evan-hines-js/lattice:latest".to_string()),
@@ -704,7 +704,8 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         // Set proxy config for kubeconfig patching during unpivot
         let proxy_url = format!(
-            "https://lattice-cell.lattice-system.svc:{}",
+            "https://{}:{}",
+            lattice_svc_dns("lattice-cell"),
             self.config.proxy_addr.port()
         );
         self.agent_registry
