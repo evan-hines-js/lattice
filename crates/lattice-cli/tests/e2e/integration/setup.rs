@@ -529,6 +529,14 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
 // Standalone Tests
 // =============================================================================
 
+/// Initialize test environment for setup tests
+fn init_setup_test() {
+    lattice_common::install_crypto_provider();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+}
+
 /// Setup full 3-cluster hierarchy and exit (leave clusters running)
 ///
 /// Use this to set up infrastructure once, then run integration tests repeatedly.
@@ -539,11 +547,7 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
 #[tokio::test]
 #[ignore]
 async fn test_setup_hierarchy_only() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
+    init_setup_test();
 
     info!("========================================");
     info!("SETUP ONLY MODE");
@@ -554,8 +558,6 @@ async fn test_setup_hierarchy_only() {
 
     let config = SetupConfig::default();
     let result = setup_full_hierarchy(&config).await.unwrap();
-
-    // Don't stop chaos or clean up - just exit
     drop(result);
 
     info!("Setup complete. Clusters are running.");
@@ -565,16 +567,10 @@ async fn test_setup_hierarchy_only() {
 #[tokio::test]
 #[ignore]
 async fn test_setup_mgmt_only() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-
+    init_setup_test();
     let config = SetupConfig::default();
     let result = setup_mgmt_only(&config).await.unwrap();
     drop(result);
-
     info!("Management cluster setup complete.");
 }
 
@@ -582,15 +578,9 @@ async fn test_setup_mgmt_only() {
 #[tokio::test]
 #[ignore]
 async fn test_setup_mgmt_and_workload_only() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-
+    init_setup_test();
     let config = SetupConfig::default();
     let result = setup_mgmt_and_workload(&config).await.unwrap();
     drop(result);
-
     info!("Management + workload cluster setup complete.");
 }

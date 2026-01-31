@@ -153,6 +153,33 @@ impl InfraContext {
     }
 }
 
+/// Initialize E2E test environment (crypto provider, tracing only)
+///
+/// Call this at the start of E2E tests that create their own infrastructure.
+/// Does not require environment variables since E2E tests provision clusters.
+pub fn init_e2e_test() {
+    lattice_common::install_crypto_provider();
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+}
+
+/// Initialize integration test environment (crypto provider, tracing, load config)
+///
+/// Call this at the start of standalone integration tests to set up:
+/// - FIPS-compliant crypto provider
+/// - Tracing subscriber with env filter
+/// - InfraContext loaded from environment variables
+///
+/// # Panics
+///
+/// Panics if required environment variables are not set.
+pub fn init_test_env(require_msg: &str) -> InfraContext {
+    init_e2e_test();
+    InfraContext::from_env().expect(require_msg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -36,6 +36,7 @@ use tracing::info;
 use lattice_cli::commands::install::Installer;
 use lattice_operator::crd::LatticeCluster;
 
+use super::context::init_e2e_test;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, docker_containers_deleted,
     ensure_docker_network, extract_docker_cluster_kubeconfig, force_delete_docker_cluster,
@@ -58,12 +59,7 @@ fn cleanup_clusters(mgmt_name: &str, workload_name: &str) {
 
 #[tokio::test]
 async fn test_docker_independence() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-
+    init_e2e_test();
     info!("Starting independence test: workload clusters survive parent deletion");
 
     let (_, mgmt_cluster) =

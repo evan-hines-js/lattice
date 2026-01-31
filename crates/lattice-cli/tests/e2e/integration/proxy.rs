@@ -16,7 +16,7 @@
 
 use tracing::info;
 
-use super::super::context::InfraContext;
+use super::super::context::{init_test_env, InfraContext};
 use super::super::helpers::{run_cmd, run_cmd_allow_fail};
 
 /// Test proxy access from management to workload cluster
@@ -198,14 +198,6 @@ pub async fn test_full_hierarchy_proxy(
     Ok(())
 }
 
-/// Get the proxy endpoint URL for a child cluster
-///
-/// The proxy endpoint follows the pattern: /clusters/{cluster-name}/api/...
-#[allow(dead_code)]
-fn proxy_endpoint(parent_api_server: &str, child_cluster_name: &str) -> String {
-    format!("{}/clusters/{}/api", parent_api_server, child_cluster_name)
-}
-
 // =============================================================================
 // Standalone Tests
 // =============================================================================
@@ -214,18 +206,9 @@ fn proxy_endpoint(parent_api_server: &str, child_cluster_name: &str) -> String {
 #[tokio::test]
 #[ignore]
 async fn test_proxy_standalone() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-
-    let ctx = InfraContext::from_env()
-        .expect("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG");
-
+    let ctx = init_test_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG");
     let workload_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
         .unwrap_or_else(|_| "e2e-workload".to_string());
-
     test_mgmt_to_workload_proxy(&ctx, &workload_name)
         .await
         .unwrap();
@@ -235,21 +218,13 @@ async fn test_proxy_standalone() {
 #[tokio::test]
 #[ignore]
 async fn test_proxy_hierarchy_standalone() {
-    lattice_common::install_crypto_provider();
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-
-    let ctx = InfraContext::from_env().expect(
+    let ctx = init_test_env(
         "Set LATTICE_MGMT_KUBECONFIG, LATTICE_WORKLOAD_KUBECONFIG, and LATTICE_WORKLOAD2_KUBECONFIG",
     );
-
     let workload_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
         .unwrap_or_else(|_| "e2e-workload".to_string());
     let workload2_name = std::env::var("LATTICE_WORKLOAD2_CLUSTER_NAME")
         .unwrap_or_else(|_| "e2e-workload2".to_string());
-
     test_full_hierarchy_proxy(&ctx, &workload_name, &workload2_name)
         .await
         .unwrap();
