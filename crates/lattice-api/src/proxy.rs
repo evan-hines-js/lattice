@@ -56,7 +56,10 @@ pub async fn proxy_handler(
     let action = method_to_k8s_verb(&method);
 
     // 3. Check Cedar authorization
-    state.cedar.authorize(&identity, cluster_name, action).await?;
+    state
+        .cedar
+        .authorize(&identity, cluster_name, action)
+        .await?;
 
     // 4. Route to the target cluster
     route_to_cluster(&state, cluster_name, request).await

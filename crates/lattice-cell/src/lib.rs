@@ -26,11 +26,11 @@ pub use bootstrap::{
     generate_bootstrap_bundle, generate_docker_addon_manifests, BootstrapBundleConfig,
     BootstrapState, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
 };
+pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};
 pub use connection::{
     AgentConnection, AgentRegistry, KubeconfigProxyConfig, PivotSourceManifests, SendError,
     SharedAgentRegistry, UnpivotManifests,
 };
-pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};
 pub use k8s_tunnel::{tunnel_request, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT};
 pub use kubeconfig::patch_kubeconfig_for_proxy;
 pub use move_sender::GrpcMoveCommandSender;

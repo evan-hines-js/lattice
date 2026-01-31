@@ -278,14 +278,18 @@ pub struct MoveCompleteInput {
     pub cluster_name: String,
     /// Target namespace
     pub target_namespace: String,
-    /// Cloud providers YAML
+    /// Cloud providers JSON
     pub cloud_providers: Vec<Vec<u8>>,
-    /// Secrets providers YAML
+    /// Secrets providers JSON
     pub secrets_providers: Vec<Vec<u8>>,
-    /// Secrets YAML
+    /// Secrets JSON
     pub secrets: Vec<Vec<u8>>,
     /// Additional manifests to apply (e.g., CiliumNetworkPolicy)
     pub manifests: Vec<Vec<u8>>,
+    /// Cedar policies JSON (inherited from ancestors)
+    pub cedar_policies: Vec<Vec<u8>>,
+    /// OIDC providers JSON (inherited from ancestors)
+    pub oidc_providers: Vec<Vec<u8>>,
 }
 
 /// Acknowledgment for move complete
@@ -312,10 +316,12 @@ pub struct CellMoverConfig {
     pub move_id: String,
     /// Timeout for batch operations
     pub batch_timeout: Duration,
-    /// Distributable resources (CloudProviders, SecretsProviders, Secrets)
+    /// Distributable resources
     pub cloud_providers: Vec<Vec<u8>>,
     pub secrets_providers: Vec<Vec<u8>>,
     pub secrets: Vec<Vec<u8>>,
+    pub cedar_policies: Vec<Vec<u8>>,
+    pub oidc_providers: Vec<Vec<u8>>,
     /// Additional manifests to apply (e.g., CiliumNetworkPolicy)
     pub manifests: Vec<Vec<u8>>,
 }
@@ -332,20 +338,22 @@ impl CellMoverConfig {
             cloud_providers: Vec::new(),
             secrets_providers: Vec::new(),
             secrets: Vec::new(),
+            cedar_policies: Vec::new(),
+            oidc_providers: Vec::new(),
             manifests: Vec::new(),
         }
     }
 
-    /// Set distributable resources
-    pub fn with_resources(
+    /// Set distributable resources from DistributableResources struct
+    pub fn with_distributable_resources(
         mut self,
-        cloud_providers: Vec<Vec<u8>>,
-        secrets_providers: Vec<Vec<u8>>,
-        secrets: Vec<Vec<u8>>,
+        resources: &lattice_common::DistributableResources,
     ) -> Self {
-        self.cloud_providers = cloud_providers;
-        self.secrets_providers = secrets_providers;
-        self.secrets = secrets;
+        self.cloud_providers = resources.cloud_providers.clone();
+        self.secrets_providers = resources.secrets_providers.clone();
+        self.secrets = resources.secrets.clone();
+        self.cedar_policies = resources.cedar_policies.clone();
+        self.oidc_providers = resources.oidc_providers.clone();
         self
     }
 
@@ -579,6 +587,8 @@ impl<S: MoveCommandSender> CellMover<S> {
             secrets_providers: self.config.secrets_providers.clone(),
             secrets: self.config.secrets.clone(),
             manifests: self.config.manifests.clone(),
+            cedar_policies: self.config.cedar_policies.clone(),
+            oidc_providers: self.config.oidc_providers.clone(),
         };
 
         self.sender.send_complete(complete).await

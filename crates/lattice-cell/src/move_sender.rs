@@ -102,6 +102,8 @@ impl MoveCommandSender for GrpcMoveCommandSender {
                 secrets_providers: complete.secrets_providers,
                 secrets: complete.secrets,
                 manifests: complete.manifests,
+                cedar_policies: complete.cedar_policies,
+                oidc_providers: complete.oidc_providers,
             })),
         };
 

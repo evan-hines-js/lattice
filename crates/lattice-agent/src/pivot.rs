@@ -11,7 +11,7 @@ use kube::Client;
 use thiserror::Error;
 use tracing::{debug, info};
 
-use lattice_common::crd::{CloudProvider, SecretsProvider};
+use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretsProvider};
 pub use lattice_common::DistributableResources;
 use lattice_common::{INTERNAL_K8S_ENDPOINT, LATTICE_SYSTEM_NAMESPACE};
 
@@ -285,6 +285,60 @@ pub async fn apply_distributed_resources(
             })?;
 
         info!(secrets_provider = %name, "Applied distributed SecretsProvider");
+    }
+
+    // Apply CedarPolicies (inherited from parent)
+    let cedar_api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    for cedar_bytes in &resources.cedar_policies {
+        let json_str = String::from_utf8_lossy(cedar_bytes);
+        let value = lattice_common::yaml::parse_yaml(&json_str).map_err(|e| {
+            PivotError::Internal(format!("failed to parse CedarPolicy JSON: {}", e))
+        })?;
+        let policy: CedarPolicy = serde_json::from_value(value).map_err(|e| {
+            PivotError::Internal(format!("failed to deserialize CedarPolicy: {}", e))
+        })?;
+
+        let name = policy
+            .metadata
+            .name
+            .as_ref()
+            .ok_or_else(|| PivotError::Internal("CedarPolicy has no name".to_string()))?;
+
+        cedar_api
+            .patch(name, &params, &Patch::Apply(&policy))
+            .await
+            .map_err(|e| {
+                PivotError::Internal(format!("failed to apply CedarPolicy {}: {}", name, e))
+            })?;
+
+        info!(cedar_policy = %name, "Applied inherited CedarPolicy");
+    }
+
+    // Apply OIDCProviders (inherited from parent)
+    let oidc_api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    for oidc_bytes in &resources.oidc_providers {
+        let json_str = String::from_utf8_lossy(oidc_bytes);
+        let value = lattice_common::yaml::parse_yaml(&json_str).map_err(|e| {
+            PivotError::Internal(format!("failed to parse OIDCProvider JSON: {}", e))
+        })?;
+        let provider: OIDCProvider = serde_json::from_value(value).map_err(|e| {
+            PivotError::Internal(format!("failed to deserialize OIDCProvider: {}", e))
+        })?;
+
+        let name = provider
+            .metadata
+            .name
+            .as_ref()
+            .ok_or_else(|| PivotError::Internal("OIDCProvider has no name".to_string()))?;
+
+        oidc_api
+            .patch(name, &params, &Patch::Apply(&provider))
+            .await
+            .map_err(|e| {
+                PivotError::Internal(format!("failed to apply OIDCProvider {}: {}", name, e))
+            })?;
+
+        info!(oidc_provider = %name, "Applied inherited OIDCProvider");
     }
 
     Ok(())

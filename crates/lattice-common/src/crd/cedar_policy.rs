@@ -71,11 +71,16 @@ pub struct CedarPolicySpec {
 
     /// Whether this policy is enabled
     /// Disabled policies are not evaluated
-    #[serde(default = "default_enabled")]
+    #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Whether to propagate this policy to child clusters
+    /// When true, policy is distributed down the hierarchy
+    #[serde(default = "default_true")]
+    pub propagate: bool,
 }
 
-fn default_enabled() -> bool {
+fn default_true() -> bool {
     true
 }
 
@@ -142,7 +147,10 @@ spec:
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let policy: CedarPolicy = serde_json::from_value(value).expect("parse");
-        assert_eq!(policy.spec.description, Some("Allow admins full access".to_string()));
+        assert_eq!(
+            policy.spec.description,
+            Some("Allow admins full access".to_string())
+        );
         assert!(policy.spec.policies.contains("admins"));
         assert!(policy.spec.enabled);
         assert_eq!(policy.spec.priority, 0);
@@ -219,5 +227,39 @@ spec:
         let policy: CedarPolicy = serde_json::from_value(value).expect("parse");
         assert!(policy.spec.policies.contains("frontend-team"));
         assert!(policy.spec.policies.contains("backend-team"));
+    }
+
+    #[test]
+    fn cedar_policy_propagate_defaults_to_true() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: admin-access
+spec:
+  policies: |
+    permit(principal, action, resource);
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let policy: CedarPolicy = serde_json::from_value(value).expect("parse");
+        // propagate should default to true
+        assert!(policy.spec.propagate);
+    }
+
+    #[test]
+    fn cedar_policy_propagate_false() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: local-only-policy
+spec:
+  propagate: false
+  policies: |
+    permit(principal, action, resource);
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let policy: CedarPolicy = serde_json::from_value(value).expect("parse");
+        assert!(!policy.spec.propagate);
     }
 }

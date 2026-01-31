@@ -588,13 +588,22 @@ impl KubeClient for KubeClientImpl {
         use kube::api::DeleteParams;
 
         let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        match api.delete(CELL_SERVICE_NAME, &DeleteParams::default()).await {
+        match api
+            .delete(CELL_SERVICE_NAME, &DeleteParams::default())
+            .await
+        {
             Ok(_) => {
-                info!(service = CELL_SERVICE_NAME, "Deleted cell LoadBalancer service");
+                info!(
+                    service = CELL_SERVICE_NAME,
+                    "Deleted cell LoadBalancer service"
+                );
                 Ok(())
             }
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                debug!(service = CELL_SERVICE_NAME, "Cell service not found (already deleted)");
+                debug!(
+                    service = CELL_SERVICE_NAME,
+                    "Cell service not found (already deleted)"
+                );
                 Ok(())
             }
             Err(e) => Err(e.into()),
@@ -1380,6 +1389,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                         Some(Arc::new(PivotOperationsImpl::new(
                             parent_servers.agent_registry(),
                             client.clone(),
+                            ctx.self_cluster_name.clone(),
                         )))
                     } else {
                         warn!("parent_servers not running, skipping pivot");
@@ -1902,14 +1912,20 @@ async fn update_cluster_status(
 pub struct PivotOperationsImpl {
     agent_registry: SharedAgentRegistry,
     client: Client,
+    self_cluster_name: Option<String>,
 }
 
 impl PivotOperationsImpl {
     /// Create new pivot operations with the given agent registry
-    pub fn new(agent_registry: SharedAgentRegistry, client: Client) -> Self {
+    pub fn new(
+        agent_registry: SharedAgentRegistry,
+        client: Client,
+        self_cluster_name: Option<String>,
+    ) -> Self {
         Self {
             agent_registry,
             client,
+            self_cluster_name,
         }
     }
 }
@@ -1934,8 +1950,9 @@ impl PivotOperations for PivotOperationsImpl {
         self.agent_registry
             .update_state(cluster_name, AgentState::Pivoting);
 
-        // Fetch resources for distribution (CloudProviders, SecretsProviders, and their secrets)
-        let resources = fetch_distributable_resources(&self.client)
+        // Fetch resources for distribution (CloudProviders, SecretsProviders, CedarPolicies, OIDCProviders, and their secrets)
+        let self_cluster_name = self.self_cluster_name.as_deref().unwrap_or("unknown");
+        let resources = fetch_distributable_resources(&self.client, self_cluster_name)
             .await
             .unwrap_or_else(|e| {
                 warn!(error = %e, "failed to fetch distributable resources, continuing without");
@@ -1946,11 +1963,7 @@ impl PivotOperations for PivotOperationsImpl {
         // Note: Infrastructure manifests (network policies, etc.) are reconciled
         // continuously by the child cluster's controller after pivot
         let config = CellMoverConfig::new(source_namespace, target_namespace, cluster_name)
-            .with_resources(
-                resources.cloud_providers,
-                resources.secrets_providers,
-                resources.secrets,
-            );
+            .with_distributable_resources(&resources);
 
         // Create the gRPC command sender
         let sender = std::sync::Arc::new(lattice_cell::GrpcMoveCommandSender::new(
@@ -3362,7 +3375,7 @@ mod tests {
                 return;
             };
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry, client);
+            let ops = PivotOperationsImpl::new(registry, client, None);
             // Just verify it can be created
             assert!(!ops.is_agent_ready("nonexistent-cluster"));
         }
@@ -3375,7 +3388,7 @@ mod tests {
                 return;
             };
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry, client);
+            let ops = PivotOperationsImpl::new(registry, client, None);
 
             assert!(!ops.is_agent_ready("test-cluster"));
         }
@@ -3388,7 +3401,7 @@ mod tests {
                 return;
             };
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry, client);
+            let ops = PivotOperationsImpl::new(registry, client, None);
 
             assert!(!ops.is_pivot_complete("test-cluster"));
         }
@@ -3401,7 +3414,7 @@ mod tests {
                 return;
             };
             let registry = Arc::new(AgentRegistry::new());
-            let ops = PivotOperationsImpl::new(registry, client);
+            let ops = PivotOperationsImpl::new(registry, client, None);
 
             let result = ops
                 .trigger_pivot("test-cluster", "default", "default")

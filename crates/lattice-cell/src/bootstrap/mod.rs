@@ -1391,33 +1391,51 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     // Collect all manifests
     let mut all_manifests = response.manifests;
 
-    // Include CloudProvider, SecretsProvider and their referenced secrets
-    // This ensures credentials are available when the operator starts, before the gRPC connection
+    // Include CloudProvider, SecretsProvider, CedarPolicy, OIDCProvider and their referenced secrets
+    // This ensures credentials and policies are available when the operator starts, before the gRPC connection
     if let Some(ref client) = state.kube_client {
-        match fetch_distributable_resources(client).await {
+        let parent_cluster_name =
+            std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "unknown".to_string());
+        match fetch_distributable_resources(client, &parent_cluster_name).await {
             Ok(resources) => {
                 let cp_count = resources.cloud_providers.len();
                 let sp_count = resources.secrets_providers.len();
                 let secret_count = resources.secrets.len();
+                let cedar_count = resources.cedar_policies.len();
+                let oidc_count = resources.oidc_providers.len();
 
                 // Add secrets first (credentials needed by providers)
                 for secret_bytes in resources.secrets {
-                    if let Ok(yaml) = String::from_utf8(secret_bytes) {
-                        all_manifests.push(yaml);
+                    if let Ok(json) = String::from_utf8(secret_bytes) {
+                        all_manifests.push(json);
                     }
                 }
 
                 // Add CloudProviders
                 for cp_bytes in resources.cloud_providers {
-                    if let Ok(yaml) = String::from_utf8(cp_bytes) {
-                        all_manifests.push(yaml);
+                    if let Ok(json) = String::from_utf8(cp_bytes) {
+                        all_manifests.push(json);
                     }
                 }
 
                 // Add SecretsProviders
                 for sp_bytes in resources.secrets_providers {
-                    if let Ok(yaml) = String::from_utf8(sp_bytes) {
-                        all_manifests.push(yaml);
+                    if let Ok(json) = String::from_utf8(sp_bytes) {
+                        all_manifests.push(json);
+                    }
+                }
+
+                // Add CedarPolicies (inherited from parent)
+                for cedar_bytes in resources.cedar_policies {
+                    if let Ok(json) = String::from_utf8(cedar_bytes) {
+                        all_manifests.push(json);
+                    }
+                }
+
+                // Add OIDCProviders (inherited from parent)
+                for oidc_bytes in resources.oidc_providers {
+                    if let Ok(json) = String::from_utf8(oidc_bytes) {
+                        all_manifests.push(json);
                     }
                 }
 
@@ -1425,6 +1443,8 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
                     cluster_id = %cluster_id,
                     cloud_providers = cp_count,
                     secrets_providers = sp_count,
+                    cedar_policies = cedar_count,
+                    oidc_providers = oidc_count,
                     secrets = secret_count,
                     "included distributed resources in bootstrap"
                 );

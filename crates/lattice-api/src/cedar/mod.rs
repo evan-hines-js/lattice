@@ -179,7 +179,9 @@ impl PolicyEngine {
         .map_err(|e| Error::Internal(format!("Failed to build Cedar request: {}", e)))?;
 
         // Evaluate
-        let response = self.authorizer.is_authorized(&request, policy_set, &entities);
+        let response = self
+            .authorizer
+            .is_authorized(&request, policy_set, &entities);
 
         debug!(
             principal = %principal,
@@ -308,8 +310,8 @@ fn build_entities(identity: &UserIdentity, cluster: &str) -> Entities {
     for group_uid in &group_uids {
         let group_entity = Entity::new(
             group_uid.clone(),
-            HashMap::new(),  // No attributes
-            HashSet::new(),  // Groups don't have parents in our model
+            HashMap::new(), // No attributes
+            HashSet::new(), // Groups don't have parents in our model
         )
         .expect("group entity should be valid");
         entities.push(group_entity);
@@ -319,7 +321,7 @@ fn build_entities(identity: &UserIdentity, cluster: &str) -> Entities {
     let user_uid = build_user_uid(&identity.username);
     let user_entity = Entity::new(
         user_uid,
-        HashMap::new(),                          // No attributes
+        HashMap::new(),                                 // No attributes
         group_uids.into_iter().collect::<HashSet<_>>(), // User is a member of groups
     )
     .expect("user entity should be valid");
@@ -329,14 +331,13 @@ fn build_entities(identity: &UserIdentity, cluster: &str) -> Entities {
     let cluster_uid = build_cluster_uid(cluster);
     let cluster_entity = Entity::new(
         cluster_uid,
-        HashMap::new(),  // No attributes (could add labels here)
-        HashSet::new(),  // No parent clusters in this model
+        HashMap::new(), // No attributes (could add labels here)
+        HashSet::new(), // No parent clusters in this model
     )
     .expect("cluster entity should be valid");
     entities.push(cluster_entity);
 
-    Entities::from_entities(entities, None)
-        .expect("entities should be valid")
+    Entities::from_entities(entities, None).expect("entities should be valid")
 }
 
 /// Helper trait for parsing entity UIDs
@@ -346,7 +347,8 @@ trait FromStrExt: Sized {
 
 impl FromStrExt for EntityTypeName {
     fn from_str(s: &str) -> std::result::Result<Self, String> {
-        s.parse().map_err(|e: cedar_policy::ParseErrors| e.to_string())
+        s.parse()
+            .map_err(|e: cedar_policy::ParseErrors| e.to_string())
     }
 }
 
@@ -358,7 +360,8 @@ impl FromStrExt for EntityId {
 
 impl FromStrExt for PolicySet {
     fn from_str(s: &str) -> std::result::Result<Self, String> {
-        s.parse().map_err(|e: cedar_policy::ParseErrors| e.to_string())
+        s.parse()
+            .map_err(|e: cedar_policy::ParseErrors| e.to_string())
     }
 }
 
@@ -457,7 +460,10 @@ mod tests {
             username: "alice@example.com".to_string(),
             groups: vec![],
         };
-        assert!(engine.authorize(&alice, "prod-frontend", "get").await.is_ok());
+        assert!(engine
+            .authorize(&alice, "prod-frontend", "get")
+            .await
+            .is_ok());
 
         // Alice cannot access other clusters
         assert!(engine.authorize(&alice, "staging", "get").await.is_err());
@@ -467,7 +473,10 @@ mod tests {
             username: "bob@example.com".to_string(),
             groups: vec![],
         };
-        assert!(engine.authorize(&bob, "prod-frontend", "get").await.is_err());
+        assert!(engine
+            .authorize(&bob, "prod-frontend", "get")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -488,7 +497,10 @@ mod tests {
             groups: vec!["admins".to_string()],
         };
         assert!(engine.authorize(&admin, "any-cluster", "get").await.is_ok());
-        assert!(engine.authorize(&admin, "another-cluster", "delete").await.is_ok());
+        assert!(engine
+            .authorize(&admin, "another-cluster", "delete")
+            .await
+            .is_ok());
 
         // Non-admin cannot access
         let user = UserIdentity {
@@ -515,12 +527,24 @@ mod tests {
         };
 
         // Read actions allowed
-        assert!(engine.authorize(&identity, "any-cluster", "get").await.is_ok());
-        assert!(engine.authorize(&identity, "any-cluster", "list").await.is_ok());
+        assert!(engine
+            .authorize(&identity, "any-cluster", "get")
+            .await
+            .is_ok());
+        assert!(engine
+            .authorize(&identity, "any-cluster", "list")
+            .await
+            .is_ok());
 
         // Write actions denied
-        assert!(engine.authorize(&identity, "any-cluster", "create").await.is_err());
-        assert!(engine.authorize(&identity, "any-cluster", "delete").await.is_err());
+        assert!(engine
+            .authorize(&identity, "any-cluster", "create")
+            .await
+            .is_err());
+        assert!(engine
+            .authorize(&identity, "any-cluster", "delete")
+            .await
+            .is_err());
     }
 
     #[tokio::test]

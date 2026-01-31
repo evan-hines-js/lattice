@@ -552,8 +552,9 @@ impl Installer {
         use lattice_agent::apply_distributed_resources;
         use lattice_cell::fetch_distributable_resources;
 
-        // Fetch all distributable resources (CloudProviders, SecretsProviders, secrets)
-        let resources = fetch_distributable_resources(bootstrap_client)
+        // Fetch all distributable resources (CloudProviders, SecretsProviders, CedarPolicies, OIDCProviders, secrets)
+        // Use "bootstrap" as the origin cluster name since this is the initial install
+        let resources = fetch_distributable_resources(bootstrap_client, "bootstrap")
             .await
             .map_err(|e| Error::command_failed(format!("Failed to fetch resources: {}", e)))?;
 
@@ -563,9 +564,11 @@ impl Installer {
         }
 
         info!(
-            "Copying {} CloudProvider(s), {} SecretsProvider(s), {} secret(s) to management cluster",
+            "Copying {} CloudProvider(s), {} SecretsProvider(s), {} CedarPolicy(s), {} OIDCProvider(s), {} secret(s) to management cluster",
             resources.cloud_providers.len(),
             resources.secrets_providers.len(),
+            resources.cedar_policies.len(),
+            resources.oidc_providers.len(),
             resources.secrets.len()
         );
 
