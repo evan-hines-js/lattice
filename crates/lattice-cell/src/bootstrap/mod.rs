@@ -58,7 +58,7 @@ use tracing::{debug, info, warn};
 use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
 use lattice_common::crd::{LatticeCluster, LatticeClusterStatus, ProviderType};
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{LABEL_MANAGED_BY, LATTICE_SYSTEM_NAMESPACE};
 #[cfg(test)]
 use lattice_infra::pki::CertificateAuthority;
 use lattice_infra::pki::{CertificateAuthorityBundle, PkiError};
@@ -370,6 +370,8 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
         bootstrap: config.bootstrap.clone(),
         cluster_name: config.cluster_name.to_string(),
         skip_cilium_policies: false,
+        parent_host: config.parent_host.map(|s| s.to_string()),
+        parent_grpc_port: config.parent_grpc_port,
     };
     let infra_manifests = lattice_infra::bootstrap::generate_all(&infra_config)
         .await
@@ -802,10 +804,7 @@ async fn persist_bootstrap_info(
             namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
             labels: Some(
                 [
-                    (
-                        "app.kubernetes.io/managed-by".to_string(),
-                        "lattice-operator".to_string(),
-                    ),
+                    (LABEL_MANAGED_BY.to_string(), "lattice-operator".to_string()),
                     ("lattice.io/cluster".to_string(), info.cluster_id.clone()),
                     ("lattice.io/type".to_string(), "bootstrap-token".to_string()),
                 ]

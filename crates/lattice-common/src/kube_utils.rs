@@ -648,6 +648,175 @@ pub async fn apply_manifest(client: &Client, manifest: &str) -> Result<(), Error
     Ok(())
 }
 
+/// Options for applying manifests with discovery
+#[derive(Debug, Clone, Default)]
+pub struct ApplyOptions {
+    /// Skip manifests for CRDs that aren't installed yet (default: false)
+    pub skip_missing_crds: bool,
+}
+
+/// Apply a single manifest using API discovery
+///
+/// Uses Kubernetes API discovery to resolve the correct resource type,
+/// supporting CRDs and custom resources. Server-side apply is used for
+/// idempotency.
+///
+/// # Arguments
+/// * `client` - Kubernetes client
+/// * `discovery` - Pre-built API discovery (reuse for efficiency)
+/// * `manifest` - YAML or JSON manifest string
+/// * `options` - Apply options (e.g., skip missing CRDs)
+pub async fn apply_manifest_with_discovery(
+    client: &Client,
+    discovery: &kube::discovery::Discovery,
+    manifest: &str,
+    options: &ApplyOptions,
+) -> Result<(), Error> {
+    let obj: serde_json::Value = crate::yaml::parse_yaml(manifest).map_err(|e| {
+        Error::internal_with_context("apply_manifest_with_discovery", format!("invalid YAML: {}", e))
+    })?;
+
+    let kind = obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::internal_with_context("apply_manifest_with_discovery", "missing kind"))?;
+    let api_version = obj
+        .get("apiVersion")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::internal_with_context("apply_manifest_with_discovery", "missing apiVersion"))?;
+    let name = obj
+        .pointer("/metadata/name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::internal_with_context("apply_manifest_with_discovery", "missing metadata.name"))?;
+    let namespace = obj.pointer("/metadata/namespace").and_then(|v| v.as_str());
+
+    // Parse apiVersion into group/version
+    let (group, version) = parse_api_version(api_version);
+
+    let gvk = kube::api::GroupVersionKind {
+        group,
+        version,
+        kind: kind.to_string(),
+    };
+
+    let Some((api_resource, _)) = discovery.resolve_gvk(&gvk) else {
+        if options.skip_missing_crds {
+            trace!(kind = %kind, name = %name, "skipping manifest - CRD not available");
+            return Ok(());
+        }
+        return Err(Error::internal_with_context(
+            "apply_manifest_with_discovery",
+            format!("unknown resource type: {}/{}", api_version, kind),
+        ));
+    };
+
+    let params = PatchParams::apply("lattice").force();
+    let api: Api<DynamicObject> = match namespace {
+        Some(ns) => Api::namespaced_with(client.clone(), ns, &api_resource),
+        None => Api::all_with(client.clone(), &api_resource),
+    };
+
+    api.patch(name, &params, &Patch::Apply(&obj))
+        .await
+        .map_err(|e| {
+            Error::internal_with_context(
+                "apply_manifest_with_discovery",
+                format!("failed to apply {}/{}: {}", kind, name, e),
+            )
+        })?;
+
+    trace!(kind = %kind, name = %name, namespace = ?namespace, "applied manifest");
+    Ok(())
+}
+
+/// Get priority for a Kubernetes resource kind (lower = apply first)
+///
+/// Used to sort manifests for proper ordering during apply.
+pub fn kind_priority(kind: &str) -> u8 {
+    match kind {
+        "Namespace" => 0,
+        "CustomResourceDefinition" => 1,
+        "ServiceAccount" => 2,
+        "ClusterRole" | "Role" => 3,
+        "ClusterRoleBinding" | "RoleBinding" => 4,
+        "ConfigMap" | "Secret" => 5,
+        "Service" => 6,
+        "Deployment" | "DaemonSet" | "StatefulSet" => 7,
+        "HorizontalPodAutoscaler" => 8,
+        _ => 10, // webhooks, policies, etc. come last
+    }
+}
+
+/// Extract kind from a YAML manifest (fast, no full parse)
+pub fn extract_kind(manifest: &str) -> &str {
+    manifest
+        .lines()
+        .find(|line| line.starts_with("kind:"))
+        .and_then(|line| line.strip_prefix("kind:"))
+        .map(|k| k.trim())
+        .unwrap_or("")
+}
+
+/// Apply multiple manifests with proper ordering and discovery
+///
+/// Applies in two phases:
+/// 1. Namespaces and CRDs (foundational resources)
+/// 2. Re-run discovery to learn new CRD types
+/// 3. Everything else (sorted by kind priority)
+///
+/// # Arguments
+/// * `client` - Kubernetes client
+/// * `manifests` - Slice of manifest strings (YAML or JSON)
+/// * `options` - Apply options
+pub async fn apply_manifests_with_discovery(
+    client: &Client,
+    manifests: &[impl AsRef<str>],
+    options: &ApplyOptions,
+) -> Result<(), Error> {
+    use kube::discovery::Discovery;
+
+    if manifests.is_empty() {
+        return Ok(());
+    }
+
+    // Split into foundational (Namespace, CRD) and rest
+    let (mut foundational, mut rest): (Vec<&str>, Vec<&str>) =
+        manifests.iter().map(|m| m.as_ref()).partition(|m| {
+            let kind = extract_kind(m);
+            kind == "Namespace" || kind == "CustomResourceDefinition"
+        });
+
+    // Sort each group by priority
+    foundational.sort_by_key(|m| kind_priority(extract_kind(m)));
+    rest.sort_by_key(|m| kind_priority(extract_kind(m)));
+
+    // Phase 1: Apply foundational resources (Namespaces, CRDs)
+    if !foundational.is_empty() {
+        let discovery = Discovery::new(client.clone())
+            .run()
+            .await
+            .map_err(|e| Error::internal_with_context("apply_manifests_with_discovery", format!("API discovery failed: {}", e)))?;
+
+        for manifest in &foundational {
+            apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
+        }
+    }
+
+    // Phase 2: Re-run discovery to learn new CRD types, then apply rest
+    if !rest.is_empty() {
+        let discovery = Discovery::new(client.clone())
+            .run()
+            .await
+            .map_err(|e| Error::internal_with_context("apply_manifests_with_discovery", format!("API refresh failed: {}", e)))?;
+
+        for manifest in &rest {
+            apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Retry interval for apply operations
 const APPLY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 

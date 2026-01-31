@@ -25,8 +25,8 @@ pub use bootstrap::{
     BootstrapState, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
 };
 pub use connection::{
-    AgentConnection, AgentRegistry, KubeconfigProxyConfig, PivotSourceManifests,
-    PostPivotManifests, SendError, SharedAgentRegistry, UnpivotManifests,
+    AgentConnection, AgentRegistry, KubeconfigProxyConfig, PivotSourceManifests, SendError,
+    SharedAgentRegistry, UnpivotManifests,
 };
 pub use k8s_proxy::{start_proxy_server, ProxyConfig, ProxyError};
 pub use kubeconfig::patch_kubeconfig_for_proxy;

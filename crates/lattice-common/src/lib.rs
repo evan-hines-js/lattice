@@ -17,7 +17,10 @@ pub mod yaml;
 
 pub use credentials::{AwsCredentials, CredentialError, OpenStackCredentials, ProxmoxCredentials};
 pub use error::Error;
-pub use kube_utils::pluralize_kind;
+pub use kube_utils::{
+    apply_manifests_with_discovery, apply_manifest_with_discovery, kind_priority, pluralize_kind,
+    ApplyOptions,
+};
 pub use protocol::{CsrRequest, CsrResponse, DistributableResources};
 
 /// Result type alias using our custom Error type
@@ -71,6 +74,32 @@ pub fn is_bootstrap_cluster() -> bool {
 /// Uses aws-lc-rs which provides FIPS 140-2/140-3 validated cryptography.
 pub fn install_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+/// Parse a cell endpoint URL into (host, port)
+///
+/// Parses URLs like "https://172.18.255.10:50051" or "https://cell.example.com:50051"
+///
+/// # Examples
+/// ```
+/// use lattice_common::parse_cell_endpoint;
+///
+/// let result = parse_cell_endpoint("https://172.18.255.10:50051");
+/// assert_eq!(result, Some(("172.18.255.10".to_string(), 50051)));
+///
+/// let result = parse_cell_endpoint("https://cell.example.com:8443");
+/// assert_eq!(result, Some(("cell.example.com".to_string(), 8443)));
+/// ```
+pub fn parse_cell_endpoint(endpoint: &str) -> Option<(String, u16)> {
+    let url = endpoint.strip_prefix("https://").unwrap_or(endpoint);
+    let url = url.strip_prefix("http://").unwrap_or(url);
+
+    if let Some((host, port_str)) = url.rsplit_once(':') {
+        if let Ok(port) = port_str.parse::<u16>() {
+            return Some((host.to_string(), port));
+        }
+    }
+    None
 }
 
 // CAPI provider namespaces

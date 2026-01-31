@@ -10,9 +10,11 @@ pub mod cilium;
 pub mod eso;
 pub mod istio;
 
+use kube::ResourceExt;
 use tracing::{debug, info};
 
-use lattice_common::crd::{BootstrapProvider, ProviderType};
+use lattice_common::crd::{BootstrapProvider, LatticeCluster, ProviderType};
+use lattice_common::DEFAULT_GRPC_PORT;
 
 // Re-export submodule types
 pub use cilium::{
@@ -22,7 +24,7 @@ pub use cilium::{
 pub use istio::{IstioConfig, IstioReconciler};
 
 /// Configuration for infrastructure manifest generation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct InfrastructureConfig {
     /// Infrastructure provider type (docker, proxmox, aws, etc.)
     pub provider: ProviderType,
@@ -32,25 +34,41 @@ pub struct InfrastructureConfig {
     pub cluster_name: String,
     /// Skip Cilium policies (true for kind/bootstrap clusters without Cilium)
     pub skip_cilium_policies: bool,
+    /// Parent cell hostname (None for root/management clusters)
+    pub parent_host: Option<String>,
+    /// Parent cell gRPC port (used with parent_host)
+    pub parent_grpc_port: u16,
 }
 
-/// Generate core infrastructure manifests (Istio, Gateway API)
+impl From<&LatticeCluster> for InfrastructureConfig {
+    /// Create an InfrastructureConfig from a LatticeCluster
+    ///
+    /// Extracts provider, bootstrap, and cluster name.
+    /// NOTE: Does NOT set parent_host - that must come from the `lattice-parent-config`
+    /// secret (the upstream parent this cluster connects to), not from parent_config
+    /// (which is for this cluster's own cell server endpoints).
+    fn from(cluster: &LatticeCluster) -> Self {
+        Self {
+            provider: cluster.spec.provider.provider_type(),
+            bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
+            cluster_name: cluster.name_any(),
+            skip_cilium_policies: false,
+            parent_host: None,
+            parent_grpc_port: DEFAULT_GRPC_PORT,
+        }
+    }
+}
+
+/// Generate core infrastructure manifests (Istio, Gateway API, ESO)
 ///
 /// Used by both operator startup and full cluster bootstrap.
 /// This is an async function to avoid blocking the tokio runtime during
 /// helm template execution.
-///
-/// # Arguments
-/// * `cluster_name` - Cluster name for trust domain (lattice.{cluster}.local)
-/// * `skip_cilium_policies` - Skip Cilium policies (true for kind/bootstrap clusters)
-pub async fn generate_core(
-    cluster_name: &str,
-    skip_cilium_policies: bool,
-) -> Result<Vec<String>, String> {
+pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
     let mut manifests = Vec::new();
 
-    // Istio ambient
-    manifests.extend(generate_istio(cluster_name, skip_cilium_policies).await?);
+    // Istio ambient + Cilium policies
+    manifests.extend(generate_istio(config).await?);
 
     // Gateway API CRDs (required for Istio Gateway and waypoints)
     let gw_api = generate_gateway_api_crds()?;
@@ -65,16 +83,16 @@ pub async fn generate_core(
 
 /// Generate ALL infrastructure manifests for a self-managing cluster
 ///
-/// Includes core infrastructure (Istio, Gateway API).
+/// Includes core infrastructure (Istio, Gateway API, ESO, Cilium policies).
 /// NOTE: cert-manager and CAPI providers are installed via `clusterctl init`,
 /// which manages their lifecycle (including upgrades).
 ///
 /// This is an async function to avoid blocking the tokio runtime during
 /// helm execution.
 pub async fn generate_all(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
-    // Core infrastructure (Istio, Gateway API)
+    // Core infrastructure (Istio, Gateway API, ESO, Cilium policies)
     // cert-manager and CAPI are installed via clusterctl init
-    let manifests = generate_core(&config.cluster_name, config.skip_cilium_policies).await?;
+    let manifests = generate_core(config).await?;
 
     info!(
         total = manifests.len(),
@@ -83,21 +101,14 @@ pub async fn generate_all(config: &InfrastructureConfig) -> Result<Vec<String>, 
     Ok(manifests)
 }
 
-/// Generate Istio manifests
+/// Generate Istio and Cilium policy manifests
 ///
 /// This is an async function to avoid blocking the tokio runtime during
 /// helm template execution.
-///
-/// # Arguments
-/// * `cluster_name` - Cluster name for trust domain (lattice.{cluster}.local)
-/// * `skip_cilium_policies` - Skip Cilium policies (true for kind/bootstrap clusters)
-pub async fn generate_istio(
-    cluster_name: &str,
-    skip_cilium_policies: bool,
-) -> Result<Vec<String>, String> {
+pub async fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
     let mut manifests = vec![namespace_yaml("istio-system")];
 
-    let reconciler = IstioReconciler::new(cluster_name);
+    let reconciler = IstioReconciler::new(&config.cluster_name);
     let istio = reconciler.manifests().await?;
     manifests.extend(istio.iter().cloned());
 
@@ -120,7 +131,7 @@ pub async fn generate_istio(
     );
 
     // Cilium policies (skip on kind/bootstrap clusters) - serialize typed structs to JSON
-    if !skip_cilium_policies {
+    if !config.skip_cilium_policies {
         manifests.push(
             serde_json::to_string_pretty(&cilium::generate_ztunnel_allowlist())
                 .expect("CiliumClusterwideNetworkPolicy serialization"),
@@ -132,6 +143,14 @@ pub async fn generate_istio(
         manifests.push(
             serde_json::to_string_pretty(&cilium::generate_waypoint_egress_policy())
                 .expect("CiliumClusterwideNetworkPolicy serialization"),
+        );
+        // Operator network policy - allows operator to reach parent cell and accept agent connections
+        manifests.push(
+            serde_json::to_string_pretty(&cilium::generate_operator_network_policy(
+                config.parent_host.as_deref(),
+                config.parent_grpc_port,
+            ))
+            .expect("CiliumNetworkPolicy serialization"),
         );
     }
 
