@@ -196,12 +196,12 @@ impl Installer {
 
     /// Returns the path where the management cluster kubeconfig is stored
     ///
-    /// Format: `/tmp/{run_id}-{cluster_name}-kubeconfig`
-    /// Example: `/tmp/a1b2c3-my-cluster-kubeconfig`
+    /// Format: `/tmp/{cluster_name}-kubeconfig-{run_id}`
+    /// Example: `/tmp/my-cluster-kubeconfig-a1b2c3`
     pub fn kubeconfig_path(&self) -> PathBuf {
         PathBuf::from(format!(
-            "/tmp/{}-{}-kubeconfig",
-            self.run_id, self.cluster_name
+            "/tmp/{}-kubeconfig-{}",
+            self.cluster_name, self.run_id
         ))
     }
 
