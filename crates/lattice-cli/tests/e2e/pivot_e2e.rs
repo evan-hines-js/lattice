@@ -30,13 +30,10 @@ use tracing::info;
 use lattice_cli::commands::uninstall::{UninstallArgs, Uninstaller};
 
 use super::context::init_e2e_test;
-use super::helpers::run_id;
+use super::helpers::{run_id, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME};
 use super::integration::{self, setup};
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(3600);
-const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
-const WORKLOAD_CLUSTER_NAME: &str = "e2e-workload";
-const WORKLOAD2_CLUSTER_NAME: &str = "e2e-workload2";
 
 #[tokio::test]
 async fn test_configurable_provider_pivot() {

@@ -157,11 +157,18 @@ impl InfraContext {
 ///
 /// Call this at the start of E2E tests that create their own infrastructure.
 /// Does not require environment variables since E2E tests provision clusters.
+///
+/// Sets up:
+/// - FIPS-compliant crypto provider
+/// - Tracing with RUST_LOG env filter (defaults to "info" if not set)
 pub fn init_e2e_test() {
     lattice_common::install_crypto_provider();
 
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .try_init();
 }
 

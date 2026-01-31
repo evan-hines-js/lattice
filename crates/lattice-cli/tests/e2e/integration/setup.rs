@@ -40,11 +40,9 @@ use super::{capi, pivot, scaling};
 // Configuration
 // =============================================================================
 
-use super::super::helpers::DEFAULT_LATTICE_IMAGE;
-
-const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
-const WORKLOAD_CLUSTER_NAME: &str = "e2e-workload";
-const WORKLOAD2_CLUSTER_NAME: &str = "e2e-workload2";
+use super::super::helpers::{
+    DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+};
 
 /// Configuration for infrastructure setup
 #[derive(Clone)]
@@ -530,13 +528,7 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
 // Standalone Tests
 // =============================================================================
 
-/// Initialize test environment for setup tests
-fn init_setup_test() {
-    lattice_common::install_crypto_provider();
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-}
+use super::super::context::init_e2e_test;
 
 /// Setup full 3-cluster hierarchy and exit (leave clusters running)
 ///
@@ -548,7 +540,7 @@ fn init_setup_test() {
 #[tokio::test]
 #[ignore]
 async fn test_setup_hierarchy_only() {
-    init_setup_test();
+    init_e2e_test();
 
     info!("========================================");
     info!("SETUP ONLY MODE");
@@ -568,7 +560,7 @@ async fn test_setup_hierarchy_only() {
 #[tokio::test]
 #[ignore]
 async fn test_setup_mgmt_only() {
-    init_setup_test();
+    init_e2e_test();
     let config = SetupConfig::default();
     let result = setup_mgmt_only(&config).await.unwrap();
     drop(result);
@@ -579,7 +571,7 @@ async fn test_setup_mgmt_only() {
 #[tokio::test]
 #[ignore]
 async fn test_setup_mgmt_and_workload_only() {
-    init_setup_test();
+    init_e2e_test();
     let config = SetupConfig::default();
     let result = setup_mgmt_and_workload(&config).await.unwrap();
     drop(result);
