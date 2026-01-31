@@ -53,10 +53,24 @@ pub struct UninstallArgs {
     /// Skip kind cluster deletion on failure (for debugging)
     #[arg(long)]
     pub keep_bootstrap_on_failure: bool,
+
+    /// Run ID for this uninstall session (auto-generated if not provided).
+    /// Used to create unique kind cluster names and temp files for parallel runs.
+    #[arg(long, env = "LATTICE_RUN_ID")]
+    pub run_id: Option<String>,
 }
 
-/// Fixed uninstall bootstrap cluster name
-const UNINSTALL_CLUSTER_NAME: &str = "lattice-uninstall";
+/// Generate a short readable run ID (6 hex chars from random bytes)
+fn generate_run_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u32;
+    let pid = std::process::id();
+    // Combine timestamp and pid, take 6 hex chars for readability
+    format!("{:06x}", (timestamp ^ pid) & 0xFFFFFF)
+}
 
 pub struct Uninstaller {
     kubeconfig: PathBuf,
@@ -64,6 +78,8 @@ pub struct Uninstaller {
     provider: ProviderType,
     capi_namespace: String,
     keep_bootstrap_on_failure: bool,
+    /// Run ID for this uninstall session
+    run_id: String,
 }
 
 impl Uninstaller {
@@ -118,6 +134,7 @@ impl Uninstaller {
             provider,
             capi_namespace,
             keep_bootstrap_on_failure: args.keep_bootstrap_on_failure,
+            run_id: args.run_id.clone().unwrap_or_else(generate_run_id),
         })
     }
 
@@ -129,8 +146,14 @@ impl Uninstaller {
         self.provider
     }
 
+    /// Returns the kind cluster name for this uninstall session
+    /// Format: `lattice-uninstall-{run_id}` (e.g., "lattice-uninstall-a1b2c3")
+    fn uninstall_cluster_name(&self) -> String {
+        format!("lattice-uninstall-{}", self.run_id)
+    }
+
     fn bootstrap_kubeconfig_path(&self) -> PathBuf {
-        std::env::temp_dir().join("lattice-uninstall-bootstrap.kubeconfig")
+        std::env::temp_dir().join(format!("{}-kubeconfig", self.uninstall_cluster_name()))
     }
 
     async fn target_client(&self) -> Result<Client> {
@@ -352,13 +375,17 @@ impl Uninstaller {
     }
 
     pub async fn run(&self) -> Result<()> {
+        info!("=======================================================");
+        info!("LATTICE UNINSTALL - Run ID: {}", self.run_id);
+        info!("=======================================================");
         info!(
             "Uninstalling cluster '{}' (provider: {})",
             self.cluster_name, self.provider
         );
 
-        info!("Creating temporary kind cluster...");
-        kind_utils::create_kind_cluster(UNINSTALL_CLUSTER_NAME, &self.bootstrap_kubeconfig_path())
+        let uninstall_cluster = self.uninstall_cluster_name();
+        info!("Creating temporary kind cluster '{}'...", uninstall_cluster);
+        kind_utils::create_kind_cluster(&uninstall_cluster, &self.bootstrap_kubeconfig_path())
             .await?;
 
         let result = self.run_uninstall().await;
@@ -366,8 +393,8 @@ impl Uninstaller {
         if result.is_err() && self.keep_bootstrap_on_failure {
             info!("Keeping kind cluster for debugging (--keep-bootstrap-on-failure)");
         } else {
-            info!("Deleting temporary kind cluster...");
-            if let Err(e) = kind_utils::delete_kind_cluster(UNINSTALL_CLUSTER_NAME).await {
+            info!("Deleting temporary kind cluster '{}'...", uninstall_cluster);
+            if let Err(e) = kind_utils::delete_kind_cluster(&uninstall_cluster).await {
                 tracing::warn!("Failed to delete kind cluster: {}", e);
             }
         }
