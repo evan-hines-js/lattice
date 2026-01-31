@@ -42,6 +42,7 @@ use super::helpers::{
     ensure_docker_network, extract_docker_cluster_kubeconfig, force_delete_docker_cluster,
     get_docker_kubeconfig, kubeconfig_path, load_cluster_config, load_registry_credentials,
     run_cmd, watch_cluster_phases, watch_worker_scaling, DEFAULT_LATTICE_IMAGE,
+    MGMT_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
 use super::integration::setup::cleanup_bootstrap_clusters;
 
@@ -63,12 +64,16 @@ async fn test_docker_independence() {
         load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml").unwrap();
     let (_, workload_cluster) =
         load_cluster_config("LATTICE_INDEP_WORKLOAD_CONFIG", "docker-workload.yaml").unwrap();
-    let mgmt_name = mgmt_cluster.metadata.name.as_deref().unwrap_or("e2e-mgmt");
+    let mgmt_name = mgmt_cluster
+        .metadata
+        .name
+        .as_deref()
+        .unwrap_or(MGMT_CLUSTER_NAME);
     let workload_name = workload_cluster
         .metadata
         .name
         .as_deref()
-        .unwrap_or("e2e-workload");
+        .unwrap_or(WORKLOAD_CLUSTER_NAME);
 
     cleanup_clusters(mgmt_name, workload_name);
 
