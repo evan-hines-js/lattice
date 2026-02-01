@@ -22,7 +22,7 @@ use lattice_common::{
 /// The agent handles unpivot automatically by detecting deletion_timestamp on connect.
 pub async fn start_agent_with_retry(client: &Client, cluster_name: &str) {
     let mut retry_delay = Duration::from_secs(1);
-    let max_retry_delay = Duration::from_secs(30);
+    let max_retry_delay = Duration::from_secs(5);
 
     loop {
         match start_agent_if_needed(client, cluster_name).await {
