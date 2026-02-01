@@ -17,7 +17,7 @@ use clap::Args;
 use kube::Client;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{generate_run_id, kind_utils};
 
@@ -445,17 +445,14 @@ impl Installer {
                 return Err(Error::command_failed("Timeout waiting for cluster"));
             }
 
-            // Check for failure first
-            let phase = get_latticecluster_phase(client, self.cluster_name()).await?;
+            // Check phase (transient errors return "Unknown" and continue polling)
+            let phase = get_latticecluster_phase(client, self.cluster_name()).await;
             if phase == "Failed" {
                 return Err(Error::command_failed("Cluster provisioning failed"));
             }
 
             // Log progress
-            info!(
-                "Cluster phase: {}",
-                if phase.is_empty() { "Pending" } else { &phase }
-            );
+            info!("Cluster phase: {}", phase);
 
             // Check if kubeconfig is ready
             if kube_utils::secret_exists(client, &secret_name, &namespace)
@@ -995,7 +992,11 @@ impl Installer {
 }
 
 /// Get LatticeCluster phase using dynamic API
-async fn get_latticecluster_phase(client: &Client, name: &str) -> Result<String> {
+///
+/// Returns the phase string, or "Unknown" for transient network errors.
+/// The caller should continue polling on "Unknown" - only "Failed" phase
+/// indicates a terminal failure.
+async fn get_latticecluster_phase(client: &Client, name: &str) -> String {
     use kube::api::{Api, DynamicObject};
 
     let ar =
@@ -1003,20 +1004,20 @@ async fn get_latticecluster_phase(client: &Client, name: &str) -> Result<String>
     let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
 
     match api.get(name).await {
-        Ok(cluster) => {
-            let phase = cluster
-                .data
-                .get("status")
-                .and_then(|s| s.get("phase"))
-                .and_then(|p| p.as_str())
-                .unwrap_or("Pending");
-            Ok(phase.to_string())
+        Ok(cluster) => cluster
+            .data
+            .get("status")
+            .and_then(|s| s.get("phase"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("Pending")
+            .to_string(),
+        Err(kube::Error::Api(e)) if e.code == 404 => "Pending".to_string(),
+        Err(e) => {
+            // Transient errors (SendRequest, timeout, etc) - log and return Unknown
+            // so caller continues polling instead of failing immediately
+            warn!("Transient error getting LatticeCluster {}: {}", name, e);
+            "Unknown".to_string()
         }
-        Err(kube::Error::Api(e)) if e.code == 404 => Ok("Pending".to_string()),
-        Err(e) => Err(Error::command_failed(format!(
-            "Failed to get LatticeCluster {}: {}",
-            name, e
-        ))),
     }
 }
 
@@ -1036,10 +1037,15 @@ async fn wait_for_control_plane_ready(client: &Client, timeout: Duration) -> Res
             ));
         }
 
-        let node_list = nodes
-            .list(&ListParams::default())
-            .await
-            .map_err(|e| Error::command_failed(format!("Failed to list nodes: {}", e)))?;
+        let node_list = match nodes.list(&ListParams::default()).await {
+            Ok(list) => list,
+            Err(e) => {
+                // Transient error - log and retry
+                warn!("Transient error listing nodes: {}", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
 
         // Filter for control plane nodes
         let cp_nodes: Vec<_> = node_list
