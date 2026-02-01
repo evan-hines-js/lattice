@@ -21,6 +21,7 @@
 //! ```
 
 pub mod capi;
+pub mod kubeconfig;
 pub mod mesh;
 pub mod pivot;
 pub mod proxy;

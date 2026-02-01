@@ -331,9 +331,8 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     let ctx = ctx.with_workload(workload_kubeconfig_path.clone());
 
     capi::verify_workload_capi_resources(&ctx, WORKLOAD_CLUSTER_NAME).await?;
-    scaling::verify_workers(&ctx, WORKLOAD_CLUSTER_NAME, 1).await?;
 
-    info!("[Setup] SUCCESS: Workload cluster verified!");
+    info!("[Setup] SUCCESS: Workload cluster pivot verified!");
 
     // Add workload to chaos targets (parent: mgmt)
     if let Some(ref targets) = chaos_targets {
@@ -345,7 +344,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     }
 
     // =========================================================================
-    // Phase 5: Create Workload2 Cluster
+    // Phase 5: Create Workload2 Cluster (parallel with workload worker join)
     // =========================================================================
     info!("[Setup/Phase 5] Creating workload2 cluster (deep hierarchy)...");
 
@@ -357,21 +356,29 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         .await
         .map_err(|e| format!("Failed to create workload2: {}", e))?;
 
-    info!("[Setup] Workload2 LatticeCluster created on workload cluster, waiting for Ready...");
+    info!("[Setup] Workload2 LatticeCluster created, waiting for Ready (workers joining in parallel)...");
 
     let workload2_kubeconfig_path = kubeconfig_path(WORKLOAD2_CLUSTER_NAME);
 
-    if workload_provider == InfraProvider::Docker {
-        watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None).await?;
-    } else {
-        watch_cluster_phases_with_kubeconfig(
-            &workload_kubeconfig_path,
-            WORKLOAD2_CLUSTER_NAME,
-            None,
-            &workload2_kubeconfig_path,
-        )
-        .await?;
-    }
+    // Run workload worker verification in parallel with workload2 provisioning
+    let (worker_result, phase_result) = tokio::join!(
+        scaling::verify_workers(&ctx, WORKLOAD_CLUSTER_NAME, 1),
+        async {
+            if workload_provider == InfraProvider::Docker {
+                watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None).await
+            } else {
+                watch_cluster_phases_with_kubeconfig(
+                    &workload_kubeconfig_path,
+                    WORKLOAD2_CLUSTER_NAME,
+                    None,
+                    &workload2_kubeconfig_path,
+                )
+                .await
+            }
+        }
+    );
+    worker_result?;
+    phase_result?;
 
     info!("[Setup] SUCCESS: Workload2 cluster is Ready!");
 

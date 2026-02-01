@@ -69,6 +69,29 @@ async fn run_full_e2e() -> Result<(), String> {
     let ctx = setup_result.ctx.clone();
 
     // =========================================================================
+    // Phase 6.5: Verify kubeconfig patching + test proxy access
+    // =========================================================================
+    info!("[Phase 6.5] Verifying kubeconfig patching and proxy access...");
+
+    // Verify kubeconfigs are patched for proxy
+    integration::kubeconfig::run_kubeconfig_verification(
+        &ctx,
+        WORKLOAD_CLUSTER_NAME,
+        Some(WORKLOAD2_CLUSTER_NAME),
+    )
+    .await?;
+
+    // Test proxy access through the hierarchy
+    integration::proxy::run_proxy_hierarchy_tests(
+        &ctx,
+        WORKLOAD_CLUSTER_NAME,
+        WORKLOAD2_CLUSTER_NAME,
+    )
+    .await?;
+
+    info!("SUCCESS: Kubeconfig and proxy verification complete!");
+
+    // =========================================================================
     // Phase 7: Run mesh tests + delete workload2 (parallel)
     // =========================================================================
     info!("[Phase 7] Running mesh tests + deleting workload2...");
