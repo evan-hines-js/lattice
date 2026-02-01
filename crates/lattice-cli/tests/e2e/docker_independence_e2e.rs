@@ -37,6 +37,7 @@ use lattice_cli::commands::install::Installer;
 use lattice_operator::crd::LatticeCluster;
 
 use super::context::init_e2e_test;
+use super::helpers::run_id;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, docker_containers_deleted,
     ensure_docker_network, extract_docker_cluster_kubeconfig, force_delete_docker_cluster,
@@ -44,7 +45,6 @@ use super::helpers::{
     run_cmd, watch_cluster_phases, watch_worker_scaling, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
     WORKLOAD_CLUSTER_NAME,
 };
-use super::helpers::run_id;
 use super::integration::setup;
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(1800);

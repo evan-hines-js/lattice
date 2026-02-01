@@ -111,7 +111,10 @@ async fn wait_for_services_ready(
         );
 
         if ready_count >= expected_count {
-            info!("[{}] All {} LatticeServices are Ready!", namespace, expected_count);
+            info!(
+                "[{}] All {} LatticeServices are Ready!",
+                namespace, expected_count
+            );
             return Ok(());
         }
 
@@ -283,14 +286,18 @@ async fn wait_for_cycles(
 
     info!(
         "[{}] Waiting for {} complete test cycles on {} traffic generators...",
-        label, min_cycles, service_names.len()
+        label,
+        min_cycles,
+        service_names.len()
     );
 
     loop {
         if start.elapsed() > timeout {
             return Err(format!(
                 "[{}] Timeout waiting for {} test cycles after {:?}",
-                label, min_cycles, start.elapsed()
+                label,
+                min_cycles,
+                start.elapsed()
             ));
         }
 
@@ -334,7 +341,9 @@ async fn wait_for_cycles(
         if pods.len() < service_names.len() {
             info!(
                 "[{}] Found {}/{} traffic generator pods, waiting...",
-                label, pods.len(), service_names.len()
+                label,
+                pods.len(),
+                service_names.len()
             );
             sleep(Duration::from_secs(5)).await;
             continue;
@@ -373,13 +382,18 @@ async fn wait_for_cycles(
 
         info!(
             "[{}] Cycle progress: {}/{} cycles complete (across {} pods)",
-            label, min_cycles_found, min_cycles, pods.len()
+            label,
+            min_cycles_found,
+            min_cycles,
+            pods.len()
         );
 
         if all_pods_ready {
             info!(
                 "[{}] All {} pods have completed {} cycles!",
-                label, pods.len(), min_cycles
+                label,
+                pods.len(),
+                min_cycles
             );
             return Ok(());
         }
@@ -389,7 +403,10 @@ async fn wait_for_cycles(
 }
 
 /// Wait for N complete test cycles on traffic generator pods in the fixed mesh test
-async fn wait_for_mesh_test_cycles(kubeconfig_path: &str, min_cycles: usize) -> Result<(), String> {
+pub async fn wait_for_mesh_test_cycles(
+    kubeconfig_path: &str,
+    min_cycles: usize,
+) -> Result<(), String> {
     // Traffic generators are frontend-* pods
     wait_for_cycles(
         kubeconfig_path,
@@ -996,7 +1013,10 @@ async fn wait_for_service_pods(kubeconfig_path: &str) -> Result<(), String> {
         );
 
         let running_count = pods_output.lines().filter(|l| *l == "Running").count();
-        info!("[Fixed Mesh] {}/{} pods running", running_count, expected_pods);
+        info!(
+            "[Fixed Mesh] {}/{} pods running",
+            running_count, expected_pods
+        );
 
         if running_count >= expected_pods {
             info!(
@@ -1074,7 +1094,11 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
         )?;
 
         for (target, expected_allowed) in expected_results.iter() {
-            let expected_str = if *expected_allowed { "ALLOWED" } else { "BLOCKED" };
+            let expected_str = if *expected_allowed {
+                "ALLOWED"
+            } else {
+                "BLOCKED"
+            };
             let allowed_pattern = format!("{}: ALLOWED", target);
             let blocked_pattern = format!("{}: BLOCKED", target);
 
@@ -1228,7 +1252,10 @@ async fn check_no_incorrectly_allowed(
 /// The test runs traffic generators continuously until `stop_and_verify()` is called.
 /// The test script handles policy propagation waiting internally via endpoint checks.
 pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, String> {
-    info!("[Fixed Mesh] Starting service mesh bilateral agreement test ({} services)...", TOTAL_SERVICES);
+    info!(
+        "[Fixed Mesh] Starting service mesh bilateral agreement test ({} services)...",
+        TOTAL_SERVICES
+    );
     deploy_test_services(kubeconfig_path).await?;
 
     // Wait for LatticeServices to be Ready (controller has reconciled)
@@ -1859,7 +1886,8 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
     for (layer_idx, layer) in mesh.layers.iter().enumerate().rev() {
         info!(
             "[Random Mesh] [Layer {}] Deploying {} services...",
-            layer_idx, layer.len()
+            layer_idx,
+            layer.len()
         );
         for name in layer {
             let svc = mesh.create_lattice_service(name, RANDOM_MESH_NAMESPACE);
@@ -1870,7 +1898,10 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
         sleep(Duration::from_secs(2)).await;
     }
 
-    info!("[Random Mesh] All {} services deployed!", mesh.services.len());
+    info!(
+        "[Random Mesh] All {} services deployed!",
+        mesh.services.len()
+    );
     Ok(())
 }
 

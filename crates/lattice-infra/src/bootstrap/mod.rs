@@ -189,7 +189,13 @@ pub(crate) async fn run_helm_template(
     extra_args: &[&str],
 ) -> Result<Vec<String>, String> {
     let output = Command::new("helm")
-        .args(["template", release_name, chart_path, "--namespace", namespace])
+        .args([
+            "template",
+            release_name,
+            chart_path,
+            "--namespace",
+            namespace,
+        ])
         .args(extra_args)
         .output()
         .await

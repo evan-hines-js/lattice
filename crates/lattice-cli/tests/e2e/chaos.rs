@@ -70,8 +70,8 @@ impl ChaosConfig {
         match provider {
             InfraProvider::Docker => Self::default(),
             InfraProvider::Aws | InfraProvider::OpenStack | InfraProvider::Proxmox => Self {
-                pod_interval: (90, 150),   // 90-150s between pod kills
-                net_interval: (120, 180),  // 120-180s between network cuts
+                pod_interval: (90, 150),  // 90-150s between pod kills
+                net_interval: (120, 180), // 120-180s between network cuts
                 net_blackout_secs: 5,
                 enable_coordinated: false,
                 coordinated_probability: 0.0,
@@ -85,8 +85,8 @@ impl ChaosConfig {
         self.enable_coordinated = true;
         self.coordinated_probability = probability;
         self.critical_blackout_secs = match self.pod_interval.0 {
-            0..=60 => 15,   // Docker: shorter critical blackout
-            _ => 20,        // AWS/cloud: longer critical blackout
+            0..=60 => 15, // Docker: shorter critical blackout
+            _ => 20,      // AWS/cloud: longer critical blackout
         };
         self
     }
@@ -608,7 +608,10 @@ async fn cut_network(
     }
 
     let _ = std::fs::remove_file(&policy_file);
-    info!("[Chaos] Network restore on {}: blackout policy removed", cluster);
+    info!(
+        "[Chaos] Network restore on {}: blackout policy removed",
+        cluster
+    );
 }
 
 fn is_unreachable(output: &str) -> bool {

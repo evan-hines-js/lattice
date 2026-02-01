@@ -1418,27 +1418,15 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     PivotAction::Complete => {
                         // Pivot complete - child cluster is now self-managing
                         info!("pivot complete, child cluster is self-managing");
-                        update_cluster_status(
-                            &cluster,
-                            &ctx,
-                            ClusterPhase::Pivoted,
-                            None,
-                            true,
-                        )
-                        .await?;
+                        update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoted, None, true)
+                            .await?;
                         Ok(Action::requeue(Duration::from_secs(60)))
                     }
                     PivotAction::TriggerPivot => {
                         // Agent ready for pivot - set Pivoting phase and trigger
                         info!("agent ready, triggering pivot");
-                        update_cluster_status(
-                            &cluster,
-                            &ctx,
-                            ClusterPhase::Pivoting,
-                            None,
-                            false,
-                        )
-                        .await?;
+                        update_cluster_status(&cluster, &ctx, ClusterPhase::Pivoting, None, false)
+                            .await?;
 
                         match pivot_ops
                             .trigger_pivot(&name, &capi_namespace, &capi_namespace)
@@ -2252,14 +2240,10 @@ async fn handle_deletion(
             desired = desired_workers,
             "Waiting for workers to match spec before unpivoting"
         );
-        let status = cluster
-            .status
-            .clone()
-            .unwrap_or_default()
-            .message(format!(
-                "Deletion pending: waiting for workers ({}/{})",
-                ready_workers, desired_workers
-            ));
+        let status = cluster.status.clone().unwrap_or_default().message(format!(
+            "Deletion pending: waiting for workers ({}/{})",
+            ready_workers, desired_workers
+        ));
         ctx.kube.patch_status(&name, &status).await?;
         return Ok(Action::requeue(Duration::from_secs(10)));
     }
