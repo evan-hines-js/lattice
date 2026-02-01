@@ -8,7 +8,8 @@ use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
 use tracing::info;
 
-use crate::auth::{OidcConfig, OidcValidator};
+use crate::auth::OidcConfig;
+use crate::auth_chain::AuthChain;
 use crate::cedar::PolicyEngine;
 use crate::error::Error;
 use crate::kubeconfig::kubeconfig_handler;
@@ -38,8 +39,8 @@ pub struct ServerConfig {
 /// Shared state for handlers
 #[derive(Clone)]
 pub struct AppState {
-    /// OIDC token validator
-    pub oidc: Arc<OidcValidator>,
+    /// Authentication chain (OIDC + ServiceAccount fallback)
+    pub auth: Arc<AuthChain>,
     /// Cedar policy engine
     pub cedar: Arc<PolicyEngine>,
     /// Kubernetes API server URL
@@ -59,30 +60,26 @@ pub struct AppState {
 /// Start the auth proxy server
 pub async fn start_server(
     config: ServerConfig,
-    oidc: Arc<OidcValidator>,
+    auth: Arc<AuthChain>,
     cedar: Arc<PolicyEngine>,
     subtree: Arc<SubtreeRegistry>,
 ) -> Result<(), Error> {
-    start_server_with_registry(config, oidc, cedar, subtree, None).await
+    start_server_with_registry(config, auth, cedar, subtree, None).await
 }
 
 /// Start the auth proxy server with optional agent registry for child cluster routing
 pub async fn start_server_with_registry(
     config: ServerConfig,
-    oidc: Arc<OidcValidator>,
+    auth: Arc<AuthChain>,
     cedar: Arc<PolicyEngine>,
     subtree: Arc<SubtreeRegistry>,
     agent_registry: Option<SharedAgentRegistry>,
 ) -> Result<(), Error> {
     // Get OIDC config for kubeconfig generation
-    let oidc_config = if !oidc.config().issuer_url.is_empty() {
-        Some(oidc.config().clone())
-    } else {
-        None
-    };
+    let oidc_config = auth.oidc_config().cloned();
 
     let state = AppState {
-        oidc,
+        auth,
         cedar,
         k8s_api_url: config.k8s_api_url.clone(),
         cluster_name: config.cluster_name.clone(),

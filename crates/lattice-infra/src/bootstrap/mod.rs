@@ -116,34 +116,37 @@ pub async fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>
     // Istio policies - serialize typed structs to JSON
     manifests.push(
         serde_json::to_string_pretty(&IstioReconciler::generate_peer_authentication())
-            .expect("PeerAuthentication serialization"),
+            .map_err(|e| format!("Failed to serialize PeerAuthentication: {}", e))?,
     );
     manifests.push(
         serde_json::to_string_pretty(&IstioReconciler::generate_default_deny())
-            .expect("AuthorizationPolicy serialization"),
+            .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
     );
     manifests.push(
         serde_json::to_string_pretty(&IstioReconciler::generate_waypoint_default_deny())
-            .expect("AuthorizationPolicy serialization"),
+            .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
     );
     manifests.push(
         serde_json::to_string_pretty(&IstioReconciler::generate_operator_allow_policy())
-            .expect("AuthorizationPolicy serialization"),
+            .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
     );
 
     // Cilium policies (skip on kind/bootstrap clusters) - serialize typed structs to JSON
     if !config.skip_cilium_policies {
         manifests.push(
-            serde_json::to_string_pretty(&cilium::generate_ztunnel_allowlist())
-                .expect("CiliumClusterwideNetworkPolicy serialization"),
+            serde_json::to_string_pretty(&cilium::generate_ztunnel_allowlist()).map_err(|e| {
+                format!("Failed to serialize CiliumClusterwideNetworkPolicy: {}", e)
+            })?,
         );
         manifests.push(
-            serde_json::to_string_pretty(&cilium::generate_default_deny())
-                .expect("CiliumClusterwideNetworkPolicy serialization"),
+            serde_json::to_string_pretty(&cilium::generate_default_deny()).map_err(|e| {
+                format!("Failed to serialize CiliumClusterwideNetworkPolicy: {}", e)
+            })?,
         );
         manifests.push(
-            serde_json::to_string_pretty(&cilium::generate_waypoint_egress_policy())
-                .expect("CiliumClusterwideNetworkPolicy serialization"),
+            serde_json::to_string_pretty(&cilium::generate_waypoint_egress_policy()).map_err(
+                |e| format!("Failed to serialize CiliumClusterwideNetworkPolicy: {}", e),
+            )?,
         );
         // Operator network policy - allows operator to reach parent cell and accept agent connections
         manifests.push(
@@ -151,7 +154,7 @@ pub async fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>
                 config.parent_host.as_deref(),
                 config.parent_grpc_port,
             ))
-            .expect("CiliumNetworkPolicy serialization"),
+            .map_err(|e| format!("Failed to serialize CiliumNetworkPolicy: {}", e))?,
         );
     }
 

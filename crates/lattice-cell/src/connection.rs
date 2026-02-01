@@ -119,10 +119,10 @@ pub type K8sResponseSender = mpsc::Sender<KubernetesResponse>;
 /// Configuration for kubeconfig proxy patching
 ///
 /// Contains the URL and CA certificate needed to patch kubeconfig Secrets
-/// to route through the K8s API proxy.
+/// to route through the authenticated K8s API proxy (with Cedar authorization).
 #[derive(Clone, Debug)]
 pub struct KubeconfigProxyConfig {
-    /// Base URL of the proxy (e.g., "https://lattice-cell.lattice-system.svc:8081")
+    /// Base URL of the auth proxy (e.g., "https://lattice-cell.lattice-system.svc:8082")
     pub url: String,
     /// PEM-encoded CA certificate for the proxy
     pub ca_cert_pem: String,
@@ -866,14 +866,14 @@ mod tests {
 
         // Set config
         let config = KubeconfigProxyConfig {
-            url: "https://proxy.example.com:8081".to_string(),
+            url: "https://proxy.example.com:8082".to_string(),
             ca_cert_pem: "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
         };
         registry.set_proxy_config(config.clone());
 
         // Get config
         let retrieved = registry.get_proxy_config().expect("config should exist");
-        assert_eq!(retrieved.url, "https://proxy.example.com:8081");
+        assert_eq!(retrieved.url, "https://proxy.example.com:8082");
         assert!(retrieved.ca_cert_pem.contains("BEGIN CERTIFICATE"));
     }
 }

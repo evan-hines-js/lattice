@@ -92,6 +92,28 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("SUCCESS: Kubeconfig and proxy verification complete!");
 
     // =========================================================================
+    // Phase 6.6: Test Cedar policy enforcement for proxy access
+    // =========================================================================
+    info!("[Phase 6.6] Testing Cedar policy enforcement...");
+
+    // Test Cedar policies for access from mgmt -> workload
+    integration::cedar::run_cedar_hierarchy_tests(&ctx, WORKLOAD_CLUSTER_NAME).await?;
+
+    // Test Cedar policies for access from workload -> workload2
+    if let Some(workload_kubeconfig) = &ctx.workload_kubeconfig {
+        let workload_ctx = super::context::InfraContext::new(
+            workload_kubeconfig.clone(),
+            None,
+            None,
+            ctx.provider,
+        );
+        integration::cedar::run_cedar_hierarchy_tests(&workload_ctx, WORKLOAD2_CLUSTER_NAME)
+            .await?;
+    }
+
+    info!("SUCCESS: Cedar policy enforcement verified!");
+
+    // =========================================================================
     // Phase 7: Run mesh tests + delete workload2 (parallel)
     // =========================================================================
     info!("[Phase 7] Running mesh tests + deleting workload2...");

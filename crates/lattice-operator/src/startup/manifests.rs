@@ -15,5 +15,5 @@ use lattice_common::{apply_manifests_with_discovery, ApplyOptions};
 pub async fn apply_manifests(client: &Client, manifests: &[impl AsRef<str>]) -> anyhow::Result<()> {
     apply_manifests_with_discovery(client, manifests, &ApplyOptions::default())
         .await
-        .map_err(|e| anyhow::anyhow!("{}", e))
+        .map_err(anyhow::Error::from)
 }

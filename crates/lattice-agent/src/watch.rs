@@ -54,6 +54,10 @@ pub fn build_watch_event_response(
         "type": event_type,
         "object": object
     });
+    // Safety: serde_json::to_vec only fails on non-string map keys or
+    // custom serializers that fail. Since we're serializing a json!() macro
+    // output (always valid JSON), this cannot fail. Using unwrap_or_default()
+    // as a defensive fallback returns an empty body instead of panicking.
     let body = serde_json::to_vec(&event_json).unwrap_or_default();
 
     KubernetesResponse {
@@ -79,6 +83,22 @@ pub fn build_watch_error_response(
         error: error.to_string(),
         streaming: true,
         stream_end: true,
+        ..Default::default()
+    }
+}
+
+/// Build an error response for non-streaming K8s API failures (pure function)
+///
+/// Used when K8s client creation or API calls fail before streaming begins.
+pub fn build_k8s_error_response(
+    request_id: &str,
+    status_code: u32,
+    error: &str,
+) -> KubernetesResponse {
+    KubernetesResponse {
+        request_id: request_id.to_string(),
+        status_code,
+        error: error.to_string(),
         ..Default::default()
     }
 }

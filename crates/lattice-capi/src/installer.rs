@@ -23,8 +23,8 @@ use tracing::{debug, info, warn};
 
 use lattice_common::crd::{ProviderType, SecretRef};
 use lattice_common::{
-    AwsCredentials, Error, AWS_CAPA_CREDENTIALS_SECRET, CAPA_NAMESPACE, CAPMOX_NAMESPACE,
-    CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
+    AwsCredentials, CredentialProvider, Error, AWS_CAPA_CREDENTIALS_SECRET, CAPA_NAMESPACE,
+    CAPMOX_NAMESPACE, CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
 
 /// Copy credentials from CloudProvider's secret reference to the CAPI provider namespace.
@@ -663,6 +663,20 @@ impl ClusterctlInstaller {
         Ok(data)
     }
 
+    /// Extract provider name from action key (format: "name:ProviderType")
+    ///
+    /// Keys are in format "kubeadm:Bootstrap", "rke2:ControlPlane", etc.
+    /// Returns the provider name (part before the colon).
+    fn extract_provider_name(key: &str) -> &str {
+        match key.split_once(':') {
+            Some((name, _)) => name,
+            None => {
+                debug!(key = %key, "Action key missing expected ':' delimiter, using full key as name");
+                key
+            }
+        }
+    }
+
     /// Build clusterctl init arguments for missing providers only
     fn build_init_args(
         config: &CapiProviderConfig,
@@ -685,10 +699,10 @@ impl ClusterctlInstaller {
             if key.contains("cluster-api:") {
                 need_core = true;
             } else if key.contains(":Bootstrap") {
-                let name = key.split(':').next().unwrap_or("");
+                let name = Self::extract_provider_name(key);
                 bootstrap_providers.push(name.to_string());
             } else if key.contains(":ControlPlane") {
-                let name = key.split(':').next().unwrap_or("");
+                let name = Self::extract_provider_name(key);
                 control_plane_providers.push(name.to_string());
             } else if key.contains(":Infrastructure") {
                 need_infra = true;

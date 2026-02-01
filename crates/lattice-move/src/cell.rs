@@ -48,7 +48,9 @@ pub async fn prepare_move_objects(
 
     if graph.is_empty() {
         // Unpause and return error
-        let _ = unpause_cluster(client, namespace).await;
+        if let Err(e) = unpause_cluster(client, namespace).await {
+            error!("Failed to unpause after discovery error: {}", e);
+        }
         return Err(MoveError::Discovery("no objects to move".to_string()));
     }
 
@@ -68,7 +70,7 @@ pub async fn prepare_move_objects(
     for (_, group) in sequence.iter_groups() {
         let nodes = extract_nodes_for_group(&graph, group);
         for node in nodes {
-            objects.push(build_move_object(node));
+            objects.push(build_move_object(node)?);
         }
     }
 
@@ -126,45 +128,26 @@ async fn set_resource_paused(
     kind: &str,
     paused: bool,
 ) -> Result<(), MoveError> {
-    // Use discovery to find the correct API version
-    let api_resource =
-        lattice_common::kube_utils::build_api_resource_with_discovery(client, group, kind)
-            .await
-            .map_err(|e| {
-                MoveError::Discovery(format!("Failed to discover {}/{}: {}", group, kind, e))
-            })?;
-
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &api_resource);
-    let list = api
-        .list(&Default::default())
-        .await
-        .map_err(MoveError::Kube)?;
-
-    for obj in list.items {
-        let name = match &obj.metadata.name {
-            Some(n) => n.clone(),
-            None => continue,
-        };
-
-        let patch = serde_json::json!({ "spec": { "paused": paused } });
-        api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
-            .await
-            .map_err(MoveError::Kube)?;
-
-        debug!(kind = %kind, name = %name, paused = paused, "Set paused state");
-    }
-
+    crate::utils::patch_resources_paused(client, namespace, group, kind, paused).await?;
     Ok(())
 }
 
 /// Build a MoveObjectOutput from a graph node
-fn build_move_object(node: &GraphNode) -> MoveObjectOutput {
+///
+/// Returns an error if the object cannot be serialized to JSON.
+fn build_move_object(node: &GraphNode) -> Result<MoveObjectOutput, MoveError> {
     let owners = extract_owner_refs(node);
-    MoveObjectOutput {
+    let manifest = serde_json::to_vec(&node.object).map_err(|e| {
+        MoveError::Serialization(format!(
+            "failed to serialize object {}/{}: {}",
+            node.identity.kind, node.identity.name, e
+        ))
+    })?;
+    Ok(MoveObjectOutput {
         source_uid: node.uid().to_string(),
-        manifest: serde_json::to_vec(&node.object).unwrap_or_default(),
+        manifest,
         owners,
-    }
+    })
 }
 
 /// Extract owner references from a graph node
@@ -435,7 +418,9 @@ impl<S: MoveCommandSender> CellMover<S> {
 
         if graph.is_empty() {
             // Unpause before returning error
-            let _ = unpause_cluster(&self.client, &self.config.source_namespace).await;
+            if let Err(e) = unpause_cluster(&self.client, &self.config.source_namespace).await {
+                error!("Failed to unpause after empty graph error: {}", e);
+            }
             return Err(MoveError::Discovery("no objects to move".to_string()));
         }
 
@@ -448,7 +433,11 @@ impl<S: MoveCommandSender> CellMover<S> {
         // If streaming failed, unpause source and return error
         if let Err(e) = stream_result {
             warn!(error = %e, "Batch streaming failed, unpausing source");
-            let _ = unpause_cluster(&self.client, &self.config.source_namespace).await;
+            if let Err(unpause_err) =
+                unpause_cluster(&self.client, &self.config.source_namespace).await
+            {
+                error!("Failed to unpause after streaming error: {}", unpause_err);
+            }
             return Err(e);
         }
 
@@ -457,7 +446,14 @@ impl<S: MoveCommandSender> CellMover<S> {
 
         if !complete_result.success {
             warn!(error = %complete_result.error, "Agent finalization failed, unpausing source");
-            let _ = unpause_cluster(&self.client, &self.config.source_namespace).await;
+            if let Err(unpause_err) =
+                unpause_cluster(&self.client, &self.config.source_namespace).await
+            {
+                error!(
+                    "Failed to unpause after finalization error: {}",
+                    unpause_err
+                );
+            }
             return Err(MoveError::AgentCommunication(complete_result.error));
         }
 
@@ -531,8 +527,10 @@ impl<S: MoveCommandSender> CellMover<S> {
 
         for (index, group) in sequence.iter_groups() {
             let nodes = extract_nodes_for_group(graph, group);
-            let objects: Vec<MoveObjectOutput> =
-                nodes.iter().map(|n| build_move_object(n)).collect();
+            let objects: Vec<MoveObjectOutput> = nodes
+                .iter()
+                .map(|n| build_move_object(n))
+                .collect::<Result<Vec<_>, _>>()?;
 
             let batch = MoveBatch {
                 move_id: self.config.move_id.clone(),

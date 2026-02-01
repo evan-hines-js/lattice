@@ -219,11 +219,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         namespace: &str,
         compiled: &CompiledService,
     ) -> Result<(), Error> {
-        use futures::future::try_join_all;
-        use k8s_openapi::api::apps::v1::Deployment as K8sDeployment;
-        use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler as K8sHpa;
-        use k8s_openapi::api::core::v1::{Service as K8sService, ServiceAccount as K8sSA};
-        use kube::api::DynamicObject;
+        use futures::future::join_all;
 
         // Ensure namespace exists with ambient mode label for Istio traffic routing
         self.ensure_namespace_with_ambient(namespace).await?;
@@ -236,11 +232,74 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>,
         > = Vec::new();
 
+        // Apply workload resources (ServiceAccount, PVCs, Deployment, Service, HPA)
+        self.collect_workload_futures(&mut futures, namespace, &params, compiled)?;
+
+        // Apply policy resources (Cilium and Istio policies)
+        self.collect_policy_futures(&mut futures, namespace, &params, compiled)?;
+
+        // Apply ingress resources (Gateway, HttpRoute, Certificate)
+        self.collect_ingress_futures(&mut futures, namespace, &params, compiled)?;
+
+        // Apply waypoint resources (Waypoint gateway and policies)
+        self.collect_waypoint_futures(&mut futures, namespace, &params, compiled)?;
+
+        // Execute all patches in parallel and collect all results
+        let count = futures.len();
+        if count > 0 {
+            debug!(count = count, "applying resources in parallel");
+            let results = join_all(futures).await;
+
+            // Collect all errors and log them
+            let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
+
+            if !errors.is_empty() {
+                // Log all failures
+                for (i, err) in errors.iter().enumerate() {
+                    error!(error = %err, index = i, "resource application failed");
+                }
+                // Return the first error
+                return Err(errors.into_iter().next().unwrap());
+            }
+        }
+
+        info!(
+            service = %service_name,
+            namespace = %namespace,
+            resources = count,
+            "applied compiled resources"
+        );
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Helper methods for ServiceKubeClientImpl
+// =============================================================================
+
+/// Type alias for boxed futures used in parallel resource application.
+/// This reduces complexity in function signatures.
+type ApplyFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>;
+
+impl ServiceKubeClientImpl {
+    /// Collect futures for workload resources (ServiceAccount, PVCs, Deployment, Service, HPA)
+    fn collect_workload_futures(
+        &self,
+        futures: &mut Vec<ApplyFuture>,
+        namespace: &str,
+        params: &PatchParams,
+        compiled: &CompiledService,
+    ) -> Result<(), Error> {
+        use k8s_openapi::api::apps::v1::Deployment as K8sDeployment;
+        use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler as K8sHpa;
+        use k8s_openapi::api::core::v1::{
+            PersistentVolumeClaim as K8sPvc, Service as K8sService, ServiceAccount as K8sSA,
+        };
+
         // ServiceAccount
         if let Some(ref sa) = compiled.workloads.service_account {
             let name = sa.metadata.name.clone();
-            let json = serde_json::to_value(sa)
-                .map_err(|e| Error::serialization(format!("ServiceAccount: {}", e)))?;
+            let json = serialize_resource("ServiceAccount", sa)?;
             let api: Api<K8sSA> = Api::namespaced(self.client.clone(), namespace);
             let params = params.clone();
             futures.push(Box::pin(async move {
@@ -250,13 +309,10 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
-        // PersistentVolumeClaims (must exist before Deployment references them)
+        // PersistentVolumeClaims
         for pvc in &compiled.workloads.pvcs {
-            use k8s_openapi::api::core::v1::PersistentVolumeClaim as K8sPvc;
-
             let name = pvc.metadata.name.clone();
-            let json = serde_json::to_value(pvc)
-                .map_err(|e| Error::serialization(format!("PersistentVolumeClaim: {}", e)))?;
+            let json = serialize_resource("PersistentVolumeClaim", pvc)?;
             let api: Api<K8sPvc> = Api::namespaced(self.client.clone(), namespace);
             let params = params.clone();
             futures.push(Box::pin(async move {
@@ -269,8 +325,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         // Deployment
         if let Some(ref deployment) = compiled.workloads.deployment {
             let name = deployment.metadata.name.clone();
-            let json = serde_json::to_value(deployment)
-                .map_err(|e| Error::serialization(format!("Deployment: {}", e)))?;
+            let json = serialize_resource("Deployment", deployment)?;
             let api: Api<K8sDeployment> = Api::namespaced(self.client.clone(), namespace);
             let params = params.clone();
             futures.push(Box::pin(async move {
@@ -283,8 +338,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         // Service
         if let Some(ref service) = compiled.workloads.service {
             let name = service.metadata.name.clone();
-            let json = serde_json::to_value(service)
-                .map_err(|e| Error::serialization(format!("Service: {}", e)))?;
+            let json = serialize_resource("Service", service)?;
             let api: Api<K8sService> = Api::namespaced(self.client.clone(), namespace);
             let params = params.clone();
             futures.push(Box::pin(async move {
@@ -297,8 +351,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         // HPA
         if let Some(ref hpa) = compiled.workloads.hpa {
             let name = hpa.metadata.name.clone();
-            let json = serde_json::to_value(hpa)
-                .map_err(|e| Error::serialization(format!("HPA: {}", e)))?;
+            let json = serialize_resource("HPA", hpa)?;
             let api: Api<K8sHpa> = Api::namespaced(self.client.clone(), namespace);
             let params = params.clone();
             futures.push(Box::pin(async move {
@@ -308,12 +361,24 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
+        Ok(())
+    }
+
+    /// Collect futures for policy resources (Cilium and Istio policies)
+    fn collect_policy_futures(
+        &self,
+        futures: &mut Vec<ApplyFuture>,
+        namespace: &str,
+        params: &PatchParams,
+        compiled: &CompiledService,
+    ) -> Result<(), Error> {
+        use kube::api::DynamicObject;
+
         // CiliumNetworkPolicies
         let cnp_ar = CiliumNetworkPolicy::api_resource();
         for cnp in &compiled.policies.cilium_policies {
             let name = cnp.metadata.name.clone();
-            let json = serde_json::to_value(cnp)
-                .map_err(|e| Error::serialization(format!("CiliumNetworkPolicy: {}", e)))?;
+            let json = serialize_resource("CiliumNetworkPolicy", cnp)?;
             let api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), namespace, &cnp_ar);
             let params = params.clone();
@@ -328,8 +393,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let authz_ar = AuthorizationPolicy::api_resource();
         for authz in &compiled.policies.authorization_policies {
             let name = authz.metadata.name.clone();
-            let json = serde_json::to_value(authz)
-                .map_err(|e| Error::serialization(format!("AuthorizationPolicy: {}", e)))?;
+            let json = serialize_resource("AuthorizationPolicy", authz)?;
             let api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), namespace, &authz_ar);
             let params = params.clone();
@@ -344,8 +408,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let se_ar = ServiceEntry::api_resource();
         for entry in &compiled.policies.service_entries {
             let name = entry.metadata.name.clone();
-            let json = serde_json::to_value(entry)
-                .map_err(|e| Error::serialization(format!("ServiceEntry: {}", e)))?;
+            let json = serialize_resource("ServiceEntry", entry)?;
             let api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), namespace, &se_ar);
             let params = params.clone();
@@ -356,12 +419,24 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
+        Ok(())
+    }
+
+    /// Collect futures for ingress resources (Gateway, HttpRoute, Certificate)
+    fn collect_ingress_futures(
+        &self,
+        futures: &mut Vec<ApplyFuture>,
+        namespace: &str,
+        params: &PatchParams,
+        compiled: &CompiledService,
+    ) -> Result<(), Error> {
+        use kube::api::DynamicObject;
+
         // Gateway
         let gw_ar = Gateway::api_resource();
         if let Some(ref gateway) = compiled.ingress.gateway {
             let name = gateway.metadata.name.clone();
-            let json = serde_json::to_value(gateway)
-                .map_err(|e| Error::serialization(format!("Gateway: {}", e)))?;
+            let json = serialize_resource("Gateway", gateway)?;
             let api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), namespace, &gw_ar);
             let params = params.clone();
@@ -376,8 +451,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let route_ar = HttpRoute::api_resource();
         if let Some(ref route) = compiled.ingress.http_route {
             let name = route.metadata.name.clone();
-            let json = serde_json::to_value(route)
-                .map_err(|e| Error::serialization(format!("HTTPRoute: {}", e)))?;
+            let json = serialize_resource("HTTPRoute", route)?;
             let api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), namespace, &route_ar);
             let params = params.clone();
@@ -392,8 +466,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         let cert_ar = Certificate::api_resource();
         if let Some(ref cert) = compiled.ingress.certificate {
             let name = cert.metadata.name.clone();
-            let json = serde_json::to_value(cert)
-                .map_err(|e| Error::serialization(format!("Certificate: {}", e)))?;
+            let json = serialize_resource("Certificate", cert)?;
             let api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), namespace, &cert_ar);
             let params = params.clone();
@@ -404,11 +477,26 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
+        Ok(())
+    }
+
+    /// Collect futures for waypoint resources (Waypoint gateway and policies)
+    fn collect_waypoint_futures(
+        &self,
+        futures: &mut Vec<ApplyFuture>,
+        namespace: &str,
+        params: &PatchParams,
+        compiled: &CompiledService,
+    ) -> Result<(), Error> {
+        use kube::api::DynamicObject;
+
+        let gw_ar = Gateway::api_resource();
+        let authz_ar = AuthorizationPolicy::api_resource();
+
         // Waypoint Gateway (for east-west L7 policies via Istio ambient mesh)
         if let Some(ref gateway) = compiled.waypoint.gateway {
             let name = gateway.metadata.name.clone();
-            let json = serde_json::to_value(gateway)
-                .map_err(|e| Error::serialization(format!("Waypoint Gateway: {}", e)))?;
+            let json = serialize_resource("Waypoint Gateway", gateway)?;
             let api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), namespace, &gw_ar);
             let params = params.clone();
@@ -424,9 +512,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         // Without this, mesh-default-deny blocks traffic before it reaches the waypoint
         if let Some(ref policy) = compiled.waypoint.allow_to_waypoint_policy {
             let name = policy.metadata.name.clone();
-            let json = serde_json::to_value(policy).map_err(|e| {
-                Error::serialization(format!("Waypoint AuthorizationPolicy: {}", e))
-            })?;
+            let json = serialize_resource("Waypoint AuthorizationPolicy", policy)?;
             let api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), namespace, &authz_ar);
             let params = params.clone();
@@ -437,21 +523,19 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }));
         }
 
-        // Execute all patches in parallel
-        let count = futures.len();
-        if count > 0 {
-            debug!(count = count, "applying resources in parallel");
-            try_join_all(futures).await?;
-        }
-
-        info!(
-            service = %service_name,
-            namespace = %namespace,
-            resources = count,
-            "applied compiled resources"
-        );
         Ok(())
     }
+}
+
+/// Serialize a Kubernetes resource to JSON Value for patching
+///
+/// This helper reduces repetitive serialization error handling throughout
+/// the apply_compiled_service function.
+fn serialize_resource<T: serde::Serialize>(
+    name: &str,
+    resource: &T,
+) -> Result<serde_json::Value, Error> {
+    serde_json::to_value(resource).map_err(|e| Error::serialization(format!("{}: {}", name, e)))
 }
 
 // =============================================================================
@@ -841,83 +925,149 @@ pub fn cleanup_external_service(external: &LatticeExternalService, ctx: &Service
 // Status update helpers
 // =============================================================================
 
+/// Status update configuration for LatticeService
+struct ServiceStatusUpdate<'a> {
+    phase: ServicePhase,
+    message: &'a str,
+    condition_type: &'a str,
+    condition_status: ConditionStatus,
+    reason: &'a str,
+    set_compiled_at: bool,
+}
+
+impl<'a> ServiceStatusUpdate<'a> {
+    fn compiling() -> Self {
+        Self {
+            phase: ServicePhase::Compiling,
+            message: "Compiling service dependencies",
+            condition_type: "Compiling",
+            condition_status: ConditionStatus::True,
+            reason: "DependencyCheck",
+            set_compiled_at: false,
+        }
+    }
+
+    fn ready() -> Self {
+        Self {
+            phase: ServicePhase::Ready,
+            message: "Service is operational",
+            condition_type: "Ready",
+            condition_status: ConditionStatus::True,
+            reason: "ServiceReady",
+            set_compiled_at: true,
+        }
+    }
+
+    fn failed(message: &'a str) -> Self {
+        Self {
+            phase: ServicePhase::Failed,
+            message,
+            condition_type: "Ready",
+            condition_status: ConditionStatus::False,
+            reason: "ValidationFailed",
+            set_compiled_at: false,
+        }
+    }
+}
+
+/// Update LatticeService status with the given configuration
+async fn update_service_status(
+    service: &LatticeService,
+    ctx: &ServiceContext,
+    update: ServiceStatusUpdate<'_>,
+) -> Result<(), Error> {
+    let name = service.name_any();
+    let namespace = service.namespace().unwrap_or_default();
+
+    let mut status = LatticeServiceStatus::with_phase(update.phase)
+        .message(update.message)
+        .condition(Condition::new(
+            update.condition_type,
+            update.condition_status,
+            update.reason,
+            update.message,
+        ));
+
+    if update.set_compiled_at {
+        status = status.compiled_at(Utc::now());
+    }
+
+    ctx.kube
+        .patch_service_status(&name, &namespace, &status)
+        .await
+}
+
+/// Convenience wrapper for compiling status
 async fn update_service_status_compiling(
     service: &LatticeService,
     ctx: &ServiceContext,
 ) -> Result<(), Error> {
-    let name = service.name_any();
-    let namespace = service.namespace().unwrap_or_default();
-    let status = LatticeServiceStatus::with_phase(ServicePhase::Compiling)
-        .message("Compiling service dependencies")
-        .condition(Condition::new(
-            "Compiling",
-            ConditionStatus::True,
-            "DependencyCheck",
-            "Checking service dependencies",
-        ));
-
-    ctx.kube
-        .patch_service_status(&name, &namespace, &status)
-        .await
+    update_service_status(service, ctx, ServiceStatusUpdate::compiling()).await
 }
 
+/// Convenience wrapper for ready status
 async fn update_service_status_ready(
     service: &LatticeService,
     ctx: &ServiceContext,
 ) -> Result<(), Error> {
-    let name = service.name_any();
-    let namespace = service.namespace().unwrap_or_default();
-    let status = LatticeServiceStatus::with_phase(ServicePhase::Ready)
-        .message("Service is operational")
-        .compiled_at(Utc::now())
-        .condition(Condition::new(
-            "Ready",
-            ConditionStatus::True,
-            "ServiceReady",
-            "All dependencies resolved",
-        ));
-
-    ctx.kube
-        .patch_service_status(&name, &namespace, &status)
-        .await
+    update_service_status(service, ctx, ServiceStatusUpdate::ready()).await
 }
 
+/// Convenience wrapper for failed status
 async fn update_service_status_failed(
     service: &LatticeService,
     ctx: &ServiceContext,
     message: &str,
 ) -> Result<(), Error> {
-    let name = service.name_any();
-    let namespace = service.namespace().unwrap_or_default();
-    let status = LatticeServiceStatus::with_phase(ServicePhase::Failed)
-        .message(message)
-        .condition(Condition::new(
-            "Ready",
-            ConditionStatus::False,
-            "ValidationFailed",
-            message,
-        ));
-
-    ctx.kube
-        .patch_service_status(&name, &namespace, &status)
-        .await
+    update_service_status(service, ctx, ServiceStatusUpdate::failed(message)).await
 }
 
-async fn update_external_status_ready(
+/// Status update configuration for LatticeExternalService
+struct ExternalStatusUpdate<'a> {
+    phase: crate::crd::ExternalServicePhase,
+    message: &'a str,
+    condition_type: &'a str,
+    condition_status: ConditionStatus,
+    reason: &'a str,
+}
+
+impl<'a> ExternalStatusUpdate<'a> {
+    fn ready() -> Self {
+        Self {
+            phase: crate::crd::ExternalServicePhase::Ready,
+            message: "External service is configured",
+            condition_type: "Ready",
+            condition_status: ConditionStatus::True,
+            reason: "EndpointsConfigured",
+        }
+    }
+
+    fn failed(message: &'a str) -> Self {
+        Self {
+            phase: crate::crd::ExternalServicePhase::Failed,
+            message,
+            condition_type: "Ready",
+            condition_status: ConditionStatus::False,
+            reason: "ValidationFailed",
+        }
+    }
+}
+
+/// Update LatticeExternalService status with the given configuration
+async fn update_external_status(
     external: &LatticeExternalService,
     ctx: &ServiceContext,
+    update: ExternalStatusUpdate<'_>,
 ) -> Result<(), Error> {
-    use crate::crd::ExternalServicePhase;
-
     let name = external.name_any();
     let namespace = external.namespace().unwrap_or_default();
-    let status = LatticeExternalServiceStatus::with_phase(ExternalServicePhase::Ready)
-        .message("External service is configured")
+    let status = LatticeExternalServiceStatus::with_phase(update.phase)
+        .message(update.message)
         .condition(Condition::new(
-            "Ready",
-            ConditionStatus::True,
-            "EndpointsConfigured",
-            "All endpoints are configured",
+            update.condition_type,
+            update.condition_status,
+            update.reason,
+            update.message,
         ));
 
     ctx.kube
@@ -925,27 +1075,21 @@ async fn update_external_status_ready(
         .await
 }
 
+/// Convenience wrapper for external ready status
+async fn update_external_status_ready(
+    external: &LatticeExternalService,
+    ctx: &ServiceContext,
+) -> Result<(), Error> {
+    update_external_status(external, ctx, ExternalStatusUpdate::ready()).await
+}
+
+/// Convenience wrapper for external failed status
 async fn update_external_status_failed(
     external: &LatticeExternalService,
     ctx: &ServiceContext,
     message: &str,
 ) -> Result<(), Error> {
-    use crate::crd::ExternalServicePhase;
-
-    let name = external.name_any();
-    let namespace = external.namespace().unwrap_or_default();
-    let status = LatticeExternalServiceStatus::with_phase(ExternalServicePhase::Failed)
-        .message(message)
-        .condition(Condition::new(
-            "Ready",
-            ConditionStatus::False,
-            "ValidationFailed",
-            message,
-        ));
-
-    ctx.kube
-        .patch_external_service_status(&name, &namespace, &status)
-        .await
+    update_external_status(external, ctx, ExternalStatusUpdate::failed(message)).await
 }
 
 // =============================================================================

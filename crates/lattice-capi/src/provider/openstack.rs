@@ -12,11 +12,9 @@ use super::{
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
     InfrastructureRef, Provider, WorkerPoolConfig,
 };
+use crate::constants::{DEFAULT_NODE_CIDR_OPENSTACK, OPENSTACK_API_VERSION};
 use lattice_common::crd::{LatticeCluster, OpenStackConfig, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result, CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET};
-
-const OPENSTACK_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta1";
-const DEFAULT_NODE_CIDR: &str = "10.6.0.0/24";
 
 /// Configuration for generating an OpenStack machine template
 struct MachineTemplateConfig<'a> {
@@ -75,7 +73,7 @@ impl OpenStackProvider {
         let node_cidr = cfg
             .node_cidr
             .clone()
-            .unwrap_or_else(|| DEFAULT_NODE_CIDR.to_string());
+            .unwrap_or_else(|| DEFAULT_NODE_CIDR_OPENSTACK.to_string());
 
         // Use filter.name for network lookup (more flexible than requiring UUID)
         let mut spec = serde_json::json!({

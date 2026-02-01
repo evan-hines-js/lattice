@@ -2,6 +2,7 @@
 //!
 //! This module handles the creation and running of all controllers.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -78,18 +79,21 @@ pub async fn run_controllers(
     tokio::select! {
         _ = cloud_provider_controller => tracing::info!("CloudProvider controller completed"),
         _ = secrets_provider_controller => tracing::info!("SecretsProvider controller completed"),
-        _ = async {
-            if let Some(ctrl) = cluster_controller { ctrl.await; }
-            else { std::future::pending::<()>().await; }
-        } => tracing::info!("Cluster controller completed"),
-        _ = async {
-            if let Some(ctrl) = service_controller { ctrl.await; }
-            else { std::future::pending::<()>().await; }
-        } => tracing::info!("Service controller completed"),
-        _ = async {
-            if let Some(ctrl) = external_controller { ctrl.await; }
-            else { std::future::pending::<()>().await; }
-        } => tracing::info!("External service controller completed"),
+        _ = run_optional_controller(cluster_controller) => tracing::info!("Cluster controller completed"),
+        _ = run_optional_controller(service_controller) => tracing::info!("Service controller completed"),
+        _ = run_optional_controller(external_controller) => tracing::info!("External service controller completed"),
+    }
+}
+
+/// Run an optional controller, or wait forever if None.
+///
+/// This helper consolidates the pattern of conditionally running a controller
+/// based on whether it was enabled. When the controller is None, it simply
+/// waits forever (pending), allowing tokio::select! to wait on other branches.
+async fn run_optional_controller<F: Future<Output = ()>>(controller: Option<F>) {
+    match controller {
+        Some(ctrl) => ctrl.await,
+        None => std::future::pending::<()>().await,
     }
 }
 

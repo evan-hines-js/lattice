@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 
 use crate::auth::UserIdentity;
 use crate::error::{Error, Result};
+use crate::is_local_resource;
 use lattice_common::crd::CedarPolicy;
 use lattice_common::INHERITED_LABEL;
 
@@ -89,14 +90,7 @@ impl PolicyEngine {
         let local_policies: Vec<_> = all_policies
             .items
             .into_iter()
-            .filter(|p| {
-                p.metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| l.get(INHERITED_LABEL))
-                    .map(|v| v != "true")
-                    .unwrap_or(true)
-            })
+            .filter(|p| is_local_resource(&p.metadata))
             .collect();
 
         let mut policy_set = PolicySet::new();
@@ -225,16 +219,16 @@ impl PolicyEngine {
         policy_set: &PolicySet,
     ) -> Result<()> {
         // Build principal - try as user first, if groups exist, also check group membership
-        let principal = build_user_uid(&identity.username);
+        let principal = build_user_uid(&identity.username)?;
 
         // Build action
-        let action_uid = build_action_uid(action);
+        let action_uid = build_action_uid(action)?;
 
         // Build resource
-        let resource = build_cluster_uid(cluster);
+        let resource = build_cluster_uid(cluster)?;
 
         // Build entities - user and their group memberships
-        let entities = build_entities(identity, cluster);
+        let entities = build_entities(identity, cluster)?;
 
         // Build context (empty for now, could add request metadata)
         let context = Context::empty();
@@ -320,46 +314,58 @@ impl Default for PolicyEngine {
     }
 }
 
+/// Build an entity UID for a given type and ID
+///
+/// # Arguments
+/// * `type_name` - The Cedar type name (e.g., "User", "Group", "Action", "Cluster")
+/// * `id` - The entity identifier
+///
+/// # Returns
+/// Result containing the EntityUid or an error if the type name is invalid
+fn build_entity_uid(type_name: &str, id: &str) -> Result<EntityUid> {
+    let full_type_name = format!("{}::{}", NAMESPACE, type_name);
+    let entity_type = EntityTypeName::from_str(&full_type_name).map_err(|e| {
+        Error::Internal(format!(
+            "Invalid Cedar entity type name '{}': {}",
+            full_type_name, e
+        ))
+    })?;
+    let entity_id = EntityId::from_str(id)
+        .map_err(|e| Error::Internal(format!("Invalid Cedar entity ID '{}': {}", id, e)))?;
+    Ok(EntityUid::from_type_name_and_id(entity_type, entity_id))
+}
+
 /// Build a User entity UID
-fn build_user_uid(username: &str) -> EntityUid {
-    let type_name = EntityTypeName::from_str(&format!("{}::User", NAMESPACE))
-        .expect("User type name should be valid");
-    let id = EntityId::from_str(username).expect("username should be valid entity ID");
-    EntityUid::from_type_name_and_id(type_name, id)
+fn build_user_uid(username: &str) -> Result<EntityUid> {
+    build_entity_uid("User", username)
 }
 
 /// Build a Group entity UID
-fn build_group_uid(group: &str) -> EntityUid {
-    let type_name = EntityTypeName::from_str(&format!("{}::Group", NAMESPACE))
-        .expect("Group type name should be valid");
-    let id = EntityId::from_str(group).expect("group should be valid entity ID");
-    EntityUid::from_type_name_and_id(type_name, id)
+fn build_group_uid(group: &str) -> Result<EntityUid> {
+    build_entity_uid("Group", group)
 }
 
 /// Build an Action entity UID
-fn build_action_uid(action: &str) -> EntityUid {
-    let type_name = EntityTypeName::from_str(&format!("{}::Action", NAMESPACE))
-        .expect("Action type name should be valid");
-    let id = EntityId::from_str(action).expect("action should be valid entity ID");
-    EntityUid::from_type_name_and_id(type_name, id)
+fn build_action_uid(action: &str) -> Result<EntityUid> {
+    build_entity_uid("Action", action)
 }
 
 /// Build a Cluster entity UID
-fn build_cluster_uid(cluster: &str) -> EntityUid {
-    let type_name = EntityTypeName::from_str(&format!("{}::Cluster", NAMESPACE))
-        .expect("Cluster type name should be valid");
-    let id = EntityId::from_str(cluster).expect("cluster should be valid entity ID");
-    EntityUid::from_type_name_and_id(type_name, id)
+fn build_cluster_uid(cluster: &str) -> Result<EntityUid> {
+    build_entity_uid("Cluster", cluster)
 }
 
 /// Build the entities set for authorization
 ///
 /// Creates entities for the user, their groups, and the cluster.
-fn build_entities(identity: &UserIdentity, cluster: &str) -> Entities {
+fn build_entities(identity: &UserIdentity, cluster: &str) -> Result<Entities> {
     let mut entities = Vec::new();
 
     // Create group entities
-    let group_uids: Vec<EntityUid> = identity.groups.iter().map(|g| build_group_uid(g)).collect();
+    let mut group_uids = Vec::new();
+    for group in &identity.groups {
+        group_uids.push(build_group_uid(group)?);
+    }
 
     for group_uid in &group_uids {
         let group_entity = Entity::new(
@@ -367,31 +373,32 @@ fn build_entities(identity: &UserIdentity, cluster: &str) -> Entities {
             HashMap::new(), // No attributes
             HashSet::new(), // Groups don't have parents in our model
         )
-        .expect("group entity should be valid");
+        .map_err(|e| Error::Internal(format!("Failed to create group entity: {}", e)))?;
         entities.push(group_entity);
     }
 
     // Create user entity with group membership
-    let user_uid = build_user_uid(&identity.username);
+    let user_uid = build_user_uid(&identity.username)?;
     let user_entity = Entity::new(
         user_uid,
         HashMap::new(),                                 // No attributes
         group_uids.into_iter().collect::<HashSet<_>>(), // User is a member of groups
     )
-    .expect("user entity should be valid");
+    .map_err(|e| Error::Internal(format!("Failed to create user entity: {}", e)))?;
     entities.push(user_entity);
 
     // Create cluster entity
-    let cluster_uid = build_cluster_uid(cluster);
+    let cluster_uid = build_cluster_uid(cluster)?;
     let cluster_entity = Entity::new(
         cluster_uid,
         HashMap::new(), // No attributes (could add labels here)
         HashSet::new(), // No parent clusters in this model
     )
-    .expect("cluster entity should be valid");
+    .map_err(|e| Error::Internal(format!("Failed to create cluster entity: {}", e)))?;
     entities.push(cluster_entity);
 
-    Entities::from_entities(entities, None).expect("entities should be valid")
+    Entities::from_entities(entities, None)
+        .map_err(|e| Error::Internal(format!("Failed to create entities set: {}", e)))
 }
 
 /// Helper trait for parsing entity UIDs
@@ -430,28 +437,28 @@ mod tests {
 
     #[test]
     fn test_build_user_uid() {
-        let uid = build_user_uid("alice@example.com");
+        let uid = build_user_uid("alice@example.com").unwrap();
         assert!(uid.to_string().contains("User"));
         assert!(uid.to_string().contains("alice@example.com"));
     }
 
     #[test]
     fn test_build_group_uid() {
-        let uid = build_group_uid("admins");
+        let uid = build_group_uid("admins").unwrap();
         assert!(uid.to_string().contains("Group"));
         assert!(uid.to_string().contains("admins"));
     }
 
     #[test]
     fn test_build_action_uid() {
-        let uid = build_action_uid("get");
+        let uid = build_action_uid("get").unwrap();
         assert!(uid.to_string().contains("Action"));
         assert!(uid.to_string().contains("get"));
     }
 
     #[test]
     fn test_build_cluster_uid() {
-        let uid = build_cluster_uid("prod-frontend");
+        let uid = build_cluster_uid("prod-frontend").unwrap();
         assert!(uid.to_string().contains("Cluster"));
         assert!(uid.to_string().contains("prod-frontend"));
     }
@@ -463,9 +470,16 @@ mod tests {
             groups: vec!["admins".to_string(), "developers".to_string()],
         };
 
-        let entities = build_entities(&identity, "prod-cluster");
+        let entities = build_entities(&identity, "prod-cluster").unwrap();
         // Should have: 1 user + 2 groups + 1 cluster = 4 entities
         assert_eq!(entities.iter().count(), 4);
+    }
+
+    #[test]
+    fn test_build_entity_uid_generic() {
+        let uid = build_entity_uid("User", "test@example.com").unwrap();
+        assert!(uid.to_string().contains("User"));
+        assert!(uid.to_string().contains("test@example.com"));
     }
 
     #[tokio::test]

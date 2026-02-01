@@ -19,13 +19,41 @@ use tracing::{info, trace, warn};
 use crate::Error;
 
 // =============================================================================
-// HasApiResource Trait
+// ApiResource Building - When to Use Each Method
+// =============================================================================
+//
+// There are three ways to build an `ApiResource` in this module:
+//
+// 1. **`HasApiResource` trait** - Use for types with compile-time known API version/kind.
+//    Best for: CRDs where you control the type definition and want type-safe API access.
+//    Example: `AuthorizationPolicy::api_resource()` gives consistent apiVersion everywhere.
+//
+// 2. **`build_api_resource()`** - Use when you have a specific apiVersion string.
+//    Best for: Processing manifests where apiVersion is extracted from YAML/JSON.
+//    Example: Parsing a manifest with `apiVersion: apps/v1` and `kind: Deployment`.
+//    Note: The version you provide is used exactly, which may not match storage version.
+//
+// 3. **`build_api_resource_with_discovery()`** - Use for querying the API server.
+//    Best for: Listing/getting resources where you want the server's storage version.
+//    Example: Listing CAPI Clusters - discovers v1beta2 even if CRD supports multiple versions.
+//    Note: Requires async + API call, use sparingly and cache the result if repeated.
+//
+// Decision tree:
+// - Know the exact apiVersion at compile time? -> HasApiResource trait
+// - Have apiVersion from a manifest/config? -> build_api_resource()
+// - Need to query API and want server's preferred version? -> build_api_resource_with_discovery()
 // =============================================================================
 
 /// Trait for types that have a known API group, version, and kind.
 ///
 /// Implement this for CRD types to derive their `ApiResource` from their
 /// internal constants, ensuring consistency between serialization and API calls.
+///
+/// **When to use**: Types where the API version is known at compile time and you
+/// want type-safe, consistent API access. The version is baked into the type.
+///
+/// For runtime version discovery (e.g., CAPI resources that may be at different
+/// versions), use `build_api_resource_with_discovery()` instead.
 ///
 /// # Example
 /// ```ignore
@@ -102,8 +130,16 @@ pub async fn discover_api_version(
 
 /// Build an ApiResource using discovery to find the correct version.
 ///
-/// This is the preferred way to build ApiResource for CAPI types since it
-/// automatically uses the storage version from the API server.
+/// **When to use**: For querying resources where you need the API server's
+/// preferred/storage version. This is essential for CAPI types where different
+/// resources in the same group may exist at different versions (e.g.,
+/// KubeadmControlPlane at v1beta2, RKE2ControlPlane at v1beta1).
+///
+/// **Trade-offs**: Requires an async API call, so cache the result if making
+/// multiple calls for the same resource type.
+///
+/// For manifests with explicit apiVersion, use `build_api_resource()` instead.
+/// For compile-time known types, implement `HasApiResource` trait instead.
 pub async fn build_api_resource_with_discovery(
     client: &Client,
     group: &str,
@@ -124,8 +160,19 @@ pub async fn build_api_resource_with_discovery(
 
 /// Build an ApiResource from a known apiVersion and kind.
 ///
-/// Use this when you have a specific apiVersion (e.g., from a manifest).
-/// For API queries where you want the storage version, use `build_api_resource_with_discovery`.
+/// **When to use**: When you have an explicit apiVersion string, typically from
+/// parsing a manifest (YAML/JSON). The version you provide is used exactly.
+///
+/// **Note**: This may not match the API server's storage version. For querying
+/// resources where version matters, use `build_api_resource_with_discovery()`.
+/// For compile-time known types, implement `HasApiResource` trait instead.
+///
+/// # Example
+/// ```ignore
+/// // From a parsed manifest
+/// let ar = build_api_resource("apps/v1", "Deployment");
+/// let api: Api<DynamicObject> = Api::namespaced_with(client, "default", &ar);
+/// ```
 pub fn build_api_resource(api_version: &str, kind: &str) -> ApiResource {
     let (group, version) = parse_api_version(api_version);
     ApiResource {

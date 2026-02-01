@@ -6,6 +6,7 @@
 //! - CapiInstaller for installing/upgrading CAPI providers via clusterctl
 
 pub mod client;
+pub mod constants;
 pub mod installer;
 pub mod provider;
 

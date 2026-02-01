@@ -12,10 +12,9 @@ use super::{
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
     InfrastructureRef, Provider, WorkerPoolConfig,
 };
+use crate::constants::AWS_API_VERSION;
 use lattice_common::crd::{AwsConfig, LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result, AWS_CAPA_CREDENTIALS_SECRET, CAPA_NAMESPACE};
-
-const AWS_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta2";
 
 /// Configuration for generating an AWS machine template
 struct MachineTemplateConfig<'a> {

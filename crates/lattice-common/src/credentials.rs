@@ -2,12 +2,17 @@
 //!
 //! Data structures for cloud provider credentials used by CAPI.
 //! Each credential type can serialize itself to a K8s Secret.
+//!
+//! All credential types implement the `CredentialProvider` trait, which provides
+//! a consistent interface for loading from environment variables, K8s secrets,
+//! and serializing to K8s secrets.
 
 use std::collections::{BTreeMap, HashMap};
 
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use thiserror::Error;
+use tracing::warn;
 
 use crate::{
     AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET, PROVIDER_LABEL,
@@ -26,6 +31,69 @@ pub enum CredentialError {
     EnvVarNotSet(&'static str),
 }
 
+/// Trait for credential types that can be loaded from environment or K8s secrets.
+///
+/// All cloud provider credential types (AWS, Proxmox, OpenStack) implement this trait
+/// to provide a consistent interface for credential management.
+///
+/// # Example
+/// ```ignore
+/// use lattice_common::credentials::{CredentialProvider, AwsCredentials};
+///
+/// // Load from environment
+/// let creds = AwsCredentials::from_env()?;
+///
+/// // Create K8s secret for storage
+/// let secret = creds.to_k8s_secret();
+///
+/// // Load from K8s secret data
+/// let restored = AwsCredentials::from_secret(&secret_data)?;
+/// ```
+pub trait CredentialProvider: Sized {
+    /// The provider identifier used in labels (e.g., "aws", "proxmox", "openstack")
+    const PROVIDER_TYPE: &'static str;
+    /// The default secret name for this credential type
+    const SECRET_NAME: &'static str;
+
+    /// Load credentials from environment variables.
+    ///
+    /// Returns `Err(CredentialError::EnvVarNotSet)` if required variables are missing.
+    fn from_env() -> Result<Self, CredentialError>;
+
+    /// Load credentials from a K8s secret's string data.
+    ///
+    /// The `data` parameter contains the secret's stringData as key-value pairs.
+    /// Returns `Err(CredentialError::MissingField)` if required fields are missing.
+    fn from_secret(data: &HashMap<String, String>) -> Result<Self, CredentialError>;
+
+    /// Convert to a K8s Secret for storage in the lattice-system namespace.
+    ///
+    /// Creates a secret with the standard name and appropriate provider label.
+    fn to_k8s_secret(&self) -> Secret;
+}
+
+/// Helper to build a K8s Secret with common metadata.
+fn build_credential_secret(
+    secret_name: &str,
+    provider_type: &str,
+    string_data: BTreeMap<String, String>,
+) -> Secret {
+    let mut labels = BTreeMap::new();
+    labels.insert(PROVIDER_LABEL.to_string(), provider_type.to_string());
+
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(secret_name.to_string()),
+            namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        type_: Some("Opaque".to_string()),
+        string_data: Some(string_data),
+        ..Default::default()
+    }
+}
+
 /// AWS credentials for CAPA provider
 #[derive(Debug, Clone)]
 pub struct AwsCredentials {
@@ -39,9 +107,11 @@ pub struct AwsCredentials {
     pub session_token: Option<String>,
 }
 
-impl AwsCredentials {
-    /// Load credentials from environment variables
-    pub fn from_env() -> Result<Self, CredentialError> {
+impl CredentialProvider for AwsCredentials {
+    const PROVIDER_TYPE: &'static str = "aws";
+    const SECRET_NAME: &'static str = AWS_CREDENTIALS_SECRET;
+
+    fn from_env() -> Result<Self, CredentialError> {
         Ok(Self {
             access_key_id: std::env::var("AWS_ACCESS_KEY_ID")
                 .map_err(|_| CredentialError::EnvVarNotSet("AWS_ACCESS_KEY_ID"))?,
@@ -54,25 +124,41 @@ impl AwsCredentials {
         })
     }
 
-    /// Load credentials from a K8s secret's string data
-    pub fn from_secret(secret: &HashMap<String, String>) -> Result<Self, CredentialError> {
+    fn from_secret(data: &HashMap<String, String>) -> Result<Self, CredentialError> {
         Ok(Self {
-            access_key_id: secret
+            access_key_id: data
                 .get("AWS_ACCESS_KEY_ID")
                 .cloned()
                 .ok_or(CredentialError::MissingField("AWS_ACCESS_KEY_ID"))?,
-            secret_access_key: secret
+            secret_access_key: data
                 .get("AWS_SECRET_ACCESS_KEY")
                 .cloned()
                 .ok_or(CredentialError::MissingField("AWS_SECRET_ACCESS_KEY"))?,
-            region: secret
+            region: data
                 .get("AWS_REGION")
                 .cloned()
                 .ok_or(CredentialError::MissingField("AWS_REGION"))?,
-            session_token: secret.get("AWS_SESSION_TOKEN").cloned(),
+            session_token: data.get("AWS_SESSION_TOKEN").cloned(),
         })
     }
 
+    fn to_k8s_secret(&self) -> Secret {
+        let mut string_data = BTreeMap::new();
+        string_data.insert("AWS_ACCESS_KEY_ID".to_string(), self.access_key_id.clone());
+        string_data.insert(
+            "AWS_SECRET_ACCESS_KEY".to_string(),
+            self.secret_access_key.clone(),
+        );
+        string_data.insert("AWS_REGION".to_string(), self.region.clone());
+        if let Some(ref token) = self.session_token {
+            string_data.insert("AWS_SESSION_TOKEN".to_string(), token.clone());
+        }
+
+        build_credential_secret(Self::SECRET_NAME, Self::PROVIDER_TYPE, string_data)
+    }
+}
+
+impl AwsCredentials {
     /// Generate AWS_B64ENCODED_CREDENTIALS for clusterctl
     ///
     /// clusterctl requires credentials in a base64-encoded INI profile format.
@@ -91,35 +177,6 @@ impl AwsCredentials {
 
         STANDARD.encode(profile)
     }
-
-    /// Convert to a K8s Secret for storage in lattice-system namespace
-    pub fn to_k8s_secret(&self) -> Secret {
-        let mut string_data = BTreeMap::new();
-        string_data.insert("AWS_ACCESS_KEY_ID".to_string(), self.access_key_id.clone());
-        string_data.insert(
-            "AWS_SECRET_ACCESS_KEY".to_string(),
-            self.secret_access_key.clone(),
-        );
-        string_data.insert("AWS_REGION".to_string(), self.region.clone());
-        if let Some(ref token) = self.session_token {
-            string_data.insert("AWS_SESSION_TOKEN".to_string(), token.clone());
-        }
-
-        let mut labels = BTreeMap::new();
-        labels.insert(PROVIDER_LABEL.to_string(), "aws".to_string());
-
-        Secret {
-            metadata: ObjectMeta {
-                name: Some(AWS_CREDENTIALS_SECRET.to_string()),
-                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-                labels: Some(labels),
-                ..Default::default()
-            },
-            type_: Some("Opaque".to_string()),
-            string_data: Some(string_data),
-            ..Default::default()
-        }
-    }
 }
 
 /// Proxmox credentials for CAPMOX provider
@@ -133,9 +190,11 @@ pub struct ProxmoxCredentials {
     pub secret: String,
 }
 
-impl ProxmoxCredentials {
-    /// Load credentials from environment variables
-    pub fn from_env() -> Result<Self, CredentialError> {
+impl CredentialProvider for ProxmoxCredentials {
+    const PROVIDER_TYPE: &'static str = "proxmox";
+    const SECRET_NAME: &'static str = PROXMOX_CREDENTIALS_SECRET;
+
+    fn from_env() -> Result<Self, CredentialError> {
         Ok(Self {
             url: std::env::var("PROXMOX_URL")
                 .map_err(|_| CredentialError::EnvVarNotSet("PROXMOX_URL"))?,
@@ -146,8 +205,7 @@ impl ProxmoxCredentials {
         })
     }
 
-    /// Load credentials from a K8s secret's string data
-    pub fn from_secret(data: &HashMap<String, String>) -> Result<Self, CredentialError> {
+    fn from_secret(data: &HashMap<String, String>) -> Result<Self, CredentialError> {
         Ok(Self {
             url: data
                 .get("url")
@@ -164,27 +222,13 @@ impl ProxmoxCredentials {
         })
     }
 
-    /// Convert to a K8s Secret for storage in lattice-system namespace
-    pub fn to_k8s_secret(&self) -> Secret {
+    fn to_k8s_secret(&self) -> Secret {
         let mut string_data = BTreeMap::new();
         string_data.insert("url".to_string(), self.url.clone());
         string_data.insert("token".to_string(), self.token.clone());
         string_data.insert("secret".to_string(), self.secret.clone());
 
-        let mut labels = BTreeMap::new();
-        labels.insert(PROVIDER_LABEL.to_string(), "proxmox".to_string());
-
-        Secret {
-            metadata: ObjectMeta {
-                name: Some(PROXMOX_CREDENTIALS_SECRET.to_string()),
-                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-                labels: Some(labels),
-                ..Default::default()
-            },
-            type_: Some("Opaque".to_string()),
-            string_data: Some(string_data),
-            ..Default::default()
-        }
+        build_credential_secret(Self::SECRET_NAME, Self::PROVIDER_TYPE, string_data)
     }
 }
 
@@ -199,13 +243,11 @@ pub struct OpenStackCredentials {
     pub cacert: Option<String>,
 }
 
-impl OpenStackCredentials {
-    /// Load credentials from environment variables
-    ///
-    /// Supports two modes:
-    /// 1. OPENSTACK_CLOUD_CONFIG points to a clouds.yaml file
-    /// 2. Individual OS_* environment variables are used to build clouds.yaml
-    pub fn from_env() -> Result<Self, CredentialError> {
+impl CredentialProvider for OpenStackCredentials {
+    const PROVIDER_TYPE: &'static str = "openstack";
+    const SECRET_NAME: &'static str = OPENSTACK_CREDENTIALS_SECRET;
+
+    fn from_env() -> Result<Self, CredentialError> {
         let clouds_yaml = if let Ok(path) = std::env::var("OPENSTACK_CLOUD_CONFIG") {
             std::fs::read_to_string(&path).map_err(|_| {
                 CredentialError::EnvVarNotSet("OPENSTACK_CLOUD_CONFIG (file not readable)")
@@ -215,9 +257,22 @@ impl OpenStackCredentials {
         };
 
         let cloud_name = std::env::var("OS_CLOUD").unwrap_or_else(|_| "openstack".to_string());
-        let cacert = std::env::var("OPENSTACK_CACERT")
-            .ok()
-            .and_then(|path| std::fs::read_to_string(&path).ok());
+
+        // Load CA cert with proper error logging instead of silently ignoring failures
+        let cacert = match std::env::var("OPENSTACK_CACERT") {
+            Ok(path) => match std::fs::read_to_string(&path) {
+                Ok(content) => Some(content),
+                Err(e) => {
+                    warn!(
+                        path = %path,
+                        error = %e,
+                        "Failed to read OpenStack CA certificate file"
+                    );
+                    None
+                }
+            },
+            Err(_) => None,
+        };
 
         Ok(Self {
             clouds_yaml,
@@ -226,6 +281,33 @@ impl OpenStackCredentials {
         })
     }
 
+    fn from_secret(data: &HashMap<String, String>) -> Result<Self, CredentialError> {
+        Ok(Self {
+            clouds_yaml: data
+                .get("clouds.yaml")
+                .cloned()
+                .ok_or(CredentialError::MissingField("clouds.yaml"))?,
+            cloud_name: data
+                .get("cloud")
+                .cloned()
+                .unwrap_or_else(|| "openstack".to_string()),
+            cacert: data.get("cacert").cloned(),
+        })
+    }
+
+    fn to_k8s_secret(&self) -> Secret {
+        let mut string_data = BTreeMap::new();
+        string_data.insert("clouds.yaml".to_string(), self.clouds_yaml.clone());
+        string_data.insert("cloud".to_string(), self.cloud_name.clone());
+        if let Some(ref cacert) = self.cacert {
+            string_data.insert("cacert".to_string(), cacert.clone());
+        }
+
+        build_credential_secret(Self::SECRET_NAME, Self::PROVIDER_TYPE, string_data)
+    }
+}
+
+impl OpenStackCredentials {
     /// Build a clouds.yaml from individual OS_* environment variables
     fn build_clouds_yaml_from_env() -> Result<String, CredentialError> {
         let auth_url = std::env::var("OS_AUTH_URL")
@@ -258,46 +340,6 @@ impl OpenStackCredentials {
     interface: public
     identity_api_version: 3"#
         ))
-    }
-
-    /// Load credentials from a K8s secret's string data
-    pub fn from_secret(data: &HashMap<String, String>) -> Result<Self, CredentialError> {
-        Ok(Self {
-            clouds_yaml: data
-                .get("clouds.yaml")
-                .cloned()
-                .ok_or(CredentialError::MissingField("clouds.yaml"))?,
-            cloud_name: data
-                .get("cloud")
-                .cloned()
-                .unwrap_or_else(|| "openstack".to_string()),
-            cacert: data.get("cacert").cloned(),
-        })
-    }
-
-    /// Convert to a K8s Secret for storage in lattice-system namespace
-    pub fn to_k8s_secret(&self) -> Secret {
-        let mut string_data = BTreeMap::new();
-        string_data.insert("clouds.yaml".to_string(), self.clouds_yaml.clone());
-        string_data.insert("cloud".to_string(), self.cloud_name.clone());
-        if let Some(ref cacert) = self.cacert {
-            string_data.insert("cacert".to_string(), cacert.clone());
-        }
-
-        let mut labels = BTreeMap::new();
-        labels.insert(PROVIDER_LABEL.to_string(), "openstack".to_string());
-
-        Secret {
-            metadata: ObjectMeta {
-                name: Some(OPENSTACK_CREDENTIALS_SECRET.to_string()),
-                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-                labels: Some(labels),
-                ..Default::default()
-            },
-            type_: Some("Opaque".to_string()),
-            string_data: Some(string_data),
-            ..Default::default()
-        }
     }
 }
 

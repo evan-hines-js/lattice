@@ -129,8 +129,8 @@ async fn route_to_local_api(
         "Received response from local K8s API"
     );
 
-    let mut builder =
-        Response::builder().status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK));
+    let mut builder = Response::builder()
+        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
 
     if let Some(ct) = headers.get("content-type") {
         builder = builder.header("Content-Type", ct.to_str().unwrap_or("application/json"));
@@ -224,7 +224,9 @@ async fn get_k8s_client() -> Result<&'static reqwest::Client, Error> {
 
     // Try to set the client, but another thread may have beaten us
     let _ = K8S_CLIENT.set(client);
-    Ok(K8S_CLIENT.get().expect("client was just set"))
+    K8S_CLIENT
+        .get()
+        .ok_or_else(|| Error::Internal("Failed to initialize K8s HTTP client".into()))
 }
 
 /// Read the ServiceAccount token from the mounted volume

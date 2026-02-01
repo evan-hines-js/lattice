@@ -322,8 +322,7 @@ pub struct VipConfig {
     pub image: String,
 }
 
-/// Default kube-vip image
-const DEFAULT_KUBE_VIP_IMAGE: &str = "ghcr.io/kube-vip/kube-vip:v0.8.0";
+use crate::constants::DEFAULT_KUBE_VIP_IMAGE;
 
 impl VipConfig {
     /// Create a new VipConfig with defaults

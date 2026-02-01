@@ -37,6 +37,37 @@ pub async fn create_k8s_client() -> Result<kube::Client, kube::Error> {
     kube::Client::try_from(config)
 }
 
+/// Create a Kubernetes client with logging, returning None on failure.
+///
+/// Helper for cases where client creation failure should be logged and handled
+/// gracefully rather than propagated as an error.
+pub async fn create_k8s_client_logged(purpose: &str) -> Option<kube::Client> {
+    match create_k8s_client().await {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to create K8s client for {}", purpose);
+            None
+        }
+    }
+}
+
+/// Macro for getting a K8s client or returning early from a function.
+///
+/// Use this in async functions that should return early if client creation fails.
+/// The purpose string is used in the warning log message.
+#[macro_export]
+macro_rules! get_client_or_return {
+    ($purpose:expr) => {
+        match $crate::create_k8s_client().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to create K8s client for {}", $purpose);
+                return;
+            }
+        }
+    };
+}
+
 pub use client::{AgentClient, AgentClientConfig, AgentCredentials, CertificateError, ClientState};
 
 // Re-export protocol types from lattice_common
@@ -47,7 +78,7 @@ pub use pivot::{
     PivotError,
 };
 pub use subtree::SubtreeSender;
-pub use watch::{execute_watch, WatchRegistry};
+pub use watch::{build_k8s_error_response, execute_watch, WatchRegistry};
 
 // Re-export proto types for convenience
 pub use lattice_proto::{

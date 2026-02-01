@@ -39,7 +39,10 @@ use lattice_common::{
 };
 use lattice_infra::pki::{CertificateAuthority, CertificateAuthorityBundle};
 use lattice_infra::ServerMtlsConfig;
-use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};
+use lattice_proto::{
+    cell_command, CellCommand, DistributableResources as ProtoDistributableResources,
+    SyncDistributedResourcesCommand,
+};
 
 /// Configuration for cell servers
 #[derive(Debug, Clone)]
@@ -50,8 +53,10 @@ pub struct ParentConfig {
     pub bootstrap_addr: SocketAddr,
     /// Address for the gRPC server
     pub grpc_addr: SocketAddr,
-    /// Address for the K8s API proxy server
+    /// Address for the CAPI K8s API proxy server (read-only, pre-pivot)
     pub proxy_addr: SocketAddr,
+    /// Address for the authenticated K8s API proxy server (auth + Cedar)
+    pub auth_proxy_addr: SocketAddr,
     /// Bootstrap token TTL
     pub token_ttl: Duration,
     /// SANs for server certificates (hostnames/IPs that agents will use to connect)
@@ -73,6 +78,9 @@ impl Default for ParentConfig {
                 .parse()
                 .expect("hardcoded socket address is valid"),
             proxy_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_PROXY_PORT)
+                .parse()
+                .expect("hardcoded socket address is valid"),
+            auth_proxy_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_AUTH_PROXY_PORT)
                 .parse()
                 .expect("hardcoded socket address is valid"),
             token_ttl: Duration::from_secs(3600),
@@ -164,12 +172,14 @@ async fn push_resources_to_agents(
         command_id: uuid::Uuid::new_v4().to_string(),
         command: Some(cell_command::Command::SyncResources(
             SyncDistributedResourcesCommand {
-                cloud_providers: resources.cloud_providers.clone(),
-                secrets_providers: resources.secrets_providers.clone(),
-                secrets: resources.secrets.clone(),
+                resources: Some(ProtoDistributableResources {
+                    cloud_providers: resources.cloud_providers.clone(),
+                    secrets_providers: resources.secrets_providers.clone(),
+                    secrets: resources.secrets.clone(),
+                    cedar_policies: resources.cedar_policies.clone(),
+                    oidc_providers: resources.oidc_providers.clone(),
+                }),
                 full_sync,
-                cedar_policies: resources.cedar_policies.clone(),
-                oidc_providers: resources.oidc_providers.clone(),
             },
         )),
     };
@@ -744,10 +754,11 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         drop(ca_bundle);
 
         // Set proxy config for kubeconfig patching during unpivot
+        // Use auth proxy port so kubeconfigs can be used post-pivot with Cedar authorization
         let proxy_url = format!(
             "https://{}:{}",
             lattice_svc_dns(CELL_SERVICE_NAME),
-            self.config.proxy_addr.port()
+            self.config.auth_proxy_addr.port()
         );
         self.agent_registry
             .set_proxy_config(crate::connection::KubeconfigProxyConfig {

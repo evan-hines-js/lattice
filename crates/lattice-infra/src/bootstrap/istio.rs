@@ -327,39 +327,4 @@ mod tests {
         assert!(ports.contains(&"8443"));
         assert!(ports.contains(&"50051"));
     }
-
-    #[test]
-    fn test_split_yaml_documents_single() {
-        use crate::bootstrap::split_yaml_documents;
-        let yaml = "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test";
-        let docs = split_yaml_documents(yaml);
-        assert_eq!(docs.len(), 1);
-        assert!(docs[0].starts_with("---"));
-        assert!(docs[0].contains("kind: ConfigMap"));
-    }
-
-    #[test]
-    fn test_split_yaml_documents_multiple() {
-        use crate::bootstrap::split_yaml_documents;
-        let yaml = "---\napiVersion: v1\nkind: ConfigMap\n---\napiVersion: v1\nkind: Secret\n---\napiVersion: v1\nkind: Service";
-        let docs = split_yaml_documents(yaml);
-        assert_eq!(docs.len(), 3);
-    }
-
-    #[test]
-    fn test_split_yaml_documents_filters_empty() {
-        use crate::bootstrap::split_yaml_documents;
-        let yaml = "---\napiVersion: v1\nkind: ConfigMap\n---\n\n---\n# comment\n---\napiVersion: v1\nkind: Secret";
-        let docs = split_yaml_documents(yaml);
-        assert_eq!(docs.len(), 2);
-    }
-
-    #[test]
-    fn test_split_yaml_documents_adds_separator() {
-        use crate::bootstrap::split_yaml_documents;
-        let yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test";
-        let docs = split_yaml_documents(yaml);
-        assert_eq!(docs.len(), 1);
-        assert!(docs[0].starts_with("---"));
-    }
 }

@@ -155,17 +155,33 @@ pub async fn fetch_distributable_resources(
     })
 }
 
+/// Core serialization logic shared by both distribution functions.
+/// Strips metadata and serializes to JSON bytes.
+fn serialize_resource_core<T>(resource: &T, resource_name: &str) -> Result<Vec<u8>, ResourceError>
+where
+    T: serde::Serialize,
+{
+    serde_json::to_string(resource)
+        .map(|s| s.into_bytes())
+        .map_err(|e| {
+            ResourceError::Internal(format!("failed to serialize {}: {}", resource_name, e))
+        })
+}
+
 /// Serialize a Kubernetes resource for distribution, stripping cluster-specific metadata
 fn serialize_for_distribution<T>(resource: &T) -> Result<Vec<u8>, ResourceError>
 where
     T: serde::Serialize + Clone + Resource<DynamicType = ()>,
 {
     let mut clean = resource.clone();
+    let resource_name = clean
+        .meta()
+        .name
+        .clone()
+        .unwrap_or_else(|| "<unnamed>".to_string());
     lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
 
-    serde_json::to_string(&clean)
-        .map(|s| s.into_bytes())
-        .map_err(|e| ResourceError::Internal(format!("failed to serialize resource: {}", e)))
+    serialize_resource_core(&clean, &resource_name)
 }
 
 /// Serialize a resource for distribution with origin cluster prefix and labels.
@@ -173,7 +189,7 @@ where
 fn serialize_inherited_resource<T>(
     resource: &T,
     cluster_name: &str,
-    resource_type: &str,
+    _resource_type: &str,
 ) -> Result<Vec<u8>, ResourceError>
 where
     T: serde::Serialize + Clone + Resource<DynamicType = ()>,
@@ -182,7 +198,8 @@ where
     let original_name = clean.meta().name.clone().unwrap_or_default();
 
     // Prefix name with origin cluster: "global-root--admin-access"
-    clean.meta_mut().name = Some(format!("{}--{}", cluster_name, original_name));
+    let prefixed_name = format!("{}--{}", cluster_name, original_name);
+    clean.meta_mut().name = Some(prefixed_name.clone());
 
     // Strip cluster-specific metadata
     lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
@@ -193,11 +210,7 @@ where
     labels.insert(ORIGINAL_NAME_LABEL.to_string(), original_name);
     labels.insert(INHERITED_LABEL.to_string(), "true".to_string());
 
-    serde_json::to_string(&clean)
-        .map(|s| s.into_bytes())
-        .map_err(|e| {
-            ResourceError::Internal(format!("failed to serialize {}: {}", resource_type, e))
-        })
+    serialize_resource_core(&clean, &prefixed_name)
 }
 
 #[cfg(test)]

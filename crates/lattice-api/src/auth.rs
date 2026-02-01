@@ -22,6 +22,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
+use crate::is_local_resource;
 use lattice_common::crd::OIDCProvider;
 use lattice_common::INHERITED_LABEL;
 
@@ -181,22 +182,20 @@ impl OidcValidator {
 
         // Fetch inherited providers (from parent clusters)
         let inherited_lp = ListParams::default().labels(&format!("{}=true", INHERITED_LABEL));
-        let inherited: Option<OIDCProvider> = api
-            .list(&inherited_lp)
-            .await
-            .ok()
-            .and_then(|list| list.items.into_iter().next());
+        let inherited: Option<OIDCProvider> = match api.list(&inherited_lp).await {
+            Ok(list) => list.items.into_iter().next(),
+            Err(e) => {
+                warn!(error = %e, "Failed to fetch inherited OIDC providers");
+                None
+            }
+        };
 
         // Fetch local providers (not inherited)
         let all_providers = api.list(&Default::default()).await?;
-        let local: Option<OIDCProvider> = all_providers.items.into_iter().find(|p| {
-            p.metadata
-                .labels
-                .as_ref()
-                .and_then(|l| l.get(INHERITED_LABEL))
-                .map(|v| v != "true")
-                .unwrap_or(true)
-        });
+        let local: Option<OIDCProvider> = all_providers
+            .items
+            .into_iter()
+            .find(|p| is_local_resource(&p.metadata));
 
         // Determine which provider to use
         let (provider, source) = match (inherited, local) {

@@ -12,6 +12,35 @@
 //!
 //! The infrastructure components are designed to be stateless where possible,
 //! with persistence handled at the operator level (e.g., CA secrets stored in K8s).
+//!
+//! # Public API
+//!
+//! This crate exports the following types for external use:
+//!
+//! ## Bootstrap
+//! - [`InfrastructureConfig`]: Configuration for infrastructure manifest generation
+//! - [`IstioConfig`], [`IstioReconciler`]: Istio manifest generation
+//! - Cilium policy generators: [`generate_cilium_manifests`], [`generate_default_deny`], etc.
+//! - ESO generators: [`generate_eso`], [`eso_version`]
+//! - Core generators: [`generate_all`], [`generate_core`], [`generate_istio`]
+//!
+//! ## PKI
+//! - [`CertificateAuthority`]: CA operations for signing CSRs
+//! - [`PkiError`]: Error type for PKI operations
+//!
+//! ## mTLS
+//! - [`ServerMtlsConfig`], [`ClientMtlsConfig`]: TLS configuration for gRPC
+//! - [`MtlsError`]: Error type for mTLS operations
+//! - [`extract_cluster_id_from_cert`], [`verify_cert_chain`]: Certificate utilities
+//!
+//! # Internal Types (Not Exported)
+//!
+//! The following types are intentionally kept internal:
+//!
+//! - `CertificateInfo`: Used internally for certificate validity checking
+//! - `AgentCertRequest`: Used internally by agents for CSR generation
+//! - `CertificateAuthorityBundle`: Used internally for CA rotation
+//! - `VerificationResult`: Used internally by verification functions
 
 pub mod bootstrap;
 pub mod mtls;

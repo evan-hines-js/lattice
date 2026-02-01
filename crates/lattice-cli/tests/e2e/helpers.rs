@@ -246,6 +246,79 @@ pub fn run_cmd_allow_fail(cmd: &str, args: &[&str]) -> String {
 }
 
 // =============================================================================
+// HTTP Testing Helpers
+// =============================================================================
+
+/// Result of an HTTP request to the proxy
+#[cfg(feature = "provider-e2e")]
+pub struct HttpResponse {
+    /// HTTP status code (0 if connection failed)
+    pub status_code: u16,
+    /// Response body
+    pub body: String,
+}
+
+#[cfg(feature = "provider-e2e")]
+impl HttpResponse {
+    /// Check if the response indicates success (2xx)
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status_code)
+    }
+
+    /// Check if the response is a 403 Forbidden
+    pub fn is_forbidden(&self) -> bool {
+        self.status_code == 403
+    }
+
+    /// Check if the response is a 401 Unauthorized
+    pub fn is_unauthorized(&self) -> bool {
+        self.status_code == 401
+    }
+}
+
+/// Make an authenticated HTTP GET request to the proxy.
+///
+/// Uses curl with the provided bearer token and returns both status code and body.
+#[cfg(feature = "provider-e2e")]
+pub fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpResponse {
+    // First get the status code
+    let status_output = run_cmd_allow_fail(
+        "curl",
+        &[
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-H",
+            &format!("Authorization: Bearer {}", token),
+            "--insecure",
+            "--max-time",
+            &timeout_secs.to_string(),
+            url,
+        ],
+    );
+
+    let status_code = status_output.trim().parse().unwrap_or(0);
+
+    // Then get the body
+    let body = run_cmd_allow_fail(
+        "curl",
+        &[
+            "-s",
+            "-H",
+            &format!("Authorization: Bearer {}", token),
+            "--insecure",
+            "--max-time",
+            &timeout_secs.to_string(),
+            url,
+        ],
+    );
+
+    HttpResponse { status_code, body }
+}
+
+// =============================================================================
 // Kubeconfig Helpers for Docker-based Clusters
 // =============================================================================
 

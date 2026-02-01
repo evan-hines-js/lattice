@@ -46,11 +46,11 @@ pub async fn proxy_handler(
         "Proxy request received"
     );
 
-    // 1. Extract and validate OIDC token
+    // 1. Extract and validate token (OIDC or ServiceAccount)
     let token = extract_bearer_token(request.headers())
         .ok_or_else(|| Error::Unauthorized("Missing Authorization header".into()))?;
 
-    let identity = state.oidc.validate(token).await?;
+    let identity = state.auth.validate(token).await?;
 
     // 2. Map HTTP method to K8s verb for authorization
     let action = method_to_k8s_verb(&method);

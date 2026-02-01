@@ -30,9 +30,37 @@ use crate::kubeconfig::patch_kubeconfig_for_proxy;
 use crate::subtree_registry::{ClusterInfo, SubtreeRegistry};
 use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::ServerMtlsConfig;
+use lattice_proto::SubtreeState;
 
 /// Shared reference to SubtreeRegistry
 pub type SharedSubtreeRegistry = std::sync::Arc<SubtreeRegistry>;
+
+/// Convert SubtreeState clusters to ClusterInfo, filtering out removed clusters
+fn convert_subtree_to_cluster_infos(state: &SubtreeState) -> Vec<ClusterInfo> {
+    state
+        .clusters
+        .iter()
+        .filter(|c| !c.removed)
+        .map(|c| ClusterInfo {
+            name: c.name.clone(),
+            parent: c.parent.clone(),
+            phase: c.phase.clone(),
+            labels: c.labels.clone(),
+        })
+        .collect()
+}
+
+/// Extract delta changes from SubtreeState (added and removed cluster names)
+fn extract_delta_changes(state: &SubtreeState) -> (Vec<ClusterInfo>, Vec<String>) {
+    let added = convert_subtree_to_cluster_infos(state);
+    let removed = state
+        .clusters
+        .iter()
+        .filter(|c| c.removed)
+        .map(|c| c.name.clone())
+        .collect();
+    (added, removed)
+}
 
 /// gRPC server for agent communication
 pub struct AgentServer {
@@ -43,8 +71,8 @@ pub struct AgentServer {
     kube_client: Client,
 }
 
-/// Handle an agent message (standalone function to avoid temporary object creation)
-async fn handle_agent_message_impl(
+/// Process an agent message (standalone function to avoid temporary object creation)
+async fn process_agent_message(
     registry: SharedAgentRegistry,
     subtree_registry: SharedSubtreeRegistry,
     msg: &AgentMessage,
@@ -467,17 +495,7 @@ async fn handle_agent_message_impl(
 
             if state.is_full_sync {
                 // Full sync: replace all clusters from this agent
-                let clusters: Vec<ClusterInfo> = state
-                    .clusters
-                    .iter()
-                    .filter(|c| !c.removed)
-                    .map(|c| ClusterInfo {
-                        name: c.name.clone(),
-                        parent: c.parent.clone(),
-                        phase: c.phase.clone(),
-                        labels: c.labels.clone(),
-                    })
-                    .collect();
+                let clusters = convert_subtree_to_cluster_infos(state);
 
                 info!(
                     cluster = %cluster_name,
@@ -489,24 +507,7 @@ async fn handle_agent_message_impl(
                     .await;
             } else {
                 // Delta: add/remove specific clusters
-                let added: Vec<ClusterInfo> = state
-                    .clusters
-                    .iter()
-                    .filter(|c| !c.removed)
-                    .map(|c| ClusterInfo {
-                        name: c.name.clone(),
-                        parent: c.parent.clone(),
-                        phase: c.phase.clone(),
-                        labels: c.labels.clone(),
-                    })
-                    .collect();
-
-                let removed: Vec<String> = state
-                    .clusters
-                    .iter()
-                    .filter(|c| c.removed)
-                    .map(|c| c.name.clone())
-                    .collect();
+                let (added, removed) = extract_delta_changes(state);
 
                 if !added.is_empty() || !removed.is_empty() {
                     debug!(
@@ -612,7 +613,7 @@ impl LatticeAgent for AgentServer {
                         }
 
                         // Handle message directly using standalone function (no temp object)
-                        handle_agent_message_impl(
+                        process_agent_message(
                             registry.clone(),
                             subtree_registry.clone(),
                             &msg,
@@ -692,38 +693,12 @@ mod tests {
             Some(Payload::MoveCompleteAck(_)) => {}
             Some(Payload::SubtreeState(state)) => {
                 if state.is_full_sync {
-                    let clusters: Vec<ClusterInfo> = state
-                        .clusters
-                        .iter()
-                        .filter(|c| !c.removed)
-                        .map(|c| ClusterInfo {
-                            name: c.name.clone(),
-                            parent: c.parent.clone(),
-                            phase: c.phase.clone(),
-                            labels: c.labels.clone(),
-                        })
-                        .collect();
+                    let clusters = convert_subtree_to_cluster_infos(state);
                     subtree_registry
                         .handle_full_sync(cluster_name, clusters)
                         .await;
                 } else {
-                    let added: Vec<ClusterInfo> = state
-                        .clusters
-                        .iter()
-                        .filter(|c| !c.removed)
-                        .map(|c| ClusterInfo {
-                            name: c.name.clone(),
-                            parent: c.parent.clone(),
-                            phase: c.phase.clone(),
-                            labels: c.labels.clone(),
-                        })
-                        .collect();
-                    let removed: Vec<String> = state
-                        .clusters
-                        .iter()
-                        .filter(|c| c.removed)
-                        .map(|c| c.name.clone())
-                        .collect();
+                    let (added, removed) = extract_delta_changes(state);
                     subtree_registry
                         .handle_delta(cluster_name, added, removed)
                         .await;
@@ -743,21 +718,56 @@ mod tests {
         SubtreeRegistry::new("test-cell".to_string())
     }
 
+    /// Factory function to create a Ready message for tests
+    fn make_ready_msg(cluster: &str, state: AgentState) -> AgentMessage {
+        AgentMessage {
+            cluster_name: cluster.to_string(),
+            payload: Some(Payload::Ready(AgentReady {
+                agent_version: "0.1.0".to_string(),
+                kubernetes_version: "1.28.0".to_string(),
+                state: state.into(),
+                api_server_endpoint: format!("https://api.{}:6443", cluster),
+            })),
+        }
+    }
+
+    /// Factory function to create a Ready message with custom versions for tests
+    fn make_ready_msg_with_versions(
+        cluster: &str,
+        state: AgentState,
+        agent_version: &str,
+        k8s_version: &str,
+    ) -> AgentMessage {
+        AgentMessage {
+            cluster_name: cluster.to_string(),
+            payload: Some(Payload::Ready(AgentReady {
+                agent_version: agent_version.to_string(),
+                kubernetes_version: k8s_version.to_string(),
+                state: state.into(),
+                api_server_endpoint: format!("https://api.{}:6443", cluster),
+            })),
+        }
+    }
+
+    /// Factory function to create a Heartbeat message for tests
+    fn make_heartbeat_msg(cluster: &str, state: AgentState) -> AgentMessage {
+        AgentMessage {
+            cluster_name: cluster.to_string(),
+            payload: Some(Payload::Heartbeat(Heartbeat {
+                state: state.into(),
+                timestamp: None,
+                uptime_seconds: 3600,
+            })),
+        }
+    }
+
     #[tokio::test]
     async fn test_handle_ready_message() {
         let registry = create_test_registry();
         let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
-        let msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "0.1.0".to_string(),
-                kubernetes_version: "1.28.0".to_string(),
-                state: AgentState::Provisioning.into(),
-                api_server_endpoint: "https://api.test:6443".to_string(),
-            })),
-        };
+        let msg = make_ready_msg("test-cluster", AgentState::Provisioning);
 
         test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
 
@@ -777,26 +787,10 @@ mod tests {
         let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
-        let msg1 = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "0.1.0".to_string(),
-                kubernetes_version: "1.28.0".to_string(),
-                state: AgentState::Provisioning.into(),
-                api_server_endpoint: "https://api.test:6443".to_string(),
-            })),
-        };
+        let msg1 = make_ready_msg("test-cluster", AgentState::Provisioning);
         test_handle_message(&registry, &subtree_registry, &msg1, &tx).await;
 
-        let msg2 = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "0.1.0".to_string(),
-                kubernetes_version: "1.28.0".to_string(),
-                state: AgentState::Ready.into(),
-                api_server_endpoint: "https://api.test:6443".to_string(),
-            })),
-        };
+        let msg2 = make_ready_msg("test-cluster", AgentState::Ready);
         test_handle_message(&registry, &subtree_registry, &msg2, &tx).await;
 
         let conn = registry
@@ -828,25 +822,10 @@ mod tests {
         let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
-        let ready_msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "0.1.0".to_string(),
-                kubernetes_version: "1.28.0".to_string(),
-                state: AgentState::Ready.into(),
-                api_server_endpoint: "https://api.test:6443".to_string(),
-            })),
-        };
+        let ready_msg = make_ready_msg("test-cluster", AgentState::Ready);
         test_handle_message(&registry, &subtree_registry, &ready_msg, &tx).await;
 
-        let msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::Heartbeat(Heartbeat {
-                state: AgentState::Ready.into(),
-                timestamp: None,
-                uptime_seconds: 3600,
-            })),
-        };
+        let msg = make_heartbeat_msg("test-cluster", AgentState::Ready);
         test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
 
         let conn = registry
@@ -914,26 +893,11 @@ mod tests {
         let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
-        let msg1 = AgentMessage {
-            cluster_name: "cluster-1".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "0.1.0".to_string(),
-                kubernetes_version: "1.28.0".to_string(),
-                state: AgentState::Ready.into(),
-                api_server_endpoint: "https://api.cluster1:6443".to_string(),
-            })),
-        };
+        let msg1 = make_ready_msg("cluster-1", AgentState::Ready);
         test_handle_message(&registry, &subtree_registry, &msg1, &tx).await;
 
-        let msg2 = AgentMessage {
-            cluster_name: "cluster-2".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "0.2.0".to_string(),
-                kubernetes_version: "1.29.0".to_string(),
-                state: AgentState::Provisioning.into(),
-                api_server_endpoint: "https://api.cluster2:6443".to_string(),
-            })),
-        };
+        let msg2 =
+            make_ready_msg_with_versions("cluster-2", AgentState::Provisioning, "0.2.0", "1.29.0");
         test_handle_message(&registry, &subtree_registry, &msg2, &tx).await;
 
         assert_eq!(registry.len(), 2);
@@ -955,15 +919,7 @@ mod tests {
         let subtree_registry = create_test_subtree_registry();
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
 
-        let msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::Ready(AgentReady {
-                agent_version: "0.1.0".to_string(),
-                kubernetes_version: "1.28.0".to_string(),
-                state: AgentState::Provisioning.into(),
-                api_server_endpoint: "https://api.test:6443".to_string(),
-            })),
-        };
+        let msg = make_ready_msg("test-cluster", AgentState::Provisioning);
         test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
         assert_eq!(
             registry
@@ -973,14 +929,7 @@ mod tests {
             AgentState::Provisioning
         );
 
-        let msg = AgentMessage {
-            cluster_name: "test-cluster".to_string(),
-            payload: Some(Payload::Heartbeat(Heartbeat {
-                state: AgentState::Ready.into(),
-                timestamp: None,
-                uptime_seconds: 60,
-            })),
-        };
+        let msg = make_heartbeat_msg("test-cluster", AgentState::Ready);
         test_handle_message(&registry, &subtree_registry, &msg, &tx).await;
         assert_eq!(
             registry

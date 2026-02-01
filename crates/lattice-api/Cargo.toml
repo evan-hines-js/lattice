@@ -49,12 +49,6 @@ thiserror = { workspace = true }
 # Logging
 tracing = { workspace = true }
 
-# Time
-chrono = { workspace = true }
-
-# UUID
-uuid = { workspace = true }
-
 [dev-dependencies]
 tokio-test = { workspace = true }
 rstest = { workspace = true }

@@ -21,6 +21,7 @@
 //! ```
 
 pub mod capi;
+pub mod cedar;
 pub mod kubeconfig;
 pub mod mesh;
 pub mod pivot;

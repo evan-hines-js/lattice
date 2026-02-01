@@ -21,6 +21,22 @@ use crate::eso::{
     SecretKeyRef, ServiceAccountRef, VaultAuth, VaultProvider,
 };
 
+/// Default Vault secret path
+const DEFAULT_PATH: &str = "secret";
+/// Default Kubernetes auth mount path in Vault
+const DEFAULT_MOUNT_PATH: &str = "kubernetes";
+/// Default Kubernetes auth role name
+const DEFAULT_ROLE: &str = "external-secrets";
+/// Default AppRole auth mount path in Vault
+const DEFAULT_APPROLE_PATH: &str = "approle";
+
+/// Requeue interval for successful reconciliation (handles drift detection)
+const REQUEUE_SUCCESS_SECS: u64 = 300;
+/// Requeue interval when CRD is not found (waiting for ESO installation)
+const REQUEUE_CRD_NOT_FOUND_SECS: u64 = 30;
+/// Requeue interval on other errors (with backoff)
+const REQUEUE_ERROR_SECS: u64 = 60;
+
 // Re-export for convenience
 pub use lattice_common::{default_error_policy, ControllerContext};
 
@@ -46,7 +62,7 @@ pub async fn reconcile(
             update_status(client, &sp, SecretsProviderPhase::Ready, None).await?;
 
             // Requeue periodically to handle drift
-            Ok(Action::requeue(Duration::from_secs(300)))
+            Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
         }
         Err(e) if is_crd_not_found(&e) => {
             // ESO not installed yet - requeue to try again
@@ -64,7 +80,9 @@ pub async fn reconcile(
             .await?;
 
             // Retry more frequently when waiting for ESO
-            Ok(Action::requeue(Duration::from_secs(30)))
+            Ok(Action::requeue(Duration::from_secs(
+                REQUEUE_CRD_NOT_FOUND_SECS,
+            )))
         }
         Err(e) => {
             warn!(
@@ -82,18 +100,17 @@ pub async fn reconcile(
             .await?;
 
             // Retry with backoff on other errors
-            Ok(Action::requeue(Duration::from_secs(60)))
+            Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
         }
     }
 }
 
 /// Check if error is due to CRD not found (ESO not installed)
 fn is_crd_not_found(error: &ReconcileError) -> bool {
-    error.to_string().contains("404")
-        || error.to_string().contains("not found")
-        || error
-            .to_string()
-            .contains("the server could not find the requested resource")
+    let err_str = error.to_string();
+    err_str.contains("404")
+        || err_str.contains("not found")
+        || err_str.contains("the server could not find the requested resource")
 }
 
 /// Ensure ClusterSecretStore exists for the SecretsProvider
@@ -116,21 +133,21 @@ async fn ensure_cluster_secret_store(
 
     // Serialize to JSON for dynamic API
     let css_json = serde_json::to_value(&css).map_err(|e| {
-        ReconcileError::Internal(format!("failed to serialize ClusterSecretStore: {}", e))
+        ReconcileError::Internal(format!("failed to serialize ClusterSecretStore: {e}"))
     })?;
 
     // Use dynamic API to apply ClusterSecretStore
     let api_resource = ClusterSecretStore::api_resource();
     let css_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
     let css_obj: DynamicObject = serde_json::from_value(css_json).map_err(|e| {
-        ReconcileError::Internal(format!("failed to build ClusterSecretStore: {}", e))
+        ReconcileError::Internal(format!("failed to build ClusterSecretStore: {e}"))
     })?;
 
     let params = PatchParams::apply("lattice-secrets-provider").force();
     css_api
         .patch(&name, &params, &Patch::Apply(&css_obj))
         .await
-        .map_err(|e| ReconcileError::Kube(e.to_string()))?;
+        .map_err(|e| ReconcileError::Kube(format!("failed to apply ClusterSecretStore: {e}")))?;
 
     debug!(secrets_provider = %name, "Applied ClusterSecretStore");
     Ok(())
@@ -142,7 +159,11 @@ fn build_vault_provider(sp: &SecretsProvider) -> Result<VaultProvider, Reconcile
 
     Ok(VaultProvider {
         server: sp.spec.server.clone(),
-        path: sp.spec.path.clone().unwrap_or_else(|| "secret".to_string()),
+        path: sp
+            .spec
+            .path
+            .clone()
+            .unwrap_or_else(|| DEFAULT_PATH.to_string()),
         version: "v2".to_string(),
         namespace: sp.spec.namespace.clone(),
         ca_bundle: sp.spec.ca_bundle.clone(),
@@ -172,12 +193,12 @@ fn build_vault_auth(sp: &SecretsProvider) -> Result<VaultAuth, ReconcileError> {
                 .spec
                 .kubernetes_mount_path
                 .clone()
-                .unwrap_or_else(|| "kubernetes".to_string());
+                .unwrap_or_else(|| DEFAULT_MOUNT_PATH.to_string());
             let role = sp
                 .spec
                 .kubernetes_role
                 .clone()
-                .unwrap_or_else(|| "external-secrets".to_string());
+                .unwrap_or_else(|| DEFAULT_ROLE.to_string());
             Ok(VaultAuth {
                 token_secret_ref: None,
                 kubernetes: Some(KubernetesAuth {
@@ -199,7 +220,7 @@ fn build_vault_auth(sp: &SecretsProvider) -> Result<VaultAuth, ReconcileError> {
                 .spec
                 .approle_mount_path
                 .clone()
-                .unwrap_or_else(|| "approle".to_string());
+                .unwrap_or_else(|| DEFAULT_APPROLE_PATH.to_string());
             Ok(VaultAuth {
                 token_secret_ref: None,
                 kubernetes: None,
@@ -258,7 +279,7 @@ async fn update_status(
         &Patch::Merge(&patch),
     )
     .await
-    .map_err(|e| ReconcileError::Kube(format!("failed to update status: {}", e)))?;
+    .map_err(|e| ReconcileError::Kube(format!("failed to update status: {e}")))?;
 
     Ok(())
 }
@@ -267,6 +288,21 @@ async fn update_status(
 mod tests {
     use super::*;
     use lattice_common::crd::{SecretRef, SecretsProviderSpec};
+
+    /// Helper to assert that a provider requires credentials_secret_ref
+    fn assert_requires_credentials<F>(mut provider_fn: F)
+    where
+        F: FnMut() -> SecretsProvider,
+    {
+        let mut sp = provider_fn();
+        sp.spec.credentials_secret_ref = None;
+        let result = build_vault_provider(&sp);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("credentialsSecretRef"));
+    }
 
     fn sample_token_provider() -> SecretsProvider {
         SecretsProvider::new(
@@ -332,15 +368,7 @@ mod tests {
 
     #[test]
     fn token_auth_requires_credentials_ref() {
-        let mut sp = sample_token_provider();
-        sp.spec.credentials_secret_ref = None;
-
-        let result = build_vault_provider(&sp);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("credentialsSecretRef"));
+        assert_requires_credentials(sample_token_provider);
     }
 
     // =========================================================================
@@ -390,15 +418,7 @@ mod tests {
 
     #[test]
     fn approle_auth_requires_credentials_ref() {
-        let mut sp = sample_approle_provider();
-        sp.spec.credentials_secret_ref = None;
-
-        let result = build_vault_provider(&sp);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("credentialsSecretRef"));
+        assert_requires_credentials(sample_approle_provider);
     }
 
     #[test]
@@ -501,5 +521,70 @@ mod tests {
         let provider = build_vault_provider(&sp).expect("should build provider");
 
         assert_eq!(provider.path, "secret");
+    }
+
+    // =========================================================================
+    // Reconcile Action Tests
+    // =========================================================================
+
+    /// Test helper to compute the expected Action for a given reconcile result.
+    /// This mirrors the logic in reconcile() without requiring a Kubernetes client.
+    fn compute_expected_action(result: Result<(), ReconcileError>) -> Action {
+        match result {
+            Ok(()) => Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)),
+            Err(e) if is_crd_not_found(&e) => {
+                Action::requeue(Duration::from_secs(REQUEUE_CRD_NOT_FOUND_SECS))
+            }
+            Err(_) => Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)),
+        }
+    }
+
+    #[test]
+    fn reconcile_success_requeues_with_300s() {
+        let action = compute_expected_action(Ok(()));
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn reconcile_crd_not_found_requeues_with_30s() {
+        let action =
+            compute_expected_action(Err(ReconcileError::Kube("404 Not Found".to_string())));
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn reconcile_crd_not_found_message_requeues_with_30s() {
+        let action = compute_expected_action(Err(ReconcileError::Kube(
+            "the server could not find the requested resource".to_string(),
+        )));
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn reconcile_other_error_requeues_with_60s() {
+        let action =
+            compute_expected_action(Err(ReconcileError::Kube("connection refused".to_string())));
+        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn reconcile_validation_error_requeues_with_60s() {
+        let action =
+            compute_expected_action(Err(ReconcileError::Validation("invalid spec".to_string())));
+        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+    }
+
+    // =========================================================================
+    // Requeue Constants Tests
+    // =========================================================================
+
+    #[test]
+    fn requeue_constants_have_expected_values() {
+        // Success path: 5 minutes for drift detection
+        assert_eq!(REQUEUE_SUCCESS_SECS, 300);
+        // CRD not found: 30 seconds for faster ESO installation detection
+        assert_eq!(REQUEUE_CRD_NOT_FOUND_SECS, 30);
+        // Error path: 1 minute for backoff
+        assert_eq!(REQUEUE_ERROR_SECS, 60);
     }
 }
