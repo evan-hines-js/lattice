@@ -5,9 +5,8 @@
 //! Runs forever until failure. Each batch:
 //! 1. Create 1 cluster
 //! 2. Wait for all to reach Running
-//! 3. Wait 20 seconds (chaos active)
-//! 4. Delete all clusters (chaos active during unpivot)
-//! 5. Repeat
+//! 3. Delete all clusters (chaos active during unpivot)
+//! 4. Repeat
 //!
 //! # Failure Conditions
 //!
@@ -46,7 +45,6 @@ use super::integration::setup;
 use super::providers::InfraProvider;
 
 const BATCH_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes per batch
-const SETTLE_DELAY: Duration = Duration::from_secs(20);
 
 /// Clean up endurance-* Docker containers
 fn cleanup_endurance_containers() {
@@ -238,14 +236,6 @@ async fn run_endurance_test() -> Result<(), String> {
                     chaos_targets.add(name, &cluster_kc_path, Some(&mgmt_kubeconfig_path));
                 }
             }
-
-            // Wait 20 seconds with chaos running against all clusters
-            info!(
-                "[ITERATION {}] Waiting {} seconds (chaos active)...",
-                iteration,
-                SETTLE_DELAY.as_secs()
-            );
-            tokio::time::sleep(SETTLE_DELAY).await;
 
             // Delete all clusters (must delete from child cluster to trigger unpivot)
             info!("[ITERATION {}] Deleting all clusters...", iteration);

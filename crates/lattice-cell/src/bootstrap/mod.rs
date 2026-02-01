@@ -861,9 +861,10 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // Validate token from in-memory cache
         // Note: On operator restart, recovery.rs re-registers clusters in Provisioning/Pivoting phase
         let info = {
-            let entry = self.clusters.get(cluster_id).ok_or_else(|| {
-                BootstrapError::ClusterNotFound(cluster_id.to_string())
-            })?;
+            let entry = self
+                .clusters
+                .get(cluster_id)
+                .ok_or_else(|| BootstrapError::ClusterNotFound(cluster_id.to_string()))?;
 
             let info = entry.value();
 
@@ -2666,5 +2667,4 @@ mod tests {
             "Non-AWS clusters should not include EBS CSI driver"
         );
     }
-
 }

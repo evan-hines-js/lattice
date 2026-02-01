@@ -46,7 +46,7 @@ use super::helpers::{
     MGMT_CLUSTER_NAME,
 };
 use super::integration::{pivot, setup};
-use super::mesh_tests::start_mesh_test;
+use super::mesh_tests::{start_mesh_test, wait_for_mesh_test_cycles};
 use super::providers::InfraProvider;
 
 /// Different from standard e2e-workload - tests Kubernetes version upgrades
@@ -174,8 +174,8 @@ async fn run_upgrade_test() -> Result<(), String> {
     info!("[Phase 3] Deploying mesh services...");
     let mesh_handle = start_mesh_test(&workload_kubeconfig_path).await?;
 
-    // Initial verification
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    // Initial verification - wait for 1 complete test cycle
+    wait_for_mesh_test_cycles(&workload_kubeconfig_path, 1).await?;
     mesh_handle.check_no_policy_gaps().await?;
     info!("Initial policy verification passed");
 
@@ -221,9 +221,9 @@ async fn run_upgrade_test() -> Result<(), String> {
     info!("[Phase 6] Monitoring upgrade (chaos active)...");
     monitor_upgrade(&workload_kubeconfig_path, &to_version, &mesh_handle).await?;
 
-    // Final verification
+    // Final verification - wait for 1 complete test cycle after upgrade
     info!("[Phase 7] Final verification...");
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    wait_for_mesh_test_cycles(&workload_kubeconfig_path, 1).await?;
     mesh_handle.check_no_policy_gaps().await?;
     mesh_handle.stop_and_verify().await?;
 

@@ -166,7 +166,8 @@ impl IstioReconciler {
 
         // 1. Render istio base chart (CRDs)
         info!(version = config.version, "Rendering Istio base chart");
-        all_manifests.extend(run_helm_template("istio-base", &base_chart, "istio-system", &[]).await?);
+        all_manifests
+            .extend(run_helm_template("istio-base", &base_chart, "istio-system", &[]).await?);
 
         // 2. Render istio-cni chart (must be installed before ztunnel)
         info!(version = config.version, "Rendering Istio CNI chart");
@@ -193,7 +194,10 @@ impl IstioReconciler {
         );
         // Configure trust domain to match Lattice SPIFFE identity format
         // Each cluster gets its own trust domain: lattice.{cluster}.local
-        let trust_domain_arg = format!("meshConfig.trustDomain=lattice.{}.local", config.cluster_name);
+        let trust_domain_arg = format!(
+            "meshConfig.trustDomain=lattice.{}.local",
+            config.cluster_name
+        );
         all_manifests.extend(
             run_helm_template(
                 "istiod",
@@ -215,7 +219,8 @@ impl IstioReconciler {
 
         // 4. Render ztunnel chart (L4 data plane for ambient mode)
         info!(version = config.version, "Rendering ztunnel chart");
-        all_manifests.extend(run_helm_template("ztunnel", &ztunnel_chart, "istio-system", &[]).await?);
+        all_manifests
+            .extend(run_helm_template("ztunnel", &ztunnel_chart, "istio-system", &[]).await?);
 
         info!(count = all_manifests.len(), "Rendered Istio manifests");
         Ok(all_manifests)

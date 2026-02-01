@@ -201,7 +201,9 @@ async fn handle_agent_message_impl(
                 } else {
                     // Log each object received for debugging
                     for obj in &objects {
-                        if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&obj.manifest) {
+                        if let Ok(parsed) =
+                            serde_json::from_slice::<serde_json::Value>(&obj.manifest)
+                        {
                             let kind = parsed.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
                             let name = parsed
                                 .get("metadata")
