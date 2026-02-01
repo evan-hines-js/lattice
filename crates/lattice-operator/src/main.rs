@@ -3,11 +3,14 @@
 //! This is the main entry point. It handles CLI parsing and starts subsystems.
 //! All business logic lives in library modules.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use kube::CustomResourceExt;
 
+use lattice_api::{AuthChain, PolicyEngine, SaValidator, ServerConfig as AuthProxyConfig};
+use lattice_common::{lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT};
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
 use lattice_operator::crd::LatticeCluster;
@@ -134,6 +137,10 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         .await?;
     tracing::info!("Cell servers started");
 
+    // Start auth proxy server (for authenticated access with Cedar authorization)
+    let auth_proxy_handle =
+        start_auth_proxy(&client, parent_servers.clone(), &self_cluster_name).await;
+
     // Start CA rotation background task
     start_ca_rotation(parent_servers.clone());
 
@@ -148,7 +155,102 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 
     // Shutdown
     agent_token.cancel();
+    if let Some(handle) = auth_proxy_handle {
+        handle.abort();
+    }
     parent_servers.shutdown().await;
     tracing::info!("Shutting down");
     Ok(())
+}
+
+/// Start the auth proxy server for authenticated cluster access
+///
+/// The auth proxy provides:
+/// - ServiceAccount token authentication (via TokenReview API)
+/// - Cedar policy authorization
+/// - Routing to local or child cluster K8s APIs
+async fn start_auth_proxy(
+    client: &kube::Client,
+    parent_servers: Arc<ParentServers<DefaultManifestGenerator>>,
+    cluster_name: &Option<String>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    // Get cluster name (default to "unknown")
+    let cluster_name = cluster_name
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Create SA validator for ServiceAccount token authentication
+    let sa_validator = Arc::new(SaValidator::new(client.clone()));
+
+    // Create auth chain (SA auth only for now, OIDC can be added later)
+    let auth_chain = Arc::new(AuthChain::sa_only(sa_validator));
+
+    // Create Cedar policy engine (loads policies from CRDs)
+    let cedar = match PolicyEngine::from_crds(client).await {
+        Ok(engine) => Arc::new(engine),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load Cedar policies, using default-deny");
+            Arc::new(PolicyEngine::new())
+        }
+    };
+
+    // Generate server certificate
+    let ca_bundle = parent_servers.ca_bundle().read().await;
+    let cell_dns = lattice_svc_dns(CELL_SERVICE_NAME);
+    let sans = vec!["localhost", "127.0.0.1", &cell_dns];
+    let (cert_pem, key_pem) = match ca_bundle.generate_server_cert(&sans) {
+        Ok((cert, key)) => (cert, key),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to generate auth proxy certificate");
+            return None;
+        }
+    };
+    drop(ca_bundle);
+
+    // Create server config
+    let addr: SocketAddr = match format!("0.0.0.0:{}", DEFAULT_AUTH_PROXY_PORT).parse() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to parse auth proxy address");
+            return None;
+        }
+    };
+
+    let base_url = format!(
+        "https://{}:{}",
+        lattice_svc_dns(CELL_SERVICE_NAME),
+        DEFAULT_AUTH_PROXY_PORT
+    );
+
+    let config = AuthProxyConfig {
+        addr,
+        cert_pem,
+        key_pem,
+        k8s_api_url: "https://kubernetes.default.svc".to_string(),
+        cluster_name: cluster_name.clone(),
+        base_url,
+    };
+
+    // Get shared registries from parent servers
+    let subtree = parent_servers.subtree_registry();
+    let agent_registry = Some(parent_servers.agent_registry());
+
+    tracing::info!(addr = %addr, cluster = %cluster_name, "Starting auth proxy server");
+
+    // Start in background task
+    let handle = tokio::spawn(async move {
+        if let Err(e) = lattice_api::start_server_with_registry(
+            config,
+            auth_chain,
+            cedar,
+            subtree,
+            agent_registry,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "Auth proxy server error");
+        }
+    });
+
+    Some(handle)
 }

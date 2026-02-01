@@ -1,8 +1,11 @@
 //! CLI commands
 
 use std::fmt::Display;
+use std::future::Future;
+use std::time::{Duration, Instant};
 
 use lattice_operator::crd::ProviderType;
+use tracing::{debug, warn};
 
 use crate::{Error, Result};
 
@@ -69,4 +72,128 @@ pub fn generate_run_id() -> String {
     let pid = std::process::id();
     // Combine timestamp and pid, take 6 hex chars for readability
     format!("{:06x}", (timestamp ^ pid) & 0xFFFFFF)
+}
+
+/// Result type for polling check functions.
+///
+/// - `Ok(Some(value))` - Condition met, return the value
+/// - `Ok(None)` - Condition not met yet, keep polling
+/// - `Err(e)` - Fatal error, stop polling immediately
+pub type PollResult<T> = std::result::Result<Option<T>, String>;
+
+/// Generic timeout-based polling utility.
+///
+/// Polls a condition function at regular intervals until:
+/// - The condition returns `Ok(Some(value))` - returns `Ok(value)`
+/// - The timeout is exceeded - returns `Err` with timeout message
+/// - The condition returns `Err` - returns that error immediately
+///
+/// # Arguments
+/// * `timeout` - Maximum time to wait for the condition
+/// * `interval` - Time between polls
+/// * `description` - Human-readable description for error messages
+/// * `check_fn` - Async function that returns `PollResult<T>`
+///
+/// # Example
+/// ```ignore
+/// let result = wait_with_timeout(
+///     Duration::from_secs(60),
+///     Duration::from_secs(2),
+///     "API server ready",
+///     || async {
+///         match client.list::<Namespace>().await {
+///             Ok(_) => Ok(Some(())),  // Ready
+///             Err(e) if is_transient(&e) => Ok(None),  // Keep polling
+///             Err(e) => Err(e.to_string()),  // Fatal error
+///         }
+///     },
+/// ).await?;
+/// ```
+pub async fn wait_with_timeout<T, F, Fut>(
+    timeout: Duration,
+    interval: Duration,
+    description: &str,
+    mut check_fn: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = PollResult<T>>,
+{
+    let start = Instant::now();
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(Error::command_failed(format!(
+                "Timeout waiting for {}",
+                description
+            )));
+        }
+
+        match check_fn().await {
+            Ok(Some(value)) => return Ok(value),
+            Ok(None) => {
+                debug!("Waiting for {}...", description);
+                tokio::time::sleep(interval).await;
+            }
+            Err(e) => {
+                return Err(Error::command_failed(format!(
+                    "Error waiting for {}: {}",
+                    description, e
+                )));
+            }
+        }
+    }
+}
+
+/// Polls until a resource is deleted (returns 404).
+///
+/// Similar to `wait_with_timeout` but specifically for waiting on resource deletion.
+/// Handles the common pattern of waiting for a Kubernetes resource to be fully removed.
+///
+/// # Arguments
+/// * `timeout` - Maximum time to wait for deletion
+/// * `interval` - Time between polls
+/// * `description` - Human-readable description for logging
+/// * `check_exists` - Async function that returns `Ok(true)` if resource exists,
+///   `Ok(false)` if deleted, or `Err` for fatal errors
+///
+/// # Returns
+/// * `Ok(())` - Resource was deleted
+/// * `Err` - Timeout or fatal error
+pub async fn wait_for_deletion<F, Fut>(
+    timeout: Duration,
+    interval: Duration,
+    description: &str,
+    mut check_exists: F,
+) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::result::Result<bool, String>>,
+{
+    let start = Instant::now();
+
+    loop {
+        if start.elapsed() > timeout {
+            warn!(
+                "Timeout waiting for {} deletion, proceeding anyway",
+                description
+            );
+            return Ok(());
+        }
+
+        match check_exists().await {
+            Ok(true) => {
+                debug!("{} still exists, waiting...", description);
+                tokio::time::sleep(interval).await;
+            }
+            Ok(false) => {
+                debug!("{} deleted", description);
+                return Ok(());
+            }
+            Err(_) => {
+                // Treat errors as "deleted" since we can't determine state
+                return Ok(());
+            }
+        }
+    }
 }

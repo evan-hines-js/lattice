@@ -19,10 +19,28 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use super::{generate_run_id, kind_utils};
+use super::{generate_run_id, kind_utils, wait_with_timeout};
 
 use lattice_common::clusterctl::move_to_kubeconfig;
+
+// Timeout constants for various provisioning phases
+const CLUSTER_PROVISIONING_TIMEOUT: Duration = Duration::from_secs(600);
+const API_SERVER_READY_TIMEOUT: Duration = Duration::from_secs(300);
+const CONTROL_PLANE_READY_TIMEOUT: Duration = Duration::from_secs(300);
+const MACHINE_PROVISIONING_TIMEOUT: Duration = Duration::from_secs(600);
+const CAPI_CRD_TIMEOUT: Duration = Duration::from_secs(300);
+const OPERATOR_READY_TIMEOUT: Duration = Duration::from_secs(300);
+const CAPI_CONTROLLERS_TIMEOUT: Duration = Duration::from_secs(300);
+const LATTICE_OPERATOR_TIMEOUT: Duration = Duration::from_secs(120);
+const CRD_APPLY_TIMEOUT: Duration = Duration::from_secs(120);
+
+// Polling intervals
+const CLUSTER_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const API_SERVER_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const CONTROL_PLANE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const MACHINE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 use lattice_common::kube_utils;
+use lattice_common::CredentialProvider;
 use lattice_common::{
     capi_namespace, kubeconfig_secret_name, AwsCredentials, OpenStackCredentials,
     ProxmoxCredentials, AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE,
@@ -389,7 +407,7 @@ impl Installer {
             client,
             "lattice-operator",
             LATTICE_SYSTEM_NAMESPACE,
-            Duration::from_secs(300),
+            OPERATOR_READY_TIMEOUT,
         )
         .await
         .cmd_err()?;
@@ -405,7 +423,7 @@ impl Installer {
         ];
 
         for crd in required_crds {
-            kube_utils::wait_for_crd(client, crd, Duration::from_secs(300))
+            kube_utils::wait_for_crd(client, crd, CAPI_CRD_TIMEOUT)
                 .await
                 .cmd_err()?;
         }
@@ -421,7 +439,7 @@ impl Installer {
             self.provider()
         );
 
-        kube_utils::apply_manifest_with_retry(client, &self.cluster_yaml, Duration::from_secs(120))
+        kube_utils::apply_manifest_with_retry(client, &self.cluster_yaml, CRD_APPLY_TIMEOUT)
             .await
             .map_err(|e| {
                 Error::command_failed(format!(
@@ -433,38 +451,46 @@ impl Installer {
     }
 
     async fn wait_for_management_cluster(&self, client: &Client) -> Result<()> {
-        let start = Instant::now();
-        let timeout = Duration::from_secs(600);
         let namespace = self.capi_ns();
         let secret_name = self.kubeconfig_secret();
+        let cluster_name = self.cluster_name().to_string();
+        let client = client.clone();
 
         // Wait for kubeconfig secret to exist. We don't wait for Ready phase because
         // the cluster needs CNI to reach Ready, and CNI is applied after this phase.
-        loop {
-            if start.elapsed() > timeout {
-                return Err(Error::command_failed("Timeout waiting for cluster"));
-            }
+        wait_with_timeout(
+            CLUSTER_PROVISIONING_TIMEOUT,
+            CLUSTER_POLL_INTERVAL,
+            "cluster provisioning",
+            || {
+                let client = client.clone();
+                let namespace = namespace.clone();
+                let secret_name = secret_name.clone();
+                let cluster_name = cluster_name.clone();
+                async move {
+                    // Check phase (transient errors return "Unknown" and continue polling)
+                    let phase = get_latticecluster_phase(&client, &cluster_name).await;
+                    if phase == "Failed" {
+                        return Err("Cluster provisioning failed".to_string());
+                    }
 
-            // Check phase (transient errors return "Unknown" and continue polling)
-            let phase = get_latticecluster_phase(client, self.cluster_name()).await;
-            if phase == "Failed" {
-                return Err(Error::command_failed("Cluster provisioning failed"));
-            }
+                    // Log progress
+                    info!("Cluster phase: {}", phase);
 
-            // Log progress
-            info!("Cluster phase: {}", phase);
+                    // Check if kubeconfig is ready
+                    if kube_utils::secret_exists(&client, &secret_name, &namespace)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        info!("Kubeconfig secret is ready");
+                        return Ok(Some(()));
+                    }
 
-            // Check if kubeconfig is ready
-            if kube_utils::secret_exists(client, &secret_name, &namespace)
-                .await
-                .unwrap_or(false)
-            {
-                info!("Kubeconfig secret is ready");
-                return Ok(());
-            }
-
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        }
+                    Ok(None) // Keep polling
+                }
+            },
+        )
+        .await
     }
 
     async fn apply_bootstrap_to_management(&self, bootstrap_client: &Client) -> Result<()> {
@@ -498,7 +524,7 @@ impl Installer {
         }
 
         info!("Waiting for control plane nodes to be ready...");
-        wait_for_control_plane_ready(&mgmt_client, Duration::from_secs(300)).await?;
+        wait_for_control_plane_ready(&mgmt_client, CONTROL_PLANE_READY_TIMEOUT).await?;
 
         info!("Installing CAPI on management cluster...");
         self.install_capi_on_management(&kubeconfig_path).await?;
@@ -683,29 +709,44 @@ impl Installer {
         use k8s_openapi::api::core::v1::Namespace;
         use kube::Api;
 
-        let start = Instant::now();
-        loop {
-            if start.elapsed() > Duration::from_secs(300) {
-                return Err(Error::command_failed("Timeout waiting for API server"));
-            }
+        let kubeconfig_path = self.kubeconfig_path();
+        wait_with_timeout(
+            API_SERVER_READY_TIMEOUT,
+            API_SERVER_POLL_INTERVAL,
+            "API server",
+            || {
+                let path = kubeconfig_path.clone();
+                async move {
+                    let client = match kube_utils::create_client_with_timeout(
+                        Some(&path),
+                        Duration::from_secs(10),
+                        Duration::from_secs(30),
+                    )
+                    .await
+                    {
+                        Ok(c) => c,
+                        Err(e) => {
+                            info!("Client creation failed: {}", e);
+                            return Ok(None); // Keep polling
+                        }
+                    };
 
-            match self.management_client().await {
-                Ok(client) => {
                     // Just check if we can list namespaces - proves API is reachable
                     let ns: Api<Namespace> = Api::all(client);
                     match ns.list(&Default::default()).await {
                         Ok(_) => {
                             info!("API server is reachable");
-                            return Ok(());
+                            Ok(Some(()))
                         }
-                        Err(e) => info!("API not ready yet: {}", e),
+                        Err(e) => {
+                            info!("API not ready yet: {}", e);
+                            Ok(None) // Keep polling
+                        }
                     }
                 }
-                Err(e) => info!("Client creation failed: {}", e),
-            }
-
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
+            },
+        )
+        .await
     }
 
     /// Installs CAPI controllers on the management cluster via clusterctl.
@@ -718,7 +759,7 @@ impl Installer {
     /// Waits for CAPI and Lattice controllers to be ready on the management cluster.
     async fn wait_for_management_controllers(&self, mgmt_client: &Client) -> Result<()> {
         // Wait for CAPI controllers
-        kube_utils::wait_for_all_deployments(mgmt_client, "capi-system", Duration::from_secs(300))
+        kube_utils::wait_for_all_deployments(mgmt_client, "capi-system", CAPI_CONTROLLERS_TIMEOUT)
             .await
             .cmd_err()?;
 
@@ -727,7 +768,7 @@ impl Installer {
             mgmt_client,
             "lattice-operator",
             LATTICE_SYSTEM_NAMESPACE,
-            Duration::from_secs(120),
+            LATTICE_OPERATOR_TIMEOUT,
         )
         .await
         .cmd_err()
@@ -891,37 +932,36 @@ impl Installer {
         // Wait for CAPI CRDs on target cluster
         info!("Waiting for CAPI CRDs on management cluster...");
         let mgmt_client = self.management_client().await?;
-        kube_utils::wait_for_crd(
-            &mgmt_client,
-            "clusters.cluster.x-k8s.io",
-            Duration::from_secs(300),
-        )
-        .await
-        .cmd_err()?;
+        kube_utils::wait_for_crd(&mgmt_client, "clusters.cluster.x-k8s.io", CAPI_CRD_TIMEOUT)
+            .await
+            .cmd_err()?;
 
         // Wait for all machines to be provisioned
         info!("Waiting for all machines to be provisioned...");
-        let start = Instant::now();
-        loop {
-            if start.elapsed() > Duration::from_secs(600) {
-                return Err(Error::command_failed(
-                    "Timeout waiting for machines to be provisioned",
-                ));
-            }
+        let ns = namespace.clone();
+        wait_with_timeout(
+            MACHINE_PROVISIONING_TIMEOUT,
+            MACHINE_POLL_INTERVAL,
+            "machines to be provisioned",
+            || {
+                let client = bootstrap_client.clone();
+                let namespace = ns.clone();
+                async move {
+                    let phases = kube_utils::get_machine_phases(&client, &namespace)
+                        .await
+                        .map_err(|e| e.to_string())?;
 
-            let phases = kube_utils::get_machine_phases(&bootstrap_client, &namespace)
-                .await
-                .cmd_err()?;
-
-            let all_running = !phases.is_empty() && phases.iter().all(|p| p == "Running");
-            if all_running {
-                info!("All machines are Running");
-                break;
-            }
-            info!("Machine phases: {}", phases.join(" "));
-
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        }
+                    let all_running = !phases.is_empty() && phases.iter().all(|p| p == "Running");
+                    if all_running {
+                        info!("All machines are Running");
+                        return Ok(Some(()));
+                    }
+                    info!("Machine phases: {}", phases.join(" "));
+                    Ok(None) // Keep polling
+                }
+            },
+        )
+        .await?;
 
         // Move CAPI resources from bootstrap to management cluster
         info!("Moving CAPI resources from bootstrap to management cluster...");
@@ -976,7 +1016,13 @@ impl Installer {
 
         let status = child.wait().await?;
         let _ = stdout_task.await;
-        let stderr_lines = stderr_task.await.unwrap_or_default();
+        let stderr_lines = match stderr_task.await {
+            Ok(lines) => lines,
+            Err(e) => {
+                warn!("stderr reader task panicked: {}", e);
+                Vec::new()
+            }
+        };
 
         if !status.success() {
             let stderr_output = stderr_lines.join("\n");
@@ -1027,64 +1073,64 @@ async fn wait_for_control_plane_ready(client: &Client, timeout: Duration) -> Res
     use kube::api::{Api, ListParams};
     use lattice_common::kube_utils::{has_condition, CONDITION_READY};
 
-    let start = Instant::now();
-    let nodes: Api<Node> = Api::all(client.clone());
+    let client = client.clone();
+    wait_with_timeout(
+        timeout,
+        CONTROL_PLANE_POLL_INTERVAL,
+        "control plane nodes to be ready",
+        || {
+            let client = client.clone();
+            async move {
+                let nodes: Api<Node> = Api::all(client);
 
-    loop {
-        if start.elapsed() > timeout {
-            return Err(Error::command_failed(
-                "Timeout waiting for control plane nodes to be ready",
-            ));
-        }
+                let node_list = match nodes.list(&ListParams::default()).await {
+                    Ok(list) => list,
+                    Err(e) => {
+                        // Transient error - log and retry
+                        warn!("Transient error listing nodes: {}", e);
+                        return Ok(None); // Keep polling
+                    }
+                };
 
-        let node_list = match nodes.list(&ListParams::default()).await {
-            Ok(list) => list,
-            Err(e) => {
-                // Transient error - log and retry
-                warn!("Transient error listing nodes: {}", e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
+                // Filter for control plane nodes
+                let cp_nodes: Vec<_> = node_list
+                    .items
+                    .iter()
+                    .filter(|n| {
+                        n.metadata.labels.as_ref().is_some_and(|l| {
+                            l.contains_key("node-role.kubernetes.io/control-plane")
+                        })
+                    })
+                    .collect();
+
+                if cp_nodes.is_empty() {
+                    info!("No control plane nodes found yet...");
+                    return Ok(None); // Keep polling
+                }
+
+                let ready_count = cp_nodes
+                    .iter()
+                    .filter(|n| {
+                        let conditions = n.status.as_ref().and_then(|s| s.conditions.as_ref());
+                        has_condition(conditions.map(|c| c.as_slice()), CONDITION_READY)
+                    })
+                    .count();
+
+                if ready_count == cp_nodes.len() {
+                    info!("{} control plane node(s) ready", cp_nodes.len());
+                    return Ok(Some(()));
+                }
+
+                info!(
+                    "Waiting for control plane nodes: {}/{} ready",
+                    ready_count,
+                    cp_nodes.len()
+                );
+                Ok(None) // Keep polling
             }
-        };
-
-        // Filter for control plane nodes
-        let cp_nodes: Vec<_> = node_list
-            .items
-            .iter()
-            .filter(|n| {
-                n.metadata
-                    .labels
-                    .as_ref()
-                    .is_some_and(|l| l.contains_key("node-role.kubernetes.io/control-plane"))
-            })
-            .collect();
-
-        if cp_nodes.is_empty() {
-            info!("No control plane nodes found yet...");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
-        }
-
-        let ready_count = cp_nodes
-            .iter()
-            .filter(|n| {
-                let conditions = n.status.as_ref().and_then(|s| s.conditions.as_ref());
-                has_condition(conditions.map(|c| c.as_slice()), CONDITION_READY)
-            })
-            .count();
-
-        if ready_count == cp_nodes.len() {
-            info!("{} control plane node(s) ready", cp_nodes.len());
-            return Ok(());
-        }
-
-        info!(
-            "Waiting for control plane nodes: {}/{} ready",
-            ready_count,
-            cp_nodes.len()
-        );
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
+        },
+    )
+    .await
 }
 
 /// Add bootstrap cluster environment variables to a deployment.

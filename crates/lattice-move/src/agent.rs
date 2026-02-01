@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use k8s_openapi::api::core::v1::Namespace;
-use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DynamicObject, ListParams, PostParams};
 use kube::Client;
 use serde_json::Value;
 use tracing::{debug, info, warn};
@@ -165,53 +165,11 @@ impl AgentMover {
 
     /// Discover types that have move labels (for UID map rebuild)
     async fn discover_move_types(&self) -> Result<Vec<(String, String, String)>, MoveError> {
-        use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
-
-        let crd_api: Api<CustomResourceDefinition> = Api::all(self.client.clone());
-        let crds = crd_api
-            .list(&ListParams::default())
-            .await
-            .map_err(MoveError::Kube)?;
-
-        let mut types = Vec::new();
-
-        for crd in crds.items {
-            // Check for move labels
-            let has_move_label = crd
-                .metadata
-                .labels
-                .as_ref()
-                .map(|l| {
-                    l.contains_key(crate::MOVE_LABEL) || l.contains_key(crate::MOVE_HIERARCHY_LABEL)
-                })
-                .unwrap_or(false);
-
-            if has_move_label && crd.spec.names.singular.is_some() {
-                let group = &crd.spec.group;
-                let kind = &crd.spec.names.kind;
-                let plural = &crd.spec.names.plural;
-
-                // Use the storage version (the one with storage: true)
-                let storage_version = crd
-                    .spec
-                    .versions
-                    .iter()
-                    .find(|v| v.storage)
-                    .or_else(|| crd.spec.versions.first());
-
-                if let Some(version) = storage_version {
-                    let api_version = if group.is_empty() {
-                        version.name.clone()
-                    } else {
-                        format!("{}/{}", group, version.name)
-                    };
-                    debug!(kind = %kind, api_version = %api_version, "Discovered move type for UID rebuild");
-                    types.push((api_version, kind.clone(), plural.clone()));
-                }
-            }
-        }
-
-        Ok(types)
+        let discovered = crate::utils::discover_move_crds(&self.client).await?;
+        Ok(discovered
+            .into_iter()
+            .map(|t| (t.api_version, t.kind, t.plural))
+            .collect())
     }
 
     /// Ensure the target namespace exists
@@ -466,48 +424,12 @@ impl AgentMover {
 
     /// Unpause a specific resource type using discovery
     async fn unpause_resource(&self, group: &str, kind: &str) -> Result<(), MoveError> {
-        // Use discovery to find the correct API version
-        let api_resource = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            group,
-            kind,
-        )
-        .await
-        .map_err(|e| {
-            MoveError::Discovery(format!("Failed to discover {}/{}: {}", group, kind, e))
-        })?;
-
-        let api: Api<DynamicObject> =
-            Api::namespaced_with(self.client.clone(), &self.namespace, &api_resource);
-
-        // List all resources
-        let list = api
-            .list(&Default::default())
-            .await
-            .map_err(MoveError::Kube)?;
-
-        for obj in list.items {
-            let name = match &obj.metadata.name {
-                Some(n) => n.clone(),
-                None => continue,
-            };
-
-            // Patch to unpause - this MUST succeed
-            let patch = serde_json::json!({
-                "spec": {
-                    "paused": false
-                }
-            });
-
-            api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
-                .await
-                .map_err(|e| {
-                    MoveError::PauseFailed(format!("Failed to unpause {} {}: {}", kind, name, e))
-                })?;
-
-            info!(kind = %kind, name = %name, "Unpaused resource");
+        let count =
+            crate::utils::patch_resources_paused(&self.client, &self.namespace, group, kind, false)
+                .await?;
+        if count > 0 {
+            info!(kind = %kind, count = count, "Unpaused resources");
         }
-
         Ok(())
     }
 }

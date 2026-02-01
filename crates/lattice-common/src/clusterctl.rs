@@ -183,6 +183,32 @@ async fn run_command(cmd: &mut Command, description: &str) -> Result<(), String>
     }
 }
 
+/// Create a retry callback that unpauses the CAPI cluster before retry.
+///
+/// When a clusterctl move operation fails mid-way, the cluster may be left in a paused
+/// state. This callback unpauses it to allow the retry to proceed. Any unpause failures
+/// are logged as warnings but don't prevent the retry.
+fn create_unpause_retry_callback(
+    kubeconfig: std::path::PathBuf,
+    namespace: String,
+    cluster_name: String,
+) -> RetryCallback<'static> {
+    Box::new(move || {
+        let kc = kubeconfig.clone();
+        let ns = namespace.clone();
+        let cn = cluster_name.clone();
+        Box::pin(async move {
+            if let Err(e) = unpause_capi_cluster(Some(&kc), &ns, &cn).await {
+                warn!(
+                    cluster = %cn,
+                    error = %e,
+                    "failed to unpause CAPI cluster before retry"
+                );
+            }
+        })
+    })
+}
+
 /// Move CAPI resources directly between clusters using --to-kubeconfig
 ///
 /// This is the preferred method when you have access to both kubeconfigs.
@@ -199,26 +225,11 @@ pub async fn move_to_kubeconfig(
     let config = RetryConfig {
         operation: "move",
         context_name: cluster_name,
-        on_retry: Some(Box::new({
-            let kc = source_kubeconfig.to_path_buf();
-            let ns = namespace.to_string();
-            let cn = cluster_name.to_string();
-            move || {
-                let kc = kc.clone();
-                let ns = ns.clone();
-                let cn = cn.clone();
-                Box::pin(async move {
-                    // Unpause before retry to recover from partial move state
-                    if let Err(e) = unpause_capi_cluster(Some(&kc), &ns, &cn).await {
-                        warn!(
-                            cluster = %cn,
-                            error = %e,
-                            "failed to unpause CAPI cluster before retry"
-                        );
-                    }
-                })
-            }
-        })),
+        on_retry: Some(create_unpause_retry_callback(
+            source_kubeconfig.to_path_buf(),
+            namespace.to_string(),
+            cluster_name.to_string(),
+        )),
         retry_delay: RETRY_DELAY,
     };
 

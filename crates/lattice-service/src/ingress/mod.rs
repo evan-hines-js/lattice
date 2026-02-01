@@ -26,6 +26,25 @@ use lattice_common::policy::{
 use crate::mesh;
 
 // =============================================================================
+// Macro for default serde functions
+// =============================================================================
+
+/// Macro to implement default_api_version() and default_kind() for types
+/// implementing HasApiResource. This reduces boilerplate for serde defaults.
+macro_rules! impl_api_defaults {
+    ($type:ty) => {
+        impl $type {
+            fn default_api_version() -> String {
+                <Self as HasApiResource>::API_VERSION.to_string()
+            }
+            fn default_kind() -> String {
+                <Self as HasApiResource>::KIND.to_string()
+            }
+        }
+    };
+}
+
+// =============================================================================
 // Gateway API Types
 // =============================================================================
 
@@ -50,14 +69,9 @@ impl HasApiResource for Gateway {
     const KIND: &'static str = "Gateway";
 }
 
-impl Gateway {
-    fn default_api_version() -> String {
-        <Self as HasApiResource>::API_VERSION.to_string()
-    }
-    fn default_kind() -> String {
-        <Self as HasApiResource>::KIND.to_string()
-    }
+impl_api_defaults!(Gateway);
 
+impl Gateway {
     /// Create a new Gateway
     pub fn new(metadata: GatewayMetadata, spec: GatewaySpec) -> Self {
         Self {
@@ -190,14 +204,9 @@ impl HasApiResource for HttpRoute {
     const KIND: &'static str = "HTTPRoute";
 }
 
-impl HttpRoute {
-    fn default_api_version() -> String {
-        <Self as HasApiResource>::API_VERSION.to_string()
-    }
-    fn default_kind() -> String {
-        <Self as HasApiResource>::KIND.to_string()
-    }
+impl_api_defaults!(HttpRoute);
 
+impl HttpRoute {
     /// Create a new HTTPRoute
     pub fn new(metadata: GatewayMetadata, spec: HttpRouteSpec) -> Self {
         Self {
@@ -308,14 +317,9 @@ impl HasApiResource for Certificate {
     const KIND: &'static str = "Certificate";
 }
 
-impl Certificate {
-    fn default_api_version() -> String {
-        <Self as HasApiResource>::API_VERSION.to_string()
-    }
-    fn default_kind() -> String {
-        <Self as HasApiResource>::KIND.to_string()
-    }
+impl_api_defaults!(Certificate);
 
+impl Certificate {
     /// Create a new Certificate
     pub fn new(metadata: GatewayMetadata, spec: CertificateSpec) -> Self {
         Self {

@@ -16,10 +16,10 @@ use tracing::{debug, info};
 
 /// Check if a kubeconfig has already been patched for proxy access.
 ///
-/// A kubeconfig is considered patched if its server URL contains "/cluster/",
+/// A kubeconfig is considered patched if its server URL contains "/clusters/",
 /// which indicates it's using the proxy path format.
 pub fn is_kubeconfig_patched(kubeconfig_str: &str) -> bool {
-    kubeconfig_str.contains("/cluster/")
+    kubeconfig_str.contains("/clusters/")
 }
 
 /// Patch a kubeconfig YAML string for proxy access.
@@ -56,7 +56,7 @@ pub fn patch_kubeconfig_yaml(
         .map_err(|e| Error::internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
 
     // Build the new server URL with cluster path
-    let new_server = format!("{}/cluster/{}", proxy_url, cluster_name);
+    let new_server = format!("{}/clusters/{}", proxy_url, cluster_name);
     let ca_b64 = STANDARD.encode(ca_cert_pem.as_bytes());
 
     // Update only the cluster server and CA, preserving everything else
@@ -235,7 +235,7 @@ users:
 
     #[test]
     fn test_is_kubeconfig_patched_true() {
-        let patched = TEST_KUBECONFIG.replace("172.18.0.5:6443", "proxy.example.com/cluster/test");
+        let patched = TEST_KUBECONFIG.replace("172.18.0.5:6443", "proxy.example.com/clusters/test");
         assert!(is_kubeconfig_patched(&patched));
     }
 
@@ -251,14 +251,14 @@ users:
 
         assert!(result.is_some());
         let patched = result.unwrap();
-        assert!(patched.contains("https://proxy.example.com:8443/cluster/my-cluster"));
+        assert!(patched.contains("https://proxy.example.com:8443/clusters/my-cluster"));
     }
 
     #[test]
     fn test_patch_kubeconfig_yaml_skips_if_already_patched() {
         let already_patched = TEST_KUBECONFIG.replace(
             "https://172.18.0.5:6443",
-            "https://proxy.example.com/cluster/test",
+            "https://proxy.example.com/clusters/test",
         );
         let result = patch_kubeconfig_yaml(
             &already_patched,
@@ -344,11 +344,11 @@ clusters:
         assert!(config["clusters"][0]["cluster"]["server"]
             .as_str()
             .unwrap()
-            .contains("/cluster/my-cluster"));
+            .contains("/clusters/my-cluster"));
         assert!(config["clusters"][1]["cluster"]["server"]
             .as_str()
             .unwrap()
-            .contains("/cluster/my-cluster"));
+            .contains("/clusters/my-cluster"));
     }
 
     #[test]

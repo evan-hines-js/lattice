@@ -1,16 +1,17 @@
 //! Hierarchy proxy integration tests
 //!
 //! Tests the K8s API proxy through the cluster hierarchy.
-//! Parent clusters can access child cluster APIs through the gRPC stream.
+//! Parent clusters can access child cluster APIs through the auth proxy.
 //!
 //! # Architecture
 //!
 //! The proxy flow is:
-//! 1. kubectl uses patched kubeconfig (server: .../cluster/{child})
-//! 2. Request goes to lattice-api proxy handler
-//! 3. Proxy routes request through gRPC tunnel to child's agent
-//! 4. Agent executes request against local K8s API
-//! 5. Response returned through the tunnel
+//! 1. Client sends request to auth proxy with Bearer token
+//! 2. Auth proxy validates token via TokenReview API
+//! 3. Cedar policy engine authorizes the request
+//! 4. Proxy routes request through gRPC tunnel to child's agent
+//! 5. Agent executes request against local K8s API
+//! 6. Response returned through the tunnel
 //!
 //! # Running Standalone
 //!
@@ -21,99 +22,48 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use base64::{engine::general_purpose::STANDARD, Engine};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
 
 use super::super::context::{init_test_env, InfraContext};
 use super::super::helpers::{
-    run_cmd, run_cmd_allow_fail, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+    http_get_with_token, run_cmd_allow_fail, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+};
+use super::cedar::{
+    apply_e2e_default_policy, get_proxy_url, get_sa_token, remove_e2e_default_policy,
 };
 
 // ============================================================================
-// Helper Functions
+// Constants
 // ============================================================================
 
-/// Extract and decode a kubeconfig from a secret.
-fn extract_kubeconfig_from_secret(
-    parent_kubeconfig: &str,
-    namespace: &str,
-    secret_name: &str,
-) -> Result<String, String> {
-    let kubeconfig_b64 = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            parent_kubeconfig,
-            "get",
-            "secret",
-            secret_name,
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.data.value}",
-        ],
-    )?;
+/// Namespace for proxy test ServiceAccount
+const PROXY_TEST_NAMESPACE: &str = "lattice-system";
 
-    if kubeconfig_b64.trim().is_empty() {
-        return Err(format!(
-            "Kubeconfig secret {}/{} not found or empty",
-            namespace, secret_name
-        ));
-    }
-
-    let kubeconfig_bytes = STANDARD
-        .decode(kubeconfig_b64.trim())
-        .map_err(|e| format!("Failed to decode kubeconfig: {}", e))?;
-
-    String::from_utf8(kubeconfig_bytes).map_err(|e| format!("Invalid UTF-8 in kubeconfig: {}", e))
-}
-
-/// Write kubeconfig to a temp file and return the path.
-fn write_temp_kubeconfig(cluster_name: &str, content: &str) -> Result<String, String> {
-    let path = format!("/tmp/proxy-test-{}-kubeconfig", cluster_name);
-    std::fs::write(&path, content)
-        .map_err(|e| format!("Failed to write temp kubeconfig: {}", e))?;
-    Ok(path)
-}
-
-/// Execute kubectl command with a temp kubeconfig and clean up.
-fn kubectl_with_temp_kubeconfig(
-    kubeconfig_content: &str,
-    cluster_name: &str,
-    args: &[&str],
-) -> Result<String, String> {
-    let temp_path = write_temp_kubeconfig(cluster_name, kubeconfig_content)?;
-
-    let mut full_args = vec!["--kubeconfig", &temp_path];
-    full_args.extend(args);
-
-    let result = run_cmd_allow_fail("kubectl", &full_args);
-
-    let _ = std::fs::remove_file(&temp_path);
-
-    Ok(result)
-}
+/// ServiceAccount name for proxy tests (uses default SA in lattice-system)
+const PROXY_TEST_SA: &str = "default";
 
 // ============================================================================
 // Core Test Functions
 // ============================================================================
 
-/// Wait for agent connection before testing proxy.
+/// Wait for cluster to be ready for proxy testing.
 ///
-/// The proxy relies on agents being connected and subtree state being synced.
+/// Checks that the cluster is in a state where proxy access should work:
+/// - Pivoted or Ready phase means the cluster was successfully bootstrapped
+/// - For pivoted clusters, the agent connection is implicit (pivot requires agent)
 pub async fn wait_for_agent_ready(
     parent_kubeconfig: &str,
     child_cluster_name: &str,
 ) -> Result<(), String> {
     info!(
-        "[Integration/Proxy] Waiting for agent connection from {}...",
+        "[Integration/Proxy] Checking cluster {} is ready for proxy access...",
         child_cluster_name
     );
 
     for attempt in 1..=30 {
-        let status = run_cmd_allow_fail(
+        let phase = run_cmd_allow_fail(
             "kubectl",
             &[
                 "--kubeconfig",
@@ -122,38 +72,43 @@ pub async fn wait_for_agent_ready(
                 "latticecluster",
                 child_cluster_name,
                 "-o",
-                "jsonpath={.status.agentConnected}",
+                "jsonpath={.status.phase}",
             ],
         );
 
-        if status.trim() == "true" {
+        let phase_trimmed = phase.trim();
+
+        // Pivoted or Ready means the cluster is operational
+        // Pivoted specifically means the agent was connected (pivot requires agent)
+        if phase_trimmed == "Pivoted" || phase_trimmed == "Ready" {
             info!(
-                "[Integration/Proxy] Agent for {} is connected",
-                child_cluster_name
+                "[Integration/Proxy] Cluster {} is {} - ready for proxy access",
+                child_cluster_name, phase_trimmed
             );
             return Ok(());
         }
 
         if attempt < 30 {
             info!(
-                "[Integration/Proxy] Waiting for agent connection (attempt {}/30)...",
-                attempt
+                "[Integration/Proxy] Waiting for cluster to be ready (attempt {}/30, phase: {})...",
+                attempt, phase_trimmed
             );
             sleep(Duration::from_secs(5)).await;
         }
     }
 
-    info!(
-        "[Integration/Proxy] Note: Could not confirm agent connection for {} (cluster may have pivoted)",
+    Err(format!(
+        "Cluster {} did not reach Ready/Pivoted state within timeout",
         child_cluster_name
-    );
-    Ok(())
+    ))
 }
 
-/// Test proxy access from parent cluster to child cluster.
+/// Test proxy access to a child cluster via the auth proxy.
 ///
-/// Uses the patched kubeconfig from the CAPI secret to access the child
-/// through the proxy endpoint.
+/// This test:
+/// 1. Gets a ServiceAccount token from the parent cluster
+/// 2. Calls the auth proxy endpoint directly with curl
+/// 3. Verifies we get a valid K8s API response
 pub async fn test_proxy_access_to_child(
     parent_kubeconfig: &str,
     child_cluster_name: &str,
@@ -163,145 +118,148 @@ pub async fn test_proxy_access_to_child(
         child_cluster_name
     );
 
-    let namespace = format!("capi-{}", child_cluster_name);
-    let secret_name = format!("{}-kubeconfig", child_cluster_name);
+    // Get the proxy URL
+    let proxy_url = get_proxy_url(parent_kubeconfig)?;
+    info!("[Integration/Proxy] Using proxy URL: {}", proxy_url);
 
-    let kubeconfig = extract_kubeconfig_from_secret(parent_kubeconfig, &namespace, &secret_name)?;
+    // Get a ServiceAccount token from the parent cluster
+    let token = get_sa_token(parent_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
+    info!(
+        "[Integration/Proxy] Got SA token for {}/{}",
+        PROXY_TEST_NAMESPACE, PROXY_TEST_SA
+    );
 
-    // Verify kubeconfig is patched for proxy
-    if !kubeconfig.contains("/cluster/") {
+    // Call the auth proxy to get namespaces from the child cluster
+    let url = format!(
+        "{}/clusters/{}/api/v1/namespaces",
+        proxy_url, child_cluster_name
+    );
+    let response = http_get_with_token(&url, &token, 30);
+
+    // Check for successful response
+    if response.is_success() {
+        if response.body.contains("\"kind\":\"NamespaceList\"")
+            || response.body.contains("\"kind\": \"NamespaceList\"")
+        {
+            let namespace_count = response.body.matches("\"kind\":\"Namespace\"").count()
+                + response.body.matches("\"kind\": \"Namespace\"").count();
+            info!(
+                "[Integration/Proxy] SUCCESS: Proxy access to {} worked - {} namespaces visible",
+                child_cluster_name, namespace_count
+            );
+            return Ok(());
+        }
+    }
+
+    // Check for specific error types
+    if response.is_forbidden() {
         return Err(format!(
-            "Kubeconfig for {} not patched for proxy - missing /cluster/ path",
+            "Proxy access denied (403 Forbidden) - Cedar policy may be missing. Response: {}",
+            truncate_response(&response.body)
+        ));
+    }
+
+    if response.is_unauthorized() {
+        return Err(format!(
+            "Proxy authentication failed (401 Unauthorized) - token validation failed. Response: {}",
+            truncate_response(&response.body)
+        ));
+    }
+
+    if response.body.contains("agent not connected") {
+        return Err(format!(
+            "Agent not connected for cluster {} - cluster may not be registered",
             child_cluster_name
         ));
     }
 
-    let result = kubectl_with_temp_kubeconfig(
-        &kubeconfig,
-        child_cluster_name,
-        &["get", "namespaces", "-o", "name", "--request-timeout=30s"],
-    )?;
-
-    if result.trim().is_empty() || result.contains("error") || result.contains("Error") {
-        info!(
-            "[Integration/Proxy] Proxy access to {} returned: {}",
-            child_cluster_name,
-            result.trim()
-        );
-        info!("[Integration/Proxy] Note: Proxy access may require Cedar policies");
-        return Ok(());
+    if response.status_code == 0 {
+        return Err(format!(
+            "Proxy request failed - could not connect to {}",
+            url
+        ));
     }
 
-    let namespace_count = result.lines().filter(|l| !l.is_empty()).count();
-    info!(
-        "[Integration/Proxy] SUCCESS: Proxy access to {} worked - {} namespaces visible",
-        child_cluster_name, namespace_count
-    );
-
-    Ok(())
+    Err(format!(
+        "Unexpected proxy response for {} (HTTP {}) - expected NamespaceList. Response: {}",
+        child_cluster_name,
+        response.status_code,
+        truncate_response(&response.body)
+    ))
 }
 
 /// Test proxy access from root cluster to grandchild cluster.
 ///
-/// This is the key hierarchical test:
-/// - Root (mgmt) → Child (workload) → Grandchild (workload2)
+/// This tests hierarchical proxy routing:
+/// Root (mgmt) → Child (workload) → Grandchild (workload2)
 ///
-/// The proxy should be able to reach the grandchild even though it's
-/// two hops away, because each parent maintains the subtree registry
-/// of all descendants.
+/// The request should route through the hierarchy via gRPC tunnels.
 pub async fn test_proxy_access_to_grandchild(
     root_kubeconfig: &str,
-    child_cluster_name: &str,
+    _child_cluster_name: &str,
     grandchild_cluster_name: &str,
 ) -> Result<(), String> {
     info!(
         "[Integration/Proxy] Testing proxy access from root to grandchild {}...",
         grandchild_cluster_name
     );
-    info!(
-        "[Integration/Proxy] Path: root -> {} -> {}",
-        child_cluster_name, grandchild_cluster_name
+
+    // Get the proxy URL from root cluster
+    let proxy_url = get_proxy_url(root_kubeconfig)?;
+
+    // Get a ServiceAccount token from the root cluster
+    let token = get_sa_token(root_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
+
+    // Call the auth proxy to get namespaces from the grandchild cluster
+    // The proxy should route this through the child cluster's agent
+    let url = format!(
+        "{}/clusters/{}/api/v1/namespaces",
+        proxy_url, grandchild_cluster_name
     );
+    let response = http_get_with_token(&url, &token, 30);
 
-    // Get child's kubeconfig from root
-    let child_namespace = format!("capi-{}", child_cluster_name);
-    let child_secret_name = format!("{}-kubeconfig", child_cluster_name);
-    let child_kubeconfig =
-        extract_kubeconfig_from_secret(root_kubeconfig, &child_namespace, &child_secret_name)?;
-
-    // Write child kubeconfig to access grandchild's secret through child
-    let child_temp_path = write_temp_kubeconfig(child_cluster_name, &child_kubeconfig)?;
-
-    // Get grandchild's kubeconfig through child (this goes through the proxy)
-    let grandchild_namespace = format!("capi-{}", grandchild_cluster_name);
-    let grandchild_secret_name = format!("{}-kubeconfig", grandchild_cluster_name);
-
-    let grandchild_kubeconfig_b64 = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            &child_temp_path,
-            "get",
-            "secret",
-            &grandchild_secret_name,
-            "-n",
-            &grandchild_namespace,
-            "-o",
-            "jsonpath={.data.value}",
-            "--request-timeout=30s",
-        ],
-    );
-
-    let _ = std::fs::remove_file(&child_temp_path);
-
-    if grandchild_kubeconfig_b64.trim().is_empty()
-        || grandchild_kubeconfig_b64.contains("error")
-        || grandchild_kubeconfig_b64.contains("Error")
-    {
-        info!(
-            "[Integration/Proxy] Could not get grandchild kubeconfig through proxy: {}",
-            grandchild_kubeconfig_b64.trim()
-        );
-        info!("[Integration/Proxy] Note: Hierarchical proxy may require Cedar policies");
-        return Ok(());
+    // Check for successful response
+    if response.is_success() {
+        if response.body.contains("\"kind\":\"NamespaceList\"")
+            || response.body.contains("\"kind\": \"NamespaceList\"")
+        {
+            let namespace_count = response.body.matches("\"kind\":\"Namespace\"").count()
+                + response.body.matches("\"kind\": \"Namespace\"").count();
+            info!(
+                "[Integration/Proxy] SUCCESS: Grandchild proxy access worked - {} namespaces visible through hierarchy",
+                namespace_count
+            );
+            return Ok(());
+        }
     }
 
-    // Decode grandchild kubeconfig
-    let grandchild_kubeconfig_bytes = STANDARD
-        .decode(grandchild_kubeconfig_b64.trim())
-        .map_err(|e| format!("Failed to decode grandchild kubeconfig: {}", e))?;
-    let grandchild_kubeconfig = String::from_utf8(grandchild_kubeconfig_bytes)
-        .map_err(|e| format!("Invalid UTF-8 in grandchild kubeconfig: {}", e))?;
-
-    // Access grandchild through the proxy
-    let result = kubectl_with_temp_kubeconfig(
-        &grandchild_kubeconfig,
-        grandchild_cluster_name,
-        &["get", "namespaces", "-o", "name", "--request-timeout=30s"],
-    )?;
-
-    if result.trim().is_empty() || result.contains("error") || result.contains("Error") {
-        info!(
-            "[Integration/Proxy] Grandchild proxy access returned: {}",
-            result.trim()
-        );
-        info!("[Integration/Proxy] Note: Full hierarchical proxy may require Cedar policies");
-        return Ok(());
+    if response.is_forbidden() {
+        return Err(format!(
+            "Grandchild proxy access denied (403) - Cedar policy may not cover grandchild. Response: {}",
+            truncate_response(&response.body)
+        ));
     }
 
-    let namespace_count = result.lines().filter(|l| !l.is_empty()).count();
-    info!(
-        "[Integration/Proxy] SUCCESS: Grandchild proxy access worked - {} namespaces visible through hierarchy",
-        namespace_count
-    );
+    if response.body.contains("agent not connected") || response.body.contains("ClusterNotFound") {
+        return Err(format!(
+            "Grandchild {} not reachable - subtree not registered or agent disconnected",
+            grandchild_cluster_name
+        ));
+    }
 
-    Ok(())
+    Err(format!(
+        "Unexpected grandchild proxy response (HTTP {}). Response: {}",
+        response.status_code,
+        truncate_response(&response.body)
+    ))
 }
 
-/// Run full proxy hierarchy tests.
+/// Run full proxy hierarchy tests with proper setup/teardown.
 ///
-/// Tests proxy access through the full cluster hierarchy:
-/// mgmt -> workload -> workload2
+/// This function:
+/// 1. Applies a default Cedar policy to allow E2E access
+/// 2. Tests proxy access through the hierarchy
+/// 3. Cleans up the policy
 pub async fn run_proxy_hierarchy_tests(
     ctx: &InfraContext,
     workload_cluster_name: &str,
@@ -313,13 +271,31 @@ pub async fn run_proxy_hierarchy_tests(
         workload_cluster_name, workload2_cluster_name
     );
 
+    // Apply default E2E policy to allow proxy access
+    apply_e2e_default_policy(&ctx.mgmt_kubeconfig)?;
+
+    // Use a closure to ensure cleanup happens even on error
+    let result = run_proxy_tests_inner(ctx, workload_cluster_name, workload2_cluster_name).await;
+
+    // Note: We don't remove the policy here because other tests may need it
+    // The policy is labeled for E2E cleanup at test suite end
+
+    result
+}
+
+/// Inner proxy test logic (separated for cleanup handling)
+async fn run_proxy_tests_inner(
+    ctx: &InfraContext,
+    workload_cluster_name: &str,
+    workload2_cluster_name: &str,
+) -> Result<(), String> {
     // Wait for child agent
     wait_for_agent_ready(&ctx.mgmt_kubeconfig, workload_cluster_name).await?;
 
     // Test direct child access through proxy
     test_proxy_access_to_child(&ctx.mgmt_kubeconfig, workload_cluster_name).await?;
 
-    // Wait for grandchild agent (through child)
+    // Wait for grandchild agent and test hierarchical access
     if ctx.has_workload() {
         wait_for_agent_ready(
             ctx.workload_kubeconfig.as_deref().unwrap(),
@@ -340,6 +316,15 @@ pub async fn run_proxy_hierarchy_tests(
     Ok(())
 }
 
+/// Truncate long responses for error messages
+fn truncate_response(response: &str) -> String {
+    if response.len() > 500 {
+        format!("{}...(truncated)", &response[..500])
+    } else {
+        response.to_string()
+    }
+}
+
 // ============================================================================
 // Standalone Tests
 // ============================================================================
@@ -352,12 +337,19 @@ async fn test_proxy_access_standalone() {
     let workload_name = std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME")
         .unwrap_or_else(|_| WORKLOAD_CLUSTER_NAME.to_string());
 
+    // Apply E2E policy
+    apply_e2e_default_policy(&ctx.mgmt_kubeconfig).unwrap();
+
     wait_for_agent_ready(&ctx.mgmt_kubeconfig, &workload_name)
         .await
         .unwrap();
-    test_proxy_access_to_child(&ctx.mgmt_kubeconfig, &workload_name)
-        .await
-        .unwrap();
+
+    let result = test_proxy_access_to_child(&ctx.mgmt_kubeconfig, &workload_name).await;
+
+    // Cleanup
+    remove_e2e_default_policy(&ctx.mgmt_kubeconfig);
+
+    result.unwrap();
 }
 
 /// Standalone test - test full hierarchy proxy

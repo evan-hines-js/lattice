@@ -25,10 +25,11 @@ use kube::Client;
 use tokio::process::Command;
 use tracing::{debug, info};
 
-use super::{generate_run_id, kind_utils, CommandErrorExt};
+use super::{generate_run_id, kind_utils, wait_for_deletion, CommandErrorExt};
 
 use lattice_common::clusterctl::{move_to_kubeconfig, teardown_cluster, TeardownConfig};
 use lattice_common::kube_utils;
+use lattice_common::CredentialProvider;
 use lattice_common::{
     capi_namespace, kubeconfig_secret_name, AwsCredentials, LATTICE_SYSTEM_NAMESPACE,
 };
@@ -94,7 +95,7 @@ impl Uninstaller {
                 .items
                 .into_iter()
                 .next()
-                .expect("len() == 1 guarantees at least one item")
+                .ok_or_else(|| Error::command_failed("No cluster found"))?
         } else if cluster_list.items.is_empty() {
             return Err(Error::command_failed("No LatticeCluster found"));
         } else {
@@ -183,19 +184,28 @@ impl Uninstaller {
 
         // Wait for LatticeCluster to be fully deleted (finalizers removed)
         info!("Waiting for LatticeCluster deletion...");
-        let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_secs(120) {
-            match api.get(&self.cluster_name).await {
-                Ok(_) => {
-                    debug!("LatticeCluster still exists, waiting...");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+        let cluster_name = self.cluster_name.clone();
+        let result = wait_for_deletion(
+            Duration::from_secs(120),
+            Duration::from_secs(2),
+            "LatticeCluster",
+            || {
+                let api = api.clone();
+                let name = cluster_name.clone();
+                async move {
+                    match api.get(&name).await {
+                        Ok(_) => Ok(true),                                        // Still exists
+                        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false), // Deleted
+                        Err(_) => Err("unknown".to_string()), // Treat as deleted
+                    }
                 }
-                Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                    info!("LatticeCluster deleted");
-                    return Ok(());
-                }
-                Err(_) => return Ok(()),
-            }
+            },
+        )
+        .await;
+
+        if result.is_ok() {
+            info!("LatticeCluster deleted");
+            return Ok(());
         }
 
         // Timeout - try to remove finalizer manually
@@ -241,17 +251,22 @@ impl Uninstaller {
 
         // Wait for deletion
         info!("Waiting for LoadBalancer cleanup...");
-        let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_secs(60) {
-            match api.get("lattice-cell").await {
-                Ok(_) => tokio::time::sleep(Duration::from_secs(2)).await,
-                Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(()),
-                Err(_) => return Ok(()),
-            }
-        }
-
-        tracing::warn!("Timeout waiting for cell service deletion, proceeding anyway");
-        Ok(())
+        wait_for_deletion(
+            Duration::from_secs(60),
+            Duration::from_secs(2),
+            "lattice-cell service",
+            || {
+                let api = api.clone();
+                async move {
+                    match api.get("lattice-cell").await {
+                        Ok(_) => Ok(true),                                        // Still exists
+                        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false), // Deleted
+                        Err(_) => Err("unknown".to_string()), // Treat as deleted
+                    }
+                }
+            },
+        )
+        .await
     }
 
     /// Patch the kubeconfig secret to use the external control plane endpoint.

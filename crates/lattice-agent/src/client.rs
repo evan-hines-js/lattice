@@ -434,7 +434,7 @@ impl AgentClient {
         // Send full subtree state to parent and start watcher for changes
         // This enables the parent cell to know about all clusters in our subtree
         // for routing K8s API requests and authorization decisions
-        if let Ok(k8s_client) = create_k8s_client().await {
+        if let Some(k8s_client) = crate::create_k8s_client_logged("subtree watcher").await {
             let subtree_sender = SubtreeSender::new(self.config.cluster_name.clone(), k8s_client);
 
             // Send full state on connect
@@ -443,8 +443,6 @@ impl AgentClient {
             // Spawn watcher to send deltas on LatticeCluster changes
             // spawn_watcher consumes the sender and runs until the channel closes
             self.subtree_watcher_handle = Some(subtree_sender.spawn_watcher(message_tx.clone()));
-        } else {
-            warn!("Failed to create K8s client for subtree watcher - subtree state will not be reported");
         }
 
         // Clone for spawned tasks
@@ -555,13 +553,15 @@ impl AgentClient {
     /// Send the ready message to cell
     async fn send_ready(&self) -> Result<(), ClientError> {
         // Get K8s version from in-cluster client
-        let k8s_version = match create_k8s_client().await {
-            Ok(client) => match client.apiserver_version().await {
-                Ok(info) => format!("v{}.{}", info.major, info.minor),
-                Err(_) => "unknown".to_string(),
-            },
-            Err(_) => "unknown".to_string(),
-        };
+        let k8s_version =
+            if let Some(client) = crate::create_k8s_client_logged("version check").await {
+                match client.apiserver_version().await {
+                    Ok(info) => format!("v{}.{}", info.major, info.minor),
+                    Err(_) => "unknown".to_string(),
+                }
+            } else {
+                "unknown".to_string()
+            };
 
         let msg = AgentMessage {
             cluster_name: self.config.cluster_name.clone(),
@@ -636,14 +636,10 @@ impl AgentClient {
         let retry_interval = std::time::Duration::from_secs(5);
 
         loop {
-            // Create k8s client for this iteration
-            let client = match create_k8s_client().await {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(error = %e, "Failed to create k8s client for unpivot");
-                    tokio::time::sleep(retry_interval).await;
-                    continue;
-                }
+            // Create K8s client for this iteration
+            let Some(client) = crate::create_k8s_client_logged("unpivot").await else {
+                tokio::time::sleep(retry_interval).await;
+                continue;
             };
 
             // Discover and prepare CAPI resources (same logic as pivot)
@@ -651,25 +647,15 @@ impl AgentClient {
                 Ok(objects) => {
                     // Log each object being sent for debugging
                     for obj in &objects {
-                        // Parse manifest to get kind/name
-                        if let Ok(parsed) =
-                            serde_json::from_slice::<serde_json::Value>(&obj.manifest)
-                        {
-                            let kind = parsed.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-                            let name = parsed
-                                .get("metadata")
-                                .and_then(|m| m.get("name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-                            info!(
-                                cluster = %cluster_name,
-                                kind = %kind,
-                                name = %name,
-                                source_uid = %obj.source_uid,
-                                owners = obj.owners.len(),
-                                "Unpivot: sending object"
-                            );
-                        }
+                        let (kind, name) = Self::extract_manifest_info_bytes(&obj.manifest);
+                        info!(
+                            cluster = %cluster_name,
+                            kind = %kind,
+                            name = %name,
+                            source_uid = %obj.source_uid,
+                            owners = obj.owners.len(),
+                            "Unpivot: sending object"
+                        );
                     }
                     info!(
                         cluster = %cluster_name,
@@ -726,10 +712,20 @@ impl AgentClient {
         }
     }
 
-    /// Extract kind and name from a YAML manifest for logging
+    /// Extract kind and name from a YAML/JSON manifest string for logging
     fn extract_manifest_info(yaml: &str) -> (String, String) {
-        match lattice_common::yaml::parse_yaml(yaml) {
-            Ok(v) => {
+        Self::extract_manifest_info_from_value(lattice_common::yaml::parse_yaml(yaml).ok())
+    }
+
+    /// Extract kind and name from manifest bytes for logging
+    fn extract_manifest_info_bytes(bytes: &[u8]) -> (String, String) {
+        Self::extract_manifest_info_from_value(serde_json::from_slice(bytes).ok())
+    }
+
+    /// Extract kind and name from a parsed JSON value
+    fn extract_manifest_info_from_value(value: Option<serde_json::Value>) -> (String, String) {
+        match value {
+            Some(v) => {
                 let kind = v["kind"].as_str().unwrap_or("unknown").to_string();
                 let name = v["metadata"]["name"]
                     .as_str()
@@ -737,7 +733,7 @@ impl AgentClient {
                     .to_string();
                 (kind, name)
             }
-            Err(_) => ("invalid".to_string(), "invalid".to_string()),
+            None => ("invalid".to_string(), "invalid".to_string()),
         }
     }
 
@@ -814,7 +810,7 @@ impl AgentClient {
 
         let client = create_k8s_client()
             .await
-            .map_err(|e| std::io::Error::other(format!("failed to create kube client: {}", e)))?;
+            .map_err(|e| std::io::Error::other(format!("failed to create K8s client: {}", e)))?;
 
         let clusters: kube::Api<LatticeCluster> = kube::Api::all(client.clone());
         let list = clusters
@@ -879,12 +875,8 @@ impl AgentClient {
         use kube::api::Api;
         use tokio::time::{sleep, Duration};
 
-        let client = match create_k8s_client().await {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, "Failed to create client for CRD check");
-                return false;
-            }
+        let Some(client) = crate::create_k8s_client_logged("CRD check").await else {
+            return false;
         };
 
         let crds: Api<CustomResourceDefinition> = Api::all(client);
@@ -928,13 +920,7 @@ impl AgentClient {
                     return;
                 }
 
-                let client = match create_k8s_client().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!(error = %e, "Failed to create k8s client for apply manifests");
-                        return;
-                    }
-                };
+                let client = crate::get_client_or_return!("apply manifests");
 
                 // Apply manifests (LatticeCluster CRD + resource)
                 let manifests_count = cmd.manifests.len();
@@ -993,34 +979,29 @@ impl AgentClient {
                 }
             }
             Some(Command::SyncResources(cmd)) => {
+                let proto_resources = cmd.resources.clone().unwrap_or_default();
                 info!(
-                    cloud_providers = cmd.cloud_providers.len(),
-                    secrets_providers = cmd.secrets_providers.len(),
-                    cedar_policies = cmd.cedar_policies.len(),
-                    oidc_providers = cmd.oidc_providers.len(),
-                    secrets = cmd.secrets.len(),
+                    cloud_providers = proto_resources.cloud_providers.len(),
+                    secrets_providers = proto_resources.secrets_providers.len(),
+                    cedar_policies = proto_resources.cedar_policies.len(),
+                    oidc_providers = proto_resources.oidc_providers.len(),
+                    secrets = proto_resources.secrets.len(),
                     full_sync = cmd.full_sync,
                     "Received sync resources command"
                 );
 
                 // Apply resources in background to not block command processing
                 let resources = DistributableResources {
-                    cloud_providers: cmd.cloud_providers.clone(),
-                    secrets_providers: cmd.secrets_providers.clone(),
-                    secrets: cmd.secrets.clone(),
-                    cedar_policies: cmd.cedar_policies.clone(),
-                    oidc_providers: cmd.oidc_providers.clone(),
+                    cloud_providers: proto_resources.cloud_providers,
+                    secrets_providers: proto_resources.secrets_providers,
+                    secrets: proto_resources.secrets,
+                    cedar_policies: proto_resources.cedar_policies,
+                    oidc_providers: proto_resources.oidc_providers,
                 };
                 let full_sync = cmd.full_sync;
 
                 tokio::spawn(async move {
-                    let client = match create_k8s_client().await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            warn!(error = %e, "Failed to create k8s client for synced resources");
-                            return;
-                        }
-                    };
+                    let client = crate::get_client_or_return!("synced resources");
                     if let Err(e) = apply_distributed_resources(&client, &resources).await {
                         warn!(error = %e, "Failed to apply synced resources");
                     } else {
@@ -1080,12 +1061,11 @@ impl AgentClient {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create K8s client for proxy request");
-                            let response = KubernetesResponse {
-                                request_id: request_id.clone(),
-                                status_code: 500,
-                                error: format!("Failed to create K8s client: {}", e),
-                                ..Default::default()
-                            };
+                            let response = crate::build_k8s_error_response(
+                                &request_id,
+                                500,
+                                &format!("Failed to create K8s client: {}", e),
+                            );
                             let msg = AgentMessage {
                                 cluster_name: cluster_name_clone,
                                 payload: Some(Payload::KubernetesResponse(response)),
@@ -1153,7 +1133,7 @@ impl AgentClient {
                     let client = match create_k8s_client().await {
                         Ok(c) => c,
                         Err(e) => {
-                            error!(error = %e, "Failed to create k8s client");
+                            error!(error = %e, "Failed to create K8s client for move batch");
                             send_batch_ack(
                                 &message_tx,
                                 &cluster_name_clone,
@@ -1161,7 +1141,7 @@ impl AgentClient {
                                 vec![],
                                 vec![MoveObjectError {
                                     source_uid: String::new(),
-                                    message: e.to_string(),
+                                    message: format!("Failed to create K8s client: {}", e),
                                     retryable: true,
                                 }],
                             )
@@ -1227,11 +1207,12 @@ impl AgentClient {
                 let message_tx = message_tx.clone();
                 let capi_cluster_name = complete.cluster_name.clone();
                 let target_namespace = complete.target_namespace.clone();
-                let cloud_providers = complete.cloud_providers.clone();
-                let secrets_providers = complete.secrets_providers.clone();
-                let secrets = complete.secrets.clone();
-                let cedar_policies = complete.cedar_policies.clone();
-                let oidc_providers = complete.oidc_providers.clone();
+                let resources = complete.resources.clone().unwrap_or_default();
+                let cloud_providers = resources.cloud_providers;
+                let secrets_providers = resources.secrets_providers;
+                let secrets = resources.secrets;
+                let cedar_policies = resources.cedar_policies;
+                let oidc_providers = resources.oidc_providers;
                 let manifests = complete.manifests.clone();
 
                 info!(
@@ -1256,13 +1237,13 @@ impl AgentClient {
                     let client = match create_k8s_client().await {
                         Ok(c) => c,
                         Err(e) => {
-                            error!(error = %e, "Failed to create k8s client");
+                            error!(error = %e, "Failed to create K8s client for move complete");
                             send_complete_ack(
                                 &message_tx,
                                 &agent_cluster_name,
                                 &request_id,
                                 false,
-                                &e.to_string(),
+                                &format!("Failed to create K8s client: {}", e),
                                 0,
                             )
                             .await;
@@ -1359,12 +1340,8 @@ impl AgentClient {
     /// If pivot_complete is already true, duplicate MoveComplete commands
     /// can be immediately acked without re-applying resources.
     async fn check_local_pivot_complete(cluster_name: &str) -> bool {
-        let client = match create_k8s_client().await {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, "Failed to create k8s client for pivot check");
-                return false;
-            }
+        let Some(client) = crate::create_k8s_client_logged("pivot check").await else {
+            return false;
         };
         let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
         match clusters.get(cluster_name).await {

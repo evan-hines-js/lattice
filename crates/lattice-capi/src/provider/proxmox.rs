@@ -16,11 +16,9 @@ use super::{
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
     InfrastructureRef, Provider, VipConfig, WorkerPoolConfig,
 };
+use crate::constants::{DEFAULT_VIP_INTERFACE_PROXMOX, PROXMOX_API_VERSION};
 use lattice_common::crd::{LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig};
 use lattice_common::{Error, Result, CAPMOX_NAMESPACE, PROXMOX_CREDENTIALS_SECRET};
-
-const PROXMOX_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1alpha1";
-const DEFAULT_VIP_INTERFACE: &str = "ens18";
 
 /// VM sizing parameters for ProxmoxMachineTemplate
 struct MachineSizing {
@@ -256,7 +254,7 @@ impl Provider for ProxmoxProvider {
             Some(
                 cfg.virtual_ip_network_interface
                     .clone()
-                    .unwrap_or_else(|| DEFAULT_VIP_INTERFACE.to_string()),
+                    .unwrap_or_else(|| DEFAULT_VIP_INTERFACE_PROXMOX.to_string()),
             ),
             cfg.kube_vip_image.clone(),
         ));

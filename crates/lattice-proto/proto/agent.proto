@@ -138,18 +138,32 @@ message StatusResponse {
 }
 
 // Kubernetes node condition
+//
+// Represents the status of a Kubernetes node condition such as Ready,
+// MemoryPressure, DiskPressure, PIDPressure, or NetworkUnavailable.
 message NodeCondition {
+  // Condition type (e.g., "Ready", "MemoryPressure", "DiskPressure")
   string type = 1;
+  // Condition status: "True", "False", or "Unknown"
   string status = 2;
+  // Machine-readable reason for the condition's last transition
   string reason = 3;
+  // Human-readable message with details about the last transition
   string message = 4;
 }
 
 // CAPI resource status
+//
+// Summary of Cluster API resources managed by this cluster. Used for
+// health reporting and debugging pivot/unpivot operations.
 message CapiStatus {
+  // Number of Cluster resources (typically 1 for self-managed clusters)
   int32 cluster_count = 1;
+  // Number of Machine resources (control plane + workers)
   int32 machine_count = 2;
+  // Number of MachineDeployment resources (worker pools)
   int32 machine_deployment_count = 3;
+  // Whether a KubeadmControlPlane resource exists
   bool has_control_plane = 4;
 }
 
@@ -193,22 +207,32 @@ message ApplyManifestsCommand {
   repeated bytes manifests = 1;
 }
 
+// Reusable bundle of distributable resource types
+//
+// These resources are distributed from parent clusters to children during
+// pivot operations and ongoing synchronization. They include infrastructure
+// providers, secrets, and policy resources that children need to operate.
+message DistributableResources {
+  // CloudProvider CRDs (JSON) - infrastructure provider configurations
+  repeated bytes cloud_providers = 1;
+  // SecretsProvider CRDs (JSON) - external secrets integrations
+  repeated bytes secrets_providers = 2;
+  // Secrets referenced by providers (JSON) - credentials for providers
+  repeated bytes secrets = 3;
+  // CedarPolicy CRDs (JSON) - inherited authorization policies from ancestors
+  repeated bytes cedar_policies = 4;
+  // OIDCProvider CRDs (JSON) - inherited identity providers from ancestors
+  repeated bytes oidc_providers = 5;
+}
+
 // Sync distributable resources to child cluster
 // Used for both watch-triggered updates and periodic reconciliation
 message SyncDistributedResourcesCommand {
-  // CloudProvider CRDs (JSON)
-  repeated bytes cloud_providers = 1;
-  // SecretsProvider CRDs (JSON)
-  repeated bytes secrets_providers = 2;
-  // Secrets referenced by providers (JSON)
-  repeated bytes secrets = 3;
+  // Resources to sync to the child cluster
+  DistributableResources resources = 1;
   // If true, delete resources not in this list (full sync)
   // If false, only add/update (incremental)
-  bool full_sync = 4;
-  // CedarPolicy CRDs (JSON) - inherited policies from ancestors
-  repeated bytes cedar_policies = 5;
-  // OIDCProvider CRDs (JSON) - inherited providers from ancestors
-  repeated bytes oidc_providers = 6;
+  bool full_sync = 2;
 }
 
 // Request current cluster status
@@ -368,18 +392,10 @@ message MoveComplete {
   string cluster_name = 2;
   // Namespace where resources were created
   string target_namespace = 3;
-  // CloudProvider CRDs (JSON) - applied after CAPI resources
-  repeated bytes cloud_providers = 4;
-  // SecretsProvider CRDs (JSON)
-  repeated bytes secrets_providers = 5;
-  // Secrets referenced by providers (JSON)
-  repeated bytes secrets = 6;
+  // Distributable resources to apply after CAPI resources are imported
+  DistributableResources resources = 4;
   // Additional manifests to apply (e.g., CiliumNetworkPolicy)
-  repeated bytes manifests = 7;
-  // CedarPolicy CRDs (JSON) - inherited policies from ancestors
-  repeated bytes cedar_policies = 8;
-  // OIDCProvider CRDs (JSON) - inherited providers from ancestors
-  repeated bytes oidc_providers = 9;
+  repeated bytes manifests = 5;
 }
 
 // Agent → Cell: Unpause done, safe to delete source

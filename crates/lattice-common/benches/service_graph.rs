@@ -11,8 +11,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use rand::prelude::*;
 
 use lattice_common::crd::{
-    ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalServiceSpec, LatticeServiceSpec,
-    PortSpec, ReplicaSpec, Resolution, ResourceSpec, ResourceType, ServicePortsSpec,
+    ContainerSpec, DependencyDirection, DeploySpec, LatticeServiceSpec, PortSpec, ReplicaSpec,
+    ResourceSpec, ResourceType, ServicePortsSpec,
 };
 use lattice_common::graph::ServiceGraph;
 

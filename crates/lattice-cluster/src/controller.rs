@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
-use kube::{Client, ResourceExt};
+use kube::{Client, Resource, ResourceExt};
+use serde::de::DeserializeOwned;
 use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(test)]
@@ -39,6 +40,21 @@ use lattice_cell::{
     fetch_distributable_resources, patch_kubeconfig_for_proxy, DefaultManifestGenerator,
     DistributableResources, ParentServers, SharedAgentRegistry,
 };
+
+/// Helper function to get a Kubernetes resource by name, returning None if not found.
+///
+/// This reduces boilerplate for the common pattern of handling 404 errors when
+/// fetching resources that may or may not exist.
+async fn get_optional<K>(api: &Api<K>, name: &str) -> Result<Option<K>, Error>
+where
+    K: Resource + Clone + DeserializeOwned + std::fmt::Debug,
+{
+    match api.get(name).await {
+        Ok(resource) => Ok(Some(resource)),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
 ///
@@ -301,15 +317,9 @@ impl KubeClient for KubeClientImpl {
         let api: Api<Namespace> = Api::all(self.client.clone());
 
         // Check if namespace already exists
-        match api.get(name).await {
-            Ok(_) => {
-                debug!(namespace = %name, "namespace already exists");
-                return Ok(());
-            }
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                // Namespace doesn't exist, create it
-            }
-            Err(e) => return Err(e.into()),
+        if get_optional(&api, name).await?.is_some() {
+            debug!(namespace = %name, "namespace already exists");
+            return Ok(());
         }
 
         // Create the namespace
@@ -334,11 +344,7 @@ impl KubeClient for KubeClientImpl {
 
     async fn get_cluster(&self, name: &str) -> Result<Option<LatticeCluster>, Error> {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
-        match api.get(name).await {
-            Ok(cluster) => Ok(Some(cluster)),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        get_optional(&api, name).await
     }
 
     async fn get_secret(
@@ -348,11 +354,7 @@ impl KubeClient for KubeClientImpl {
     ) -> Result<Option<k8s_openapi::api::core::v1::Secret>, Error> {
         use k8s_openapi::api::core::v1::Secret;
         let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
-        match api.get(name).await {
-            Ok(secret) => Ok(Some(secret)),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        get_optional(&api, name).await
     }
 
     async fn copy_secret_to_namespace(
@@ -366,20 +368,14 @@ impl KubeClient for KubeClientImpl {
         let target_api: Api<Secret> = Api::namespaced(self.client.clone(), target_namespace);
 
         // Check if secret already exists in target namespace
-        match target_api.get(name).await {
-            Ok(_) => {
-                debug!(
-                    secret = %name,
-                    source = %source_namespace,
-                    target = %target_namespace,
-                    "secret already exists in target namespace"
-                );
-                return Ok(());
-            }
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                // Secret doesn't exist, will copy it
-            }
-            Err(e) => return Err(e.into()),
+        if get_optional(&target_api, name).await?.is_some() {
+            debug!(
+                secret = %name,
+                source = %source_namespace,
+                target = %target_namespace,
+                "secret already exists in target namespace"
+            );
+            return Ok(());
         }
 
         // Get the source secret
@@ -470,15 +466,11 @@ impl KubeClient for KubeClientImpl {
         };
 
         // Check if service exists
-        match api.get(CELL_SERVICE_NAME).await {
-            Ok(_) => {
-                debug!("cell service already exists");
-            }
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                info!("creating cell LoadBalancer service");
-                api.create(&PostParams::default(), &service).await?;
-            }
-            Err(e) => return Err(e.into()),
+        if get_optional(&api, CELL_SERVICE_NAME).await?.is_some() {
+            debug!("cell service already exists");
+        } else {
+            info!("creating cell LoadBalancer service");
+            api.create(&PostParams::default(), &service).await?;
         }
 
         Ok(())
@@ -566,10 +558,9 @@ impl KubeClient for KubeClientImpl {
         use k8s_openapi::api::core::v1::Service;
 
         let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        let svc = match api.get(CELL_SERVICE_NAME).await {
-            Ok(s) => s,
-            Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let svc = match get_optional(&api, CELL_SERVICE_NAME).await? {
+            Some(s) => s,
+            None => return Ok(None),
         };
 
         // Get host from LoadBalancer ingress status
@@ -614,11 +605,7 @@ impl KubeClient for KubeClientImpl {
         use k8s_openapi::api::core::v1::Service;
 
         let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        match api.get(CELL_SERVICE_NAME).await {
-            Ok(_) => Ok(true),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
-            Err(e) => Err(e.into()),
-        }
+        Ok(get_optional(&api, CELL_SERVICE_NAME).await?.is_some())
     }
 
     async fn list_clusters(&self) -> Result<Vec<LatticeCluster>, Error> {
@@ -635,11 +622,7 @@ impl KubeClient for KubeClientImpl {
 
         let api: Api<CloudProvider> =
             Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        match api.get(name).await {
-            Ok(cp) => Ok(Some(cp)),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        get_optional(&api, name).await
     }
 }
 

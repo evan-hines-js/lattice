@@ -15,7 +15,9 @@ pub mod retry;
 pub mod template;
 pub mod yaml;
 
-pub use credentials::{AwsCredentials, CredentialError, OpenStackCredentials, ProxmoxCredentials};
+pub use credentials::{
+    AwsCredentials, CredentialError, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
+};
 pub use error::{default_error_policy, ControllerContext, Error, ReconcileError};
 pub use kube_utils::{
     apply_manifest_with_discovery, apply_manifests_with_discovery, kind_priority, pluralize_kind,
@@ -34,6 +36,9 @@ pub const DEFAULT_GRPC_PORT: u16 = 50051;
 
 /// Default port for the K8s API proxy server (CAPI controller access to child clusters)
 pub const DEFAULT_PROXY_PORT: u16 = 8081;
+
+/// Default port for the authenticated K8s API proxy (user/service access with Cedar)
+pub const DEFAULT_AUTH_PROXY_PORT: u16 = 8082;
 
 /// Namespace for Lattice system resources (CA, credentials, operator)
 pub const LATTICE_SYSTEM_NAMESPACE: &str = "lattice-system";

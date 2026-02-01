@@ -5,7 +5,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{Api, DynamicObject, ListParams};
 use kube::discovery::ApiResource;
 use kube::Client;
@@ -13,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::error::MoveError;
-use crate::{MOVE_HIERARCHY_LABEL, MOVE_LABEL};
 
 /// Identity of a Kubernetes object
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -214,70 +212,34 @@ impl ObjectGraph {
 
     /// Discover CRDs with clusterctl move labels
     async fn discover_types(&mut self, client: &Client) -> Result<(), MoveError> {
-        let crd_api: Api<CustomResourceDefinition> = Api::all(client.clone());
+        let discovered = crate::utils::discover_move_crds(client).await?;
 
-        let crds = crd_api
-            .list(&ListParams::default())
-            .await
-            .map_err(|e| MoveError::Discovery(format!("failed to list CRDs: {}", e)))?;
-
-        for crd in crds.items {
-            let name = match &crd.metadata.name {
-                Some(n) => n,
-                None => continue,
-            };
-
-            let labels = crd.metadata.labels.as_ref();
-
-            // Check for move label or move-hierarchy label
-            let has_move = labels.is_some_and(|l| l.contains_key(MOVE_LABEL));
-            let has_move_hierarchy = labels.is_some_and(|l| l.contains_key(MOVE_HIERARCHY_LABEL));
-
-            if !has_move && !has_move_hierarchy {
-                continue;
-            }
-
-            // Extract API resource info from CRD spec
-            let spec = &crd.spec;
-            let group = &spec.group;
-            let kind = &spec.names.kind;
-            let plural = &spec.names.plural;
-
-            // Use the first version that is served and stored
-            let version = spec
-                .versions
-                .iter()
-                .find(|v| v.served && v.storage)
-                .map(|v| &v.name)
-                .or_else(|| spec.versions.first().map(|v| &v.name));
-
-            let version = match version {
-                Some(v) => v.clone(),
-                None => {
-                    warn!(crd = %name, "CRD has no versions, skipping");
-                    continue;
-                }
+        for crd_type in discovered {
+            // Parse api_version into group and version
+            let (group, version) = if crd_type.api_version.contains('/') {
+                let parts: Vec<&str> = crd_type.api_version.splitn(2, '/').collect();
+                (parts[0].to_string(), parts[1].to_string())
+            } else {
+                (String::new(), crd_type.api_version.clone())
             };
 
             let api_resource = ApiResource {
-                group: group.clone(),
-                version: version.clone(),
-                kind: kind.clone(),
-                api_version: format!("{}/{}", group, version),
-                plural: plural.clone(),
+                group,
+                version,
+                kind: crd_type.kind.clone(),
+                api_version: crd_type.api_version,
+                plural: crd_type.plural,
             };
 
             debug!(
-                crd = %name,
-                kind = %kind,
-                move_label = has_move,
-                move_hierarchy = has_move_hierarchy,
+                kind = %crd_type.kind,
+                move_hierarchy = crd_type.move_hierarchy,
                 "Discovered CRD type"
             );
 
             self.discovered_types.push(DiscoveredType {
                 api_resource,
-                move_hierarchy: has_move_hierarchy,
+                move_hierarchy: crd_type.move_hierarchy,
             });
         }
 
@@ -311,7 +273,9 @@ impl ObjectGraph {
 
     /// List all objects of discovered types in the namespace
     async fn list_objects(&mut self, client: &Client) -> Result<(), MoveError> {
-        for discovered_type in &self.discovered_types.clone() {
+        // Clone once at the start to avoid borrow issues when inserting nodes
+        let discovered_types = self.discovered_types.clone();
+        for discovered_type in &discovered_types {
             let api: Api<DynamicObject> = Api::namespaced_with(
                 client.clone(),
                 &self.namespace,
@@ -322,7 +286,7 @@ impl ObjectGraph {
                 Ok(l) => l,
                 Err(e) => {
                     // Not found is okay - type may not have any instances
-                    if e.to_string().contains("404") || e.to_string().contains("not found") {
+                    if crate::utils::is_not_found_error(&e) {
                         debug!(kind = %discovered_type.api_resource.kind, "Type not found, skipping");
                         continue;
                     }
@@ -388,18 +352,14 @@ impl ObjectGraph {
             .filter(|n| n.identity.kind == "Secret")
             .filter_map(|n| {
                 let secret_name = &n.identity.name;
-                // Check for common CAPI secret naming patterns
-                for (cluster_name, cluster_uid) in &cluster_names {
-                    if secret_name == &format!("{}-kubeconfig", cluster_name)
-                        || secret_name == &format!("{}-ca", cluster_name)
-                        || secret_name == &format!("{}-etcd", cluster_name)
-                        || secret_name == &format!("{}-sa", cluster_name)
-                        || secret_name.starts_with(&format!("{}-", cluster_name))
-                    {
-                        return Some((n.uid().to_string(), cluster_uid.clone()));
-                    }
-                }
-                None
+                // Use shared utility for efficient pattern matching
+                crate::utils::find_cluster_owner_for_secret(
+                    secret_name,
+                    cluster_names
+                        .iter()
+                        .map(|(name, uid)| (name.as_str(), uid.as_str())),
+                )
+                .map(|cluster_uid| (n.uid().to_string(), cluster_uid))
             })
             .collect();
 

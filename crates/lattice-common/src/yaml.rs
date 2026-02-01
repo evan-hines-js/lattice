@@ -24,10 +24,10 @@ impl std::error::Error for YamlError {}
 /// Returns `Value::Null` for empty input.
 pub fn parse_yaml(input: &str) -> Result<Value, YamlError> {
     let docs = YamlLoader::load_from_str(input).map_err(|e| YamlError(e.to_string()))?;
-    docs.into_iter()
-        .next()
-        .map(yaml_to_json)
-        .unwrap_or(Ok(Value::Null))
+    match docs.into_iter().next() {
+        Some(doc) => yaml_to_json(doc),
+        None => Ok(Value::Null),
+    }
 }
 
 /// Parse a multi-document YAML string into a Vec of serde_json::Values.

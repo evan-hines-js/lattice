@@ -2182,7 +2182,6 @@ dependencies = [
  "axum 0.8.8",
  "axum-server",
  "cedar-policy",
- "chrono",
  "futures",
  "jsonwebtoken",
  "k8s-openapi",
@@ -2201,7 +2200,6 @@ dependencies = [
  "tokio-stream",
  "tokio-test",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -2460,6 +2458,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "lattice-agent",
+ "lattice-api",
  "lattice-capi",
  "lattice-cell",
  "lattice-cloud-provider",

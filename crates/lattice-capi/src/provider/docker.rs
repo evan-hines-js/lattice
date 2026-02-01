@@ -23,6 +23,8 @@
 //! let manifests = provider.generate_capi_manifests(&cluster).await?;
 //! ```
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -32,21 +34,12 @@ use super::{
     generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix, CAPIManifest,
     ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, WorkerPoolConfig,
 };
+use crate::constants::{
+    DEFAULT_NAMESPACE, DOCKER_INFRASTRUCTURE_API_GROUP, DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA1,
+    DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2,
+};
 use lattice_common::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result};
-
-/// Default namespace for CAPI resources
-const DEFAULT_NAMESPACE: &str = "default";
-
-/// Docker infrastructure API group (used in refs)
-const DOCKER_INFRASTRUCTURE_API_GROUP: &str = "infrastructure.cluster.x-k8s.io";
-
-/// Docker infrastructure API version for kubeadm (v1beta2 - latest CAPI)
-const DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2: &str = "infrastructure.cluster.x-k8s.io/v1beta2";
-
-/// Docker infrastructure API version for RKE2 (v1beta1 - required by CAPRKE2)
-/// See: https://github.com/rancher/cluster-api-provider-rke2/issues/789
-const DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA1: &str = "infrastructure.cluster.x-k8s.io/v1beta1";
 
 /// Docker/Kind infrastructure provider
 ///
@@ -212,25 +205,12 @@ backend rke2-servers
         let template_name = control_plane_name(name);
         let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
 
-        let spec = json!({
-            "template": {
-                "spec": {
-                    "extraMounts": [{
-                        "containerPath": "/var/run/docker.sock",
-                        "hostPath": "/var/run/docker.sock"
-                    }]
-                }
-            }
-        });
-
-        Ok(CAPIManifest::new(
-            api_version,
-            "DockerMachineTemplate",
+        Ok(Self::generate_docker_machine_template(
             &template_name,
             &namespace,
-        )
-        .with_labels(labels)
-        .with_spec(spec))
+            labels,
+            api_version,
+        ))
     }
 
     /// Generate the DockerMachineTemplate for a worker pool (Docker-specific)
@@ -246,6 +226,24 @@ backend rke2-servers
         let template_name = format!("{}-{}", name, suffix);
         let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
 
+        Ok(Self::generate_docker_machine_template(
+            &template_name,
+            &namespace,
+            labels,
+            api_version,
+        ))
+    }
+
+    /// Generate a DockerMachineTemplate with the standard Docker socket mount
+    ///
+    /// This is shared logic for both control plane and worker machine templates,
+    /// as they use identical specs with the Docker socket mount for CAPD.
+    fn generate_docker_machine_template(
+        name: &str,
+        namespace: &str,
+        labels: BTreeMap<String, String>,
+        api_version: &str,
+    ) -> CAPIManifest {
         let spec = json!({
             "template": {
                 "spec": {
@@ -257,14 +255,9 @@ backend rke2-servers
             }
         });
 
-        Ok(CAPIManifest::new(
-            api_version,
-            "DockerMachineTemplate",
-            &template_name,
-            &namespace,
-        )
-        .with_labels(labels)
-        .with_spec(spec))
+        CAPIManifest::new(api_version, "DockerMachineTemplate", name, namespace)
+            .with_labels(labels)
+            .with_spec(spec)
     }
 }
 
@@ -395,6 +388,7 @@ impl Provider for DockerProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2;
     use crate::provider::{
         build_post_kubeadm_commands, CAPI_BOOTSTRAP_API_VERSION, CAPI_CLUSTER_API_VERSION,
         CAPI_CONTROLPLANE_API_VERSION,

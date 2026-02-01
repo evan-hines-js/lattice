@@ -19,11 +19,22 @@ struct Provider {
 fn main() {
     let manifest_dir =
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
-    let workspace_root = Path::new(&manifest_dir)
+    let manifest_path = Path::new(&manifest_dir);
+    let workspace_root = manifest_path
         .parent()
-        .expect("crate should have parent")
+        .unwrap_or_else(|| {
+            panic!(
+                "lattice-capi crate directory '{}' should have a parent (crates/)",
+                manifest_path.display()
+            )
+        })
         .parent()
-        .expect("crates dir should have parent");
+        .unwrap_or_else(|| {
+            panic!(
+                "crates directory '{}' should have a parent (workspace root)",
+                manifest_path.parent().unwrap().display()
+            )
+        });
 
     let versions_path = workspace_root.join("versions.toml");
     println!("cargo:rerun-if-changed={}", versions_path.display());

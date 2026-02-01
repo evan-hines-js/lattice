@@ -2,8 +2,6 @@
 //!
 //! Provides functions for installing infrastructure components like Istio, Cilium, and CAPI.
 
-use std::time::Duration;
-
 use kube::api::ListParams;
 use kube::{Api, Client};
 
@@ -14,6 +12,7 @@ use crate::crd::{CloudProvider, LatticeCluster, ProviderType};
 use crate::infra::bootstrap::{self, InfrastructureConfig};
 
 use super::manifests::apply_manifests;
+use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT};
 
 /// Reconcile infrastructure components
 ///
@@ -117,22 +116,24 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
     let cloud_providers: Api<CloudProvider> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     tracing::info!(provider_ref = %provider_ref, "Waiting for CloudProvider...");
-    let cp = loop {
-        match cloud_providers.get(&provider_ref).await {
-            Ok(cp) => break cp,
-            Err(kube::Error::Api(e)) if e.code == 404 => {
-                tracing::debug!(provider_ref = %provider_ref, "CloudProvider not found, waiting...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+    let cp = wait_for_resource(
+        &format!("CloudProvider '{}'", provider_ref),
+        DEFAULT_RESOURCE_TIMEOUT,
+        DEFAULT_POLL_INTERVAL,
+        || {
+            let cloud_providers = cloud_providers.clone();
+            let provider_ref = provider_ref.clone();
+            async move {
+                match cloud_providers.get(&provider_ref).await {
+                    Ok(cp) => Ok(Some(cp)),
+                    Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
+                    Err(e) => Err(format!("API error: {}", e)),
+                }
             }
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "Failed to get CloudProvider '{}': {}",
-                    provider_ref,
-                    e
-                ));
-            }
-        }
-    };
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
     tracing::info!(provider_ref = %provider_ref, "CloudProvider found");
 
     // Copy credentials to CAPI provider namespace if present

@@ -101,11 +101,11 @@ pub async fn kubeconfig_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, Error> {
-    // Extract and validate token
+    // Extract and validate token (OIDC or ServiceAccount)
     let token = extract_bearer_token(&headers)
         .ok_or_else(|| Error::Unauthorized("Missing Authorization header".into()))?;
 
-    let identity = state.oidc.validate(token).await?;
+    let identity = state.auth.validate(token).await?;
 
     // Get all clusters in subtree
     let subtree_clusters = state.subtree.all_clusters().await;
@@ -151,13 +151,17 @@ fn build_kubeconfig(
     oidc_config: Option<&OidcConfig>,
 ) -> Kubeconfig {
     // Build cluster entries - all point to the same entry point but with different paths
+    // Note: certificate_authority_data is None because:
+    // 1. The entry point cluster typically uses a public CA (Let's Encrypt, etc.)
+    // 2. Users can add CA data to their kubeconfig manually if using a private CA
+    // 3. The CA for internal cluster communication is handled separately via in-cluster certs
     let cluster_entries: Vec<KubeconfigCluster> = clusters
         .iter()
         .map(|name| KubeconfigCluster {
             name: name.clone(),
             cluster: ClusterConfig {
                 server: format!("{}/clusters/{}", base_url, name),
-                certificate_authority_data: None, // TODO: Add CA from config
+                certificate_authority_data: None,
             },
         })
         .collect();

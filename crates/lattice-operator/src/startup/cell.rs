@@ -14,6 +14,10 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use crate::crd::{LatticeCluster, ProviderType};
 
+use super::polling::{
+    wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT, LOAD_BALANCER_POLL_INTERVAL,
+};
+
 /// Ensure the cell LoadBalancer Service exists.
 ///
 /// - Cloud providers: `load_balancer_ip` is None, cloud assigns address
@@ -148,13 +152,28 @@ pub async fn get_cell_server_sans(
     // Wait for our LatticeCluster to exist
     tracing::info!(cluster = %name, "Waiting for LatticeCluster...");
     let clusters: Api<LatticeCluster> = Api::all(client.clone());
-    let cluster = loop {
-        match clusters.get(name).await {
-            Ok(c) => break c,
-            Err(e) => {
-                tracing::debug!(error = %e, "LatticeCluster not found, retrying...");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let cluster = match wait_for_resource(
+        &format!("LatticeCluster '{}'", name),
+        DEFAULT_RESOURCE_TIMEOUT,
+        DEFAULT_POLL_INTERVAL,
+        || {
+            let clusters = clusters.clone();
+            let name = name.clone();
+            async move {
+                match clusters.get(&name).await {
+                    Ok(c) => Ok(Some(c)),
+                    Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
+                    Err(e) => Err(format!("API error: {}", e)),
+                }
             }
+        },
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to wait for LatticeCluster");
+            return vec![];
         }
     };
     tracing::info!(cluster = %name, "LatticeCluster found");
@@ -183,19 +202,21 @@ pub async fn get_cell_server_sans(
 
     // Wait for LoadBalancer to get external address
     tracing::info!("Waiting for cell LoadBalancer address...");
-    loop {
-        match discover_cell_host(client).await {
-            Ok(Some(host)) => {
-                tracing::info!(host = %host, "Cell host discovered, adding to TLS SANs");
-                return vec![host];
-            }
-            Ok(None) => {
-                // Not yet assigned, keep waiting
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to discover cell host, retrying...");
-            }
+    match wait_for_resource(
+        "cell LoadBalancer address",
+        DEFAULT_RESOURCE_TIMEOUT,
+        LOAD_BALANCER_POLL_INTERVAL,
+        || async { discover_cell_host(client).await },
+    )
+    .await
+    {
+        Ok(host) => {
+            tracing::info!(host = %host, "Cell host discovered, adding to TLS SANs");
+            vec![host]
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to wait for cell LoadBalancer address");
+            vec![]
+        }
     }
 }
