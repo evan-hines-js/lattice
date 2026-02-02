@@ -11,7 +11,7 @@ use k8s_openapi::ByteString;
 use kube::api::{Api, PostParams};
 use kube::Client;
 
-use lattice_agent::{AgentClient, AgentClientConfig, AgentCredentials, ClientState};
+use lattice_agent::{AgentClient, AgentClientConfig, AgentCredentials, ClientState, SharedK8sForwarder};
 use lattice_common::{
     ParentConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY, LATTICE_SYSTEM_NAMESPACE, TLS_CERT_KEY,
     TLS_KEY_KEY,
@@ -20,12 +20,15 @@ use lattice_common::{
 /// Supervise agent connection with automatic reconnection.
 /// If a parent cell is configured, maintains connection indefinitely with retries.
 /// The agent handles unpivot automatically by detecting deletion_timestamp on connect.
-pub async fn start_agent_with_retry(client: &Client, cluster_name: &str) {
+///
+/// The forwarder is used for hierarchical routing - when this cluster receives
+/// K8s API requests destined for child clusters, it forwards them via the forwarder.
+pub async fn start_agent_with_retry(client: &Client, cluster_name: &str, forwarder: SharedK8sForwarder) {
     let mut retry_delay = Duration::from_secs(1);
     let max_retry_delay = Duration::from_secs(5);
 
     loop {
-        match start_agent_if_needed(client, cluster_name).await {
+        match start_agent_if_needed(client, cluster_name, forwarder.clone()).await {
             Ok(Some(agent)) => {
                 tracing::info!("Agent connection to parent cell established");
                 retry_delay = Duration::from_secs(1);
@@ -57,6 +60,7 @@ pub async fn start_agent_with_retry(client: &Client, cluster_name: &str) {
 async fn start_agent_if_needed(
     client: &Client,
     cluster_name: &str,
+    forwarder: SharedK8sForwarder,
 ) -> anyhow::Result<Option<AgentClient>> {
     // Read parent config - if missing, this is a root cluster
     let parent = match ParentConfig::read(client).await {
@@ -110,8 +114,8 @@ async fn start_agent_if_needed(
         ..Default::default()
     };
 
-    // Create and connect agent
-    let mut agent = AgentClient::new(config);
+    // Create and connect agent with forwarder for hierarchical routing
+    let mut agent = AgentClient::with_forwarder(config, forwarder);
     agent
         .connect_with_mtls(&credentials)
         .await

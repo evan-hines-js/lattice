@@ -4,6 +4,7 @@
 
 // Startup and agent modules for main.rs
 pub mod agent;
+pub mod forwarder;
 pub mod startup;
 
 // Re-export cell modules from lattice-cell

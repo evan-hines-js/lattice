@@ -215,6 +215,7 @@ async fn proxy_handler(
             query: query.to_string(),
             body: Vec::new(), // Read-only, no body
             content_type: String::new(),
+            target_cluster: cluster_name.to_string(),
         },
     )
     .await?;

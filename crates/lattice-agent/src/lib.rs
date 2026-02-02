@@ -11,6 +11,7 @@
 //! The agent runs on child clusters and maintains an **outbound** connection
 //! to the parent cell. All communication is initiated by the agent.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 pub mod client;
@@ -23,6 +24,55 @@ pub mod watch;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default read timeout for kube clients
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Trait for forwarding K8s API requests to child clusters.
+///
+/// When an agent receives a K8s request with a target_cluster that differs
+/// from its local cluster name, it uses this forwarder to route the request
+/// to the correct child cluster via its own parent_servers.
+#[async_trait::async_trait]
+pub trait K8sRequestForwarder: Send + Sync {
+    /// Forward a K8s request to a target cluster in this agent's subtree.
+    ///
+    /// Returns the K8s response, or an error response if:
+    /// - The cluster is not in this agent's subtree (404)
+    /// - The cluster's agent is not connected (502)
+    /// - The request times out (504)
+    async fn forward(
+        &self,
+        target_cluster: &str,
+        request: KubernetesRequest,
+    ) -> KubernetesResponse;
+}
+
+/// Shared forwarder type used by the agent for hierarchical routing.
+pub type SharedK8sForwarder = Arc<dyn K8sRequestForwarder>;
+
+/// Default forwarder for clusters without children.
+/// Returns 404 for all requests since there's no subtree to route to.
+pub struct NoChildrenForwarder;
+
+#[async_trait::async_trait]
+impl K8sRequestForwarder for NoChildrenForwarder {
+    async fn forward(
+        &self,
+        target_cluster: &str,
+        request: KubernetesRequest,
+    ) -> KubernetesResponse {
+        KubernetesResponse {
+            request_id: request.request_id,
+            status_code: 404,
+            body: format!(
+                r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"cluster '{}' not found in subtree","reason":"NotFound","code":404}}"#,
+                target_cluster
+            ).into_bytes(),
+            content_type: "application/json".to_string(),
+            error: String::new(),
+            streaming: false,
+            stream_end: false,
+        }
+    }
+}
 
 /// Create a Kubernetes client with proper timeouts
 ///
