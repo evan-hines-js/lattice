@@ -126,6 +126,10 @@ impl<'a> PolicyCompiler<'a> {
         ));
 
         // Generate ServiceEntries and AuthorizationPolicies for external dependencies
+        // NOTE: We only generate ALLOW policies, not DENY policies for external services.
+        // Istio evaluates DENY before ALLOW, so a DENY would block all traffic before
+        // the ALLOW could permit authorized callers. The mesh-default-deny handles
+        // unauthorized access (callers without an ALLOW policy are denied by default).
         for edge in &outbound_edges {
             if let Some(callee) = self
                 .graph
@@ -136,13 +140,6 @@ impl<'a> PolicyCompiler<'a> {
                     {
                         output.service_entries.push(entry);
                     }
-                    // Generate default-deny for this ServiceEntry
-                    output
-                        .authorization_policies
-                        .push(Self::compile_external_default_deny(
-                            &callee.name,
-                            &edge.callee_namespace,
-                        ));
                     // Generate ALLOW policy for THIS service to access the external
                     output
                         .authorization_policies
@@ -683,23 +680,6 @@ impl<'a> PolicyCompiler<'a> {
                 resolution,
             },
         ))
-    }
-
-    fn compile_external_default_deny(external_name: &str, namespace: &str) -> AuthorizationPolicy {
-        AuthorizationPolicy::new(
-            PolicyMetadata::new(format!("deny-all-to-{}", external_name), namespace),
-            AuthorizationPolicySpec {
-                target_refs: vec![TargetRef {
-                    group: "networking.istio.io".to_string(),
-                    kind: "ServiceEntry".to_string(),
-                    name: external_name.to_string(),
-                }],
-                selector: None,
-                action: "DENY".to_string(),
-                // Istio requires at least one rule for DENY to trigger - empty rule matches all
-                rules: vec![AuthorizationRule::default()],
-            },
-        )
     }
 
     fn compile_external_access_policy(
