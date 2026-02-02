@@ -49,8 +49,8 @@ use super::super::context::InfraContext;
 use super::super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd_allow_fail, watch_cluster_phases,
-    watch_cluster_phases_with_kubeconfig,
+    load_registry_credentials, rebuild_and_restart_operators, run_cmd_allow_fail,
+    watch_cluster_phases, watch_cluster_phases_with_kubeconfig,
 };
 use super::super::providers::InfraProvider;
 use super::{capi, pivot, scaling};
@@ -645,4 +645,42 @@ async fn test_setup_mgmt_and_workload_only() {
     let result = setup_mgmt_and_workload(&config).await.unwrap();
     drop(result);
     info!("Management + workload cluster setup complete.");
+}
+
+/// Rebuild image and restart operators on all existing clusters
+///
+/// Use this to update operators after making code changes without full teardown.
+/// Requires `LATTICE_MGMT_KUBECONFIG` and optionally `LATTICE_WORKLOAD_KUBECONFIG`
+/// and `LATTICE_WORKLOAD2_KUBECONFIG`.
+///
+/// ```bash
+/// LATTICE_MGMT_KUBECONFIG=/path/to/mgmt-kubeconfig \
+/// LATTICE_WORKLOAD_KUBECONFIG=/path/to/workload-kubeconfig \
+/// cargo test --features provider-e2e --test e2e test_rebuild_operators -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore]
+async fn test_rebuild_operators() {
+    use super::super::context::init_test_env;
+
+    let ctx = init_test_env("Set LATTICE_MGMT_KUBECONFIG to rebuild operators");
+
+    info!("========================================");
+    info!("REBUILD AND RESTART OPERATORS");
+    info!("========================================");
+
+    let kubeconfigs = ctx.all_kubeconfigs();
+    info!("Found {} cluster(s):", kubeconfigs.len());
+    for (name, path) in &kubeconfigs {
+        info!("  {}: {}", name, path);
+    }
+
+    rebuild_and_restart_operators(DEFAULT_LATTICE_IMAGE, &kubeconfigs)
+        .await
+        .unwrap();
+
+    info!("");
+    info!("========================================");
+    info!("OPERATORS REBUILT AND RESTARTED");
+    info!("========================================");
 }

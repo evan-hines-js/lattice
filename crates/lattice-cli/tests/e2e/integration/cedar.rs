@@ -23,12 +23,13 @@
 use std::time::Duration;
 use tracing::info;
 
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+
 use super::super::context::{init_test_env, InfraContext};
 use super::super::helpers::{
-    get_proxy_url_for_provider, get_sa_token, http_get_with_token, proxy_service_exists, run_cmd,
-    run_cmd_allow_fail,
+    get_sa_token, http_get_with_token, proxy_service_exists, run_cmd, run_cmd_allow_fail,
+    start_proxy_port_forward,
 };
-use super::super::providers::InfraProvider;
 
 // =============================================================================
 // Constants
@@ -176,7 +177,7 @@ pub fn delete_cedar_policy(kubeconfig: &str, policy_name: &str) -> Result<(), St
             "cedarpolicy",
             policy_name,
             "-n",
-            "lattice-system",
+            LATTICE_SYSTEM_NAMESPACE,
             "--ignore-not-found",
         ],
     )?;
@@ -197,7 +198,7 @@ pub fn cleanup_cedar_test_resources(kubeconfig: &str) {
             "delete",
             "cedarpolicy",
             "-n",
-            "lattice-system",
+            LATTICE_SYSTEM_NAMESPACE,
             "-l",
             "lattice.dev/test=cedar",
             "--ignore-not-found",
@@ -269,7 +270,7 @@ pub fn remove_e2e_default_policy(kubeconfig: &str) {
             "cedarpolicy",
             E2E_DEFAULT_POLICY_NAME,
             "-n",
-            "lattice-system",
+            LATTICE_SYSTEM_NAMESPACE,
             "--ignore-not-found",
         ],
     );
@@ -336,19 +337,17 @@ fn verify_sa_access_denied(proxy_url: &str, token: &str, cluster_name: &str) -> 
 /// # Arguments
 /// * `parent_kubeconfig` - Kubeconfig for the parent cluster (where proxy runs)
 /// * `child_cluster_name` - Name of the child cluster to test access to
-/// * `provider` - Infrastructure provider (affects proxy URL resolution)
 pub async fn run_cedar_proxy_test(
     parent_kubeconfig: &str,
     child_cluster_name: &str,
-    provider: InfraProvider,
 ) -> Result<(), String> {
     info!(
         "[Integration/Cedar] Running Cedar proxy test for access to {}...",
         child_cluster_name
     );
 
-    // Get proxy URL from parent cluster (provider-aware)
-    let proxy_url = get_proxy_url_for_provider(parent_kubeconfig, provider)?;
+    // Start port-forward to proxy (needed on macOS where Docker network isn't accessible)
+    let (proxy_url, _port_forward) = start_proxy_port_forward(parent_kubeconfig)?;
     info!("[Integration/Cedar] Using proxy URL: {}", proxy_url);
 
     // Setup test resources on parent cluster
@@ -396,18 +395,17 @@ pub async fn run_cedar_proxy_test(
 /// # Arguments
 /// * `parent_kubeconfig` - Kubeconfig for the parent cluster (where proxy runs)
 /// * `child_cluster_name` - Name of the child cluster to test access to
-/// * `provider` - Infrastructure provider (affects proxy URL resolution)
 pub async fn run_cedar_group_test(
     parent_kubeconfig: &str,
     child_cluster_name: &str,
-    provider: InfraProvider,
 ) -> Result<(), String> {
     info!(
         "[Integration/Cedar] Running group policy test for {}...",
         child_cluster_name
     );
 
-    let proxy_url = get_proxy_url_for_provider(parent_kubeconfig, provider)?;
+    // Start port-forward to proxy
+    let (proxy_url, _port_forward) = start_proxy_port_forward(parent_kubeconfig)?;
 
     // Setup
     setup_cedar_test_resources(parent_kubeconfig).await?;
@@ -464,10 +462,10 @@ pub async fn run_cedar_hierarchy_tests(
     }
 
     // Run SA-specific policy test
-    run_cedar_proxy_test(&ctx.mgmt_kubeconfig, child_cluster_name, ctx.provider).await?;
+    run_cedar_proxy_test(&ctx.mgmt_kubeconfig, child_cluster_name).await?;
 
     // Run group policy test
-    run_cedar_group_test(&ctx.mgmt_kubeconfig, child_cluster_name, ctx.provider).await?;
+    run_cedar_group_test(&ctx.mgmt_kubeconfig, child_cluster_name).await?;
 
     info!("[Integration/Cedar] All Cedar hierarchy tests passed!");
     Ok(())
@@ -529,7 +527,7 @@ async fn test_cedar_sa_auth_standalone() {
     let child_cluster_name =
         std::env::var("LATTICE_CHILD_CLUSTER_NAME").unwrap_or_else(|_| "e2e-workload".to_string());
 
-    run_cedar_proxy_test(&ctx.mgmt_kubeconfig, &child_cluster_name, ctx.provider)
+    run_cedar_proxy_test(&ctx.mgmt_kubeconfig, &child_cluster_name)
         .await
         .unwrap();
 }
@@ -542,7 +540,7 @@ async fn test_cedar_group_policy_standalone() {
     let child_cluster_name =
         std::env::var("LATTICE_CHILD_CLUSTER_NAME").unwrap_or_else(|_| "e2e-workload".to_string());
 
-    run_cedar_group_test(&ctx.mgmt_kubeconfig, &child_cluster_name, ctx.provider)
+    run_cedar_group_test(&ctx.mgmt_kubeconfig, &child_cluster_name)
         .await
         .unwrap();
 }

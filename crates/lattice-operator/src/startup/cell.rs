@@ -10,7 +10,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, PostParams};
 use kube::Client;
 
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE};
 
 use crate::crd::{LatticeCluster, ProviderType};
 
@@ -31,6 +31,7 @@ pub async fn ensure_cell_service_exists(
     provider_type: ProviderType,
 ) -> anyhow::Result<()> {
     let api: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let auth_proxy_port = DEFAULT_AUTH_PROXY_PORT;
 
     // Check if it already exists
     if api.get("lattice-cell").await.is_ok() {
@@ -82,6 +83,13 @@ pub async fn ensure_cell_service_exists(
                     protocol: Some("TCP".to_string()),
                     ..Default::default()
                 },
+                ServicePort {
+                    name: Some("auth-proxy".to_string()),
+                    port: auth_proxy_port as i32,
+                    target_port: Some(IntOrString::Int(auth_proxy_port as i32)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                },
             ]),
             ..Default::default()
         }),
@@ -94,6 +102,7 @@ pub async fn ensure_cell_service_exists(
         bootstrap_port,
         grpc_port,
         proxy_port,
+        auth_proxy_port,
         "Created lattice-cell LoadBalancer Service"
     );
 

@@ -213,7 +213,9 @@ async fn run_resource_sync(client: Client, registry: SharedAgentRegistry, cluste
     let oidc_api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     // Create watchers for all distributable CRDs
-    let watcher_config = watcher::Config::default();
+    // Set a timeout shorter than the client's read_timeout (30s) to ensure the API server
+    // closes the watch before the client times out. This prevents "body read timed out" errors.
+    let watcher_config = watcher::Config::default().timeout(25);
     let cp_watcher = watcher::watcher(cp_api, watcher_config.clone());
     let sp_watcher = watcher::watcher(sp_api, watcher_config.clone());
     let cedar_watcher = watcher::watcher(cedar_api, watcher_config.clone());

@@ -5,12 +5,16 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use kube::CustomResourceExt;
+use futures::StreamExt;
+use kube::runtime::watcher::{self, Event};
+use kube::{Api, CustomResourceExt};
 
 use lattice_api::{AuthChain, PolicyEngine, SaValidator, ServerConfig as AuthProxyConfig};
-use lattice_common::{lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT};
+use lattice_common::crd::CedarPolicy;
+use lattice_common::{lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE};
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
 use lattice_operator::crd::LatticeCluster;
@@ -194,6 +198,9 @@ async fn start_auth_proxy(
         }
     };
 
+    // Start Cedar policy watcher to reload policies when CRDs change
+    start_cedar_policy_watcher(client.clone(), cedar.clone());
+
     // Generate server certificate
     let ca_bundle = parent_servers.ca_bundle().read().await;
     let cell_dns = lattice_svc_dns(CELL_SERVICE_NAME);
@@ -253,4 +260,43 @@ async fn start_auth_proxy(
     });
 
     Some(handle)
+}
+
+/// Start a background task to watch for CedarPolicy CRD changes and reload the policy engine.
+///
+/// This ensures the auth proxy's Cedar policies are updated when CedarPolicy CRDs are
+/// created, modified, or deleted.
+fn start_cedar_policy_watcher(client: kube::Client, cedar: Arc<PolicyEngine>) {
+    tokio::spawn(async move {
+        let api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+        // Use a shorter timeout than client's read_timeout to prevent "body read timed out"
+        let watcher_config = watcher::Config::default().timeout(25);
+        let watcher = watcher::watcher(api, watcher_config);
+        let mut watcher = std::pin::pin!(watcher);
+
+        tracing::info!("Cedar policy watcher started");
+
+        loop {
+            match watcher.next().await {
+                Some(Ok(Event::Apply(_))) | Some(Ok(Event::InitApply(_))) | Some(Ok(Event::Delete(_))) => {
+                    tracing::info!("CedarPolicy changed, reloading policies...");
+                    if let Err(e) = cedar.reload(&client).await {
+                        tracing::warn!(error = %e, "Failed to reload Cedar policies");
+                    }
+                }
+                Some(Ok(Event::Init)) | Some(Ok(Event::InitDone)) => {
+                    tracing::debug!("Cedar policy watcher initialized");
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(error = %e, "Cedar policy watcher error, retrying...");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                None => {
+                    tracing::warn!("Cedar policy watcher stream ended, restarting...");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    });
 }
