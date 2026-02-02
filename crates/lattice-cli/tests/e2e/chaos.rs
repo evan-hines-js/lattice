@@ -21,11 +21,8 @@ use tracing::info;
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_operator::crd::{ClusterPhase, LatticeCluster};
 
-use super::helpers::{client_from_kubeconfig, run_cmd_allow_fail};
+use super::helpers::{client_from_kubeconfig, run_cmd_allow_fail, OPERATOR_LABEL};
 use super::providers::InfraProvider;
-
-const OPERATOR_NS: &str = LATTICE_SYSTEM_NAMESPACE;
-const OPERATOR_LABEL: &str = "app=lattice-operator";
 
 // =============================================================================
 // Configuration
@@ -502,7 +499,7 @@ fn kill_pod(cluster: &str, kubeconfig: &str) {
             "delete",
             "pod",
             "-n",
-            OPERATOR_NS,
+            LATTICE_SYSTEM_NAMESPACE,
             "-l",
             OPERATOR_LABEL,
             "--wait=false",

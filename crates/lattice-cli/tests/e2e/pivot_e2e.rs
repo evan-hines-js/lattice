@@ -29,7 +29,7 @@ use tracing::info;
 
 use lattice_cli::commands::uninstall::{UninstallArgs, Uninstaller};
 
-use super::context::init_e2e_test;
+use super::context::{init_e2e_test, InfraContext};
 use super::helpers::{run_id, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME};
 use super::integration::{self, setup};
 
@@ -87,39 +87,33 @@ async fn run_full_e2e() -> Result<(), String> {
     )
     .await?;
 
-    // TODO: Re-enable proxy tests once auth proxy is stabilized
-    // integration::proxy::run_proxy_hierarchy_tests(
-    //     &ctx,
-    //     WORKLOAD_CLUSTER_NAME,
-    //     WORKLOAD2_CLUSTER_NAME,
-    // )
-    // .await?;
+    // Test proxy access through the hierarchy
+    integration::proxy::run_proxy_hierarchy_tests(&ctx, WORKLOAD_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME)
+        .await?;
 
-    info!("SUCCESS: Kubeconfig verification complete!");
+    info!("SUCCESS: Kubeconfig and proxy verification complete!");
 
     // =========================================================================
     // Phase 6.6: Test Cedar policy enforcement for proxy access
     // =========================================================================
-    // TODO: Re-enable Cedar/proxy tests once auth proxy is stabilized
-    // info!("[Phase 6.6] Testing Cedar policy enforcement...");
-    //
-    // // Test Cedar policies for access from mgmt -> workload
-    // integration::cedar::run_cedar_hierarchy_tests(&ctx, WORKLOAD_CLUSTER_NAME).await?;
-    //
-    // // Test Cedar policies for access from workload -> workload2
-    // if let Some(workload_kubeconfig) = &ctx.workload_kubeconfig {
-    //     let workload_ctx = super::context::InfraContext::new(
-    //         workload_kubeconfig.clone(),
-    //         None,
-    //         None,
-    //         ctx.provider,
-    //     );
-    //     integration::cedar::run_cedar_hierarchy_tests(&workload_ctx, WORKLOAD2_CLUSTER_NAME)
-    //         .await?;
-    // }
-    //
-    // info!("SUCCESS: Cedar policy enforcement verified!");
-    info!("[Phase 6.6] Skipping Cedar/proxy tests (temporarily disabled)");
+    info!("[Phase 6.6] Testing Cedar policy enforcement...");
+
+    // Test Cedar policies for access from mgmt -> workload
+    integration::cedar::run_cedar_hierarchy_tests(&ctx, WORKLOAD_CLUSTER_NAME).await?;
+
+    // Test Cedar policies for access from workload -> workload2
+    if let Some(workload_kubeconfig) = &ctx.workload_kubeconfig {
+        let workload_ctx = super::context::InfraContext::new(
+            workload_kubeconfig.clone(),
+            None,
+            None,
+            ctx.provider,
+        );
+        integration::cedar::run_cedar_hierarchy_tests(&workload_ctx, WORKLOAD2_CLUSTER_NAME)
+            .await?;
+    }
+
+    info!("SUCCESS: Cedar policy enforcement verified!");
 
     // =========================================================================
     // Phase 7: Run mesh tests + delete workload2 (parallel)

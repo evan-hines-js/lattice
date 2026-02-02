@@ -151,6 +151,21 @@ impl InfraContext {
             _ => InfraProvider::Docker,
         }
     }
+
+    /// Get all cluster kubeconfigs as (name, path) tuples
+    ///
+    /// Returns a vector of all available cluster kubeconfigs for use with
+    /// `rebuild_and_restart_operators`.
+    pub fn all_kubeconfigs(&self) -> Vec<(&str, &str)> {
+        let mut configs = vec![("mgmt", self.mgmt_kubeconfig.as_str())];
+        if let Some(ref workload) = self.workload_kubeconfig {
+            configs.push(("workload", workload.as_str()));
+        }
+        if let Some(ref workload2) = self.workload2_kubeconfig {
+            configs.push(("workload2", workload2.as_str()));
+        }
+        configs
+    }
 }
 
 /// Initialize E2E test environment (crypto provider, tracing only)

@@ -110,6 +110,11 @@ fn log_enabled_controllers(run_cluster: bool, run_service: bool) {
     tracing::info!("- SecretsProvider controller");
 }
 
+/// Watcher timeout (seconds) - must be less than client read_timeout (30s)
+/// This forces the API server to close the watch before the client times out,
+/// preventing "body read timed out" errors on idle watches.
+const WATCH_TIMEOUT_SECS: u32 = 25;
+
 fn create_cluster_controller(
     enabled: bool,
     clusters: Api<LatticeCluster>,
@@ -120,7 +125,7 @@ fn create_cluster_controller(
     }
 
     Some(
-        Controller::new(clusters, WatcherConfig::default())
+        Controller::new(clusters, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
             .shutdown_on_signal()
             .run(reconcile, error_policy, ctx)
             .for_each(|result| async move {
@@ -150,10 +155,10 @@ fn create_service_controllers(
     let graph_for_watch = ctx.graph.clone();
     let services_for_watch = services.clone();
 
-    let svc_ctrl = Controller::new(services, WatcherConfig::default())
+    let svc_ctrl = Controller::new(services, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
         .watches(
             services_for_watch,
-            WatcherConfig::default(),
+            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
             move |service| {
                 let graph = graph_for_watch.clone();
                 let namespace = match service.metadata.namespace.as_deref() {
@@ -191,7 +196,7 @@ fn create_service_controllers(
             }
         });
 
-    let ext_ctrl = Controller::new(external_services, WatcherConfig::default())
+    let ext_ctrl = Controller::new(external_services, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
         .shutdown_on_signal()
         .run(reconcile_external, error_policy_external, ctx)
         .for_each(|result| async move {
@@ -208,7 +213,7 @@ fn create_cloud_provider_controller(client: Client) -> impl std::future::Future<
     let cloud_providers: Api<CloudProvider> = Api::all(client.clone());
     let ctx = Arc::new(ControllerContext::new(client));
 
-    Controller::new(cloud_providers, WatcherConfig::default())
+    Controller::new(cloud_providers, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
         .shutdown_on_signal()
         .run(
             cloud_provider_ctrl::reconcile,
@@ -227,7 +232,7 @@ fn create_secrets_provider_controller(client: Client) -> impl std::future::Futur
     let secrets_providers: Api<SecretsProvider> = Api::all(client.clone());
     let ctx = Arc::new(ControllerContext::new(client));
 
-    Controller::new(secrets_providers, WatcherConfig::default())
+    Controller::new(secrets_providers, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
         .shutdown_on_signal()
         .run(
             secrets_provider_ctrl::reconcile,

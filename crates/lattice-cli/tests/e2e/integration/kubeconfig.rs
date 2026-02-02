@@ -15,6 +15,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use tracing::info;
 
+use lattice_common::{capi_namespace, kubeconfig_secret_name};
+
 use super::super::context::{init_test_env, InfraContext};
 use super::super::helpers::{run_cmd, run_cmd_allow_fail, WORKLOAD_CLUSTER_NAME};
 
@@ -38,8 +40,8 @@ pub async fn verify_kubeconfig_patched(
         cluster_name
     );
 
-    let namespace = format!("capi-{}", cluster_name);
-    let secret_name = format!("{}-kubeconfig", cluster_name);
+    let namespace = capi_namespace(cluster_name);
+    let secret_name = kubeconfig_secret_name(cluster_name);
 
     // Try to get the kubeconfig secret from the parent cluster (pre-pivot location)
     let kubeconfig_b64 = run_cmd_allow_fail(

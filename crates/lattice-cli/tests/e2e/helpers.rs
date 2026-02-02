@@ -13,7 +13,7 @@ use kube::{
     Client,
 };
 #[cfg(feature = "provider-e2e")]
-use lattice_common::{capi_namespace, kubeconfig_secret_name};
+use lattice_common::{capi_namespace, kubeconfig_secret_name, LATTICE_SYSTEM_NAMESPACE};
 #[cfg(feature = "provider-e2e")]
 use lattice_operator::crd::{BootstrapProvider, ClusterPhase};
 #[cfg(feature = "provider-e2e")]
@@ -38,6 +38,10 @@ pub const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
 pub const WORKLOAD_CLUSTER_NAME: &str = "e2e-workload";
 #[cfg(feature = "provider-e2e")]
 pub const WORKLOAD2_CLUSTER_NAME: &str = "e2e-workload2";
+
+/// Label selector for lattice-operator pods
+#[cfg(feature = "provider-e2e")]
+pub const OPERATOR_LABEL: &str = "app=lattice-operator";
 
 // =============================================================================
 // Unique Run ID for Parallel Test Execution
@@ -815,6 +819,121 @@ pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
     Ok(())
 }
 
+// =============================================================================
+// Operator Management
+// =============================================================================
+
+/// Rebuild image, push to registry, and restart operator pods on all clusters.
+///
+/// This combines the three operations needed for operator updates:
+/// 1. Build and push Docker image
+/// 2. Delete operator pods on all clusters to force image pull
+/// 3. Wait for operator deployments to be ready
+///
+/// # Arguments
+///
+/// * `image` - Docker image tag (e.g., "ghcr.io/evan-hines-js/lattice:latest")
+/// * `kubeconfigs` - List of (cluster_name, kubeconfig_path) tuples
+#[cfg(feature = "provider-e2e")]
+pub async fn rebuild_and_restart_operators(
+    image: &str,
+    kubeconfigs: &[(&str, &str)],
+) -> Result<(), String> {
+    // 1. Build and push image
+    build_and_push_lattice_image(image).await?;
+
+    // 2. Delete operator pods on each cluster (parallel)
+    info!(
+        "Restarting operators on {} cluster(s)...",
+        kubeconfigs.len()
+    );
+    for (cluster_name, kubeconfig) in kubeconfigs {
+        delete_operator_pods(cluster_name, kubeconfig);
+    }
+
+    // 3. Wait for operators to be ready on all clusters
+    for (cluster_name, kubeconfig) in kubeconfigs {
+        wait_for_operator_ready(cluster_name, kubeconfig, None).await?;
+    }
+
+    info!(
+        "Image rebuilt and operators restarted on {} cluster(s)",
+        kubeconfigs.len()
+    );
+    Ok(())
+}
+
+/// Delete operator pods to trigger image pull.
+#[cfg(feature = "provider-e2e")]
+pub fn delete_operator_pods(cluster_name: &str, kubeconfig: &str) {
+    let output = run_cmd_allow_fail(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "delete",
+            "pod",
+            "-n",
+            LATTICE_SYSTEM_NAMESPACE,
+            "-l",
+            OPERATOR_LABEL,
+            "--wait=false",
+        ],
+    );
+
+    let msg = if output.contains("deleted") {
+        "deleted operator pod"
+    } else if output.contains("No resources found") {
+        "no pod found"
+    } else {
+        "command completed"
+    };
+    info!("[{}] {}", cluster_name, msg);
+}
+
+/// Wait for operator deployment to be ready.
+#[cfg(feature = "provider-e2e")]
+pub async fn wait_for_operator_ready(
+    cluster_name: &str,
+    kubeconfig: &str,
+    timeout_secs: Option<u64>,
+) -> Result<(), String> {
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(300));
+    let start = std::time::Instant::now();
+
+    info!("[{}] Waiting for operator to be ready...", cluster_name);
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout waiting for operator on {} to be ready",
+                cluster_name
+            ));
+        }
+
+        let output = run_cmd_allow_fail(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig,
+                "rollout",
+                "status",
+                "deployment/lattice-operator",
+                "-n",
+                LATTICE_SYSTEM_NAMESPACE,
+                "--timeout=10s",
+            ],
+        );
+
+        if output.contains("successfully rolled out") {
+            info!("[{}] Operator is ready", cluster_name);
+            return Ok(());
+        }
+
+        sleep(Duration::from_secs(5)).await;
+    }
+}
+
 /// Load registry credentials from .env file or environment
 #[cfg(feature = "provider-e2e")]
 pub fn load_registry_credentials() -> Option<String> {
@@ -1003,6 +1122,7 @@ pub async fn verify_cluster_capi_resources(
 // =============================================================================
 
 /// The auth proxy runs as part of the lattice-cell service on port 8082
+/// (8081 is the CAPI proxy for internal CAPI controller access)
 #[cfg(feature = "provider-e2e")]
 const PROXY_SERVICE_NAME: &str = "lattice-cell";
 #[cfg(feature = "provider-e2e")]
@@ -1020,7 +1140,7 @@ pub fn proxy_service_exists(kubeconfig: &str) -> bool {
             "svc",
             PROXY_SERVICE_NAME,
             "-n",
-            "lattice-system",
+            LATTICE_SYSTEM_NAMESPACE,
             "-o",
             "name",
         ],
@@ -1028,15 +1148,17 @@ pub fn proxy_service_exists(kubeconfig: &str) -> bool {
     !result.trim().is_empty() && !result.contains("not found")
 }
 
-/// Get the proxy URL with provider-specific handling.
+/// Get the proxy URL using kubectl port-forward.
 ///
-/// - Docker: Uses control plane container IP + NodePort (LB IPs aren't accessible from localhost)
-/// - Cloud: Uses LoadBalancer external IP
+/// On macOS, Docker networks aren't accessible from the host, so we use
+/// kubectl port-forward to create a tunnel to the service.
+///
+/// Returns the localhost URL and the port-forward process handle.
+/// The caller should keep the handle alive for the duration of proxy access.
 #[cfg(feature = "provider-e2e")]
-pub fn get_proxy_url_for_provider(
-    kubeconfig: &str,
-    provider: InfraProvider,
-) -> Result<String, String> {
+pub fn start_proxy_port_forward(kubeconfig: &str) -> Result<(String, std::process::Child), String> {
+    use std::process::{Command, Stdio};
+
     if !proxy_service_exists(kubeconfig) {
         return Err(format!(
             "{} service not found - proxy may not be deployed",
@@ -1044,102 +1166,52 @@ pub fn get_proxy_url_for_provider(
         ));
     }
 
-    match provider {
-        InfraProvider::Docker => get_proxy_url_docker(kubeconfig),
-        _ => get_proxy_url_cloud(kubeconfig),
-    }
-}
-
-/// Get proxy URL for Docker/CAPD clusters via NodePort on control plane container.
-#[cfg(feature = "provider-e2e")]
-fn get_proxy_url_docker(kubeconfig: &str) -> Result<String, String> {
-    // Get cluster name from kubeconfig context
-    let context = run_cmd_allow_fail(
-        "kubectl",
-        &["--kubeconfig", kubeconfig, "config", "current-context"],
-    );
-    let cluster_name = context.trim().replace("-admin@", "").replace("kind-", "");
-    if cluster_name.is_empty() {
-        return Err("Could not determine cluster name from kubeconfig".to_string());
-    }
-
-    // Get NodePort for proxy service
-    let node_port = run_cmd_allow_fail(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "svc",
-            PROXY_SERVICE_NAME,
-            "-n",
-            "lattice-system",
-            "-o",
-            &format!(
-                "jsonpath={{.spec.ports[?(@.port=={})].nodePort}}",
-                PROXY_PORT
-            ),
-        ],
-    );
-    if node_port.trim().is_empty() {
-        return Err(format!(
-            "Proxy service {} does not have a NodePort for port {}",
-            PROXY_SERVICE_NAME, PROXY_PORT
-        ));
-    }
-
-    // Get control plane container IP (accessible from localhost via Docker network)
-    let cp_container = format!("{}-control-plane", cluster_name);
-    let cp_ip = run_cmd_allow_fail(
-        "docker",
-        &[
-            "inspect",
-            "-f",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-            &cp_container,
-        ],
-    );
-    if cp_ip.trim().is_empty() {
-        return Err(format!(
-            "Could not get IP for control plane container {}",
-            cp_container
-        ));
-    }
+    // Find an available local port
+    let local_port = find_available_port()?;
 
     info!(
-        "[Helpers] Using Docker control plane {}:{} for proxy",
-        cp_ip.trim(),
-        node_port.trim()
+        "[Helpers] Starting port-forward to {}:{} on localhost:{}",
+        PROXY_SERVICE_NAME, PROXY_PORT, local_port
     );
-    Ok(format!("https://{}:{}", cp_ip.trim(), node_port.trim()))
-}
 
-/// Get proxy URL for cloud providers via LoadBalancer IP.
-#[cfg(feature = "provider-e2e")]
-fn get_proxy_url_cloud(kubeconfig: &str) -> Result<String, String> {
-    let lb_ip = run_cmd_allow_fail(
-        "kubectl",
-        &[
+    // Start kubectl port-forward in background
+    let child = Command::new("kubectl")
+        .args([
             "--kubeconfig",
             kubeconfig,
-            "get",
-            "svc",
-            PROXY_SERVICE_NAME,
+            "port-forward",
+            &format!("svc/{}", PROXY_SERVICE_NAME),
+            &format!("{}:{}", local_port, PROXY_PORT),
             "-n",
-            "lattice-system",
-            "-o",
-            "jsonpath={.status.loadBalancer.ingress[0].ip}",
-        ],
-    );
+            LATTICE_SYSTEM_NAMESPACE,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to start port-forward: {}", e))?;
 
-    if lb_ip.trim().is_empty() {
-        return Err(format!(
-            "LoadBalancer IP not available for {} service",
-            PROXY_SERVICE_NAME
-        ));
-    }
+    // Wait for port-forward to be ready
+    std::thread::sleep(std::time::Duration::from_secs(2));
 
-    Ok(format!("https://{}:{}", lb_ip.trim(), PROXY_PORT))
+    let url = format!("https://127.0.0.1:{}", local_port);
+    info!("[Helpers] Port-forward ready at {}", url);
+
+    Ok((url, child))
+}
+
+/// Find an available local port for port-forwarding.
+#[cfg(feature = "provider-e2e")]
+fn find_available_port() -> Result<u16, String> {
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Failed to bind to ephemeral port: {}", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to get local address: {}", e))?
+        .port();
+    drop(listener);
+    Ok(port)
 }
 
 // =============================================================================

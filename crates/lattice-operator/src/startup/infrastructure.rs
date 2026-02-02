@@ -2,6 +2,8 @@
 //!
 //! Provides functions for installing infrastructure components like Istio, Cilium, and CAPI.
 
+use std::time::Duration;
+
 use kube::api::ListParams;
 use kube::{Api, Client};
 
@@ -9,11 +11,62 @@ use lattice_common::{
     apply_manifests_with_discovery, ApplyOptions, ParentConfig, LATTICE_SYSTEM_NAMESPACE,
 };
 
+/// Maximum retries for infrastructure apply (handles transient 503 errors during startup)
+const INFRA_APPLY_MAX_RETRIES: u32 = 10;
+/// Delay between infrastructure apply retries
+const INFRA_APPLY_RETRY_DELAY: Duration = Duration::from_secs(5);
+
 use crate::capi::{ensure_capi_installed, CapiProviderConfig, ClusterctlInstaller};
 use crate::crd::{CloudProvider, LatticeCluster, ProviderType};
 use crate::infra::bootstrap::{self, InfrastructureConfig};
 
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT};
+
+/// Apply manifests with retry logic for transient errors (503, connection issues).
+///
+/// During cluster startup, the API server may return 503 while webhooks or
+/// other services are still initializing. This function retries on such errors.
+async fn apply_manifests_with_retry(
+    client: &Client,
+    manifests: &[String],
+    context: &str,
+) -> anyhow::Result<()> {
+    let mut last_error = None;
+
+    for attempt in 1..=INFRA_APPLY_MAX_RETRIES {
+        match apply_manifests_with_discovery(client, manifests, &ApplyOptions::default()).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let err_str = e.to_string();
+                // Retry on transient errors (503, connection refused, etc.)
+                let is_transient = err_str.contains("503")
+                    || err_str.contains("Service Unavailable")
+                    || err_str.contains("connection refused")
+                    || err_str.contains("connection reset");
+
+                if is_transient && attempt < INFRA_APPLY_MAX_RETRIES {
+                    tracing::warn!(
+                        attempt = attempt,
+                        max_attempts = INFRA_APPLY_MAX_RETRIES,
+                        error = %err_str,
+                        context = context,
+                        "Transient error applying manifests, retrying..."
+                    );
+                    tokio::time::sleep(INFRA_APPLY_RETRY_DELAY).await;
+                    last_error = Some(e);
+                    continue;
+                }
+
+                // Non-transient error or max retries reached
+                return Err(e.into());
+            }
+        }
+    }
+
+    Err(last_error
+        .map(|e| anyhow::anyhow!("{}", e))
+        .unwrap_or_else(|| anyhow::anyhow!("max retries reached")))
+}
 
 /// Reconcile infrastructure components
 ///
@@ -43,7 +96,7 @@ pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("failed to generate core infrastructure: {}", e))?;
         tracing::info!(count = manifests.len(), "applying core infrastructure");
-        apply_manifests_with_discovery(client, &manifests, &ApplyOptions::default()).await?;
+        apply_manifests_with_retry(client, &manifests, "core infrastructure").await?;
 
         tracing::info!("Installing CAPI on bootstrap cluster...");
         ensure_capi_on_bootstrap(client).await?;
@@ -83,7 +136,7 @@ pub async fn ensure_infrastructure(client: &Client) -> anyhow::Result<()> {
             count = manifests.len(),
             "applying all infrastructure (same as bootstrap webhook)"
         );
-        apply_manifests_with_discovery(client, &manifests, &ApplyOptions::default()).await?;
+        apply_manifests_with_retry(client, &manifests, "full infrastructure").await?;
     }
 
     tracing::info!("Infrastructure installation complete");

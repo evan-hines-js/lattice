@@ -35,7 +35,7 @@ pub async fn route_to_cluster(
     // Check if this is the local cluster
     if cluster_name == state.cluster_name {
         debug!(cluster = %cluster_name, "Routing to local K8s API");
-        return route_to_local_api(state, request).await;
+        return route_to_local_api(state, cluster_name, request).await;
     }
 
     // Check if the cluster is in our subtree
@@ -46,7 +46,7 @@ pub async fn route_to_cluster(
         .ok_or_else(|| Error::ClusterNotFound(cluster_name.to_string()))?;
 
     if route_info.is_self {
-        return route_to_local_api(state, request).await;
+        return route_to_local_api(state, cluster_name, request).await;
     }
 
     // Route to child cluster via gRPC tunnel
@@ -62,11 +62,22 @@ pub async fn route_to_cluster(
 /// Route request to local K8s API server
 async fn route_to_local_api(
     state: &AppState,
+    cluster_name: &str,
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     let method = request.method().clone();
     let uri = request.uri().clone();
-    let path = uri.path();
+    let full_path = uri.path();
+
+    // Strip /clusters/{cluster_name} prefix to get the K8s API path
+    // e.g., /clusters/e2e-mgmt/api/v1/namespaces -> /api/v1/namespaces
+    let cluster_prefix = format!("/clusters/{}", cluster_name);
+    let path = if full_path.starts_with(&cluster_prefix) {
+        &full_path[cluster_prefix.len()..]
+    } else {
+        full_path
+    };
+
     let query = uri.query();
 
     debug!(
@@ -161,7 +172,17 @@ async fn route_to_child_cluster(
 
     let method = request.method().clone();
     let uri = request.uri().clone();
-    let path = uri.path().to_string();
+    let full_path = uri.path();
+
+    // Strip /clusters/{cluster_name} prefix to get the K8s API path
+    // e.g., /clusters/e2e-workload/api/v1/namespaces -> /api/v1/namespaces
+    let cluster_prefix = format!("/clusters/{}", cluster_name);
+    let path = if full_path.starts_with(&cluster_prefix) {
+        full_path[cluster_prefix.len()..].to_string()
+    } else {
+        full_path.to_string()
+    };
+
     let query = uri.query().unwrap_or("").to_string();
     let content_type = request
         .headers()
