@@ -40,7 +40,7 @@ use lattice_proto::{
 
 use crate::subtree::SubtreeSender;
 use crate::watch::{execute_watch, WatchRegistry};
-use crate::{create_k8s_client, execute_k8s_request, is_watch_request, ClientMtlsConfig};
+use crate::{create_k8s_client, execute_k8s_request, is_watch_request, ClientMtlsConfig, NoChildrenForwarder, SharedK8sForwarder};
 
 /// Configuration for the agent client
 #[derive(Clone, Debug)]
@@ -137,11 +137,20 @@ pub struct AgentClient {
     subtree_watcher_handle: Option<tokio::task::JoinHandle<()>>,
     /// Registry for tracking active K8s API watches
     watch_registry: Arc<WatchRegistry>,
+    /// Forwarder for routing K8s requests to child clusters
+    forwarder: SharedK8sForwarder,
 }
 
 impl AgentClient {
-    /// Create a new agent client with the given configuration
+    /// Create a new agent client with the given configuration.
+    /// Uses the default NoChildrenForwarder which returns 404 for forwarding requests.
     pub fn new(config: AgentClientConfig) -> Self {
+        Self::with_forwarder(config, Arc::new(NoChildrenForwarder))
+    }
+
+    /// Create a new agent client with a custom forwarder for hierarchical routing.
+    /// Use this when this cluster has children that may need K8s API requests forwarded.
+    pub fn with_forwarder(config: AgentClientConfig, forwarder: SharedK8sForwarder) -> Self {
         Self {
             config,
             state: Arc::new(RwLock::new(ClientState::Disconnected)),
@@ -154,6 +163,7 @@ impl AgentClient {
             deletion_watcher_handle: None,
             subtree_watcher_handle: None,
             watch_registry: Arc::new(WatchRegistry::new()),
+            forwarder,
         }
     }
 
@@ -450,6 +460,7 @@ impl AgentClient {
         let agent_state = self.agent_state.clone();
         let message_tx_clone = message_tx.clone();
         let watch_registry = self.watch_registry.clone();
+        let forwarder = self.forwarder.clone();
 
         // Spawn heartbeat task and store handle
         let heartbeat_interval = self.config.heartbeat_interval;
@@ -516,7 +527,7 @@ impl AgentClient {
                     Some(result) = inbound.next() => {
                         match result {
                             Ok(command) => {
-                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry).await;
+                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry, &forwarder).await;
                             }
                             Err(e) => {
                                 error!(error = %e, "Error receiving command");
@@ -887,6 +898,7 @@ impl AgentClient {
         message_tx: &mpsc::Sender<AgentMessage>,
         cluster_name: &str,
         watch_registry: &Arc<WatchRegistry>,
+        forwarder: &SharedK8sForwarder,
     ) {
         debug!(command_id = %command.command_id, "Received command");
 
@@ -1005,10 +1017,15 @@ impl AgentClient {
                 });
             }
             Some(Command::KubernetesRequest(req)) => {
+                let target = &req.target_cluster;
+                let is_local = target == cluster_name;
+
                 debug!(
                     request_id = %req.request_id,
                     verb = %req.verb,
                     path = %req.path,
+                    target_cluster = %target,
+                    is_local = is_local,
                     "Received K8s API proxy request"
                 );
 
@@ -1037,40 +1054,54 @@ impl AgentClient {
                 let message_tx = message_tx.clone();
                 let req = req.clone();
                 let registry = watch_registry.clone();
+                let forwarder = forwarder.clone();
 
                 tokio::spawn(async move {
-                    let client = match create_k8s_client().await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            error!(error = %e, "Failed to create K8s client for proxy request");
-                            let response = crate::build_k8s_error_response(
-                                &request_id,
-                                500,
-                                &format!("Failed to create K8s client: {}", e),
-                            );
-                            let msg = AgentMessage {
-                                cluster_name: cluster_name_clone,
-                                payload: Some(Payload::KubernetesResponse(response)),
-                            };
-                            if let Err(e) = message_tx.send(msg).await {
-                                error!(error = %e, "Failed to send K8s error response");
+                    let response = if is_local {
+                        // Execute locally on this cluster
+                        let client = match create_k8s_client().await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                error!(error = %e, "Failed to create K8s client for proxy request");
+                                let response = crate::build_k8s_error_response(
+                                    &request_id,
+                                    500,
+                                    &format!("Failed to create K8s client: {}", e),
+                                );
+                                let msg = AgentMessage {
+                                    cluster_name: cluster_name_clone,
+                                    payload: Some(Payload::KubernetesResponse(response)),
+                                };
+                                if let Err(e) = message_tx.send(msg).await {
+                                    error!(error = %e, "Failed to send K8s error response");
+                                }
+                                return;
                             }
-                            return;
+                        };
+
+                        // Route watch requests to execute_watch, others to execute_k8s_request
+                        if is_watch_request(&req) {
+                            execute_watch(client, req, cluster_name_clone, message_tx, registry).await;
+                            return; // Watch handles its own response sending
                         }
+                        execute_k8s_request(&client, &req).await
+                    } else {
+                        // Forward to child cluster via our subtree
+                        let target = req.target_cluster.clone();
+                        debug!(
+                            request_id = %request_id,
+                            target = %target,
+                            "Forwarding request to child cluster"
+                        );
+                        forwarder.forward(&target, req).await
                     };
 
-                    // Route watch requests to execute_watch, others to execute_k8s_request
-                    if is_watch_request(&req) {
-                        execute_watch(client, req, cluster_name_clone, message_tx, registry).await;
-                    } else {
-                        let response = execute_k8s_request(&client, &req).await;
-                        let msg = AgentMessage {
-                            cluster_name: cluster_name_clone,
-                            payload: Some(Payload::KubernetesResponse(response)),
-                        };
-                        if let Err(e) = message_tx.send(msg).await {
-                            error!(request_id = %request_id, error = %e, "Failed to send K8s response");
-                        }
+                    let msg = AgentMessage {
+                        cluster_name: cluster_name_clone,
+                        payload: Some(Payload::KubernetesResponse(response)),
+                    };
+                    if let Err(e) = message_tx.send(msg).await {
+                        error!(request_id = %request_id, error = %e, "Failed to send K8s response");
                     }
                 });
             }
@@ -1779,6 +1810,7 @@ mod tests {
             &tx,
             "test-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::NoChildrenForwarder),
         )
         .await;
     }
@@ -1802,6 +1834,7 @@ mod tests {
             &tx,
             "test-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::NoChildrenForwarder),
         )
         .await;
     }
@@ -1822,6 +1855,7 @@ mod tests {
             &tx,
             "test-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::NoChildrenForwarder),
         )
         .await;
         // Should log warning but not crash
@@ -2148,6 +2182,7 @@ mod tests {
             &tx,
             "apply-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::NoChildrenForwarder),
         )
         .await;
 
@@ -2176,6 +2211,7 @@ mod tests {
             &tx,
             "status-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::NoChildrenForwarder),
         )
         .await;
 
@@ -2203,6 +2239,7 @@ mod tests {
             &tx,
             "robust-cluster",
             &Arc::new(WatchRegistry::new()),
+            &Arc::new(crate::NoChildrenForwarder),
         )
         .await;
 

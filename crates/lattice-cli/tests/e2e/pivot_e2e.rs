@@ -29,7 +29,7 @@ use tracing::info;
 
 use lattice_cli::commands::uninstall::{UninstallArgs, Uninstaller};
 
-use super::context::{init_e2e_test, InfraContext};
+use super::context::init_e2e_test;
 use super::helpers::{run_id, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME};
 use super::integration::{self, setup};
 

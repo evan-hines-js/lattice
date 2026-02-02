@@ -34,6 +34,11 @@ pub struct K8sRequestParams {
     pub body: Vec<u8>,
     /// Content-Type header
     pub content_type: String,
+    /// Target cluster - the final destination cluster
+    /// Agent compares this to its own cluster name:
+    /// - If equal: execute request locally
+    /// - If different: forward to target cluster via its subtree
+    pub target_cluster: String,
 }
 
 /// Check if a query indicates a watch request
@@ -67,6 +72,7 @@ pub async fn tunnel_request(
             DEFAULT_TIMEOUT.as_millis() as u32
         },
         cancel: false,
+        target_cluster: params.target_cluster,
     };
 
     // Create response channel

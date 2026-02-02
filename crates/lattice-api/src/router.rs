@@ -49,14 +49,19 @@ pub async fn route_to_cluster(
         return route_to_local_api(state, cluster_name, request).await;
     }
 
+    // Get the agent to route through
+    let agent_id = route_info
+        .agent_id
+        .ok_or_else(|| Error::Internal("Route info missing agent_id".into()))?;
+
     // Route to child cluster via gRPC tunnel
     debug!(
         cluster = %cluster_name,
-        agent_id = ?route_info.agent_id,
+        agent_id = %agent_id,
         "Routing to child cluster via gRPC tunnel"
     );
 
-    route_to_child_cluster(state, cluster_name, request).await
+    route_to_child_cluster(state, cluster_name, &agent_id, request).await
 }
 
 /// Route request to local K8s API server
@@ -153,9 +158,16 @@ async fn route_to_local_api(
 }
 
 /// Route request to child cluster via gRPC tunnel
+///
+/// # Arguments
+/// * `state` - Application state
+/// * `cluster_name` - Target cluster name (for path rewriting)
+/// * `agent_id` - Agent to route through (may be different from cluster_name for grandchildren)
+/// * `request` - HTTP request to forward
 async fn route_to_child_cluster(
     state: &AppState,
     cluster_name: &str,
+    agent_id: &str,
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     let agent_registry = state
@@ -164,8 +176,8 @@ async fn route_to_child_cluster(
         .ok_or_else(|| Error::Internal("Agent registry not configured".into()))?;
 
     let agent = agent_registry
-        .get(cluster_name)
-        .ok_or_else(|| Error::ClusterNotFound(format!("Agent not connected: {}", cluster_name)))?;
+        .get(agent_id)
+        .ok_or_else(|| Error::ClusterNotFound(format!("Agent not connected: {}", agent_id)))?;
 
     let command_tx = agent.command_tx.clone();
     drop(agent);
@@ -195,7 +207,9 @@ async fn route_to_child_cluster(
         .await
         .map_err(|e| Error::Internal(format!("Failed to read request body: {}", e)))?;
 
-    // Use shared tunnel logic
+    // Use shared tunnel logic - target_cluster is always the final destination
+    // The agent compares this to its own cluster name to decide whether to
+    // execute locally or forward through its subtree
     tunnel_request(
         agent_registry,
         cluster_name,
@@ -206,6 +220,7 @@ async fn route_to_child_cluster(
             query,
             body: body.to_vec(),
             content_type,
+            target_cluster: cluster_name.to_string(),
         },
     )
     .await

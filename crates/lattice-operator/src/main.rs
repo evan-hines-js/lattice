@@ -18,6 +18,7 @@ use lattice_common::{lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::bootstrap::DefaultManifestGenerator;
 use lattice_operator::crd::LatticeCluster;
+use lattice_operator::forwarder::SubtreeForwarder;
 use lattice_operator::parent::{ParentConfig, ParentServers};
 use lattice_operator::startup::{
     ensure_crds_installed, ensure_infrastructure, get_cell_server_sans,
@@ -121,15 +122,21 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     let is_bootstrap = lattice_common::is_bootstrap_cluster();
 
     // Start agent connection to parent (if we have one)
+    // The forwarder enables hierarchical routing - when this cluster receives
+    // K8s requests for child clusters, it forwards them via the gRPC tunnel.
     let agent_token = tokio_util::sync::CancellationToken::new();
     if let Some(ref name) = self_cluster_name {
         let client = client.clone();
         let name = name.clone();
         let token = agent_token.clone();
+        let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> = Arc::new(SubtreeForwarder::new(
+            parent_servers.subtree_registry(),
+            parent_servers.agent_registry(),
+        ));
         tokio::spawn(async move {
             tokio::select! {
                 _ = token.cancelled() => {}
-                _ = start_agent_with_retry(&client, &name) => {}
+                _ = start_agent_with_retry(&client, &name, forwarder) => {}
             }
         });
     }

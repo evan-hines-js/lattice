@@ -277,6 +277,11 @@ message KubernetesRequest {
   // Set to true to cancel an active watch by request_id
   // Agent will stop the watch and send stream_end response
   bool cancel = 8;
+
+  // Target cluster for hierarchical routing (optional)
+  // If set, the receiving agent should route to this cluster instead of handling locally
+  // Empty means execute on the receiving agent's cluster
+  string target_cluster = 9;
 }
 
 // Agent → Cell: Response from child's K8s API
