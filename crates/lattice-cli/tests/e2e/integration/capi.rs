@@ -34,29 +34,7 @@ pub async fn verify_mgmt_capi_resources(
     cluster_name: &str,
 ) -> Result<(), String> {
     info!("[Integration/CAPI] Verifying management cluster CAPI resources...");
-
-    let capi_check = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            &ctx.mgmt_kubeconfig,
-            "get",
-            "clusters",
-            "-A",
-            "-o",
-            "wide",
-        ],
-    )?;
-
-    info!("[Integration/CAPI] CAPI clusters:\n{}", capi_check);
-
-    if !capi_check.contains(cluster_name) {
-        return Err(format!(
-            "Management cluster {} should have its own CAPI Cluster resource",
-            cluster_name
-        ));
-    }
-
+    verify_cluster_capi_resources(&ctx.mgmt_kubeconfig, cluster_name).await?;
     info!(
         "[Integration/CAPI] Management cluster {} has CAPI resources",
         cluster_name

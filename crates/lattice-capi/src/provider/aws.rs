@@ -104,8 +104,13 @@ impl AwsProvider {
             .load_balancer_type
             .clone()
             .unwrap_or_else(|| "nlb".to_string());
+        let lb_scheme = if cfg.internal_load_balancer.unwrap_or(false) {
+            "internal"
+        } else {
+            "internet-facing"
+        };
         spec["controlPlaneLoadBalancer"] = serde_json::json!({
-            "scheme": "internet-facing",
+            "scheme": lb_scheme,
             "loadBalancerType": lb_type,
             "healthCheckProtocol": "HTTPS"
         });
@@ -373,9 +378,31 @@ mod tests {
             .iter()
             .find(|m| m.kind == "AWSCluster")
             .expect("AWSCluster should exist");
-        let lb_type = &aws_cluster.spec.as_ref().expect("spec should exist")
-            ["controlPlaneLoadBalancer"]["loadBalancerType"];
-        assert_eq!(lb_type, "nlb");
+        let lb = &aws_cluster.spec.as_ref().expect("spec should exist")["controlPlaneLoadBalancer"];
+        assert_eq!(lb["loadBalancerType"], "nlb");
+        assert_eq!(lb["scheme"], "internet-facing");
+    }
+
+    #[tokio::test]
+    async fn uses_internal_lb_when_configured() {
+        let provider = AwsProvider::with_namespace("capi-system");
+        let mut cluster = test_cluster("test");
+
+        if let Some(ref mut cfg) = cluster.spec.provider.config.aws {
+            cfg.internal_load_balancer = Some(true);
+        }
+
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &BootstrapInfo::default())
+            .await
+            .expect("manifest generation should succeed");
+
+        let aws_cluster = manifests
+            .iter()
+            .find(|m| m.kind == "AWSCluster")
+            .expect("AWSCluster should exist");
+        let lb = &aws_cluster.spec.as_ref().expect("spec should exist")["controlPlaneLoadBalancer"];
+        assert_eq!(lb["scheme"], "internal");
     }
 
     #[tokio::test]
