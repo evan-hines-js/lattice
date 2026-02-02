@@ -49,6 +49,12 @@ pub struct AwsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_balancer_type: Option<String>,
 
+    /// Use internal (private) load balancer for API server.
+    /// When true, the API server is only accessible from within the VPC.
+    /// Default: false (public load balancer)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_load_balancer: Option<bool>,
+
     /// Root volume size in GB for control plane (default: 80)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cp_root_volume_size_gb: Option<u32>,
@@ -135,5 +141,19 @@ workerRootVolumeSizeGb: 200
         assert!(!config.is_byoi());
         assert_eq!(config.cp_root_volume_size_gb, Some(100));
         assert_eq!(config.load_balancer_type, Some("nlb".to_string()));
+    }
+
+    #[test]
+    fn private_cluster_config() {
+        let yaml = r#"
+region: us-west-2
+cpInstanceType: m5.xlarge
+workerInstanceType: m5.large
+sshKeyName: lattice-key
+internalLoadBalancer: true
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let config: AwsConfig = serde_json::from_value(value).expect("deserialization");
+        assert_eq!(config.internal_load_balancer, Some(true));
     }
 }

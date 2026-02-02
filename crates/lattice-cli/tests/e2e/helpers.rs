@@ -13,7 +13,11 @@ use kube::{
     Client,
 };
 #[cfg(feature = "provider-e2e")]
-use lattice_common::{capi_namespace, kubeconfig_secret_name, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    capi_namespace, kubeconfig_secret_name,
+    retry::{retry_with_backoff, RetryConfig},
+    LATTICE_SYSTEM_NAMESPACE,
+};
 #[cfg(feature = "provider-e2e")]
 use lattice_operator::crd::{BootstrapProvider, ClusterPhase};
 #[cfg(feature = "provider-e2e")]
@@ -285,15 +289,13 @@ impl HttpResponse {
 /// Uses curl with the provided bearer token and returns both status code and body.
 #[cfg(feature = "provider-e2e")]
 pub fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpResponse {
-    // First get the status code
-    let status_output = run_cmd_allow_fail(
+    // Use -w to append status code after body with a delimiter
+    let output = run_cmd_allow_fail(
         "curl",
         &[
             "-s",
-            "-o",
-            "/dev/null",
             "-w",
-            "%{http_code}",
+            "\n__HTTP_STATUS__%{http_code}",
             "-H",
             &format!("Authorization: Bearer {}", token),
             "--insecure",
@@ -303,23 +305,19 @@ pub fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpRes
         ],
     );
 
-    let status_code = status_output.trim().parse().unwrap_or(0);
-
-    // Then get the body
-    let body = run_cmd_allow_fail(
-        "curl",
-        &[
-            "-s",
-            "-H",
-            &format!("Authorization: Bearer {}", token),
-            "--insecure",
-            "--max-time",
-            &timeout_secs.to_string(),
-            url,
-        ],
-    );
-
-    HttpResponse { status_code, body }
+    // Parse body and status code from combined output
+    if let Some(idx) = output.rfind("\n__HTTP_STATUS__") {
+        let body = output[..idx].to_string();
+        let status_str = &output[idx + 16..]; // Skip "\n__HTTP_STATUS__"
+        let status_code = status_str.trim().parse().unwrap_or(0);
+        HttpResponse { status_code, body }
+    } else {
+        // Fallback if delimiter not found
+        HttpResponse {
+            status_code: 0,
+            body: output,
+        }
+    }
 }
 
 // =============================================================================
@@ -1348,7 +1346,7 @@ pub async fn delete_cluster_and_wait(
 ///
 /// ```ignore
 /// let session = ProxySession::start(mgmt_kubeconfig)?;
-/// let workload_kc = session.kubeconfig_for("e2e-workload")?;
+/// let workload_kc = session.kubeconfig_for("e2e-workload").await?;
 /// // Use workload_kc with kubectl...
 /// // Port-forward stays alive while session is in scope
 /// ```
@@ -1382,25 +1380,35 @@ impl ProxySession {
     ///
     /// Calls the /kubeconfig endpoint and writes a kubeconfig file that routes
     /// requests through this proxy session's port-forward.
-    pub fn kubeconfig_for(&self, cluster_name: &str) -> Result<String, String> {
+    pub async fn kubeconfig_for(&self, cluster_name: &str) -> Result<String, String> {
         info!("[ProxySession] Fetching kubeconfig for {}...", cluster_name);
 
-        // Call /kubeconfig?format=token
-        let response = http_get_with_token(
-            &format!("{}/kubeconfig?format=token", self.url),
-            &self.token,
-            30,
-        );
+        let url = format!("{}/kubeconfig?format=token", self.url);
+        let token = self.token.clone();
 
-        if !response.is_success() {
-            return Err(format!(
-                "Failed to fetch kubeconfig: HTTP {} - {}",
-                response.status_code, response.body
-            ));
-        }
+        let retry_config = RetryConfig {
+            max_attempts: 10,
+            initial_delay: std::time::Duration::from_secs(1),
+            max_delay: std::time::Duration::from_secs(5),
+            backoff_multiplier: 1.5,
+        };
+
+        let body = retry_with_backoff(&retry_config, "fetch_proxy_kubeconfig", || {
+            let url = url.clone();
+            let token = token.clone();
+            async move {
+                let response = http_get_with_token(&url, &token, 10);
+                if response.is_success() {
+                    Ok(response.body)
+                } else {
+                    Err(format!("HTTP {} - {}", response.status_code, response.body))
+                }
+            }
+        })
+        .await?;
 
         // Parse the response and build a kubeconfig for the specific cluster
-        let kubeconfig = self.build_kubeconfig(&response.body, cluster_name)?;
+        let kubeconfig = self.build_kubeconfig(&body, cluster_name)?;
 
         // Write to temp file
         let path = format!("/tmp/{}-kubeconfig-{}", cluster_name, run_id());

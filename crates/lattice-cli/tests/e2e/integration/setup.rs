@@ -53,7 +53,7 @@ use super::super::helpers::{
     watch_cluster_phases, watch_cluster_phases_with_kubeconfig, ProxySession,
 };
 use super::super::providers::InfraProvider;
-use super::{capi, pivot, scaling};
+use super::{capi, cedar, pivot, scaling};
 
 // =============================================================================
 // Configuration
@@ -423,14 +423,17 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // =========================================================================
     info!("[Setup/Phase 7] Generating proxy kubeconfigs...");
 
+    // Apply Cedar policies to allow proxy access
+    cedar::apply_e2e_default_policy(&mgmt_kubeconfig_path)?;
+    cedar::apply_e2e_default_policy(&workload_kubeconfig_path)?;
+
     // Start proxy session to mgmt for accessing workload
     let mgmt_proxy = ProxySession::start(&mgmt_kubeconfig_path)?;
-    let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME)?;
+    let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME).await?;
 
     // Start proxy session to workload for accessing workload2
-    // Note: We use the direct workload kubeconfig here since we need to access workload directly
     let workload_proxy = ProxySession::start(&workload_kubeconfig_path)?;
-    let workload2_proxy_kc = workload_proxy.kubeconfig_for(WORKLOAD2_CLUSTER_NAME)?;
+    let workload2_proxy_kc = workload_proxy.kubeconfig_for(WORKLOAD2_CLUSTER_NAME).await?;
 
     // Build final context with proxy kubeconfigs
     let ctx = InfraContext::new(
@@ -599,8 +602,9 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
 
     // Generate proxy kubeconfig for workload
     info!("[Setup] Generating proxy kubeconfig for workload...");
+    cedar::apply_e2e_default_policy(&result.ctx.mgmt_kubeconfig)?;
     let mgmt_proxy = ProxySession::start(&result.ctx.mgmt_kubeconfig)?;
-    let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME)?;
+    let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME).await?;
 
     // Update context with proxy kubeconfig
     result.ctx = InfraContext::new(
