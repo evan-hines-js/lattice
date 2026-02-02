@@ -170,7 +170,8 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         tracing::info!("Cell servers started");
 
         // Start auth proxy server (for authenticated access with Cedar authorization)
-        auth_proxy_handle = start_auth_proxy(&client, servers.clone(), &self_cluster_name).await;
+        auth_proxy_handle =
+            start_auth_proxy(&client, servers.clone(), &self_cluster_name, &extra_sans).await;
 
         // Start CA rotation background task
         start_ca_rotation(servers.clone());
@@ -216,6 +217,7 @@ async fn start_auth_proxy(
     client: &kube::Client,
     parent_servers: Arc<ParentServers<DefaultManifestGenerator>>,
     cluster_name: &Option<String>,
+    extra_sans: &[String],
 ) -> Option<tokio::task::JoinHandle<()>> {
     // Get cluster name (default to "unknown")
     let cluster_name = cluster_name
@@ -241,9 +243,12 @@ async fn start_auth_proxy(
     start_cedar_policy_watcher(client.clone(), cedar.clone());
 
     // Generate server certificate and get CA cert for kubeconfig generation
+    // Include LB address in SANs if available (for external access)
     let ca_bundle = parent_servers.ca_bundle().read().await;
     let cell_dns = lattice_svc_dns(CELL_SERVICE_NAME);
-    let sans = vec!["localhost", "127.0.0.1", &cell_dns];
+    let mut sans: Vec<&str> = vec!["localhost", "127.0.0.1", &cell_dns];
+    let extra_san_refs: Vec<&str> = extra_sans.iter().map(|s| s.as_str()).collect();
+    sans.extend(extra_san_refs);
     let (cert_pem, key_pem) = match ca_bundle.generate_server_cert(&sans) {
         Ok((cert, key)) => (cert, key),
         Err(e) => {
@@ -263,11 +268,13 @@ async fn start_auth_proxy(
         }
     };
 
-    let base_url = format!(
-        "https://{}:{}",
-        lattice_svc_dns(CELL_SERVICE_NAME),
-        DEFAULT_AUTH_PROXY_PORT
-    );
+    // Use LB address for base_url if available (for external kubeconfig generation)
+    // Fall back to internal service DNS if no LB
+    let base_host = extra_sans
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or(&cell_dns);
+    let base_url = format!("https://{}:{}", base_host, DEFAULT_AUTH_PROXY_PORT);
 
     let config = AuthProxyConfig {
         addr,

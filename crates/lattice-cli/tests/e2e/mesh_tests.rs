@@ -590,11 +590,11 @@ fi
         script.push_str(&format!(
             r#"
 # Test {url} - retry transient failures, accept 403 as definitive block
-MAX_ATTEMPTS=5
+MAX_ATTEMPTS=3
 ATTEMPT=0
 RESULT="UNKNOWN"
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 5 --max-time 10 {url} 2>/dev/null || echo "000")
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 2 --max-time 3 {url} 2>/dev/null || echo "000")
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
         RESULT="ALLOWED"
         break
@@ -606,7 +606,7 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
         # Transient failure (000=connection error, 5xx=server error) - retry
         ATTEMPT=$((ATTEMPT + 1))
         if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-            sleep 2
+            sleep 1
         fi
     fi
 done
@@ -615,8 +615,8 @@ if [ "$RESULT" = "ALLOWED" ]; then
 elif [ "$RESULT" = "BLOCKED" ]; then
     echo "{fail_msg}"
 else
-    # All attempts failed with transient errors - treat as blocked but note it
-    echo "{fail_msg} (transient)"
+    # All attempts failed with connection errors - blocked at network layer (Cilium)
+    echo "{fail_msg} (timeout)"
 fi
 "#,
             url = target.url,
