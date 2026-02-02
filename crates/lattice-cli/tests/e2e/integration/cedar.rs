@@ -428,16 +428,24 @@ pub async fn run_cedar_group_test(
         child_cluster_name,
     )?;
 
-    // Get tokens for both SAs (both should be allowed via group)
-    let allowed_token = get_sa_token(parent_kubeconfig, CEDAR_TEST_NAMESPACE, ALLOWED_SA_NAME)?;
-    let denied_token = get_sa_token(parent_kubeconfig, CEDAR_TEST_NAMESPACE, DENIED_SA_NAME)?;
+    // Get tokens for SAs in the group (both should be allowed)
+    let in_group_token1 = get_sa_token(parent_kubeconfig, CEDAR_TEST_NAMESPACE, ALLOWED_SA_NAME)?;
+    let in_group_token2 = get_sa_token(parent_kubeconfig, CEDAR_TEST_NAMESPACE, DENIED_SA_NAME)?;
 
-    // Both SAs should have access via group membership
-    info!("[Integration/Cedar] Testing first SA access via group...");
-    verify_sa_access_allowed(&proxy_url, &allowed_token, child_cluster_name)?;
+    // Get token for SA outside the group (should be denied)
+    let outside_group_token =
+        get_sa_token(parent_kubeconfig, LATTICE_SYSTEM_NAMESPACE, "default")?;
 
-    info!("[Integration/Cedar] Testing second SA access via group...");
-    verify_sa_access_allowed(&proxy_url, &denied_token, child_cluster_name)?;
+    // SAs in the group should have access
+    info!("[Integration/Cedar] Testing SA in group (should be allowed)...");
+    verify_sa_access_allowed(&proxy_url, &in_group_token1, child_cluster_name)?;
+
+    info!("[Integration/Cedar] Testing second SA in group (should be allowed)...");
+    verify_sa_access_allowed(&proxy_url, &in_group_token2, child_cluster_name)?;
+
+    // SA outside the group should be denied
+    info!("[Integration/Cedar] Testing SA outside group (should be denied)...");
+    verify_sa_access_denied(&proxy_url, &outside_group_token, child_cluster_name)?;
 
     // Cleanup
     delete_cedar_policy(
