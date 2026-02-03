@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    ClusterPhase, Condition, EndpointsSpec, NetworkingSpec, NodeSpec, ProviderSpec, WorkloadSpec,
+    ClusterPhase, Condition, EndpointsSpec, NetworkingSpec, NodeSpec, ProviderSpec,
 };
 
 /// Specification for a LatticeCluster
@@ -62,10 +62,6 @@ pub struct LatticeClusterSpec {
     /// Region identifier
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
-
-    /// Workload configuration - services to deploy
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workload: Option<WorkloadSpec>,
 }
 
 impl LatticeClusterSpec {
@@ -313,7 +309,6 @@ mod tests {
             parent_config: Some(endpoints_spec()),
             environment: None,
             region: None,
-            workload: None,
         };
 
         assert!(spec.is_parent(), "Should be recognized as a parent");
@@ -333,7 +328,6 @@ mod tests {
             parent_config: None,
             environment: Some("prod".to_string()),
             region: Some("us-west".to_string()),
-            workload: None,
         };
 
         assert!(!spec.is_parent(), "Leaf cluster cannot have children");
@@ -358,7 +352,6 @@ mod tests {
             parent_config: Some(endpoints_spec()),
             environment: None,
             region: None,
-            workload: None,
         };
 
         assert!(
@@ -380,7 +373,6 @@ mod tests {
             parent_config: None,
             environment: None,
             region: None,
-            workload: None,
         };
 
         assert!(
@@ -411,7 +403,6 @@ mod tests {
             parent_config: None,
             environment: None,
             region: None,
-            workload: None,
         };
 
         assert!(
@@ -433,7 +424,6 @@ mod tests {
             parent_config: None,
             environment: None,
             region: None,
-            workload: None,
         };
 
         assert!(
@@ -567,12 +557,11 @@ parentConfig:
         );
     }
 
-    /// Story: User defines production workload cluster in YAML manifest
+    /// Story: User defines leaf cluster with environment metadata in YAML
     ///
-    /// Application teams define workload clusters with environment metadata
-    /// and service deployments.
+    /// Application teams define leaf clusters with environment and region metadata.
     #[test]
-    fn story_yaml_manifest_defines_production_workload_cluster() {
+    fn story_yaml_manifest_defines_leaf_cluster() {
         let yaml = r#"
 providerRef: aws-prod
 environment: prod
@@ -589,24 +578,15 @@ nodes:
   workerPools:
     general:
       replicas: 3
-workload:
-  services:
-    - name: curl-tester
-    - name: simple-nginx
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("should parse YAML");
         let spec: LatticeClusterSpec =
-            serde_json::from_value(value).expect("workload cluster YAML should parse successfully");
+            serde_json::from_value(value).expect("leaf cluster YAML should parse successfully");
 
-        assert!(!spec.is_parent(), "Should be workload cluster");
+        assert!(!spec.is_parent(), "Should be leaf cluster");
         assert_eq!(spec.environment.as_deref(), Some("prod"));
         assert_eq!(spec.region.as_deref(), Some("us-west"));
         assert_eq!(spec.nodes.total_workers(), 3);
-
-        let workload = spec.workload.expect("workload config should be present");
-        assert_eq!(workload.services.len(), 2);
-        assert_eq!(workload.services[0].name, "curl-tester");
-        assert_eq!(workload.services[1].name, "simple-nginx");
     }
 
     /// Story: Spec survives serialization roundtrip
@@ -623,7 +603,6 @@ workload:
             parent_config: None,
             environment: Some("staging".to_string()),
             region: None,
-            workload: None,
         };
 
         let json =
@@ -656,8 +635,7 @@ workload:
                 parent_config: None,
                 environment: None,
                 region: None,
-                workload: None,
-            },
+                },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
         };
 

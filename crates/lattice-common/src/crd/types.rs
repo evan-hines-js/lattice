@@ -593,16 +593,8 @@ pub struct ServiceSpec {
 }
 
 // =============================================================================
-// Workload Configuration
+// Service Reference
 // =============================================================================
-
-/// Workload specification for clusters
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct WorkloadSpec {
-    /// Services to deploy on this cluster
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub services: Vec<ServiceRef>,
-}
 
 /// Reference to a service with optional namespace qualification
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]

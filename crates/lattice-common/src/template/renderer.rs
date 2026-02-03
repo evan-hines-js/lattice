@@ -333,27 +333,17 @@ impl TemplateRenderer {
         file: &FileMount,
         ctx: &TemplateContext,
     ) -> Result<RenderedFile, TemplateError> {
-        // Check if expansion is disabled
-        let no_expand = file.no_expand.unwrap_or(false);
+        let no_expand = file.no_expand;
+        let reverse_expand = file.reverse_expand;
 
         let content: Option<String> = if let Some(ref template) = file.content {
-            let template: &TemplateString = template;
-            if no_expand {
-                Some(template.as_str().to_string())
-            } else {
-                Some(self.engine.render(template.as_str(), ctx)?)
-            }
+            Some(self.render_file_content(template.as_str(), ctx, no_expand, reverse_expand)?)
         } else {
             None
         };
 
         let source: Option<String> = if let Some(ref template) = file.source {
-            let template: &TemplateString = template;
-            if no_expand {
-                Some(template.as_str().to_string())
-            } else {
-                Some(self.engine.render(template.as_str(), ctx)?)
-            }
+            Some(self.render_file_content(template.as_str(), ctx, no_expand, reverse_expand)?)
         } else {
             None
         };
@@ -364,6 +354,31 @@ impl TemplateRenderer {
             source,
             mode: file.mode.clone(),
         })
+    }
+
+    /// Render file content with expansion options
+    fn render_file_content(
+        &self,
+        template: &str,
+        ctx: &TemplateContext,
+        no_expand: bool,
+        reverse_expand: bool,
+    ) -> Result<String, TemplateError> {
+        if no_expand {
+            return Ok(template.to_string());
+        }
+
+        if reverse_expand {
+            // Reverse mode: ${...} stays literal, $${...} expands
+            // Swap single and double dollar signs before rendering
+            const PLACEHOLDER: &str = "\x00LATTICE_DOLLAR_BRACE\x00";
+            let step1 = template.replace("$${", PLACEHOLDER);
+            let step2 = step1.replace("${", "$${"); // Escape single so they stay literal
+            let step3 = step2.replace(PLACEHOLDER, "${"); // Double becomes single for expansion
+            self.engine.render(&step3, ctx)
+        } else {
+            self.engine.render(template, ctx)
+        }
     }
 
     /// Render a volume mount
@@ -490,7 +505,8 @@ mod tests {
                 binary_content: None,
                 source: None,
                 mode: Some("0644".to_string()),
-                no_expand: None,
+                no_expand: false,
+                reverse_expand: false,
             },
         );
 
@@ -638,7 +654,8 @@ mod tests {
                 binary_content: None,
                 source: None,
                 mode: None,
-                no_expand: Some(true), // Disable expansion
+                no_expand: true,
+                reverse_expand: false,
             },
         );
 
@@ -695,6 +712,110 @@ mod tests {
         assert_eq!(
             rendered.files["/etc/script.sh"].content,
             Some("echo ${VAR}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_reverse_expand_for_bash_scripts() {
+        let graph = make_graph_with_db("prod");
+
+        let mut files = BTreeMap::new();
+        files.insert(
+            "/etc/script.sh".to_string(),
+            FileMount {
+                // Bash variables stay literal, Lattice templates use $$
+                content: Some(TemplateString::from(
+                    "#!/bin/bash\nDB_HOST=$${resources.db.host}\necho \"Host: ${DB_HOST}\"",
+                )),
+                binary_content: None,
+                source: None,
+                mode: Some("0755".to_string()),
+                no_expand: false,
+                reverse_expand: true,
+            },
+        );
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "app:latest".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                files,
+                volumes: BTreeMap::new(),
+                resources: None,
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+                security: None,
+            },
+        );
+
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "db".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Outbound,
+                id: Some("postgres".to_string()),
+                class: None,
+                metadata: None,
+                params: None,
+                namespace: None,
+                inbound: None,
+                outbound: None,
+            },
+        );
+
+        let service = LatticeService {
+            metadata: ObjectMeta {
+                name: Some("test".to_string()),
+                namespace: Some("prod".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeServiceSpec {
+                containers,
+                resources,
+                service: None,
+                replicas: ReplicaSpec::default(),
+                deploy: crate::crd::DeploySpec::default(),
+                ingress: None,
+                sidecars: BTreeMap::new(),
+                sysctls: BTreeMap::new(),
+                host_network: None,
+                share_process_namespace: None,
+            },
+            status: None,
+        };
+
+        let renderer = TemplateRenderer::new();
+        let config = RenderConfig::new(&graph, "prod", "prod-ns");
+        let ctx = renderer
+            .build_context(&service, &config)
+            .expect("template context should build successfully");
+
+        let rendered = renderer
+            .render_container("main", &service.spec.containers["main"], &ctx)
+            .expect("container rendering should succeed");
+
+        let content = rendered.files["/etc/script.sh"]
+            .content
+            .as_ref()
+            .expect("file content should be present");
+
+        // $${resources.db.host} should expand to the resolved value
+        // ${DB_HOST} should stay literal as a bash variable
+        assert!(
+            content.contains("DB_HOST=postgres.prod-ns.svc.cluster.local"),
+            "Lattice template ($${{...}}) should expand. Got: {}",
+            content
+        );
+        assert!(
+            content.contains("echo \"Host: ${DB_HOST}\""),
+            "Bash variable (${{...}}) should stay literal. Got: {}",
+            content
         );
     }
 

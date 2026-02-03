@@ -15,7 +15,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, PostParams};
 use rand::prelude::*;
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{info, warn};
 
 use lattice_operator::crd::{
     ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalService,
@@ -440,7 +440,7 @@ async fn wait_for_cycles(
         let mut min_cycles_found = usize::MAX;
 
         for pod in &pods {
-            let logs = run_cmd(
+            let logs = match run_cmd(
                 "kubectl",
                 &[
                     "--kubeconfig",
@@ -452,8 +452,13 @@ async fn wait_for_cycles(
                     "--tail",
                     "2000",
                 ],
-            )
-            .unwrap_or_default();
+            ) {
+                Ok(output) => output,
+                Err(e) => {
+                    warn!("[{}] Failed to get logs for pod {}: {}", label, pod, e);
+                    String::new()
+                }
+            };
 
             let cycle_count = logs.matches(CYCLE_END_MARKER).count();
             min_cycles_found = min_cycles_found.min(cycle_count);
