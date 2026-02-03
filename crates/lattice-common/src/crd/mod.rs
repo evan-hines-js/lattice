@@ -48,7 +48,7 @@ pub use types::{
     AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig,
     EndpointsSpec, Ipv4PoolConfig, Ipv6PoolConfig, KubernetesSpec, NetworkPool, NetworkingSpec,
     NodeSpec, NodeTaint, OpenStackConfig, ProviderConfig, ProviderSpec, ProviderType,
-    ProxmoxConfig, SecretRef, ServiceRef, ServiceSpec, TaintEffect, WorkerPoolSpec, WorkloadSpec,
+    ProxmoxConfig, SecretRef, ServiceRef, ServiceSpec, TaintEffect, WorkerPoolSpec,
 };
 
 // =============================================================================

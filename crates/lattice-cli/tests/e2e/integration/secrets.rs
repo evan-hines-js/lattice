@@ -35,6 +35,7 @@ use lattice_operator::crd::{
 
 use super::super::context::InfraContext;
 use super::super::helpers::{client_from_kubeconfig, run_cmd};
+use super::cedar::apply_e2e_default_policy;
 
 /// Test namespace for secrets integration tests
 const TEST_NAMESPACE: &str = "secrets-test";
@@ -650,6 +651,9 @@ async fn verify_synced_secret(
 
 /// Run all secrets integration tests
 pub async fn run_secrets_tests(ctx: &InfraContext) -> Result<(), String> {
+    // Ensure Cedar policy allows proxy access (may have been removed by Cedar tests)
+    apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
+
     let kubeconfig = ctx.require_workload()?;
 
     info!(

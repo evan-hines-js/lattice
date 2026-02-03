@@ -80,11 +80,16 @@ async fn run_full_e2e() -> Result<(), String> {
     let mut setup_result = integration::setup::setup_full_hierarchy(&config).await?;
     let ctx = setup_result.ctx.clone();
 
+    // Stop chaos after setup - it's only useful during pivot operations
+    // Running it during proxy/mesh/secrets tests just adds noise
+    setup_result.stop_chaos().await;
+
+    // Ensure port-forwards are alive (may have died during setup)
+    setup_result.ensure_proxies_alive()?;
+
     // =========================================================================
     // Phase 6.5: Verify kubeconfig patching + test proxy access
     // =========================================================================
-    // Note: chaos is already stopped by setup_full_hierarchy before creating proxy sessions
-
     info!("[Phase 6.5] Verifying kubeconfig patching and proxy access...");
 
     // Verify kubeconfigs are patched for proxy
@@ -219,10 +224,8 @@ async fn run_full_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 9: Uninstall management cluster
     // =========================================================================
+    // Chaos continues running - uninstall should be resilient to pod restarts
     info!("[Phase 9] Uninstalling management cluster...");
-
-    // Stop chaos before uninstall
-    setup_result.stop_chaos().await;
 
     let uninstall_args = UninstallArgs {
         kubeconfig: PathBuf::from(&ctx.mgmt_kubeconfig),

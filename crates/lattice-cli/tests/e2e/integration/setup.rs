@@ -150,6 +150,17 @@ impl SetupResult {
             self.chaos = Some(ChaosMonkey::start(targets.clone()));
         }
     }
+
+    /// Ensure all proxy sessions are alive, restarting port-forwards if needed
+    pub fn ensure_proxies_alive(&mut self) -> Result<(), String> {
+        if let Some(ref mut proxy) = self.mgmt_proxy {
+            proxy.ensure_alive()?;
+        }
+        if let Some(ref mut proxy) = self.workload_proxy {
+            proxy.ensure_alive()?;
+        }
+        Ok(())
+    }
 }
 
 // =============================================================================
@@ -474,8 +485,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     // Wait for operators to be ready before trying to connect to their proxies
     // The operator includes the auth proxy server, so we need it running first
-    // Note: Chaos can continue running - ProxySession uses deterministic ports
-    // and can self-heal via ensure_alive() if the port-forward dies.
+    // Note: Caller should stop chaos after setup - it's only useful during pivot operations
     wait_for_operator_ready(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, Some(120)).await?;
     wait_for_operator_ready(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path, Some(120)).await?;
 

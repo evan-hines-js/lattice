@@ -593,9 +593,15 @@ pub struct FileMount {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
 
-    /// Disable placeholder expansion
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub no_expand: Option<bool>,
+    /// Disable placeholder expansion entirely
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_expand: bool,
+
+    /// Reverse expansion mode for bash scripts: `${...}` stays literal,
+    /// `$${...}` expands. Useful when shell variables are more common
+    /// than Lattice templates.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reverse_expand: bool,
 }
 
 /// Volume mount specification
@@ -2049,7 +2055,8 @@ deploy:
             binary_content: None,
             source: None,
             mode: None,
-            no_expand: None,
+            no_expand: false,
+            reverse_expand: false,
         };
         assert!(file.validate("main", "/etc/config").is_err());
 
@@ -2059,7 +2066,8 @@ deploy:
             binary_content: None,
             source: None,
             mode: None,
-            no_expand: None,
+            no_expand: false,
+            reverse_expand: false,
         };
         assert!(file_with_content.validate("main", "/etc/config").is_ok());
     }
