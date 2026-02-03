@@ -249,7 +249,12 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         );
     }
 
-    // Run controllers until shutdown OR leadership lost
+    // Run controllers until shutdown signal, controllers exit, or leadership lost
+    let shutdown_signal = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Received shutdown signal");
+    };
+
     tokio::select! {
         _ = controller_runner::run_controllers(client, mode, self_cluster_name, parent_servers.clone()) => {
             tracing::info!("Controllers exited");
@@ -257,9 +262,16 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         _ = guard.lost() => {
             tracing::warn!("Leadership lost, shutting down");
         }
+        _ = shutdown_signal => {}
     }
 
-    // Shutdown (no Endpoints cleanup needed - new leader will overwrite)
+    // Graceful shutdown: release leadership so standby can take over immediately
+    tracing::info!("Releasing leadership for fast failover...");
+    if let Err(e) = guard.release_leadership().await {
+        tracing::warn!(error = %e, "Failed to release leadership (standby will wait for lease expiry)");
+    }
+
+    // Stop services
     agent_token.cancel();
     health_handle.abort();
     if let Some(handle) = auth_proxy_handle {
@@ -268,7 +280,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     if let Some(servers) = parent_servers {
         servers.shutdown().await;
     }
-    tracing::info!("Shutting down");
+    tracing::info!("Shutdown complete");
     Ok(())
 }
 

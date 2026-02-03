@@ -379,6 +379,50 @@ impl LeaderElector {
         info!(identity = %self.identity, "Leader label removed");
         Ok(())
     }
+
+    /// Release the lease by clearing the holder identity
+    ///
+    /// This allows another pod to immediately acquire leadership instead of
+    /// waiting for the lease to expire. Call during graceful shutdown.
+    async fn release_lease(&self) -> Result<(), LeaderElectionError> {
+        let api: Api<Lease> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        // Get current lease to check we still hold it
+        let lease = match api.get(&self.lease_name).await {
+            Ok(l) => l,
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                debug!(identity = %self.identity, "Lease not found, nothing to release");
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        // Only release if we're the holder
+        let holder = lease.spec.as_ref().and_then(|s| s.holder_identity.as_ref());
+        if holder != Some(&self.identity) {
+            debug!(identity = %self.identity, "Not the lease holder, nothing to release");
+            return Ok(());
+        }
+
+        // Clear the holder and set renew_time to past so it's immediately acquirable
+        let past = Utc::now() - chrono::Duration::seconds(60);
+        let patch = json!({
+            "spec": {
+                "holderIdentity": null,
+                "renewTime": past.to_rfc3339()
+            }
+        });
+
+        api.patch(
+            &self.lease_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+        info!(identity = %self.identity, "Lease released for fast failover");
+        Ok(())
+    }
 }
 
 /// Guard that maintains leadership
@@ -434,6 +478,14 @@ impl LeaderGuard {
     /// shutdown before dropping the guard.
     pub async fn release_traffic(&self) -> Result<(), LeaderElectionError> {
         self.elector.remove_leader_label().await
+    }
+
+    /// Release leadership by clearing the lease holder
+    ///
+    /// Call this during graceful shutdown to allow the standby to immediately
+    /// become leader instead of waiting for the lease to expire.
+    pub async fn release_leadership(&self) -> Result<(), LeaderElectionError> {
+        self.elector.release_lease().await
     }
 }
 
