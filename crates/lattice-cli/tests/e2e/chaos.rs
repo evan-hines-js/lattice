@@ -48,8 +48,8 @@ pub struct ChaosConfig {
 impl Default for ChaosConfig {
     fn default() -> Self {
         Self {
-            pod_interval: (30, 90),
-            net_interval: (60, 120),
+            pod_interval: (60, 120),
+            net_interval: (90, 150),
             net_blackout_secs: 3,
             enable_coordinated: false,
             coordinated_probability: 0.0,
