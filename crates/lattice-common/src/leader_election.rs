@@ -221,7 +221,7 @@ impl LeaderElector {
 
         api.patch(
             &self.lease_name,
-            &PatchParams::apply(FIELD_MANAGER),
+            &PatchParams::apply(FIELD_MANAGER).force(),
             &Patch::Apply(&patch),
         )
         .await?;
@@ -256,7 +256,7 @@ impl LeaderElector {
         match api
             .patch(
                 &self.lease_name,
-                &PatchParams::apply(FIELD_MANAGER),
+                &PatchParams::apply(FIELD_MANAGER).force(),
                 &Patch::Apply(&patch),
             )
             .await
