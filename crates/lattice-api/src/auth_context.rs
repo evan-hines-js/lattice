@@ -209,38 +209,20 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_weekday_str_monday() {
-        assert_eq!(weekday_str(chrono::Weekday::Mon), "Mon");
-    }
-
-    #[test]
-    fn test_weekday_str_tuesday() {
-        assert_eq!(weekday_str(chrono::Weekday::Tue), "Tue");
-    }
-
-    #[test]
-    fn test_weekday_str_wednesday() {
-        assert_eq!(weekday_str(chrono::Weekday::Wed), "Wed");
-    }
-
-    #[test]
-    fn test_weekday_str_thursday() {
-        assert_eq!(weekday_str(chrono::Weekday::Thu), "Thu");
-    }
-
-    #[test]
-    fn test_weekday_str_friday() {
-        assert_eq!(weekday_str(chrono::Weekday::Fri), "Fri");
-    }
-
-    #[test]
-    fn test_weekday_str_saturday() {
-        assert_eq!(weekday_str(chrono::Weekday::Sat), "Sat");
-    }
-
-    #[test]
-    fn test_weekday_str_sunday() {
-        assert_eq!(weekday_str(chrono::Weekday::Sun), "Sun");
+    fn test_weekday_str_all_days() {
+        use chrono::Weekday;
+        let cases = [
+            (Weekday::Mon, "Mon"),
+            (Weekday::Tue, "Tue"),
+            (Weekday::Wed, "Wed"),
+            (Weekday::Thu, "Thu"),
+            (Weekday::Fri, "Fri"),
+            (Weekday::Sat, "Sat"),
+            (Weekday::Sun, "Sun"),
+        ];
+        for (weekday, expected) in cases {
+            assert_eq!(weekday_str(weekday), expected, "Failed for {:?}", weekday);
+        }
     }
 
     // =========================================================================

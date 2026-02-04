@@ -8,6 +8,7 @@
 //! - `lattice-capi`: CAPI provider management and client
 
 pub mod controller;
+pub mod phases;
 
 // Re-export controller types
 pub use controller::{

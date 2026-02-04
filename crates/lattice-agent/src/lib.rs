@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub mod client;
+pub mod commands;
 pub mod config;
 pub mod exec;
 pub mod executor;

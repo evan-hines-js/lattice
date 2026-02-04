@@ -177,12 +177,7 @@ impl PolicyEngine {
             otel.kind = "internal"
         )
     )]
-    pub async fn authorize(
-        &self,
-        identity: &UserIdentity,
-        cluster: &str,
-        _action: &str, // Not used - we only have AccessCluster action
-    ) -> Result<()> {
+    pub async fn authorize(&self, identity: &UserIdentity, cluster: &str) -> Result<()> {
         self.authorize_with_context(identity, cluster, Context::empty())
             .await
     }
@@ -670,7 +665,7 @@ mod tests {
             groups: vec![],
         };
 
-        let result = engine.authorize(&identity, "any-cluster", "get").await;
+        let result = engine.authorize(&identity, "any-cluster").await;
         assert!(result.is_ok());
     }
 
@@ -682,7 +677,7 @@ mod tests {
             groups: vec![],
         };
 
-        let result = engine.authorize(&identity, "any-cluster", "get").await;
+        let result = engine.authorize(&identity, "any-cluster").await;
         assert!(result.is_err());
     }
 
@@ -708,12 +703,12 @@ mod tests {
             groups: vec![],
         };
         assert!(engine
-            .authorize(&alice, "prod-frontend", "get")
+            .authorize(&alice, "prod-frontend")
             .await
             .is_ok());
 
         // Alice cannot access other clusters
-        assert!(engine.authorize(&alice, "staging", "get").await.is_err());
+        assert!(engine.authorize(&alice, "staging").await.is_err());
 
         // Bob cannot access prod-frontend
         let bob = UserIdentity {
@@ -721,7 +716,7 @@ mod tests {
             groups: vec![],
         };
         assert!(engine
-            .authorize(&bob, "prod-frontend", "get")
+            .authorize(&bob, "prod-frontend")
             .await
             .is_err());
     }
@@ -749,11 +744,11 @@ mod tests {
             groups: vec!["admins".to_string()],
         };
         assert!(engine
-            .authorize(&admin, "any-cluster", "get")
+            .authorize(&admin, "any-cluster")
             .await
             .is_ok());
         assert!(engine
-            .authorize(&admin, "another-cluster", "delete")
+            .authorize(&admin, "another-cluster")
             .await
             .is_ok());
 
@@ -763,7 +758,7 @@ mod tests {
             groups: vec!["developers".to_string()],
         };
         assert!(engine
-            .authorize(&user, "any-cluster", "get")
+            .authorize(&user, "any-cluster")
             .await
             .is_err());
     }
@@ -852,7 +847,7 @@ mod tests {
             groups: vec!["developers".to_string()],
         };
 
-        let result = engine.authorize(&developer, "staging", "get").await;
+        let result = engine.authorize(&developer, "staging").await;
         assert!(result.is_ok());
     }
 
@@ -888,7 +883,7 @@ mod tests {
             groups: vec!["developers".to_string()],
         };
 
-        let result = engine.authorize(&developer, "production", "get").await;
+        let result = engine.authorize(&developer, "production").await;
         assert!(result.is_err());
     }
 
@@ -924,7 +919,7 @@ mod tests {
             groups: vec!["developers".to_string()],
         };
 
-        let result = engine.authorize(&developer, "unlabeled", "get").await;
+        let result = engine.authorize(&developer, "unlabeled").await;
         assert!(result.is_err());
     }
 
@@ -961,14 +956,14 @@ mod tests {
             username: "admin@example.com".to_string(),
             groups: vec!["admins".to_string()],
         };
-        assert!(engine.authorize(&admin, "prod", "get").await.is_ok());
+        assert!(engine.authorize(&admin, "prod").await.is_ok());
 
         // Contractor denied even though they're in admins group
         let contractor = UserIdentity {
             username: "contractor@example.com".to_string(),
             groups: vec!["admins".to_string()],
         };
-        assert!(engine.authorize(&contractor, "prod", "get").await.is_err());
+        assert!(engine.authorize(&contractor, "prod").await.is_err());
     }
 
     // ========================================================================

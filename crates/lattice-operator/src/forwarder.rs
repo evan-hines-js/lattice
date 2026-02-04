@@ -61,14 +61,13 @@ impl SubtreeForwarder {
             .agent_id
             .ok_or((502, "internal routing error: missing agent_id".to_string()))?;
 
-        // Get the agent connection
-        let agent = self
+        // Get the agent's command channel
+        let command_tx = self
             .agent_registry
             .get(&agent_id)
-            .ok_or_else(|| (502, format!("agent '{}' not connected", agent_id)))?;
-
-        let command_tx = agent.command_tx.clone();
-        drop(agent);
+            .ok_or_else(|| (502, format!("agent '{}' not connected", agent_id)))?
+            .command_tx
+            .clone();
 
         Ok(ResolvedRoute {
             agent_id,
@@ -76,18 +75,18 @@ impl SubtreeForwarder {
         })
     }
 
-    /// Build K8sRequestParams from a KubernetesRequest
-    fn build_params(target_cluster: &str, request: &KubernetesRequest) -> K8sRequestParams {
+    /// Build K8sRequestParams from a KubernetesRequest (takes ownership)
+    fn build_params(target_cluster: &str, request: KubernetesRequest) -> K8sRequestParams {
         K8sRequestParams {
-            method: request.verb.clone(),
-            path: request.path.clone(),
-            query: request.query.clone(),
-            body: request.body.clone(),
-            content_type: request.content_type.clone(),
-            accept: request.accept.clone(),
+            method: request.verb,
+            path: request.path,
+            query: request.query,
+            body: request.body,
+            content_type: request.content_type,
+            accept: request.accept,
             target_cluster: target_cluster.to_string(),
-            source_user: request.source_user.clone(),
-            source_groups: request.source_groups.clone(),
+            source_user: request.source_user,
+            source_groups: request.source_groups,
         }
     }
 }
@@ -99,22 +98,24 @@ impl K8sRequestForwarder for SubtreeForwarder {
         target_cluster: &str,
         request: KubernetesRequest,
     ) -> KubernetesResponse {
+        let request_id = request.request_id.clone();
+
         let route = match self.resolve_route(target_cluster).await {
             Ok(r) => r,
             Err((status, msg)) => {
-                warn!(target = %target_cluster, request_id = %request.request_id, msg, "Route resolution failed");
-                return build_k8s_status_response(&request.request_id, status, &msg);
+                warn!(target = %target_cluster, request_id = %request_id, msg, "Route resolution failed");
+                return build_k8s_status_response(&request_id, status, &msg);
             }
         };
 
         debug!(
             target = %target_cluster,
             agent_id = %route.agent_id,
-            request_id = %request.request_id,
+            request_id = %request_id,
             "Forwarding request to child cluster"
         );
 
-        let params = Self::build_params(target_cluster, &request);
+        let params = Self::build_params(target_cluster, request);
 
         // Use streaming tunnel but collect the full response for non-watch requests
         let mut rx = match tunnel_request_streaming(
@@ -128,18 +129,14 @@ impl K8sRequestForwarder for SubtreeForwarder {
             Ok(rx) => rx,
             Err(e) => {
                 let (status, msg) = tunnel_error_to_status(&e);
-                return build_k8s_status_response(&request.request_id, status, &msg);
+                return build_k8s_status_response(&request_id, status, &msg);
             }
         };
 
         // For non-watch, we expect a single response
         match rx.recv().await {
             Some(response) => response,
-            None => build_k8s_status_response(
-                &request.request_id,
-                502,
-                "no response received from agent",
-            ),
+            None => build_k8s_status_response(&request_id, 502, "no response received from agent"),
         }
     }
 
@@ -148,10 +145,12 @@ impl K8sRequestForwarder for SubtreeForwarder {
         target_cluster: &str,
         request: KubernetesRequest,
     ) -> Result<mpsc::Receiver<KubernetesResponse>, String> {
+        let request_id = &request.request_id;
+
         let route = match self.resolve_route(target_cluster).await {
             Ok(r) => r,
             Err((_, msg)) => {
-                warn!(target = %target_cluster, request_id = %request.request_id, msg, "Route resolution failed");
+                warn!(target = %target_cluster, request_id = %request_id, msg, "Route resolution failed");
                 return Err(msg);
             }
         };
@@ -159,11 +158,11 @@ impl K8sRequestForwarder for SubtreeForwarder {
         debug!(
             target = %target_cluster,
             agent_id = %route.agent_id,
-            request_id = %request.request_id,
+            request_id = %request_id,
             "Forwarding watch request to child cluster"
         );
 
-        let params = Self::build_params(target_cluster, &request);
+        let params = Self::build_params(target_cluster, request);
 
         tunnel_request_streaming(&self.agent_registry, target_cluster, route.command_tx, params)
             .await
@@ -178,6 +177,8 @@ impl ExecRequestForwarder for SubtreeForwarder {
         target_cluster: &str,
         request: ExecRequest,
     ) -> Result<ForwardedExecSession, String> {
+        let request_id = request.request_id.clone();
+
         let route = match self.resolve_route(target_cluster).await {
             Ok(r) => r,
             Err((_, msg)) => return Err(msg),
@@ -186,16 +187,16 @@ impl ExecRequestForwarder for SubtreeForwarder {
         debug!(
             target = %target_cluster,
             agent_id = %route.agent_id,
-            request_id = %request.request_id,
+            request_id = %request_id,
             "Forwarding exec request to child cluster"
         );
 
         let exec_params = ExecRequestParams {
-            path: request.path.clone(),
-            query: request.query.clone(),
+            path: request.path,
+            query: request.query,
             target_cluster: target_cluster.to_string(),
-            source_user: request.source_user.clone(),
-            source_groups: request.source_groups.clone(),
+            source_user: request.source_user,
+            source_groups: request.source_groups,
         };
 
         let (session, data_rx) = start_exec_session(
@@ -236,7 +237,7 @@ impl ExecRequestForwarder for SubtreeForwarder {
         });
 
         Ok(ForwardedExecSession {
-            request_id: request.request_id,
+            request_id,
             stdin_tx,
             resize_tx,
             data_rx,

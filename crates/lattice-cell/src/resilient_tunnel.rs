@@ -147,7 +147,7 @@ async fn tunnel_watch_resilient(
                 Err(_) if !resilient_enabled => break,
                 Err(_) => {
                     // Wait for reconnection
-                    if !wait_for_reconnect(&registry, &cluster_name, reconnect_timeout, &mut current_params).await {
+                    if !wait_for_reconnect(&registry, &cluster_name, reconnect_timeout).await {
                         break;
                     }
                     continue;
@@ -171,7 +171,7 @@ async fn tunnel_watch_resilient(
                         error = %e,
                         "Watch request failed, waiting for reconnection"
                     );
-                    if !wait_for_reconnect(&registry, &cluster_name, reconnect_timeout, &mut current_params).await {
+                    if !wait_for_reconnect(&registry, &cluster_name, reconnect_timeout).await {
                         break;
                     }
                     continue;
@@ -194,7 +194,7 @@ async fn tunnel_watch_resilient(
                 cluster = %cluster_name,
                 "Watch stream interrupted, waiting for reconnection"
             );
-            if !wait_for_reconnect(&registry, &cluster_name, reconnect_timeout, &mut current_params).await {
+            if !wait_for_reconnect(&registry, &cluster_name, reconnect_timeout).await {
                 break;
             }
             info!(
@@ -248,14 +248,13 @@ fn is_retryable(e: &TunnelError) -> bool {
     )
 }
 
-/// Wait for agent reconnection, updating params with new resourceVersion if needed
+/// Wait for agent reconnection
 ///
 /// Returns true if reconnected, false if timeout or should stop
 async fn wait_for_reconnect(
     registry: &SharedAgentRegistry,
     cluster_name: &str,
     timeout: Duration,
-    _params: &mut K8sRequestParams,
 ) -> bool {
     let mut reconnect_rx = registry.subscribe_reconnections();
     let deadline = tokio::time::Instant::now() + timeout;
