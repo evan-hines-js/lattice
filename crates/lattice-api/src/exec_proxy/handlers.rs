@@ -18,8 +18,8 @@ use lattice_proto::{
 };
 
 use super::websocket::{
-    build_k8s_message, channel, parse_k8s_message, send_close_error, send_close_internal,
-    send_close_normal, K8sMessage,
+    build_k8s_message, channel, parse_k8s_message, send_close_normal, send_k8s_error_and_close,
+    K8sMessage,
 };
 use crate::auth::UserIdentity;
 use crate::server::AppState;
@@ -64,7 +64,19 @@ pub async fn handle_exec_websocket(
     path: String,
     query: String,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| {
+    // K8s WebSocket subprotocols in order of preference
+    // Without this negotiation, kubectl disconnects immediately after upgrade
+    // See: https://kubernetes.io/docs/reference/using-api/websockets/
+    // v5 added in K8s 1.31 for close signal support
+    let protocols = [
+        "v5.channel.k8s.io",
+        "v4.channel.k8s.io",
+        "v3.channel.k8s.io",
+        "v2.channel.k8s.io",
+        "channel.k8s.io",
+    ];
+
+    ws.protocols(protocols).on_upgrade(move |socket| {
         handle_websocket_connection(socket, state, cluster_name, identity, path, query)
     })
 }
@@ -91,7 +103,7 @@ async fn handle_websocket_connection(
         None => {
             let (mut ws_sender, _) = socket.split();
             error!(cluster = %cluster_name, "Cluster not found in subtree");
-            send_close_error(&mut ws_sender, "Cluster not found").await;
+            send_k8s_error_and_close(&mut ws_sender, "Cluster not found").await;
             return;
         }
     };
@@ -120,7 +132,7 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
     // Parse the path to extract namespace and pod name
     let Some((namespace, pod_name, subresource)) = parse_exec_path(&path) else {
         error!(path = %path, "Invalid exec path");
-        send_close_error(&mut ws_sender, "Invalid exec path").await;
+        send_k8s_error_and_close(&mut ws_sender, "Invalid exec path").await;
         return;
     };
 
@@ -136,7 +148,7 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
         Ok(c) => c,
         Err(e) => {
             error!(error = %e, "Failed to create K8s client");
-            send_close_internal(&mut ws_sender, "Failed to create K8s client").await;
+            send_k8s_error_and_close(&mut ws_sender, "Failed to create K8s client").await;
             return;
         }
     };
@@ -163,7 +175,7 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
             .await
             .map_err(|e| format!("attach failed: {}", e)),
         _ => {
-            send_close_error(
+            send_k8s_error_and_close(
                 &mut ws_sender,
                 format!("Unsupported subresource: {}", subresource),
             )
@@ -176,7 +188,7 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
         Ok(a) => a,
         Err(e) => {
             error!(error = %e, "Failed to start exec");
-            send_close_internal(&mut ws_sender, e).await;
+            send_k8s_error_and_close(&mut ws_sender, e).await;
             return;
         }
     };
@@ -192,14 +204,14 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
     if let Some(stdout) = attached.stdout() {
         let tx = output_tx.clone();
         handles.push(tokio::spawn(async move {
-            forward_stream_to_channel(stdout, tx, channel::STDOUT).await;
+            forward_reader_to_channel(stdout, tx, |data| (channel::STDOUT, data)).await;
         }));
     }
 
     if let Some(stderr) = attached.stderr() {
         let tx = output_tx.clone();
         handles.push(tokio::spawn(async move {
-            forward_stream_to_channel(stderr, tx, channel::STDERR).await;
+            forward_reader_to_channel(stderr, tx, |data| (channel::STDERR, data)).await;
         }));
     }
 
@@ -273,18 +285,21 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
     info!(namespace = %namespace, pod = %pod_name, "Local exec session closed");
 }
 
-/// Forward a stream (stdout/stderr) to a channel
-async fn forward_stream_to_channel<R: AsyncRead + Unpin>(
-    mut reader: R,
-    tx: tokio::sync::mpsc::Sender<(u8, Vec<u8>)>,
-    stream_id: u8,
-) {
+/// Forward an async reader to a channel
+///
+/// Reads from the async reader in 4KB chunks and sends them to the channel.
+/// Stops when the reader is exhausted, errors, or the channel closes.
+async fn forward_reader_to_channel<R, T, F>(mut reader: R, tx: tokio::sync::mpsc::Sender<T>, transform: F)
+where
+    R: AsyncRead + Unpin,
+    F: Fn(Vec<u8>) -> T,
+{
     let mut buf = vec![0u8; 4096];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                if tx.send((stream_id, buf[..n].to_vec())).await.is_err() {
+                if tx.send(transform(buf[..n].to_vec())).await.is_err() {
                     break;
                 }
             }
@@ -304,7 +319,7 @@ async fn handle_local_portforward(
     let ports = parse_portforward_ports(query);
 
     if ports.is_empty() {
-        send_close_error(&mut ws_sender, "No ports specified").await;
+        send_k8s_error_and_close(&mut ws_sender, "No ports specified").await;
         return;
     }
 
@@ -318,7 +333,7 @@ async fn handle_local_portforward(
         Ok(pf) => pf,
         Err(e) => {
             error!(error = %e, "Failed to start portforward");
-            send_close_internal(&mut ws_sender, format!("portforward failed: {}", e)).await;
+            send_k8s_error_and_close(&mut ws_sender, format!("portforward failed: {}", e)).await;
             return;
         }
     };
@@ -328,7 +343,7 @@ async fn handle_local_portforward(
         Some(s) => s,
         None => {
             error!(port, "Failed to get stream for port");
-            send_close_internal(
+            send_k8s_error_and_close(
                 &mut ws_sender,
                 format!("Failed to get stream for port {}", port),
             )
@@ -344,22 +359,9 @@ async fn handle_local_portforward(
     // Create channel for forwarding data from pod to WebSocket
     let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
-    // Spawn reader task
+    // Spawn reader task using shared forwarder
     let reader_handle = tokio::spawn(async move {
-        let tx = output_tx;
-        let mut reader = reader;
-        let mut buf = vec![0u8; 4096];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+        forward_reader_to_channel(reader, output_tx, |data| data).await;
     });
 
     // Handle bidirectional communication
@@ -422,7 +424,7 @@ async fn handle_remote_exec(
 
     let Some(agent_registry) = state.agent_registry.as_ref() else {
         error!("Agent registry not configured");
-        send_close_internal(&mut ws_sender, "Agent registry not configured").await;
+        send_k8s_error_and_close(&mut ws_sender, "Agent registry not configured").await;
         return;
     };
 
@@ -430,7 +432,7 @@ async fn handle_remote_exec(
         Some(id) => id,
         None => {
             error!(cluster = %cluster_name, "No agent route available");
-            send_close_error(&mut ws_sender, "No agent route available").await;
+            send_k8s_error_and_close(&mut ws_sender, "No agent route available").await;
             return;
         }
     };
@@ -439,7 +441,7 @@ async fn handle_remote_exec(
         Some(agent) => agent.command_tx.clone(),
         None => {
             error!(agent = %agent_id, "Agent not connected");
-            send_close_error(&mut ws_sender, "Agent not connected").await;
+            send_k8s_error_and_close(&mut ws_sender, "Agent not connected").await;
             return;
         }
     };
@@ -457,7 +459,7 @@ async fn handle_remote_exec(
             Ok(session) => session,
             Err(e) => {
                 error!(error = %e, "Failed to start exec session");
-                send_close_internal(
+                send_k8s_error_and_close(
                     &mut ws_sender,
                     format!("Failed to start exec session: {}", e),
                 )
@@ -481,13 +483,7 @@ async fn handle_remote_exec(
                                         warn!(request_id = %request_id, error = %e, "Failed to send resize");
                                     }
                                 }
-                                K8sMessage::Stdin(payload) => {
-                                    if let Err(e) = exec_session.send_stdin(payload).await {
-                                        warn!(request_id = %request_id, error = %e, "Failed to send stdin");
-                                        break;
-                                    }
-                                }
-                                K8sMessage::Raw(payload) => {
+                                K8sMessage::Stdin(payload) | K8sMessage::Raw(payload) => {
                                     if let Err(e) = exec_session.send_stdin(payload).await {
                                         warn!(request_id = %request_id, error = %e, "Failed to send stdin");
                                         break;
@@ -527,7 +523,7 @@ async fn handle_remote_exec(
                         if data.stream_id == stream_id::ERROR {
                             let error_msg = String::from_utf8_lossy(&data.data);
                             error!(request_id = %request_id, error = %error_msg, "Exec error from agent");
-                            send_close_internal(&mut ws_sender, error_msg.to_string()).await;
+                            send_k8s_error_and_close(&mut ws_sender, error_msg.to_string()).await;
                             break;
                         }
 

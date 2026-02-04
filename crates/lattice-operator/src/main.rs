@@ -203,19 +203,23 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         let servers = Arc::new(ParentServers::new(parent_config, &client).await?);
 
         // Start agent connection to parent (if we have one)
-        // The forwarder enables hierarchical routing - when this cluster receives
-        // K8s requests for child clusters, it forwards them via the gRPC tunnel.
+        // The forwarders enable hierarchical routing - when this cluster receives
+        // K8s/exec requests for child clusters, it forwards them via the gRPC tunnel.
         if let Some(ref name) = self_cluster_name {
             let client = client.clone();
             let name = name.clone();
             let token = agent_token.clone();
-            let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> = Arc::new(
+            let subtree_forwarder =
+                SubtreeForwarder::new(servers.subtree_registry(), servers.agent_registry());
+            let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> =
+                Arc::new(subtree_forwarder);
+            let exec_forwarder: Arc<dyn lattice_agent::ExecRequestForwarder> = Arc::new(
                 SubtreeForwarder::new(servers.subtree_registry(), servers.agent_registry()),
             );
             tokio::spawn(async move {
                 tokio::select! {
                     _ = token.cancelled() => {}
-                    _ = start_agent_with_retry(&client, &name, forwarder) => {}
+                    _ = start_agent_with_retry(&client, &name, forwarder, exec_forwarder) => {}
                 }
             });
         }
