@@ -28,6 +28,7 @@ use lattice_proto::{agent_message::Payload, AgentMessage, AgentState, CellComman
 
 use crate::kubeconfig::patch_kubeconfig_for_proxy;
 use crate::subtree_registry::{ClusterInfo, SubtreeRegistry};
+use crate::connection::K8sResponseRegistry;
 use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::ServerMtlsConfig;
 use lattice_proto::SubtreeState;

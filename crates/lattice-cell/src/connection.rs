@@ -1,16 +1,74 @@
 //! Agent connection tracking
 //!
 //! Manages the registry of connected agents and their state.
+//! Includes reconnection notification for resilient request handling.
+//!
+//! # Traits
+//!
+//! For testability, key operations are exposed via traits:
+//! - `K8sResponseRegistry`: Pending K8s API response tracking (for tunnel tests)
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use lattice_proto::{AgentState, CellCommand, ExecData, KubernetesResponse};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 // Re-export from lattice_move to avoid duplicate type definitions
 pub use lattice_move::{BatchAck, CompleteAck};
+
+// ============================================================================
+// Traits for Testability
+// ============================================================================
+
+/// Trait for tracking pending K8s API responses
+///
+/// Extracted for testing tunnel logic without a full AgentRegistry.
+#[cfg_attr(test, mockall::automock)]
+pub trait K8sResponseRegistry: Send + Sync {
+    /// Register a channel for receiving K8s API responses
+    fn register_pending_k8s_response(&self, request_id: &str, sender: K8sResponseSender);
+
+    /// Get the sender for streaming responses (does not remove)
+    fn get_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender>;
+
+    /// Take and remove the pending response sender
+    fn take_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender>;
+
+    /// Check if a request is pending
+    fn has_pending_k8s_response(&self, request_id: &str) -> bool;
+}
+
+/// Trait for subscribing to agent reconnection events
+///
+/// Extracted for testing resilient tunnel logic.
+#[cfg_attr(test, mockall::automock)]
+pub trait ReconnectionNotifier: Send + Sync {
+    /// Subscribe to agent reconnection notifications
+    fn subscribe_reconnections(&self) -> broadcast::Receiver<ReconnectNotification>;
+}
+
+/// Trait for checking agent connectivity
+///
+/// Extracted for testability in routing logic.
+#[cfg_attr(test, mockall::automock)]
+pub trait AgentConnectivity: Send + Sync {
+    /// Check if an agent is connected
+    fn is_connected(&self, cluster_name: &str) -> bool;
+
+    /// Get command channel for a cluster (returns None if not connected)
+    fn get_command_tx(&self, cluster_name: &str) -> Option<mpsc::Sender<CellCommand>>;
+}
+
+/// Notification sent when an agent reconnects
+#[derive(Clone, Debug)]
+pub struct ReconnectNotification {
+    /// The cluster that reconnected
+    pub cluster_name: String,
+    /// New command channel for the reconnected agent
+    pub command_tx: mpsc::Sender<CellCommand>,
+}
 
 /// Represents a connected agent
 pub struct AgentConnection {
@@ -134,6 +192,7 @@ pub struct KubeconfigProxyConfig {
 /// Registry of connected agents
 ///
 /// Thread-safe registry using DashMap for concurrent access.
+/// Includes reconnection notification for resilient request handling.
 pub struct AgentRegistry {
     agents: DashMap<String, AgentConnection>,
     unpivot_manifests: DashMap<String, UnpivotManifests>,
@@ -153,10 +212,17 @@ pub struct AgentRegistry {
     pending_exec_data: DashMap<String, ExecDataSender>,
     /// Proxy configuration for kubeconfig patching
     proxy_config: std::sync::RwLock<Option<KubeconfigProxyConfig>>,
+    /// Broadcast channel for agent reconnection notifications
+    /// Allows waiting requests to retry when an agent reconnects
+    reconnect_tx: broadcast::Sender<ReconnectNotification>,
 }
+
+/// Channel capacity for reconnection notifications
+const RECONNECT_CHANNEL_CAPACITY: usize = 64;
 
 impl Default for AgentRegistry {
     fn default() -> Self {
+        let (reconnect_tx, _) = broadcast::channel(RECONNECT_CHANNEL_CAPACITY);
         Self {
             agents: DashMap::new(),
             unpivot_manifests: DashMap::new(),
@@ -167,6 +233,7 @@ impl Default for AgentRegistry {
             pending_k8s_responses: DashMap::new(),
             pending_exec_data: DashMap::new(),
             proxy_config: std::sync::RwLock::new(None),
+            reconnect_tx,
         }
     }
 }
@@ -190,10 +257,26 @@ impl AgentRegistry {
     }
 
     /// Register a new agent connection
+    ///
+    /// If an agent was previously registered with the same cluster name,
+    /// this is treated as a reconnection and waiting requests are notified.
     pub fn register(&self, connection: AgentConnection) {
         let cluster_name = connection.cluster_name.clone();
-        info!(cluster = %cluster_name, "Agent registered");
-        self.agents.insert(cluster_name, connection);
+        let command_tx = connection.command_tx.clone();
+        let was_reconnect = self.agents.contains_key(&cluster_name);
+
+        self.agents.insert(cluster_name.clone(), connection);
+
+        if was_reconnect {
+            info!(cluster = %cluster_name, "Agent reconnected");
+            // Notify waiting requests - ignore send errors (no receivers)
+            let _ = self.reconnect_tx.send(ReconnectNotification {
+                cluster_name,
+                command_tx,
+            });
+        } else {
+            info!(cluster = %cluster_name, "Agent registered");
+        }
     }
 
     /// Unregister an agent
@@ -219,11 +302,6 @@ impl AgentRegistry {
         cluster_name: &str,
     ) -> Option<dashmap::mapref::one::RefMut<'_, String, AgentConnection>> {
         self.agents.get_mut(cluster_name)
-    }
-
-    /// Check if an agent is connected
-    pub fn is_connected(&self, cluster_name: &str) -> bool {
-        self.agents.contains_key(cluster_name)
     }
 
     /// Get the number of connected agents
@@ -382,43 +460,6 @@ impl AgentRegistry {
     }
 
     // =========================================================================
-    // K8s API Proxy response tracking
-    // =========================================================================
-
-    /// Register a pending K8s API response channel
-    ///
-    /// The request_id should be the KubernetesRequest.request_id.
-    /// Uses mpsc::Sender to support streaming responses (watches).
-    pub fn register_pending_k8s_response(&self, request_id: &str, sender: K8sResponseSender) {
-        self.pending_k8s_responses
-            .insert(request_id.to_string(), sender);
-        debug!(request_id = %request_id, "Registered pending K8s API response");
-    }
-
-    /// Get the pending K8s response sender (does not remove)
-    ///
-    /// Returns a clone of the sender for streaming responses.
-    pub fn get_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
-        self.pending_k8s_responses
-            .get(request_id)
-            .map(|r| r.clone())
-    }
-
-    /// Remove and return the pending K8s response sender
-    ///
-    /// Use this when the stream ends (stream_end=true) or for single responses.
-    pub fn take_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
-        self.pending_k8s_responses
-            .remove(request_id)
-            .map(|(_, sender)| sender)
-    }
-
-    /// Check if a K8s API request is pending
-    pub fn has_pending_k8s_response(&self, request_id: &str) -> bool {
-        self.pending_k8s_responses.contains_key(request_id)
-    }
-
-    // =========================================================================
     // Exec data response tracking
     // =========================================================================
 
@@ -451,6 +492,50 @@ impl AgentRegistry {
     /// Check if an exec session is pending
     pub fn has_pending_exec_data(&self, request_id: &str) -> bool {
         self.pending_exec_data.contains_key(request_id)
+    }
+}
+
+// ============================================================================
+// Trait Implementations
+// ============================================================================
+
+impl K8sResponseRegistry for AgentRegistry {
+    fn register_pending_k8s_response(&self, request_id: &str, sender: K8sResponseSender) {
+        self.pending_k8s_responses
+            .insert(request_id.to_string(), sender);
+        debug!(request_id = %request_id, "Registered pending K8s API response");
+    }
+
+    fn get_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
+        self.pending_k8s_responses
+            .get(request_id)
+            .map(|r| r.clone())
+    }
+
+    fn take_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
+        self.pending_k8s_responses
+            .remove(request_id)
+            .map(|(_, sender)| sender)
+    }
+
+    fn has_pending_k8s_response(&self, request_id: &str) -> bool {
+        self.pending_k8s_responses.contains_key(request_id)
+    }
+}
+
+impl ReconnectionNotifier for AgentRegistry {
+    fn subscribe_reconnections(&self) -> broadcast::Receiver<ReconnectNotification> {
+        self.reconnect_tx.subscribe()
+    }
+}
+
+impl AgentConnectivity for AgentRegistry {
+    fn is_connected(&self, cluster_name: &str) -> bool {
+        self.agents.contains_key(cluster_name)
+    }
+
+    fn get_command_tx(&self, cluster_name: &str) -> Option<mpsc::Sender<CellCommand>> {
+        self.agents.get(cluster_name).map(|a| a.command_tx.clone())
     }
 }
 

@@ -4,4 +4,4 @@
 
 mod policy_engine;
 
-pub use policy_engine::PolicyEngine;
+pub use policy_engine::{ClusterAttributes, PolicyEngine};

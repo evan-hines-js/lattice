@@ -2,21 +2,45 @@
 //!
 //! Forwards K8s API requests to the appropriate destination:
 //! - Local cluster: proxies to the local K8s API server using ServiceAccount auth
+//!   with user impersonation for K8s RBAC enforcement
 //! - Remote cluster: tunnels through gRPC to the child cluster's agent
+//!
+//! # Security
+//!
+//! **Impersonation headers from users are always stripped** to prevent privilege
+//! escalation. The proxy adds its own impersonation headers based on the
+//! authenticated identity. This allows K8s RBAC to enforce permissions and
+//! ensures audit logs show the real user.
+//!
+//! # Dependency Injection
+//!
+//! The module uses trait-based dependency injection for testability:
+//! - `K8sHttpClient`: HTTP client for proxying to K8s API
+//! - `TokenReader`: ServiceAccount token file reader
+//!
+//! Tests can inject mock implementations to test without real infrastructure.
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use futures::TryStreamExt;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tracing::debug;
 
 use crate::auth::UserIdentity;
 use crate::error::Error;
 use crate::routing::strip_cluster_prefix;
 use crate::server::AppState;
-use lattice_cell::{tunnel_request, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT};
+use lattice_cell::{
+    tunnel_request_resilient, AgentConnectivity, K8sRequestParams, ResilientTunnelConfig,
+    TunnelError, DEFAULT_TIMEOUT,
+};
 use lattice_proto::is_watch_query;
+
+// ============================================================================
+// Constants
+// ============================================================================
 
 /// Maximum request body size (10 MB - reasonable for K8s API)
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -24,24 +48,276 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 /// Path to the in-cluster CA certificate
 const CA_CERT_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 
+/// Path to the ServiceAccount token
+const TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+
+/// Impersonation header names that must be stripped from incoming requests
+const IMPERSONATION_HEADERS: &[&str] = &[
+    "Impersonate-User",
+    "Impersonate-Group",
+    "Impersonate-Uid",
+    // Impersonate-Extra-* headers are handled with a prefix check
+];
+
 /// Shared HTTP client for local K8s API requests
 static K8S_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+// ============================================================================
+// Traits for Dependency Injection
+// ============================================================================
+
+/// Trait for reading ServiceAccount token from filesystem
+#[cfg_attr(test, mockall::automock)]
+#[async_trait]
+pub trait TokenReader: Send + Sync {
+    /// Read the ServiceAccount token
+    async fn read_token(&self) -> Result<String, Error>;
+}
+
+/// Default TokenReader that reads from the standard K8s mount path
+#[derive(Clone, Default)]
+pub struct FileTokenReader;
+
+#[async_trait]
+impl TokenReader for FileTokenReader {
+    async fn read_token(&self) -> Result<String, Error> {
+        tokio::fs::read_to_string(TOKEN_PATH)
+            .await
+            .map_err(|e| Error::Internal(format!("Failed to read ServiceAccount token: {}", e)))
+    }
+}
+
+/// HTTP response from K8s API (non-streaming)
+#[derive(Debug)]
+pub struct HttpResponse {
+    /// HTTP status code
+    pub status: u16,
+    /// Content-Type header value
+    pub content_type: String,
+    /// Response body bytes
+    pub body: Vec<u8>,
+}
+
+/// Streaming HTTP response for watch/follow queries
+pub struct StreamingHttpResponse {
+    /// HTTP status code
+    pub status: u16,
+    /// Content-Type header value
+    pub content_type: String,
+    /// Stream of response chunks
+    pub stream: std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send>,
+    >,
+}
+
+/// Parameters for K8s HTTP requests
+#[derive(Clone)]
+pub struct K8sHttpRequest {
+    /// HTTP method
+    pub method: String,
+    /// Full URL
+    pub url: String,
+    /// Bearer token
+    pub token: String,
+    /// User identity for impersonation
+    pub identity: UserIdentity,
+    /// Content-Type header
+    pub content_type: Option<String>,
+    /// Request body
+    pub body: Vec<u8>,
+}
+
+/// Trait for making HTTP requests to the K8s API
+#[cfg_attr(test, mockall::automock)]
+#[async_trait]
+pub trait K8sHttpClient: Send + Sync {
+    /// Make a non-streaming HTTP request
+    async fn request(&self, req: K8sHttpRequest) -> Result<HttpResponse, Error>;
+
+    /// Make a streaming HTTP request (for watch/follow queries)
+    async fn request_streaming(&self, req: K8sHttpRequest) -> Result<StreamingHttpResponse, Error>;
+}
+
+/// Default K8sHttpClient using reqwest with in-cluster TLS
+pub struct ReqwestK8sClient {
+    client: reqwest::Client,
+}
+
+impl ReqwestK8sClient {
+    /// Create a new client using the shared static client
+    pub async fn new() -> Result<Self, Error> {
+        let client = get_or_init_client().await?.clone();
+        Ok(Self { client })
+    }
+
+    /// Build a reqwest request from K8sHttpRequest
+    fn build_request(&self, req: &K8sHttpRequest) -> Result<reqwest::Request, Error> {
+        let method = reqwest::Method::from_bytes(req.method.as_bytes())
+            .map_err(|_| Error::Internal(format!("Invalid HTTP method: {}", req.method)))?;
+
+        let mut builder = self
+            .client
+            .request(method, &req.url)
+            .header("Authorization", format!("Bearer {}", req.token))
+            .header("Impersonate-User", &req.identity.username);
+
+        for group in &req.identity.groups {
+            builder = builder.header("Impersonate-Group", group);
+        }
+
+        if let Some(ct) = &req.content_type {
+            builder = builder.header("Content-Type", ct);
+        }
+
+        if !req.body.is_empty() {
+            builder = builder.body(req.body.clone());
+        }
+
+        builder
+            .build()
+            .map_err(|e| Error::Internal(format!("Failed to build request: {}", e)))
+    }
+}
+
+#[async_trait]
+impl K8sHttpClient for ReqwestK8sClient {
+    async fn request(&self, req: K8sHttpRequest) -> Result<HttpResponse, Error> {
+        let http_request = self.build_request(&req)?;
+
+        let response = self
+            .client
+            .execute(http_request)
+            .await
+            .map_err(|e| Error::Proxy(format!("Failed to proxy to K8s API: {}", e)))?;
+
+        let status = response.status().as_u16();
+        let content_type = extract_content_type(&response);
+
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(|e| Error::Proxy(format!("Failed to read K8s API response: {}", e)))?;
+
+        Ok(HttpResponse {
+            status,
+            content_type,
+            body: body_bytes.to_vec(),
+        })
+    }
+
+    async fn request_streaming(&self, req: K8sHttpRequest) -> Result<StreamingHttpResponse, Error> {
+        let http_request = self.build_request(&req)?;
+
+        let response = self
+            .client
+            .execute(http_request)
+            .await
+            .map_err(|e| Error::Proxy(format!("Failed to proxy to K8s API: {}", e)))?;
+
+        let status = response.status().as_u16();
+        let content_type = extract_content_type(&response);
+        let stream = response.bytes_stream().map_err(std::io::Error::other);
+
+        Ok(StreamingHttpResponse {
+            status,
+            content_type,
+            stream: Box::pin(stream),
+        })
+    }
+}
+
+/// Extract Content-Type header from response
+fn extract_content_type(response: &reqwest::Response) -> String {
+    response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string()
+}
+
+/// Get or initialize the shared K8s HTTP client
+async fn get_or_init_client() -> Result<&'static reqwest::Client, Error> {
+    if let Some(client) = K8S_CLIENT.get() {
+        return Ok(client);
+    }
+
+    let ca_cert = tokio::fs::read(CA_CERT_PATH)
+        .await
+        .map_err(|e| Error::Internal(format!("Failed to read in-cluster CA certificate: {}", e)))?;
+
+    let cert = reqwest::Certificate::from_pem(&ca_cert)
+        .map_err(|e| Error::Internal(format!("Invalid CA certificate: {}", e)))?;
+
+    let client = reqwest::Client::builder()
+        .add_root_certificate(cert)
+        .timeout(DEFAULT_TIMEOUT)
+        .build()
+        .map_err(|e| Error::Internal(format!("Failed to create HTTP client: {}", e)))?;
+
+    let _ = K8S_CLIENT.set(client);
+    K8S_CLIENT
+        .get()
+        .ok_or_else(|| Error::Internal("Failed to initialize K8s HTTP client".into()))
+}
+
+// ============================================================================
+// Injectable Dependencies
+// ============================================================================
+
+/// Injectable dependencies for K8s API forwarding
+pub struct ForwarderDeps {
+    /// HTTP client for K8s API requests
+    pub http_client: Arc<dyn K8sHttpClient>,
+    /// Token reader for ServiceAccount auth
+    pub token_reader: Arc<dyn TokenReader>,
+}
+
+impl ForwarderDeps {
+    /// Create dependencies with default implementations
+    pub async fn new() -> Result<Self, Error> {
+        let http_client = ReqwestK8sClient::new().await?;
+        Ok(Self {
+            http_client: Arc::new(http_client),
+            token_reader: Arc::new(FileTokenReader),
+        })
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
 
 /// Route a request to the target cluster
 ///
 /// Authorization is handled by Cedar before this function is called.
-/// The proxy's service account is used for K8s API calls to the local cluster.
-/// For child clusters, the source identity is passed through for Cedar checks at each hop.
+/// The proxy's service account is used for K8s API calls with user impersonation
+/// to preserve identity for K8s RBAC and audit logs.
 pub async fn route_to_cluster(
     state: &AppState,
     cluster_name: &str,
     identity: &UserIdentity,
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
+    let deps = ForwarderDeps::new().await?;
+    route_to_cluster_with_deps(state, cluster_name, identity, request, &deps).await
+}
+
+/// Route a request to the target cluster with injected dependencies (for testing)
+pub async fn route_to_cluster_with_deps(
+    state: &AppState,
+    cluster_name: &str,
+    identity: &UserIdentity,
+    request: Request<Body>,
+    deps: &ForwarderDeps,
+) -> Result<Response<Body>, Error> {
+    // SECURITY: Strip any user-supplied impersonation headers
+    let request = strip_impersonation_headers(request);
+
     // Check if this is the local cluster
     if cluster_name == state.cluster_name {
         debug!(cluster = %cluster_name, "Routing to local K8s API");
-        return route_to_local_api(state, cluster_name, request).await;
+        return forward_to_k8s_api(&state.k8s_api_url, cluster_name, identity, request, deps).await;
     }
 
     // Check if the cluster is in our subtree
@@ -52,7 +328,7 @@ pub async fn route_to_cluster(
         .ok_or_else(|| Error::ClusterNotFound(cluster_name.to_string()))?;
 
     if route_info.is_self {
-        return route_to_local_api(state, cluster_name, request).await;
+        return forward_to_k8s_api(&state.k8s_api_url, cluster_name, identity, request, deps).await;
     }
 
     // Get the agent to route through
@@ -60,7 +336,6 @@ pub async fn route_to_cluster(
         .agent_id
         .ok_or_else(|| Error::Internal("Route info missing agent_id".into()))?;
 
-    // Route to child cluster via gRPC tunnel
     debug!(
         cluster = %cluster_name,
         agent_id = %agent_id,
@@ -70,13 +345,22 @@ pub async fn route_to_cluster(
     route_to_child_cluster(state, cluster_name, &agent_id, identity, request).await
 }
 
-/// Route request to local K8s API server
-async fn route_to_local_api(
-    state: &AppState,
+// ============================================================================
+// Local API Forwarding
+// ============================================================================
+
+/// Route request to local K8s API server with user impersonation
+///
+/// This is the core forwarding logic, extracted for testability.
+/// Takes only the dependencies it needs rather than full AppState.
+async fn forward_to_k8s_api(
+    k8s_api_url: &str,
     cluster_name: &str,
+    identity: &UserIdentity,
     request: Request<Body>,
+    deps: &ForwarderDeps,
 ) -> Result<Response<Body>, Error> {
-    let method = request.method().clone();
+    let method = request.method().to_string();
     let uri = request.uri().clone();
     let path = strip_cluster_prefix(uri.path(), cluster_name);
     let query = uri.query();
@@ -86,116 +370,50 @@ async fn route_to_local_api(
         method = %method,
         path = %path,
         query = ?query,
-        "Proxying to local K8s API"
+        user = %identity.username,
+        "Proxying to local K8s API with impersonation"
     );
 
-    // Build target URL
-    let target_url = if let Some(q) = query {
-        format!("{}{}?{}", state.k8s_api_url, path, q)
-    } else {
-        format!("{}{}", state.k8s_api_url, path)
+    let target_url = match query {
+        Some(q) => format!("{}{}?{}", k8s_api_url, path, q),
+        None => format!("{}{}", k8s_api_url, path),
     };
 
-    // Read ServiceAccount token
-    let sa_token = read_service_account_token().await?;
+    let sa_token = deps.token_reader.read_token().await?;
 
-    // Get or create the shared HTTP client with proper TLS
-    let client = get_k8s_client().await?;
+    let content_type = request
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
-    // Build request with service account auth
-    let mut req_builder = client.request(method.clone(), &target_url);
-    req_builder = req_builder.header("Authorization", format!("Bearer {}", sa_token));
-
-    // Copy content-type if present
-    if let Some(content_type) = request.headers().get("content-type") {
-        if let Ok(ct) = content_type.to_str() {
-            req_builder = req_builder.header("Content-Type", ct);
-        }
-    }
-
-    // Copy body with size limit to prevent memory exhaustion
     let body = axum::body::to_bytes(request.into_body(), MAX_BODY_SIZE)
         .await
         .map_err(|e| Error::Internal(format!("Failed to read request body: {}", e)))?;
 
-    if !body.is_empty() {
-        req_builder = req_builder.body(body.to_vec());
-    }
+    let http_req = K8sHttpRequest {
+        method,
+        url: target_url,
+        token: sa_token,
+        identity: identity.clone(),
+        content_type,
+        body: body.to_vec(),
+    };
 
-    // Execute request
-    let response = req_builder
-        .send()
-        .await
-        .map_err(|e| Error::Proxy(format!("Failed to proxy to K8s API: {}", e)))?;
-
-    // For streaming queries (watch=true, follow=true), stream the response
     if is_watch_query(query_str) {
-        return build_streaming_response(response).await;
+        let streaming = deps.http_client.request_streaming(http_req).await?;
+        return build_streaming_response(streaming);
     }
 
-    // For regular requests, buffer and return
-    build_buffered_response(response).await
+    let http_response = deps.http_client.request(http_req).await?;
+    build_buffered_response(http_response)
 }
 
-/// Build a streaming response for watch/follow queries
-async fn build_streaming_response(response: reqwest::Response) -> Result<Response<Body>, Error> {
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
-        .to_string();
-
-    debug!(status = %status, "Starting streaming response");
-
-    // Convert reqwest byte stream to axum body stream
-    let stream = response.bytes_stream().map_err(std::io::Error::other);
-
-    Response::builder()
-        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
-        .header("Content-Type", content_type)
-        .header("Transfer-Encoding", "chunked")
-        .body(Body::from_stream(stream))
-        .map_err(|e| Error::Internal(format!("Failed to build streaming response: {}", e)))
-}
-
-/// Build a buffered response for regular (non-streaming) requests
-async fn build_buffered_response(response: reqwest::Response) -> Result<Response<Body>, Error> {
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
-        .to_string();
-
-    let body_bytes = response
-        .bytes()
-        .await
-        .map_err(|e| Error::Proxy(format!("Failed to read K8s API response: {}", e)))?;
-
-    debug!(
-        status = %status,
-        body_len = body_bytes.len(),
-        "Received response from local K8s API"
-    );
-
-    Response::builder()
-        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
-        .header("Content-Type", content_type)
-        .body(Body::from(body_bytes.to_vec()))
-        .map_err(|e| Error::Internal(format!("Failed to build response: {}", e)))
-}
+// ============================================================================
+// Remote Cluster Forwarding
+// ============================================================================
 
 /// Route request to child cluster via gRPC tunnel
-///
-/// # Arguments
-/// * `state` - Application state
-/// * `cluster_name` - Target cluster name (for path rewriting)
-/// * `agent_id` - Agent to route through (may be different from cluster_name for grandchildren)
-/// * `identity` - Source user identity (preserved through routing chain for Cedar)
-/// * `request` - HTTP request to forward
 async fn route_to_child_cluster(
     state: &AppState,
     cluster_name: &str,
@@ -208,14 +426,14 @@ async fn route_to_child_cluster(
         .as_ref()
         .ok_or_else(|| Error::Internal("Agent registry not configured".into()))?;
 
-    let agent = agent_registry
-        .get(agent_id)
-        .ok_or_else(|| Error::ClusterNotFound(format!("Agent not connected: {}", agent_id)))?;
+    if !agent_registry.is_connected(agent_id) {
+        return Err(Error::ClusterNotFound(format!(
+            "Agent not connected: {}",
+            agent_id
+        )));
+    }
 
-    let command_tx = agent.command_tx.clone();
-    drop(agent);
-
-    let method = request.method().clone();
+    let method = request.method().to_string();
     let uri = request.uri().clone();
     let path = strip_cluster_prefix(uri.path(), cluster_name).to_string();
     let query = uri.query().unwrap_or("").to_string();
@@ -236,16 +454,11 @@ async fn route_to_child_cluster(
         .await
         .map_err(|e| Error::Internal(format!("Failed to read request body: {}", e)))?;
 
-    // Use shared tunnel logic - target_cluster is always the final destination
-    // The agent compares this to its own cluster name to decide whether to
-    // execute locally or forward through its subtree
-    // Source identity is preserved through the entire chain for Cedar checks
-    tunnel_request(
+    tunnel_request_resilient(
         agent_registry,
-        cluster_name,
-        command_tx,
+        agent_id,
         K8sRequestParams {
-            method: method.to_string(),
+            method,
             path,
             query,
             body: body.to_vec(),
@@ -255,10 +468,79 @@ async fn route_to_child_cluster(
             source_user: identity.username.clone(),
             source_groups: identity.groups.clone(),
         },
+        &ResilientTunnelConfig::default(),
     )
     .await
     .map_err(tunnel_error_to_api_error)
 }
+
+// ============================================================================
+// Response Building
+// ============================================================================
+
+/// Build a streaming response for watch/follow queries
+fn build_streaming_response(response: StreamingHttpResponse) -> Result<Response<Body>, Error> {
+    debug!(status = response.status, "Starting streaming response");
+
+    Response::builder()
+        .status(
+            StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        )
+        .header("Content-Type", response.content_type)
+        .header("Transfer-Encoding", "chunked")
+        .body(Body::from_stream(response.stream))
+        .map_err(|e| Error::Internal(format!("Failed to build streaming response: {}", e)))
+}
+
+/// Build a buffered response for regular (non-streaming) requests
+fn build_buffered_response(response: HttpResponse) -> Result<Response<Body>, Error> {
+    debug!(
+        status = response.status,
+        body_len = response.body.len(),
+        "Received response from K8s API"
+    );
+
+    Response::builder()
+        .status(StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+        .header("Content-Type", response.content_type)
+        .body(Body::from(response.body))
+        .map_err(|e| Error::Internal(format!("Failed to build response: {}", e)))
+}
+
+// ============================================================================
+// Security
+// ============================================================================
+
+/// Strip any user-supplied impersonation headers to prevent privilege escalation
+fn strip_impersonation_headers(request: Request<Body>) -> Request<Body> {
+    let (mut parts, body) = request.into_parts();
+
+    for header in IMPERSONATION_HEADERS {
+        parts.headers.remove(*header);
+    }
+
+    // Remove Impersonate-Extra-* headers (prefix-based)
+    let extra_headers: Vec<_> = parts
+        .headers
+        .keys()
+        .filter(|k| {
+            k.as_str()
+                .to_lowercase()
+                .starts_with("impersonate-extra-")
+        })
+        .cloned()
+        .collect();
+
+    for key in extra_headers {
+        parts.headers.remove(&key);
+    }
+
+    Request::from_parts(parts, body)
+}
+
+// ============================================================================
+// Error Conversion
+// ============================================================================
 
 /// Convert TunnelError to API Error
 fn tunnel_error_to_api_error(e: TunnelError) -> Error {
@@ -271,38 +553,461 @@ fn tunnel_error_to_api_error(e: TunnelError) -> Error {
     }
 }
 
-/// Get or create the shared K8s HTTP client with proper TLS verification
-async fn get_k8s_client() -> Result<&'static reqwest::Client, Error> {
-    if let Some(client) = K8S_CLIENT.get() {
-        return Ok(client);
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_request_with_headers(headers: Vec<(&str, &str)>) -> Request<Body> {
+        let mut builder = Request::builder().method("GET").uri("/test");
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
+        builder.body(Body::empty()).unwrap()
     }
 
-    // Read the in-cluster CA certificate
-    let ca_cert = tokio::fs::read(CA_CERT_PATH)
+    fn test_identity() -> UserIdentity {
+        UserIdentity {
+            username: "test-user".to_string(),
+            groups: vec!["developers".to_string()],
+        }
+    }
+
+    // ========================================================================
+    // Impersonation Header Stripping Tests
+    // ========================================================================
+
+    #[test]
+    fn test_strip_impersonation_user_header() {
+        let request = make_request_with_headers(vec![
+            ("Impersonate-User", "evil-user"),
+            ("Content-Type", "application/json"),
+        ]);
+
+        let stripped = strip_impersonation_headers(request);
+
+        assert!(stripped.headers().get("Impersonate-User").is_none());
+        assert!(stripped.headers().get("Content-Type").is_some());
+    }
+
+    #[test]
+    fn test_strip_impersonation_group_header() {
+        let request = make_request_with_headers(vec![
+            ("Impersonate-Group", "admin-group"),
+            ("Authorization", "Bearer token"),
+        ]);
+
+        let stripped = strip_impersonation_headers(request);
+
+        assert!(stripped.headers().get("Impersonate-Group").is_none());
+        assert!(stripped.headers().get("Authorization").is_some());
+    }
+
+    #[test]
+    fn test_strip_impersonation_uid_header() {
+        let request = make_request_with_headers(vec![("Impersonate-Uid", "12345")]);
+
+        let stripped = strip_impersonation_headers(request);
+
+        assert!(stripped.headers().get("Impersonate-Uid").is_none());
+    }
+
+    #[test]
+    fn test_strip_impersonation_extra_headers() {
+        let request = make_request_with_headers(vec![
+            ("Impersonate-Extra-scopes", "read:write"),
+            ("Impersonate-Extra-token", "secret"),
+            ("X-Custom-Header", "keep-me"),
+        ]);
+
+        let stripped = strip_impersonation_headers(request);
+
+        assert!(stripped.headers().get("Impersonate-Extra-scopes").is_none());
+        assert!(stripped.headers().get("Impersonate-Extra-token").is_none());
+        assert!(stripped.headers().get("X-Custom-Header").is_some());
+    }
+
+    #[test]
+    fn test_strip_all_impersonation_headers() {
+        let request = make_request_with_headers(vec![
+            ("Impersonate-User", "bad-user"),
+            ("Impersonate-Group", "bad-group"),
+            ("Impersonate-Uid", "123"),
+            ("Impersonate-Extra-foo", "bar"),
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json"),
+        ]);
+
+        let stripped = strip_impersonation_headers(request);
+
+        assert!(stripped.headers().get("Impersonate-User").is_none());
+        assert!(stripped.headers().get("Impersonate-Group").is_none());
+        assert!(stripped.headers().get("Impersonate-Uid").is_none());
+        assert!(stripped.headers().get("Impersonate-Extra-foo").is_none());
+        assert!(stripped.headers().get("Content-Type").is_some());
+        assert!(stripped.headers().get("Accept").is_some());
+    }
+
+    #[test]
+    fn test_preserves_non_impersonation_headers() {
+        let request = make_request_with_headers(vec![
+            ("Authorization", "Bearer token"),
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json"),
+            ("X-Request-Id", "abc123"),
+        ]);
+
+        let stripped = strip_impersonation_headers(request);
+
+        assert_eq!(
+            stripped.headers().get("Authorization").unwrap(),
+            "Bearer token"
+        );
+        assert_eq!(
+            stripped.headers().get("Content-Type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            stripped.headers().get("Accept").unwrap(),
+            "application/json"
+        );
+        assert_eq!(stripped.headers().get("X-Request-Id").unwrap(), "abc123");
+    }
+
+    // ========================================================================
+    // K8s API Forwarding Tests (real business logic with mocked deps)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_forward_to_k8s_api_success() {
+        let mut mock_http = MockK8sHttpClient::new();
+        let mut mock_token = MockTokenReader::new();
+
+        mock_token
+            .expect_read_token()
+            .returning(|| Ok("test-sa-token".to_string()));
+
+        mock_http.expect_request().returning(|req| {
+            // Verify request was built correctly
+            assert_eq!(req.method, "GET");
+            assert!(req.url.contains("https://kubernetes.default.svc"));
+            assert!(req.url.contains("/api/v1/pods"));
+            assert_eq!(req.token, "test-sa-token");
+            assert_eq!(req.identity.username, "test-user");
+            assert!(req.identity.groups.contains(&"developers".to_string()));
+
+            Ok(HttpResponse {
+                status: 200,
+                content_type: "application/json".to_string(),
+                body: br#"{"items":[]}"#.to_vec(),
+            })
+        });
+
+        let deps = ForwarderDeps {
+            http_client: Arc::new(mock_http),
+            token_reader: Arc::new(mock_token),
+        };
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/clusters/my-cluster/api/v1/pods")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = forward_to_k8s_api(
+            "https://kubernetes.default.svc",
+            "my-cluster",
+            &test_identity(),
+            request,
+            &deps,
+        )
         .await
-        .map_err(|e| Error::Internal(format!("Failed to read in-cluster CA certificate: {}", e)))?;
+        .unwrap();
 
-    let cert = reqwest::Certificate::from_pem(&ca_cert)
-        .map_err(|e| Error::Internal(format!("Invalid CA certificate: {}", e)))?;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
-    let client = reqwest::Client::builder()
-        .add_root_certificate(cert)
-        .timeout(DEFAULT_TIMEOUT)
-        .build()
-        .map_err(|e| Error::Internal(format!("Failed to create HTTP client: {}", e)))?;
+    #[tokio::test]
+    async fn test_forward_to_k8s_api_token_failure() {
+        let mock_http = MockK8sHttpClient::new();
+        let mut mock_token = MockTokenReader::new();
 
-    // Try to set the client, but another thread may have beaten us
-    let _ = K8S_CLIENT.set(client);
-    K8S_CLIENT
-        .get()
-        .ok_or_else(|| Error::Internal("Failed to initialize K8s HTTP client".into()))
-}
+        mock_token
+            .expect_read_token()
+            .returning(|| Err(Error::Internal("Token file not found".to_string())));
 
-/// Read the ServiceAccount token from the mounted volume
-async fn read_service_account_token() -> Result<String, Error> {
-    const TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+        let deps = ForwarderDeps {
+            http_client: Arc::new(mock_http),
+            token_reader: Arc::new(mock_token),
+        };
 
-    tokio::fs::read_to_string(TOKEN_PATH)
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/pods")
+            .body(Body::empty())
+            .unwrap();
+
+        let result = forward_to_k8s_api(
+            "https://kubernetes.default.svc",
+            "my-cluster",
+            &test_identity(),
+            request,
+            &deps,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn test_forward_to_k8s_api_http_error() {
+        let mut mock_http = MockK8sHttpClient::new();
+        let mut mock_token = MockTokenReader::new();
+
+        mock_token
+            .expect_read_token()
+            .returning(|| Ok("token".to_string()));
+
+        mock_http
+            .expect_request()
+            .returning(|_| Err(Error::Proxy("Connection refused".to_string())));
+
+        let deps = ForwarderDeps {
+            http_client: Arc::new(mock_http),
+            token_reader: Arc::new(mock_token),
+        };
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/pods")
+            .body(Body::empty())
+            .unwrap();
+
+        let result = forward_to_k8s_api(
+            "https://kubernetes.default.svc",
+            "my-cluster",
+            &test_identity(),
+            request,
+            &deps,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Proxy(_)));
+    }
+
+    #[tokio::test]
+    async fn test_forward_to_k8s_api_with_query_params() {
+        let mut mock_http = MockK8sHttpClient::new();
+        let mut mock_token = MockTokenReader::new();
+
+        mock_token
+            .expect_read_token()
+            .returning(|| Ok("token".to_string()));
+
+        mock_http.expect_request().returning(|req| {
+            // Verify query params are preserved
+            assert!(req.url.contains("labelSelector=app%3Dnginx"));
+
+            Ok(HttpResponse {
+                status: 200,
+                content_type: "application/json".to_string(),
+                body: br#"{"items":[]}"#.to_vec(),
+            })
+        });
+
+        let deps = ForwarderDeps {
+            http_client: Arc::new(mock_http),
+            token_reader: Arc::new(mock_token),
+        };
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/pods?labelSelector=app%3Dnginx")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = forward_to_k8s_api(
+            "https://kubernetes.default.svc",
+            "my-cluster",
+            &test_identity(),
+            request,
+            &deps,
+        )
         .await
-        .map_err(|e| Error::Internal(format!("Failed to read ServiceAccount token: {}", e)))
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_forward_to_k8s_api_with_body() {
+        let mut mock_http = MockK8sHttpClient::new();
+        let mut mock_token = MockTokenReader::new();
+
+        mock_token
+            .expect_read_token()
+            .returning(|| Ok("token".to_string()));
+
+        mock_http.expect_request().returning(|req| {
+            assert_eq!(req.method, "POST");
+            assert_eq!(req.content_type, Some("application/json".to_string()));
+            let body_str = String::from_utf8(req.body).unwrap();
+            assert!(body_str.contains("my-pod"));
+
+            Ok(HttpResponse {
+                status: 201,
+                content_type: "application/json".to_string(),
+                body: br#"{"metadata":{"name":"my-pod"}}"#.to_vec(),
+            })
+        });
+
+        let deps = ForwarderDeps {
+            http_client: Arc::new(mock_http),
+            token_reader: Arc::new(mock_token),
+        };
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/namespaces/default/pods")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"metadata":{"name":"my-pod"}}"#))
+            .unwrap();
+
+        let response = forward_to_k8s_api(
+            "https://kubernetes.default.svc",
+            "my-cluster",
+            &test_identity(),
+            request,
+            &deps,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_forward_to_k8s_api_403_forbidden() {
+        let mut mock_http = MockK8sHttpClient::new();
+        let mut mock_token = MockTokenReader::new();
+
+        mock_token
+            .expect_read_token()
+            .returning(|| Ok("token".to_string()));
+
+        mock_http.expect_request().returning(|_| {
+            Ok(HttpResponse {
+                status: 403,
+                content_type: "application/json".to_string(),
+                body: br#"{"message":"forbidden"}"#.to_vec(),
+            })
+        });
+
+        let deps = ForwarderDeps {
+            http_client: Arc::new(mock_http),
+            token_reader: Arc::new(mock_token),
+        };
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/secrets")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = forward_to_k8s_api(
+            "https://kubernetes.default.svc",
+            "my-cluster",
+            &test_identity(),
+            request,
+            &deps,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ========================================================================
+    // Response Building Tests (actual logic)
+    // ========================================================================
+
+    #[test]
+    fn test_build_buffered_response_200() {
+        let http_response = HttpResponse {
+            status: 200,
+            content_type: "application/json".to_string(),
+            body: br#"{"items":[]}"#.to_vec(),
+        };
+
+        let response = build_buffered_response(http_response).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("Content-Type").unwrap(),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn test_build_buffered_response_404() {
+        let http_response = HttpResponse {
+            status: 404,
+            content_type: "application/json".to_string(),
+            body: br#"{"message":"not found"}"#.to_vec(),
+        };
+
+        let response = build_buffered_response(http_response).unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_build_buffered_response_invalid_status_code() {
+        // Status codes must be 100-999; 99 is invalid
+        let http_response = HttpResponse {
+            status: 99,
+            content_type: "application/json".to_string(),
+            body: vec![],
+        };
+
+        let response = build_buffered_response(http_response).unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ========================================================================
+    // Error Conversion Tests
+    // ========================================================================
+
+    #[test]
+    fn test_tunnel_error_to_api_error_send_failed() {
+        let err = tunnel_error_to_api_error(TunnelError::SendFailed("channel full".to_string()));
+        assert!(matches!(err, Error::Proxy(_)));
+    }
+
+    #[test]
+    fn test_tunnel_error_to_api_error_channel_closed() {
+        let err = tunnel_error_to_api_error(TunnelError::ChannelClosed);
+        assert!(matches!(err, Error::Proxy(_)));
+    }
+
+    #[test]
+    fn test_tunnel_error_to_api_error_timeout() {
+        let err = tunnel_error_to_api_error(TunnelError::Timeout);
+        assert!(matches!(err, Error::Proxy(_)));
+    }
+
+    #[test]
+    fn test_tunnel_error_to_api_error_agent_error() {
+        let err = tunnel_error_to_api_error(TunnelError::AgentError("bad request".to_string()));
+        assert!(matches!(err, Error::Proxy(_)));
+    }
+
+    #[test]
+    fn test_tunnel_error_to_api_error_response_build() {
+        let err = tunnel_error_to_api_error(TunnelError::ResponseBuild("invalid".to_string()));
+        assert!(matches!(err, Error::Internal(_)));
+    }
 }

@@ -5,9 +5,10 @@
 //! - **gRPC Server**: Accepts agent connections from child clusters
 //! - **Bootstrap Server**: HTTP endpoints for kubeadm callbacks and CSR signing
 //! - **K8s API Proxy**: Read-only proxy for CAPI controller access to children
-//! - **Connection Registry**: Tracks connected agents
+//! - **Connection Registry**: Tracks connected agents with reconnection notifications
 //! - **Resource Distribution**: Fetching resources to sync to children
 //! - **Move Sender**: gRPC-based move command sender for distributed pivot
+//! - **Resilient Tunnel**: K8s API tunneling with automatic reconnection
 
 pub mod bootstrap;
 pub mod capi_proxy;
@@ -18,6 +19,7 @@ pub mod k8s_tunnel;
 pub mod kubeconfig;
 pub mod move_sender;
 pub mod parent;
+pub mod resilient_tunnel;
 pub mod resources;
 pub mod server;
 pub mod subtree_registry;
@@ -29,17 +31,24 @@ pub use bootstrap::{
 };
 pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};
 pub use connection::{
-    AgentConnection, AgentRegistry, KubeconfigProxyConfig, PivotSourceManifests, SendError,
-    SharedAgentRegistry, UnpivotManifests,
+    AgentConnection, AgentConnectivity, AgentRegistry, K8sResponseRegistry,
+    KubeconfigProxyConfig, PivotSourceManifests, ReconnectNotification, ReconnectionNotifier,
+    SendError, SharedAgentRegistry, UnpivotManifests,
 };
 pub use exec_tunnel::{
     start_exec_session, stream_id, ExecRequestParams, ExecSession, ExecTunnelError,
     EXEC_CHANNEL_SIZE,
 };
-pub use k8s_tunnel::{tunnel_request, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT};
+pub use k8s_tunnel::{
+    build_http_response, tunnel_request, tunnel_request_streaming, K8sRequestParams, TunnelError,
+    DEFAULT_TIMEOUT,
+};
 pub use kubeconfig::patch_kubeconfig_for_proxy;
 pub use move_sender::GrpcMoveCommandSender;
 pub use parent::{load_or_create_ca, CellServerError, ParentConfig, ParentServers};
+pub use resilient_tunnel::{
+    tunnel_request_resilient, ResilientTunnelConfig, RECONNECT_TIMEOUT,
+};
 pub use resources::{fetch_distributable_resources, DistributableResources, ResourceError};
 pub use server::{AgentServer, SharedSubtreeRegistry};
 pub use subtree_registry::{ClusterInfo, RouteInfo, SubtreeRegistry};

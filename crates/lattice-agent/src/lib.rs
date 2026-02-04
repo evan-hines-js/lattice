@@ -12,21 +12,17 @@
 //! to the parent cell. All communication is initiated by the agent.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
 pub mod client;
+pub mod config;
 pub mod exec;
 pub mod executor;
+pub mod kube_client;
 pub mod pivot;
 pub mod subtree;
 pub mod watch;
-
-/// Default connection timeout for kube clients (5s is plenty for local API server)
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Default read timeout for kube clients
-const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Trait for forwarding K8s API requests to child clusters.
 ///
@@ -41,8 +37,21 @@ pub trait K8sRequestForwarder: Send + Sync {
     /// - The cluster is not in this agent's subtree (404)
     /// - The cluster's agent is not connected (502)
     /// - The request times out (504)
-    async fn forward(&self, target_cluster: &str, request: KubernetesRequest)
-        -> KubernetesResponse;
+    async fn forward(
+        &self,
+        target_cluster: &str,
+        request: KubernetesRequest,
+    ) -> KubernetesResponse;
+
+    /// Forward a watch/follow request to a target cluster with streaming response.
+    ///
+    /// Returns a receiver that yields multiple KubernetesResponse messages
+    /// as watch events arrive. The stream ends when stream_end=true is received.
+    async fn forward_watch(
+        &self,
+        target_cluster: &str,
+        request: KubernetesRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<KubernetesResponse>, String>;
 }
 
 /// Shared forwarder type used by the agent for hierarchical routing.
@@ -169,51 +178,8 @@ pub fn build_cluster_not_found_response(
     )
 }
 
-/// Create a Kubernetes client with proper timeouts
-///
-/// Uses in-cluster configuration with explicit timeouts (5s connect, 30s read)
-/// instead of kube-rs defaults which may be too long and cause hangs.
-pub async fn create_k8s_client() -> Result<kube::Client, kube::Error> {
-    let mut config = kube::Config::infer()
-        .await
-        .map_err(kube::Error::InferConfig)?;
-    config.connect_timeout = Some(DEFAULT_CONNECT_TIMEOUT);
-    config.read_timeout = Some(DEFAULT_READ_TIMEOUT);
-    kube::Client::try_from(config)
-}
-
-/// Create a Kubernetes client with logging, returning None on failure.
-///
-/// Helper for cases where client creation failure should be logged and handled
-/// gracefully rather than propagated as an error.
-pub async fn create_k8s_client_logged(purpose: &str) -> Option<kube::Client> {
-    match create_k8s_client().await {
-        Ok(c) => Some(c),
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to create K8s client for {}", purpose);
-            None
-        }
-    }
-}
-
-/// Macro for getting a K8s client or returning early from a function.
-///
-/// Use this in async functions that should return early if client creation fails.
-/// The purpose string is used in the warning log message.
-#[macro_export]
-macro_rules! get_client_or_return {
-    ($purpose:expr) => {
-        match $crate::create_k8s_client().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to create K8s client for {}", $purpose);
-                return;
-            }
-        }
-    };
-}
-
 pub use client::{AgentClient, AgentClientConfig, AgentCredentials, CertificateError, ClientState};
+pub use kube_client::{InClusterClientProvider, KubeClientProvider};
 
 // Re-export protocol types from lattice_common
 pub use executor::{execute_k8s_request, is_watch_request};

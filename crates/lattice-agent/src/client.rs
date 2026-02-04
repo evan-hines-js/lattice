@@ -40,11 +40,13 @@ use lattice_proto::{
     MoveCompleteAck, MoveObject, MoveObjectAck, MoveObjectError, StatusResponse, UidMapping,
 };
 
+use crate::kube_client::{InClusterClientProvider, KubeClientProvider};
 use crate::subtree::SubtreeSender;
 use crate::watch::{execute_watch, WatchRegistry};
 use crate::{
-    build_cluster_not_found_response, create_k8s_client, execute_k8s_request, is_watch_request,
-    ClientMtlsConfig, ForwardedExecSession, SharedExecForwarder, SharedK8sForwarder,
+    build_cluster_not_found_response, build_k8s_status_response, execute_k8s_request,
+    is_watch_request, ClientMtlsConfig, ForwardedExecSession, SharedExecForwarder,
+    SharedK8sForwarder,
 };
 
 /// Configuration for the agent client
@@ -124,6 +126,10 @@ pub enum ClientState {
 /// bidirectional communication.
 pub struct AgentClient {
     config: AgentClientConfig,
+    /// Environment config for K8s service discovery
+    env_config: Arc<dyn crate::config::K8sEnvConfig>,
+    /// Provider for creating K8s clients
+    kube_provider: Arc<dyn KubeClientProvider>,
     state: Arc<RwLock<ClientState>>,
     agent_state: Arc<RwLock<AgentState>>,
     /// Sender for outgoing messages
@@ -154,38 +160,56 @@ pub struct AgentClient {
     exec_forwarder: Option<SharedExecForwarder>,
 }
 
-impl AgentClient {
-    /// Create a new agent client with the given configuration.
-    /// Without forwarders, requests targeting other clusters return 404/error.
+/// Builder for AgentClient with fluent configuration
+pub struct AgentClientBuilder {
+    config: AgentClientConfig,
+    env_config: Arc<dyn crate::config::K8sEnvConfig>,
+    kube_provider: Arc<dyn KubeClientProvider>,
+    forwarder: Option<SharedK8sForwarder>,
+    exec_forwarder: Option<SharedExecForwarder>,
+}
+
+impl AgentClientBuilder {
+    /// Create a new builder with the given configuration
     pub fn new(config: AgentClientConfig) -> Self {
         Self {
             config,
-            state: Arc::new(RwLock::new(ClientState::Disconnected)),
-            agent_state: Arc::new(RwLock::new(AgentState::Provisioning)),
-            message_tx: None,
-            shutdown_tx: None,
-            start_time: Instant::now(),
-            heartbeat_handle: None,
-            command_handler_handle: None,
-            deletion_watcher_handle: None,
-            subtree_watcher_handle: None,
-            watch_registry: Arc::new(WatchRegistry::new()),
-            exec_registry: Arc::new(crate::exec::ExecRegistry::new()),
-            forwarded_exec_sessions: Arc::new(DashMap::new()),
+            env_config: Arc::new(crate::config::OsEnvConfig),
+            kube_provider: Arc::new(InClusterClientProvider),
             forwarder: None,
             exec_forwarder: None,
         }
     }
 
-    /// Create a new agent client with forwarders for hierarchical routing.
-    /// Use this when this cluster has children that need K8s API/exec requests forwarded.
-    pub fn with_forwarders(
-        config: AgentClientConfig,
-        forwarder: SharedK8sForwarder,
+    /// Set custom environment configuration (for testing)
+    pub fn env_config(mut self, env_config: Arc<dyn crate::config::K8sEnvConfig>) -> Self {
+        self.env_config = env_config;
+        self
+    }
+
+    /// Set custom Kubernetes client provider (for testing)
+    pub fn kube_provider(mut self, provider: Arc<dyn KubeClientProvider>) -> Self {
+        self.kube_provider = provider;
+        self
+    }
+
+    /// Set forwarders for hierarchical K8s request routing
+    pub fn forwarders(
+        mut self,
+        k8s_forwarder: SharedK8sForwarder,
         exec_forwarder: SharedExecForwarder,
     ) -> Self {
-        Self {
-            config,
+        self.forwarder = Some(k8s_forwarder);
+        self.exec_forwarder = Some(exec_forwarder);
+        self
+    }
+
+    /// Build the AgentClient
+    pub fn build(self) -> AgentClient {
+        AgentClient {
+            config: self.config,
+            env_config: self.env_config,
+            kube_provider: self.kube_provider,
             state: Arc::new(RwLock::new(ClientState::Disconnected)),
             agent_state: Arc::new(RwLock::new(AgentState::Provisioning)),
             message_tx: None,
@@ -198,9 +222,22 @@ impl AgentClient {
             watch_registry: Arc::new(WatchRegistry::new()),
             exec_registry: Arc::new(crate::exec::ExecRegistry::new()),
             forwarded_exec_sessions: Arc::new(DashMap::new()),
-            forwarder: Some(forwarder),
-            exec_forwarder: Some(exec_forwarder),
+            forwarder: self.forwarder,
+            exec_forwarder: self.exec_forwarder,
         }
+    }
+}
+
+impl AgentClient {
+    /// Create a new agent client with the given configuration.
+    /// Without forwarders, requests targeting other clusters return 404/error.
+    pub fn new(config: AgentClientConfig) -> Self {
+        AgentClientBuilder::new(config).build()
+    }
+
+    /// Create a builder for configuring the agent client
+    pub fn builder(config: AgentClientConfig) -> AgentClientBuilder {
+        AgentClientBuilder::new(config)
     }
 
     /// Get the agent uptime in seconds
@@ -209,17 +246,21 @@ impl AgentClient {
     }
 
     /// Get the Kubernetes API server endpoint from environment
-    fn get_api_server_endpoint() -> String {
-        std::env::var("KUBERNETES_SERVICE_HOST")
-            .map(|host| {
-                let port =
-                    std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_string());
-                format!("https://{}:{}", host, port)
-            })
-            .unwrap_or_default()
+    fn api_server_endpoint(&self) -> String {
+        crate::config::api_server_endpoint(self.env_config.as_ref())
     }
-}
-impl AgentClient {
+
+    /// Create a K8s client using the injected provider
+    async fn create_client(&self) -> Result<kube::Client, kube::Error> {
+        self.kube_provider.create().await
+    }
+
+    /// Create a K8s client with logging, using the injected provider
+    async fn create_client_logged(&self, purpose: &str) -> Option<kube::Client> {
+        crate::kube_client::create_client_logged(self.kube_provider.as_ref(), purpose).await
+    }
+
+
     /// Request a signed certificate from the cell
     ///
     /// This is the first step in connecting to the cell with mTLS.
@@ -442,10 +483,10 @@ impl AgentClient {
         let mut installed_providers = vec![];
 
         for attempt in 1..=3 {
-            match Self::install_capi().await {
+            match self.install_capi().await {
                 Ok(provider) => {
                     info!("CAPI installed, waiting for CRDs");
-                    if Self::wait_for_capi_crds(120).await {
+                    if self.wait_for_capi_crds(120).await {
                         info!("CAPI is ready");
                         capi_ready = true;
                         installed_providers = vec![provider];
@@ -479,7 +520,7 @@ impl AgentClient {
         // Send full subtree state to parent and start watcher for changes
         // This enables the parent cell to know about all clusters in our subtree
         // for routing K8s API requests and authorization decisions
-        if let Some(k8s_client) = crate::create_k8s_client_logged("subtree watcher").await {
+        if let Some(k8s_client) = self.create_client_logged("subtree watcher").await {
             let subtree_sender = SubtreeSender::new(self.config.cluster_name.clone(), k8s_client);
 
             // Send full state on connect
@@ -490,7 +531,7 @@ impl AgentClient {
             self.subtree_watcher_handle = Some(subtree_sender.spawn_watcher(message_tx.clone()));
         }
 
-            // Clone for spawned tasks
+        // Clone for spawned tasks
         let config = self.config.clone();
         let state = self.state.clone();
         let agent_state = self.agent_state.clone();
@@ -500,6 +541,7 @@ impl AgentClient {
         let forwarder = self.forwarder.clone();
         let exec_forwarder = self.exec_forwarder.clone();
         let forwarded_exec_sessions = self.forwarded_exec_sessions.clone();
+        let kube_provider = self.kube_provider.clone();
 
         // Spawn heartbeat task and store handle
         let heartbeat_interval = self.config.heartbeat_interval;
@@ -536,13 +578,16 @@ impl AgentClient {
         // - Crash recovery: cluster was being deleted when agent crashed/restarted
         // Polls every 5 seconds, so crash recovery has at most 5s latency.
         let deletion_tx = message_tx.clone();
+        let deletion_provider = self.kube_provider.clone();
         self.deletion_watcher_handle = Some(tokio::spawn(async move {
             let poll_interval = Duration::from_secs(5);
             loop {
                 tokio::time::sleep(poll_interval).await;
 
                 // Check if cluster is being deleted
-                if let Some((namespace, cluster_name)) = Self::check_cluster_deleting().await {
+                if let Some((namespace, cluster_name)) =
+                    Self::check_cluster_deleting(deletion_provider.as_ref()).await
+                {
                     info!(
                         cluster = %cluster_name,
                         namespace = %namespace,
@@ -550,7 +595,13 @@ impl AgentClient {
                     );
 
                     // Start the unpivot retry loop (runs until CAPI deletes us)
-                    Self::run_unpivot_loop(deletion_tx, &cluster_name, &namespace).await;
+                    Self::run_unpivot_loop(
+                        deletion_tx,
+                        &cluster_name,
+                        &namespace,
+                        deletion_provider.as_ref(),
+                    )
+                    .await;
 
                     // run_unpivot_loop only exits when the channel closes (disconnect)
                     // so we break here
@@ -566,7 +617,7 @@ impl AgentClient {
                     Some(result) = inbound.next() => {
                         match result {
                             Ok(command) => {
-                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry, &exec_registry, forwarder.as_ref(), exec_forwarder.as_ref(), &forwarded_exec_sessions).await;
+                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry, &exec_registry, forwarder.as_ref(), exec_forwarder.as_ref(), &forwarded_exec_sessions, &kube_provider).await;
                             }
                             Err(e) => {
                                 error!(error = %e, "Error receiving command");
@@ -604,7 +655,7 @@ impl AgentClient {
     async fn send_ready(&self) -> Result<(), ClientError> {
         // Get K8s version from in-cluster client
         let k8s_version =
-            if let Some(client) = crate::create_k8s_client_logged("version check").await {
+            if let Some(client) = self.create_client_logged("version check").await {
                 match client.apiserver_version().await {
                     Ok(info) => format!("v{}.{}", info.major, info.minor),
                     Err(_) => "unknown".to_string(),
@@ -619,7 +670,7 @@ impl AgentClient {
                 agent_version: self.config.agent_version.clone(),
                 kubernetes_version: k8s_version,
                 state: (*self.agent_state.read().await).into(),
-                api_server_endpoint: Self::get_api_server_endpoint(),
+                api_server_endpoint: self.api_server_endpoint(),
             })),
         };
 
@@ -655,8 +706,12 @@ impl AgentClient {
     ///
     /// Returns Some((namespace, cluster_name)) if the cluster has a deletion timestamp,
     /// indicating we should start the unpivot retry loop.
-    async fn check_cluster_deleting() -> Option<(String, String)> {
-        let client = crate::create_k8s_client_logged("cluster deletion check").await?;
+    async fn check_cluster_deleting(
+        kube_provider: &dyn KubeClientProvider,
+    ) -> Option<(String, String)> {
+        let client =
+            crate::kube_client::create_client_logged(kube_provider, "cluster deletion check")
+                .await?;
         let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
         let list = clusters
             .list(&kube::api::ListParams::default())
@@ -682,12 +737,15 @@ impl AgentClient {
         message_tx: mpsc::Sender<AgentMessage>,
         cluster_name: &str,
         namespace: &str,
+        kube_provider: &dyn KubeClientProvider,
     ) {
         let retry_interval = std::time::Duration::from_secs(5);
 
         loop {
             // Create K8s client for this iteration
-            let Some(client) = crate::create_k8s_client_logged("unpivot").await else {
+            let Some(client) =
+                crate::kube_client::create_client_logged(kube_provider, "unpivot").await
+            else {
                 tokio::time::sleep(retry_interval).await;
                 continue;
             };
@@ -838,10 +896,11 @@ impl AgentClient {
     /// Reads provider type from LatticeCluster CRD, then:
     /// 1. Copies provider credentials from lattice-system to provider namespace
     /// 2. Runs clusterctl init (installs cert-manager + CAPI providers from bundled manifests)
-    async fn install_capi() -> Result<String, std::io::Error> {
+    async fn install_capi(&self) -> Result<String, std::io::Error> {
         use kube::api::ListParams;
 
-        let client = create_k8s_client()
+        let client = self
+            .create_client()
             .await
             .map_err(|e| std::io::Error::other(format!("failed to create K8s client: {}", e)))?;
 
@@ -903,12 +962,12 @@ impl AgentClient {
     ///
     /// Uses kube-rs to check if the clusters.cluster.x-k8s.io CRD exists.
     /// Returns true if CRD becomes available within timeout_secs.
-    async fn wait_for_capi_crds(timeout_secs: u64) -> bool {
+    async fn wait_for_capi_crds(&self, timeout_secs: u64) -> bool {
         use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
         use kube::api::Api;
         use tokio::time::{sleep, Duration};
 
-        let Some(client) = crate::create_k8s_client_logged("CRD check").await else {
+        let Some(client) = self.create_client_logged("CRD check").await else {
             return false;
         };
 
@@ -939,6 +998,7 @@ impl AgentClient {
     /// * `exec_forwarder` - Optional forwarder for routing exec requests to child clusters.
     ///   When None, returns error for exec requests targeting other clusters.
     /// * `forwarded_exec_sessions` - Registry for tracking forwarded exec sessions.
+    /// * `kube_provider` - Provider for creating Kubernetes clients (dependency injection).
     #[allow(clippy::too_many_arguments)]
     async fn handle_command(
         command: &CellCommand,
@@ -950,6 +1010,7 @@ impl AgentClient {
         forwarder: Option<&SharedK8sForwarder>,
         exec_forwarder: Option<&SharedExecForwarder>,
         forwarded_exec_sessions: &Arc<DashMap<String, ForwardedExecSession>>,
+        kube_provider: &Arc<dyn KubeClientProvider>,
     ) {
         debug!(command_id = %command.command_id, "Received command");
 
@@ -965,7 +1026,11 @@ impl AgentClient {
                     return;
                 }
 
-                let client = crate::get_client_or_return!("apply manifests");
+                let Some(client) =
+                    crate::kube_client::create_client_logged(kube_provider.as_ref(), "apply manifests").await
+                else {
+                    return;
+                };
 
                 // Apply manifests (LatticeCluster CRD + resource)
                 let manifests_count = cmd.manifests.len();
@@ -1044,9 +1109,14 @@ impl AgentClient {
                     oidc_providers: proto_resources.oidc_providers,
                 };
                 let full_sync = cmd.full_sync;
+                let provider = kube_provider.clone();
 
                 tokio::spawn(async move {
-                    let client = crate::get_client_or_return!("synced resources");
+                    let Some(client) =
+                        crate::kube_client::create_client_logged(provider.as_ref(), "synced resources").await
+                    else {
+                        return;
+                    };
                     if let Err(e) = apply_distributed_resources(&client, &resources).await {
                         warn!(error = %e, "Failed to apply synced resources");
                     } else {
@@ -1106,11 +1176,12 @@ impl AgentClient {
                 let req = req.clone();
                 let registry = watch_registry.clone();
                 let forwarder = forwarder.cloned(); // Clone the Arc if Some
+                let provider = kube_provider.clone();
 
                 tokio::spawn(async move {
                     let response = if is_local {
                         // Execute locally on this cluster
-                        let client = match create_k8s_client().await {
+                        let client = match provider.create().await {
                             Ok(c) => c,
                             Err(e) => {
                                 error!(error = %e, "Failed to create K8s client for proxy request");
@@ -1140,24 +1211,62 @@ impl AgentClient {
                     } else {
                         // Forward to child cluster via our subtree
                         let target = req.target_cluster.clone();
-                        match &forwarder {
-                            Some(f) => {
-                                debug!(
-                                    request_id = %request_id,
-                                    target = %target,
-                                    "Forwarding request to child cluster"
-                                );
-                                f.forward(&target, req).await
+                        let Some(f) = &forwarder else {
+                            debug!(
+                                request_id = %request_id,
+                                target = %target,
+                                "No forwarder configured, returning 404"
+                            );
+                            let response = build_cluster_not_found_response(&target, &request_id);
+                            let msg = AgentMessage {
+                                cluster_name: cluster_name_clone,
+                                payload: Some(Payload::KubernetesResponse(response)),
+                            };
+                            let _ = message_tx.send(msg).await;
+                            return;
+                        };
+
+                        // Use streaming forwarder for watch requests
+                        if is_watch_request(&req) {
+                            debug!(
+                                request_id = %request_id,
+                                target = %target,
+                                "Forwarding watch request to child cluster"
+                            );
+                            match f.forward_watch(&target, req).await {
+                                Ok(mut rx) => {
+                                    while let Some(response) = rx.recv().await {
+                                        let msg = AgentMessage {
+                                            cluster_name: cluster_name_clone.clone(),
+                                            payload: Some(Payload::KubernetesResponse(response.clone())),
+                                        };
+                                        if message_tx.send(msg).await.is_err() {
+                                            break;
+                                        }
+                                        if response.stream_end {
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(request_id = %request_id, error = %e, "Failed to forward watch");
+                                    let response = build_k8s_status_response(&request_id, 502, &e);
+                                    let msg = AgentMessage {
+                                        cluster_name: cluster_name_clone,
+                                        payload: Some(Payload::KubernetesResponse(response)),
+                                    };
+                                    let _ = message_tx.send(msg).await;
+                                }
                             }
-                            None => {
-                                debug!(
-                                    request_id = %request_id,
-                                    target = %target,
-                                    "No forwarder configured, returning 404"
-                                );
-                                build_cluster_not_found_response(&target, &request_id)
-                            }
+                            return;
                         }
+
+                        debug!(
+                            request_id = %request_id,
+                            target = %target,
+                            "Forwarding request to child cluster"
+                        );
+                        f.forward(&target, req).await
                     };
 
                     let msg = AgentMessage {
@@ -1206,8 +1315,9 @@ impl AgentClient {
                     "Processing move batch"
                 );
 
+                let provider = kube_provider.clone();
                 tokio::spawn(async move {
-                    let client = match create_k8s_client().await {
+                    let client = match provider.create().await {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create K8s client for move batch");
@@ -1303,15 +1413,16 @@ impl AgentClient {
                 );
 
                 // Check if pivot already completed (handles re-sends after parent crash)
-                if Self::check_local_pivot_complete(&capi_cluster_name).await {
+                if Self::check_local_pivot_complete(&capi_cluster_name, kube_provider.as_ref()).await {
                     info!(request_id = %request_id, "Pivot already complete, sending immediate ack");
                     send_complete_ack(&message_tx, &agent_cluster_name, &request_id, true, "", 0)
                         .await;
                     return;
                 }
 
+                let provider = kube_provider.clone();
                 tokio::spawn(async move {
-                    let client = match create_k8s_client().await {
+                    let client = match provider.create().await {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create K8s client for move complete");
@@ -1330,7 +1441,7 @@ impl AgentClient {
 
                     // Patch kubeconfig to use kubernetes.default.svc (avoids hairpinning)
                     if let Err(e) =
-                        patch_kubeconfig_for_self_management(&capi_cluster_name, &target_namespace)
+                        patch_kubeconfig_for_self_management(&capi_cluster_name, &target_namespace, provider.as_ref())
                             .await
                     {
                         warn!(error = %e, "Failed to patch kubeconfig for self-management");
@@ -1388,7 +1499,7 @@ impl AgentClient {
                     // Set local pivot_complete AFTER all resources are confirmed in etcd
                     // If agent crashes after this but before ack, the status persists
                     // and we'll send immediate ack on next MoveComplete re-send
-                    if let Err(e) = Self::set_local_pivot_complete(&capi_cluster_name).await {
+                    if let Err(e) = Self::set_local_pivot_complete(&capi_cluster_name, &provider).await {
                         warn!(error = %e, "Failed to set local pivot_complete");
                         // Continue anyway - all resources are applied successfully
                     }
@@ -1418,7 +1529,7 @@ impl AgentClient {
                 );
 
                 if is_local {
-                    let client = match create_k8s_client().await {
+                    let client = match kube_provider.create().await {
                         Ok(c) => c,
                         Err(e) => {
                             error!(error = %e, "Failed to create K8s client for exec");
@@ -1600,8 +1711,13 @@ impl AgentClient {
     /// Each workload cluster has exactly one LatticeCluster CRD (its own).
     /// If pivot_complete is already true, duplicate MoveComplete commands
     /// can be immediately acked without re-applying resources.
-    async fn check_local_pivot_complete(cluster_name: &str) -> bool {
-        let Some(client) = crate::create_k8s_client_logged("pivot check").await else {
+    async fn check_local_pivot_complete(
+        cluster_name: &str,
+        kube_provider: &dyn KubeClientProvider,
+    ) -> bool {
+        let Some(client) =
+            crate::kube_client::create_client_logged(kube_provider, "pivot check").await
+        else {
             return false;
         };
         let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
@@ -1623,8 +1739,11 @@ impl AgentClient {
     /// Called after successfully applying pivot resources, before sending ack.
     /// This ensures the agent remembers the pivot completed even if it crashes
     /// after setting status but before the parent receives the ack.
-    async fn set_local_pivot_complete(cluster_name: &str) -> Result<(), kube::Error> {
-        let client = create_k8s_client().await?;
+    async fn set_local_pivot_complete(
+        cluster_name: &str,
+        kube_provider: &Arc<dyn KubeClientProvider>,
+    ) -> Result<(), kube::Error> {
+        let client = kube_provider.create().await?;
         let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
 
         let patch = serde_json::json!({
@@ -1794,10 +1913,6 @@ fn extract_domain(url: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use lattice_proto::{ApplyManifestsCommand, StatusRequest};
-    use std::sync::Mutex;
-
-    // Mutex to serialize tests that modify environment variables
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_default_config() {
@@ -2052,6 +2167,7 @@ mod tests {
             })),
         };
 
+        let kube_provider: Arc<dyn KubeClientProvider> = Arc::new(InClusterClientProvider);
         AgentClient::handle_command(
             &command,
             &agent_state,
@@ -2060,6 +2176,9 @@ mod tests {
             &Arc::new(WatchRegistry::new()),
             &Arc::new(crate::exec::ExecRegistry::new()),
             None,
+            None,
+            &Arc::new(DashMap::new()),
+            &kube_provider,
         )
         .await;
     }
@@ -2077,6 +2196,7 @@ mod tests {
             })),
         };
 
+        let kube_provider: Arc<dyn KubeClientProvider> = Arc::new(InClusterClientProvider);
         AgentClient::handle_command(
             &command,
             &agent_state,
@@ -2085,6 +2205,9 @@ mod tests {
             &Arc::new(WatchRegistry::new()),
             &Arc::new(crate::exec::ExecRegistry::new()),
             None,
+            None,
+            &Arc::new(DashMap::new()),
+            &kube_provider,
         )
         .await;
     }
@@ -2099,6 +2222,7 @@ mod tests {
             command: None,
         };
 
+        let kube_provider: Arc<dyn KubeClientProvider> = Arc::new(InClusterClientProvider);
         AgentClient::handle_command(
             &command,
             &agent_state,
@@ -2107,6 +2231,9 @@ mod tests {
             &Arc::new(WatchRegistry::new()),
             &Arc::new(crate::exec::ExecRegistry::new()),
             None,
+            None,
+            &Arc::new(DashMap::new()),
+            &kube_provider,
         )
         .await;
         // Should log warning but not crash
@@ -2427,6 +2554,7 @@ mod tests {
         };
 
         // Should not panic or error
+        let kube_provider: Arc<dyn KubeClientProvider> = Arc::new(InClusterClientProvider);
         AgentClient::handle_command(
             &command,
             &agent_state,
@@ -2435,6 +2563,9 @@ mod tests {
             &Arc::new(WatchRegistry::new()),
             &Arc::new(crate::exec::ExecRegistry::new()),
             None,
+            None,
+            &Arc::new(DashMap::new()),
+            &kube_provider,
         )
         .await;
 
@@ -2457,6 +2588,7 @@ mod tests {
         };
 
         // Should handle without error
+        let kube_provider: Arc<dyn KubeClientProvider> = Arc::new(InClusterClientProvider);
         AgentClient::handle_command(
             &command,
             &agent_state,
@@ -2465,6 +2597,9 @@ mod tests {
             &Arc::new(WatchRegistry::new()),
             &Arc::new(crate::exec::ExecRegistry::new()),
             None,
+            None,
+            &Arc::new(DashMap::new()),
+            &kube_provider,
         )
         .await;
 
@@ -2486,6 +2621,7 @@ mod tests {
         };
 
         // Should not panic
+        let kube_provider: Arc<dyn KubeClientProvider> = Arc::new(InClusterClientProvider);
         AgentClient::handle_command(
             &command,
             &agent_state,
@@ -2494,6 +2630,9 @@ mod tests {
             &Arc::new(WatchRegistry::new()),
             &Arc::new(crate::exec::ExecRegistry::new()),
             None,
+            None,
+            &Arc::new(DashMap::new()),
+            &kube_provider,
         )
         .await;
 
@@ -3013,82 +3152,43 @@ mod tests {
     // ==========================================================================
     // Story Tests: API Server Endpoint Detection
     // ==========================================================================
+    //
+    // Note: Core endpoint logic is tested in config::tests.
+    // These tests verify AgentClient correctly uses the injected config.
 
-    /// Story: API server endpoint is detected from environment
-    ///
-    /// When running inside a Kubernetes cluster, the agent should detect
-    /// the API server endpoint from standard environment variables.
+    /// Story: API server endpoint uses injected config
     #[test]
-    fn story_api_server_endpoint_from_env() {
-        let _guard = ENV_MUTEX.lock().expect("mutex should not be poisoned");
+    fn story_api_server_endpoint_uses_config() {
+        use crate::config::MockK8sEnvConfig;
 
-        // Save original values
-        let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
-        let orig_port = std::env::var("KUBERNETES_SERVICE_PORT").ok();
+        let mut mock = MockK8sEnvConfig::new();
+        mock.expect_kubernetes_service_host()
+            .returning(|| Some("10.96.0.1".to_string()));
+        mock.expect_kubernetes_service_port()
+            .returning(|| "443".to_string());
 
-        // Set test values
-        std::env::set_var("KUBERNETES_SERVICE_HOST", "10.96.0.1");
-        std::env::set_var("KUBERNETES_SERVICE_PORT", "443");
+        let config = AgentClientConfig::default();
+        let client = AgentClient::builder(config)
+            .env_config(Arc::new(mock))
+            .build();
 
-        let endpoint = AgentClient::get_api_server_endpoint();
-        assert_eq!(endpoint, "https://10.96.0.1:443");
-
-        // Restore original values
-        match orig_host {
-            Some(v) => std::env::set_var("KUBERNETES_SERVICE_HOST", v),
-            None => std::env::remove_var("KUBERNETES_SERVICE_HOST"),
-        }
-        match orig_port {
-            Some(v) => std::env::set_var("KUBERNETES_SERVICE_PORT", v),
-            None => std::env::remove_var("KUBERNETES_SERVICE_PORT"),
-        }
+        assert_eq!(client.api_server_endpoint(), "https://10.96.0.1:443");
     }
 
-    /// Story: API server endpoint uses default port when not specified
+    /// Story: API server endpoint is empty when host not configured
     #[test]
-    fn story_api_server_endpoint_default_port() {
-        let _guard = ENV_MUTEX.lock().expect("mutex should not be poisoned");
+    fn story_api_server_endpoint_empty_without_host() {
+        use crate::config::MockK8sEnvConfig;
 
-        // Save original values
-        let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
-        let orig_port = std::env::var("KUBERNETES_SERVICE_PORT").ok();
+        let mut mock = MockK8sEnvConfig::new();
+        mock.expect_kubernetes_service_host().returning(|| None);
 
-        // Set host only
-        std::env::set_var("KUBERNETES_SERVICE_HOST", "10.96.0.1");
-        std::env::remove_var("KUBERNETES_SERVICE_PORT");
+        let config = AgentClientConfig::default();
+        let client = AgentClient::builder(config)
+            .env_config(Arc::new(mock))
+            .build();
 
-        let endpoint = AgentClient::get_api_server_endpoint();
-        assert_eq!(endpoint, "https://10.96.0.1:443");
-
-        // Restore original values
-        match orig_host {
-            Some(v) => std::env::set_var("KUBERNETES_SERVICE_HOST", v),
-            None => std::env::remove_var("KUBERNETES_SERVICE_HOST"),
-        }
-        match orig_port {
-            Some(v) => std::env::set_var("KUBERNETES_SERVICE_PORT", v),
-            None => std::env::remove_var("KUBERNETES_SERVICE_PORT"),
-        }
-    }
-
-    /// Story: API server endpoint is empty when not in cluster
-    #[test]
-    fn story_api_server_endpoint_empty_outside_cluster() {
-        let _guard = ENV_MUTEX.lock().expect("mutex should not be poisoned");
-
-        // Save original value
-        let orig_host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
-
-        // Remove the env var
-        std::env::remove_var("KUBERNETES_SERVICE_HOST");
-
-        let endpoint = AgentClient::get_api_server_endpoint();
-        assert!(endpoint.is_empty());
-
-        // Restore original value
-        if let Some(v) = orig_host {
-            std::env::set_var("KUBERNETES_SERVICE_HOST", v);
-        }
+        assert!(client.api_server_endpoint().is_empty());
     }
 
     // ==========================================================================
