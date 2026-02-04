@@ -14,6 +14,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 pub mod client;
 pub mod exec;
 pub mod executor;
@@ -58,6 +60,8 @@ pub struct ForwardedExecSession {
     pub resize_tx: tokio::sync::mpsc::Sender<(u16, u16)>,
     /// Receiver for exec data (stdout/stderr) from the child session
     pub data_rx: tokio::sync::mpsc::Receiver<ExecData>,
+    /// Cancellation token to signal session termination
+    pub cancel_token: CancellationToken,
 }
 
 /// Trait for forwarding exec requests to child clusters.

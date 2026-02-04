@@ -12,6 +12,7 @@ use lattice_cell::{
     SharedSubtreeRegistry, TunnelError,
 };
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 /// Forwarder that routes K8s requests to child clusters via gRPC tunnel.
@@ -224,12 +225,15 @@ impl ExecRequestForwarder for SubtreeForwarder {
         // Create channels for stdin and resize
         let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);
+        let cancel_token = CancellationToken::new();
 
         // Spawn a task to forward stdin and resize to the session
         let session_for_relay = session;
+        let cancel_token_relay = cancel_token.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    _ = cancel_token_relay.cancelled() => break,
                     Some(data) = stdin_rx.recv() => {
                         if let Err(e) = session_for_relay.send_stdin(data).await {
                             error!(error = %e, "Failed to forward stdin to child exec session");
@@ -254,6 +258,7 @@ impl ExecRequestForwarder for SubtreeForwarder {
             stdin_tx,
             resize_tx,
             data_rx,
+            cancel_token,
         })
     }
 }

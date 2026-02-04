@@ -1469,6 +1469,7 @@ impl AgentClient {
                                     Ok(session) => {
                                         let mut data_rx = session.data_rx;
                                         let request_id = session.request_id.clone();
+                                        let cancel_token = session.cancel_token.clone();
 
                                         // Store the session for stdin/resize forwarding
                                         sessions.insert(request_id.clone(), ForwardedExecSession {
@@ -1476,6 +1477,7 @@ impl AgentClient {
                                             stdin_tx: session.stdin_tx,
                                             resize_tx: session.resize_tx,
                                             data_rx: tokio::sync::mpsc::channel(1).1, // dummy, we take the real one
+                                            cancel_token,
                                         });
 
                                         // Relay data from child back to parent
@@ -1573,6 +1575,19 @@ impl AgentClient {
                         let _ = session.resize_tx.send((width, height)).await;
                     }
                 });
+            }
+            Some(Command::ExecCancel(cancel)) => {
+                let request_id = cancel.request_id.clone();
+                debug!(request_id = %request_id, "Received exec cancel");
+
+                // Try local exec registry first
+                if exec_registry.cancel(&request_id) {
+                    return;
+                }
+                // Otherwise, try forwarded sessions
+                if let Some((_, session)) = forwarded_exec_sessions.remove(&request_id) {
+                    session.cancel_token.cancel();
+                }
             }
             None => {
                 warn!(command_id = %command.command_id, "Received command with no payload");
