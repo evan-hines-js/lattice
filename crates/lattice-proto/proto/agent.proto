@@ -208,6 +208,8 @@ message CellCommand {
     ExecData exec_stdin = 9;
     // Exec/attach/portforward: terminal resize
     ExecResize exec_resize = 10;
+    // Exec/attach/portforward: cancel session (client disconnected)
+    ExecCancel exec_cancel = 11;
   }
 }
 
@@ -550,4 +552,13 @@ message ExecResize {
   uint32 width = 2;
   // New terminal height in rows
   uint32 height = 3;
+}
+
+// Cell → Agent: Cancel exec session
+//
+// Sent when the client disconnects (WebSocket close) to signal the agent
+// to terminate the exec session and clean up resources.
+message ExecCancel {
+  // Session ID to cancel
+  string request_id = 1;
 }

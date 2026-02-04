@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error};
 use uuid::Uuid;
 
-use lattice_proto::{cell_command, CellCommand, ExecData, ExecRequest, ExecResize};
+use lattice_proto::{cell_command, CellCommand, ExecCancel, ExecData, ExecRequest, ExecResize};
 
 use crate::connection::SharedAgentRegistry;
 
@@ -98,9 +98,18 @@ impl ExecSession {
 
 impl Drop for ExecSession {
     fn drop(&mut self) {
+        // Send cancel command to agent (best-effort, non-blocking)
+        let command = CellCommand {
+            command_id: self.request_id.clone(),
+            command: Some(cell_command::Command::ExecCancel(ExecCancel {
+                request_id: self.request_id.clone(),
+            })),
+        };
+        let _ = self.command_tx.try_send(command);
+
         // Clean up pending exec data registration
         self.registry.take_pending_exec_data(&self.request_id);
-        debug!(request_id = %self.request_id, "Exec session dropped");
+        debug!(request_id = %self.request_id, "Exec session dropped, cancel sent");
     }
 }
 
