@@ -14,6 +14,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
+
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::interval;
@@ -42,7 +44,7 @@ use crate::subtree::SubtreeSender;
 use crate::watch::{execute_watch, WatchRegistry};
 use crate::{
     build_cluster_not_found_response, create_k8s_client, execute_k8s_request, is_watch_request,
-    ClientMtlsConfig, SharedK8sForwarder,
+    ClientMtlsConfig, ForwardedExecSession, SharedExecForwarder, SharedK8sForwarder,
 };
 
 /// Configuration for the agent client
@@ -142,14 +144,19 @@ pub struct AgentClient {
     watch_registry: Arc<WatchRegistry>,
     /// Registry for tracking active exec sessions
     exec_registry: Arc<crate::exec::ExecRegistry>,
+    /// Registry for tracking forwarded exec sessions (to child clusters)
+    forwarded_exec_sessions: Arc<DashMap<String, ForwardedExecSession>>,
     /// Optional forwarder for routing K8s requests to child clusters.
     /// When None, requests targeting other clusters return 404.
     forwarder: Option<SharedK8sForwarder>,
+    /// Optional forwarder for routing exec requests to child clusters.
+    /// When None, exec requests targeting other clusters return an error.
+    exec_forwarder: Option<SharedExecForwarder>,
 }
 
 impl AgentClient {
     /// Create a new agent client with the given configuration.
-    /// Without a forwarder, requests targeting other clusters return 404.
+    /// Without forwarders, requests targeting other clusters return 404/error.
     pub fn new(config: AgentClientConfig) -> Self {
         Self {
             config,
@@ -164,13 +171,19 @@ impl AgentClient {
             subtree_watcher_handle: None,
             watch_registry: Arc::new(WatchRegistry::new()),
             exec_registry: Arc::new(crate::exec::ExecRegistry::new()),
+            forwarded_exec_sessions: Arc::new(DashMap::new()),
             forwarder: None,
+            exec_forwarder: None,
         }
     }
 
-    /// Create a new agent client with a forwarder for hierarchical routing.
-    /// Use this when this cluster has children that need K8s API requests forwarded.
-    pub fn with_forwarder(config: AgentClientConfig, forwarder: SharedK8sForwarder) -> Self {
+    /// Create a new agent client with forwarders for hierarchical routing.
+    /// Use this when this cluster has children that need K8s API/exec requests forwarded.
+    pub fn with_forwarders(
+        config: AgentClientConfig,
+        forwarder: SharedK8sForwarder,
+        exec_forwarder: SharedExecForwarder,
+    ) -> Self {
         Self {
             config,
             state: Arc::new(RwLock::new(ClientState::Disconnected)),
@@ -184,7 +197,9 @@ impl AgentClient {
             subtree_watcher_handle: None,
             watch_registry: Arc::new(WatchRegistry::new()),
             exec_registry: Arc::new(crate::exec::ExecRegistry::new()),
+            forwarded_exec_sessions: Arc::new(DashMap::new()),
             forwarder: Some(forwarder),
+            exec_forwarder: Some(exec_forwarder),
         }
     }
 
@@ -475,7 +490,7 @@ impl AgentClient {
             self.subtree_watcher_handle = Some(subtree_sender.spawn_watcher(message_tx.clone()));
         }
 
-        // Clone for spawned tasks
+            // Clone for spawned tasks
         let config = self.config.clone();
         let state = self.state.clone();
         let agent_state = self.agent_state.clone();
@@ -483,6 +498,8 @@ impl AgentClient {
         let watch_registry = self.watch_registry.clone();
         let exec_registry = self.exec_registry.clone();
         let forwarder = self.forwarder.clone();
+        let exec_forwarder = self.exec_forwarder.clone();
+        let forwarded_exec_sessions = self.forwarded_exec_sessions.clone();
 
         // Spawn heartbeat task and store handle
         let heartbeat_interval = self.config.heartbeat_interval;
@@ -549,7 +566,7 @@ impl AgentClient {
                     Some(result) = inbound.next() => {
                         match result {
                             Ok(command) => {
-                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry, &exec_registry, forwarder.as_ref()).await;
+                                Self::handle_command(&command, &agent_state, &message_tx_clone, &config.cluster_name, &watch_registry, &exec_registry, forwarder.as_ref(), exec_forwarder.as_ref(), &forwarded_exec_sessions).await;
                             }
                             Err(e) => {
                                 error!(error = %e, "Error receiving command");
@@ -917,8 +934,12 @@ impl AgentClient {
     /// Handle incoming command from cell
     ///
     /// # Arguments
-    /// * `forwarder` - Optional forwarder for routing requests to child clusters.
+    /// * `forwarder` - Optional forwarder for routing K8s requests to child clusters.
     ///   When None, returns 404 for requests targeting other clusters.
+    /// * `exec_forwarder` - Optional forwarder for routing exec requests to child clusters.
+    ///   When None, returns error for exec requests targeting other clusters.
+    /// * `forwarded_exec_sessions` - Registry for tracking forwarded exec sessions.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_command(
         command: &CellCommand,
         agent_state: &Arc<RwLock<AgentState>>,
@@ -927,6 +948,8 @@ impl AgentClient {
         watch_registry: &Arc<WatchRegistry>,
         exec_registry: &Arc<crate::exec::ExecRegistry>,
         forwarder: Option<&SharedK8sForwarder>,
+        exec_forwarder: Option<&SharedExecForwarder>,
+        forwarded_exec_sessions: &Arc<DashMap<String, ForwardedExecSession>>,
     ) {
         debug!(command_id = %command.command_id, "Received command");
 
@@ -1423,40 +1446,132 @@ impl AgentClient {
                         crate::exec::execute_exec(client, req, cluster_name_clone, message_tx, registry).await;
                     });
                 } else {
-                    // Forward to child cluster - not yet implemented
-                    warn!(
-                        request_id = %req.request_id,
-                        target = %target,
-                        "Exec forwarding to child clusters not yet implemented"
-                    );
-                    let response = lattice_proto::ExecData {
-                        request_id: req.request_id.clone(),
-                        stream_id: crate::exec::stream_id::ERROR,
-                        data: b"exec forwarding not implemented".to_vec(),
-                        stream_end: true,
-                    };
-                    let msg = AgentMessage {
-                        cluster_name: cluster_name.to_string(),
-                        payload: Some(Payload::ExecData(response)),
-                    };
-                    let _ = message_tx.send(msg).await;
+                    // Forward to child cluster via exec forwarder
+                    let target = target.clone();
+                    let request_id = req.request_id.clone();
+
+                    match exec_forwarder {
+                        Some(f) => {
+                            debug!(
+                                request_id = %request_id,
+                                target = %target,
+                                "Forwarding exec request to child cluster"
+                            );
+
+                            let f = f.clone();
+                            let req = req.clone();
+                            let cluster_name = cluster_name.to_string();
+                            let message_tx = message_tx.clone();
+                            let sessions = forwarded_exec_sessions.clone();
+
+                            tokio::spawn(async move {
+                                match f.forward_exec(&target, req).await {
+                                    Ok(session) => {
+                                        let mut data_rx = session.data_rx;
+                                        let request_id = session.request_id.clone();
+
+                                        // Store the session for stdin/resize forwarding
+                                        sessions.insert(request_id.clone(), ForwardedExecSession {
+                                            request_id: request_id.clone(),
+                                            stdin_tx: session.stdin_tx,
+                                            resize_tx: session.resize_tx,
+                                            data_rx: tokio::sync::mpsc::channel(1).1, // dummy, we take the real one
+                                        });
+
+                                        // Relay data from child back to parent
+                                        while let Some(data) = data_rx.recv().await {
+                                            let msg = AgentMessage {
+                                                cluster_name: cluster_name.clone(),
+                                                payload: Some(Payload::ExecData(data)),
+                                            };
+                                            if message_tx.send(msg).await.is_err() {
+                                                break;
+                                            }
+                                        }
+
+                                        // Clean up session
+                                        sessions.remove(&request_id);
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            request_id = %request_id,
+                                            target = %target,
+                                            error = %e,
+                                            "Failed to forward exec request"
+                                        );
+                                        let response = lattice_proto::ExecData {
+                                            request_id,
+                                            stream_id: crate::exec::stream_id::ERROR,
+                                            data: format!("exec forwarding failed: {}", e).into_bytes(),
+                                            stream_end: true,
+                                        };
+                                        let msg = AgentMessage {
+                                            cluster_name,
+                                            payload: Some(Payload::ExecData(response)),
+                                        };
+                                        let _ = message_tx.send(msg).await;
+                                    }
+                                }
+                            });
+                        }
+                        None => {
+                            debug!(
+                                request_id = %request_id,
+                                target = %target,
+                                "No exec forwarder configured, returning error"
+                            );
+                            let response = lattice_proto::ExecData {
+                                request_id,
+                                stream_id: crate::exec::stream_id::ERROR,
+                                data: format!("cluster '{}' not found in subtree", target).into_bytes(),
+                                stream_end: true,
+                            };
+                            let msg = AgentMessage {
+                                cluster_name: cluster_name.to_string(),
+                                payload: Some(Payload::ExecData(response)),
+                            };
+                            let _ = message_tx.send(msg).await;
+                        }
+                    }
                 }
             }
             Some(Command::ExecStdin(data)) => {
-                let exec_registry = exec_registry.clone();
                 let request_id = data.request_id.clone();
                 let data_bytes = data.data.clone();
+
+                // Try local exec registry first
+                let exec_registry = exec_registry.clone();
+                let forwarded = forwarded_exec_sessions.clone();
+
                 tokio::spawn(async move {
-                    exec_registry.send_stdin(&request_id, data_bytes).await;
+                    // Check if it's a local exec session
+                    if exec_registry.send_stdin(&request_id, data_bytes.clone()).await {
+                        return;
+                    }
+                    // Otherwise, try forwarded sessions
+                    if let Some(session) = forwarded.get(&request_id) {
+                        let _ = session.stdin_tx.send(data_bytes).await;
+                    }
                 });
             }
             Some(Command::ExecResize(resize)) => {
-                let exec_registry = exec_registry.clone();
                 let request_id = resize.request_id.clone();
                 let width = resize.width as u16;
                 let height = resize.height as u16;
+
+                // Try local exec registry first
+                let exec_registry = exec_registry.clone();
+                let forwarded = forwarded_exec_sessions.clone();
+
                 tokio::spawn(async move {
-                    exec_registry.send_resize(&request_id, width, height).await;
+                    // Check if it's a local exec session
+                    if exec_registry.send_resize(&request_id, width, height).await {
+                        return;
+                    }
+                    // Otherwise, try forwarded sessions
+                    if let Some(session) = forwarded.get(&request_id) {
+                        let _ = session.resize_tx.send((width, height)).await;
+                    }
                 });
             }
             None => {

@@ -106,17 +106,18 @@ pub async fn start_server_with_registry(
         .route("/healthz", get(|| async { "ok" }))
         // Exec/attach/portforward - WebSocket upgrade routes (must be before generic proxy)
         // These match paths like /clusters/{cluster}/api/v1/namespaces/{ns}/pods/{pod}/exec
+        // Note: kubectl sends POST (not GET) for exec/attach with WebSocket upgrade headers
         .route(
             "/clusters/{cluster_name}/api/v1/namespaces/{ns}/pods/{pod}/exec",
-            get(exec_handler),
+            any(exec_handler),
         )
         .route(
             "/clusters/{cluster_name}/api/v1/namespaces/{ns}/pods/{pod}/attach",
-            get(exec_handler),
+            any(exec_handler),
         )
         .route(
             "/clusters/{cluster_name}/api/v1/namespaces/{ns}/pods/{pod}/portforward",
-            get(exec_handler),
+            any(exec_handler),
         )
         // K8s API proxy - route all cluster paths to the proxy handler
         .route("/clusters/{cluster_name}", any(proxy_handler))

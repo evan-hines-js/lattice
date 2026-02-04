@@ -22,13 +22,9 @@ pub mod channel {
 }
 
 /// WebSocket close codes
-pub mod close_code {
+mod close_code {
     /// Normal closure
     pub const NORMAL: u16 = 1000;
-    /// Policy violation (e.g., not found)
-    pub const POLICY_VIOLATION: u16 = 1008;
-    /// Internal error
-    pub const INTERNAL_ERROR: u16 = 1011;
 }
 
 /// Parsed K8s WebSocket message
@@ -104,20 +100,23 @@ pub async fn send_close_normal(
     send_close(sender, close_code::NORMAL, reason).await;
 }
 
-/// Send an error close frame (policy violation - 1008)
-pub async fn send_close_error(
+/// Send an error on K8s channel 3 (error channel) then close the WebSocket.
+///
+/// kubectl expects errors to come through the K8s error channel, not just
+/// in the WebSocket close frame reason. This function sends a properly
+/// formatted error message that kubectl can display.
+pub async fn send_k8s_error_and_close(
     sender: &mut SplitSink<WebSocket, Message>,
-    reason: impl Into<String>,
+    error: impl Into<String>,
 ) {
-    send_close(sender, close_code::POLICY_VIOLATION, reason).await;
-}
+    let error_str = error.into();
 
-/// Send an internal error close frame (1011)
-pub async fn send_close_internal(
-    sender: &mut SplitSink<WebSocket, Message>,
-    reason: impl Into<String>,
-) {
-    send_close(sender, close_code::INTERNAL_ERROR, reason).await;
+    // Send error on K8s channel 3 (ERROR)
+    let error_msg = build_k8s_message(channel::ERROR, error_str.as_bytes());
+    let _ = sender.send(Message::Binary(error_msg.into())).await;
+
+    // Then close normally
+    send_close(sender, close_code::NORMAL, "").await;
 }
 
 #[cfg(test)]
