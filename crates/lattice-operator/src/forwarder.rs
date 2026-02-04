@@ -8,8 +8,8 @@ use lattice_agent::{
     K8sRequestForwarder, KubernetesRequest, KubernetesResponse,
 };
 use lattice_cell::{
-    start_exec_session, tunnel_request, ExecRequestParams, K8sRequestParams, SharedAgentRegistry,
-    SharedSubtreeRegistry, TunnelError,
+    start_exec_session, tunnel_request_streaming, ExecRequestParams, K8sRequestParams,
+    SharedAgentRegistry, SharedSubtreeRegistry, TunnelError,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -18,10 +18,16 @@ use tracing::{debug, error, warn};
 /// Forwarder that routes K8s requests to child clusters via gRPC tunnel.
 ///
 /// Uses the subtree registry to determine which agent connection to route through,
-/// then uses the tunnel_request function to forward the request.
+/// then uses the tunnel functions to forward requests.
 pub struct SubtreeForwarder {
     subtree_registry: SharedSubtreeRegistry,
     agent_registry: SharedAgentRegistry,
+}
+
+/// Resolved route information for forwarding
+struct ResolvedRoute {
+    agent_id: String,
+    command_tx: mpsc::Sender<lattice_proto::CellCommand>,
 }
 
 impl SubtreeForwarder {
@@ -35,80 +41,44 @@ impl SubtreeForwarder {
             agent_registry,
         }
     }
-}
 
-#[async_trait::async_trait]
-impl K8sRequestForwarder for SubtreeForwarder {
-    async fn forward(
-        &self,
-        target_cluster: &str,
-        request: KubernetesRequest,
-    ) -> KubernetesResponse {
+    /// Resolve the route to a target cluster, returning the agent connection.
+    async fn resolve_route(&self, target_cluster: &str) -> Result<ResolvedRoute, (u32, String)> {
         // Look up the route to the target cluster
-        let route_info = match self.subtree_registry.get_route(target_cluster).await {
-            Some(info) => info,
-            None => {
-                warn!(
-                    target = %target_cluster,
-                    request_id = %request.request_id,
-                    "Target cluster not found in subtree"
-                );
-                return build_k8s_status_response(
-                    &request.request_id,
+        let route_info = self
+            .subtree_registry
+            .get_route(target_cluster)
+            .await
+            .ok_or_else(|| {
+                (
                     404,
-                    &format!("cluster '{}' not found in subtree", target_cluster),
-                );
-            }
-        };
+                    format!("cluster '{}' not found in subtree", target_cluster),
+                )
+            })?;
 
         // Get the agent ID to route through
-        let agent_id = match route_info.agent_id {
-            Some(id) => id,
-            None => {
-                warn!(
-                    target = %target_cluster,
-                    request_id = %request.request_id,
-                    "Route info missing agent_id"
-                );
-                return build_k8s_status_response(
-                    &request.request_id,
-                    502,
-                    "internal routing error: missing agent_id",
-                );
-            }
-        };
+        let agent_id = route_info
+            .agent_id
+            .ok_or((502, "internal routing error: missing agent_id".to_string()))?;
 
         // Get the agent connection
-        let agent = match self.agent_registry.get(&agent_id) {
-            Some(a) => a,
-            None => {
-                warn!(
-                    target = %target_cluster,
-                    agent_id = %agent_id,
-                    request_id = %request.request_id,
-                    "Agent not connected"
-                );
-                return build_k8s_status_response(
-                    &request.request_id,
-                    502,
-                    &format!("agent '{}' not connected", agent_id),
-                );
-            }
-        };
+        let agent = self
+            .agent_registry
+            .get(&agent_id)
+            .ok_or_else(|| (502, format!("agent '{}' not connected", agent_id)))?;
 
         let command_tx = agent.command_tx.clone();
         drop(agent);
 
-        debug!(
-            target = %target_cluster,
-            agent_id = %agent_id,
-            request_id = %request.request_id,
-            "Forwarding request to child cluster"
-        );
+        Ok(ResolvedRoute {
+            agent_id,
+            command_tx,
+        })
+    }
 
-        // Forward the request using the tunnel
-        // Source identity is preserved from the original request for Cedar checks
-        let params = K8sRequestParams {
+    /// Build K8sRequestParams from a KubernetesRequest
+    fn build_params(target_cluster: &str, request: &KubernetesRequest) -> K8sRequestParams {
+        K8sRequestParams {
             method: request.verb.clone(),
             path: request.path.clone(),
             query: request.query.clone(),
@@ -118,52 +88,86 @@ impl K8sRequestForwarder for SubtreeForwarder {
             target_cluster: target_cluster.to_string(),
             source_user: request.source_user.clone(),
             source_groups: request.source_groups.clone(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl K8sRequestForwarder for SubtreeForwarder {
+    async fn forward(
+        &self,
+        target_cluster: &str,
+        request: KubernetesRequest,
+    ) -> KubernetesResponse {
+        let route = match self.resolve_route(target_cluster).await {
+            Ok(r) => r,
+            Err((status, msg)) => {
+                warn!(target = %target_cluster, request_id = %request.request_id, msg, "Route resolution failed");
+                return build_k8s_status_response(&request.request_id, status, &msg);
+            }
         };
 
-        match tunnel_request(&self.agent_registry, target_cluster, command_tx, params).await {
-            Ok(response) => {
-                // Convert axum Response<Body> to KubernetesResponse
-                let status = response.status().as_u16() as u32;
-                let content_type = response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("application/json")
-                    .to_string();
+        debug!(
+            target = %target_cluster,
+            agent_id = %route.agent_id,
+            request_id = %request.request_id,
+            "Forwarding request to child cluster"
+        );
 
-                let body = match axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024).await
-                {
-                    Ok(b) => b.to_vec(),
-                    Err(e) => {
-                        return build_k8s_status_response(
-                            &request.request_id,
-                            502,
-                            &format!("failed to read response body: {}", e),
-                        );
-                    }
-                };
+        let params = Self::build_params(target_cluster, &request);
 
-                KubernetesResponse {
-                    request_id: request.request_id,
-                    status_code: status,
-                    body,
-                    content_type,
-                    error: String::new(),
-                    streaming: false,
-                    stream_end: false,
-                }
-            }
+        // Use streaming tunnel but collect the full response for non-watch requests
+        let mut rx = match tunnel_request_streaming(
+            &self.agent_registry,
+            target_cluster,
+            route.command_tx,
+            params,
+        )
+        .await
+        {
+            Ok(rx) => rx,
             Err(e) => {
-                let (status, msg) = match &e {
-                    TunnelError::SendFailed(m) => (502, format!("send failed: {}", m)),
-                    TunnelError::ChannelClosed => (502, "agent connection lost".to_string()),
-                    TunnelError::Timeout => (504, "request timed out".to_string()),
-                    TunnelError::AgentError(m) => (502, format!("agent error: {}", m)),
-                    TunnelError::ResponseBuild(m) => (500, format!("response build error: {}", m)),
-                };
-                build_k8s_status_response(&request.request_id, status, &msg)
+                let (status, msg) = tunnel_error_to_status(&e);
+                return build_k8s_status_response(&request.request_id, status, &msg);
             }
+        };
+
+        // For non-watch, we expect a single response
+        match rx.recv().await {
+            Some(response) => response,
+            None => build_k8s_status_response(
+                &request.request_id,
+                502,
+                "no response received from agent",
+            ),
         }
+    }
+
+    async fn forward_watch(
+        &self,
+        target_cluster: &str,
+        request: KubernetesRequest,
+    ) -> Result<mpsc::Receiver<KubernetesResponse>, String> {
+        let route = match self.resolve_route(target_cluster).await {
+            Ok(r) => r,
+            Err((_, msg)) => {
+                warn!(target = %target_cluster, request_id = %request.request_id, msg, "Route resolution failed");
+                return Err(msg);
+            }
+        };
+
+        debug!(
+            target = %target_cluster,
+            agent_id = %route.agent_id,
+            request_id = %request.request_id,
+            "Forwarding watch request to child cluster"
+        );
+
+        let params = Self::build_params(target_cluster, &request);
+
+        tunnel_request_streaming(&self.agent_registry, target_cluster, route.command_tx, params)
+            .await
+            .map_err(|e| format!("tunnel error: {:?}", e))
     }
 }
 
@@ -174,37 +178,18 @@ impl ExecRequestForwarder for SubtreeForwarder {
         target_cluster: &str,
         request: ExecRequest,
     ) -> Result<ForwardedExecSession, String> {
-        // Look up the route to the target cluster
-        let route_info = self
-            .subtree_registry
-            .get_route(target_cluster)
-            .await
-            .ok_or_else(|| {
-                format!("cluster '{}' not found in subtree", target_cluster)
-            })?;
-
-        // Get the agent ID to route through
-        let agent_id = route_info
-            .agent_id
-            .ok_or("internal routing error: missing agent_id")?;
-
-        // Get the agent connection
-        let agent = self
-            .agent_registry
-            .get(&agent_id)
-            .ok_or_else(|| format!("agent '{}' not connected", agent_id))?;
-
-        let command_tx = agent.command_tx.clone();
-        drop(agent);
+        let route = match self.resolve_route(target_cluster).await {
+            Ok(r) => r,
+            Err((_, msg)) => return Err(msg),
+        };
 
         debug!(
             target = %target_cluster,
-            agent_id = %agent_id,
+            agent_id = %route.agent_id,
             request_id = %request.request_id,
             "Forwarding exec request to child cluster"
         );
 
-        // Start the exec session through the tunnel
         let exec_params = ExecRequestParams {
             path: request.path.clone(),
             query: request.query.clone(),
@@ -216,7 +201,7 @@ impl ExecRequestForwarder for SubtreeForwarder {
         let (session, data_rx) = start_exec_session(
             &self.agent_registry,
             target_cluster,
-            command_tx,
+            route.command_tx,
             exec_params,
         )
         .await
@@ -227,21 +212,20 @@ impl ExecRequestForwarder for SubtreeForwarder {
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);
         let cancel_token = CancellationToken::new();
 
-        // Spawn a task to forward stdin and resize to the session
-        let session_for_relay = session;
+        // Spawn relay task
         let cancel_token_relay = cancel_token.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel_token_relay.cancelled() => break,
                     Some(data) = stdin_rx.recv() => {
-                        if let Err(e) = session_for_relay.send_stdin(data).await {
+                        if let Err(e) = session.send_stdin(data).await {
                             error!(error = %e, "Failed to forward stdin to child exec session");
                             break;
                         }
                     }
                     Some((width, height)) = resize_rx.recv() => {
-                        if let Err(e) = session_for_relay.send_resize(width as u32, height as u32).await {
+                        if let Err(e) = session.send_resize(width as u32, height as u32).await {
                             error!(error = %e, "Failed to forward resize to child exec session");
                             break;
                         }
@@ -251,8 +235,6 @@ impl ExecRequestForwarder for SubtreeForwarder {
             }
         });
 
-        // Convert ExecData receiver (from lattice_proto) to the format expected by ForwardedExecSession
-        // Both use the same ExecData type, so we can use it directly
         Ok(ForwardedExecSession {
             request_id: request.request_id,
             stdin_tx,
@@ -260,6 +242,17 @@ impl ExecRequestForwarder for SubtreeForwarder {
             data_rx,
             cancel_token,
         })
+    }
+}
+
+/// Convert TunnelError to HTTP status code and message
+fn tunnel_error_to_status(e: &TunnelError) -> (u32, String) {
+    match e {
+        TunnelError::SendFailed(m) => (502, format!("send failed: {}", m)),
+        TunnelError::ChannelClosed => (502, "agent connection lost".to_string()),
+        TunnelError::Timeout => (504, "request timed out".to_string()),
+        TunnelError::AgentError(m) => (502, format!("agent error: {}", m)),
+        TunnelError::ResponseBuild(m) => (500, format!("response build error: {}", m)),
     }
 }
 
@@ -273,5 +266,17 @@ mod tests {
         assert_eq!(response.request_id, "req-1");
         assert_eq!(response.status_code, 404);
         assert!(String::from_utf8_lossy(&response.body).contains("cluster not found"));
+    }
+
+    #[test]
+    fn test_tunnel_error_to_status() {
+        assert_eq!(
+            tunnel_error_to_status(&TunnelError::Timeout),
+            (504, "request timed out".to_string())
+        );
+        assert_eq!(
+            tunnel_error_to_status(&TunnelError::ChannelClosed),
+            (502, "agent connection lost".to_string())
+        );
     }
 }

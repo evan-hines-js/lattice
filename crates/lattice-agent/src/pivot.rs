@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::{debug, info};
 
-use crate::create_k8s_client;
+use crate::kube_client::KubeClientProvider;
 use lattice_common::crd::{CedarPolicy, CloudProvider, OIDCProvider, SecretsProvider};
 pub use lattice_common::DistributableResources;
 use lattice_common::{kubeconfig_secret_name, INTERNAL_K8S_ENDPOINT, LATTICE_SYSTEM_NAMESPACE};
@@ -168,10 +168,12 @@ async fn apply_kubeconfig_patch(
 pub async fn patch_kubeconfig_for_self_management(
     cluster_name: &str,
     namespace: &str,
+    kube_provider: &dyn KubeClientProvider,
 ) -> Result<(), PivotError> {
     info!(cluster = %cluster_name, namespace = %namespace, "Patching kubeconfig for self-management");
 
-    let client = create_k8s_client()
+    let client = kube_provider
+        .create()
         .await
         .map_err(|e| PivotError::Internal(format!("failed to create k8s client: {}", e)))?;
 

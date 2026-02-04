@@ -126,7 +126,9 @@ async fn start_agent_if_needed(
     };
 
     // Create and connect agent with forwarders for hierarchical routing
-    let mut agent = AgentClient::with_forwarders(config, forwarder, exec_forwarder);
+    let mut agent = AgentClient::builder(config)
+        .forwarders(forwarder, exec_forwarder)
+        .build();
     agent
         .connect_with_mtls(&credentials)
         .await

@@ -31,7 +31,7 @@ use lattice_infra::InfrastructureConfig;
 use lattice_move::{CellMover, CellMoverConfig};
 use lattice_proto::AgentState;
 
-use lattice_agent::patch_kubeconfig_for_self_management;
+use lattice_agent::{patch_kubeconfig_for_self_management, InClusterClientProvider};
 use lattice_capi::{
     create_provider, ensure_capi_installed, CAPIClient, CAPIClientImpl, CAPIManifest,
     CapiInstaller, CapiProviderConfig,
@@ -1176,7 +1176,10 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     || {
                         let cn = cluster_name.clone();
                         let ns = namespace.clone();
-                        async move { patch_kubeconfig_for_self_management(&cn, &ns).await }
+                        let provider = InClusterClientProvider;
+                        async move {
+                            patch_kubeconfig_for_self_management(&cn, &ns, &provider).await
+                        }
                     },
                 )
                 .await;

@@ -22,6 +22,7 @@
 
 pub mod auth;
 pub mod auth_chain;
+pub mod auth_context;
 pub mod cedar;
 pub mod error;
 pub mod exec_proxy;
@@ -57,6 +58,7 @@ pub fn is_local_resource(metadata: &ObjectMeta) -> bool {
 
 pub use auth::{OidcConfig, OidcValidator, UserIdentity};
 pub use auth_chain::AuthChain;
+pub use auth_context::AuthContext;
 pub use cedar::PolicyEngine;
 pub use error::{Error, Result};
 pub use sa_auth::SaValidator;

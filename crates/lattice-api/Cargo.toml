@@ -34,6 +34,9 @@ reqwest = { workspace = true }
 jsonwebtoken = { workspace = true }
 cedar-policy = { workspace = true }
 
+# Time
+chrono = { workspace = true }
+
 # Crypto
 rustls = { workspace = true }
 aws-lc-rs = { workspace = true }
@@ -52,3 +55,4 @@ base64.workspace = true
 [dev-dependencies]
 tokio-test = { workspace = true }
 rstest = { workspace = true }
+mockall = { workspace = true }

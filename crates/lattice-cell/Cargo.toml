@@ -66,3 +66,4 @@ tempfile = { workspace = true }
 tower = { workspace = true }
 rstest = { workspace = true }
 x509-parser = { workspace = true }
+mockall = { workspace = true }
