@@ -15,7 +15,7 @@ use crate::auth::authenticate_and_authorize;
 use crate::error::Error;
 use crate::exec_proxy::{handle_exec_websocket, has_websocket_upgrade_headers};
 use crate::k8s_forwarder::route_to_cluster;
-use crate::routing::{method_to_k8s_verb, strip_cluster_prefix};
+use crate::routing::strip_cluster_prefix;
 use crate::server::AppState;
 use lattice_proto::is_exec_path;
 
@@ -77,13 +77,11 @@ pub async fn proxy_handler(
     }
 
     // Authenticate and authorize
-    let action = method_to_k8s_verb(&method);
     let identity = authenticate_and_authorize(
         &state.auth,
         &state.cedar,
         request.headers(),
         cluster_name,
-        action,
     )
     .await?;
 
@@ -119,13 +117,12 @@ pub async fn exec_handler(
         "Exec WebSocket request received"
     );
 
-    // Authenticate and authorize (exec uses "create" verb like kubectl)
+    // Authenticate and authorize
     let identity = authenticate_and_authorize(
         &state.auth,
         &state.cedar,
         request.headers(),
         cluster_name,
-        "create",
     )
     .await?;
 

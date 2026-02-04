@@ -32,22 +32,19 @@ pub fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
 /// * `cedar` - Cedar policy engine for authorization
 /// * `headers` - Request headers (must contain Authorization header)
 /// * `cluster` - Target cluster name for authorization
-/// * `action` - K8s verb (get, list, create, update, delete, etc.)
 ///
 /// # Returns
 ///
 /// The authenticated user identity if successful, or an error if:
 /// - No Authorization header is present
 /// - The token is invalid or expired
-/// - The user is not authorized to perform the action on the cluster
+/// - The user is not authorized to access the cluster
 pub async fn authenticate_and_authorize(
     auth: &Arc<AuthChain>,
     cedar: &Arc<PolicyEngine>,
     headers: &HeaderMap,
     cluster: &str,
-    action: &str,
 ) -> Result<UserIdentity> {
-    // Extract and validate token
     let token = extract_bearer_token(headers)
         .ok_or_else(|| Error::Unauthorized("Missing Authorization header".into()))?;
 
@@ -56,12 +53,10 @@ pub async fn authenticate_and_authorize(
     debug!(
         user = %identity.username,
         cluster = %cluster,
-        action = %action,
         "Checking authorization"
     );
 
-    // Check Cedar authorization
-    cedar.authorize(&identity, cluster, action).await?;
+    cedar.authorize(&identity, cluster).await?;
 
     Ok(identity)
 }

@@ -761,20 +761,17 @@ mod tests {
         registry: SharedAgentRegistry,
         subtree_registry: SubtreeRegistry,
         tx: mpsc::Sender<CellCommand>,
-        #[allow(dead_code)]
-        rx: mpsc::Receiver<CellCommand>,
     }
 
     /// Setup common test context for message handling tests
     fn setup_test_context() -> TestContext {
         let registry = create_test_registry();
         let subtree_registry = create_test_subtree_registry();
-        let (tx, rx) = mpsc::channel::<CellCommand>(32);
+        let (tx, _rx) = mpsc::channel::<CellCommand>(32);
         TestContext {
             registry,
             subtree_registry,
             tx,
-            rx,
         }
     }
 

@@ -3,8 +3,6 @@
 //! Single source of truth for path manipulation functions used across
 //! the proxy, router, and exec handlers.
 
-use axum::http::Method;
-
 /// Strip /clusters/{cluster_name} prefix from a path to get the K8s API path.
 ///
 /// # Examples
@@ -42,30 +40,6 @@ pub fn extract_cluster_from_path(path: &str) -> Option<&str> {
         None
     } else {
         Some(cluster)
-    }
-}
-
-/// Map HTTP method to Kubernetes verb for authorization.
-///
-/// # Examples
-///
-/// ```
-/// use axum::http::Method;
-/// use lattice_api::routing::method_to_k8s_verb;
-///
-/// assert_eq!(method_to_k8s_verb(&Method::GET), "get");
-/// assert_eq!(method_to_k8s_verb(&Method::POST), "create");
-/// ```
-pub fn method_to_k8s_verb(method: &Method) -> &'static str {
-    match *method {
-        Method::GET => "get", // Could also be "list" or "watch" depending on path
-        Method::POST => "create",
-        Method::PUT => "update",
-        Method::PATCH => "patch",
-        Method::DELETE => "delete",
-        Method::HEAD => "get",
-        Method::OPTIONS => "get",
-        _ => "unknown",
     }
 }
 
@@ -144,14 +118,4 @@ mod tests {
         assert_eq!(extract_cluster_from_path("/clusters/"), None);
     }
 
-    #[test]
-    fn test_method_to_k8s_verb() {
-        assert_eq!(method_to_k8s_verb(&Method::GET), "get");
-        assert_eq!(method_to_k8s_verb(&Method::POST), "create");
-        assert_eq!(method_to_k8s_verb(&Method::PUT), "update");
-        assert_eq!(method_to_k8s_verb(&Method::PATCH), "patch");
-        assert_eq!(method_to_k8s_verb(&Method::DELETE), "delete");
-        assert_eq!(method_to_k8s_verb(&Method::HEAD), "get");
-        assert_eq!(method_to_k8s_verb(&Method::OPTIONS), "get");
-    }
 }
