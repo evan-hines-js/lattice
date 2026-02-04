@@ -24,6 +24,7 @@ pub mod capi;
 pub mod cedar;
 pub mod kubeconfig;
 pub mod mesh;
+pub mod multi_hop;
 pub mod pivot;
 pub mod proxy;
 pub mod scaling;

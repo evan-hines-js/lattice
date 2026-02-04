@@ -136,6 +136,15 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("SUCCESS: Cedar policy enforcement verified!");
 
     // =========================================================================
+    // Phase 6.7: Test multi-hop proxy operations (if workload2 exists)
+    // =========================================================================
+    if ctx.has_workload2() {
+        info!("[Phase 6.7] Testing multi-hop proxy operations (mgmt -> workload -> workload2)...");
+        integration::multi_hop::run_multi_hop_proxy_tests(&ctx).await?;
+        info!("SUCCESS: Multi-hop proxy tests complete!");
+    }
+
+    // =========================================================================
     // Phase 7: Run mesh + secrets tests + delete workload2 (parallel, if workload2 exists)
     // =========================================================================
     if ctx.has_workload2() {

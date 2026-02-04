@@ -200,6 +200,22 @@ pub use lattice_proto::{
     KubernetesRequest, KubernetesResponse, StatusResponse,
 };
 
+/// Convert proto DistributableResources to domain type.
+///
+/// This is a standalone function rather than a From impl because of Rust's
+/// orphan rules - both types are defined in other crates.
+pub fn distributable_resources_from_proto(
+    proto: lattice_proto::DistributableResources,
+) -> DistributableResources {
+    DistributableResources {
+        cloud_providers: proto.cloud_providers,
+        secrets_providers: proto.secrets_providers,
+        secrets: proto.secrets,
+        cedar_policies: proto.cedar_policies,
+        oidc_providers: proto.oidc_providers,
+    }
+}
+
 // Re-export mTLS from infra
 pub use lattice_infra::{ClientMtlsConfig, MtlsError, ServerMtlsConfig};
 

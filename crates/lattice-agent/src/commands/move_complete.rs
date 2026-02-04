@@ -6,8 +6,9 @@ use lattice_proto::{agent_message::Payload, AgentMessage, MoveComplete, MoveComp
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+use crate::distributable_resources_from_proto;
 use crate::kube_client::KubeClientProvider;
-use crate::pivot::{apply_distributed_resources, patch_kubeconfig_for_self_management, DistributableResources};
+use crate::pivot::{apply_distributed_resources, patch_kubeconfig_for_self_management};
 use lattice_common::crd::LatticeCluster;
 
 use super::apply_manifests::apply_manifests;
@@ -20,12 +21,7 @@ pub async fn handle(command_id: &str, complete: &MoveComplete, ctx: &CommandCont
     let message_tx = ctx.message_tx.clone();
     let capi_cluster_name = complete.cluster_name.clone();
     let target_namespace = complete.target_namespace.clone();
-    let resources = complete.resources.clone().unwrap_or_default();
-    let cloud_providers = resources.cloud_providers;
-    let secrets_providers = resources.secrets_providers;
-    let secrets = resources.secrets;
-    let cedar_policies = resources.cedar_policies;
-    let oidc_providers = resources.oidc_providers;
+    let resources = distributable_resources_from_proto(complete.resources.clone().unwrap_or_default());
     let manifests = complete.manifests.clone();
 
     info!(
@@ -33,8 +29,8 @@ pub async fn handle(command_id: &str, complete: &MoveComplete, ctx: &CommandCont
         cluster = %capi_cluster_name,
         namespace = %target_namespace,
         manifests = manifests.len(),
-        cedar_policies = cedar_policies.len(),
-        oidc_providers = oidc_providers.len(),
+        cedar_policies = resources.cedar_policies.len(),
+        oidc_providers = resources.oidc_providers.len(),
         "Processing move complete"
     );
 
@@ -82,14 +78,6 @@ pub async fn handle(command_id: &str, complete: &MoveComplete, ctx: &CommandCont
         let resources_created = mover.resources_created() as i32;
 
         // Apply distributed resources - fail pivot if this fails
-        let resources = DistributableResources {
-            cloud_providers,
-            secrets_providers,
-            secrets,
-            cedar_policies,
-            oidc_providers,
-        };
-
         if let Err(e) = apply_distributed_resources(&client, &resources).await {
             error!(error = %e, "Failed to apply distributed resources");
             send_complete_ack(

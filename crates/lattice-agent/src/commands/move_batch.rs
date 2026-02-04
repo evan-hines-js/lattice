@@ -50,7 +50,7 @@ pub async fn handle(command_id: &str, batch: &MoveObjectBatch, ctx: &CommandCont
         let client = match provider.create().await {
             Ok(c) => c,
             Err(e) => {
-                error!(error = %e, "Failed to create K8s client for move batch");
+                error!(error = ?e, "Failed to create K8s client for move batch");
                 send_batch_ack(
                     &message_tx,
                     &cluster_name,
