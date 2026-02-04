@@ -1238,6 +1238,10 @@ const PROXY_SERVICE_NAME: &str = "lattice-cell";
 #[cfg(feature = "provider-e2e")]
 const PROXY_PORT: u16 = 8082;
 
+/// Jumpbox pod name - a stable pod for port-forwarding that isn't targeted by chaos
+#[cfg(feature = "provider-e2e")]
+const JUMPBOX_POD_NAME: &str = "e2e-jumpbox";
+
 /// Check if the lattice-cell proxy service exists
 #[cfg(feature = "provider-e2e")]
 pub fn proxy_service_exists(kubeconfig: &str) -> bool {
@@ -1256,6 +1260,104 @@ pub fn proxy_service_exists(kubeconfig: &str) -> bool {
         ],
     )
     .is_ok()
+}
+
+/// Deploy a jumpbox pod for stable port-forwarding during chaos testing.
+///
+/// The jumpbox is a simple socat container that forwards TCP traffic to the
+/// lattice-cell service. Since it's not the operator pod, chaos won't kill it,
+/// providing a stable port-forward target.
+#[cfg(feature = "provider-e2e")]
+pub fn ensure_jumpbox_deployed(kubeconfig: &str) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    // Check if already deployed
+    if run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig", kubeconfig,
+            "get", "pod", JUMPBOX_POD_NAME,
+            "-n", LATTICE_SYSTEM_NAMESPACE,
+            "-o", "name",
+        ],
+    ).is_ok() {
+        return Ok(());
+    }
+
+    info!("[Helpers] Deploying jumpbox pod for stable port-forwarding...");
+
+    // Deploy socat pod that forwards to lattice-cell service
+    let manifest = format!(r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {name}
+  namespace: {ns}
+  labels:
+    app: e2e-jumpbox
+spec:
+  containers:
+  - name: socat
+    image: alpine/socat:latest
+    args:
+    - TCP-LISTEN:{port},fork,reuseaddr
+    - TCP:{svc}.{ns}.svc:{port}
+    ports:
+    - containerPort: {port}
+  restartPolicy: Always
+"#,
+        name = JUMPBOX_POD_NAME,
+        ns = LATTICE_SYSTEM_NAMESPACE,
+        port = PROXY_PORT,
+        svc = PROXY_SERVICE_NAME,
+    );
+
+    let mut child = Command::new("kubectl")
+        .args(["--kubeconfig", kubeconfig, "apply", "-f", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn kubectl: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(manifest.as_bytes())
+            .map_err(|e| format!("Failed to write manifest: {}", e))?;
+    }
+
+    let output = child.wait_with_output()
+        .map_err(|e| format!("Failed to wait for kubectl: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to deploy jumpbox: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Wait for pod to be ready
+    info!("[Helpers] Waiting for jumpbox pod to be ready...");
+    for _ in 0..60 {
+        let result = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig", kubeconfig,
+                "get", "pod", JUMPBOX_POD_NAME,
+                "-n", LATTICE_SYSTEM_NAMESPACE,
+                "-o", "jsonpath={.status.phase}",
+            ],
+        );
+        if let Ok(phase) = result {
+            if phase.trim() == "Running" {
+                info!("[Helpers] Jumpbox pod is ready");
+                return Ok(());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+
+    Err("Jumpbox pod failed to become ready".to_string())
 }
 
 /// Base port for deterministic port allocation.
@@ -1314,17 +1416,18 @@ fn check_proxy_health(url: &str, timeout_secs: u32) -> bool {
     )
 }
 
-/// Spawn a kubectl port-forward process.
+/// Spawn a kubectl port-forward process to the jumpbox pod.
 #[cfg(feature = "provider-e2e")]
 fn spawn_port_forward(kubeconfig: &str, local_port: u16) -> Result<std::process::Child, String> {
     use std::process::{Command, Stdio};
 
+    // Port-forward to the jumpbox pod (not the service) for chaos resilience
     Command::new("kubectl")
         .args([
             "--kubeconfig",
             kubeconfig,
             "port-forward",
-            &format!("svc/{}", PROXY_SERVICE_NAME),
+            &format!("pod/{}", JUMPBOX_POD_NAME),
             &format!("{}:{}", local_port, PROXY_PORT),
             "-n",
             LATTICE_SYSTEM_NAMESPACE,
@@ -1335,10 +1438,10 @@ fn spawn_port_forward(kubeconfig: &str, local_port: u16) -> Result<std::process:
         .map_err(|e| format!("Failed to spawn port-forward: {}", e))
 }
 
-/// Start a port-forward to the proxy service and wait until it's healthy.
+/// Start a port-forward to the proxy via jumpbox and wait until it's healthy.
 ///
 /// Internal function used by ResilientPortForward.
-/// Retries automatically if the auth proxy isn't ready yet.
+/// Deploys jumpbox if needed, then retries until the proxy is responding.
 #[cfg(feature = "provider-e2e")]
 fn start_proxy_port_forward(
     kubeconfig: &str,
@@ -1351,9 +1454,12 @@ fn start_proxy_port_forward(
         ));
     }
 
+    // Deploy jumpbox for stable port-forwarding during chaos
+    ensure_jumpbox_deployed(kubeconfig)?;
+
     info!(
         "[Helpers] Starting port-forward to {}:{} on localhost:{}",
-        PROXY_SERVICE_NAME, PROXY_PORT, local_port
+        JUMPBOX_POD_NAME, PROXY_PORT, local_port
     );
 
     let url = format!("https://127.0.0.1:{}", local_port);
@@ -1439,7 +1545,6 @@ pub fn get_or_create_proxy(
 /// Uses deterministic ports so kubeconfigs remain valid across restarts.
 #[cfg(feature = "provider-e2e")]
 pub struct ResilientPortForward {
-    kubeconfig: String,
     port: u16,
     pub url: String,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1475,7 +1580,6 @@ impl ResilientPortForward {
         );
 
         Ok(Self {
-            kubeconfig: kubeconfig.to_string(),
             port,
             url,
             stop_flag,

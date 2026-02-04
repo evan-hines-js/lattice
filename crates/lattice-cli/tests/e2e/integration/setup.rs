@@ -481,13 +481,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // =========================================================================
     // Phase 7: Generate Proxy Kubeconfigs
     // =========================================================================
-    // Stop chaos before proxy setup - chaos is only useful during pivot operations.
-    // The proxy setup needs stable operators to establish port-forwards.
-    // Caller can restart chaos for delete/uninstall phases using restart_chaos().
-    if let Some(c) = chaos {
-        info!("[Setup] Stopping chaos for proxy kubeconfig generation...");
-        c.stop().await;
-    }
+    // Keep chaos running - resilient_tunnel should handle reconnections during proxy setup
     info!("[Setup/Phase 7] Generating proxy kubeconfigs...");
 
     // Wait for operators to be ready before trying to connect to their proxies
@@ -565,7 +559,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     Ok(SetupResult {
         ctx,
-        chaos: None, // Stopped before Phase 7; caller can restart_chaos() for delete/uninstall
+        chaos, // Keep chaos running throughout - resilient_tunnel handles reconnections
         chaos_targets,
         mgmt_proxy: Some(mgmt_proxy),
         workload_proxy,
