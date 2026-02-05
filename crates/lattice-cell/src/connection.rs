@@ -70,7 +70,12 @@ pub struct ReconnectNotification {
     pub command_tx: mpsc::Sender<CellCommand>,
 }
 
-/// Represents a connected agent
+/// Represents an agent (connected or disconnected)
+///
+/// Agents stay in the registry after disconnection to:
+/// - Detect reconnections (vs first-time connections)
+/// - Preserve state like pivot_complete across brief disconnections
+/// - Allow resilient tunnels to wait for known agents to reconnect
 pub struct AgentConnection {
     /// Cluster name this agent manages
     pub cluster_name: String,
@@ -80,12 +85,14 @@ pub struct AgentConnection {
     pub kubernetes_version: String,
     /// Current agent state
     pub state: AgentState,
-    /// Channel to send commands to this agent
+    /// Channel to send commands to this agent (only valid when connected)
     pub command_tx: mpsc::Sender<CellCommand>,
     /// Whether CAPI is installed and ready on this cluster
     pub capi_ready: bool,
     /// Whether pivot has completed successfully
     pub pivot_complete: bool,
+    /// Whether the agent is currently connected
+    pub connected: bool,
 }
 
 impl AgentConnection {
@@ -104,6 +111,7 @@ impl AgentConnection {
             command_tx,
             capi_ready: false,
             pivot_complete: false,
+            connected: true,
         }
     }
 
@@ -189,16 +197,13 @@ pub struct KubeconfigProxyConfig {
     pub ca_cert_pem: String,
 }
 
-/// Registry of connected agents
+/// Registry of agents (connected and disconnected)
 ///
 /// Thread-safe registry using DashMap for concurrent access.
-/// Includes reconnection notification for resilient request handling.
+/// Agents remain in the registry after disconnection to detect reconnections
+/// and allow resilient tunnels to wait for known agents.
 pub struct AgentRegistry {
     agents: DashMap<String, AgentConnection>,
-    /// Clusters that have connected at least once (for reconnection detection)
-    /// When an agent disconnects and reconnects, we need to send a notification
-    /// even though the agent was removed from `agents` on disconnect.
-    known_clusters: dashmap::DashSet<String>,
     unpivot_manifests: DashMap<String, UnpivotManifests>,
     /// CAPI manifests exported during pivot (deleted after MoveCompleteAck)
     pivot_source_manifests: DashMap<String, PivotSourceManifests>,
@@ -229,7 +234,6 @@ impl Default for AgentRegistry {
         let (reconnect_tx, _) = broadcast::channel(RECONNECT_CHANNEL_CAPACITY);
         Self {
             agents: DashMap::new(),
-            known_clusters: dashmap::DashSet::new(),
             unpivot_manifests: DashMap::new(),
             pivot_source_manifests: DashMap::new(),
             teardown_in_progress: DashMap::new(),
@@ -265,18 +269,22 @@ impl AgentRegistry {
     ///
     /// If an agent was previously registered with the same cluster name,
     /// this is treated as a reconnection and waiting requests are notified.
-    /// Reconnection detection uses `known_clusters` (not `agents`) so that
-    /// reconnections are detected even after agents disconnect and reconnect.
-    pub fn register(&self, connection: AgentConnection) {
+    pub fn register(&self, mut connection: AgentConnection) {
         let cluster_name = connection.cluster_name.clone();
         let command_tx = connection.command_tx.clone();
 
-        // Check if this cluster has connected before (survives unregister)
-        let was_reconnect = self.known_clusters.contains(&cluster_name);
+        // Check if this cluster was previously registered (even if disconnected)
+        let was_reconnect = self.agents.contains_key(&cluster_name);
 
-        // Track that this cluster has connected (never removed)
-        self.known_clusters.insert(cluster_name.clone());
+        // Preserve pivot_complete status across reconnections
+        if let Some(existing) = self.agents.get(&cluster_name) {
+            if existing.pivot_complete {
+                connection.pivot_complete = true;
+            }
+        }
 
+        // Ensure connected flag is set
+        connection.connected = true;
         self.agents.insert(cluster_name.clone(), connection);
 
         if was_reconnect {
@@ -291,12 +299,18 @@ impl AgentRegistry {
         }
     }
 
-    /// Unregister an agent
+    /// Mark an agent as disconnected
+    ///
+    /// The agent stays in the registry (with connected=false) so that:
+    /// - Reconnections can be detected
+    /// - State like pivot_complete is preserved
+    /// - Resilient tunnels can wait for known agents to reconnect
     pub fn unregister(&self, cluster_name: &str) {
-        if self.agents.remove(cluster_name).is_some() {
+        if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+            agent.connected = false;
             // Clear teardown guard when agent disconnects
             self.teardown_in_progress.remove(cluster_name);
-            info!(cluster = %cluster_name, "Agent unregistered");
+            info!(cluster = %cluster_name, "Agent disconnected");
         }
     }
 
@@ -318,17 +332,30 @@ impl AgentRegistry {
 
     /// Get the number of connected agents
     pub fn len(&self) -> usize {
-        self.agents.len()
+        self.agents.iter().filter(|r| r.connected).count()
     }
 
-    /// Check if registry is empty
+    /// Check if registry has no connected agents
     pub fn is_empty(&self) -> bool {
-        self.agents.is_empty()
+        !self.agents.iter().any(|r| r.connected)
     }
 
     /// List all connected cluster names
     pub fn list_clusters(&self) -> Vec<String> {
-        self.agents.iter().map(|r| r.key().clone()).collect()
+        self.agents
+            .iter()
+            .filter(|r| r.connected)
+            .map(|r| r.key().clone())
+            .collect()
+    }
+
+    /// Check if a cluster is known (has connected at least once)
+    ///
+    /// This is used by resilient tunnels to distinguish between:
+    /// - Unknown cluster (fail fast)
+    /// - Known but disconnected cluster (wait for reconnect)
+    pub fn is_known(&self, cluster_name: &str) -> bool {
+        self.agents.contains_key(cluster_name)
     }
 
     /// Update agent state
@@ -543,11 +570,17 @@ impl ReconnectionNotifier for AgentRegistry {
 
 impl AgentConnectivity for AgentRegistry {
     fn is_connected(&self, cluster_name: &str) -> bool {
-        self.agents.contains_key(cluster_name)
+        self.agents
+            .get(cluster_name)
+            .map(|a| a.connected)
+            .unwrap_or(false)
     }
 
     fn get_command_tx(&self, cluster_name: &str) -> Option<mpsc::Sender<CellCommand>> {
-        self.agents.get(cluster_name).map(|a| a.command_tx.clone())
+        self.agents
+            .get(cluster_name)
+            .filter(|a| a.connected)
+            .map(|a| a.command_tx.clone())
     }
 }
 
@@ -589,8 +622,10 @@ mod tests {
         registry.register(conn);
         registry.unregister("test-cluster");
 
+        // Agent is still known but not connected
         assert!(!registry.is_connected("test-cluster"));
-        assert!(registry.is_empty());
+        assert!(registry.is_known("test-cluster"));
+        assert!(registry.is_empty()); // No connected agents
     }
 
     #[test]
@@ -1017,10 +1052,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reconnection_detection_survives_unregister() {
-        // Verify that reconnection is detected even after an agent was unregistered
-        // This is critical for the resilient tunnel to work - agents may disconnect
-        // briefly and we need to notify waiting requests when they reconnect.
+    fn test_reconnection_detection() {
+        // Verify that reconnection is detected after an agent disconnects.
+        // Agents stay in the registry with connected=false, so reconnection
+        // is simply detected by checking if the cluster already exists.
         let registry = AgentRegistry::new();
 
         // Subscribe to reconnections before any registration
@@ -1030,12 +1065,15 @@ mod tests {
         let (conn1, _rx1) = create_test_connection("test-cluster");
         registry.register(conn1);
         assert!(reconnect_rx.try_recv().is_err()); // No notification
+        assert!(registry.is_connected("test-cluster"));
+        assert!(registry.is_known("test-cluster"));
 
         // Unregister (simulates agent disconnect)
         registry.unregister("test-cluster");
         assert!(!registry.is_connected("test-cluster"));
+        assert!(registry.is_known("test-cluster")); // Still known
 
-        // Re-register (simulates agent reconnect) - SHOULD be detected as reconnect
+        // Re-register (simulates agent reconnect) - detected as reconnect
         let (conn2, _rx2) = create_test_connection("test-cluster");
         registry.register(conn2);
 
@@ -1044,5 +1082,40 @@ mod tests {
             .try_recv()
             .expect("should receive reconnection notification");
         assert_eq!(notification.cluster_name, "test-cluster");
+        assert!(registry.is_connected("test-cluster"));
+    }
+
+    #[test]
+    fn test_is_known_unknown_cluster() {
+        let registry = AgentRegistry::new();
+        assert!(!registry.is_known("never-seen"));
+        assert!(!registry.is_connected("never-seen"));
+    }
+
+    #[test]
+    fn test_pivot_complete_preserved_across_reconnection() {
+        let registry = AgentRegistry::new();
+
+        // First connection
+        let (conn1, _rx1) = create_test_connection("test-cluster");
+        registry.register(conn1);
+        registry.set_pivot_complete("test-cluster", true);
+
+        // Verify pivot_complete is set
+        {
+            let agent = registry.get("test-cluster").unwrap();
+            assert!(agent.pivot_complete);
+        }
+
+        // Disconnect
+        registry.unregister("test-cluster");
+
+        // Reconnect with new connection (would normally have pivot_complete=false)
+        let (conn2, _rx2) = create_test_connection("test-cluster");
+        registry.register(conn2);
+
+        // pivot_complete should be preserved from before
+        let agent = registry.get("test-cluster").unwrap();
+        assert!(agent.pivot_complete);
     }
 }
