@@ -267,6 +267,34 @@ pub async fn move_to_kubeconfig(
     .await
 }
 
+/// Set the paused state of a CAPI cluster
+async fn set_capi_cluster_paused(
+    kubeconfig: Option<&Path>,
+    namespace: &str,
+    cluster_name: &str,
+    paused: bool,
+) -> Result<(), ClusterctlError> {
+    let client = kube_utils::create_client(kubeconfig)
+        .await
+        .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
+    let ar = cluster_api_resource(&client).await?;
+    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
+    let patch = serde_json::json!({"spec": {"paused": paused}});
+
+    let action = if paused { "pause" } else { "unpause" };
+    api.patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .map_err(|e| {
+            ClusterctlError::ExecutionFailed(format!(
+                "failed to {} cluster {}: {}",
+                action, cluster_name, e
+            ))
+        })?;
+
+    info!(cluster = %cluster_name, paused = paused, "CAPI cluster pause state updated");
+    Ok(())
+}
+
 /// Pause a CAPI cluster (call after export to keep cluster dormant until deletion)
 ///
 /// This is needed because `clusterctl move --to-directory` unpauses the cluster
@@ -277,24 +305,7 @@ pub async fn pause_capi_cluster(
     namespace: &str,
     cluster_name: &str,
 ) -> Result<(), ClusterctlError> {
-    let client = kube_utils::create_client(kubeconfig)
-        .await
-        .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
-    let ar = cluster_api_resource(&client).await?;
-    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
-    let patch = serde_json::json!({"spec": {"paused": true}});
-
-    api.patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-        .map_err(|e| {
-            ClusterctlError::ExecutionFailed(format!(
-                "failed to pause cluster {}: {}",
-                cluster_name, e
-            ))
-        })?;
-
-    info!(cluster = %cluster_name, "CAPI cluster paused");
-    Ok(())
+    set_capi_cluster_paused(kubeconfig, namespace, cluster_name, true).await
 }
 
 /// Unpause a CAPI cluster (required before deletion - CAPI won't delete paused clusters)
@@ -303,24 +314,7 @@ pub async fn unpause_capi_cluster(
     namespace: &str,
     cluster_name: &str,
 ) -> Result<(), ClusterctlError> {
-    let client = kube_utils::create_client(kubeconfig)
-        .await
-        .map_err(|e| ClusterctlError::ExecutionFailed(e.to_string()))?;
-    let ar = cluster_api_resource(&client).await?;
-    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
-    let patch = serde_json::json!({"spec": {"paused": false}});
-
-    api.patch(cluster_name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-        .map_err(|e| {
-            ClusterctlError::ExecutionFailed(format!(
-                "failed to unpause cluster {}: {}",
-                cluster_name, e
-            ))
-        })?;
-
-    info!(cluster = %cluster_name, "CAPI cluster unpaused");
-    Ok(())
+    set_capi_cluster_paused(kubeconfig, namespace, cluster_name, false).await
 }
 
 /// Check if a CAPI cluster exists and is ready for pivot

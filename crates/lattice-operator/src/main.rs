@@ -302,14 +302,19 @@ fn start_health_server() -> tokio::task::JoinHandle<()> {
             .route("/metrics", get(metrics_handler));
 
         let addr: SocketAddr = ([0, 0, 0, 0], DEFAULT_HEALTH_PORT).into();
-        tracing::info!(port = DEFAULT_HEALTH_PORT, "Health server started");
 
-        if let Err(e) = axum::serve(
-            tokio::net::TcpListener::bind(addr).await.unwrap(),
-            app.into_make_service(),
-        )
-        .await
-        {
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => {
+                tracing::info!(port = DEFAULT_HEALTH_PORT, "Health server started");
+                l
+            }
+            Err(e) => {
+                tracing::error!(error = %e, port = DEFAULT_HEALTH_PORT, "Failed to bind health server port");
+                return;
+            }
+        };
+
+        if let Err(e) = axum::serve(listener, app.into_make_service()).await {
             tracing::error!(error = %e, "Health server error");
         }
     })

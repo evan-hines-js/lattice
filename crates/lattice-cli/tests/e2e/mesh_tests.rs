@@ -20,130 +20,14 @@ use tracing::{info, warn};
 use lattice_operator::crd::{
     ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalService,
     LatticeExternalServiceSpec, LatticeService, LatticeServiceSpec, PortSpec, ReplicaSpec,
-    Resolution, ResourceSpec, ResourceType, ServicePhase, ServicePortsSpec,
+    Resolution, ResourceSpec, ResourceType, ServicePortsSpec,
 };
 
-use super::helpers::{client_from_kubeconfig, run_cmd};
+use super::helpers::{client_from_kubeconfig, delete_namespace, ensure_fresh_namespace, run_cmd};
 
 // =============================================================================
-// Namespace Helpers
+// Service Status Helpers
 // =============================================================================
-
-/// Delete a namespace using kubectl (non-blocking)
-fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
-    info!("[Mesh Cleanup] Deleting namespace {}...", namespace);
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "delete",
-            "namespace",
-            namespace,
-            "--wait=false",
-        ],
-    );
-}
-
-/// Ensure a fresh namespace exists by deleting if present and waiting for full cleanup.
-///
-/// This is important for re-running tests - stale resources cause conflicts.
-async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> Result<(), String> {
-    // Check if namespace exists
-    let ns_exists = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "namespace",
-            namespace,
-            "-o",
-            "name",
-        ],
-    )
-    .is_ok();
-
-    if ns_exists {
-        info!(
-            "[Mesh] Namespace {} exists, deleting for fresh start...",
-            namespace
-        );
-        delete_namespace(kubeconfig_path, namespace);
-
-        // Wait for namespace to be fully deleted
-        let start = std::time::Instant::now();
-        let timeout = Duration::from_secs(120);
-
-        loop {
-            if start.elapsed() > timeout {
-                return Err(format!(
-                    "Timeout waiting for namespace {} to be deleted",
-                    namespace
-                ));
-            }
-
-            // If the command fails or returns empty, the namespace is deleted
-            let deleted = match run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig_path,
-                    "get",
-                    "namespace",
-                    namespace,
-                    "-o",
-                    "name",
-                ],
-            ) {
-                Ok(output) => output.trim().is_empty(),
-                Err(_) => true, // Error means not found
-            };
-
-            if deleted {
-                info!("[Mesh] Namespace {} fully deleted", namespace);
-                break;
-            }
-
-            // Check phase for logging
-            let phase = run_cmd(
-                "kubectl",
-                &[
-                    "--kubeconfig",
-                    kubeconfig_path,
-                    "get",
-                    "namespace",
-                    namespace,
-                    "-o",
-                    "jsonpath={.status.phase}",
-                ],
-            )
-            .unwrap_or_default();
-            info!(
-                "[Mesh] Waiting for namespace {} deletion (phase: {})...",
-                namespace,
-                phase.trim()
-            );
-
-            sleep(Duration::from_secs(5)).await;
-        }
-    }
-
-    // Create fresh namespace
-    info!("[Mesh] Creating fresh namespace {}...", namespace);
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "create",
-            "namespace",
-            namespace,
-        ],
-    )?;
-
-    Ok(())
-}
 
 /// Wait for all LatticeServices in a namespace to be Ready
 async fn wait_for_services_ready(
@@ -151,11 +35,6 @@ async fn wait_for_services_ready(
     namespace: &str,
     expected_count: usize,
 ) -> Result<(), String> {
-    use kube::api::ListParams;
-
-    let client = client_from_kubeconfig(kubeconfig_path).await?;
-    let api: Api<LatticeService> = Api::namespaced(client, namespace);
-
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(300);
 
@@ -172,23 +51,39 @@ async fn wait_for_services_ready(
             ));
         }
 
-        let services = api
-            .list(&ListParams::default())
-            .await
-            .map_err(|e| format!("Failed to list services: {}", e))?;
+        // Use kubectl for resilience - handles retries/reconnection internally
+        let output = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "latticeservices",
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={range .items[*]}{.metadata.name}:{.status.phase}{\"\\n\"}{end}",
+            ],
+        )
+        .unwrap_or_default();
 
-        let ready_count = services
-            .items
-            .iter()
-            .filter(|svc| {
-                svc.status
-                    .as_ref()
-                    .map(|s| s.phase == ServicePhase::Ready)
-                    .unwrap_or(false)
+        let services: Vec<(&str, &str)> = output
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    Some((parts[0].trim(), parts[1].trim()))
+                } else {
+                    None
+                }
             })
-            .count();
+            .collect();
 
-        let total = services.items.len();
+        let total = services.len();
+        let ready_count = services
+            .iter()
+            .filter(|(_, phase)| *phase == "Ready")
+            .count();
 
         info!(
             "[{}] {}/{} LatticeServices ready (total: {})",
@@ -204,24 +99,10 @@ async fn wait_for_services_ready(
         }
 
         // Log which services are not ready yet
-        let not_ready: Vec<_> = services
-            .items
+        let not_ready: Vec<String> = services
             .iter()
-            .filter(|svc| {
-                svc.status
-                    .as_ref()
-                    .map(|s| s.phase != ServicePhase::Ready)
-                    .unwrap_or(true)
-            })
-            .filter_map(|svc| {
-                let name = svc.metadata.name.as_deref()?;
-                let phase = svc
-                    .status
-                    .as_ref()
-                    .map(|s| format!("{:?}", s.phase))
-                    .unwrap_or_else(|| "NoStatus".to_string());
-                Some(format!("{}:{}", name, phase))
-            })
+            .filter(|(_, phase)| *phase != "Ready")
+            .map(|(name, phase)| format!("{}:{}", name, phase))
             .collect();
 
         if !not_ready.is_empty() && not_ready.len() <= 5 {
@@ -1076,22 +957,31 @@ async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn wait_for_service_pods(kubeconfig_path: &str) -> Result<(), String> {
+/// Wait for pods to be running in a namespace.
+///
+/// Waits until `num_services + 1` pods are running (+1 for the Istio waypoint proxy).
+async fn wait_for_pods_running(
+    kubeconfig_path: &str,
+    namespace: &str,
+    num_services: usize,
+    label: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<(), String> {
     let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(300);
     // +1 for the Istio ambient waypoint proxy pod created per namespace
-    let expected_pods = TOTAL_SERVICES + 1;
+    let expected_pods = num_services + 1;
 
     info!(
-        "[Fixed Mesh] Waiting for {} pods ({} services + 1 waypoint)...",
-        expected_pods, TOTAL_SERVICES
+        "[{}] Waiting for {} pods ({} services + 1 waypoint)...",
+        label, expected_pods, num_services
     );
 
     loop {
         if start.elapsed() > timeout {
             return Err(format!(
-                "Timeout waiting for test pods (expected {})",
-                expected_pods
+                "[{}] Timeout waiting for pods (expected {})",
+                label, expected_pods
             ));
         }
 
@@ -1103,29 +993,45 @@ async fn wait_for_service_pods(kubeconfig_path: &str) -> Result<(), String> {
                 "get",
                 "pods",
                 "-n",
-                TEST_SERVICES_NAMESPACE,
+                namespace,
                 "-o",
                 "jsonpath={range .items[*]}{.status.phase}{\"\\n\"}{end}",
             ],
         ) {
-            Ok(output) => output.lines().filter(|l: &&str| *l == "Running").count(),
+            Ok(output) => output
+                .lines()
+                .filter(|l: &&str| l.trim() == "Running")
+                .count(),
             Err(_) => 0,
         };
+
         info!(
-            "[Fixed Mesh] {}/{} pods running",
-            running_count, expected_pods
+            "[{}] {}/{} pods running",
+            label, running_count, expected_pods
         );
 
         if running_count >= expected_pods {
             info!(
-                "[Fixed Mesh] All {} pods running ({} services + 1 waypoint)",
-                expected_pods, TOTAL_SERVICES
+                "[{}] All {} pods running ({} services + 1 waypoint)",
+                label, expected_pods, num_services
             );
             return Ok(());
         }
 
-        sleep(Duration::from_secs(10)).await;
+        sleep(poll_interval).await;
     }
+}
+
+async fn wait_for_service_pods(kubeconfig_path: &str) -> Result<(), String> {
+    wait_for_pods_running(
+        kubeconfig_path,
+        TEST_SERVICES_NAMESPACE,
+        TOTAL_SERVICES,
+        "Fixed Mesh",
+        Duration::from_secs(300),
+        Duration::from_secs(10),
+    )
+    .await
 }
 
 const FRONTEND_WEB_EXPECTED: &[(&str, bool)] = &[
@@ -2012,56 +1918,15 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
 }
 
 async fn wait_for_random_mesh_pods(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<(), String> {
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(1200);
-    // +1 for the Istio ambient waypoint proxy pod created per namespace
-    let num_services = mesh.services.len();
-    let expected_pods = num_services + 1;
-
-    info!(
-        "[Random Mesh] Waiting for {} pods ({} services + 1 waypoint)...",
-        expected_pods, num_services
-    );
-
-    loop {
-        if start.elapsed() > timeout {
-            return Err(format!(
-                "Timeout waiting for pods (expected {})",
-                expected_pods
-            ));
-        }
-
-        let running = match run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "get",
-                "pods",
-                "-n",
-                RANDOM_MESH_NAMESPACE,
-                "-o",
-                "jsonpath={range .items[*]}{.status.phase}{\"\\n\"}{end}",
-            ],
-        ) {
-            Ok(output) => output
-                .lines()
-                .filter(|l: &&str| l.trim() == "Running")
-                .count(),
-            Err(_) => 0,
-        };
-        info!("[Random Mesh] {}/{} pods running", running, expected_pods);
-
-        if running >= expected_pods {
-            info!(
-                "[Random Mesh] All {} pods running ({} services + 1 waypoint)",
-                expected_pods, num_services
-            );
-            return Ok(());
-        }
-
-        sleep(Duration::from_secs(15)).await;
-    }
+    wait_for_pods_running(
+        kubeconfig_path,
+        RANDOM_MESH_NAMESPACE,
+        mesh.services.len(),
+        "Random Mesh",
+        Duration::from_secs(1200),
+        Duration::from_secs(15),
+    )
+    .await
 }
 
 async fn verify_random_mesh_traffic(

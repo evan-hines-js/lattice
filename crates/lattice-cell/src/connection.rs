@@ -195,6 +195,10 @@ pub struct KubeconfigProxyConfig {
 /// Includes reconnection notification for resilient request handling.
 pub struct AgentRegistry {
     agents: DashMap<String, AgentConnection>,
+    /// Clusters that have connected at least once (for reconnection detection)
+    /// When an agent disconnects and reconnects, we need to send a notification
+    /// even though the agent was removed from `agents` on disconnect.
+    known_clusters: dashmap::DashSet<String>,
     unpivot_manifests: DashMap<String, UnpivotManifests>,
     /// CAPI manifests exported during pivot (deleted after MoveCompleteAck)
     pivot_source_manifests: DashMap<String, PivotSourceManifests>,
@@ -225,6 +229,7 @@ impl Default for AgentRegistry {
         let (reconnect_tx, _) = broadcast::channel(RECONNECT_CHANNEL_CAPACITY);
         Self {
             agents: DashMap::new(),
+            known_clusters: dashmap::DashSet::new(),
             unpivot_manifests: DashMap::new(),
             pivot_source_manifests: DashMap::new(),
             teardown_in_progress: DashMap::new(),
@@ -260,10 +265,17 @@ impl AgentRegistry {
     ///
     /// If an agent was previously registered with the same cluster name,
     /// this is treated as a reconnection and waiting requests are notified.
+    /// Reconnection detection uses `known_clusters` (not `agents`) so that
+    /// reconnections are detected even after agents disconnect and reconnect.
     pub fn register(&self, connection: AgentConnection) {
         let cluster_name = connection.cluster_name.clone();
         let command_tx = connection.command_tx.clone();
-        let was_reconnect = self.agents.contains_key(&cluster_name);
+
+        // Check if this cluster has connected before (survives unregister)
+        let was_reconnect = self.known_clusters.contains(&cluster_name);
+
+        // Track that this cluster has connected (never removed)
+        self.known_clusters.insert(cluster_name.clone());
 
         self.agents.insert(cluster_name.clone(), connection);
 
@@ -275,7 +287,7 @@ impl AgentRegistry {
                 command_tx,
             });
         } else {
-            info!(cluster = %cluster_name, "Agent registered");
+            info!(cluster = %cluster_name, "Agent registered (first connection)");
         }
     }
 
@@ -1002,5 +1014,35 @@ mod tests {
         let retrieved = registry.get_proxy_config().expect("config should exist");
         assert_eq!(retrieved.url, "https://proxy.example.com:8082");
         assert!(retrieved.ca_cert_pem.contains("BEGIN CERTIFICATE"));
+    }
+
+    #[test]
+    fn test_reconnection_detection_survives_unregister() {
+        // Verify that reconnection is detected even after an agent was unregistered
+        // This is critical for the resilient tunnel to work - agents may disconnect
+        // briefly and we need to notify waiting requests when they reconnect.
+        let registry = AgentRegistry::new();
+
+        // Subscribe to reconnections before any registration
+        let mut reconnect_rx = registry.subscribe_reconnections();
+
+        // First registration - not a reconnect
+        let (conn1, _rx1) = create_test_connection("test-cluster");
+        registry.register(conn1);
+        assert!(reconnect_rx.try_recv().is_err()); // No notification
+
+        // Unregister (simulates agent disconnect)
+        registry.unregister("test-cluster");
+        assert!(!registry.is_connected("test-cluster"));
+
+        // Re-register (simulates agent reconnect) - SHOULD be detected as reconnect
+        let (conn2, _rx2) = create_test_connection("test-cluster");
+        registry.register(conn2);
+
+        // Should receive reconnection notification
+        let notification = reconnect_rx
+            .try_recv()
+            .expect("should receive reconnection notification");
+        assert_eq!(notification.cluster_name, "test-cluster");
     }
 }

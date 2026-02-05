@@ -14,7 +14,6 @@ use kube::{
 };
 #[cfg(feature = "provider-e2e")]
 use lattice_common::{
-    capi_namespace, kubeconfig_secret_name,
     retry::{retry_with_backoff, RetryConfig},
     LATTICE_SYSTEM_NAMESPACE,
 };
@@ -124,9 +123,26 @@ pub fn kubeconfig_local_path(cluster_name: &str) -> String {
 // Kubernetes Client
 // =============================================================================
 
-/// Create a kube client from a kubeconfig file with proper timeouts
+/// Create a kube client from a kubeconfig file with proper timeouts.
+///
+/// Retries on transient connection failures (up to 10 attempts with exponential backoff).
 #[cfg(feature = "provider-e2e")]
 pub async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
+    let path = path.to_string();
+    retry_with_backoff(
+        &RetryConfig::with_max_attempts(10),
+        "create_kube_client",
+        || {
+            let path = path.clone();
+            async move { client_from_kubeconfig_inner(&path).await }
+        },
+    )
+    .await
+}
+
+/// Inner function for client creation (called by retry wrapper).
+#[cfg(feature = "provider-e2e")]
+async fn client_from_kubeconfig_inner(path: &str) -> Result<Client, String> {
     let kubeconfig =
         Kubeconfig::read_from(path).map_err(|e| format!("Failed to read kubeconfig: {}", e))?;
 
@@ -290,6 +306,24 @@ pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Run a kubectl command with retry logic.
+///
+/// Use this for kubectl commands that go through proxy kubeconfigs during
+/// chaos testing. Retries all errors with exponential backoff.
+#[cfg(feature = "provider-e2e")]
+pub async fn run_kubectl_with_retry(args: &[&str]) -> Result<String, String> {
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+    retry_with_backoff(&RetryConfig::with_max_attempts(20), "kubectl", || {
+        let args = args.clone();
+        async move {
+            let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            run_cmd("kubectl", &args_ref)
+        }
+    })
+    .await
+}
+
 // =============================================================================
 // HTTP Testing Helpers
 // =============================================================================
@@ -375,8 +409,7 @@ pub fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpRes
 ///
 /// Does NOT retry on:
 /// - 4xx errors (401, 403, 404, etc.) - these are permanent failures
-/// - 2xx success - returns immediately
-/// - 5xx other than 502-504 - likely permanent server errors
+/// Retries on any non-success response until max attempts exhausted.
 #[cfg(feature = "provider-e2e")]
 pub async fn http_get_with_retry(
     url: &str,
@@ -384,10 +417,10 @@ pub async fn http_get_with_retry(
     timeout_secs: u32,
 ) -> Result<HttpResponse, String> {
     let retry_config = RetryConfig {
-        max_attempts: 5,
+        max_attempts: 15,
         initial_delay: Duration::from_secs(2),
-        max_delay: Duration::from_secs(15),
-        backoff_multiplier: 2.0,
+        max_delay: Duration::from_secs(10),
+        backoff_multiplier: 1.5,
     };
 
     let url = url.to_string();
@@ -399,28 +432,21 @@ pub async fn http_get_with_retry(
         async move {
             let resp = http_get_with_token(&url, &token, timeout_secs);
 
-            // Success - return immediately
-            if resp.is_success() {
+            // Don't retry 4xx errors - these are intentional responses
+            if resp.status_code >= 400 && resp.status_code < 500 {
                 return Ok(resp);
             }
 
-            // Transient errors - retry
-            if resp.status_code == 0
-                || resp.status_code == 502
-                || resp.status_code == 503
-                || resp.status_code == 504
-            {
-                return Err(format!(
-                    "Transient error (status {}): {}",
-                    resp.status_code, resp.body
-                ));
+            // Retry everything else (success or 5xx/connection errors)
+            if resp.is_success() {
+                Ok(resp)
+            } else {
+                Err(format!("HTTP {} - {}", resp.status_code, resp.body))
             }
-
-            // Permanent errors (4xx, other 5xx) - return as-is, don't retry
-            Ok(resp)
         }
     })
     .await
+    .map_err(|e| e.to_string())
 }
 
 // =============================================================================
@@ -644,157 +670,6 @@ pub async fn watch_cluster_phases(
         }
 
         sleep(Duration::from_secs(10)).await;
-    }
-}
-
-/// Watch LatticeCluster and extract kubeconfig during Provisioning phase
-///
-/// For cloud providers (Proxmox, AWS, etc.), the kubeconfig secret is moved
-/// during pivot. This function extracts it BEFORE pivot so it can be used
-/// to access the cluster after pivot completes.
-///
-/// # Arguments
-/// * `mgmt_kubeconfig` - Path to management cluster kubeconfig
-/// * `cluster_name` - Name of the cluster to watch
-/// * `timeout_secs` - Timeout in seconds (default 1800 = 30 minutes if None)
-/// * `kubeconfig_output_path` - Path to write workload cluster kubeconfig
-#[cfg(feature = "provider-e2e")]
-pub async fn watch_cluster_phases_with_kubeconfig(
-    mgmt_kubeconfig: &str,
-    cluster_name: &str,
-    timeout_secs: Option<u64>,
-    kubeconfig_output_path: &str,
-) -> Result<(), String> {
-    use kube::Api;
-    use lattice_operator::crd::LatticeCluster;
-
-    let client = client_from_kubeconfig(mgmt_kubeconfig).await?;
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(timeout_secs.unwrap_or(1800));
-
-    let mut last_phase: Option<ClusterPhase> = None;
-    let mut kubeconfig_extracted = false;
-
-    loop {
-        if start.elapsed() > timeout {
-            return Err(format!(
-                "Timeout waiting for cluster {} to reach Ready state. Last phase: {:?}",
-                cluster_name, last_phase
-            ));
-        }
-
-        match api.get(cluster_name).await {
-            Ok(cluster) => {
-                let current_phase = cluster
-                    .status
-                    .as_ref()
-                    .map(|s| s.phase.clone())
-                    .unwrap_or(ClusterPhase::Pending);
-
-                if last_phase.as_ref() != Some(&current_phase) {
-                    info!("Cluster {} phase: {:?}", cluster_name, current_phase);
-                    last_phase = Some(current_phase.clone());
-                }
-
-                // Extract kubeconfig during Provisioning (before pivot moves it)
-                if !kubeconfig_extracted
-                    && matches!(
-                        current_phase,
-                        ClusterPhase::Provisioning | ClusterPhase::Pivoting
-                    )
-                {
-                    if let Ok(()) = try_extract_kubeconfig(
-                        mgmt_kubeconfig,
-                        cluster_name,
-                        kubeconfig_output_path,
-                    ) {
-                        info!(
-                            "Kubeconfig extracted to {} (before pivot)",
-                            kubeconfig_output_path
-                        );
-                        kubeconfig_extracted = true;
-                    }
-                }
-
-                if matches!(current_phase, ClusterPhase::Ready | ClusterPhase::Pivoted) {
-                    info!(
-                        "Cluster {} is operational ({:?})!",
-                        cluster_name, current_phase
-                    );
-                    if !kubeconfig_extracted {
-                        return Err(format!(
-                            "Cluster {} is operational but kubeconfig was not extracted before pivot",
-                            cluster_name
-                        ));
-                    }
-                    return Ok(());
-                }
-
-                if matches!(current_phase, ClusterPhase::Failed) {
-                    let msg = cluster
-                        .status
-                        .as_ref()
-                        .and_then(|s| s.message.as_deref())
-                        .unwrap_or("unknown error");
-                    return Err(format!("Cluster {} failed: {}", cluster_name, msg));
-                }
-            }
-            Err(e) => {
-                info!(
-                    "Warning: failed to get cluster {} status: {}",
-                    cluster_name, e
-                );
-            }
-        }
-
-        sleep(Duration::from_secs(10)).await;
-    }
-}
-
-/// Try to extract kubeconfig from CAPI secret (non-blocking, returns error if not found)
-#[cfg(feature = "provider-e2e")]
-fn try_extract_kubeconfig(
-    mgmt_kubeconfig: &str,
-    cluster_name: &str,
-    output_path: &str,
-) -> Result<(), String> {
-    use base64::Engine;
-
-    let namespace = capi_namespace(cluster_name);
-    let secret_name = kubeconfig_secret_name(cluster_name);
-
-    let result = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            mgmt_kubeconfig,
-            "get",
-            "secret",
-            &secret_name,
-            "-n",
-            &namespace,
-            "-o",
-            "jsonpath={.data.value}",
-        ],
-    );
-
-    match result {
-        Ok(output) if !output.trim().is_empty() => {
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(output.trim())
-                .map_err(|e| format!("Failed to decode kubeconfig: {}", e))?;
-
-            let kubeconfig = String::from_utf8(decoded)
-                .map_err(|e| format!("Kubeconfig is not valid UTF-8: {}", e))?;
-
-            std::fs::write(output_path, &kubeconfig)
-                .map_err(|e| format!("Failed to write kubeconfig: {}", e))?;
-
-            Ok(())
-        }
-        _ => Err("Kubeconfig secret not found yet".to_string()),
     }
 }
 
@@ -1264,6 +1139,47 @@ pub fn proxy_service_exists(kubeconfig: &str) -> bool {
     .is_ok()
 }
 
+/// Get the LoadBalancer URL for the proxy service (for cloud providers).
+///
+/// Waits up to 2 minutes for the LoadBalancer to get an external IP.
+/// Returns None if the service doesn't have a LoadBalancer IP.
+#[cfg(feature = "provider-e2e")]
+pub fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> {
+    for attempt in 1..=24 {
+        let result = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig,
+                "get",
+                "svc",
+                PROXY_SERVICE_NAME,
+                "-n",
+                LATTICE_SYSTEM_NAMESPACE,
+                "-o",
+                "jsonpath={.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}",
+            ],
+        );
+
+        if let Ok(addr) = result {
+            let addr = addr.trim();
+            if !addr.is_empty() {
+                return Ok(format!("https://{}:{}", addr, PROXY_PORT));
+            }
+        }
+
+        if attempt % 6 == 0 {
+            info!(
+                "[Helpers] Waiting for LoadBalancer IP... (attempt {}/24)",
+                attempt
+            );
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+
+    Err("LoadBalancer IP not available after 2 minutes".to_string())
+}
+
 /// Base port for deterministic port allocation.
 #[cfg(feature = "provider-e2e")]
 const PROXY_PORT_BASE: u16 = 19000;
@@ -1285,18 +1201,6 @@ pub fn deterministic_port(kubeconfig: &str) -> u16 {
     PROXY_PORT_BASE + ((hasher.finish() % PROXY_PORT_RANGE as u64) as u16)
 }
 
-/// Start a port-forward to the proxy service on a specific local port.
-///
-/// On macOS, Docker networks aren't accessible from the host, so we use
-/// kubectl port-forward to create a tunnel to the service.
-///
-/// Uses a deterministic port based on the kubeconfig path. This ensures that
-/// if the port-forward dies and restarts, it uses the same local port, keeping
-/// any generated kubeconfigs valid.
-///
-/// Returns the localhost URL and the port-forward process handle.
-/// The caller should keep the handle alive for the duration of proxy access.
-#[cfg(feature = "provider-e2e")]
 /// Check if a proxy URL is healthy by hitting its /healthz endpoint.
 #[cfg(feature = "provider-e2e")]
 fn check_proxy_health(url: &str, timeout_secs: u32) -> bool {
@@ -1387,7 +1291,10 @@ fn start_proxy_port_forward(
 
             // Check if healthy
             if check_proxy_health(&url, 2) {
-                info!("[Helpers] Port-forward ready at {} (attempt {})", url, attempt);
+                info!(
+                    "[Helpers] Port-forward ready at {} (attempt {})",
+                    url, attempt
+                );
                 return Ok((url, child));
             }
 
@@ -1471,7 +1378,13 @@ impl ResilientPortForward {
 
         // Spawn watchdog thread
         let watchdog_handle = std::thread::spawn(move || {
-            Self::watchdog_loop(initial_child, kubeconfig_clone, port, url_clone, stop_flag_clone);
+            Self::watchdog_loop(
+                initial_child,
+                kubeconfig_clone,
+                port,
+                url_clone,
+                stop_flag_clone,
+            );
         });
 
         info!(
@@ -1647,17 +1560,15 @@ pub async fn delete_cluster_and_wait(
     // 3. Parent imports and deletes via CAPI, which kills the infrastructure
     // 4. The cluster's API server dies before the finalizer is removed
     // So we just initiate deletion and wait for parent confirmation
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            cluster_kubeconfig,
-            "delete",
-            "latticecluster",
-            cluster_name,
-            "--wait=false",
-        ],
-    )?;
+    run_kubectl_with_retry(&[
+        "--kubeconfig",
+        cluster_kubeconfig,
+        "delete",
+        "latticecluster",
+        cluster_name,
+        "--wait=false",
+    ])
+    .await?;
     info!("LatticeCluster deletion initiated (async)");
 
     // Wait for the LatticeCluster to be fully deleted from parent
@@ -1820,7 +1731,9 @@ pub struct ProxySession {
 
 #[cfg(feature = "provider-e2e")]
 impl ProxySession {
-    /// Start a proxy session for Docker (uses resilient port-forward).
+    /// Start a proxy session using port-forward (for Docker/kind).
+    ///
+    /// For cloud providers with LoadBalancer, use `start_cloud` instead.
     pub fn start(kubeconfig: &str) -> Result<Self, String> {
         let resilient_pf = ResilientPortForward::start(kubeconfig)?;
         let url = resilient_pf.url.clone();
@@ -1834,16 +1747,28 @@ impl ProxySession {
         })
     }
 
-    /// Start a proxy session for cloud providers (direct LoadBalancer access).
-    pub fn start_cloud(kubeconfig: &str, lb_url: &str) -> Result<Self, String> {
+    /// Start a proxy session for cloud providers (fetches LoadBalancer URL).
+    pub fn start_cloud(kubeconfig: &str) -> Result<Self, String> {
+        let lb_url = get_proxy_loadbalancer_url(kubeconfig)?;
         let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator")?;
 
         Ok(Self {
             kubeconfig: kubeconfig.to_string(),
-            url: lb_url.to_string(),
+            url: lb_url,
             token,
             resilient_port_forward: None,
         })
+    }
+
+    /// Start a proxy session, choosing port-forward or LoadBalancer based on provider.
+    pub fn start_for_provider(
+        kubeconfig: &str,
+        provider: super::providers::InfraProvider,
+    ) -> Result<Self, String> {
+        match provider {
+            super::providers::InfraProvider::Docker => Self::start(kubeconfig),
+            _ => Self::start_cloud(kubeconfig),
+        }
     }
 
     /// Wait until the proxy is healthy (useful after operations that disrupt connectivity).
@@ -1890,7 +1815,11 @@ impl ProxySession {
     /// use the old token - you'll need to regenerate them with `kubeconfig_for()`.
     pub fn refresh_token(&mut self) -> Result<(), String> {
         info!("[ProxySession] Refreshing SA token...");
-        self.token = get_sa_token(&self.kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator")?;
+        self.token = get_sa_token(
+            &self.kubeconfig,
+            LATTICE_SYSTEM_NAMESPACE,
+            "lattice-operator",
+        )?;
         info!("[ProxySession] Token refreshed successfully");
         Ok(())
     }
@@ -2004,8 +1933,7 @@ impl ProxySession {
 
             if available_contexts.contains(&cluster_name.to_string()) {
                 // Found the cluster - finalize and return
-                kubeconfig["current-context"] =
-                    serde_json::Value::String(cluster_name.to_string());
+                kubeconfig["current-context"] = serde_json::Value::String(cluster_name.to_string());
 
                 let kubeconfig_str = serde_json::to_string_pretty(&kubeconfig)
                     .map_err(|e| format!("Failed to serialize kubeconfig: {}", e))?;
@@ -2031,3 +1959,128 @@ impl ProxySession {
 }
 
 // Note: No explicit Drop needed for ProxySession - ResilientPortForward handles its own cleanup
+
+// =============================================================================
+// Namespace Helpers
+// =============================================================================
+
+/// Delete a namespace (non-blocking).
+#[cfg(feature = "provider-e2e")]
+pub fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
+    info!("[Namespace] Deleting namespace {}...", namespace);
+    let _ = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "delete",
+            "namespace",
+            namespace,
+            "--wait=false",
+        ],
+    );
+}
+
+/// Ensure a fresh namespace exists by deleting if present and waiting for full cleanup.
+///
+/// This is important for re-running tests - stale resources cause conflicts.
+#[cfg(feature = "provider-e2e")]
+pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> Result<(), String> {
+    // Check if namespace exists
+    let ns_exists = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "namespace",
+            namespace,
+            "-o",
+            "name",
+        ],
+    )
+    .is_ok();
+
+    if ns_exists {
+        info!(
+            "[Namespace] Namespace {} exists, deleting for fresh start...",
+            namespace
+        );
+        delete_namespace(kubeconfig_path, namespace);
+
+        // Wait for namespace to be fully deleted
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(120);
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(format!(
+                    "Timeout waiting for namespace {} to be deleted",
+                    namespace
+                ));
+            }
+
+            // If the command fails or returns empty, the namespace is deleted
+            let deleted = match run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "get",
+                    "namespace",
+                    namespace,
+                    "-o",
+                    "name",
+                ],
+            ) {
+                Ok(output) => output.trim().is_empty(),
+                Err(_) => true, // Error means not found
+            };
+
+            if deleted {
+                info!("[Namespace] Namespace {} fully deleted", namespace);
+                break;
+            }
+
+            // Check phase for logging
+            let phase = run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "get",
+                    "namespace",
+                    namespace,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ],
+            )
+            .unwrap_or_default();
+            info!(
+                "[Namespace] Waiting for namespace {} deletion (phase: {})...",
+                namespace,
+                phase.trim()
+            );
+
+            sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    // Create fresh namespace with retry for transient connection failures
+    info!("[Namespace] Creating fresh namespace {}...", namespace);
+    let kc = kubeconfig_path.to_string();
+    let ns = namespace.to_string();
+    retry_with_backoff(
+        &RetryConfig::with_max_attempts(10),
+        "create_namespace",
+        || async {
+            run_cmd(
+                "kubectl",
+                &["--kubeconfig", &kc, "create", "namespace", &ns],
+            )
+        },
+    )
+    .await?;
+
+    Ok(())
+}

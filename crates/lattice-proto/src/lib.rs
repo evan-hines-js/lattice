@@ -292,19 +292,25 @@ mod tests {
     fn test_is_exec_path() {
         // Exec paths
         assert!(is_exec_path("/api/v1/namespaces/default/pods/nginx/exec"));
-        assert!(is_exec_path("/api/v1/namespaces/kube-system/pods/coredns-abc/exec"));
+        assert!(is_exec_path(
+            "/api/v1/namespaces/kube-system/pods/coredns-abc/exec"
+        ));
         // Attach paths
         assert!(is_exec_path("/api/v1/namespaces/default/pods/nginx/attach"));
         // Portforward paths
-        assert!(is_exec_path("/api/v1/namespaces/default/pods/nginx/portforward"));
+        assert!(is_exec_path(
+            "/api/v1/namespaces/default/pods/nginx/portforward"
+        ));
         // Non-exec paths
         assert!(!is_exec_path("/api/v1/namespaces/default/pods/nginx"));
         assert!(!is_exec_path("/api/v1/namespaces/default/pods/nginx/log"));
-        assert!(!is_exec_path("/api/v1/namespaces/default/pods/nginx/status"));
+        assert!(!is_exec_path(
+            "/api/v1/namespaces/default/pods/nginx/status"
+        ));
         assert!(!is_exec_path("/api/v1/pods"));
         assert!(!is_exec_path("/apis/apps/v1/deployments"));
         assert!(!is_exec_path("")); // Empty path
-        // Edge cases - substring shouldn't match
+                                    // Edge cases - substring shouldn't match
         assert!(!is_exec_path("/api/v1/namespaces/default/pods/exec-pod"));
         assert!(!is_exec_path("/api/v1/namespaces/exec/pods/nginx"));
     }
@@ -378,6 +384,9 @@ mod tests {
         assert!(parse_portforward_ports("").is_empty());
         assert!(parse_portforward_ports("foo=bar").is_empty());
         // Invalid port numbers are filtered out
-        assert_eq!(parse_portforward_ports("ports=8080,invalid,9090"), vec![8080, 9090]);
+        assert_eq!(
+            parse_portforward_ports("ports=8080,invalid,9090"),
+            vec![8080, 9090]
+        );
     }
 }

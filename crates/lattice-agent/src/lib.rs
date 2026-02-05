@@ -38,11 +38,8 @@ pub trait K8sRequestForwarder: Send + Sync {
     /// - The cluster is not in this agent's subtree (404)
     /// - The cluster's agent is not connected (502)
     /// - The request times out (504)
-    async fn forward(
-        &self,
-        target_cluster: &str,
-        request: KubernetesRequest,
-    ) -> KubernetesResponse;
+    async fn forward(&self, target_cluster: &str, request: KubernetesRequest)
+        -> KubernetesResponse;
 
     /// Forward a watch/follow request to a target cluster with streaming response.
     ///
@@ -183,6 +180,7 @@ pub use client::{AgentClient, AgentClientConfig, AgentCredentials, CertificateEr
 pub use kube_client::{InClusterClientProvider, KubeClientProvider};
 
 // Re-export protocol types from lattice_common
+pub use exec::{execute_exec, ExecRegistry};
 pub use executor::{execute_k8s_request, is_watch_request};
 pub use lattice_common::{CsrRequest, CsrResponse};
 pub use pivot::{
@@ -191,7 +189,6 @@ pub use pivot::{
 };
 pub use subtree::SubtreeSender;
 pub use watch::{execute_watch, WatchRegistry};
-pub use exec::{execute_exec, ExecRegistry};
 
 // Re-export proto types for convenience
 pub use lattice_proto::{

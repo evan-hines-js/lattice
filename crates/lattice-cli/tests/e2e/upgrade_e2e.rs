@@ -42,9 +42,10 @@ use super::context::init_e2e_test;
 use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
     extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd, run_id, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
+    load_registry_credentials, run_cmd, run_id, watch_cluster_phases, DEFAULT_LATTICE_IMAGE,
+    MGMT_CLUSTER_NAME,
 };
-use super::integration::{pivot, setup};
+use super::integration::setup;
 use super::mesh_tests::{start_mesh_test, wait_for_mesh_test_cycles};
 use super::providers::InfraProvider;
 
@@ -156,7 +157,7 @@ async fn run_upgrade_test() -> Result<(), String> {
         .map_err(|e| format!("Failed to create workload cluster: {}", e))?;
 
     // Wait for cluster to be ready
-    pivot::wait_for_cluster_ready(&mgmt_client, UPGRADE_WORKLOAD_CLUSTER_NAME, Some(600)).await?;
+    watch_cluster_phases(&mgmt_client, UPGRADE_WORKLOAD_CLUSTER_NAME, Some(600)).await?;
     info!("Workload cluster ready at v{}!", from_version);
 
     // Extract kubeconfig
@@ -231,7 +232,7 @@ async fn run_upgrade_test() -> Result<(), String> {
     let _ = workload_api
         .delete(UPGRADE_WORKLOAD_CLUSTER_NAME, &DeleteParams::default())
         .await;
-    wait_for_cluster_deleted(&mgmt_client, UPGRADE_WORKLOAD_CLUSTER_NAME).await?;
+    wait_for_cluster_deleted(&mgmt_kubeconfig, UPGRADE_WORKLOAD_CLUSTER_NAME).await?;
 
     // Force cleanup Docker containers
     let _ = run_cmd(
@@ -258,15 +259,34 @@ async fn run_upgrade_test() -> Result<(), String> {
     Ok(())
 }
 
-async fn wait_for_cluster_deleted(client: &kube::Client, name: &str) -> Result<(), String> {
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-
+async fn wait_for_cluster_deleted(kubeconfig: &str, name: &str) -> Result<(), String> {
     loop {
-        match api.get(name).await {
-            Ok(_) => tokio::time::sleep(Duration::from_secs(5)).await,
-            Err(kube::Error::Api(ref e)) if e.code == 404 => return Ok(()),
-            Err(e) => return Err(format!("Error checking cluster deletion: {}", e)),
+        // Use kubectl for resilience - handles retries/reconnection internally
+        let output = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig,
+                "get",
+                "latticecluster",
+                name,
+                "-o",
+                "name",
+            ],
+        );
+
+        match output {
+            Err(e) if e.contains("not found") || e.contains("NotFound") => return Ok(()),
+            Err(e) => {
+                // Log but continue - transient errors should not fail the wait
+                info!("[Upgrade] Error checking cluster deletion: {}", e);
+            }
+            Ok(_) => {
+                // Cluster still exists, keep waiting
+            }
         }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 

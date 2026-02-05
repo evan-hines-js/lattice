@@ -236,10 +236,9 @@ mod tests {
             source_groups: vec![],
         };
 
-        let (session, _data_rx) =
-            start_exec_session(&registry, "test", command_tx, params)
-                .await
-                .unwrap();
+        let (session, _data_rx) = start_exec_session(&registry, "test", command_tx, params)
+            .await
+            .unwrap();
 
         // Drain the initial ExecRequest
         let _ = command_rx.recv().await;
@@ -272,10 +271,9 @@ mod tests {
             source_groups: vec![],
         };
 
-        let (session, _data_rx) =
-            start_exec_session(&registry, "test", command_tx, params)
-                .await
-                .unwrap();
+        let (session, _data_rx) = start_exec_session(&registry, "test", command_tx, params)
+            .await
+            .unwrap();
 
         // Drain the initial ExecRequest
         let _ = command_rx.recv().await;
@@ -307,10 +305,9 @@ mod tests {
             source_groups: vec![],
         };
 
-        let (session, _data_rx) =
-            start_exec_session(&registry, "test", command_tx, params)
-                .await
-                .unwrap();
+        let (session, _data_rx) = start_exec_session(&registry, "test", command_tx, params)
+            .await
+            .unwrap();
 
         // Drain the initial ExecRequest
         let _ = command_rx.recv().await;

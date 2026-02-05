@@ -26,9 +26,9 @@ use lattice_common::crd::LatticeCluster;
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
 use lattice_proto::{agent_message::Payload, AgentMessage, AgentState, CellCommand};
 
+use crate::connection::K8sResponseRegistry;
 use crate::kubeconfig::patch_kubeconfig_for_proxy;
 use crate::subtree_registry::{ClusterInfo, SubtreeRegistry};
-use crate::connection::K8sResponseRegistry;
 use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::ServerMtlsConfig;
 use lattice_proto::SubtreeState;
@@ -61,6 +61,227 @@ fn extract_delta_changes(state: &SubtreeState) -> (Vec<ClusterInfo>, Vec<String>
         .map(|c| c.name.clone())
         .collect();
     (added, removed)
+}
+
+/// Convert proto MoveObject to lattice_move MoveObjectInput
+fn convert_proto_objects(
+    objects: &[lattice_proto::MoveObject],
+) -> Vec<lattice_move::MoveObjectInput> {
+    objects
+        .iter()
+        .map(|obj| lattice_move::MoveObjectInput {
+            source_uid: obj.source_uid.clone(),
+            manifest: obj.manifest.clone(),
+            owners: obj
+                .owners
+                .iter()
+                .map(|o| lattice_move::SourceOwnerRefInput {
+                    source_uid: o.source_uid.clone(),
+                    api_version: o.api_version.clone(),
+                    kind: o.kind.clone(),
+                    name: o.name.clone(),
+                    controller: o.controller,
+                    block_owner_deletion: o.block_owner_deletion,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Handle cluster deletion (unpivot flow)
+///
+/// This is the core logic for handling a ClusterDeleting message from an agent.
+/// It imports CAPI objects from the child cluster, patches the kubeconfig,
+/// unpauses resources, and initiates deletion.
+///
+/// # Arguments
+/// * `cluster` - Name of the cluster being deleted
+/// * `namespace` - Namespace where CAPI objects should be imported
+/// * `objects` - CAPI objects to import
+/// * `client` - Kubernetes client
+/// * `registry` - Agent registry for state management
+async fn handle_cluster_deletion(
+    cluster: String,
+    namespace: String,
+    objects: Vec<lattice_move::MoveObjectInput>,
+    client: Client,
+    registry: SharedAgentRegistry,
+) {
+    let api: Api<LatticeCluster> = Api::all(client.clone());
+
+    // Step 0: Check if import already complete (crash recovery)
+    let import_already_complete = match api.get(&cluster).await {
+        Ok(lc) => lc
+            .status
+            .as_ref()
+            .map(|s| s.unpivot_import_complete)
+            .unwrap_or(false),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            info!(cluster = %cluster, "LatticeCluster already deleted");
+            registry.finish_teardown(&cluster);
+            return;
+        }
+        Err(e) => {
+            error!(cluster = %cluster, error = %e, "Failed to get LatticeCluster");
+            registry.finish_teardown(&cluster);
+            return;
+        }
+    };
+
+    if import_already_complete {
+        info!(
+            cluster = %cluster,
+            "CAPI import already complete, skipping re-import (crash recovery)"
+        );
+    } else if objects.is_empty() {
+        error!(
+            cluster = %cluster,
+            "No CAPI objects received from child - discovery may have failed"
+        );
+        registry.finish_teardown(&cluster);
+        return;
+    } else {
+        // Import CAPI objects
+        if let Err(e) =
+            import_capi_objects(&cluster, &namespace, &objects, &client, &registry).await
+        {
+            error!(cluster = %cluster, error = %e, "Failed to import CAPI objects");
+            registry.finish_teardown(&cluster);
+            return;
+        }
+
+        // Mark import complete (crash-safe)
+        let status_patch = serde_json::json!({
+            "status": {
+                "unpivotImportComplete": true
+            }
+        });
+        if let Err(e) = api
+            .patch_status(
+                &cluster,
+                &PatchParams::apply("lattice-cell"),
+                &Patch::Merge(&status_patch),
+            )
+            .await
+        {
+            error!(cluster = %cluster, error = %e, "Failed to mark import complete");
+            registry.finish_teardown(&cluster);
+            return;
+        }
+        info!(cluster = %cluster, "Marked unpivot import complete");
+    }
+
+    // Step 2: Delete LatticeCluster
+    info!(cluster = %cluster, "Initiating LatticeCluster deletion");
+    if let Err(e) = api.delete(&cluster, &DeleteParams::default()).await {
+        if !matches!(&e, kube::Error::Api(ae) if ae.code == 404) {
+            error!(cluster = %cluster, error = %e, "Failed to delete LatticeCluster");
+        }
+    }
+
+    // NOTE: We intentionally do NOT call finish_teardown() here.
+    // The teardown guard stays in place to prevent duplicate ClusterDeleting
+    // messages from re-importing CAPI objects. The guard is cleared when
+    // the agent disconnects (unregister).
+    info!(cluster = %cluster, "Teardown initiated - controller will handle cleanup");
+}
+
+/// Import CAPI objects from child cluster
+///
+/// Handles object logging, namespace creation, batch apply, kubeconfig patching,
+/// and resource unpausing.
+async fn import_capi_objects(
+    cluster: &str,
+    namespace: &str,
+    objects: &[lattice_move::MoveObjectInput],
+    client: &Client,
+    registry: &SharedAgentRegistry,
+) -> Result<(), String> {
+    // Log each object received for debugging
+    for obj in objects {
+        if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&obj.manifest) {
+            let kind = parsed.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+            let name = parsed
+                .get("metadata")
+                .and_then(|m| m.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            info!(
+                cluster = %cluster,
+                kind = %kind,
+                name = %name,
+                source_uid = %obj.source_uid,
+                owners = obj.owners.len(),
+                "Unpivot: received object"
+            );
+        }
+    }
+
+    info!(
+        cluster = %cluster,
+        object_count = objects.len(),
+        "Importing CAPI objects from child"
+    );
+
+    let mut mover = lattice_move::AgentMover::new(client.clone(), namespace);
+
+    // Ensure namespace exists
+    mover
+        .ensure_namespace()
+        .await
+        .map_err(|e| format!("Failed to ensure namespace: {}", e))?;
+
+    // Apply all objects
+    let (mappings, errors) = mover.apply_batch(objects).await;
+
+    if !errors.is_empty() {
+        for e in &errors {
+            error!(
+                cluster = %cluster,
+                source_uid = %e.source_uid,
+                error = %e.message,
+                "Failed to import object"
+            );
+        }
+        return Err(format!(
+            "Import failed, {} errors - agent will retry",
+            errors.len()
+        ));
+    }
+
+    info!(
+        cluster = %cluster,
+        created = mappings.len(),
+        "CAPI objects imported successfully"
+    );
+
+    // Patch kubeconfig for proxy access
+    let proxy_config = registry
+        .get_proxy_config()
+        .ok_or("No proxy config available")?;
+
+    match patch_kubeconfig_for_proxy(
+        client,
+        cluster,
+        namespace,
+        &proxy_config.url,
+        &proxy_config.ca_cert_pem,
+    )
+    .await
+    {
+        Ok(true) => info!(cluster = %cluster, "Kubeconfig patched for proxy access"),
+        Ok(false) => return Err("Kubeconfig Secret not found after import".to_string()),
+        Err(e) => return Err(format!("Failed to patch kubeconfig: {}", e)),
+    }
+
+    // Unpause cluster
+    mover
+        .unpause_resources()
+        .await
+        .map_err(|e| format!("Failed to unpause cluster: {}", e))?;
+    info!(cluster = %cluster, "Cluster unpaused successfully");
+
+    Ok(())
 }
 
 /// gRPC server for agent communication
@@ -100,6 +321,9 @@ async fn process_agent_message(
             );
             registry.register(conn);
             registry.update_state(cluster_name, ready.state());
+
+            // Mark cluster as connected in subtree registry (restores connectivity after disconnect)
+            subtree_registry.handle_agent_reconnect(cluster_name).await;
 
             // If agent reports Ready state, pivot must have completed
             if ready.state() == AgentState::Ready {
@@ -146,7 +370,7 @@ async fn process_agent_message(
             );
         }
         Some(Payload::ClusterDeleting(cd)) => {
-            // Guard against concurrent teardown spawns (in-memory, resets on restart)
+            // Guard against concurrent teardown spawns
             if !registry.start_teardown(cluster_name) {
                 debug!(
                     cluster = %cluster_name,
@@ -162,216 +386,19 @@ async fn process_agent_message(
                 "Cluster deletion requested"
             );
 
-            // Convert proto objects to MoveObjectInput
-            let objects: Vec<lattice_move::MoveObjectInput> = cd
-                .objects
-                .iter()
-                .map(|obj| lattice_move::MoveObjectInput {
-                    source_uid: obj.source_uid.clone(),
-                    manifest: obj.manifest.clone(),
-                    owners: obj
-                        .owners
-                        .iter()
-                        .map(|o| lattice_move::SourceOwnerRefInput {
-                            source_uid: o.source_uid.clone(),
-                            api_version: o.api_version.clone(),
-                            kind: o.kind.clone(),
-                            name: o.name.clone(),
-                            controller: o.controller,
-                            block_owner_deletion: o.block_owner_deletion,
-                        })
-                        .collect(),
-                })
-                .collect();
-
+            let objects = convert_proto_objects(&cd.objects);
             let namespace = cd.namespace.clone();
             let cluster = cluster_name.to_string();
             let client = kube_client.clone();
-            let registry_for_task = registry.clone();
+            let registry_clone = registry.clone();
 
-            // Spawn to avoid blocking the gRPC stream
-            tokio::spawn(async move {
-                let api: Api<LatticeCluster> = Api::all(client.clone());
-
-                // Step 0: Check if import already complete (crash recovery)
-                // This is the persistent marker that survives restarts
-                let import_already_complete = match api.get(&cluster).await {
-                    Ok(lc) => lc
-                        .status
-                        .as_ref()
-                        .map(|s| s.unpivot_import_complete)
-                        .unwrap_or(false),
-                    Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                        // Cluster already deleted, nothing to do
-                        info!(cluster = %cluster, "LatticeCluster already deleted");
-                        registry_for_task.finish_teardown(&cluster);
-                        return;
-                    }
-                    Err(e) => {
-                        error!(cluster = %cluster, error = %e, "Failed to get LatticeCluster");
-                        registry_for_task.finish_teardown(&cluster);
-                        return;
-                    }
-                };
-
-                if import_already_complete {
-                    info!(
-                        cluster = %cluster,
-                        "CAPI import already complete, skipping re-import (crash recovery)"
-                    );
-                } else if objects.is_empty() {
-                    // No objects received - discovery likely failed on child, don't proceed
-                    error!(
-                        cluster = %cluster,
-                        "No CAPI objects received from child - discovery may have failed"
-                    );
-                    registry_for_task.finish_teardown(&cluster);
-                    return;
-                } else {
-                    // Log each object received for debugging
-                    for obj in &objects {
-                        if let Ok(parsed) =
-                            serde_json::from_slice::<serde_json::Value>(&obj.manifest)
-                        {
-                            let kind = parsed.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-                            let name = parsed
-                                .get("metadata")
-                                .and_then(|m| m.get("name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-                            info!(
-                                cluster = %cluster,
-                                kind = %kind,
-                                name = %name,
-                                source_uid = %obj.source_uid,
-                                owners = obj.owners.len(),
-                                "Unpivot: received object"
-                            );
-                        }
-                    }
-
-                    info!(
-                        cluster = %cluster,
-                        object_count = objects.len(),
-                        "Importing CAPI objects from child"
-                    );
-
-                    let mut mover = lattice_move::AgentMover::new(client.clone(), &namespace);
-
-                    // Ensure namespace exists
-                    if let Err(e) = mover.ensure_namespace().await {
-                        error!(cluster = %cluster, error = %e, "Failed to ensure namespace");
-                        registry_for_task.finish_teardown(&cluster);
-                        return;
-                    }
-
-                    // Apply all objects (AgentMover handles UID remapping)
-                    let (mappings, errors) = mover.apply_batch(&objects).await;
-
-                    if !errors.is_empty() {
-                        for e in &errors {
-                            error!(
-                                cluster = %cluster,
-                                source_uid = %e.source_uid,
-                                error = %e.message,
-                                "Failed to import object"
-                            );
-                        }
-                        // Don't proceed with deletion if import failed - agent will retry
-                        error!(
-                            cluster = %cluster,
-                            failed = errors.len(),
-                            "Import failed, aborting teardown - agent will retry"
-                        );
-                        registry_for_task.finish_teardown(&cluster);
-                        return;
-                    }
-
-                    info!(
-                        cluster = %cluster,
-                        created = mappings.len(),
-                        "CAPI objects imported successfully"
-                    );
-
-                    // Patch kubeconfig to route through proxy
-                    // This must happen BEFORE unpausing, otherwise CAPI can't reach the cluster
-                    let Some(proxy_config) = registry_for_task.get_proxy_config() else {
-                        error!(cluster = %cluster, "No proxy config available, cannot patch kubeconfig");
-                        registry_for_task.finish_teardown(&cluster);
-                        return;
-                    };
-
-                    match patch_kubeconfig_for_proxy(
-                        &client,
-                        &cluster,
-                        &namespace,
-                        &proxy_config.url,
-                        &proxy_config.ca_cert_pem,
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            info!(cluster = %cluster, "Kubeconfig patched for proxy access");
-                        }
-                        Ok(false) => {
-                            error!(cluster = %cluster, "Kubeconfig Secret not found after import");
-                            registry_for_task.finish_teardown(&cluster);
-                            return;
-                        }
-                        Err(e) => {
-                            error!(cluster = %cluster, error = %e, "Failed to patch kubeconfig for proxy");
-                            registry_for_task.finish_teardown(&cluster);
-                            return;
-                        }
-                    }
-
-                    // Unpause cluster - CAPI won't delete paused clusters
-                    // This MUST succeed, otherwise infrastructure will be orphaned
-                    if let Err(e) = mover.unpause_resources().await {
-                        error!(cluster = %cluster, error = %e, "Failed to unpause cluster - infrastructure may be orphaned");
-                        registry_for_task.finish_teardown(&cluster);
-                        return;
-                    }
-                    info!(cluster = %cluster, "Cluster unpaused successfully");
-
-                    // Step 1: Mark import complete BEFORE deletion (crash-safe)
-                    // This prevents re-import on crash recovery which could cause UID conflicts
-                    let status_patch = serde_json::json!({
-                        "status": {
-                            "unpivotImportComplete": true
-                        }
-                    });
-                    if let Err(e) = api
-                        .patch_status(
-                            &cluster,
-                            &PatchParams::apply("lattice-cell"),
-                            &Patch::Merge(&status_patch),
-                        )
-                        .await
-                    {
-                        error!(cluster = %cluster, error = %e, "Failed to mark import complete");
-                        registry_for_task.finish_teardown(&cluster);
-                        return;
-                    }
-                    info!(cluster = %cluster, "Marked unpivot import complete");
-                }
-
-                // Step 2: Delete LatticeCluster (adds deletionTimestamp)
-                // Controller will delete CAPI Cluster which triggers infrastructure cleanup.
-                // The finalizer keeps it around while controller handles CAPI cleanup.
-                info!(cluster = %cluster, "Initiating LatticeCluster deletion");
-                if let Err(e) = api.delete(&cluster, &DeleteParams::default()).await {
-                    if !matches!(&e, kube::Error::Api(ae) if ae.code == 404) {
-                        error!(cluster = %cluster, error = %e, "Failed to delete LatticeCluster");
-                    }
-                }
-
-                // NOTE: We intentionally do NOT call finish_teardown() here.
-                // The teardown guard stays in place to prevent duplicate ClusterDeleting
-                // messages from re-importing CAPI objects. The guard is cleared when
-                // the agent disconnects (unregister).
-                info!(cluster = %cluster, "Teardown initiated - controller will handle cleanup");
-            });
+            tokio::spawn(handle_cluster_deletion(
+                cluster,
+                namespace,
+                objects,
+                client,
+                registry_clone,
+            ));
         }
         Some(Payload::KubernetesResponse(resp)) => {
             debug!(
@@ -715,6 +742,8 @@ mod tests {
                 if ready.state() == AgentState::Ready {
                     registry.set_pivot_complete(cluster_name, true);
                 }
+                // Mark cluster as connected in subtree registry
+                subtree_registry.handle_agent_reconnect(cluster_name).await;
             }
             Some(Payload::BootstrapComplete(bc)) => {
                 registry.set_capi_ready(cluster_name, bc.capi_ready);

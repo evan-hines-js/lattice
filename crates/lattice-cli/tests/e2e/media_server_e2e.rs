@@ -10,10 +10,9 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
 
-use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Pod};
+use k8s_openapi::api::core::v1::Namespace;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, ListParams, PostParams};
+use kube::api::{Api, PostParams};
 
 use lattice_operator::crd::LatticeService;
 
@@ -79,19 +78,8 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn deployment_is_available(d: &Deployment) -> bool {
-    d.status.as_ref().is_some_and(|status| {
-        let desired = status.replicas.unwrap_or(0);
-        let available = status.available_replicas.unwrap_or(0);
-        desired > 0 && available >= desired
-    })
-}
-
-async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
+async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
     info!("Waiting for deployments...");
-
-    let client = client_from_kubeconfig(kubeconfig_path).await?;
-    let api: Api<Deployment> = Api::namespaced(client, NAMESPACE);
 
     let timeout = Duration::from_secs(300);
     let poll_interval = Duration::from_secs(5);
@@ -101,25 +89,46 @@ async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
         let start = std::time::Instant::now();
 
         loop {
-            match api.get(name).await {
-                Ok(deployment) if deployment_is_available(&deployment) => {
-                    info!("{} is available", name);
-                    break;
-                }
-                Ok(deployment) => {
-                    let status = deployment.status.as_ref();
-                    let available = status.and_then(|s| s.available_replicas).unwrap_or(0);
-                    let desired = status.and_then(|s| s.replicas).unwrap_or(0);
-                    info!(
-                        "  {} not ready yet ({}/{} available), retrying...",
-                        name, available, desired
-                    );
-                }
-                Err(kube::Error::Api(e)) if e.code == 404 => {
-                    info!("{} not found yet, retrying...", name);
+            // Use kubectl for resilience - handles retries/reconnection internally
+            let output = run_cmd(
+                "kubectl",
+                &[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "get",
+                    "deployment",
+                    "-n",
+                    NAMESPACE,
+                    name,
+                    "-o",
+                    "jsonpath={.status.availableReplicas}/{.status.replicas}",
+                ],
+            );
+
+            match output {
+                Ok(status) => {
+                    let parts: Vec<&str> = status.split('/').collect();
+                    if parts.len() == 2 {
+                        let available = parts[0].parse::<i32>().unwrap_or(0);
+                        let desired = parts[1].parse::<i32>().unwrap_or(0);
+                        if desired > 0 && available >= desired {
+                            info!("{} is available ({}/{})", name, available, desired);
+                            break;
+                        }
+                        info!(
+                            "  {} not ready yet ({}/{} available), retrying...",
+                            name, available, desired
+                        );
+                    } else {
+                        info!("  {} status unclear: {}, retrying...", name, status);
+                    }
                 }
                 Err(e) => {
-                    info!("Error checking {}: {}, retrying...", name, e);
+                    if e.contains("not found") || e.contains("NotFound") {
+                        info!("{} not found yet, retrying...", name);
+                    } else {
+                        info!("Error checking {}: {}, retrying...", name, e);
+                    }
                 }
             }
 
@@ -138,19 +147,23 @@ async fn wait_for_pods(kubeconfig_path: &str) -> Result<(), String> {
 async fn verify_pvcs(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying PVCs...");
 
-    let client = client_from_kubeconfig(kubeconfig_path).await?;
-    let api: Api<PersistentVolumeClaim> = Api::namespaced(client, NAMESPACE);
+    // Use kubectl for resilience - handles retries/reconnection internally
+    let output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "pvc",
+            "-n",
+            NAMESPACE,
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+        ],
+    )
+    .map_err(|e| format!("Failed to list PVCs: {}", e))?;
 
-    let pvcs = api
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| format!("Failed to list PVCs: {}", e))?;
-
-    let pvc_names: Vec<&str> = pvcs
-        .items
-        .iter()
-        .filter_map(|p| p.metadata.name.as_deref())
-        .collect();
+    let pvc_names: Vec<&str> = output.lines().map(|l| l.trim()).collect();
 
     for expected in [
         "vol-media-storage",
@@ -179,42 +192,52 @@ async fn verify_pvcs(kubeconfig_path: &str) -> Result<(), String> {
 async fn verify_node_colocation(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying pod co-location...");
 
-    let client = client_from_kubeconfig(kubeconfig_path).await?;
-    let api: Api<Pod> = Api::namespaced(client, NAMESPACE);
+    // Use kubectl for resilience - handles retries/reconnection internally
+    // Get pods with their lattice.io/name label and node name
+    let label_escaped = lattice_common::LABEL_NAME.replace('.', r"\.");
+    let jsonpath = format!(
+        "{{range .items[*]}}{{.metadata.labels.{}}}:{{.spec.nodeName}}{{\"\\n\"}}{{end}}",
+        label_escaped
+    );
 
-    let get_node = |pods: &[Pod], name: &str| -> Result<String, String> {
-        let pod = pods
-            .iter()
-            .find(|p| {
-                p.metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| l.get(lattice_common::LABEL_NAME))
-                    .map(|v| v == name)
-                    .unwrap_or(false)
-            })
-            .ok_or_else(|| {
-                format!(
-                    "No pod found with label {}={}",
-                    lattice_common::LABEL_NAME,
-                    name
-                )
-            })?;
+    let output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig_path,
+            "get",
+            "pods",
+            "-n",
+            NAMESPACE,
+            "-o",
+            &format!("jsonpath={}", jsonpath),
+        ],
+    )
+    .map_err(|e| format!("Failed to list pods: {}", e))?;
 
-        pod.spec
-            .as_ref()
-            .and_then(|s| s.node_name.clone())
-            .ok_or_else(|| format!("Pod {} has no node assigned", name))
+    // Parse output: "service-name:node-name\n..."
+    let mut node_map: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for line in output.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            node_map.insert(parts[0], parts[1]);
+        }
+    }
+
+    let get_node = |name: &str| -> Result<&str, String> {
+        node_map.get(name).copied().ok_or_else(|| {
+            format!(
+                "No pod found with label {}={} (found: {:?})",
+                lattice_common::LABEL_NAME,
+                name,
+                node_map.keys().collect::<Vec<_>>()
+            )
+        })
     };
 
-    let pod_list = api
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| format!("Failed to list pods: {}", e))?;
-
-    let jellyfin_node = get_node(&pod_list.items, "jellyfin")?;
-    let sonarr_node = get_node(&pod_list.items, "sonarr")?;
-    let nzbget_node = get_node(&pod_list.items, "nzbget")?;
+    let jellyfin_node = get_node("jellyfin")?;
+    let sonarr_node = get_node("sonarr")?;
+    let nzbget_node = get_node("nzbget")?;
 
     if jellyfin_node != sonarr_node || jellyfin_node != nzbget_node {
         return Err(format!(
@@ -292,28 +315,41 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
 async fn wait_for_waypoint(kubeconfig_path: &str) -> Result<(), String> {
     info!("Waiting for Istio waypoint...");
 
-    let client = client_from_kubeconfig(kubeconfig_path).await?;
-    let api: Api<Deployment> = Api::namespaced(client, NAMESPACE);
-
     let timeout = Duration::from_secs(120);
     let poll_interval = Duration::from_secs(5);
     let start = std::time::Instant::now();
 
     loop {
         // Look for waypoint deployment (name pattern: *-waypoint or media-waypoint)
-        let deployments = api.list(&ListParams::default()).await;
-        if let Ok(list) = deployments {
-            if let Some(waypoint) = list.items.iter().find(|d| {
-                d.metadata
-                    .name
-                    .as_ref()
-                    .map(|n| n.contains("waypoint"))
-                    .unwrap_or(false)
-            }) {
-                if deployment_is_available(waypoint) {
-                    let name = waypoint.metadata.name.as_deref().unwrap_or("waypoint");
-                    info!("{} is ready", name);
-                    return Ok(());
+        // Use kubectl for resilience - handles retries/reconnection internally
+        let output = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "deployments",
+                "-n",
+                NAMESPACE,
+                "-o",
+                "jsonpath={range .items[*]}{.metadata.name}:{.status.availableReplicas}/{.status.replicas}{\"\\n\"}{end}",
+            ],
+        )
+        .unwrap_or_default();
+
+        // Find waypoint deployment and check if it's ready
+        for line in output.lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() == 2 && parts[0].contains("waypoint") {
+                let name = parts[0];
+                let replicas: Vec<&str> = parts[1].split('/').collect();
+                if replicas.len() == 2 {
+                    let available = replicas[0].parse::<i32>().unwrap_or(0);
+                    let desired = replicas[1].parse::<i32>().unwrap_or(0);
+                    if available > 0 && available >= desired {
+                        info!("{} is ready ({}/{})", name, available, desired);
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -369,7 +405,7 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
     info!("========================================\n");
 
     deploy_media_services(kubeconfig_path).await?;
-    wait_for_pods(kubeconfig_path).await?;
+    wait_for_deployments(kubeconfig_path).await?;
     verify_pvcs(kubeconfig_path).await?;
     verify_node_colocation(kubeconfig_path).await?;
     verify_volume_sharing(kubeconfig_path).await?;

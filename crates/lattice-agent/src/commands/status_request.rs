@@ -28,9 +28,9 @@ pub async fn handle(command_id: &str, ctx: &CommandContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_proto::AgentState;
     use std::sync::Arc;
     use tokio::sync::{mpsc, RwLock};
-    use lattice_proto::AgentState;
 
     #[tokio::test]
     async fn test_handle_status_request() {

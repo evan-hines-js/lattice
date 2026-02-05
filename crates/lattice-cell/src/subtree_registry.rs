@@ -34,6 +34,8 @@ pub struct RouteInfo {
     pub agent_id: Option<String>,
     /// Whether this cluster is the current cell itself
     pub is_self: bool,
+    /// Whether the agent is currently connected (false = temporarily unavailable)
+    pub connected: bool,
     /// Cluster info
     pub cluster: ClusterInfo,
 }
@@ -60,6 +62,7 @@ impl SubtreeRegistry {
         let self_info = RouteInfo {
             agent_id: None,
             is_self: true,
+            connected: true, // Self is always connected
             cluster: ClusterInfo {
                 name: cluster_name.clone(),
                 parent: String::new(),
@@ -127,6 +130,7 @@ impl SubtreeRegistry {
             let route = RouteInfo {
                 agent_id: Some(agent_id.to_string()),
                 is_self: false,
+                connected: true,
                 cluster,
             };
             routes.insert(route.cluster.name.clone(), route);
@@ -164,16 +168,46 @@ impl SubtreeRegistry {
             let route = RouteInfo {
                 agent_id: Some(agent_id.to_string()),
                 is_self: false,
+                connected: true,
                 cluster,
             };
             routes.insert(route.cluster.name.clone(), route);
         }
     }
 
-    /// Handle agent disconnect - remove all clusters routed via this agent
+    /// Handle agent disconnect - mark clusters as disconnected (not removed)
+    ///
+    /// The clusters are kept in the registry so the proxy can return "temporarily
+    /// unavailable" (503) instead of "not found" (404). When the agent reconnects,
+    /// handle_full_sync will update the connected status.
     pub async fn handle_agent_disconnect(&self, agent_id: &str) {
         let mut routes = self.routes.write().await;
-        routes.retain(|_, info| info.agent_id.as_deref() != Some(agent_id));
+        for (_, info) in routes.iter_mut() {
+            if info.agent_id.as_deref() == Some(agent_id) {
+                info.connected = false;
+            }
+        }
+    }
+
+    /// Handle agent reconnect - mark clusters as connected
+    ///
+    /// Called when an agent that was previously connected reconnects.
+    pub async fn handle_agent_reconnect(&self, agent_id: &str) {
+        let mut routes = self.routes.write().await;
+        for (_, info) in routes.iter_mut() {
+            if info.agent_id.as_deref() == Some(agent_id) {
+                info.connected = true;
+            }
+        }
+    }
+
+    /// Check if a cluster is currently connected (agent is online)
+    pub async fn is_connected(&self, cluster_name: &str) -> bool {
+        let routes = self.routes.read().await;
+        routes
+            .get(cluster_name)
+            .map(|r| r.connected)
+            .unwrap_or(false)
     }
 
     /// Get count of clusters in subtree
@@ -313,7 +347,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_agent_disconnect() {
+    async fn test_agent_disconnect_marks_unavailable() {
         let registry = SubtreeRegistry::new("parent".to_string());
 
         // Add clusters from two agents
@@ -333,16 +367,50 @@ mod tests {
         registry.handle_full_sync("agent-1", clusters1).await;
         registry.handle_full_sync("agent-2", clusters2).await;
 
+        // Both clusters exist and are connected
         assert!(registry.contains("from-agent-1").await);
         assert!(registry.contains("from-agent-2").await);
+        assert!(registry.is_connected("from-agent-1").await);
+        assert!(registry.is_connected("from-agent-2").await);
 
-        // Disconnect agent-1
+        // Disconnect agent-1 - cluster stays in registry but marked disconnected
         registry.handle_agent_disconnect("agent-1").await;
 
-        assert!(!registry.contains("from-agent-1").await);
+        // Cluster still exists (allows 503 "temporarily unavailable" vs 404 "not found")
+        assert!(registry.contains("from-agent-1").await);
+        // But is marked as disconnected
+        assert!(!registry.is_connected("from-agent-1").await);
+
+        // Agent-2's cluster is unaffected
         assert!(registry.contains("from-agent-2").await);
-        // Self is always preserved
+        assert!(registry.is_connected("from-agent-2").await);
+
+        // Self is always preserved and connected
         assert!(registry.contains("parent").await);
+        assert!(registry.is_connected("parent").await);
+    }
+
+    #[tokio::test]
+    async fn test_agent_reconnect_restores_connected() {
+        let registry = SubtreeRegistry::new("parent".to_string());
+
+        let clusters = vec![ClusterInfo {
+            name: "child-1".to_string(),
+            parent: "parent".to_string(),
+            phase: "Ready".to_string(),
+            labels: HashMap::new(),
+        }];
+
+        registry.handle_full_sync("agent-1", clusters.clone()).await;
+        assert!(registry.is_connected("child-1").await);
+
+        // Disconnect
+        registry.handle_agent_disconnect("agent-1").await;
+        assert!(!registry.is_connected("child-1").await);
+
+        // Reconnect
+        registry.handle_agent_reconnect("agent-1").await;
+        assert!(registry.is_connected("child-1").await);
     }
 
     #[tokio::test]

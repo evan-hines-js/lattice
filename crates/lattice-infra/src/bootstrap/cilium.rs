@@ -21,7 +21,10 @@ use lattice_common::policy::{
     ClusterwideMetadata, DnsMatch, DnsRules, EnableDefaultDeny, EndpointSelector, FqdnSelector,
     MatchExpression, PolicyMetadata,
 };
-use lattice_common::{DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    DEFAULT_AUTH_PROXY_PORT, DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT,
+    LATTICE_SYSTEM_NAMESPACE,
+};
 
 use super::{charts_dir, run_helm_template};
 use crate::system_namespaces;
@@ -427,6 +430,14 @@ pub fn generate_operator_network_policy(
                         },
                         CiliumPort {
                             port: DEFAULT_GRPC_PORT.to_string(),
+                            protocol: "TCP".to_string(),
+                        },
+                        CiliumPort {
+                            port: DEFAULT_PROXY_PORT.to_string(),
+                            protocol: "TCP".to_string(),
+                        },
+                        CiliumPort {
+                            port: DEFAULT_AUTH_PROXY_PORT.to_string(),
                             protocol: "TCP".to_string(),
                         },
                     ],

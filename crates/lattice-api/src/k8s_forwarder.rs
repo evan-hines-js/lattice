@@ -33,8 +33,7 @@ use crate::error::Error;
 use crate::routing::strip_cluster_prefix;
 use crate::server::AppState;
 use lattice_cell::{
-    tunnel_request_resilient, AgentConnectivity, K8sRequestParams, ResilientTunnelConfig,
-    TunnelError, DEFAULT_TIMEOUT,
+    tunnel_request_resilient, K8sRequestParams, ResilientTunnelConfig, TunnelError, DEFAULT_TIMEOUT,
 };
 use lattice_proto::is_watch_query;
 
@@ -426,12 +425,9 @@ async fn route_to_child_cluster(
         .as_ref()
         .ok_or_else(|| Error::Internal("Agent registry not configured".into()))?;
 
-    if !agent_registry.is_connected(agent_id) {
-        return Err(Error::ClusterNotFound(format!(
-            "Agent not connected: {}",
-            agent_id
-        )));
-    }
+    // Don't check is_connected here - let tunnel_request_resilient handle it.
+    // The resilient tunnel will wait up to 30s for the agent to reconnect,
+    // providing seamless handling of brief disconnections during chaos testing.
 
     let method = request.method().to_string();
     let uri = request.uri().clone();
@@ -483,9 +479,7 @@ fn build_streaming_response(response: StreamingHttpResponse) -> Result<Response<
     debug!(status = response.status, "Starting streaming response");
 
     Response::builder()
-        .status(
-            StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-        )
+        .status(StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
         .header("Content-Type", response.content_type)
         .header("Transfer-Encoding", "chunked")
         .body(Body::from_stream(response.stream))
@@ -523,11 +517,7 @@ fn strip_impersonation_headers(request: Request<Body>) -> Request<Body> {
     let extra_headers: Vec<_> = parts
         .headers
         .keys()
-        .filter(|k| {
-            k.as_str()
-                .to_lowercase()
-                .starts_with("impersonate-extra-")
-        })
+        .filter(|k| k.as_str().to_lowercase().starts_with("impersonate-extra-"))
         .cloned()
         .collect();
 

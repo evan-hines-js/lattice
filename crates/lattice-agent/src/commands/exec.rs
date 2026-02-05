@@ -1,6 +1,8 @@
 //! Exec command handlers (ExecRequest, ExecStdin, ExecResize, ExecCancel).
 
-use lattice_proto::{agent_message::Payload, AgentMessage, ExecCancel, ExecData, ExecRequest, ExecResize};
+use lattice_proto::{
+    agent_message::Payload, AgentMessage, ExecCancel, ExecData, ExecRequest, ExecResize,
+};
 use tracing::{debug, error};
 
 use crate::exec::stream_id;
@@ -33,7 +35,13 @@ async fn handle_local_exec(req: &ExecRequest, ctx: &CommandContext) {
         Ok(c) => c,
         Err(e) => {
             error!(error = %e, "Failed to create K8s client for exec");
-            send_exec_error(&ctx.message_tx, &ctx.cluster_name, &req.request_id, &format!("Failed to create K8s client: {}", e)).await;
+            send_exec_error(
+                &ctx.message_tx,
+                &ctx.cluster_name,
+                &req.request_id,
+                &format!("Failed to create K8s client: {}", e),
+            )
+            .await;
             return;
         }
     };
@@ -105,7 +113,13 @@ async fn handle_forwarded_exec(req: &ExecRequest, ctx: &CommandContext) {
                             error = %e,
                             "Failed to forward exec request"
                         );
-                        send_exec_error(&message_tx, &cluster_name, &request_id, &format!("exec forwarding failed: {}", e)).await;
+                        send_exec_error(
+                            &message_tx,
+                            &cluster_name,
+                            &request_id,
+                            &format!("exec forwarding failed: {}", e),
+                        )
+                        .await;
                     }
                 }
             });
@@ -116,7 +130,13 @@ async fn handle_forwarded_exec(req: &ExecRequest, ctx: &CommandContext) {
                 target = %target,
                 "No exec forwarder configured, returning error"
             );
-            send_exec_error(&ctx.message_tx, &ctx.cluster_name, &request_id, &format!("cluster '{}' not found in subtree", target)).await;
+            send_exec_error(
+                &ctx.message_tx,
+                &ctx.cluster_name,
+                &request_id,
+                &format!("cluster '{}' not found in subtree", target),
+            )
+            .await;
         }
     }
 }
@@ -131,7 +151,10 @@ pub async fn handle_exec_stdin(data: &ExecData, ctx: &CommandContext) {
 
     tokio::spawn(async move {
         // Check if it's a local exec session
-        if exec_registry.send_stdin(&request_id, data_bytes.clone()).await {
+        if exec_registry
+            .send_stdin(&request_id, data_bytes.clone())
+            .await
+        {
             return;
         }
         // Otherwise, try forwarded sessions

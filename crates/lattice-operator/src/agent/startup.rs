@@ -36,8 +36,13 @@ pub async fn start_agent_with_retry(
     let max_retry_delay = Duration::from_secs(5);
 
     loop {
-        match start_agent_if_needed(client, cluster_name, forwarder.clone(), exec_forwarder.clone())
-            .await
+        match start_agent_if_needed(
+            client,
+            cluster_name,
+            forwarder.clone(),
+            exec_forwarder.clone(),
+        )
+        .await
         {
             Ok(Some(agent)) => {
                 tracing::info!("Agent connection to parent cell established");

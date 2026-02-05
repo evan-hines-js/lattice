@@ -392,5 +392,4 @@ mod tests {
         assert_eq!(resp.status_code, 0);
         assert!(resp.error.is_empty());
     }
-
 }

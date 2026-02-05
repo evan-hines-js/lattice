@@ -77,13 +77,9 @@ pub async fn proxy_handler(
     }
 
     // Authenticate and authorize
-    let identity = authenticate_and_authorize(
-        &state.auth,
-        &state.cedar,
-        request.headers(),
-        cluster_name,
-    )
-    .await?;
+    let identity =
+        authenticate_and_authorize(&state.auth, &state.cedar, request.headers(), cluster_name)
+            .await?;
 
     // Route to the target cluster
     route_to_cluster(&state, cluster_name, &identity, request).await
@@ -118,13 +114,9 @@ pub async fn exec_handler(
     );
 
     // Authenticate and authorize
-    let identity = authenticate_and_authorize(
-        &state.auth,
-        &state.cedar,
-        request.headers(),
-        cluster_name,
-    )
-    .await?;
+    let identity =
+        authenticate_and_authorize(&state.auth, &state.cedar, request.headers(), cluster_name)
+            .await?;
 
     // Strip the /clusters/{cluster_name} prefix from the path
     let api_path = strip_cluster_prefix(path, cluster_name);

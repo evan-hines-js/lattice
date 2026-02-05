@@ -803,6 +803,9 @@ mod tests {
         targets3.add("a", "/tmp/a", None);
         targets3.add("b", "/tmp/b", None);
         let delays3: Vec<u64> = (0..5).map(|_| targets3.random_delay(60, 120)).collect();
-        assert_ne!(delays1, delays3, "Different seed should produce different delays");
+        assert_ne!(
+            delays1, delays3,
+            "Different seed should produce different delays"
+        );
     }
 }
