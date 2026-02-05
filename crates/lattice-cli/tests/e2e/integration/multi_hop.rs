@@ -39,7 +39,7 @@ use tokio::time::sleep;
 use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
-use super::super::helpers::run_cmd;
+use super::super::helpers::{run_cmd, run_kubectl_with_retry};
 
 // ============================================================================
 // Constants
@@ -123,19 +123,17 @@ async fn ensure_namespace(kubeconfig: &str) -> Result<(), String> {
         MULTI_HOP_NAMESPACE
     );
 
-    // Check if namespace exists
-    let exists = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "namespace",
-            MULTI_HOP_NAMESPACE,
-            "-o",
-            "name",
-        ],
-    )
+    // Check if namespace exists (with retry for proxy failures)
+    let exists = run_kubectl_with_retry(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "namespace",
+        MULTI_HOP_NAMESPACE,
+        "-o",
+        "name",
+    ])
+    .await
     .is_ok();
 
     if exists {
@@ -147,16 +145,14 @@ async fn ensure_namespace(kubeconfig: &str) -> Result<(), String> {
     }
 
     // Create namespace
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "create",
-            "namespace",
-            MULTI_HOP_NAMESPACE,
-        ],
-    )
+    run_kubectl_with_retry(&[
+        "--kubeconfig",
+        kubeconfig,
+        "create",
+        "namespace",
+        MULTI_HOP_NAMESPACE,
+    ])
+    .await
     .map_err(|e| format!("Failed to create namespace {}: {}", MULTI_HOP_NAMESPACE, e))?;
 
     info!(
@@ -213,23 +209,21 @@ async fn test_create_pod(kubeconfig: &str) -> Result<(), String> {
     // The pod echoes a marker then sleeps to stay running for log/exec tests
     let pod_command = format!("echo '{}'; sleep 300", LOG_MARKER);
 
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "run",
-            TEST_POD_NAME,
-            "-n",
-            MULTI_HOP_NAMESPACE,
-            "--image=busybox:latest",
-            "--restart=Never",
-            "--",
-            "sh",
-            "-c",
-            &pod_command,
-        ],
-    )
+    run_kubectl_with_retry(&[
+        "--kubeconfig",
+        kubeconfig,
+        "run",
+        TEST_POD_NAME,
+        "-n",
+        MULTI_HOP_NAMESPACE,
+        "--image=busybox:latest",
+        "--restart=Never",
+        "--",
+        "sh",
+        "-c",
+        &pod_command,
+    ])
+    .await
     .map_err(|e| format!("Failed to create pod: {}", e))?;
 
     info!("[Integration/MultiHop] SUCCESS: Pod created through 2-hop proxy");
@@ -251,21 +245,19 @@ async fn test_wait_pod_ready(kubeconfig: &str) -> Result<(), String> {
             ));
         }
 
-        // Check pod phase
-        let phase = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig,
-                "get",
-                "pod",
-                TEST_POD_NAME,
-                "-n",
-                MULTI_HOP_NAMESPACE,
-                "-o",
-                "jsonpath={.status.phase}",
-            ],
-        )
+        // Check pod phase (with retry for proxy failures)
+        let phase = run_kubectl_with_retry(&[
+            "--kubeconfig",
+            kubeconfig,
+            "get",
+            "pod",
+            TEST_POD_NAME,
+            "-n",
+            MULTI_HOP_NAMESPACE,
+            "-o",
+            "jsonpath={.status.phase}",
+        ])
+        .await
         .unwrap_or_default();
 
         match phase.trim() {
@@ -294,18 +286,16 @@ async fn test_stream_logs(kubeconfig: &str) -> Result<(), String> {
     info!("[Integration/MultiHop] Test 3: Streaming logs through 2-hop proxy...");
 
     // Use --tail to get recent logs (simpler than --follow for testing)
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "logs",
-            TEST_POD_NAME,
-            "-n",
-            MULTI_HOP_NAMESPACE,
-            "--tail=10",
-        ],
-    )
+    let output = run_kubectl_with_retry(&[
+        "--kubeconfig",
+        kubeconfig,
+        "logs",
+        TEST_POD_NAME,
+        "-n",
+        MULTI_HOP_NAMESPACE,
+        "--tail=10",
+    ])
+    .await
     .map_err(|e| format!("Failed to stream logs: {}", e))?;
 
     if !output.contains(LOG_MARKER) {
@@ -325,20 +315,18 @@ async fn test_exec_command(kubeconfig: &str) -> Result<(), String> {
     info!("[Integration/MultiHop] Test 4: Exec command through 2-hop proxy (WebSocket)...");
 
     // First check if pod is still running (it might have completed)
-    let phase = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "get",
-            "pod",
-            TEST_POD_NAME,
-            "-n",
-            MULTI_HOP_NAMESPACE,
-            "-o",
-            "jsonpath={.status.phase}",
-        ],
-    )
+    let phase = run_kubectl_with_retry(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "pod",
+        TEST_POD_NAME,
+        "-n",
+        MULTI_HOP_NAMESPACE,
+        "-o",
+        "jsonpath={.status.phase}",
+    ])
+    .await
     .unwrap_or_default();
 
     if phase.trim() != "Running" {
@@ -349,20 +337,18 @@ async fn test_exec_command(kubeconfig: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    let output = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "exec",
-            TEST_POD_NAME,
-            "-n",
-            MULTI_HOP_NAMESPACE,
-            "--",
-            "echo",
-            EXEC_MARKER,
-        ],
-    )
+    let output = run_kubectl_with_retry(&[
+        "--kubeconfig",
+        kubeconfig,
+        "exec",
+        TEST_POD_NAME,
+        "-n",
+        MULTI_HOP_NAMESPACE,
+        "--",
+        "echo",
+        EXEC_MARKER,
+    ])
+    .await
     .map_err(|e| format!("Failed to exec into pod: {}", e))?;
 
     if !output.contains(EXEC_MARKER) {
@@ -381,19 +367,17 @@ async fn test_exec_command(kubeconfig: &str) -> Result<(), String> {
 async fn test_delete_pod(kubeconfig: &str) -> Result<(), String> {
     info!("[Integration/MultiHop] Test 5: Deleting pod through 2-hop proxy...");
 
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "pod",
-            TEST_POD_NAME,
-            "-n",
-            MULTI_HOP_NAMESPACE,
-            "--wait=false",
-        ],
-    )
+    run_kubectl_with_retry(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "pod",
+        TEST_POD_NAME,
+        "-n",
+        MULTI_HOP_NAMESPACE,
+        "--wait=false",
+    ])
+    .await
     .map_err(|e| format!("Failed to delete pod: {}", e))?;
 
     info!("[Integration/MultiHop] SUCCESS: Pod deleted through 2-hop proxy");

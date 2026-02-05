@@ -21,7 +21,8 @@ pub async fn handle(command_id: &str, complete: &MoveComplete, ctx: &CommandCont
     let message_tx = ctx.message_tx.clone();
     let capi_cluster_name = complete.cluster_name.clone();
     let target_namespace = complete.target_namespace.clone();
-    let resources = distributable_resources_from_proto(complete.resources.clone().unwrap_or_default());
+    let resources =
+        distributable_resources_from_proto(complete.resources.clone().unwrap_or_default());
     let manifests = complete.manifests.clone();
 
     info!(
@@ -62,8 +63,12 @@ pub async fn handle(command_id: &str, complete: &MoveComplete, ctx: &CommandCont
         };
 
         // Patch kubeconfig to use kubernetes.default.svc (avoids hairpinning)
-        if let Err(e) =
-            patch_kubeconfig_for_self_management(&capi_cluster_name, &target_namespace, provider.as_ref()).await
+        if let Err(e) = patch_kubeconfig_for_self_management(
+            &capi_cluster_name,
+            &target_namespace,
+            provider.as_ref(),
+        )
+        .await
         {
             warn!(error = %e, "Failed to patch kubeconfig for self-management");
         }
@@ -134,8 +139,7 @@ pub async fn check_local_pivot_complete(
     cluster_name: &str,
     kube_provider: &dyn KubeClientProvider,
 ) -> bool {
-    let Some(client) =
-        crate::kube_client::create_client_logged(kube_provider, "pivot check").await
+    let Some(client) = crate::kube_client::create_client_logged(kube_provider, "pivot check").await
     else {
         return false;
     };

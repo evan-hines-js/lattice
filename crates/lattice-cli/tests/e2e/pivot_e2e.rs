@@ -110,28 +110,15 @@ async fn run_full_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 6.6: Test Cedar policy enforcement for proxy access
     // =========================================================================
-    info!("[Phase 6.6] Testing Cedar policy enforcement...");
+    // Pause chaos on mgmt cluster only - we want to test resilience to workload
+    // operator restarts. The retry logic should handle "cluster not found" errors
+    // when the agent temporarily disconnects.
+    setup_result.pause_chaos_on_cluster(MGMT_CLUSTER_NAME);
+    info!("[Phase 6.6] Testing Cedar policy enforcement (chaos paused on mgmt)...");
 
     // Test Cedar policies for access from mgmt -> workload
+    // (Multi-hop tests in Phase 6.7 validate the full mgmt -> workload -> workload2 chain)
     integration::cedar::run_cedar_hierarchy_tests(&ctx, WORKLOAD_CLUSTER_NAME).await?;
-
-    // Test Cedar policies for access from workload -> workload2 (if workload2 exists)
-    if ctx.has_workload2() {
-        if let Some(workload_kubeconfig) = &ctx.workload_kubeconfig {
-            let mut workload_ctx = super::context::InfraContext::new(
-                workload_kubeconfig.clone(),
-                None,
-                None,
-                ctx.provider,
-            );
-            // Pass workload's proxy URL so Cedar tests use the existing port-forward
-            if let Some(proxy_url) = &ctx.workload_proxy_url {
-                workload_ctx = workload_ctx.with_mgmt_proxy_url(proxy_url.clone());
-            }
-            integration::cedar::run_cedar_hierarchy_tests(&workload_ctx, WORKLOAD2_CLUSTER_NAME)
-                .await?;
-        }
-    }
 
     info!("SUCCESS: Cedar policy enforcement verified!");
 
@@ -212,7 +199,8 @@ async fn run_full_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 8: Delete workload (unpivot to mgmt)
     // =========================================================================
-    // Re-enable chaos during cluster deletion to test unpivot resilience
+    // Resume chaos on mgmt cluster for deletion/unpivot testing
+    setup_result.resume_chaos_on_cluster(MGMT_CLUSTER_NAME, &ctx.mgmt_kubeconfig, None);
     setup_result.restart_chaos();
 
     info!("[Phase 8] Deleting workload cluster (unpivot to mgmt)...");

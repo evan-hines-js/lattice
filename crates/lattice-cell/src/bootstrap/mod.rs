@@ -634,7 +634,9 @@ impl DefaultManifestGenerator {
                             liveness_probe: Some(Probe {
                                 http_get: Some(HTTPGetAction {
                                     path: Some("/healthz".to_string()),
-                                    port: IntOrString::Int(lattice_common::DEFAULT_HEALTH_PORT as i32),
+                                    port: IntOrString::Int(
+                                        lattice_common::DEFAULT_HEALTH_PORT as i32,
+                                    ),
                                     ..Default::default()
                                 }),
                                 initial_delay_seconds: Some(5),
@@ -644,7 +646,9 @@ impl DefaultManifestGenerator {
                             readiness_probe: Some(Probe {
                                 http_get: Some(HTTPGetAction {
                                     path: Some("/readyz".to_string()),
-                                    port: IntOrString::Int(lattice_common::DEFAULT_HEALTH_PORT as i32),
+                                    port: IntOrString::Int(
+                                        lattice_common::DEFAULT_HEALTH_PORT as i32,
+                                    ),
                                     ..Default::default()
                                 }),
                                 initial_delay_seconds: Some(5),

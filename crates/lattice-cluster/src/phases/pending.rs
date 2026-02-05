@@ -173,8 +173,12 @@ async fn handle_child_cluster(
                 let kube = Arc::clone(&ctx.kube);
                 let target_namespace = capi_namespace.clone();
                 async move {
-                    kube.copy_secret_to_namespace(&secret_name, &source_namespace, &target_namespace)
-                        .await
+                    kube.copy_secret_to_namespace(
+                        &secret_name,
+                        &source_namespace,
+                        &target_namespace,
+                    )
+                    .await
                 }
             })
             .collect();
@@ -186,7 +190,9 @@ async fn handle_child_cluster(
 
     // Apply CAPI manifests to the cluster-specific namespace
     info!(count = manifests.len(), namespace = %capi_namespace, "applying CAPI manifests");
-    ctx.capi.apply_manifests(&manifests, &capi_namespace).await?;
+    ctx.capi
+        .apply_manifests(&manifests, &capi_namespace)
+        .await?;
 
     // Transition to Provisioning
     info!("transitioning to Provisioning phase");

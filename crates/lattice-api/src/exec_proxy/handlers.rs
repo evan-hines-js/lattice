@@ -289,8 +289,11 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
 ///
 /// Reads from the async reader in 4KB chunks and sends them to the channel.
 /// Stops when the reader is exhausted, errors, or the channel closes.
-async fn forward_reader_to_channel<R, T, F>(mut reader: R, tx: tokio::sync::mpsc::Sender<T>, transform: F)
-where
+async fn forward_reader_to_channel<R, T, F>(
+    mut reader: R,
+    tx: tokio::sync::mpsc::Sender<T>,
+    transform: F,
+) where
     R: AsyncRead + Unpin,
     F: Fn(Vec<u8>) -> T,
 {

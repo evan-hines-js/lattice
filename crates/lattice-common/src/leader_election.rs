@@ -191,7 +191,8 @@ impl LeaderElector {
 
                 if is_expired {
                     let transitions = spec.and_then(|s| s.lease_transitions).unwrap_or(0);
-                    self.take_over_lease(&api, resource_version, now, transitions).await
+                    self.take_over_lease(&api, resource_version, now, transitions)
+                        .await
                 } else {
                     // Lease held by someone else and not expired
                     Ok(false)
@@ -243,18 +244,14 @@ impl LeaderElector {
         existing: &Lease,
         now: chrono::DateTime<Utc>,
     ) -> Result<bool, LeaderElectionError> {
-        let resource_version = existing
-            .metadata
-            .resource_version
-            .as_ref()
-            .ok_or_else(|| LeaderElectionError::Kube(kube::Error::Api(
-                kube::error::ErrorResponse {
-                    status: "Failed".to_string(),
-                    message: "Lease missing resourceVersion".to_string(),
-                    reason: "Invalid".to_string(),
-                    code: 500,
-                },
-            )))?;
+        let resource_version = existing.metadata.resource_version.as_ref().ok_or_else(|| {
+            LeaderElectionError::Kube(kube::Error::Api(kube::error::ErrorResponse {
+                status: "Failed".to_string(),
+                message: "Lease missing resourceVersion".to_string(),
+                reason: "Invalid".to_string(),
+                code: 500,
+            }))
+        })?;
 
         // Build updated lease with same resourceVersion for atomic update
         let mut updated = existing.clone();
@@ -450,8 +447,7 @@ impl LeaderGuard {
     /// leader pod receives traffic. Kubernetes readiness probes handle removal
     /// of unresponsive pods from Endpoints.
     pub async fn claim_traffic(&self, pod_name: &str) -> Result<(), LeaderElectionError> {
-        let api: Api<Pod> =
-            Api::namespaced(self.elector.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let api: Api<Pod> = Api::namespaced(self.elector.client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         let patch = json!({
             "metadata": {

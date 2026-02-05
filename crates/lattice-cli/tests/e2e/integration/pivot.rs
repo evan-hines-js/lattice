@@ -17,7 +17,7 @@
 use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
-use super::super::helpers::{delete_cluster_and_wait, watch_cluster_phases};
+use super::super::helpers::delete_cluster_and_wait;
 use super::super::providers::InfraProvider;
 
 /// Delete a cluster and verify CAPI resources unpivot to parent
@@ -68,32 +68,6 @@ pub async fn delete_workload_and_verify_unpivot(
         ctx.provider,
     )
     .await
-}
-
-/// Watch a LatticeCluster and wait for it to reach Ready state
-///
-/// # Arguments
-///
-/// * `client` - Kubernetes client connected to the cluster hosting the LatticeCluster
-/// * `cluster_name` - Name of the cluster to watch
-/// * `timeout_secs` - Optional timeout in seconds (defaults to 30 minutes)
-pub async fn wait_for_cluster_ready(
-    client: &kube::Client,
-    cluster_name: &str,
-    timeout_secs: Option<u64>,
-) -> Result<(), String> {
-    info!(
-        "[Integration/Pivot] Waiting for LatticeCluster {} to be Ready...",
-        cluster_name
-    );
-
-    watch_cluster_phases(client, cluster_name, timeout_secs).await?;
-
-    info!(
-        "[Integration/Pivot] LatticeCluster {} is Ready",
-        cluster_name
-    );
-    Ok(())
 }
 
 /// Start cluster deletion in background

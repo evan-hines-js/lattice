@@ -455,8 +455,15 @@ async fn execute_portforward(
     let reader_ct = cancel_token.clone();
 
     let reader_handle = tokio::spawn(async move {
-        spawn_reader_task(reader, stream_id::STDOUT, reader_rid, reader_cn, reader_tx, reader_ct)
-            .await;
+        spawn_reader_task(
+            reader,
+            stream_id::STDOUT,
+            reader_rid,
+            reader_cn,
+            reader_tx,
+            reader_ct,
+        )
+        .await;
     });
 
     // Handle stdin (data from client) and write to pod

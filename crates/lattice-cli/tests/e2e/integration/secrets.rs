@@ -30,11 +30,11 @@ use tracing::info;
 
 use lattice_operator::crd::{
     ContainerSpec, DeploySpec, LatticeService, LatticeServiceSpec, PortSpec, ReplicaSpec,
-    ResourceSpec, ResourceType, ServicePhase, ServicePortsSpec,
+    ResourceSpec, ResourceType, ServicePortsSpec,
 };
 
 use super::super::context::InfraContext;
-use super::super::helpers::{client_from_kubeconfig, run_cmd};
+use super::super::helpers::{client_from_kubeconfig, ensure_fresh_namespace, run_cmd};
 use super::cedar::apply_e2e_default_policy;
 
 /// Test namespace for secrets integration tests
@@ -62,7 +62,14 @@ const VAULT_HOST_URL: &str = "http://127.0.0.1:8200";
 /// Check if secrets tests should run (Vault is reachable)
 pub fn secrets_tests_enabled() -> bool {
     std::process::Command::new("curl")
-        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", &format!("{}/v1/sys/health", VAULT_HOST_URL)])
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            &format!("{}/v1/sys/health", VAULT_HOST_URL),
+        ])
         .output()
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).starts_with("200"))
         .unwrap_or(false)
@@ -73,11 +80,23 @@ async fn setup_vault_test_secrets() -> Result<(), String> {
     info!("[Secrets/Vault] Setting up test secrets in Vault...");
 
     let test_secrets = [
-        ("database/prod/credentials", r#"{"data":{"username":"admin","password":"secret123"}}"#),
-        ("services/all-secrets", r#"{"data":{"api_key":"key123","api_secret":"secret456","endpoint":"https://api.example.com"}}"#),
-        ("database/credentials", r#"{"data":{"username":"dbuser","password":"dbpass"}}"#),
+        (
+            "database/prod/credentials",
+            r#"{"data":{"username":"admin","password":"secret123"}}"#,
+        ),
+        (
+            "services/all-secrets",
+            r#"{"data":{"api_key":"key123","api_secret":"secret456","endpoint":"https://api.example.com"}}"#,
+        ),
+        (
+            "database/credentials",
+            r#"{"data":{"username":"dbuser","password":"dbpass"}}"#,
+        ),
         ("services/api-key", r#"{"data":{"key":"my-api-key-12345"}}"#),
-        ("pki/certificates", r#"{"data":{"cert":"-----BEGIN CERTIFICATE-----...","key":"-----BEGIN PRIVATE KEY-----..."}}"#),
+        (
+            "pki/certificates",
+            r#"{"data":{"cert":"-----BEGIN CERTIFICATE-----...","key":"-----BEGIN PRIVATE KEY-----..."}}"#,
+        ),
     ];
 
     let client = reqwest::Client::new();
@@ -96,7 +115,10 @@ async fn setup_vault_test_secrets() -> Result<(), String> {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(format!("Failed to create secret at {}: {} - {}", path, status, body));
+            return Err(format!(
+                "Failed to create secret at {}: {} - {}",
+                path, status, body
+            ));
         }
     }
 
@@ -135,9 +157,14 @@ stringData:
             .map_err(|e| format!("Failed to write to stdin: {}", e))?;
     }
 
-    let output = child.wait_with_output().map_err(|e| format!("kubectl failed: {}", e))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("kubectl failed: {}", e))?;
     if !output.status.success() {
-        return Err(format!("kubectl apply failed: {}", String::from_utf8_lossy(&output.stderr)));
+        return Err(format!(
+            "kubectl apply failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
     info!("[Secrets/Setup] Vault token secret created");
@@ -180,9 +207,14 @@ spec:
             .map_err(|e| format!("Failed to write to stdin: {}", e))?;
     }
 
-    let output = child.wait_with_output().map_err(|e| format!("kubectl failed: {}", e))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("kubectl failed: {}", e))?;
     if !output.status.success() {
-        return Err(format!("kubectl apply failed: {}", String::from_utf8_lossy(&output.stderr)));
+        return Err(format!(
+            "kubectl apply failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
     info!("[Secrets/Setup] SecretsProvider created");
@@ -255,55 +287,6 @@ pub async fn setup_vault_infrastructure(kubeconfig: &str) -> Result<(), String> 
 // =============================================================================
 // Helper Functions
 // =============================================================================
-
-/// Ensure a fresh namespace exists
-async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> Result<(), String> {
-    // Check if namespace exists
-    let ns_exists = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "get",
-            "namespace",
-            namespace,
-            "-o",
-            "name",
-        ],
-    )
-    .is_ok();
-
-    if ns_exists {
-        info!("[Secrets] Namespace {} exists, deleting...", namespace);
-        let _ = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "delete",
-                "namespace",
-                namespace,
-                "--wait=true",
-                "--timeout=60s",
-            ],
-        );
-        sleep(Duration::from_secs(5)).await;
-    }
-
-    info!("[Secrets] Creating fresh namespace {}...", namespace);
-    run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig_path,
-            "create",
-            "namespace",
-            namespace,
-        ],
-    )?;
-
-    Ok(())
-}
 
 /// Create a LatticeService with secret resources
 fn create_service_with_secrets(
@@ -388,13 +371,13 @@ async fn wait_for_service_ready(
     namespace: &str,
     name: &str,
 ) -> Result<(), String> {
-    let client = client_from_kubeconfig(kubeconfig_path).await?;
-    let api: Api<LatticeService> = Api::namespaced(client, namespace);
-
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(120);
 
-    info!("[Secrets] Waiting for LatticeService {} to be Ready...", name);
+    info!(
+        "[Secrets] Waiting for LatticeService {} to be Ready...",
+        name
+    );
 
     loop {
         if start.elapsed() > timeout {
@@ -404,29 +387,50 @@ async fn wait_for_service_ready(
             ));
         }
 
-        match api.get(name).await {
-            Ok(svc) => {
-                let phase = svc
-                    .status
-                    .as_ref()
-                    .map(|s| s.phase.clone())
-                    .unwrap_or(ServicePhase::Pending);
+        // Use kubectl for resilience - handles retries/reconnection internally
+        let output = run_cmd(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "latticeservice",
+                name,
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={.status.phase}",
+            ],
+        );
 
-                info!("[Secrets] LatticeService {} phase: {:?}", name, phase);
+        match output {
+            Ok(phase) => {
+                let phase = phase.trim();
+                info!("[Secrets] LatticeService {} phase: {}", name, phase);
 
-                if phase == ServicePhase::Ready {
+                if phase == "Ready" {
                     info!("[Secrets] LatticeService {} is Ready!", name);
                     return Ok(());
                 }
 
-                if phase == ServicePhase::Failed {
-                    let message = svc
-                        .status
-                        .as_ref()
-                        .and_then(|s| s.conditions.first())
-                        .map(|c| c.message.clone())
-                        .unwrap_or_else(|| "Unknown error".to_string());
-                    return Err(format!("LatticeService {} failed: {}", name, message));
+                if phase == "Failed" {
+                    // Get error message
+                    let msg = run_cmd(
+                        "kubectl",
+                        &[
+                            "--kubeconfig",
+                            kubeconfig_path,
+                            "get",
+                            "latticeservice",
+                            name,
+                            "-n",
+                            namespace,
+                            "-o",
+                            "jsonpath={.status.conditions[0].message}",
+                        ],
+                    )
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                    return Err(format!("LatticeService {} failed: {}", name, msg));
                 }
             }
             Err(e) => {
@@ -467,9 +471,7 @@ async fn verify_external_secret(
         serde_json::from_str(&output).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
     // Verify apiVersion
-    let api_version = json["apiVersion"]
-        .as_str()
-        .ok_or("Missing apiVersion")?;
+    let api_version = json["apiVersion"].as_str().ok_or("Missing apiVersion")?;
     assert_eq!(
         api_version, "external-secrets.io/v1beta1",
         "ExternalSecret should have correct apiVersion"
@@ -616,9 +618,7 @@ async fn verify_synced_secret(
 
             // Verify data keys if specified
             if let Some(keys) = expected_keys {
-                let data = json["data"]
-                    .as_object()
-                    .ok_or("Secret should have data")?;
+                let data = json["data"].as_object().ok_or("Secret should have data")?;
 
                 for key in keys {
                     if !data.contains_key(*key) {

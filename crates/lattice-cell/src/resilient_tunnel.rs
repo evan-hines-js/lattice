@@ -179,11 +179,8 @@ async fn tunnel_watch_resilient(
             };
 
             // Stream responses to client, tracking resourceVersion
-            let disconnect = stream_watch_responses(
-                response_rx,
-                &body_tx,
-                &mut current_params,
-            ).await;
+            let disconnect =
+                stream_watch_responses(response_rx, &body_tx, &mut current_params).await;
 
             if !disconnect || !resilient_enabled {
                 break;
@@ -219,7 +216,9 @@ fn get_command_tx(
     registry: &SharedAgentRegistry,
     cluster_name: &str,
 ) -> Result<mpsc::Sender<lattice_proto::CellCommand>, TunnelError> {
-    let agent = registry.get(cluster_name).ok_or(TunnelError::ChannelClosed)?;
+    let agent = registry
+        .get(cluster_name)
+        .ok_or(TunnelError::ChannelClosed)?;
     Ok(agent.command_tx.clone())
 }
 
@@ -242,10 +241,7 @@ async fn tunnel_and_receive(
 
 /// Check if an error is retryable (worth waiting for reconnect)
 fn is_retryable(e: &TunnelError) -> bool {
-    matches!(
-        e,
-        TunnelError::ChannelClosed | TunnelError::SendFailed(_)
-    )
+    matches!(e, TunnelError::ChannelClosed | TunnelError::SendFailed(_))
 }
 
 /// Wait for agent reconnection
@@ -370,11 +366,9 @@ mod tests {
 
     #[test]
     fn test_extract_resource_version() {
-        let event = br#"{"type":"ADDED","object":{"metadata":{"resourceVersion":"12345","name":"test"}}}"#;
-        assert_eq!(
-            extract_resource_version(event),
-            Some("12345".to_string())
-        );
+        let event =
+            br#"{"type":"ADDED","object":{"metadata":{"resourceVersion":"12345","name":"test"}}}"#;
+        assert_eq!(extract_resource_version(event), Some("12345".to_string()));
     }
 
     #[test]

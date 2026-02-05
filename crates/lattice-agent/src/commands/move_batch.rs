@@ -1,6 +1,9 @@
 //! Move batch command handler.
 
-use lattice_proto::{agent_message::Payload, AgentMessage, MoveObjectAck, MoveObjectBatch, MoveObjectError, UidMapping};
+use lattice_proto::{
+    agent_message::Payload, AgentMessage, MoveObjectAck, MoveObjectBatch, MoveObjectError,
+    UidMapping,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 

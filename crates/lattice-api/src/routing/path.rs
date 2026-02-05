@@ -117,5 +117,4 @@ mod tests {
     fn test_extract_cluster_from_path_incomplete() {
         assert_eq!(extract_cluster_from_path("/clusters/"), None);
     }
-
 }

@@ -4,7 +4,10 @@ use lattice_proto::{agent_message::Payload, AgentMessage, KubernetesRequest, Kub
 use tracing::{debug, error};
 
 use crate::watch::execute_watch;
-use crate::{build_cluster_not_found_response, build_k8s_status_response, execute_k8s_request, is_watch_request};
+use crate::{
+    build_cluster_not_found_response, build_k8s_status_response, execute_k8s_request,
+    is_watch_request,
+};
 
 use super::CommandContext;
 

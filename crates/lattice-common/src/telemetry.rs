@@ -130,9 +130,8 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<Option<PrometheusHandle
     };
 
     // Build tracing subscriber layers
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("info,lattice=debug,kube=info,tower=warn,hyper=warn")
-    });
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,lattice=debug,kube=info,tower=warn,hyper=warn"));
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .json()

@@ -702,10 +702,7 @@ mod tests {
             username: "alice@example.com".to_string(),
             groups: vec![],
         };
-        assert!(engine
-            .authorize(&alice, "prod-frontend")
-            .await
-            .is_ok());
+        assert!(engine.authorize(&alice, "prod-frontend").await.is_ok());
 
         // Alice cannot access other clusters
         assert!(engine.authorize(&alice, "staging").await.is_err());
@@ -715,10 +712,7 @@ mod tests {
             username: "bob@example.com".to_string(),
             groups: vec![],
         };
-        assert!(engine
-            .authorize(&bob, "prod-frontend")
-            .await
-            .is_err());
+        assert!(engine.authorize(&bob, "prod-frontend").await.is_err());
     }
 
     #[tokio::test]
@@ -743,24 +737,15 @@ mod tests {
             username: "alice@example.com".to_string(),
             groups: vec!["admins".to_string()],
         };
-        assert!(engine
-            .authorize(&admin, "any-cluster")
-            .await
-            .is_ok());
-        assert!(engine
-            .authorize(&admin, "another-cluster")
-            .await
-            .is_ok());
+        assert!(engine.authorize(&admin, "any-cluster").await.is_ok());
+        assert!(engine.authorize(&admin, "another-cluster").await.is_ok());
 
         // Non-admin cannot access
         let user = UserIdentity {
             username: "bob@example.com".to_string(),
             groups: vec!["developers".to_string()],
         };
-        assert!(engine
-            .authorize(&user, "any-cluster")
-            .await
-            .is_err());
+        assert!(engine.authorize(&user, "any-cluster").await.is_err());
     }
 
     #[tokio::test]
@@ -782,10 +767,7 @@ mod tests {
 
         let mut clusters = HashMap::new();
         clusters.insert("prod-frontend".to_string(), ClusterAttributes::default());
-        clusters.insert(
-            "staging-frontend".to_string(),
-            ClusterAttributes::default(),
-        );
+        clusters.insert("staging-frontend".to_string(), ClusterAttributes::default());
         clusters.insert("prod-backend".to_string(), ClusterAttributes::default());
         engine.set_clusters(clusters).await;
 
@@ -1001,9 +983,7 @@ mod tests {
         )])
         .unwrap();
 
-        let result = engine
-            .authorize_with_context(&user, "prod", context)
-            .await;
+        let result = engine.authorize_with_context(&user, "prod", context).await;
         assert!(result.is_ok());
     }
 
@@ -1038,9 +1018,7 @@ mod tests {
         )])
         .unwrap();
 
-        let result = engine
-            .authorize_with_context(&user, "prod", context)
-            .await;
+        let result = engine.authorize_with_context(&user, "prod", context).await;
         assert!(result.is_err());
     }
 

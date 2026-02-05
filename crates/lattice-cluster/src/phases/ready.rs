@@ -113,7 +113,8 @@ async fn reconcile_worker_pools(
         pool_statuses.insert(pool_id.clone(), pool_status);
 
         // Execute scaling action
-        if let Err(action) = execute_scaling_action(ctx, name, pool_id, capi_namespace, &action).await
+        if let Err(action) =
+            execute_scaling_action(ctx, name, pool_id, capi_namespace, &action).await
         {
             return Ok((total_desired, action));
         }
@@ -142,7 +143,11 @@ async fn execute_scaling_action(
                 desired = target,
                 "Scaling pool MachineDeployment to match spec"
             );
-            if let Err(e) = ctx.capi.scale_pool(name, pool_id, capi_namespace, *target).await {
+            if let Err(e) = ctx
+                .capi
+                .scale_pool(name, pool_id, capi_namespace, *target)
+                .await
+            {
                 warn!(pool = %pool_id, error = %e, "Failed to scale pool, will retry");
                 // Return empty map - caller will handle requeue
                 return Err(BTreeMap::new());

@@ -273,7 +273,10 @@ mod tests {
             TunnelError::SendFailed("test".into()).status_code(),
             StatusCode::BAD_GATEWAY
         );
-        assert_eq!(TunnelError::Timeout.status_code(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            TunnelError::Timeout.status_code(),
+            StatusCode::GATEWAY_TIMEOUT
+        );
     }
 
     #[test]

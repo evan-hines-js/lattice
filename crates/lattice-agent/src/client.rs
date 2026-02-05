@@ -22,8 +22,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Endpoint;
 use tracing::{debug, error, info, warn};
 
-use crate::commands::{self, CommandContext, StoredExecSession};
 use crate::commands::apply_manifests::extract_manifest_info_bytes;
+use crate::commands::{self, CommandContext, StoredExecSession};
 use lattice_capi::{
     copy_credentials_to_provider_namespace, ensure_capi_installed, CapiProviderConfig,
     ClusterctlInstaller,
@@ -33,8 +33,8 @@ use lattice_common::{capi_namespace, CsrRequest, CsrResponse, LATTICE_SYSTEM_NAM
 use lattice_infra::pki::AgentCertRequest;
 use lattice_proto::lattice_agent_client::LatticeAgentClient;
 use lattice_proto::{
-    agent_message::Payload, AgentMessage, AgentReady, AgentState,
-    BootstrapComplete, ClusterDeleting, Heartbeat, MoveObject,
+    agent_message::Payload, AgentMessage, AgentReady, AgentState, BootstrapComplete,
+    ClusterDeleting, Heartbeat, MoveObject,
 };
 
 use crate::kube_client::{InClusterClientProvider, KubeClientProvider};
@@ -252,7 +252,6 @@ impl AgentClient {
     async fn create_client_logged(&self, purpose: &str) -> Option<kube::Client> {
         crate::kube_client::create_client_logged(self.kube_provider.as_ref(), purpose).await
     }
-
 
     /// Request a signed certificate from the cell
     ///
@@ -660,15 +659,14 @@ impl AgentClient {
     /// Send the ready message to cell
     async fn send_ready(&self) -> Result<(), ClientError> {
         // Get K8s version from in-cluster client
-        let k8s_version =
-            if let Some(client) = self.create_client_logged("version check").await {
-                match client.apiserver_version().await {
-                    Ok(info) => format!("v{}.{}", info.major, info.minor),
-                    Err(_) => "unknown".to_string(),
-                }
-            } else {
-                "unknown".to_string()
-            };
+        let k8s_version = if let Some(client) = self.create_client_logged("version check").await {
+            match client.apiserver_version().await {
+                Ok(info) => format!("v{}.{}", info.major, info.minor),
+                Err(_) => "unknown".to_string(),
+            }
+        } else {
+            "unknown".to_string()
+        };
 
         let msg = AgentMessage {
             cluster_name: self.config.cluster_name.clone(),

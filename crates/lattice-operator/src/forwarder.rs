@@ -164,9 +164,14 @@ impl K8sRequestForwarder for SubtreeForwarder {
 
         let params = Self::build_params(target_cluster, request);
 
-        tunnel_request_streaming(&self.agent_registry, target_cluster, route.command_tx, params)
-            .await
-            .map_err(|e| format!("tunnel error: {:?}", e))
+        tunnel_request_streaming(
+            &self.agent_registry,
+            target_cluster,
+            route.command_tx,
+            params,
+        )
+        .await
+        .map_err(|e| format!("tunnel error: {:?}", e))
     }
 }
 

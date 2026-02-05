@@ -22,10 +22,7 @@ use crate::phases::update_status;
 /// This phase waits for CAPI infrastructure to become ready, then:
 /// 1. Patches the kubeconfig to use the K8s API proxy
 /// 2. Transitions to Pivoting phase
-pub async fn handle_provisioning(
-    cluster: &LatticeCluster,
-    ctx: &Context,
-) -> Result<Action, Error> {
+pub async fn handle_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Result<Action, Error> {
     let name = cluster.name_any();
     let capi_namespace = capi_namespace(&name);
 
@@ -45,7 +42,8 @@ pub async fn handle_provisioning(
     // Infrastructure is ready - patch kubeconfig to use proxy before pivoting
     // Skip on bootstrap cluster - installer accesses cluster directly
     if !lattice_common::is_bootstrap_cluster() {
-        if let Err(e) = patch_kubeconfig_for_proxy_access(cluster, ctx, &name, &capi_namespace).await
+        if let Err(e) =
+            patch_kubeconfig_for_proxy_access(cluster, ctx, &name, &capi_namespace).await
         {
             return e;
         }

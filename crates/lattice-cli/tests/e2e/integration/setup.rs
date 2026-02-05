@@ -48,12 +48,11 @@ use super::super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::super::context::{ClusterLevel, InfraContext};
 use super::super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, ensure_docker_network,
-    extract_docker_cluster_kubeconfig, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd, wait_for_operator_ready, watch_cluster_phases,
-    watch_cluster_phases_with_kubeconfig, ProxySession,
+    get_docker_kubeconfig, kubeconfig_path, load_cluster_config, load_registry_credentials,
+    run_cmd, wait_for_operator_ready, watch_cluster_phases, ProxySession,
 };
 use super::super::providers::InfraProvider;
-use super::{capi, cedar, pivot, scaling};
+use super::{capi, cedar, scaling};
 
 // =============================================================================
 // Configuration
@@ -127,10 +126,8 @@ pub struct SetupResult {
     pub chaos: Option<ChaosMonkey>,
     /// Chaos targets (if enabled)
     pub chaos_targets: Option<Arc<ChaosTargets>>,
-    /// Proxy session to mgmt cluster (keeps port-forward alive for workload access)
+    /// Proxy session to mgmt cluster (all child access routes through mgmt's proxy)
     pub mgmt_proxy: Option<ProxySession>,
-    /// Proxy session to workload cluster (keeps port-forward alive for workload2 access)
-    pub workload_proxy: Option<ProxySession>,
 }
 
 impl SetupResult {
@@ -151,15 +148,32 @@ impl SetupResult {
         }
     }
 
-    /// Verify all proxy sessions are healthy (watchdog handles restarts automatically)
+    /// Verify the mgmt proxy session is healthy (watchdog handles restarts automatically)
     pub fn ensure_proxies_alive(&mut self) -> Result<(), String> {
         if let Some(ref mut proxy) = self.mgmt_proxy {
             proxy.ensure_alive()?;
         }
-        if let Some(ref mut proxy) = self.workload_proxy {
-            proxy.ensure_alive()?;
-        }
         Ok(())
+    }
+
+    /// Pause chaos on a specific cluster by removing it from targets.
+    /// Use resume_chaos_on_cluster to re-add it later.
+    pub fn pause_chaos_on_cluster(&self, cluster_name: &str) {
+        if let Some(ref targets) = self.chaos_targets {
+            targets.remove(cluster_name);
+        }
+    }
+
+    /// Resume chaos on a specific cluster by adding it back to targets.
+    pub fn resume_chaos_on_cluster(
+        &self,
+        cluster_name: &str,
+        kubeconfig: &str,
+        parent_kubeconfig: Option<&str>,
+    ) {
+        if let Some(ref targets) = self.chaos_targets {
+            targets.add(cluster_name, kubeconfig, parent_kubeconfig);
+        }
     }
 }
 
@@ -329,7 +343,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     capi::verify_capi_resources(&ctx, MGMT_CLUSTER_NAME, ClusterLevel::Mgmt).await?;
 
     info!("[Setup] Waiting for management LatticeCluster to be Ready...");
-    pivot::wait_for_cluster_ready(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
+    watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
 
     info!("[Setup] SUCCESS: Management cluster is self-managing!");
 
@@ -350,47 +364,45 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     info!("[Setup] Workload LatticeCluster created, waiting for Ready...");
 
-    let workload_kubeconfig_path = kubeconfig_path(WORKLOAD_CLUSTER_NAME);
-
-    if workload_provider == InfraProvider::Docker {
-        watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME, None).await?;
-    } else {
-        watch_cluster_phases_with_kubeconfig(
-            &mgmt_kubeconfig_path,
-            WORKLOAD_CLUSTER_NAME,
-            None,
-            &workload_kubeconfig_path,
-        )
-        .await?;
-    }
+    // Watch for Ready state, then set up proxy access
+    watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME, None).await?;
 
     info!("[Setup] SUCCESS: Workload cluster is Ready!");
 
     // =========================================================================
-    // Phase 4: Verify Workload Cluster
+    // Phase 4: Set up proxy access to workload cluster
     // =========================================================================
-    info!("[Setup/Phase 4] Verifying workload cluster...");
+    // All providers use proxy for workload cluster access.
+    // This ensures consistent behavior and tests the proxy path thoroughly.
+    info!("[Setup/Phase 4] Setting up proxy access to workload cluster...");
 
-    if workload_provider == InfraProvider::Docker {
-        extract_docker_cluster_kubeconfig(
-            WORKLOAD_CLUSTER_NAME,
-            &workload_bootstrap,
-            &workload_kubeconfig_path,
-        )?;
-    }
-    info!("[Setup] Workload kubeconfig: {}", workload_kubeconfig_path);
+    wait_for_operator_ready(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, Some(120)).await?;
+    cedar::apply_e2e_default_policy(&mgmt_kubeconfig_path).await?;
 
-    let ctx = ctx.with_workload(workload_kubeconfig_path.clone());
+    let mgmt_proxy = ProxySession::start_for_provider(&mgmt_kubeconfig_path, mgmt_provider)?;
+    let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME).await?;
+
+    info!(
+        "[Setup] Workload kubeconfig (via proxy): {}",
+        workload_proxy_kc
+    );
+
+    let ctx = ctx.with_workload(workload_proxy_kc.clone());
+
+    // =========================================================================
+    // Phase 4.5: Verify Workload Cluster
+    // =========================================================================
+    info!("[Setup/Phase 4.5] Verifying workload cluster...");
 
     capi::verify_capi_resources(&ctx, WORKLOAD_CLUSTER_NAME, ClusterLevel::Workload).await?;
 
     info!("[Setup] SUCCESS: Workload cluster pivot verified!");
 
-    // Add workload to chaos targets (parent: mgmt)
+    // Add workload to chaos targets
     if let Some(ref targets) = chaos_targets {
         targets.add(
             WORKLOAD_CLUSTER_NAME,
-            &workload_kubeconfig_path,
+            &workload_proxy_kc,
             Some(&mgmt_kubeconfig_path),
         );
     }
@@ -398,10 +410,10 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // =========================================================================
     // Phase 5: Create Workload2 Cluster (parallel with workload worker join)
     // =========================================================================
-    let (_, workload2_kubeconfig_path) = if let Some(workload2_cluster) = workload2_cluster {
+    let ctx = if let Some(workload2_cluster) = workload2_cluster {
         info!("[Setup/Phase 5] Creating workload2 cluster (deep hierarchy)...");
 
-        let workload_client = client_from_kubeconfig(&workload_kubeconfig_path).await?;
+        let workload_client = client_from_kubeconfig(&workload_proxy_kc).await?;
         let workload_api: Api<LatticeCluster> = Api::all(workload_client.clone());
 
         workload_api
@@ -411,24 +423,10 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
         info!("[Setup] Workload2 LatticeCluster created, waiting for Ready (workers joining in parallel)...");
 
-        let workload2_kubeconfig_path = kubeconfig_path(WORKLOAD2_CLUSTER_NAME);
-
         // Run workload worker verification in parallel with workload2 provisioning
         let (worker_result, phase_result) = tokio::join!(
             scaling::verify_cluster_workers(&ctx, WORKLOAD_CLUSTER_NAME, 1, ClusterLevel::Workload),
-            async {
-                if workload_provider == InfraProvider::Docker {
-                    watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None).await
-                } else {
-                    watch_cluster_phases_with_kubeconfig(
-                        &workload_kubeconfig_path,
-                        WORKLOAD2_CLUSTER_NAME,
-                        None,
-                        &workload2_kubeconfig_path,
-                    )
-                    .await
-                }
-            }
+            watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None)
         );
         worker_result?;
         phase_result?;
@@ -436,24 +434,28 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         info!("[Setup] SUCCESS: Workload2 cluster is Ready!");
 
         // =========================================================================
-        // Phase 6: Verify Workload2 Cluster
+        // Phase 6: Set up proxy access to workload2 and verify
         // =========================================================================
-        info!("[Setup/Phase 6] Verifying workload2 cluster...");
+        info!("[Setup/Phase 6] Setting up proxy access to workload2...");
 
-        if workload_provider == InfraProvider::Docker {
-            extract_docker_cluster_kubeconfig(
-                WORKLOAD2_CLUSTER_NAME,
-                workload2_bootstrap.as_ref().unwrap(),
-                &workload2_kubeconfig_path,
-            )?;
-        }
+        // Wait for workload operator to be ready (so workload2's agent can connect)
+        wait_for_operator_ready(WORKLOAD_CLUSTER_NAME, &workload_proxy_kc, Some(120)).await?;
+
+        // Apply Cedar policy on workload to allow proxy access to workload2
+        cedar::apply_e2e_default_policy(&workload_proxy_kc).await?;
+
+        // Get workload2 kubeconfig from mgmt proxy - it sees workload2 in its subtree
+        // The route is: mgmt proxy -> workload agent -> workload proxy -> workload2 agent
+        let workload2_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD2_CLUSTER_NAME).await?;
+
         info!(
-            "[Setup] Workload2 kubeconfig: {}",
-            workload2_kubeconfig_path
+            "[Setup] Workload2 kubeconfig (via proxy): {}",
+            workload2_proxy_kc
         );
 
-        let ctx = ctx.with_workload2(workload2_kubeconfig_path.clone());
+        let ctx = ctx.with_workload2(workload2_proxy_kc.clone());
 
+        info!("[Setup/Phase 6.5] Verifying workload2 cluster...");
         capi::verify_capi_resources(&ctx, WORKLOAD2_CLUSTER_NAME, ClusterLevel::Workload2).await?;
 
         info!("[Setup] SUCCESS: Workload2 cluster verified!");
@@ -462,12 +464,12 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         if let Some(ref targets) = chaos_targets {
             targets.add(
                 WORKLOAD2_CLUSTER_NAME,
-                &workload2_kubeconfig_path,
-                Some(&workload_kubeconfig_path),
+                &workload2_proxy_kc,
+                Some(&workload_proxy_kc),
             );
         }
 
-        (ctx, Some(workload2_kubeconfig_path))
+        ctx
     } else {
         info!("[Setup/Phase 5] Skipping workload2 cluster (disabled)");
 
@@ -475,57 +477,21 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         scaling::verify_cluster_workers(&ctx, WORKLOAD_CLUSTER_NAME, 1, ClusterLevel::Workload)
             .await?;
 
-        (ctx, None)
+        ctx
     };
 
     // =========================================================================
-    // Phase 7: Generate Proxy Kubeconfigs
+    // Phase 7: Finalize Context with Proxy URL
     // =========================================================================
-    // Keep chaos running - resilient_tunnel should handle reconnections during proxy setup
-    info!("[Setup/Phase 7] Generating proxy kubeconfigs...");
+    info!("[Setup/Phase 7] Finalizing context...");
 
-    // Wait for operators to be ready before trying to connect to their proxies
-    // The operator includes the auth proxy server, so we need it running first
-    wait_for_operator_ready(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, Some(120)).await?;
-    wait_for_operator_ready(WORKLOAD_CLUSTER_NAME, &workload_kubeconfig_path, Some(120)).await?;
-
-    // Apply Cedar policies to allow proxy access
-    cedar::apply_e2e_default_policy(&mgmt_kubeconfig_path).await?;
-    cedar::apply_e2e_default_policy(&workload_kubeconfig_path).await?;
-
-    // Start proxy session to mgmt for accessing workload
-    // Uses deterministic ports so kubeconfigs remain valid if port-forward restarts
-    let mgmt_proxy = ProxySession::start(&mgmt_kubeconfig_path)?;
-    let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME).await?;
-
-    // Start proxy session to workload for accessing workload2 (if enabled)
-    let (workload_proxy, workload2_proxy_kc, ctx) = if workload2_kubeconfig_path.is_some() {
-        let workload_proxy = ProxySession::start(&workload_kubeconfig_path)?;
-        let workload2_proxy_kc = workload_proxy
-            .kubeconfig_for(WORKLOAD2_CLUSTER_NAME)
-            .await?;
-
-        let ctx = InfraContext::new(
-            mgmt_kubeconfig_path.clone(),
-            Some(workload_proxy_kc.clone()),
-            Some(workload2_proxy_kc.clone()),
-            mgmt_provider,
-        )
-        .with_mgmt_proxy_url(mgmt_proxy.url.clone())
-        .with_workload_proxy_url(workload_proxy.url.clone());
-
-        (Some(workload_proxy), Some(workload2_proxy_kc), ctx)
-    } else {
-        let ctx = InfraContext::new(
-            mgmt_kubeconfig_path.clone(),
-            Some(workload_proxy_kc.clone()),
-            None,
-            mgmt_provider,
-        )
-        .with_mgmt_proxy_url(mgmt_proxy.url.clone());
-
-        (None, None, ctx)
-    };
+    let final_ctx = InfraContext::new(
+        mgmt_kubeconfig_path.clone(),
+        ctx.workload_kubeconfig.clone(),
+        ctx.workload2_kubeconfig.clone(),
+        mgmt_provider,
+    )
+    .with_mgmt_proxy_url(mgmt_proxy.url.clone());
 
     // =========================================================================
     // Setup Complete - Print copy-pasteable output
@@ -535,34 +501,39 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     println!("INFRASTRUCTURE SETUP COMPLETE");
     println!("========================================");
     println!();
-    if workload2_kubeconfig_path.is_some() {
+    if final_ctx.has_workload2() {
         println!("Cluster hierarchy: mgmt -> workload -> workload2");
     } else {
         println!("Cluster hierarchy: mgmt -> workload");
     }
     println!();
     println!("Kubeconfig paths (proxy-based for child clusters):");
-    println!("  LATTICE_MGMT_KUBECONFIG={}", ctx.mgmt_kubeconfig);
-    println!("  LATTICE_WORKLOAD_KUBECONFIG={}", workload_proxy_kc);
-    if let Some(ref w2_kc) = workload2_proxy_kc {
-        println!("  LATTICE_WORKLOAD2_KUBECONFIG={}", w2_kc);
+    println!("  LATTICE_MGMT_KUBECONFIG={}", final_ctx.mgmt_kubeconfig);
+    if let Some(ref wk) = final_ctx.workload_kubeconfig {
+        println!("  LATTICE_WORKLOAD_KUBECONFIG={}", wk);
+    }
+    if let Some(ref w2k) = final_ctx.workload2_kubeconfig {
+        println!("  LATTICE_WORKLOAD2_KUBECONFIG={}", w2k);
     }
     println!();
     println!("Run integration tests with:");
-    println!("  LATTICE_MGMT_KUBECONFIG={} \\", ctx.mgmt_kubeconfig);
-    println!("  LATTICE_WORKLOAD_KUBECONFIG={} \\", workload_proxy_kc);
-    if let Some(ref w2_kc) = workload2_proxy_kc {
-        println!("  LATTICE_WORKLOAD2_KUBECONFIG={} \\", w2_kc);
+    println!("  LATTICE_MGMT_KUBECONFIG={} \\", final_ctx.mgmt_kubeconfig);
+    if let Some(ref wk) = final_ctx.workload_kubeconfig {
+        println!("  LATTICE_WORKLOAD_KUBECONFIG={} \\", wk);
     }
-    println!("  cargo test --features provider-e2e --test e2e <test_name> -- --ignored --nocapture");
+    if let Some(ref w2k) = final_ctx.workload2_kubeconfig {
+        println!("  LATTICE_WORKLOAD2_KUBECONFIG={} \\", w2k);
+    }
+    println!(
+        "  cargo test --features provider-e2e --test e2e <test_name> -- --ignored --nocapture"
+    );
     println!();
 
     Ok(SetupResult {
-        ctx,
-        chaos, // Keep chaos running throughout - resilient_tunnel handles reconnections
+        ctx: final_ctx,
+        chaos,
         chaos_targets,
         mgmt_proxy: Some(mgmt_proxy),
-        workload_proxy,
     })
 }
 
@@ -619,7 +590,7 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
 
     let ctx = InfraContext::mgmt_only(mgmt_kubeconfig_path.clone(), mgmt_provider);
     capi::verify_capi_resources(&ctx, MGMT_CLUSTER_NAME, ClusterLevel::Mgmt).await?;
-    pivot::wait_for_cluster_ready(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
+    watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
 
     if let Some(ref targets) = chaos_targets {
         targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, None);
@@ -637,7 +608,6 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
         chaos,
         chaos_targets,
         mgmt_proxy: None,
-        workload_proxy: None,
     })
 }
 
@@ -648,8 +618,6 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
 
     let (_, workload_cluster) =
         load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
-    let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
-    let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
 
     info!("[Setup] Creating workload cluster...");
 
@@ -660,27 +628,21 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
         .await
         .map_err(|e| format!("Failed to create workload LatticeCluster: {}", e))?;
 
-    let workload_kubeconfig_path = kubeconfig_path(WORKLOAD_CLUSTER_NAME);
+    // Watch for Ready state
+    watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME, None).await?;
 
-    if workload_provider == InfraProvider::Docker {
-        watch_cluster_phases(&mgmt_client, WORKLOAD_CLUSTER_NAME, None).await?;
-        extract_docker_cluster_kubeconfig(
-            WORKLOAD_CLUSTER_NAME,
-            &workload_bootstrap,
-            &workload_kubeconfig_path,
-        )?;
-    } else {
-        watch_cluster_phases_with_kubeconfig(
-            &result.ctx.mgmt_kubeconfig,
-            WORKLOAD_CLUSTER_NAME,
-            None,
-            &workload_kubeconfig_path,
-        )
-        .await?;
-    }
+    // Set up proxy access to workload cluster (all providers use proxy)
+    info!("[Setup] Setting up proxy access to workload...");
+    wait_for_operator_ready(MGMT_CLUSTER_NAME, &result.ctx.mgmt_kubeconfig, Some(120)).await?;
+    cedar::apply_e2e_default_policy(&result.ctx.mgmt_kubeconfig).await?;
+    let mgmt_proxy =
+        ProxySession::start_for_provider(&result.ctx.mgmt_kubeconfig, result.ctx.provider)?;
+    let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME).await?;
 
-    result.ctx = result.ctx.with_workload(workload_kubeconfig_path.clone());
+    // Update context with proxy kubeconfig
+    result.ctx = result.ctx.with_workload(workload_proxy_kc.clone());
 
+    // Verify cluster is operational
     capi::verify_capi_resources(&result.ctx, WORKLOAD_CLUSTER_NAME, ClusterLevel::Workload).await?;
     scaling::verify_cluster_workers(
         &result.ctx,
@@ -690,29 +652,15 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
     )
     .await?;
 
+    // Add to chaos targets
     if let Some(ref targets) = result.chaos_targets {
         targets.add(
             WORKLOAD_CLUSTER_NAME,
-            &workload_kubeconfig_path,
+            &workload_proxy_kc,
             Some(&result.ctx.mgmt_kubeconfig),
         );
     }
 
-    // Generate proxy kubeconfig for workload
-    // Note: Chaos can continue running - ProxySession auto-restarts port-forwards.
-    info!("[Setup] Generating proxy kubeconfig for workload...");
-
-    cedar::apply_e2e_default_policy(&result.ctx.mgmt_kubeconfig).await?;
-    let mgmt_proxy = ProxySession::start(&result.ctx.mgmt_kubeconfig)?;
-    let workload_proxy_kc = mgmt_proxy.kubeconfig_for(WORKLOAD_CLUSTER_NAME).await?;
-
-    // Update context with proxy kubeconfig
-    result.ctx = InfraContext::new(
-        result.ctx.mgmt_kubeconfig.clone(),
-        Some(workload_proxy_kc.clone()),
-        None,
-        result.ctx.provider,
-    );
     result.mgmt_proxy = Some(mgmt_proxy);
 
     info!("");

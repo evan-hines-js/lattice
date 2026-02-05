@@ -635,7 +635,7 @@ nodes:
                 parent_config: None,
                 environment: None,
                 region: None,
-                },
+            },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
         };
 

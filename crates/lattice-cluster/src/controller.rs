@@ -27,8 +27,8 @@ use lattice_proto::AgentState;
 
 use lattice_capi::{CAPIClient, CAPIClientImpl, CapiInstaller};
 use lattice_cell::{
-    fetch_distributable_resources, DefaultManifestGenerator, DistributableResources,
-    ParentServers, SharedAgentRegistry,
+    fetch_distributable_resources, DefaultManifestGenerator, DistributableResources, ParentServers,
+    SharedAgentRegistry,
 };
 
 use crate::phases::{
@@ -1096,7 +1096,14 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // Validate the cluster spec
     if let Err(e) = cluster.spec.validate() {
         warn!(error = %e, "cluster validation failed");
-        update_status(&cluster, &ctx, ClusterPhase::Failed, Some(&e.to_string()), false).await?;
+        update_status(
+            &cluster,
+            &ctx,
+            ClusterPhase::Failed,
+            Some(&e.to_string()),
+            false,
+        )
+        .await?;
         // Don't requeue for validation errors - they require spec changes
         return Ok(Action::await_change());
     }
