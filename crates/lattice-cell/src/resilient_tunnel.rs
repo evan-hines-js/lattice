@@ -71,9 +71,13 @@ async fn tunnel_single_resilient(
     params: K8sRequestParams,
     config: &ResilientTunnelConfig,
 ) -> Result<Response<Body>, TunnelError> {
-    // First attempt
-    let command_tx = get_command_tx(registry, cluster_name)?;
-    match tunnel_and_receive(registry, cluster_name, command_tx, &params).await {
+    // First attempt - handle both missing agent and request failure
+    let first_attempt_result = match get_command_tx(registry, cluster_name) {
+        Ok(command_tx) => tunnel_and_receive(registry, cluster_name, command_tx, &params).await,
+        Err(e) => Err(e),
+    };
+
+    match first_attempt_result {
         Ok(response) => return Ok(response),
         Err(e) if !config.enabled || !is_retryable(&e) => return Err(e),
         Err(e) => {
@@ -212,14 +216,20 @@ async fn tunnel_watch_resilient(
 }
 
 /// Get command channel for a cluster
+///
+/// Returns:
+/// - Ok(sender) if agent is connected
+/// - Err(ChannelClosed) if agent is known but disconnected (retryable)
+/// - Err(UnknownCluster) if agent has never connected (not retryable)
 fn get_command_tx(
     registry: &SharedAgentRegistry,
     cluster_name: &str,
 ) -> Result<mpsc::Sender<lattice_proto::CellCommand>, TunnelError> {
-    let agent = registry
-        .get(cluster_name)
-        .ok_or(TunnelError::ChannelClosed)?;
-    Ok(agent.command_tx.clone())
+    match registry.get(cluster_name) {
+        Some(agent) if agent.connected => Ok(agent.command_tx.clone()),
+        Some(_) => Err(TunnelError::ChannelClosed), // Known but disconnected
+        None => Err(TunnelError::UnknownCluster(cluster_name.to_string())),
+    }
 }
 
 /// Execute tunnel request and receive single response
@@ -240,6 +250,9 @@ async fn tunnel_and_receive(
 }
 
 /// Check if an error is retryable (worth waiting for reconnect)
+///
+/// Retryable errors indicate the agent was known but is temporarily disconnected.
+/// Non-retryable errors (UnknownCluster, Timeout, AgentError) should fail fast.
 fn is_retryable(e: &TunnelError) -> bool {
     matches!(e, TunnelError::ChannelClosed | TunnelError::SendFailed(_))
 }
@@ -402,8 +415,12 @@ mod tests {
 
     #[test]
     fn test_is_retryable() {
+        // Retryable: known agent that disconnected
         assert!(is_retryable(&TunnelError::ChannelClosed));
         assert!(is_retryable(&TunnelError::SendFailed("test".into())));
+
+        // Not retryable: unknown cluster or other errors
+        assert!(!is_retryable(&TunnelError::UnknownCluster("test".into())));
         assert!(!is_retryable(&TunnelError::Timeout));
         assert!(!is_retryable(&TunnelError::AgentError("test".into())));
     }

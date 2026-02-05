@@ -238,8 +238,11 @@ pub enum TunnelError {
     #[error("failed to send request: {0}")]
     SendFailed(String),
 
-    #[error("agent connection lost")]
+    #[error("agent disconnected")]
     ChannelClosed,
+
+    #[error("unknown cluster: {0}")]
+    UnknownCluster(String),
 
     #[error("request timed out")]
     Timeout,
@@ -256,6 +259,7 @@ impl TunnelError {
         match self {
             TunnelError::SendFailed(_) => StatusCode::BAD_GATEWAY,
             TunnelError::ChannelClosed => StatusCode::BAD_GATEWAY,
+            TunnelError::UnknownCluster(_) => StatusCode::NOT_FOUND,
             TunnelError::Timeout => StatusCode::GATEWAY_TIMEOUT,
             TunnelError::AgentError(_) => StatusCode::BAD_GATEWAY,
             TunnelError::ResponseBuild(_) => StatusCode::INTERNAL_SERVER_ERROR,

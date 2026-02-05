@@ -347,7 +347,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     info!("[Setup] SUCCESS: Management cluster is self-managing!");
 
-    // Add mgmt to chaos targets (no parent)
+    // Add mgmt to chaos targets - tests agent connections during workload provisioning
     if let Some(ref targets) = chaos_targets {
         targets.add(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, None);
     }
@@ -373,8 +373,14 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // Phase 4: Set up proxy access to workload cluster
     // =========================================================================
     // All providers use proxy for workload cluster access.
-    // This ensures consistent behavior and tests the proxy path thoroughly.
+    // Remove mgmt from chaos - port-forward needs stability for the rest of setup.
+    // mgmt stays out of chaos until deletion phase.
     info!("[Setup/Phase 4] Setting up proxy access to workload cluster...");
+
+    if let Some(ref targets) = chaos_targets {
+        info!("[Setup] Removing mgmt from chaos (port-forward needs stability)...");
+        targets.remove(MGMT_CLUSTER_NAME);
+    }
 
     wait_for_operator_ready(MGMT_CLUSTER_NAME, &mgmt_kubeconfig_path, Some(120)).await?;
     cedar::apply_e2e_default_policy(&mgmt_kubeconfig_path).await?;
@@ -398,7 +404,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     info!("[Setup] SUCCESS: Workload cluster pivot verified!");
 
-    // Add workload to chaos targets
+    // Add workload to chaos targets (mgmt stays out - port-forward stability)
     if let Some(ref targets) = chaos_targets {
         targets.add(
             WORKLOAD_CLUSTER_NAME,
@@ -436,6 +442,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         // =========================================================================
         // Phase 6: Set up proxy access to workload2 and verify
         // =========================================================================
+        // mgmt is already out of chaos (removed in Phase 4), workload chaos continues
         info!("[Setup/Phase 6] Setting up proxy access to workload2...");
 
         // Wait for workload operator to be ready (so workload2's agent can connect)
@@ -460,7 +467,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
         info!("[Setup] SUCCESS: Workload2 cluster verified!");
 
-        // Add workload2 to chaos targets (parent: workload)
+        // Add workload2 to chaos targets
         if let Some(ref targets) = chaos_targets {
             targets.add(
                 WORKLOAD2_CLUSTER_NAME,

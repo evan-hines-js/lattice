@@ -536,7 +536,8 @@ fn strip_impersonation_headers(request: Request<Body>) -> Request<Body> {
 fn tunnel_error_to_api_error(e: TunnelError) -> Error {
     match e {
         TunnelError::SendFailed(msg) => Error::Proxy(msg),
-        TunnelError::ChannelClosed => Error::Proxy("Agent connection lost".into()),
+        TunnelError::ChannelClosed => Error::Proxy("Agent disconnected".into()),
+        TunnelError::UnknownCluster(name) => Error::ClusterNotFound(name),
         TunnelError::Timeout => Error::Proxy("Request timed out".into()),
         TunnelError::AgentError(msg) => Error::Proxy(msg),
         TunnelError::ResponseBuild(msg) => Error::Internal(msg),
@@ -999,5 +1000,11 @@ mod tests {
     fn test_tunnel_error_to_api_error_response_build() {
         let err = tunnel_error_to_api_error(TunnelError::ResponseBuild("invalid".to_string()));
         assert!(matches!(err, Error::Internal(_)));
+    }
+
+    #[test]
+    fn test_tunnel_error_to_api_error_unknown_cluster() {
+        let err = tunnel_error_to_api_error(TunnelError::UnknownCluster("test-cluster".to_string()));
+        assert!(matches!(err, Error::ClusterNotFound(_)));
     }
 }

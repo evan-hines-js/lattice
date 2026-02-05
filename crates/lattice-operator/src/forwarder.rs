@@ -255,7 +255,8 @@ impl ExecRequestForwarder for SubtreeForwarder {
 fn tunnel_error_to_status(e: &TunnelError) -> (u32, String) {
     match e {
         TunnelError::SendFailed(m) => (502, format!("send failed: {}", m)),
-        TunnelError::ChannelClosed => (502, "agent connection lost".to_string()),
+        TunnelError::ChannelClosed => (502, "agent disconnected".to_string()),
+        TunnelError::UnknownCluster(name) => (404, format!("unknown cluster: {}", name)),
         TunnelError::Timeout => (504, "request timed out".to_string()),
         TunnelError::AgentError(m) => (502, format!("agent error: {}", m)),
         TunnelError::ResponseBuild(m) => (500, format!("response build error: {}", m)),
@@ -282,7 +283,11 @@ mod tests {
         );
         assert_eq!(
             tunnel_error_to_status(&TunnelError::ChannelClosed),
-            (502, "agent connection lost".to_string())
+            (502, "agent disconnected".to_string())
+        );
+        assert_eq!(
+            tunnel_error_to_status(&TunnelError::UnknownCluster("test".to_string())),
+            (404, "unknown cluster: test".to_string())
         );
     }
 }
