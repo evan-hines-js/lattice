@@ -151,6 +151,7 @@ pub fn is_docker_provider(ctx: &InfraContext) -> bool {
 async fn test_mesh_standalone() {
     let session =
         TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
+            .await
             .unwrap();
     apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
         .await
@@ -164,6 +165,7 @@ async fn test_mesh_standalone() {
 async fn test_fixed_mesh_standalone() {
     let session =
         TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
+            .await
             .unwrap();
     apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
         .await
@@ -177,6 +179,7 @@ async fn test_fixed_mesh_standalone() {
 async fn test_random_mesh_standalone() {
     let session =
         TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
+            .await
             .unwrap();
     apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
         .await

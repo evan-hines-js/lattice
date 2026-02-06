@@ -12,6 +12,8 @@
   <a href="#quick-start">Quick Start</a> &bull;
   <a href="#cli-reference">CLI Reference</a> &bull;
   <a href="#service-networking">Service Mesh</a> &bull;
+  <a href="#cedar-policies">Cedar Policies</a> &bull;
+  <a href="#secrets">Secrets</a> &bull;
   <a href="#how-it-works">Architecture</a> &bull;
   <a href="#development">Development</a>
 </p>
@@ -677,9 +679,201 @@ Any service that declares a volume with the same `id` shares the same underlying
 
 ---
 
-### Secrets via External Secrets Operator
+### Cedar Policies
 
-Lattice integrates with [ESO](https://external-secrets.io) to sync secrets from external stores (Vault, AWS Secrets Manager, etc.) into your pods. Declare a `secret` resource and reference its keys in templates — Lattice generates the `ExternalSecret` and wires everything up.
+Lattice uses [Cedar](https://www.cedarpolicy.com) for fine-grained access control across two domains: **proxy access** (who can reach which clusters) and **secret access** (which services can use which secrets). Policies are defined as `CedarPolicy` CRDs in the `lattice-system` namespace.
+
+#### Entity Model
+
+| Entity Type | Role | Example |
+|---|---|---|
+| `Lattice::User` | Human or ServiceAccount identity (principal) | `"system:serviceaccount:default:my-sa"` |
+| `Lattice::Group` | Identity group (principal) | `"system:serviceaccounts:production"` |
+| `Lattice::Cluster` | Target cluster (resource for proxy access) | `"prod-us-west"` |
+| `Lattice::Service` | LatticeService identity (principal for secret access) | `"payments/checkout"` |
+| `Lattice::SecretPath` | Vault path + provider (resource for secret access) | `"vault-prod:database/prod/creds"` |
+| `Lattice::Action` | Operation being performed | `"AccessCluster"`, `"AccessSecret"` |
+
+#### Proxy Access Control
+
+Control which users and ServiceAccounts can access child clusters through the K8s API proxy:
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: allow-platform-team
+  namespace: lattice-system
+spec:
+  enabled: true
+  priority: 100
+  propagate: true          # Distribute to child clusters
+  description: "Platform team can access all clusters"
+  policies: |
+    permit(
+      principal in Lattice::Group::"system:serviceaccounts:platform",
+      action,
+      resource
+    );
+```
+
+Deny a specific user from production:
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: deny-intern-prod
+  namespace: lattice-system
+spec:
+  enabled: true
+  priority: 200            # Higher priority = evaluated first
+  policies: |
+    forbid(
+      principal == Lattice::User::"system:serviceaccount:default:intern-sa",
+      action,
+      resource == Lattice::Cluster::"production"
+    );
+```
+
+#### Secret Access Authorization
+
+**Default-deny:** services with secrets require an explicit `permit` CedarPolicy. Without one, the service compiler rejects the service and it transitions to `Failed`.
+
+Permit a namespace to access its own secrets:
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: payments-secrets
+  namespace: lattice-system
+spec:
+  enabled: true
+  priority: 100
+  policies: |
+    permit(
+      principal,
+      action == Lattice::Action::"AccessSecret",
+      resource
+    ) when {
+      principal.namespace == "payments" &&
+      resource.path like "secret/data/payments/*"
+    };
+```
+
+Forbid all services from accessing production secrets (overrides any permit):
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: forbid-prod-secrets
+  namespace: lattice-system
+spec:
+  enabled: true
+  priority: 200
+  policies: |
+    forbid(
+      principal,
+      action == Lattice::Action::"AccessSecret",
+      resource
+    ) when {
+      resource.path like "*/prod/*"
+    };
+```
+
+Scope access by provider (e.g., only platform services can use the admin Vault):
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: admin-vault-platform-only
+  namespace: lattice-system
+spec:
+  enabled: true
+  priority: 100
+  policies: |
+    permit(
+      principal,
+      action == Lattice::Action::"AccessSecret",
+      resource
+    ) when {
+      principal.namespace == "platform" &&
+      resource.provider == "vault-admin"
+    };
+```
+
+#### Policy Lifecycle
+
+When a service fails due to `SecretAccessDenied`, the controller retries every 30 seconds. Apply the missing `CedarPolicy` and the service recovers automatically — no manual intervention required.
+
+#### CedarPolicy Spec Reference
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `policies` | string | **(required)** | Cedar policy text (one or more statements) |
+| `enabled` | bool | `true` | Disabled policies are not evaluated |
+| `priority` | int | `0` | Higher priority = evaluated first. Use for forbid overrides |
+| `propagate` | bool | `true` | Distribute to child clusters in the hierarchy |
+| `description` | string | — | Human-readable description |
+
+---
+
+### Secrets
+
+Lattice integrates with [ESO](https://external-secrets.io) to sync secrets from external stores (Vault, AWS Secrets Manager, etc.) into your pods. The pipeline has three layers:
+
+1. **SecretsProvider** — defines the connection to your secret store
+2. **Cedar policy** — authorizes which services can access which secrets (default-deny)
+3. **LatticeService** — declares secret resources and references keys in templates
+
+#### 1. Create a SecretsProvider
+
+A `SecretsProvider` CRD defines a connection to an external secret store. Lattice creates the corresponding ESO `ClusterSecretStore` automatically.
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: SecretsProvider
+metadata:
+  name: vault-prod
+  namespace: lattice-system
+spec:
+  server: https://vault.example.com:8200
+  path: secret                           # KV v2 mount path
+  authMethod: token                      # token, kubernetes, or appRole
+  credentialsSecretRef:
+    name: vault-token                    # K8s Secret with the Vault token
+    namespace: lattice-system
+```
+
+Kubernetes ServiceAccount auth (no static credentials):
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: SecretsProvider
+metadata:
+  name: vault-k8s-auth
+  namespace: lattice-system
+spec:
+  server: https://vault.internal:8200
+  path: secret
+  authMethod: kubernetes
+  kubernetesRole: lattice-reader         # Vault Kubernetes auth role
+  caBundle: |                            # Optional: custom CA for TLS
+    -----BEGIN CERTIFICATE-----
+    ...
+    -----END CERTIFICATE-----
+```
+
+#### 2. Authorize Access with Cedar
+
+Before ESO resources are generated, the service compiler evaluates Cedar policies. Without an explicit `permit`, the service transitions to `Failed` with a `secret access denied` message.
+
+See the [Cedar Policies](#cedar-policies) section for policy examples.
+
+#### 3. Declare Secrets in LatticeService
 
 ```yaml
 resources:
@@ -687,7 +881,7 @@ resources:
     type: secret
     id: database/prod/credentials       # Path in your secret store (e.g., Vault path)
     params:
-      provider: vault-prod              # References a ClusterSecretStore
+      provider: vault-prod              # References the SecretsProvider name
       keys: [username, password]        # Specific keys to sync
       refreshInterval: 1h              # How often ESO re-syncs
 
@@ -704,7 +898,33 @@ containers:
           password=${resources.db-creds.password}
 ```
 
-Lattice generates an `ExternalSecret` that points at your `ClusterSecretStore`, syncs the specified keys into a Kubernetes `Secret`, and injects them into your container via the template system. Secrets auto-rotate on the `refreshInterval` cadence — no manual rotation, no restart required.
+Lattice generates an `ExternalSecret` that points at the `ClusterSecretStore` (created by the `SecretsProvider`), syncs the specified keys into a Kubernetes `Secret`, and injects them into your container via the template system. Secrets auto-rotate on the `refreshInterval` cadence — no manual rotation, no restart required.
+
+Omit `keys` to sync all keys from the path (uses ESO's `dataFrom` pattern):
+
+```yaml
+resources:
+  all-config:
+    type: secret
+    id: services/api-config              # Syncs ALL keys from this path
+    params:
+      provider: vault-prod
+      refreshInterval: 30m
+```
+
+#### SecretsProvider Spec Reference
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `server` | string | **(required)** | Vault server URL |
+| `path` | string | — | Secret engine mount path (e.g., `secret`) |
+| `authMethod` | enum | **(required)** | `token`, `kubernetes`, or `appRole` |
+| `credentialsSecretRef` | object | — | K8s Secret reference for auth credentials |
+| `kubernetesRole` | string | — | Vault Kubernetes auth role |
+| `kubernetesMountPath` | string | `kubernetes` | Vault Kubernetes auth mount path |
+| `approleMountPath` | string | `approle` | Vault AppRole auth mount path |
+| `namespace` | string | — | Vault namespace (enterprise) |
+| `caBundle` | string | — | CA certificate PEM for TLS verification |
 
 ---
 
@@ -861,6 +1081,7 @@ crates/
 ├── lattice-agent/          Child cluster agent (outbound gRPC client)
 ├── lattice-cell/           Parent cluster cell server (gRPC + API proxy)
 ├── lattice-api/            Auth proxy with Cedar-based access control
+├── lattice-cedar/          Cedar policy engine (proxy + secret authorization)
 ├── lattice-capi/           CAPI provider resource templating
 ├── lattice-infra/          PKI, bootstrap manifests, FIPS crypto setup
 ├── lattice-cloud-provider/ Cloud account validation and resources

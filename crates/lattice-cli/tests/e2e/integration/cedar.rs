@@ -350,7 +350,8 @@ pub async fn run_cedar_proxy_test(
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Get or create proxy connection
-    let (proxy_url, _port_forward) = get_or_create_proxy(parent_kubeconfig, existing_proxy_url)?;
+    let (proxy_url, _port_forward) =
+        get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
 
     // Setup test resources on parent cluster
     setup_cedar_test_resources(parent_kubeconfig).await?;
@@ -414,7 +415,8 @@ pub async fn run_cedar_group_test(
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Get or create proxy connection
-    let (proxy_url, _port_forward) = get_or_create_proxy(parent_kubeconfig, existing_proxy_url)?;
+    let (proxy_url, _port_forward) =
+        get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
 
     // Setup
     setup_cedar_test_resources(parent_kubeconfig).await?;
@@ -509,7 +511,9 @@ pub async fn run_cedar_hierarchy_tests(
 #[ignore]
 async fn test_cedar_sa_auth_standalone() {
     let session =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests").unwrap();
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests")
+            .await
+            .unwrap();
     let child_cluster_name = get_child_cluster_name();
 
     run_cedar_proxy_test(
@@ -528,7 +532,9 @@ async fn test_cedar_sa_auth_standalone() {
 #[ignore]
 async fn test_cedar_group_policy_standalone() {
     let session =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests").unwrap();
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests")
+            .await
+            .unwrap();
     let child_cluster_name = get_child_cluster_name();
 
     run_cedar_group_test(
@@ -547,7 +553,9 @@ async fn test_cedar_group_policy_standalone() {
 #[ignore]
 async fn test_cedar_all_standalone() {
     let session =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests").unwrap();
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests")
+            .await
+            .unwrap();
     let child_cluster_name = get_child_cluster_name();
 
     run_cedar_hierarchy_tests(&session.ctx, &child_cluster_name)

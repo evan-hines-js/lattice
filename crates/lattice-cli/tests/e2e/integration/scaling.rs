@@ -130,6 +130,7 @@ async fn test_scaling_standalone() {
     let session = TestSession::from_env(
         "Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG to run standalone scaling tests",
     )
+    .await
     .unwrap();
     apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
         .await
@@ -155,6 +156,7 @@ async fn test_scaling_standalone() {
 async fn test_list_nodes_standalone() {
     let session =
         TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
+            .await
             .unwrap();
     apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
         .await

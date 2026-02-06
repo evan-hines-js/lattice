@@ -20,22 +20,20 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, PostParams};
+use lattice_operator::crd::LatticeService;
 use tokio::time::sleep;
 use tracing::info;
 
-use lattice_operator::crd::{
-    ContainerSpec, DeploySpec, LatticeService, LatticeServiceSpec, PortSpec, ReplicaSpec,
-    ResourceSpec, ResourceType, ServicePortsSpec,
-};
-
 use super::super::context::InfraContext;
-use super::super::helpers::{client_from_kubeconfig, ensure_fresh_namespace, run_cmd};
+use super::super::helpers::{
+    client_from_kubeconfig, create_service_with_secrets, ensure_fresh_namespace, run_cmd,
+    wait_for_service_phase,
+};
 use super::cedar::apply_e2e_default_policy;
+use super::cedar_secrets::{apply_cedar_secret_permit_all, remove_cedar_secret_permit_all};
 
 /// Test namespace for secrets integration tests
 const TEST_NAMESPACE: &str = "secrets-test";
@@ -288,160 +286,6 @@ pub async fn setup_vault_infrastructure(kubeconfig: &str) -> Result<(), String> 
 // Helper Functions
 // =============================================================================
 
-/// Create a LatticeService with secret resources
-fn create_service_with_secrets(
-    name: &str,
-    namespace: &str,
-    secrets: Vec<(&str, &str, &str, Option<Vec<&str>>)>, // (resource_name, vault_path, provider, keys)
-) -> LatticeService {
-    let mut resources = BTreeMap::new();
-
-    for (resource_name, vault_path, provider, keys) in secrets {
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!(provider));
-        if let Some(ks) = keys {
-            params.insert("keys".to_string(), serde_json::json!(ks));
-        }
-        params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
-
-        resources.insert(
-            resource_name.to_string(),
-            ResourceSpec {
-                type_: ResourceType::Secret,
-                id: Some(vault_path.to_string()),
-                params: Some(params),
-                ..Default::default()
-            },
-        );
-    }
-
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        "main".to_string(),
-        ContainerSpec {
-            image: "busybox:latest".to_string(),
-            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
-            args: None,
-            variables: BTreeMap::new(),
-            resources: None,
-            files: BTreeMap::new(),
-            volumes: BTreeMap::new(),
-            liveness_probe: None,
-            readiness_probe: None,
-            startup_probe: None,
-            security: None,
-        },
-    );
-
-    let mut ports = BTreeMap::new();
-    ports.insert(
-        "http".to_string(),
-        PortSpec {
-            port: 8080,
-            target_port: None,
-            protocol: None,
-        },
-    );
-
-    LatticeService {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            containers,
-            resources,
-            service: Some(ServicePortsSpec { ports }),
-            replicas: ReplicaSpec { min: 1, max: None },
-            deploy: DeploySpec::default(),
-            ingress: None,
-            sidecars: BTreeMap::new(),
-            sysctls: BTreeMap::new(),
-            host_network: None,
-            share_process_namespace: None,
-        },
-        status: None,
-    }
-}
-
-/// Wait for LatticeService to be Ready
-async fn wait_for_service_ready(
-    kubeconfig_path: &str,
-    namespace: &str,
-    name: &str,
-) -> Result<(), String> {
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(120);
-
-    info!(
-        "[Secrets] Waiting for LatticeService {} to be Ready...",
-        name
-    );
-
-    loop {
-        if start.elapsed() > timeout {
-            return Err(format!(
-                "Timeout waiting for LatticeService {} to be Ready",
-                name
-            ));
-        }
-
-        // Use kubectl for resilience - handles retries/reconnection internally
-        let output = run_cmd(
-            "kubectl",
-            &[
-                "--kubeconfig",
-                kubeconfig_path,
-                "get",
-                "latticeservice",
-                name,
-                "-n",
-                namespace,
-                "-o",
-                "jsonpath={.status.phase}",
-            ],
-        );
-
-        match output {
-            Ok(phase) => {
-                let phase = phase.trim();
-                info!("[Secrets] LatticeService {} phase: {}", name, phase);
-
-                if phase == "Ready" {
-                    info!("[Secrets] LatticeService {} is Ready!", name);
-                    return Ok(());
-                }
-
-                if phase == "Failed" {
-                    // Get error message
-                    let msg = run_cmd(
-                        "kubectl",
-                        &[
-                            "--kubeconfig",
-                            kubeconfig_path,
-                            "get",
-                            "latticeservice",
-                            name,
-                            "-n",
-                            namespace,
-                            "-o",
-                            "jsonpath={.status.conditions[0].message}",
-                        ],
-                    )
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                    return Err(format!("LatticeService {} failed: {}", name, msg));
-                }
-            }
-            Err(e) => {
-                info!("[Secrets] Error getting service: {}", e);
-            }
-        }
-
-        sleep(Duration::from_secs(5)).await;
-    }
-}
-
 /// Get ExternalSecret and verify its structure
 async fn verify_external_secret(
     kubeconfig_path: &str,
@@ -651,13 +495,7 @@ async fn verify_synced_secret(
 
 /// Run all secrets integration tests
 pub async fn run_secrets_tests(ctx: &InfraContext) -> Result<(), String> {
-    // TODO: Re-enable once Vault/ESO infrastructure is stable
-    info!("[Integration/Secrets] Secrets tests are disabled for now");
-    let _ = ctx; // suppress unused warning
-    return Ok(());
-
     // Ensure Cedar policy allows proxy access (may have been removed by Cedar tests)
-    #[allow(unreachable_code)]
     apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
 
     let kubeconfig = ctx.require_workload()?;
@@ -667,19 +505,36 @@ pub async fn run_secrets_tests(ctx: &InfraContext) -> Result<(), String> {
         kubeconfig
     );
 
+    // Apply permit-all-secrets Cedar policy so ESO pipeline tests pass Cedar authorization
+    apply_cedar_secret_permit_all(kubeconfig).await?;
+
     setup_vault_infrastructure(kubeconfig).await?;
 
-    // Test 1: Basic secret resource with explicit keys
-    info!("[Integration/Secrets] Test 1: Basic secret with explicit keys...");
-    run_basic_secret_test(kubeconfig).await?;
+    let result = async {
+        // Test 1: Basic secret resource with explicit keys
+        info!("[Integration/Secrets] Test 1: Basic secret with explicit keys...");
+        run_basic_secret_test(kubeconfig).await?;
 
-    // Test 2: Secret without explicit keys (dataFrom pattern)
-    info!("[Integration/Secrets] Test 2: Secret without explicit keys (dataFrom)...");
-    run_data_from_secret_test(kubeconfig).await?;
+        // Test 2: Secret without explicit keys (dataFrom pattern)
+        info!("[Integration/Secrets] Test 2: Secret without explicit keys (dataFrom)...");
+        run_data_from_secret_test(kubeconfig).await?;
 
-    // Test 3: Multiple secrets in one service
-    info!("[Integration/Secrets] Test 3: Multiple secrets in one service...");
-    run_multiple_secrets_test(kubeconfig).await?;
+        // Test 3: Multiple secrets in one service
+        info!("[Integration/Secrets] Test 3: Multiple secrets in one service...");
+        run_multiple_secrets_test(kubeconfig).await?;
+
+        // Test 4: Cedar + Secrets pipeline (deny → permit → verify ESO resources)
+        info!("[Integration/Secrets] Test 4: Cedar + Secrets pipeline...");
+        run_cedar_secrets_pipeline_test(kubeconfig).await?;
+
+        Ok::<(), String>(())
+    }
+    .await;
+
+    // Clean up the permit-all-secrets policy regardless of test outcome
+    remove_cedar_secret_permit_all(kubeconfig);
+
+    result?;
 
     info!("[Integration/Secrets] All secrets tests passed!");
     Ok(())
@@ -710,7 +565,14 @@ async fn run_basic_secret_test(kubeconfig: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to create service: {}", e))?;
 
     // Wait for service to be Ready
-    wait_for_service_ready(kubeconfig, TEST_NAMESPACE, "api-with-secrets").await?;
+    wait_for_service_phase(
+        kubeconfig,
+        TEST_NAMESPACE,
+        "api-with-secrets",
+        "Ready",
+        Duration::from_secs(120),
+    )
+    .await?;
 
     // Verify ExternalSecret was created with correct structure
     verify_external_secret(
@@ -760,7 +622,14 @@ async fn run_data_from_secret_test(kubeconfig: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to create service: {}", e))?;
 
-    wait_for_service_ready(kubeconfig, TEST_NAMESPACE, "api-all-keys").await?;
+    wait_for_service_phase(
+        kubeconfig,
+        TEST_NAMESPACE,
+        "api-all-keys",
+        "Ready",
+        Duration::from_secs(120),
+    )
+    .await?;
 
     // Verify ExternalSecret uses dataFrom pattern
     verify_external_secret(
@@ -815,7 +684,14 @@ async fn run_multiple_secrets_test(kubeconfig: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to create service: {}", e))?;
 
-    wait_for_service_ready(kubeconfig, TEST_NAMESPACE, "api-multi-secrets").await?;
+    wait_for_service_phase(
+        kubeconfig,
+        TEST_NAMESPACE,
+        "api-multi-secrets",
+        "Ready",
+        Duration::from_secs(120),
+    )
+    .await?;
 
     // Verify each ExternalSecret
     verify_external_secret(
@@ -852,6 +728,110 @@ async fn run_multiple_secrets_test(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Test Cedar + Secrets pipeline: deny → permit → verify ESO resources
+///
+/// Validates the full pipeline:
+/// 1. Create service with secrets, NO Cedar policy → Failed, no ExternalSecret
+/// 2. Apply permit policy → service recovers to Ready
+/// 3. Verify ExternalSecret IS created
+async fn run_cedar_secrets_pipeline_test(kubeconfig: &str) -> Result<(), String> {
+    const PIPELINE_NAMESPACE: &str = "secrets-pipeline-test";
+
+    ensure_fresh_namespace(kubeconfig, PIPELINE_NAMESPACE).await?;
+
+    // Remove the permit-all policy so we start with default-deny
+    remove_cedar_secret_permit_all(kubeconfig);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let client = client_from_kubeconfig(kubeconfig).await?;
+    let api: Api<LatticeService> = Api::namespaced(client, PIPELINE_NAMESPACE);
+
+    // Create service with secrets — no Cedar policy → should fail
+    let service = create_service_with_secrets(
+        "pipeline-svc",
+        PIPELINE_NAMESPACE,
+        vec![(
+            "db-creds",
+            "database/credentials",
+            TEST_PROVIDER,
+            Some(vec!["username", "password"]),
+        )],
+    );
+
+    info!("[Secrets/Pipeline] Creating LatticeService pipeline-svc (expect Failed)...");
+    api.create(&PostParams::default(), &service)
+        .await
+        .map_err(|e| format!("Failed to create service: {}", e))?;
+
+    wait_for_service_phase(
+        kubeconfig,
+        PIPELINE_NAMESPACE,
+        "pipeline-svc",
+        "Failed",
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    // Verify NO ExternalSecret was created (Cedar denied before ESO generation)
+    let es_output = run_cmd(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            kubeconfig,
+            "get",
+            "externalsecret",
+            "pipeline-svc-db-creds",
+            "-n",
+            PIPELINE_NAMESPACE,
+            "--ignore-not-found",
+            "-o",
+            "name",
+        ],
+    );
+    match es_output {
+        Ok(output) if output.trim().is_empty() => {
+            info!("[Secrets/Pipeline] Confirmed: no ExternalSecret created while denied");
+        }
+        Ok(output) => {
+            return Err(format!(
+                "ExternalSecret should not exist while Cedar denies access, but found: {}",
+                output.trim()
+            ));
+        }
+        Err(_) => {
+            info!("[Secrets/Pipeline] ExternalSecret not found (expected)");
+        }
+    }
+
+    // Apply permit policy → service should recover
+    info!("[Secrets/Pipeline] Applying Cedar permit policy...");
+    apply_cedar_secret_permit_all(kubeconfig).await?;
+
+    // Wait for service to recover to Ready
+    wait_for_service_phase(
+        kubeconfig,
+        PIPELINE_NAMESPACE,
+        "pipeline-svc",
+        "Ready",
+        Duration::from_secs(90),
+    )
+    .await?;
+
+    // Verify ExternalSecret IS now created
+    verify_external_secret(
+        kubeconfig,
+        PIPELINE_NAMESPACE,
+        "pipeline-svc-db-creds",
+        TEST_PROVIDER,
+        "database/credentials",
+        Some(&["username", "password"]),
+    )
+    .await?;
+
+    info!("[Secrets/Pipeline] Test passed: Cedar deny → permit → ESO pipeline works!");
+    Ok(())
+}
+
 /// Start secrets tests asynchronously (for parallel execution in E2E)
 pub async fn start_secrets_tests_async(
     ctx: &InfraContext,
@@ -871,6 +851,7 @@ async fn test_secrets_standalone() {
     use super::super::context::TestSession;
 
     let session = TestSession::from_env("Set LATTICE_WORKLOAD_KUBECONFIG to run secrets tests")
+        .await
         .expect("Failed to create test session");
 
     if let Err(e) = run_secrets_tests(&session.ctx).await {
@@ -885,6 +866,7 @@ async fn test_basic_secret_standalone() {
     use super::super::context::TestSession;
 
     let session = TestSession::from_env("Set LATTICE_WORKLOAD_KUBECONFIG")
+        .await
         .expect("Failed to create test session");
     let kubeconfig = session
         .ctx
@@ -903,6 +885,7 @@ async fn test_basic_secret_standalone() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_operator::crd::ResourceType;
 
     #[test]
     fn test_create_service_with_secrets_structure() {

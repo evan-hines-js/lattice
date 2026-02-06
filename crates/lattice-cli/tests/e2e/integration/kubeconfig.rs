@@ -176,7 +176,9 @@ pub async fn run_kubeconfig_verification(
 #[tokio::test]
 #[ignore]
 async fn test_kubeconfig_patched() {
-    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG").unwrap();
+    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG")
+        .await
+        .unwrap();
     let workload_name = get_workload_cluster_name();
 
     verify_kubeconfig_patched(&session.ctx.mgmt_kubeconfig, &workload_name)
@@ -190,7 +192,9 @@ async fn test_kubeconfig_patched() {
 #[tokio::test]
 #[ignore]
 async fn test_cedar_policies() {
-    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG").unwrap();
+    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG")
+        .await
+        .unwrap();
     verify_cedar_policies_loaded(&session.ctx.mgmt_kubeconfig)
         .await
         .unwrap();

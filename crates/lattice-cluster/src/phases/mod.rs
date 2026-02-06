@@ -16,13 +16,15 @@ pub use ready::handle_ready;
 use std::time::Duration;
 
 use kube::runtime::controller::Action;
-use kube::Client;
+use kube::runtime::events::EventType;
+use kube::{Client, Resource};
 use tracing::{debug, info, warn};
 
 use lattice_capi::{create_provider, CAPIManifest};
 use lattice_common::crd::{
     ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus,
 };
+use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, Error};
 
 use crate::controller::Context;
@@ -49,6 +51,15 @@ pub async fn try_transition_to_ready(
 
     // All checks passed, transition to Ready
     info!("transitioning cluster to Ready phase");
+    ctx.events
+        .publish(
+            &cluster.object_ref(&()),
+            EventType::Normal,
+            reasons::CLUSTER_READY,
+            actions::RECONCILE,
+            Some("Cluster is ready".to_string()),
+        )
+        .await;
     update_status(cluster, ctx, ClusterPhase::Ready, None, set_pivot_complete).await?;
     Ok(Action::requeue(Duration::from_secs(60)))
 }
@@ -146,6 +157,15 @@ pub async fn update_status(
     ctx.kube.patch_status(&name, &status).await?;
 
     if phase == ClusterPhase::Failed {
+        ctx.events
+            .publish(
+                &cluster.object_ref(&()),
+                EventType::Warning,
+                reasons::CLUSTER_FAILED,
+                actions::RECONCILE,
+                Some(message.to_string()),
+            )
+            .await;
         warn!(message, "updated status to Failed");
     } else {
         info!("updated status to {:?}", phase);

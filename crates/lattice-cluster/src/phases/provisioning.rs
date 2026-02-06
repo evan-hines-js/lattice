@@ -5,11 +5,13 @@
 use std::time::Duration;
 
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::runtime::events::EventType;
+use kube::{Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_cell::patch_kubeconfig_for_proxy;
 use lattice_common::crd::{ClusterPhase, LatticeCluster};
+use lattice_common::events::{actions, reasons};
 use lattice_common::{
     capi_namespace, lattice_svc_dns, Error, CELL_SERVICE_NAME, DEFAULT_PROXY_PORT,
 };
@@ -39,7 +41,18 @@ pub async fn handle_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Res
         return Ok(Action::requeue(Duration::from_secs(30)));
     }
 
-    // Infrastructure is ready - patch kubeconfig to use proxy before pivoting
+    // Infrastructure is ready
+    ctx.events
+        .publish(
+            &cluster.object_ref(&()),
+            EventType::Normal,
+            reasons::INFRASTRUCTURE_READY,
+            actions::PROVISION,
+            Some("Infrastructure ready, starting pivot".to_string()),
+        )
+        .await;
+
+    // Patch kubeconfig to use proxy before pivoting
     // Skip on bootstrap cluster - installer accesses cluster directly
     if !lattice_common::is_bootstrap_cluster() {
         if let Err(e) =

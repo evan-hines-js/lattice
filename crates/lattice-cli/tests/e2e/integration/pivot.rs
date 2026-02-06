@@ -110,6 +110,7 @@ async fn test_unpivot_standalone() {
     let session = TestSession::from_env(
         "Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG for unpivot test",
     )
+    .await
     .unwrap();
     let cluster_name =
         std::env::var("LATTICE_CLUSTER_TO_DELETE").expect("LATTICE_CLUSTER_TO_DELETE must be set");

@@ -82,7 +82,7 @@ async fn run_full_e2e() -> Result<(), String> {
 
     // Chaos was stopped inside setup before proxy kubeconfig generation (Phase 7).
     // Ensure port-forwards are alive before continuing.
-    setup_result.ensure_proxies_alive()?;
+    setup_result.ensure_proxies_alive().await?;
 
     // =========================================================================
     // Phase 6.5: Verify kubeconfig patching + test proxy access
@@ -121,6 +121,10 @@ async fn run_full_e2e() -> Result<(), String> {
     integration::cedar::run_cedar_hierarchy_tests(&ctx, WORKLOAD_CLUSTER_NAME).await?;
 
     info!("SUCCESS: Cedar policy enforcement verified!");
+
+    // Test Cedar secret authorization (default-deny, permit, forbid, namespace isolation)
+    integration::cedar_secrets::run_cedar_secret_tests(&ctx).await?;
+    info!("SUCCESS: Cedar secret authorization tests verified!");
 
     // =========================================================================
     // Phase 6.7: Test multi-hop proxy operations (if workload2 exists)

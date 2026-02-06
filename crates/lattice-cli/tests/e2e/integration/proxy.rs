@@ -123,7 +123,8 @@ pub async fn test_proxy_access_to_child(
     );
 
     // Get or create proxy connection
-    let (proxy_url, _port_forward) = get_or_create_proxy(parent_kubeconfig, existing_proxy_url)?;
+    let (proxy_url, _port_forward) =
+        get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
 
     // Get a ServiceAccount token from the parent cluster
     let token = get_sa_token(parent_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
@@ -158,7 +159,8 @@ pub async fn test_proxy_access_to_grandchild(
     );
 
     // Get or create proxy connection
-    let (proxy_url, _port_forward) = get_or_create_proxy(root_kubeconfig, existing_proxy_url)?;
+    let (proxy_url, _port_forward) =
+        get_or_create_proxy(root_kubeconfig, existing_proxy_url).await?;
 
     // Get a ServiceAccount token from the root cluster
     let token = get_sa_token(root_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA)?;
@@ -308,7 +310,9 @@ fn truncate_response(response: &str) -> String {
 #[tokio::test]
 #[ignore]
 async fn test_proxy_access_standalone() {
-    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG").unwrap();
+    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG")
+        .await
+        .unwrap();
     let workload_name = get_workload_cluster_name();
 
     // Apply E2E policy
@@ -340,6 +344,7 @@ async fn test_proxy_access_standalone() {
 async fn test_proxy_hierarchy_standalone() {
     let session =
         TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG")
+            .await
             .unwrap();
     let workload_name = get_workload_cluster_name();
     let workload2_name = if session.ctx.has_workload2() {
