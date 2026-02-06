@@ -51,7 +51,7 @@ pub async fn reconcile(
         if policy
             .spec
             .selector
-            .matches(&svc_labels, &ns_labels, &namespace, &svc_namespace)
+            .matches(svc_labels, &ns_labels, &namespace, &svc_namespace)
         {
             matched_refs.push(format!("{}/{}", svc_namespace, svc_name));
         }
