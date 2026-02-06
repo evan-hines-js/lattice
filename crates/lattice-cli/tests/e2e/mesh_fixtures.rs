@@ -180,6 +180,7 @@ pub fn build_lattice_service(
             host_network: None,
             share_process_namespace: None,
             backup: None,
+            gpu: None,
         },
         status: None,
     }

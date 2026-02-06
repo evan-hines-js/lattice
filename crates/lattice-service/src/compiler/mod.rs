@@ -368,6 +368,7 @@ mod tests {
                 host_network: None,
                 share_process_namespace: None,
                 backup: None,
+                gpu: None,
             },
             status: None,
         }
@@ -470,6 +471,7 @@ mod tests {
             host_network: None,
             share_process_namespace: None,
             backup: None,
+            gpu: None,
         }
     }
 

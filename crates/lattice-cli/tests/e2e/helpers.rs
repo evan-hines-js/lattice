@@ -1534,6 +1534,7 @@ pub fn create_service_with_secrets(
             host_network: None,
             share_process_namespace: None,
             backup: None,
+            gpu: None,
         },
         status: None,
     }

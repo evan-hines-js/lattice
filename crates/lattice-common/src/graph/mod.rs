@@ -569,6 +569,7 @@ mod tests {
             host_network: None,
             share_process_namespace: None,
             backup: None,
+            gpu: None,
         }
     }
 
@@ -661,6 +662,7 @@ mod tests {
             host_network: None,
             share_process_namespace: None,
             backup: None,
+            gpu: None,
         };
 
         graph.put_service("frontend", "web", &frontend_spec);
@@ -888,6 +890,7 @@ mod tests {
             host_network: None,
             share_process_namespace: None,
             backup: None,
+            gpu: None,
         };
 
         graph.put_service("frontend", "web", &frontend_spec);

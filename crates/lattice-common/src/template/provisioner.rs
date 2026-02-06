@@ -440,6 +440,7 @@ mod tests {
             host_network: None,
             share_process_namespace: None,
             backup: None,
+            gpu: None,
         };
 
         graph.put_service(env, name, &spec);
@@ -645,6 +646,7 @@ mod tests {
             host_network: None,
             share_process_namespace: None,
             backup: None,
+            gpu: None,
         };
 
         let registry = ProvisionerRegistry::new();
