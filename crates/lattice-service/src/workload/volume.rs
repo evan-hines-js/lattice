@@ -480,6 +480,7 @@ mod tests {
             host_network: None,
             share_process_namespace: None,
             backup: None,
+            gpu: None,
         }
     }
 
@@ -762,6 +763,7 @@ mod tests {
             host_network: None,
             share_process_namespace: None,
             backup: None,
+            gpu: None,
         };
 
         let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();

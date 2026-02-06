@@ -362,6 +362,12 @@ pub struct PodSpec {
     /// Topology spread constraints for HA
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topology_spread_constraints: Vec<TopologySpreadConstraint>,
+    /// Node selector for scheduling onto specific nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_selector: Option<BTreeMap<String, String>>,
+    /// Tolerations for scheduling onto tainted nodes
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tolerations: Vec<Toleration>,
 }
 
 /// Topology spread constraint for distributing pods across failure domains
@@ -376,6 +382,20 @@ pub struct TopologySpreadConstraint {
     pub when_unsatisfiable: String,
     /// Label selector to find pods to spread
     pub label_selector: LabelSelector,
+}
+
+/// Kubernetes toleration
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Toleration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<String>,
 }
 
 /// Container spec
@@ -446,7 +466,7 @@ pub struct ContainerPort {
 }
 
 /// Resource requirements
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceRequirements {
     /// Requests
@@ -458,15 +478,33 @@ pub struct ResourceRequirements {
 }
 
 /// Resource quantity
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ResourceQuantity {
-    /// CPU
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<String>,
-    /// Memory
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+    /// GPU count (serializes as `nvidia.com/gpu`)
+    #[serde(
+        default,
+        rename = "nvidia.com/gpu",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gpu: Option<String>,
+    /// GPU memory in MiB for HAMi (serializes as `nvidia.com/gpumem`)
+    #[serde(
+        default,
+        rename = "nvidia.com/gpumem",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gpu_memory: Option<String>,
+    /// GPU compute percentage for HAMi (serializes as `nvidia.com/gpucores`)
+    #[serde(
+        default,
+        rename = "nvidia.com/gpucores",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gpu_cores: Option<String>,
 }
 
 /// Probe specification - maps 1:1 with Kubernetes probe spec
@@ -831,8 +869,91 @@ impl GeneratedWorkloads {
 // Workload Compiler
 // =============================================================================
 
-use crate::crd::{DeployStrategy, LatticeService, LatticeServiceSpec, ProviderType};
+use crate::crd::{DeployStrategy, GPUSpec, LatticeService, LatticeServiceSpec, ProviderType};
+use lattice_common::crd::parse_gpu_memory_mib;
 use lattice_common::mesh;
+
+/// Map a short GPU model name to the `nvidia.com/gpu.product` NFD label value.
+///
+/// Known models are mapped to their full NVIDIA product names.
+/// Unknown models are passed through as-is.
+fn gpu_product_label(model: &str) -> String {
+    match model.to_uppercase().as_str() {
+        "H100" => "NVIDIA-H100-80GB-HBM3".to_string(),
+        "H100SXM" => "NVIDIA-H100-80GB-HBM3".to_string(),
+        "H100PCIE" => "NVIDIA-H100-PCIe".to_string(),
+        "A100" => "NVIDIA-A100-SXM4-80GB".to_string(),
+        "A100-80G" => "NVIDIA-A100-SXM4-80GB".to_string(),
+        "A100-40G" => "NVIDIA-A100-SXM4-40GB".to_string(),
+        "A10G" => "NVIDIA-A10G".to_string(),
+        "L40S" => "NVIDIA-L40S".to_string(),
+        "L40" => "NVIDIA-L40".to_string(),
+        "L4" => "NVIDIA-L4".to_string(),
+        "T4" => "NVIDIA-Tesla-T4".to_string(),
+        "V100" => "NVIDIA-Tesla-V100-SXM2-16GB".to_string(),
+        _ => model.to_string(),
+    }
+}
+
+/// Merge GPU resource requests into container limits.
+///
+/// For full GPU mode (count only), adds `nvidia.com/gpu` to limits.
+/// For HAMi fractional mode (memory/compute set), also adds
+/// `nvidia.com/gpumem` and/or `nvidia.com/gpucores`.
+fn merge_gpu_resources(
+    resources: Option<ResourceRequirements>,
+    gpu: &Option<GPUSpec>,
+) -> Option<ResourceRequirements> {
+    let gpu = match gpu {
+        Some(g) => g,
+        None => return resources,
+    };
+
+    let mut reqs = resources.unwrap_or_default();
+    let limits = reqs.limits.get_or_insert_with(ResourceQuantity::default);
+
+    limits.gpu = Some(gpu.count.to_string());
+
+    if let Some(ref memory) = gpu.memory {
+        if let Ok(mib) = parse_gpu_memory_mib(memory) {
+            limits.gpu_memory = Some(mib.to_string());
+        }
+    }
+
+    if let Some(compute) = gpu.compute {
+        limits.gpu_cores = Some(compute.to_string());
+    }
+
+    Some(reqs)
+}
+
+/// Build GPU tolerations for a pod spec.
+fn gpu_tolerations(gpu: &Option<GPUSpec>) -> Vec<Toleration> {
+    match gpu {
+        Some(g) if g.tolerations => vec![Toleration {
+            key: Some("nvidia.com/gpu".to_string()),
+            operator: Some("Exists".to_string()),
+            effect: Some("NoSchedule".to_string()),
+            ..Default::default()
+        }],
+        _ => vec![],
+    }
+}
+
+/// Build GPU node selector for a pod spec.
+fn gpu_node_selector(gpu: &Option<GPUSpec>) -> Option<BTreeMap<String, String>> {
+    match gpu {
+        Some(g) => g.model.as_ref().map(|model| {
+            let mut selector = BTreeMap::new();
+            selector.insert(
+                "nvidia.com/gpu.product".to_string(),
+                gpu_product_label(model),
+            );
+            selector
+        }),
+        None => None,
+    }
+}
 
 /// Compiler for generating Kubernetes workload resources from LatticeService
 ///
@@ -896,7 +1017,8 @@ impl WorkloadCompiler {
     ) -> Vec<Container> {
         spec.containers
             .iter()
-            .map(|(container_name, container_spec)| {
+            .enumerate()
+            .map(|(idx, (container_name, container_spec))| {
                 // NOTE: Template rendering happens before this stage.
                 // At compile time, variables still contain unrendered templates.
                 // The workload compiler should render these before generating K8s resources.
@@ -933,12 +1055,21 @@ impl WorkloadCompiler {
                         requests: r.requests.as_ref().map(|req| ResourceQuantity {
                             cpu: req.cpu.clone(),
                             memory: req.memory.clone(),
+                            ..Default::default()
                         }),
                         limits: r.limits.as_ref().map(|lim| ResourceQuantity {
                             cpu: lim.cpu.clone(),
                             memory: lim.memory.clone(),
+                            ..Default::default()
                         }),
                     });
+
+                // Merge GPU resources into limits (first container only)
+                let resources = if idx == 0 {
+                    merge_gpu_resources(resources, &spec.gpu)
+                } else {
+                    resources
+                };
 
                 // Convert probes using helper
                 let liveness_probe = container_spec
@@ -1125,10 +1256,12 @@ impl WorkloadCompiler {
                     requests: r.requests.as_ref().map(|req| ResourceQuantity {
                         cpu: req.cpu.clone(),
                         memory: req.memory.clone(),
+                        ..Default::default()
                     }),
                     limits: r.limits.as_ref().map(|lim| ResourceQuantity {
                         cpu: lim.cpu.clone(),
                         memory: lim.memory.clone(),
+                        ..Default::default()
                     }),
                 });
 
@@ -1296,6 +1429,8 @@ impl WorkloadCompiler {
                                 },
                             },
                         }],
+                        node_selector: gpu_node_selector(&spec.gpu),
+                        tolerations: gpu_tolerations(&spec.gpu),
                     },
                 },
                 strategy,
@@ -1378,7 +1513,7 @@ impl WorkloadCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ContainerSpec, DeploySpec, PortSpec, ReplicaSpec, ServicePortsSpec};
+    use crate::crd::{ContainerSpec, DeploySpec, GPUSpec, PortSpec, ReplicaSpec, ServicePortsSpec};
     use lattice_common::template::TemplateString;
 
     /// Helper to compile a service with empty volumes (for basic tests)
@@ -1446,6 +1581,7 @@ mod tests {
                 host_network: None,
                 share_process_namespace: None,
                 backup: None,
+                gpu: None,
             },
             status: None,
         }
@@ -2090,5 +2226,272 @@ mod tests {
             .expect("should have security context");
         assert_eq!(sec.run_as_non_root, Some(true));
         assert_eq!(sec.run_as_user, Some(1000));
+    }
+
+    // =========================================================================
+    // Story: GPU Resource Compilation
+    // =========================================================================
+
+    #[test]
+    fn gpu_full_gpu_in_limits() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.gpu = Some(GPUSpec {
+            count: 1,
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+        let main = &deployment.spec.template.spec.containers[0];
+        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
+
+        assert_eq!(limits.gpu, Some("1".to_string()));
+        assert!(limits.gpu_memory.is_none());
+        assert!(limits.gpu_cores.is_none());
+    }
+
+    #[test]
+    fn gpu_multi_gpu() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.gpu = Some(GPUSpec {
+            count: 4,
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+        let main = &deployment.spec.template.spec.containers[0];
+        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
+
+        assert_eq!(limits.gpu, Some("4".to_string()));
+    }
+
+    #[test]
+    fn gpu_hami_fractional() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.gpu = Some(GPUSpec {
+            count: 1,
+            memory: Some("20Gi".to_string()),
+            compute: Some(30),
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+        let main = &deployment.spec.template.spec.containers[0];
+        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
+
+        assert_eq!(limits.gpu, Some("1".to_string()));
+        assert_eq!(limits.gpu_memory, Some("20480".to_string())); // 20Gi = 20480 MiB
+        assert_eq!(limits.gpu_cores, Some("30".to_string()));
+    }
+
+    #[test]
+    fn gpu_memory_only_no_compute() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.gpu = Some(GPUSpec {
+            count: 1,
+            memory: Some("8Gi".to_string()),
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+        let main = &deployment.spec.template.spec.containers[0];
+        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
+
+        assert_eq!(limits.gpu, Some("1".to_string()));
+        assert_eq!(limits.gpu_memory, Some("8192".to_string()));
+        assert!(limits.gpu_cores.is_none());
+    }
+
+    #[test]
+    fn gpu_toleration_added_by_default() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.gpu = Some(GPUSpec {
+            count: 1,
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+        let tolerations = &deployment.spec.template.spec.tolerations;
+
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(tolerations[0].key, Some("nvidia.com/gpu".to_string()));
+        assert_eq!(tolerations[0].operator, Some("Exists".to_string()));
+        assert_eq!(tolerations[0].effect, Some("NoSchedule".to_string()));
+    }
+
+    #[test]
+    fn gpu_toleration_disabled() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.gpu = Some(GPUSpec {
+            count: 1,
+            tolerations: false,
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+        assert!(deployment.spec.template.spec.tolerations.is_empty());
+    }
+
+    #[test]
+    fn gpu_model_node_selector() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.gpu = Some(GPUSpec {
+            count: 4,
+            model: Some("H100".to_string()),
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+        let selector = deployment
+            .spec
+            .template
+            .spec
+            .node_selector
+            .as_ref()
+            .expect("should have node selector");
+
+        assert_eq!(
+            selector.get("nvidia.com/gpu.product"),
+            Some(&"NVIDIA-H100-80GB-HBM3".to_string())
+        );
+    }
+
+    #[test]
+    fn no_gpu_no_tolerations_or_selector() {
+        let service = make_service("my-app", "default");
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        assert!(deployment.spec.template.spec.tolerations.is_empty());
+        assert!(deployment.spec.template.spec.node_selector.is_none());
+    }
+
+    #[test]
+    fn gpu_first_container_only() {
+        let mut service = make_service("gpu-app", "default");
+        // Add a second container (BTreeMap sorts alphabetically: "main" < "sidecar")
+        // But "gpu-worker" < "main", so gpu-worker gets idx 0
+        service.spec.containers.insert(
+            "gpu-worker".to_string(),
+            ContainerSpec {
+                image: "worker:latest".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                resources: None,
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+                security: None,
+            },
+        );
+        service.spec.gpu = Some(GPUSpec {
+            count: 1,
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+        let containers = &deployment.spec.template.spec.containers;
+
+        // First container (alphabetically) gets GPU limits
+        let first = containers.iter().find(|c| c.name == "gpu-worker").unwrap();
+        let first_limits = first.resources.as_ref().unwrap().limits.as_ref().unwrap();
+        assert_eq!(first_limits.gpu, Some("1".to_string()));
+
+        // Second container does NOT get GPU limits
+        let second = containers.iter().find(|c| c.name == "main").unwrap();
+        assert!(
+            second.resources.is_none() || {
+                let r = second.resources.as_ref().unwrap();
+                r.limits.is_none() || r.limits.as_ref().unwrap().gpu.is_none()
+            }
+        );
+    }
+
+    #[test]
+    fn gpu_merge_with_existing_resources() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.containers.get_mut("main").unwrap().resources =
+            Some(crate::crd::ResourceRequirements {
+                requests: Some(crate::crd::ResourceQuantity {
+                    cpu: Some("2".to_string()),
+                    memory: Some("8Gi".to_string()),
+                }),
+                limits: Some(crate::crd::ResourceQuantity {
+                    cpu: Some("4".to_string()),
+                    memory: Some("16Gi".to_string()),
+                }),
+            });
+        service.spec.gpu = Some(GPUSpec {
+            count: 1,
+            ..Default::default()
+        });
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+        let main = &deployment.spec.template.spec.containers[0];
+        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
+
+        // CPU and memory preserved
+        assert_eq!(limits.cpu, Some("4".to_string()));
+        assert_eq!(limits.memory, Some("16Gi".to_string()));
+        // GPU merged alongside
+        assert_eq!(limits.gpu, Some("1".to_string()));
+    }
+
+    #[test]
+    fn gpu_product_label_known_models() {
+        assert_eq!(gpu_product_label("H100"), "NVIDIA-H100-80GB-HBM3");
+        assert_eq!(gpu_product_label("A100"), "NVIDIA-A100-SXM4-80GB");
+        assert_eq!(gpu_product_label("L4"), "NVIDIA-L4");
+        assert_eq!(gpu_product_label("T4"), "NVIDIA-Tesla-T4");
+        assert_eq!(gpu_product_label("L40S"), "NVIDIA-L40S");
+    }
+
+    #[test]
+    fn gpu_product_label_unknown_passthrough() {
+        assert_eq!(gpu_product_label("custom-gpu-xyz"), "custom-gpu-xyz");
+    }
+
+    #[test]
+    fn gpu_resource_quantity_serialization() {
+        let limits = ResourceQuantity {
+            cpu: Some("4".to_string()),
+            memory: Some("16Gi".to_string()),
+            gpu: Some("1".to_string()),
+            gpu_memory: Some("8192".to_string()),
+            gpu_cores: Some("30".to_string()),
+        };
+
+        let json = serde_json::to_value(&limits).unwrap();
+        assert_eq!(json["cpu"], "4");
+        assert_eq!(json["memory"], "16Gi");
+        assert_eq!(json["nvidia.com/gpu"], "1");
+        assert_eq!(json["nvidia.com/gpumem"], "8192");
+        assert_eq!(json["nvidia.com/gpucores"], "30");
+    }
+
+    #[test]
+    fn gpu_resource_quantity_empty_omits_gpu_fields() {
+        let limits = ResourceQuantity {
+            cpu: Some("1".to_string()),
+            memory: Some("1Gi".to_string()),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&limits).unwrap();
+        assert_eq!(json["cpu"], "1");
+        assert!(json.get("nvidia.com/gpu").is_none());
+        assert!(json.get("nvidia.com/gpumem").is_none());
+        assert!(json.get("nvidia.com/gpucores").is_none());
     }
 }
