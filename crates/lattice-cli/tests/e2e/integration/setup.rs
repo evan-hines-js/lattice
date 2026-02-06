@@ -149,9 +149,9 @@ impl SetupResult {
     }
 
     /// Verify the mgmt proxy session is healthy (watchdog handles restarts automatically)
-    pub fn ensure_proxies_alive(&mut self) -> Result<(), String> {
+    pub async fn ensure_proxies_alive(&mut self) -> Result<(), String> {
         if let Some(ref mut proxy) = self.mgmt_proxy {
-            proxy.ensure_alive()?;
+            proxy.ensure_alive().await?;
         }
         Ok(())
     }
@@ -756,8 +756,9 @@ async fn test_setup_mgmt_and_workload_only() {
 async fn test_rebuild_operators() {
     use super::super::context::TestSession;
 
-    let mut session =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to rebuild operators").unwrap();
+    let mut session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to rebuild operators")
+        .await
+        .unwrap();
 
     info!("========================================");
     info!("REBUILD AND RESTART OPERATORS");

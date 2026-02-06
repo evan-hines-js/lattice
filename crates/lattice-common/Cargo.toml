@@ -10,6 +10,7 @@ default = []
 fips = ["aws-lc-rs/fips"]
 
 [dependencies]
+async-trait.workspace = true
 kube.workspace = true
 k8s-openapi.workspace = true
 serde.workspace = true

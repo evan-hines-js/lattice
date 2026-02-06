@@ -134,7 +134,8 @@ async fn resolve_server_and_token(
                 let pf = super::port_forward::PortForward::start(
                     kubeconfig_path,
                     lattice_common::DEFAULT_AUTH_PROXY_PORT,
-                )?;
+                )
+                .await?;
                 let url = pf.url.clone();
                 (url, Some(pf))
             } else {

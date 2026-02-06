@@ -211,14 +211,14 @@ impl TestSession {
     ///
     /// Starts a port-forward to mgmt's proxy if workload kubeconfig is set.
     /// All child cluster access routes through mgmt's proxy.
-    pub fn from_env(require_msg: &str) -> Result<Self, String> {
+    pub async fn from_env(require_msg: &str) -> Result<Self, String> {
         init_e2e_test();
         let mut ctx = InfraContext::from_env().ok_or(require_msg)?;
 
         // Start port-forward to mgmt proxy if we have child kubeconfigs
         // (all child access routes through mgmt's proxy)
         let mgmt_proxy = if ctx.workload_kubeconfig.is_some() {
-            match ProxySession::start(&ctx.mgmt_kubeconfig) {
+            match ProxySession::start(&ctx.mgmt_kubeconfig).await {
                 Ok(session) => {
                     ctx.mgmt_proxy_url = Some(session.url.clone());
                     Some(session)
@@ -242,13 +242,13 @@ impl TestSession {
         let kubeconfigs = self.ctx.all_kubeconfigs();
         rebuild_and_restart_operators(image, &kubeconfigs).await?;
 
-        self.ensure_proxy_alive()
+        self.ensure_proxy_alive().await
     }
 
     /// Verify mgmt proxy is healthy.
-    pub fn ensure_proxy_alive(&mut self) -> Result<(), String> {
+    pub async fn ensure_proxy_alive(&mut self) -> Result<(), String> {
         if let Some(ref mut proxy) = self.mgmt_proxy {
-            proxy.ensure_alive()?;
+            proxy.ensure_alive().await?;
             self.ctx.mgmt_proxy_url = Some(proxy.url.clone());
         }
         Ok(())

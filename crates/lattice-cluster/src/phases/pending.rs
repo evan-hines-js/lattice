@@ -6,12 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::runtime::events::EventType;
+use kube::{Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_agent::{patch_kubeconfig_for_self_management, InClusterClientProvider};
 use lattice_capi::{create_provider, ensure_capi_installed, CapiProviderConfig};
 use lattice_common::crd::{ClusterPhase, LatticeCluster};
+use lattice_common::events::{actions, reasons};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{capi_namespace, Error};
 
@@ -193,6 +195,16 @@ async fn handle_child_cluster(
     ctx.capi
         .apply_manifests(&manifests, &capi_namespace)
         .await?;
+
+    ctx.events
+        .publish(
+            &cluster.object_ref(&()),
+            EventType::Normal,
+            reasons::PROVISIONING_STARTED,
+            actions::PROVISION,
+            Some(format!("Applied {} CAPI manifests", manifests.len())),
+        )
+        .await;
 
     // Transition to Provisioning
     info!("transitioning to Provisioning phase");

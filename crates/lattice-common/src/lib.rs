@@ -6,6 +6,7 @@ pub mod clusterctl;
 pub mod crd;
 pub mod credentials;
 pub mod error;
+pub mod events;
 pub mod fips;
 pub mod graph;
 pub mod kube_utils;
@@ -23,6 +24,7 @@ pub use credentials::{
     AwsCredentials, CredentialError, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
 };
 pub use error::{default_error_policy, ControllerContext, Error, ReconcileError};
+pub use events::{EventPublisher, KubeEventPublisher, NoopEventPublisher};
 pub use kube_utils::{
     apply_manifest_with_discovery, apply_manifests_with_discovery, kind_priority, pluralize_kind,
     ApplyOptions,

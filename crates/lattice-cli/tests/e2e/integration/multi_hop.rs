@@ -410,6 +410,7 @@ async fn test_multi_hop_standalone() {
     let session = TestSession::from_env(
         "Set LATTICE_MGMT_KUBECONFIG, LATTICE_WORKLOAD_KUBECONFIG, and LATTICE_WORKLOAD2_KUBECONFIG",
     )
+    .await
     .unwrap();
 
     if !session.ctx.has_workload2() {

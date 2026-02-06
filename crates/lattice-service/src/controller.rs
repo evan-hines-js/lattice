@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
-use kube::{Client, ResourceExt};
+use kube::runtime::events::EventType;
+use kube::{Client, Resource, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(test)]
@@ -24,8 +25,12 @@ use lattice_common::kube_utils::HasApiResource;
 use lattice_common::policy::{AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry};
 
 use lattice_cedar::PolicyEngine;
+use lattice_common::events::{actions, reasons, EventPublisher};
+use lattice_common::KubeEventPublisher;
+#[cfg(test)]
+use lattice_common::NoopEventPublisher;
 
-use crate::compiler::{CompiledService, ServiceCompiler};
+use crate::compiler::{CompileError, CompiledService, ServiceCompiler};
 use crate::crd::{
     Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
     LatticeService, LatticeServiceSpec, LatticeServiceStatus, ProviderType, ServicePhase,
@@ -591,6 +596,8 @@ pub struct ServiceContext {
     pub provider_type: ProviderType,
     /// Cedar policy engine for secret access authorization
     pub cedar: Arc<PolicyEngine>,
+    /// Event publisher for emitting Kubernetes Events
+    pub events: Arc<dyn EventPublisher>,
 }
 
 impl ServiceContext {
@@ -601,6 +608,7 @@ impl ServiceContext {
         cluster_name: impl Into<String>,
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
+        events: Arc<dyn EventPublisher>,
     ) -> Self {
         Self {
             kube,
@@ -608,6 +616,7 @@ impl ServiceContext {
             cluster_name: cluster_name.into(),
             provider_type,
             cedar,
+            events,
         }
     }
 
@@ -621,12 +630,17 @@ impl ServiceContext {
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
     ) -> Self {
+        let events = Arc::new(KubeEventPublisher::new(
+            client.clone(),
+            "lattice-service-controller",
+        ));
         Self {
             kube: Arc::new(ServiceKubeClientImpl::new(client)),
             graph: Arc::new(ServiceGraph::new()),
             cluster_name: cluster_name.into(),
             provider_type,
             cedar,
+            events,
         }
     }
 
@@ -642,6 +656,7 @@ impl ServiceContext {
             cluster_name: "test-cluster".to_string(),
             provider_type: ProviderType::Docker,
             cedar: Arc::new(PolicyEngine::new()),
+            events: Arc::new(NoopEventPublisher),
         }
     }
 }
@@ -732,13 +747,43 @@ pub async fn reconcile(
             // Compile workloads and policies
             let compiler =
                 ServiceCompiler::new(&ctx.graph, &ctx.cluster_name, ctx.provider_type, &ctx.cedar);
-            let compiled = compiler.compile(&service).await?;
+            let compiled = match compiler.compile(&service).await {
+                Ok(compiled) => compiled,
+                Err(e) => {
+                    let event_reason = match &e {
+                        CompileError::SecretAccessDenied(_) => reasons::SECRET_ACCESS_DENIED,
+                        _ => reasons::COMPILATION_FAILED,
+                    };
+                    let msg = e.to_string();
+                    ctx.events
+                        .publish(
+                            &service.object_ref(&()),
+                            EventType::Warning,
+                            event_reason,
+                            actions::COMPILE,
+                            Some(msg.clone()),
+                        )
+                        .await;
+                    warn!(error = %msg, "compilation failed");
+                    update_service_status_failed(&service, &ctx, &msg).await?;
+                    return Ok(Action::requeue(Duration::from_secs(30)));
+                }
+            };
 
             // Apply compiled resources to the cluster
             info!(
                 resources = compiled.resource_count(),
                 "applying compiled resources"
             );
+            ctx.events
+                .publish(
+                    &service.object_ref(&()),
+                    EventType::Normal,
+                    reasons::COMPILATION_SUCCESS,
+                    actions::COMPILE,
+                    Some(format!("Generated {} resources", compiled.resource_count())),
+                )
+                .await;
             if let Err(e) = ctx
                 .kube
                 .apply_compiled_service(&name, namespace, &compiled)
@@ -770,7 +815,28 @@ pub async fn reconcile(
             // update our ingress/egress policies to reflect the new bilateral agreements.
             let compiler =
                 ServiceCompiler::new(&ctx.graph, &ctx.cluster_name, ctx.provider_type, &ctx.cedar);
-            let compiled = compiler.compile(&service).await?;
+            let compiled = match compiler.compile(&service).await {
+                Ok(compiled) => compiled,
+                Err(e) => {
+                    let event_reason = match &e {
+                        CompileError::SecretAccessDenied(_) => reasons::SECRET_ACCESS_DENIED,
+                        _ => reasons::COMPILATION_FAILED,
+                    };
+                    let msg = e.to_string();
+                    ctx.events
+                        .publish(
+                            &service.object_ref(&()),
+                            EventType::Warning,
+                            event_reason,
+                            actions::COMPILE,
+                            Some(msg.clone()),
+                        )
+                        .await;
+                    warn!(error = %msg, "compilation failed");
+                    update_service_status_failed(&service, &ctx, &msg).await?;
+                    return Ok(Action::requeue(Duration::from_secs(30)));
+                }
+            };
 
             debug!(
                 resources = compiled.resource_count(),
@@ -1563,6 +1629,7 @@ mod tests {
             "test-cluster",
             ProviderType::Docker,
             Arc::clone(&cedar),
+            Arc::new(NoopEventPublisher),
         );
         let ctx2 = ServiceContext::new(
             mock_kube2,
@@ -1570,6 +1637,7 @@ mod tests {
             "test-cluster",
             ProviderType::Docker,
             Arc::clone(&cedar),
+            Arc::new(NoopEventPublisher),
         );
 
         // Add service via ctx1

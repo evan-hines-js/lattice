@@ -71,9 +71,9 @@ impl PortForward {
     ///
     /// The OS picks a free local port. The watchdog thread monitors the process
     /// and restarts it (on the same port) if it dies or becomes unhealthy.
-    pub fn start(kubeconfig: &str, remote_port: u16) -> Result<Self> {
+    pub async fn start(kubeconfig: &str, remote_port: u16) -> Result<Self> {
         // Initial spawn: let the OS pick a free port
-        let (port, initial_child) = start_port_forward(kubeconfig, None, remote_port)?;
+        let (port, initial_child) = start_port_forward(kubeconfig, None, remote_port).await?;
         let url = format!("https://127.0.0.1:{}", port);
 
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -83,16 +83,20 @@ impl PortForward {
         let kc = kubeconfig.to_string();
         let url_clone = url.clone();
 
+        // Capture the tokio handle so the watchdog thread can call async functions.
+        let handle = tokio::runtime::Handle::current();
+
         let watchdog_handle = std::thread::spawn(move || {
-            watchdog_loop(
-                initial_child,
-                &kc,
-                port,
+            let cfg = WatchdogConfig {
+                kubeconfig: kc,
+                local_port: port,
                 remote_port,
-                &url_clone,
-                &stop_clone,
-                &restart_clone,
-            );
+                url: url_clone,
+                stop_flag: stop_clone,
+                restart_count: restart_clone,
+                handle,
+            };
+            watchdog_loop(initial_child, &cfg);
         });
 
         info!("[PortForward] Started with watchdog on port {}", port);
@@ -112,8 +116,8 @@ impl PortForward {
     }
 
     /// Check if the port-forward is currently healthy.
-    pub fn is_healthy(&self) -> bool {
-        check_health(&self.url, WATCHDOG_PROBE_TIMEOUT)
+    pub async fn is_healthy(&self) -> bool {
+        check_health(&self.url, WATCHDOG_PROBE_TIMEOUT).await
     }
 
     /// How many times the watchdog has restarted the port-forward.
@@ -121,16 +125,16 @@ impl PortForward {
         self.restart_count.load(Ordering::Relaxed)
     }
 
-    /// Block until the port-forward is healthy or timeout expires.
+    /// Wait until the port-forward is healthy or timeout expires.
     ///
     /// The watchdog handles the actual restart; this just waits for it to finish.
-    pub fn wait_until_healthy(&self, timeout: Duration) -> Result<()> {
+    pub async fn wait_until_healthy(&self, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if self.is_healthy() {
+            if self.is_healthy().await {
                 return Ok(());
             }
-            std::thread::sleep(Duration::from_millis(500));
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
         Err(Error::command_failed(format!(
             "port-forward on port {} not healthy after {:?}",
@@ -150,10 +154,10 @@ impl Drop for PortForward {
 }
 
 /// Check if a proxy URL is healthy by hitting its `/healthz` endpoint.
-pub fn check_health(url: &str, timeout: Duration) -> bool {
+pub async fn check_health(url: &str, timeout: Duration) -> bool {
     let health_url = format!("{}/healthz", url);
 
-    let client = match reqwest::blocking::Client::builder()
+    let client = match reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(timeout)
         .connect_timeout(timeout)
@@ -163,7 +167,7 @@ pub fn check_health(url: &str, timeout: Duration) -> bool {
         Err(_) => return false,
     };
 
-    match client.get(&health_url).send() {
+    match client.get(&health_url).send().await {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
     }
@@ -246,7 +250,7 @@ fn parse_forwarded_port(child: &mut Child) -> Result<u16> {
 /// Spawn a port-forward, parse the assigned port, and wait for it to become healthy.
 ///
 /// Returns `(local_port, child)` on success.
-fn start_port_forward(
+async fn start_port_forward(
     kubeconfig: &str,
     local_port: Option<u16>,
     remote_port: u16,
@@ -267,7 +271,7 @@ fn start_port_forward(
                     "[PortForward] Failed to spawn kubectl (attempt {}): {}",
                     attempt, e
                 );
-                std::thread::sleep(Duration::from_secs(1));
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
         };
@@ -282,7 +286,7 @@ fn start_port_forward(
                 );
                 let _ = child.kill();
                 let _ = child.wait();
-                std::thread::sleep(Duration::from_millis(500));
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
             }
         };
@@ -299,7 +303,7 @@ fn start_port_forward(
                 break;
             }
 
-            if check_health(&url, STARTUP_PROBE_TIMEOUT) {
+            if check_health(&url, STARTUP_PROBE_TIMEOUT).await {
                 info!(
                     "[PortForward] Ready at {} (attempt {}, probe {})",
                     url, attempt, probe
@@ -307,7 +311,7 @@ fn start_port_forward(
                 return Ok((port, child));
             }
 
-            std::thread::sleep(Duration::from_millis(500));
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         let _ = child.kill();
@@ -321,13 +325,24 @@ fn start_port_forward(
             );
         }
 
-        std::thread::sleep(Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
     Err(Error::command_failed(format!(
         "port-forward failed to become ready after {:?}",
         STARTUP_TIMEOUT
     )))
+}
+
+/// Config for the watchdog thread.
+struct WatchdogConfig {
+    kubeconfig: String,
+    local_port: u16,
+    remote_port: u16,
+    url: String,
+    stop_flag: Arc<AtomicBool>,
+    restart_count: Arc<AtomicU64>,
+    handle: tokio::runtime::Handle,
 }
 
 /// Background watchdog that monitors and restarts the port-forward.
@@ -338,20 +353,15 @@ fn start_port_forward(
 ///    where kubectl is alive but the connection is broken.
 ///
 /// On restart, re-uses the same local port (it's free because kubectl just died).
-fn watchdog_loop(
-    mut child: Child,
-    kubeconfig: &str,
-    local_port: u16,
-    remote_port: u16,
-    url: &str,
-    stop_flag: &AtomicBool,
-    restart_count: &AtomicU64,
-) {
+///
+/// The `handle` is used to call async functions (`check_health`, `start_port_forward`)
+/// from this std::thread via `block_on`.
+fn watchdog_loop(mut child: Child, cfg: &WatchdogConfig) {
     let mut last_health_check = Instant::now();
     let mut consecutive_health_failures = 0u32;
 
     loop {
-        if stop_flag.load(Ordering::Relaxed) {
+        if cfg.stop_flag.load(Ordering::Relaxed) {
             info!("[PortForward] Watchdog stopping, killing port-forward");
             let _ = child.kill();
             let _ = child.wait();
@@ -371,7 +381,10 @@ fn watchdog_loop(
                 // Process alive - periodic active health check
                 if last_health_check.elapsed() >= ACTIVE_HEALTH_CHECK_INTERVAL {
                     last_health_check = Instant::now();
-                    if !check_health(url, WATCHDOG_PROBE_TIMEOUT) {
+                    if !cfg
+                        .handle
+                        .block_on(check_health(&cfg.url, WATCHDOG_PROBE_TIMEOUT))
+                    {
                         consecutive_health_failures += 1;
                         warn!(
                             "[PortForward] Health check failed ({} consecutive)",
@@ -398,7 +411,7 @@ fn watchdog_loop(
         if needs_restart {
             info!(
                 "[PortForward] Restarting on port {} (reason: {})",
-                local_port, reason
+                cfg.local_port, reason
             );
 
             let _ = child.kill();
@@ -410,21 +423,25 @@ fn watchdog_loop(
             let mut restart_attempts = 0u32;
 
             loop {
-                if stop_flag.load(Ordering::Relaxed) {
+                if cfg.stop_flag.load(Ordering::Relaxed) {
                     return;
                 }
 
                 restart_attempts += 1;
                 // Re-use the same local port (free because kubectl just died)
-                match start_port_forward(kubeconfig, Some(local_port), remote_port) {
+                match cfg.handle.block_on(start_port_forward(
+                    &cfg.kubeconfig,
+                    Some(cfg.local_port),
+                    cfg.remote_port,
+                )) {
                     Ok((_, new_child)) => {
                         child = new_child;
-                        let count = restart_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        let count = cfg.restart_count.fetch_add(1, Ordering::Relaxed) + 1;
                         consecutive_health_failures = 0;
                         last_health_check = Instant::now();
                         info!(
                             "[PortForward] Restarted at {} (total restarts: {})",
-                            url, count
+                            cfg.url, count
                         );
                         break;
                     }

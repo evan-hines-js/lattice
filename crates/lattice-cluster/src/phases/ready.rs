@@ -6,10 +6,12 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::runtime::events::EventType;
+use kube::{Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{LatticeCluster, LatticeClusterStatus, WorkerPoolStatus};
+use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, Error};
 
 use crate::controller::{
@@ -117,6 +119,19 @@ async fn reconcile_worker_pools(
         };
 
         pool_statuses.insert(pool_id.clone(), pool_status);
+
+        // Emit event for scaling actions
+        if let ScalingAction::Scale { current, target } = &action {
+            ctx.events
+                .publish(
+                    &cluster.object_ref(&()),
+                    EventType::Normal,
+                    reasons::WORKER_SCALING,
+                    actions::SCALE,
+                    Some(format!("Scaling pool '{}' {}→{}", pool_id, current, target)),
+                )
+                .await;
+        }
 
         // Execute scaling action
         if let Err(action) =

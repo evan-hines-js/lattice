@@ -16,11 +16,17 @@ use serde::de::DeserializeOwned;
 use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(test)]
+use lattice_common::NoopEventPublisher;
+#[cfg(test)]
 use mockall::automock;
 
+use kube::runtime::events::EventType;
 use lattice_common::crd::{ClusterPhase, LatticeCluster, LatticeClusterStatus, WorkerPoolSpec};
+
+use lattice_common::events::{actions, reasons, EventPublisher};
 use lattice_common::{
-    capi_namespace, Error, CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_SECRET,
+    capi_namespace, Error, KubeEventPublisher, CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE,
+    PARENT_CONFIG_SECRET,
 };
 use lattice_move::{CellMover, CellMoverConfig};
 use lattice_proto::AgentState;
@@ -894,6 +900,8 @@ pub struct Context {
     /// Name of the cluster this controller is running on (from LATTICE_CLUSTER_NAME env var)
     /// When reconciling this cluster, we skip provisioning since we ARE this cluster
     pub self_cluster_name: Option<String>,
+    /// Event publisher for emitting Kubernetes Events
+    pub events: Arc<dyn EventPublisher>,
 }
 
 impl Context {
@@ -937,6 +945,7 @@ impl Context {
             capi_installer,
             parent_servers: None,
             self_cluster_name: None,
+            events: Arc::new(NoopEventPublisher),
         }
     }
 }
@@ -971,6 +980,7 @@ pub struct ContextBuilder {
     capi_installer: Option<Arc<dyn CapiInstaller>>,
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     self_cluster_name: Option<String>,
+    events: Option<Arc<dyn EventPublisher>>,
 }
 
 impl ContextBuilder {
@@ -983,6 +993,7 @@ impl ContextBuilder {
             capi_installer: None,
             parent_servers: None,
             self_cluster_name: None,
+            events: None,
         }
     }
 
@@ -1016,9 +1027,22 @@ impl ContextBuilder {
         self
     }
 
+    /// Override the event publisher (primarily for testing)
+    pub fn event_publisher(mut self, events: Arc<dyn EventPublisher>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
     /// Build the Context
     pub fn build(self) -> Context {
         use lattice_capi::ClusterctlInstaller;
+
+        let events = self.events.unwrap_or_else(|| {
+            Arc::new(KubeEventPublisher::new(
+                self.client.clone(),
+                "lattice-cluster-controller",
+            ))
+        });
 
         Context {
             kube: self
@@ -1033,6 +1057,7 @@ impl ContextBuilder {
                 .unwrap_or_else(|| Arc::new(ClusterctlInstaller::new())),
             parent_servers: self.parent_servers,
             self_cluster_name: self.self_cluster_name,
+            events,
         }
     }
 }
@@ -1106,6 +1131,15 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // Validate the cluster spec
     if let Err(e) = cluster.spec.validate() {
         warn!(error = %e, "cluster validation failed");
+        ctx.events
+            .publish(
+                &cluster.object_ref(&()),
+                EventType::Warning,
+                reasons::VALIDATION_FAILED,
+                actions::RECONCILE,
+                Some(e.to_string()),
+            )
+            .await;
         update_status(
             &cluster,
             &ctx,
@@ -1399,6 +1433,15 @@ async fn handle_deletion(
 
             // Delete CAPI Cluster to trigger infrastructure cleanup
             info!(cluster = %name, "Deleting CAPI Cluster to trigger infrastructure cleanup");
+            ctx.events
+                .publish(
+                    &cluster.object_ref(&()),
+                    EventType::Normal,
+                    reasons::DELETION_STARTED,
+                    actions::DELETE,
+                    Some("Deleting CAPI cluster".to_string()),
+                )
+                .await;
             if let Err(e) = ctx.capi.delete_capi_cluster(&name, &capi_namespace).await {
                 warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster");
             }
@@ -1516,6 +1559,15 @@ async fn handle_deletion(
 
     if current_phase != ClusterPhase::Unpivoting {
         info!(cluster = %name, "Starting unpivot - agent will send manifests to parent");
+        ctx.events
+            .publish(
+                &cluster.object_ref(&()),
+                EventType::Normal,
+                reasons::UNPIVOT_STARTED,
+                actions::DELETE,
+                Some("Starting unpivot to parent".to_string()),
+            )
+            .await;
 
         // Delete the cell LoadBalancer service to free the IP
         ctx.kube.delete_cell_service().await?;

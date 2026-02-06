@@ -6,10 +6,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::runtime::events::EventType;
+use kube::{Resource, ResourceExt};
 use tracing::{debug, error, info, warn};
 
 use lattice_common::crd::{ClusterPhase, LatticeCluster};
+use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, Error};
 
 use crate::controller::{
@@ -103,12 +105,30 @@ async fn execute_pivot(
         PivotAction::Complete => {
             // Pivot complete - child cluster is now self-managing
             info!("pivot complete, child cluster is self-managing");
+            ctx.events
+                .publish(
+                    &cluster.object_ref(&()),
+                    EventType::Normal,
+                    reasons::PIVOT_COMPLETE,
+                    actions::PIVOT,
+                    Some("Cluster is now self-managing".to_string()),
+                )
+                .await;
             update_status(cluster, ctx, ClusterPhase::Pivoted, None, true).await?;
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         PivotAction::TriggerPivot => {
             // Agent ready for pivot - set Pivoting phase and trigger
             info!("agent ready, triggering pivot");
+            ctx.events
+                .publish(
+                    &cluster.object_ref(&()),
+                    EventType::Normal,
+                    reasons::PIVOT_STARTED,
+                    actions::PIVOT,
+                    Some("Agent ready, triggering pivot".to_string()),
+                )
+                .await;
             update_status(cluster, ctx, ClusterPhase::Pivoting, None, false).await?;
 
             match pivot_ops

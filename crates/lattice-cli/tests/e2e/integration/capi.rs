@@ -81,8 +81,9 @@ pub async fn list_capi_clusters(kubeconfig: &str) -> Result<String, String> {
 #[tokio::test]
 #[ignore]
 async fn test_capi_standalone() {
-    let session =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone CAPI tests").unwrap();
+    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone CAPI tests")
+        .await
+        .unwrap();
     let cluster_name = get_mgmt_cluster_name();
     verify_capi_resources(&session.ctx, &cluster_name, ClusterLevel::Mgmt)
         .await
@@ -96,6 +97,7 @@ async fn test_capi_workload_standalone() {
     let session = TestSession::from_env(
         "Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG to run standalone CAPI tests",
     )
+    .await
     .unwrap();
     apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
         .await
@@ -112,8 +114,9 @@ async fn test_capi_workload_standalone() {
 #[tokio::test]
 #[ignore]
 async fn test_list_capi_clusters_standalone() {
-    let session =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone CAPI tests").unwrap();
+    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone CAPI tests")
+        .await
+        .unwrap();
     let clusters = list_capi_clusters(&session.ctx.mgmt_kubeconfig)
         .await
         .unwrap();

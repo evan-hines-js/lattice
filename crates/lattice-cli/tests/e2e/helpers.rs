@@ -1239,21 +1239,23 @@ pub use lattice_cli::commands::port_forward::PortForward as ResilientPortForward
 /// If an existing URL is provided, verifies it's healthy first. If unhealthy,
 /// creates a fresh resilient port-forward with automatic restart capability.
 #[cfg(feature = "provider-e2e")]
-pub fn get_or_create_proxy(
+pub async fn get_or_create_proxy(
     kubeconfig: &str,
     existing_url: Option<&str>,
 ) -> Result<(String, Option<ResilientPortForward>), String> {
     use lattice_cli::commands::port_forward::check_health;
 
     if let Some(url) = existing_url {
-        if check_health(url, Duration::from_secs(5)) {
+        if check_health(url, Duration::from_secs(5)).await {
             info!("[Helpers] Using existing proxy URL: {}", url);
             return Ok((url.to_string(), None));
         }
         info!("[Helpers] Existing proxy URL unhealthy, creating fresh port-forward...");
     }
 
-    let pf = ResilientPortForward::start(kubeconfig, PROXY_PORT).map_err(|e| e.to_string())?;
+    let pf = ResilientPortForward::start(kubeconfig, PROXY_PORT)
+        .await
+        .map_err(|e| e.to_string())?;
     let url = pf.url.clone();
     Ok((url, Some(pf)))
 }
@@ -1442,6 +1444,165 @@ fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
 }
 
 // =============================================================================
+// LatticeService Test Helpers
+// =============================================================================
+
+/// Create a LatticeService with secret resources for testing.
+///
+/// This is the canonical builder for test services with secrets.
+/// Used by both Cedar secret tests and ESO pipeline tests.
+///
+/// # Arguments
+/// * `name` - Service name
+/// * `namespace` - Target namespace
+/// * `secrets` - Vec of (resource_name, vault_path, provider, optional_keys)
+#[cfg(feature = "provider-e2e")]
+pub fn create_service_with_secrets(
+    name: &str,
+    namespace: &str,
+    secrets: Vec<(&str, &str, &str, Option<Vec<&str>>)>,
+) -> lattice_operator::crd::LatticeService {
+    use std::collections::BTreeMap;
+
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use lattice_operator::crd::{
+        ContainerSpec, DeploySpec, LatticeService, LatticeServiceSpec, PortSpec, ReplicaSpec,
+        ResourceSpec, ResourceType, ServicePortsSpec,
+    };
+
+    let mut resources = BTreeMap::new();
+    for (resource_name, vault_path, provider, keys) in secrets {
+        let mut params = BTreeMap::new();
+        params.insert("provider".to_string(), serde_json::json!(provider));
+        if let Some(ks) = keys {
+            params.insert("keys".to_string(), serde_json::json!(ks));
+        }
+        params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+
+        resources.insert(
+            resource_name.to_string(),
+            ResourceSpec {
+                type_: ResourceType::Secret,
+                id: Some(vault_path.to_string()),
+                params: Some(params),
+                ..Default::default()
+            },
+        );
+    }
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: "busybox:latest".to_string(),
+            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            args: None,
+            variables: BTreeMap::new(),
+            resources: None,
+            files: BTreeMap::new(),
+            volumes: BTreeMap::new(),
+            liveness_probe: None,
+            readiness_probe: None,
+            startup_probe: None,
+            security: None,
+        },
+    );
+
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 8080,
+            target_port: None,
+            protocol: None,
+        },
+    );
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            containers,
+            resources,
+            service: Some(ServicePortsSpec { ports }),
+            replicas: ReplicaSpec { min: 1, max: None },
+            deploy: DeploySpec::default(),
+            ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
+        },
+        status: None,
+    }
+}
+
+/// Wait for a LatticeService to reach the expected phase.
+///
+/// Polls the service status via kubectl until the phase matches or timeout expires.
+/// Used by Cedar secret tests, ESO pipeline tests, and secrets integration tests.
+#[cfg(feature = "provider-e2e")]
+pub async fn wait_for_service_phase(
+    kubeconfig: &str,
+    namespace: &str,
+    name: &str,
+    phase: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let kc = kubeconfig.to_string();
+    let ns = namespace.to_string();
+    let svc_name = name.to_string();
+    let expected_phase = phase.to_string();
+
+    wait_for_condition(
+        &format!("LatticeService {}/{} to reach {}", namespace, name, phase),
+        timeout,
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let ns = ns.clone();
+            let svc_name = svc_name.clone();
+            let expected_phase = expected_phase.clone();
+            async move {
+                let output = run_cmd(
+                    "kubectl",
+                    &[
+                        "--kubeconfig",
+                        &kc,
+                        "get",
+                        "latticeservice",
+                        &svc_name,
+                        "-n",
+                        &ns,
+                        "-o",
+                        "jsonpath={.status.phase}",
+                    ],
+                );
+
+                match output {
+                    Ok(current_phase) => {
+                        let current = current_phase.trim();
+                        info!("LatticeService {}/{} phase: {}", ns, svc_name, current);
+                        Ok(current == expected_phase)
+                    }
+                    Err(e) => {
+                        info!(
+                            "Error checking LatticeService {}/{} phase: {}",
+                            ns, svc_name, e
+                        );
+                        Ok(false)
+                    }
+                }
+            }
+        },
+    )
+    .await
+}
+
+// =============================================================================
 // Proxy Session
 // =============================================================================
 
@@ -1479,8 +1640,10 @@ impl ProxySession {
     /// Start a proxy session using port-forward (for Docker/kind).
     ///
     /// For cloud providers with LoadBalancer, use `start_cloud` instead.
-    pub fn start(kubeconfig: &str) -> Result<Self, String> {
-        let pf = ResilientPortForward::start(kubeconfig, PROXY_PORT).map_err(|e| e.to_string())?;
+    pub async fn start(kubeconfig: &str) -> Result<Self, String> {
+        let pf = ResilientPortForward::start(kubeconfig, PROXY_PORT)
+            .await
+            .map_err(|e| e.to_string())?;
         let url = pf.url.clone();
         let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator")?;
 
@@ -1511,7 +1674,7 @@ impl ProxySession {
         provider: super::providers::InfraProvider,
     ) -> Result<Self, String> {
         match provider {
-            super::providers::InfraProvider::Docker => Self::start(kubeconfig),
+            super::providers::InfraProvider::Docker => Self::start(kubeconfig).await,
             _ => Self::start_cloud(kubeconfig).await,
         }
     }
@@ -1520,12 +1683,13 @@ impl ProxySession {
     ///
     /// The watchdog handles automatic restarts, but this method waits until
     /// the proxy is actually responding. Returns Ok immediately for cloud providers.
-    pub fn ensure_alive(&mut self) -> Result<(), String> {
+    pub async fn ensure_alive(&mut self) -> Result<(), String> {
         let Some(ref pf) = self.port_forward else {
             return Ok(()); // Cloud providers don't use port-forward
         };
 
         pf.wait_until_healthy(Duration::from_secs(10))
+            .await
             .map_err(|e| e.to_string())
     }
 
