@@ -17,11 +17,11 @@ use lattice_api::auth::oidc_controller as oidc_provider_ctrl;
 use lattice_api::cedar::validation as cedar_validation_ctrl;
 use lattice_backup::backup_policy_controller as backup_policy_ctrl;
 use lattice_backup::restore_controller as restore_ctrl;
+use lattice_capi::installer::CapiInstaller;
 use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::ParentServers;
 use lattice_cloud_provider as cloud_provider_ctrl;
-use lattice_capi::installer::CapiInstaller;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,

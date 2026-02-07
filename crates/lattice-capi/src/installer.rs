@@ -131,7 +131,10 @@ fn resolve_var_expr(expr: &str, vars: &HashMap<&str, &str>) -> String {
     // ${VAR/#pattern/replacement} — bash string substitution
     if let Some(slash_pos) = expr.find("/#") {
         let var_name = &expr[..slash_pos];
-        return vars.get(var_name).map(|s| s.to_string()).unwrap_or_default();
+        return vars
+            .get(var_name)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
     }
 
     // ${VAR:=default} or ${VAR:-default}
@@ -986,10 +989,7 @@ mod tests {
     #[test]
     fn substitute_vars_colon_equals_prefers_provided_value() {
         let yaml = "- --insecure-diagnostics=${CAPI_INSECURE_DIAGNOSTICS:=false}";
-        let vars = vec![(
-            "CAPI_INSECURE_DIAGNOSTICS".to_string(),
-            "true".to_string(),
-        )];
+        let vars = vec![("CAPI_INSECURE_DIAGNOSTICS".to_string(), "true".to_string())];
         let result = substitute_vars(yaml, &vars);
         assert_eq!(result, "- --insecure-diagnostics=true");
     }

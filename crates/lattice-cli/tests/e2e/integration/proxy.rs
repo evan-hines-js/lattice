@@ -30,7 +30,7 @@ use super::super::helpers::{
     get_or_create_proxy, get_sa_token, get_workload2_cluster_name, get_workload_cluster_name,
     http_get_with_retry, run_cmd,
 };
-use super::cedar::{apply_e2e_default_policy, remove_e2e_default_policy};
+use super::cedar::{apply_e2e_default_policy, delete_cedar_policy, E2E_DEFAULT_POLICY_NAME};
 
 // ============================================================================
 // Constants
@@ -333,7 +333,7 @@ async fn test_proxy_access_standalone() {
     .await;
 
     // Cleanup
-    remove_e2e_default_policy(&session.ctx.mgmt_kubeconfig);
+    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME);
 
     result.unwrap();
 }

@@ -7,14 +7,10 @@ use std::time::Duration;
 use kube::api::ListParams;
 use kube::{Api, Client};
 
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{
     apply_manifests_with_discovery, ApplyOptions, ParentConfig, LATTICE_SYSTEM_NAMESPACE,
 };
-
-/// Maximum retries for infrastructure apply (handles transient 503 errors during startup)
-const INFRA_APPLY_MAX_RETRIES: u32 = 10;
-/// Delay between infrastructure apply retries
-const INFRA_APPLY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 use lattice_capi::installer::{
     copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
@@ -24,50 +20,27 @@ use lattice_infra::bootstrap::{self, InfrastructureConfig};
 
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT};
 
-/// Apply manifests with retry logic for transient errors (503, connection issues).
+/// Apply manifests with infinite retry and exponential backoff.
 ///
-/// During cluster startup, the API server may return 503 while webhooks or
-/// other services are still initializing. This function retries on such errors.
+/// During startup, the API server's discovery endpoint returns 503 while
+/// aggregated APIServices (e.g., KEDA metrics) initialize. The operator
+/// cannot proceed without infrastructure, so we retry forever.
 async fn apply_manifests_with_retry(
     client: &Client,
     manifests: &[String],
     context: &str,
 ) -> anyhow::Result<()> {
-    let mut last_error = None;
+    let config = RetryConfig {
+        initial_delay: Duration::from_secs(2),
+        ..RetryConfig::infinite()
+    };
 
-    for attempt in 1..=INFRA_APPLY_MAX_RETRIES {
-        match apply_manifests_with_discovery(client, manifests, &ApplyOptions::default()).await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                let err_str = e.to_string();
-                // Retry on transient errors (503, connection refused, etc.)
-                let is_transient = err_str.contains("503")
-                    || err_str.contains("Service Unavailable")
-                    || err_str.contains("connection refused")
-                    || err_str.contains("connection reset");
-
-                if is_transient && attempt < INFRA_APPLY_MAX_RETRIES {
-                    tracing::warn!(
-                        attempt = attempt,
-                        max_attempts = INFRA_APPLY_MAX_RETRIES,
-                        error = %err_str,
-                        context = context,
-                        "Transient error applying manifests, retrying..."
-                    );
-                    tokio::time::sleep(INFRA_APPLY_RETRY_DELAY).await;
-                    last_error = Some(e);
-                    continue;
-                }
-
-                // Non-transient error or max retries reached
-                return Err(e.into());
-            }
-        }
-    }
-
-    Err(last_error
-        .map(|e| anyhow::anyhow!("{}", e))
-        .unwrap_or_else(|| anyhow::anyhow!("max retries reached")))
+    retry_with_backoff(&config, context, || {
+        let client = client.clone();
+        async move { apply_manifests_with_discovery(&client, manifests, &ApplyOptions::default()).await }
+    })
+    .await
+    .map_err(Into::into)
 }
 
 /// Reconcile Service-mode infrastructure (Istio, Gateway API, ESO, Cilium policies)
@@ -104,11 +77,9 @@ pub async fn ensure_service_infrastructure(client: &Client) -> anyhow::Result<()
 /// Reconcile Cluster-mode infrastructure (CAPI, operator network policies)
 ///
 /// Reads provider/bootstrap from LatticeCluster CRD (the source of truth).
-/// Ensures all infrastructure is installed. Server-side apply handles idempotency.
-///
-/// IMPORTANT: Uses the SAME generate_core() function as the bootstrap webhook.
-/// This guarantees upgrades work by changing Lattice version - on restart,
-/// the operator re-applies identical infrastructure manifests.
+/// Infrastructure is NOT included in the bootstrap bundle (to reduce network
+/// pressure from simultaneous image pulls on new nodes). The operator installs
+/// everything once it's running. Server-side apply handles idempotency.
 pub async fn ensure_cluster_infrastructure(
     client: &Client,
     installer: &dyn CapiInstaller,
@@ -172,10 +143,7 @@ pub async fn ensure_cluster_infrastructure(
         let manifests = bootstrap::generate_core(&config)
             .await
             .map_err(|e| anyhow::anyhow!("failed to generate infrastructure manifests: {}", e))?;
-        tracing::info!(
-            count = manifests.len(),
-            "applying all infrastructure (same as bootstrap webhook)"
-        );
+        tracing::info!(count = manifests.len(), "applying infrastructure manifests");
         apply_manifests_with_retry(client, &manifests, "full infrastructure").await?;
 
         // Install CAPI providers so this cluster can self-manage.
