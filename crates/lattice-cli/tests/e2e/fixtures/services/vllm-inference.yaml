@@ -1,0 +1,32 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: vllm-inference
+  namespace: model-cache-test
+spec:
+  containers:
+    main:
+      image: vllm/vllm-openai:latest
+      volumes:
+        /models:
+          source: ${resources.llm}
+      resources:
+        requests:
+          cpu: 1000m
+          memory: 2Gi
+        limits:
+          cpu: 4000m
+          memory: 8Gi
+  service:
+    ports:
+      http:
+        port: 8000
+        protocol: TCP
+  resources:
+    llm:
+      type: model
+      params:
+        uri: "file:///tmp/test-model"
+        size: "1Gi"
+  replicas:
+    min: 1

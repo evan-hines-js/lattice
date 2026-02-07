@@ -2988,7 +2988,10 @@ resources:
 
         let params = resource.model_params().expect("should parse model params");
         let params = params.expect("should be Some for model resource");
-        assert_eq!(params.uri, "huggingface://meta-llama/Llama-3.3-70B-Instruct");
+        assert_eq!(
+            params.uri,
+            "huggingface://meta-llama/Llama-3.3-70B-Instruct"
+        );
         assert_eq!(params.revision.as_deref(), Some("main"));
         assert_eq!(params.pvc_size(), "140Gi");
     }

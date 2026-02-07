@@ -21,13 +21,13 @@ use lattice_backup::restore_controller as restore_ctrl;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::ParentServers;
 use lattice_cloud_provider as cloud_provider_ctrl;
-use lattice_common::ControllerContext;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
     LatticeRestore, LatticeService, LatticeServicePolicy, ModelArtifact, OIDCProvider,
     ProviderType, SecretsProvider,
 };
+use lattice_common::ControllerContext;
 use lattice_model_cache::{self as model_cache_ctrl, ModelCacheContext};
 use lattice_secrets_provider as secrets_provider_ctrl;
 use lattice_service::controller::{

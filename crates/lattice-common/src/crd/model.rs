@@ -63,13 +63,7 @@ pub const DEFAULT_MODEL_CACHE_SIZE: &str = "50Gi";
 impl ModelParams {
     /// Validate model parameters
     pub fn validate(&self) -> Result<(), String> {
-        let valid_schemes = [
-            "huggingface://",
-            "s3://",
-            "gs://",
-            "az://",
-            "file:///",
-        ];
+        let valid_schemes = ["huggingface://", "s3://", "gs://", "az://", "file:///"];
         if !valid_schemes.iter().any(|s| self.uri.starts_with(s)) {
             return Err(format!(
                 "model uri must start with one of: {}",
