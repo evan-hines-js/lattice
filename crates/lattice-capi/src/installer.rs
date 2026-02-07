@@ -94,14 +94,70 @@ fn provider_component_files(
 // Env var substitution
 // =============================================================================
 
-/// Substitute `${VAR_NAME}` patterns in YAML with values from the provided map.
+/// Substitute `${VAR}` patterns in YAML, handling bash-style defaults.
+///
+/// Supported patterns (matching clusterctl behavior):
+/// - `${VAR}` — replaced with value from `vars`, or left as-is if missing
+/// - `${VAR:=default}` — replaced with value from `vars`, or `default` if missing
+/// - `${VAR:-default}` — same as `:=`
+/// - `${VAR="default"}` — replaced with value from `vars`, or `default` if missing
+/// - `${VAR/#pattern/replacement}` — bash string substitution (resolved to value or empty)
 fn substitute_vars(yaml: &str, vars: &[(String, String)]) -> String {
-    let mut result = yaml.to_string();
-    for (key, value) in vars {
-        let pattern = format!("${{{}}}", key);
-        result = result.replace(&pattern, value);
+    let var_map: HashMap<&str, &str> = vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut result = String::with_capacity(yaml.len());
+    let mut remaining = yaml;
+
+    while let Some(start) = remaining.find("${") {
+        result.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 2..];
+
+        if let Some(end) = after_start.find('}') {
+            let expr = &after_start[..end];
+            let replacement = resolve_var_expr(expr, &var_map);
+            result.push_str(&replacement);
+            remaining = &after_start[end + 1..];
+        } else {
+            // No closing brace — emit literal and advance past "${"
+            result.push_str("${");
+            remaining = after_start;
+        }
     }
+    result.push_str(remaining);
     result
+}
+
+/// Resolve a single variable expression (the content between `${` and `}`).
+fn resolve_var_expr(expr: &str, vars: &HashMap<&str, &str>) -> String {
+    // ${VAR/#pattern/replacement} — bash string substitution
+    if let Some(slash_pos) = expr.find("/#") {
+        let var_name = &expr[..slash_pos];
+        return vars.get(var_name).map(|s| s.to_string()).unwrap_or_default();
+    }
+
+    // ${VAR:=default} or ${VAR:-default}
+    if let Some(pos) = expr.find(":=").or_else(|| expr.find(":-")) {
+        let var_name = &expr[..pos];
+        let default = &expr[pos + 2..];
+        return vars
+            .get(var_name)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default.to_string());
+    }
+
+    // ${VAR="default"} — strip surrounding quotes from default
+    if let Some(pos) = expr.find('=') {
+        let var_name = &expr[..pos];
+        let default = expr[pos + 1..].trim_matches('"');
+        return vars
+            .get(var_name)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default.to_string());
+    }
+
+    // ${VAR} — plain substitution, leave as-is if missing
+    vars.get(expr)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("${{{}}}", expr))
 }
 
 // =============================================================================
@@ -918,6 +974,54 @@ mod tests {
         let vars = vec![("OTHER".to_string(), "val".to_string())];
         let result = substitute_vars(yaml, &vars);
         assert_eq!(result, "value: ${UNKNOWN_VAR}");
+    }
+
+    #[test]
+    fn substitute_vars_handles_colon_equals_default() {
+        let yaml = "- --insecure-diagnostics=${CAPI_INSECURE_DIAGNOSTICS:=false}";
+        let result = substitute_vars(yaml, &[]);
+        assert_eq!(result, "- --insecure-diagnostics=false");
+    }
+
+    #[test]
+    fn substitute_vars_colon_equals_prefers_provided_value() {
+        let yaml = "- --insecure-diagnostics=${CAPI_INSECURE_DIAGNOSTICS:=false}";
+        let vars = vec![(
+            "CAPI_INSECURE_DIAGNOSTICS".to_string(),
+            "true".to_string(),
+        )];
+        let result = substitute_vars(yaml, &vars);
+        assert_eq!(result, "- --insecure-diagnostics=true");
+    }
+
+    #[test]
+    fn substitute_vars_handles_colon_dash_default() {
+        let yaml = "value: ${MY_VAR:-hello}";
+        let result = substitute_vars(yaml, &[]);
+        assert_eq!(result, "value: hello");
+    }
+
+    #[test]
+    fn substitute_vars_handles_equals_quoted_default() {
+        let yaml = "host: ${PROXMOX_URL=\"\"}";
+        let result = substitute_vars(yaml, &[]);
+        assert_eq!(result, "host: ");
+    }
+
+    #[test]
+    fn substitute_vars_handles_bash_string_substitution() {
+        // ${VAR/#pattern/replacement} should resolve to value or empty
+        let yaml = "role: ${AWS_CONTROLLER_IAM_ROLE/#arn/eks.amazonaws.com/role-arn: arn}";
+        let result = substitute_vars(yaml, &[]);
+        assert_eq!(result, "role: ");
+    }
+
+    #[test]
+    fn substitute_vars_handles_multiple_defaults_in_one_string() {
+        let yaml = "a=${X:=1} b=${Y:=2} c=${Z:=3}";
+        let vars = vec![("Y".to_string(), "override".to_string())];
+        let result = substitute_vars(yaml, &vars);
+        assert_eq!(result, "a=1 b=override c=3");
     }
 
     #[test]

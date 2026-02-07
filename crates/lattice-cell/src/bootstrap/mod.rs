@@ -2794,8 +2794,10 @@ mod tests {
             !manifests_str.contains("cloud-controller-manager"),
             "Non-AWS clusters should not include CCM"
         );
+        // Check for the actual CSI driver resource name (JSON-serialized), not
+        // incidental mentions in helm chart descriptions (e.g. KEDA's CSIMigration docs)
         assert!(
-            !manifests_str.contains("ebs.csi.aws.com"),
+            !manifests_str.contains("\"ebs.csi.aws.com\""),
             "Non-AWS clusters should not include EBS CSI driver"
         );
     }

@@ -8,7 +8,7 @@ use kube::Client;
 use tracing::debug;
 
 use crate::error::MoveError;
-use crate::{MOVE_HIERARCHY_LABEL, MOVE_LABEL};
+use crate::MOVE_LABEL;
 
 /// Information about a discovered CRD type for move operations
 #[derive(Debug, Clone)]
@@ -19,8 +19,6 @@ pub struct DiscoveredCrdType {
     pub kind: String,
     /// Plural name (e.g., "clusters")
     pub plural: String,
-    /// Whether this type has the move-hierarchy label
-    pub move_hierarchy: bool,
 }
 
 /// Discover CRDs with move labels.
@@ -40,13 +38,13 @@ pub async fn discover_move_crds(client: &Client) -> Result<Vec<DiscoveredCrdType
     let mut types = Vec::new();
 
     for crd in crds.items {
-        let labels = crd.metadata.labels.as_ref();
+        let has_move = crd
+            .metadata
+            .labels
+            .as_ref()
+            .is_some_and(|l| l.contains_key(MOVE_LABEL));
 
-        // Check for move label or move-hierarchy label
-        let has_move = labels.is_some_and(|l| l.contains_key(MOVE_LABEL));
-        let has_move_hierarchy = labels.is_some_and(|l| l.contains_key(MOVE_HIERARCHY_LABEL));
-
-        if !has_move && !has_move_hierarchy {
+        if !has_move {
             continue;
         }
 
@@ -77,7 +75,6 @@ pub async fn discover_move_crds(client: &Client) -> Result<Vec<DiscoveredCrdType
             debug!(
                 kind = %kind,
                 api_version = %api_version,
-                move_hierarchy = has_move_hierarchy,
                 "Discovered move CRD type"
             );
 
@@ -85,7 +82,6 @@ pub async fn discover_move_crds(client: &Client) -> Result<Vec<DiscoveredCrdType
                 api_version,
                 kind: kind.clone(),
                 plural: plural.clone(),
-                move_hierarchy: has_move_hierarchy,
             });
         }
     }
