@@ -1,74 +1,31 @@
 //! Velero manifest generation
 //!
-//! Generates Velero manifests for backup and restore capabilities.
-//! Deployed during cluster provisioning via Helm chart with node-agent
-//! DaemonSet for file-level backup and CSI plugin for volume snapshots.
+//! Embeds pre-rendered Velero manifests from build time.
 
-use std::sync::Arc;
+use std::sync::LazyLock;
 
-use tokio::sync::OnceCell;
-use tracing::info;
+use super::{namespace_yaml, split_yaml_documents};
 
-use super::{charts_dir, namespace_yaml, run_helm_template};
-
-/// Cached Velero manifests to avoid repeated helm template calls.
-static VELERO_MANIFESTS: OnceCell<Result<Arc<Vec<String>>, String>> = OnceCell::const_new();
+/// Pre-rendered Velero manifests with namespace prepended.
+static VELERO_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let mut manifests = vec![namespace_yaml("velero")];
+    manifests.extend(split_yaml_documents(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/velero.yaml"
+    ))));
+    manifests
+});
 
 /// Velero version (pinned at build time)
 pub fn velero_version() -> &'static str {
     env!("VELERO_VERSION")
 }
 
-/// Generate Velero manifests using helm template
+/// Generate Velero manifests
 ///
-/// Renders via `helm template` on-demand with caching. The first call executes helm
-/// and caches the result; subsequent calls return the cached manifests.
-pub async fn generate_velero() -> Result<Arc<Vec<String>>, String> {
-    VELERO_MANIFESTS
-        .get_or_init(|| async { render_velero_helm().await.map(Arc::new) })
-        .await
-        .clone()
-}
-
-/// Internal function to render Velero manifests via helm template
-async fn render_velero_helm() -> Result<Vec<String>, String> {
-    let version = velero_version();
-    let charts = charts_dir();
-    let chart_path = format!("{}/velero-{}.tgz", charts, version);
-
-    info!(version, "Rendering Velero chart");
-
-    let helm_manifests = run_helm_template(
-        "velero",
-        &chart_path,
-        "velero",
-        &[
-            "--set",
-            "deployNodeAgent=true",
-            "--set",
-            "snapshotsEnabled=true",
-            "--set",
-            "initContainers=null",
-            // CRDs are included via --include-crds; disable the upgrade-crds Job
-            // (it uses bitnami/kubectl which is discontinued)
-            "--set",
-            "upgradeCRDs=false",
-            // Don't create default BackupStorageLocation or VolumeSnapshotLocation —
-            // these are configured later via LatticeBackupPolicy when the user sets up
-            // their backup target.
-            "--set-json",
-            "configuration.backupStorageLocation=[]",
-            "--set-json",
-            "configuration.volumeSnapshotLocation=[]",
-        ],
-    )
-    .await?;
-
-    let mut manifests = vec![namespace_yaml("velero")];
-    manifests.extend(helm_manifests);
-
-    info!(count = manifests.len(), "Rendered Velero manifests");
-    Ok(manifests)
+/// Returns pre-rendered manifests embedded at build time.
+pub fn generate_velero() -> &'static [String] {
+    &VELERO_MANIFESTS
 }
 
 #[cfg(test)]
@@ -86,5 +43,12 @@ mod tests {
         let ns = namespace_yaml("velero");
         assert!(ns.contains("kind: Namespace"));
         assert!(ns.contains("name: velero"));
+    }
+
+    #[test]
+    fn manifests_are_embedded() {
+        let manifests = generate_velero();
+        assert!(!manifests.is_empty());
+        assert!(manifests[0].contains("kind: Namespace"));
     }
 }

@@ -59,13 +59,15 @@ RUN apt-get update && apt-get install -y \
     golang \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy helm from go-builder (FIPS-compliant, built from source)
+# Copy helm from go-builder (needed by build.rs to pre-render charts)
 COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock versions.toml ./
 COPY crates ./crates
 COPY scripts/runtime ./scripts
+# Charts are needed by build.rs to pre-render manifests at compile time
+COPY test-charts ./test-charts
 
 # Build with BuildKit cache mounts for incremental compilation
 # - registry/git: caches downloaded crates
@@ -95,15 +97,11 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy FIPS-compliant Go binaries
-COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
+# Copy FIPS-compliant clusterctl (helm no longer needed at runtime)
 COPY --from=go-builder /usr/local/bin/clusterctl /usr/local/bin/clusterctl
 
-# Copy Lattice operator binary
+# Copy Lattice operator binary (manifests are embedded at build time)
 COPY --from=rust-builder /usr/local/bin/lattice-operator /usr/local/bin/lattice-operator
-
-# Copy helm charts from source (pre-downloaded)
-COPY test-charts /charts
 
 # Copy CAPI providers from source (pre-downloaded)
 COPY test-providers /providers
@@ -153,19 +151,17 @@ RUN echo "cert-manager:" > /providers/clusterctl.yaml && \
 ENV GOPROXY=off
 ENV CLUSTERCTL_DISABLE_VERSIONCHECK=true
 
-# Enable FIPS mode at runtime for Go binaries (helm, clusterctl)
+# Enable FIPS mode at runtime for Go binaries (clusterctl)
 # Using fips140=on (not =only) because =only rejects X25519 in TLS handshakes,
 # which breaks connections to servers that offer X25519 (like RKE2 with BoringCrypto)
 ENV GODEBUG=fips140=on
 
 # Create non-root user
 RUN useradd -r -u 1000 -m lattice && \
-    chown -R lattice:lattice /charts /providers /scripts
+    chown -R lattice:lattice /providers /scripts
 
 USER lattice
 
-# Set chart location for runtime
-ENV LATTICE_CHARTS_DIR=/charts
 # Set scripts location for templating
 ENV LATTICE_SCRIPTS_DIR=/scripts
 # Set clusterctl config for offline CAPI installation

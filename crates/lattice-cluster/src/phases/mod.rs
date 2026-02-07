@@ -185,7 +185,7 @@ pub async fn reconcile_infrastructure(
     cluster: &LatticeCluster,
 ) -> Result<(), Error> {
     use lattice_common::ParentConfig;
-    use lattice_infra::InfrastructureConfig;
+    use lattice_infra::bootstrap::InfrastructureConfig;
 
     let mut config = InfrastructureConfig::from(cluster);
 
@@ -196,7 +196,7 @@ pub async fn reconcile_infrastructure(
     }
 
     // Generate infrastructure manifests
-    let manifests = lattice_infra::generate_all(&config)
+    let manifests = lattice_infra::bootstrap::generate_all(&config)
         .await
         .map_err(|e| Error::internal(format!("failed to generate infrastructure: {}", e)))?;
 

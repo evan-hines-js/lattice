@@ -56,15 +56,6 @@ repo = "https://charts.jetstack.io"
 chart = "jetstack/cert-manager"
 filename = "cert-manager-v{version}.tgz"
 
-[charts.envoy-gateway]
-version = "1.6.2"
-# OCI chart - uses oci:// protocol
-repo = "oci://docker.io/envoyproxy/gateway-helm"
-chart = "oci://docker.io/envoyproxy/gateway-helm"
-filename = "gateway-helm-v{version}.tgz"
-oci = true
-version_prefix = "v"
-
 [charts.external-secrets]
 version = "1.2.1"
 repo = "https://charts.external-secrets.io"

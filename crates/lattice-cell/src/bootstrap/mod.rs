@@ -397,7 +397,7 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
     let mut manifests = generate_all_manifests(generator, &manifest_config).await?;
 
     // Generate infrastructure manifests (cert-manager, CAPI, Istio, Cilium)
-    let infra_config = lattice_infra::InfrastructureConfig {
+    let infra_config = lattice_infra::bootstrap::InfrastructureConfig {
         provider: config.provider,
         bootstrap: config.bootstrap.clone(),
         cluster_name: config.cluster_name.to_string(),
@@ -719,9 +719,6 @@ enum ManifestError {
         /// Error message
         message: String,
     },
-    /// Cilium manifest generation failed
-    #[error("Cilium manifest generation failed: {0}")]
-    Cilium(String),
 }
 
 #[async_trait::async_trait]
@@ -759,13 +756,8 @@ impl DefaultManifestGenerator {
     ) -> Result<Vec<String>, ManifestError> {
         let mut manifests = Vec::new();
 
-        // CNI manifests first (Cilium) - rendered on-demand
-        match lattice_infra::generate_cilium_manifests().await {
-            Ok(cilium_manifests) => manifests.extend(cilium_manifests.iter().cloned()),
-            Err(e) => {
-                return Err(ManifestError::Cilium(e.to_string()));
-            }
-        }
+        // CNI manifests first (Cilium) - embedded at build time
+        manifests.extend(lattice_infra::bootstrap::cilium::generate_cilium_manifests().iter().cloned());
 
         // Then operator manifests
         let operator_manifests = self
@@ -1042,7 +1034,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     /// Generates ALL manifests needed for a self-managing cluster:
     /// - CNI (Cilium)
     /// - Lattice operator
-    /// - cert-manager, CAPI, Istio, Envoy Gateway (infrastructure)
+    /// - cert-manager, CAPI, Istio (infrastructure)
     /// - LatticeCluster CRD definition
     /// - Parent connection config Secret
     ///
