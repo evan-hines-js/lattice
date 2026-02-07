@@ -371,6 +371,20 @@ pub struct PodSpec {
     /// Runtime class name (e.g., "nvidia" for GPU workloads)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class_name: Option<String>,
+    /// Scheduling gates — block pod scheduling until gates are removed
+    ///
+    /// Used by the ModelCache controller to prevent pods from scheduling
+    /// until model artifacts are cached in the PVC.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduling_gates: Vec<SchedulingGate>,
+}
+
+/// Scheduling gate that blocks pod scheduling until removed
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchedulingGate {
+    /// Gate name (e.g., "lattice.dev/model-ready")
+    pub name: String,
 }
 
 /// Topology spread constraint for distributing pods across failure domains
@@ -1469,6 +1483,7 @@ impl WorkloadCompiler {
                         node_selector: gpu_node_selector(&spec.gpu),
                         tolerations: gpu_tolerations(&spec.gpu),
                         runtime_class_name: spec.gpu.as_ref().map(|_| "nvidia".to_string()),
+                        scheduling_gates: volumes.scheduling_gates.clone(),
                     },
                 },
                 strategy,
