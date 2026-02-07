@@ -25,7 +25,7 @@ use tracing::info;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     client_from_kubeconfig, ensure_fresh_namespace, load_service_config, run_cmd,
-    wait_for_condition, wait_for_model_artifact_phase,
+    wait_for_condition,
 };
 
 /// Test namespace for model cache integration tests
@@ -296,12 +296,40 @@ async fn verify_phase_transitions(kubeconfig: &str) -> Result<(), String> {
         .ok_or("ModelArtifact has no name")?;
 
     // The artifact should transition to Downloading (controller creates Job)
-    wait_for_model_artifact_phase(
-        kubeconfig,
-        TEST_NAMESPACE,
-        artifact_name,
-        "Downloading",
+    let kc_dl = kubeconfig.to_string();
+    let name_dl = artifact_name.to_string();
+    wait_for_condition(
+        &format!("ModelArtifact {} to reach Downloading", artifact_name),
         Duration::from_secs(120),
+        Duration::from_secs(5),
+        || {
+            let kc = kc_dl.clone();
+            let name = name_dl.clone();
+            async move {
+                let output = run_cmd(
+                    "kubectl",
+                    &[
+                        "--kubeconfig",
+                        &kc,
+                        "get",
+                        "modelartifact",
+                        &name,
+                        "-n",
+                        TEST_NAMESPACE,
+                        "-o",
+                        "jsonpath={.status.phase}",
+                    ],
+                );
+                match output {
+                    Ok(phase) => {
+                        let phase = phase.trim();
+                        info!("[ModelCache] Artifact {} phase: {}", name, phase);
+                        Ok(phase == "Downloading")
+                    }
+                    Err(_) => Ok(false),
+                }
+            }
+        },
     )
     .await?;
 
@@ -365,7 +393,8 @@ async fn verify_failed_retry(kubeconfig: &str) -> Result<(), String> {
             uri: "file:///nonexistent/invalid/path".to_string(),
             revision: None,
             pvc_name: format!("pvc-{}", test_name),
-            size_bytes: None,
+            cache_size: "1Gi".to_string(),
+            storage_class: None,
         },
     );
 

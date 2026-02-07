@@ -4,15 +4,14 @@
 //! the cache state of pre-fetched model artifacts.
 //!
 //! Model loading is triggered by `type: model` resources on LatticeServiceSpec.
-//! The VolumeCompiler generates PVCs and scheduling gates; the ModelCache
-//! controller watches for these and creates pre-fetch Jobs to populate them.
+//! The VolumeCompiler generates scheduling gates and pod volume references;
+//! the ModelCache controller creates PVCs (owned by ModelArtifact) and
+//! pre-fetch Jobs to populate them.
 
 use chrono::{DateTime, Utc};
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-use super::types::Condition;
 
 // =============================================================================
 // ModelParams — parsed from ResourceSpec.params when type == model
@@ -170,9 +169,12 @@ pub struct ModelArtifactSpec {
     /// Name of the PVC backing this model cache
     pub pvc_name: String,
 
-    /// Expected size in bytes (for progress tracking)
+    /// PVC size for the model cache (Kubernetes quantity, e.g. "50Gi")
+    pub cache_size: String,
+
+    /// Kubernetes storage class for the cache PVC
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
+    pub storage_class: Option<String>,
 }
 
 /// Status of a ModelArtifact
@@ -182,9 +184,6 @@ pub struct ModelArtifactStatus {
     /// Current phase
     pub phase: ModelArtifactPhase,
 
-    /// Bytes downloaded so far
-    pub downloaded_bytes: u64,
-
     /// When the download completed
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
@@ -193,10 +192,16 @@ pub struct ModelArtifactStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 
-    /// Standard Kubernetes conditions
+    /// Number of times the download has been retried after failure
     #[serde(default)]
-    pub conditions: Vec<Condition>,
+    pub retry_count: u32,
 }
+
+/// Base delay in seconds for retry backoff (30s * 2^retry_count, capped at 5 min)
+pub const RETRY_BASE_DELAY_SECS: u64 = 30;
+
+/// Maximum retry delay in seconds (5 minutes)
+pub const RETRY_MAX_DELAY_SECS: u64 = 300;
 
 /// Phase of a ModelArtifact
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -210,8 +215,6 @@ pub enum ModelArtifactPhase {
     Ready,
     /// Download or validation failed
     Failed,
-    /// Model cache is being evicted (PVC cleanup)
-    Evicting,
 }
 
 // =============================================================================

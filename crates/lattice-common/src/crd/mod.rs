@@ -35,7 +35,7 @@ pub use external_service::{
 };
 pub use model::{
     ModelArtifact, ModelArtifactPhase, ModelArtifactSpec, ModelArtifactStatus, ModelParams,
-    MODEL_READY_GATE,
+    MODEL_READY_GATE, RETRY_BASE_DELAY_SECS, RETRY_MAX_DELAY_SECS,
 };
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,

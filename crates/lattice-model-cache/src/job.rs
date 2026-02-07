@@ -18,6 +18,11 @@ use lattice_common::crd::ModelArtifactSpec;
 /// Destination path inside the loader container where models are written
 const MODEL_DEST_PATH: &str = "/models";
 
+/// Derive the Job name for a model artifact's pre-fetch Job.
+pub fn prefetch_job_name(artifact_name: &str) -> String {
+    format!("model-prefetch-{}", artifact_name)
+}
+
 /// Build a Kubernetes Job that pre-fetches a model artifact into a PVC.
 ///
 /// The Job:
@@ -33,7 +38,7 @@ pub fn build_prefetch_job(
     namespace: &str,
     loader_image: &str,
 ) -> Job {
-    let job_name = format!("model-prefetch-{}", artifact_name);
+    let job_name = prefetch_job_name(artifact_name);
 
     let mut args = vec![
         "--uri".to_string(),
@@ -163,7 +168,8 @@ mod tests {
             uri: "huggingface://meta-llama/Llama-3.3-70B-Instruct".to_string(),
             revision: Some("main".to_string()),
             pvc_name: "model-cache-meta-llama-abc123".to_string(),
-            size_bytes: None,
+            cache_size: "140Gi".to_string(),
+            storage_class: None,
         }
     }
 
