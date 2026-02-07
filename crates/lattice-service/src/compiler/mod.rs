@@ -28,16 +28,13 @@
 
 use lattice_cedar::{PolicyEngine, SecretAuthzRequest};
 
+use lattice_common::mesh;
+
 use crate::crd::{LatticeService, ProviderType};
 use crate::graph::ServiceGraph;
 use crate::ingress::{GeneratedIngress, GeneratedWaypoint, IngressCompiler, WaypointCompiler};
 use crate::policy::{GeneratedPolicies, PolicyCompiler};
 use crate::workload::{GeneratedWorkloads, SecretsCompiler, VolumeCompiler, WorkloadCompiler};
-
-// Re-export types for convenience
-pub use crate::ingress::{Certificate, Gateway, HttpRoute};
-pub use crate::policy::{CiliumNetworkPolicy, ServiceEntry};
-pub use crate::workload::{Deployment, HorizontalPodAutoscaler, Service, ServiceAccount};
 
 /// Errors that can occur during service compilation
 #[derive(Debug, thiserror::Error)]
@@ -242,9 +239,21 @@ impl<'a> ServiceCompiler<'a> {
                 .map(|s| s.ports.values().map(|p| p.port).collect())
                 .unwrap_or_default();
 
+            let gateway_name = mesh::ingress_gateway_name(namespace);
             let gateway_policy =
                 policy_compiler.compile_gateway_allow_policy(name, namespace, &ports);
             policies.authorization_policies.push(gateway_policy);
+
+            // Add Cilium L4 rule: allow Istio gateway proxy → service
+            if let Some(cilium_policy) = policies.cilium_policies.first_mut() {
+                cilium_policy
+                    .spec
+                    .ingress
+                    .push(PolicyCompiler::compile_gateway_ingress_rule(
+                        &gateway_name,
+                        &ports,
+                    ));
+            }
 
             ingress
         } else {
@@ -391,7 +400,6 @@ mod tests {
                     kind: None,
                 }),
             }),
-            rate_limit: None,
             gateway_class: None,
         });
         service
@@ -642,7 +650,7 @@ mod tests {
             .ingress
             .gateway
             .expect("gateway should be generated for ingress");
-        assert_eq!(gateway.metadata.name, "api-gateway");
+        assert_eq!(gateway.metadata.name, "prod-ingress");
         assert_eq!(gateway.metadata.namespace, "prod");
 
         let route = output

@@ -335,6 +335,42 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
+    /// Generate a CiliumIngressRule allowing the Istio gateway proxy to reach
+    /// a service. The gateway runs in the same namespace, selected by its
+    /// `istio.io/gateway-name` label.
+    pub(crate) fn compile_gateway_ingress_rule(
+        gateway_name: &str,
+        ports: &[u16],
+    ) -> CiliumIngressRule {
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "k8s:istio.io/gateway-name".to_string(),
+            gateway_name.to_string(),
+        );
+
+        let to_ports = if ports.is_empty() {
+            vec![]
+        } else {
+            vec![CiliumPortRule {
+                ports: ports
+                    .iter()
+                    .map(|p| CiliumPort {
+                        port: p.to_string(),
+                        protocol: "TCP".to_string(),
+                    })
+                    .collect(),
+                rules: None,
+            }]
+        };
+
+        CiliumIngressRule {
+            from_endpoints: vec![EndpointSelector {
+                match_labels: labels,
+            }],
+            to_ports,
+        }
+    }
+
     /// Build port rules for external service endpoints (TCP only)
     fn build_external_port_rules(callee: &ServiceNode) -> Vec<CiliumPortRule> {
         let ports: Vec<CiliumPort> = callee

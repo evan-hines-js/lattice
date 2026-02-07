@@ -54,10 +54,6 @@ spec:
     sonarr:
       type: service
       direction: inbound
-      inbound:
-        rateLimit:
-          requestsPerInterval: 100
-          intervalSeconds: 60
   ingress:
     hosts:
       - jellyfin.home.local

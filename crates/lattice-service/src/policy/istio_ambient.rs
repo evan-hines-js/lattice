@@ -222,14 +222,15 @@ impl<'a> PolicyCompiler<'a> {
         )
     }
 
-    /// Compile an AuthorizationPolicy to allow Envoy Gateway to reach a service
-    pub fn compile_gateway_allow_policy(
+    /// Compile an AuthorizationPolicy to allow the Istio gateway proxy to reach a service
+    pub(crate) fn compile_gateway_allow_policy(
         &self,
         service_name: &str,
         namespace: &str,
         ports: &[u16],
     ) -> AuthorizationPolicy {
-        let gateway_principal = mesh::trust_domain::gateway_principal(&self.cluster_name);
+        let gateway_principal =
+            mesh::trust_domain::gateway_principal(&self.cluster_name, namespace);
         let port_strings: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
 
         AuthorizationPolicy::new(

@@ -114,7 +114,7 @@ impl GatewayMetadata {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewaySpec {
-    /// GatewayClass name (e.g., "eg" or "istio-waypoint")
+    /// GatewayClass name (e.g., "istio" or "istio-waypoint")
     pub gateway_class_name: String,
     /// Listener configurations
     pub listeners: Vec<GatewayListener>,
@@ -168,6 +168,17 @@ pub struct CertificateRef {
 pub struct AllowedRoutes {
     /// Namespace selector
     pub namespaces: RouteNamespaces,
+}
+
+impl AllowedRoutes {
+    /// Routes allowed only from the same namespace as the Gateway
+    fn same_namespace() -> Self {
+        Self {
+            namespaces: RouteNamespaces {
+                from: "Same".to_string(),
+            },
+        }
+    }
 }
 
 /// Route namespace selector
@@ -245,6 +256,22 @@ pub struct ParentRef {
     /// Gateway namespace
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    /// Listener section name to bind to
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_name: Option<String>,
+}
+
+impl ParentRef {
+    /// Create a reference to a specific listener on a Gateway
+    fn gateway(name: &str, namespace: &str, section_name: impl Into<String>) -> Self {
+        Self {
+            group: Some("gateway.networking.k8s.io".to_string()),
+            kind: Some("Gateway".to_string()),
+            name: name.to_string(),
+            namespace: Some(namespace.to_string()),
+            section_name: Some(section_name.into()),
+        }
+    }
 }
 
 /// HTTPRoute rule
@@ -484,11 +511,7 @@ impl WaypointCompiler {
                     port: mesh::HBONE_PORT,
                     protocol: "HBONE".to_string(),
                     tls: None,
-                    allowed_routes: Some(AllowedRoutes {
-                        namespaces: RouteNamespaces {
-                            from: "Same".to_string(),
-                        },
-                    }),
+                    allowed_routes: Some(AllowedRoutes::same_namespace()),
                 }],
             },
         )
@@ -540,8 +563,8 @@ impl WaypointCompiler {
 pub struct IngressCompiler;
 
 impl IngressCompiler {
-    /// Default GatewayClass for ingress (Envoy Gateway for north-south)
-    const DEFAULT_GATEWAY_CLASS: &'static str = "eg";
+    /// Default GatewayClass for ingress (Istio for north-south)
+    const DEFAULT_GATEWAY_CLASS: &'static str = mesh::INGRESS_GATEWAY_CLASS;
 
     /// Compile ingress resources for a service
     pub fn compile(
@@ -576,45 +599,50 @@ impl IngressCompiler {
             .as_deref()
             .unwrap_or(Self::DEFAULT_GATEWAY_CLASS);
 
+        let gateway_name = mesh::ingress_gateway_name(namespace);
+
+        // Manual mode with explicit secret_name → use it, otherwise → {service}-tls
+        let tls_secret_name = ingress
+            .tls
+            .as_ref()
+            .filter(|tls| tls.mode == TlsMode::Manual)
+            .and_then(|tls| tls.secret_name.clone())
+            .unwrap_or_else(|| format!("{}-tls", service_name));
+
         let has_tls = ingress.tls.is_some();
-        let secret_name = format!("{}-tls", service_name);
 
-        let mut listeners = vec![GatewayListener {
-            name: "http".to_string(),
-            hostname: ingress.hosts.first().cloned(),
-            port: 80,
-            protocol: "HTTP".to_string(),
-            tls: None,
-            allowed_routes: Some(AllowedRoutes {
-                namespaces: RouteNamespaces {
-                    from: "Same".to_string(),
-                },
-            }),
-        }];
-
-        if has_tls {
+        // Per-host listeners with unique names for clean merging
+        let mut listeners = Vec::new();
+        for (i, host) in ingress.hosts.iter().enumerate() {
             listeners.push(GatewayListener {
-                name: "https".to_string(),
-                hostname: ingress.hosts.first().cloned(),
-                port: 443,
-                protocol: "HTTPS".to_string(),
-                tls: Some(GatewayTlsConfig {
-                    mode: "Terminate".to_string(),
-                    certificate_refs: vec![CertificateRef {
-                        kind: Some("Secret".to_string()),
-                        name: secret_name,
-                    }],
-                }),
-                allowed_routes: Some(AllowedRoutes {
-                    namespaces: RouteNamespaces {
-                        from: "Same".to_string(),
-                    },
-                }),
+                name: format!("{}-http-{}", service_name, i),
+                hostname: Some(host.clone()),
+                port: 80,
+                protocol: "HTTP".to_string(),
+                tls: None,
+                allowed_routes: Some(AllowedRoutes::same_namespace()),
             });
+
+            if has_tls {
+                listeners.push(GatewayListener {
+                    name: format!("{}-https-{}", service_name, i),
+                    hostname: Some(host.clone()),
+                    port: 443,
+                    protocol: "HTTPS".to_string(),
+                    tls: Some(GatewayTlsConfig {
+                        mode: "Terminate".to_string(),
+                        certificate_refs: vec![CertificateRef {
+                            kind: Some("Secret".to_string()),
+                            name: tls_secret_name.clone(),
+                        }],
+                    }),
+                    allowed_routes: Some(AllowedRoutes::same_namespace()),
+                });
+            }
         }
 
         Gateway::new(
-            GatewayMetadata::new(format!("{}-gateway", service_name), namespace),
+            GatewayMetadata::new(gateway_name, namespace),
             GatewaySpec {
                 gateway_class_name: gateway_class.to_string(),
                 listeners,
@@ -651,12 +679,26 @@ impl IngressCompiler {
             }]
         };
 
-        let parent_refs = vec![ParentRef {
-            group: Some("gateway.networking.k8s.io".to_string()),
-            kind: Some("Gateway".to_string()),
-            name: format!("{}-gateway", service_name),
-            namespace: Some(namespace.to_string()),
-        }];
+        let gateway_name = mesh::ingress_gateway_name(namespace);
+        let has_tls = ingress.tls.is_some();
+
+        // Parent refs bind to specific listener sections on the shared gateway
+        let mut parent_refs = Vec::new();
+        for (i, _host) in ingress.hosts.iter().enumerate() {
+            parent_refs.push(ParentRef::gateway(
+                &gateway_name,
+                namespace,
+                format!("{}-http-{}", service_name, i),
+            ));
+
+            if has_tls {
+                parent_refs.push(ParentRef::gateway(
+                    &gateway_name,
+                    namespace,
+                    format!("{}-https-{}", service_name, i),
+                ));
+            }
+        }
 
         HttpRoute::new(
             GatewayMetadata::new(format!("{}-route", service_name), namespace),
@@ -727,7 +769,6 @@ mod tests {
                 None
             },
             gateway_class: None,
-            rate_limit: None,
         }
     }
 
@@ -741,13 +782,14 @@ mod tests {
         let output = IngressCompiler::compile("api", "prod", &ingress, 8080);
 
         let gateway = output.gateway.expect("should have gateway");
-        assert_eq!(gateway.metadata.name, "api-gateway");
+        assert_eq!(gateway.metadata.name, "prod-ingress");
         assert_eq!(gateway.metadata.namespace, "prod");
-        assert_eq!(gateway.spec.gateway_class_name, "eg");
+        assert_eq!(gateway.spec.gateway_class_name, "istio");
         assert_eq!(gateway.spec.listeners.len(), 1);
 
         let listener = &gateway.spec.listeners[0];
-        assert_eq!(listener.name, "http");
+        assert_eq!(listener.name, "api-http-0");
+        assert_eq!(listener.hostname, Some("api.example.com".to_string()));
         assert_eq!(listener.port, 80);
         assert_eq!(listener.protocol, "HTTP");
         assert!(listener.tls.is_none());
@@ -761,8 +803,13 @@ mod tests {
         let gateway = output.gateway.expect("should have gateway");
         assert_eq!(gateway.spec.listeners.len(), 2);
 
+        let http_listener = &gateway.spec.listeners[0];
+        assert_eq!(http_listener.name, "api-http-0");
+        assert_eq!(http_listener.hostname, Some("api.example.com".to_string()));
+
         let https_listener = &gateway.spec.listeners[1];
-        assert_eq!(https_listener.name, "https");
+        assert_eq!(https_listener.name, "api-https-0");
+        assert_eq!(https_listener.hostname, Some("api.example.com".to_string()));
         assert_eq!(https_listener.port, 443);
         assert_eq!(https_listener.protocol, "HTTPS");
         assert!(https_listener.tls.is_some());
@@ -777,6 +824,14 @@ mod tests {
         assert_eq!(route.metadata.name, "api-route");
         assert_eq!(route.spec.hostnames, vec!["api.example.com"]);
         assert_eq!(route.spec.rules.len(), 1);
+
+        // Parent ref uses shared gateway with section_name binding
+        assert_eq!(route.spec.parent_refs.len(), 1);
+        assert_eq!(route.spec.parent_refs[0].name, "prod-ingress");
+        assert_eq!(
+            route.spec.parent_refs[0].section_name,
+            Some("api-http-0".to_string())
+        );
 
         let backend = &route.spec.rules[0].backend_refs[0];
         assert_eq!(backend.name, "api");
@@ -822,6 +877,95 @@ mod tests {
             matches[1].path.as_ref().expect("path should be set").type_,
             "Exact"
         );
+    }
+
+    #[test]
+    fn multi_host_generates_per_host_listeners() {
+        let ingress = make_ingress_spec(vec!["api.example.com", "api.internal.example.com"], true);
+        let output = IngressCompiler::compile("api", "prod", &ingress, 8080);
+
+        let gateway = output.gateway.expect("should have gateway");
+        // 2 hosts × (HTTP + HTTPS) = 4 listeners
+        assert_eq!(gateway.spec.listeners.len(), 4);
+        assert_eq!(gateway.spec.listeners[0].name, "api-http-0");
+        assert_eq!(
+            gateway.spec.listeners[0].hostname,
+            Some("api.example.com".to_string())
+        );
+        assert_eq!(gateway.spec.listeners[1].name, "api-https-0");
+        assert_eq!(gateway.spec.listeners[2].name, "api-http-1");
+        assert_eq!(
+            gateway.spec.listeners[2].hostname,
+            Some("api.internal.example.com".to_string())
+        );
+        assert_eq!(gateway.spec.listeners[3].name, "api-https-1");
+
+        let route = output.http_route.expect("should have route");
+        // 2 hosts × (HTTP + HTTPS) = 4 parent refs
+        assert_eq!(route.spec.parent_refs.len(), 4);
+        assert_eq!(
+            route.spec.parent_refs[0].section_name,
+            Some("api-http-0".to_string())
+        );
+        assert_eq!(
+            route.spec.parent_refs[1].section_name,
+            Some("api-https-0".to_string())
+        );
+        assert_eq!(
+            route.spec.parent_refs[2].section_name,
+            Some("api-http-1".to_string())
+        );
+        assert_eq!(
+            route.spec.parent_refs[3].section_name,
+            Some("api-https-1".to_string())
+        );
+    }
+
+    #[test]
+    fn manual_tls_uses_provided_secret_name() {
+        let ingress = IngressSpec {
+            hosts: vec!["api.example.com".to_string()],
+            paths: None,
+            tls: Some(IngressTls {
+                mode: TlsMode::Manual,
+                secret_name: Some("my-custom-cert".to_string()),
+                issuer_ref: None,
+            }),
+            gateway_class: None,
+        };
+        let output = IngressCompiler::compile("api", "prod", &ingress, 8080);
+
+        let gateway = output.gateway.expect("should have gateway");
+        let https_listener = &gateway.spec.listeners[1];
+        let tls = https_listener.tls.as_ref().expect("should have tls");
+        assert_eq!(tls.certificate_refs[0].name, "my-custom-cert");
+
+        // No Certificate generated for manual mode
+        assert!(output.certificate.is_none());
+    }
+
+    #[test]
+    fn manual_tls_without_secret_name_falls_back() {
+        let ingress = IngressSpec {
+            hosts: vec!["api.example.com".to_string()],
+            paths: None,
+            tls: Some(IngressTls {
+                mode: TlsMode::Manual,
+                secret_name: None,
+                issuer_ref: None,
+            }),
+            gateway_class: None,
+        };
+        let output = IngressCompiler::compile("api", "prod", &ingress, 8080);
+
+        let gateway = output.gateway.expect("should have gateway");
+        let https_listener = &gateway.spec.listeners[1];
+        let tls = https_listener.tls.as_ref().expect("should have tls");
+        // Falls back to {service}-tls
+        assert_eq!(tls.certificate_refs[0].name, "api-tls");
+
+        // No Certificate generated for manual mode
+        assert!(output.certificate.is_none());
     }
 
     // =========================================================================

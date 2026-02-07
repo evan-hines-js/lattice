@@ -22,13 +22,7 @@
 mod cilium;
 mod istio_ambient;
 
-pub use lattice_common::policy::{
-    AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
-    AuthorizationSource, CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy,
-    CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule, DnsMatch, DnsRules, EndpointSelector,
-    FqdnSelector, OperationSpec, PolicyMetadata, ServiceEntry, ServiceEntryPort, ServiceEntrySpec,
-    SourceSpec, TargetRef, WorkloadSelector,
-};
+use lattice_common::policy::{AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry};
 
 use crate::graph::{ServiceGraph, ServiceType};
 
@@ -180,13 +174,14 @@ impl<'a> PolicyCompiler<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::PolicyCompiler;
     use crate::crd::{
         ContainerSpec, DependencyDirection, DeploySpec, LatticeExternalServiceSpec, PortSpec,
         ReplicaSpec, Resolution, ResourceSpec, ResourceType, ServicePortsSpec,
     };
     use crate::graph::ServiceGraph;
     use lattice_common::mesh;
+    use lattice_common::policy::{CiliumEgressRule, FqdnSelector};
     use std::collections::BTreeMap;
 
     fn make_external_spec(allowed: Vec<&str>) -> LatticeExternalServiceSpec {
@@ -496,10 +491,12 @@ mod tests {
         assert_eq!(policy.metadata.name, "allow-gateway-to-api");
         assert_eq!(policy.spec.action, "ALLOW");
 
+        // Istio gateway proxy runs in the same namespace with SA {namespace}-ingress-istio
         let principals = &policy.spec.rules[0].from[0].source.principals;
-        assert!(principals
-            .iter()
-            .any(|p| p.contains("envoy-gateway-system")));
+        assert_eq!(
+            principals[0],
+            "lattice.prod-cluster.local/ns/prod-ns/sa/prod-ns-ingress-istio"
+        );
 
         let ports = &policy.spec.rules[0].to[0].operation.ports;
         assert!(ports.contains(&"8080".to_string()));
