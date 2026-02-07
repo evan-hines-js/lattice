@@ -820,7 +820,7 @@ pub struct ScaledObjectTrigger {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metric_type: Option<String>,
     /// Trigger-specific key-value metadata
-    pub metadata: std::collections::BTreeMap<String, String>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 // =============================================================================
@@ -851,7 +851,7 @@ pub struct GeneratedWorkloads {
     /// ExternalSecrets for syncing secrets from SecretsProvider (Vault)
     pub external_secrets: Vec<lattice_secrets_provider::ExternalSecret>,
     /// Secret references for template resolution (resource_name -> SecretRef)
-    pub secret_refs: std::collections::BTreeMap<String, SecretRef>,
+    pub secret_refs: BTreeMap<String, SecretRef>,
 }
 
 impl GeneratedWorkloads {

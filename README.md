@@ -32,7 +32,7 @@ Networking follows the same philosophy: default-deny everywhere, traffic only fl
 
 **K8s API proxy** — Access any cluster in your hierarchy from a single kubectl context. Requests travel through existing gRPC tunnels with Cedar policy authorization. No VPN required.
 
-**LatticeService** — One CRD replaces Deployment + Service + HPA + PVC + ExternalSecret + NetworkPolicy + AuthorizationPolicy + Gateway + HTTPRoute. Score-compatible `${...}` templates resolve dependencies automatically.
+**LatticeService** — One CRD replaces Deployment + Service + ScaledObject + PVC + ExternalSecret + NetworkPolicy + AuthorizationPolicy + Gateway + HTTPRoute. Score-compatible `${...}` templates resolve dependencies automatically.
 
 **Cedar access control** — Fine-grained policies for proxy access (who can reach which clusters) and secret access (which services can use which Vault paths). Default-deny for secrets.
 
@@ -151,7 +151,7 @@ spec:
     max: 10
 ```
 
-Generates: Deployment, Service, HPA, CiliumNetworkPolicy, AuthorizationPolicy, ExternalSecret, ServiceAccount — all wired together, default-deny enforced.
+Generates: Deployment, Service, ScaledObject, CiliumNetworkPolicy, AuthorizationPolicy, ExternalSecret, ServiceAccount — all wired together, default-deny enforced.
 
 ---
 
