@@ -62,8 +62,6 @@ pub struct GraphNode {
     pub owners: HashSet<String>,
     /// UIDs of soft owners (by naming convention)
     pub soft_owners: HashSet<String>,
-    /// Whether this node should force-move its hierarchy
-    pub force_move_hierarchy: bool,
     /// New UID after creation on target (filled in during import)
     pub new_uid: Option<String>,
 }
@@ -104,7 +102,6 @@ impl GraphNode {
             object,
             owners,
             soft_owners: HashSet::new(),
-            force_move_hierarchy: false,
             new_uid: None,
         })
     }
@@ -125,8 +122,6 @@ impl GraphNode {
 pub struct DiscoveredType {
     /// API resource for this type
     pub api_resource: ApiResource,
-    /// Whether to force-move the hierarchy (from move-hierarchy label)
-    pub move_hierarchy: bool,
 }
 
 /// The object graph containing all discovered CAPI resources and their relationships
@@ -198,9 +193,6 @@ impl ObjectGraph {
         // Step 3: Process soft ownership relationships
         self.process_soft_ownership();
 
-        // Step 4: Propagate force_move_hierarchy to descendants
-        self.propagate_force_move_hierarchy();
-
         info!(
             namespace = %self.namespace,
             types = self.discovered_types.len(),
@@ -232,16 +224,9 @@ impl ObjectGraph {
                 plural: crd_type.plural,
             };
 
-            debug!(
-                kind = %crd_type.kind,
-                move_hierarchy = crd_type.move_hierarchy,
-                "Discovered CRD type"
-            );
+            debug!(kind = %crd_type.kind, "Discovered CRD type");
 
-            self.discovered_types.push(DiscoveredType {
-                api_resource,
-                move_hierarchy: crd_type.move_hierarchy,
-            });
+            self.discovered_types.push(DiscoveredType { api_resource });
         }
 
         // Also add core types that are commonly moved (Secrets, ConfigMaps)
@@ -260,13 +245,11 @@ impl ObjectGraph {
         // Secrets are often referenced by CAPI resources
         self.discovered_types.push(DiscoveredType {
             api_resource: build_api_resource("v1", "Secret"),
-            move_hierarchy: false,
         });
 
         // ConfigMaps may also be referenced
         self.discovered_types.push(DiscoveredType {
             api_resource: build_api_resource("v1", "ConfigMap"),
-            move_hierarchy: false,
         });
     }
 
@@ -306,14 +289,11 @@ impl ObjectGraph {
             }
 
             for obj in list.items {
-                if let Some(mut node) = GraphNode::from_dynamic_object(
+                if let Some(node) = GraphNode::from_dynamic_object(
                     &obj,
                     &discovered_type.api_resource.api_version,
                     &discovered_type.api_resource.kind,
                 ) {
-                    // Mark if this type forces hierarchy move
-                    node.force_move_hierarchy = discovered_type.move_hierarchy;
-
                     let uid = node.uid().to_string();
                     debug!(
                         kind = %node.identity.kind,
@@ -384,44 +364,6 @@ impl ObjectGraph {
             secrets_found = secret_count,
             "Secrets discovered in namespace"
         );
-    }
-
-    /// Propagate force_move_hierarchy to all descendants
-    fn propagate_force_move_hierarchy(&mut self) {
-        // Build reverse ownership map (child -> parents)
-        // and find all nodes with force_move_hierarchy
-        let force_move_nodes: Vec<String> = self
-            .nodes
-            .values()
-            .filter(|n| n.force_move_hierarchy)
-            .map(|n| n.uid().to_string())
-            .collect();
-
-        // For each force_move node, mark all descendants
-        for root_uid in force_move_nodes {
-            self.mark_descendants_force_move(&root_uid);
-        }
-    }
-
-    /// Mark all descendants of a node as force_move_hierarchy
-    fn mark_descendants_force_move(&mut self, root_uid: &str) {
-        // Find all nodes that have this root as an owner
-        let children: Vec<String> = self
-            .nodes
-            .values()
-            .filter(|n| n.all_owners().contains(root_uid))
-            .map(|n| n.uid().to_string())
-            .collect();
-
-        for child_uid in children {
-            if let Some(node) = self.nodes.get_mut(&child_uid) {
-                if !node.force_move_hierarchy {
-                    node.force_move_hierarchy = true;
-                    // Recursively mark this node's descendants
-                    self.mark_descendants_force_move(&child_uid);
-                }
-            }
-        }
     }
 
     /// Filter the graph to only include objects related to a specific cluster
@@ -506,7 +448,6 @@ mod tests {
             object: serde_json::json!({"metadata": {"name": name, "uid": uid}}),
             owners: owners.into_iter().map(String::from).collect(),
             soft_owners: HashSet::new(),
-            force_move_hierarchy: false,
             new_uid: None,
         }
     }

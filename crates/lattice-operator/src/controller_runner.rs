@@ -21,6 +21,7 @@ use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::ParentServers;
 use lattice_cloud_provider as cloud_provider_ctrl;
+use lattice_capi::installer::CapiInstaller;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
@@ -46,8 +47,9 @@ pub fn build_cluster_controllers(
     client: Client,
     self_cluster_name: Option<String>,
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
+    capi_installer: Arc<dyn CapiInstaller>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    let mut ctx_builder = Context::builder(client.clone());
+    let mut ctx_builder = Context::builder(client.clone()).capi_installer(capi_installer);
     if let Some(servers) = parent_servers {
         ctx_builder = ctx_builder.parent_servers(servers);
     }

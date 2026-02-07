@@ -912,24 +912,6 @@ impl Context {
         ContextBuilder::new(client)
     }
 
-    /// Create a new controller context with the given Kubernetes client
-    ///
-    /// This is a convenience method equivalent to `Context::builder(client).build()`.
-    pub fn new(client: Client) -> Self {
-        Self::builder(client).build()
-    }
-
-    /// Create a new controller context with cell servers for dynamic startup
-    ///
-    /// Cell servers will start automatically when Pending LatticeCluster CRDs are detected.
-    /// Cell endpoint configuration is read from the LatticeCluster CRD's spec.parent_config.
-    pub fn new_with_cell(
-        client: Client,
-        parent_servers: Arc<ParentServers<DefaultManifestGenerator>>,
-    ) -> Self {
-        Self::builder(client).parent_servers(parent_servers).build()
-    }
-
     /// Create a context for testing with custom mock clients
     ///
     /// This method is primarily for unit tests where a real Kubernetes

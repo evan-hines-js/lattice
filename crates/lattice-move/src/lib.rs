@@ -70,9 +70,6 @@ pub use graph::{GraphNode, ObjectGraph, ObjectIdentity};
 pub use local::local_move;
 pub use sequence::MoveSequence;
 
-/// Label indicating a CRD should be included in move operations
-/// CAPI uses the label key with empty value: `clusterctl.cluster.x-k8s.io: ""`
-pub const MOVE_LABEL: &str = "clusterctl.cluster.x-k8s.io";
-
-/// Label indicating a CRD's hierarchy should be included in move operations
-pub const MOVE_HIERARCHY_LABEL: &str = "clusterctl.cluster.x-k8s.io/move-hierarchy";
+/// Label indicating a CRD should be included in move operations.
+/// All upstream CAPI provider CRDs carry `cluster.x-k8s.io/provider: <name>`.
+pub const MOVE_LABEL: &str = "cluster.x-k8s.io/provider";

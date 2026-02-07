@@ -195,7 +195,6 @@ mod tests {
             object: serde_json::json!({}),
             owners: owners.into_iter().map(String::from).collect(),
             soft_owners: std::collections::HashSet::new(),
-            force_move_hierarchy: false,
             new_uid: None,
         }
     }

@@ -17,7 +17,7 @@ const INFRA_APPLY_MAX_RETRIES: u32 = 10;
 const INFRA_APPLY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 use lattice_capi::installer::{
-    copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig, NativeInstaller,
+    copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
 };
 use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
 use lattice_infra::bootstrap::{self, InfrastructureConfig};
@@ -109,7 +109,10 @@ pub async fn ensure_service_infrastructure(client: &Client) -> anyhow::Result<()
 /// IMPORTANT: Uses the SAME generate_core() function as the bootstrap webhook.
 /// This guarantees upgrades work by changing Lattice version - on restart,
 /// the operator re-applies identical infrastructure manifests.
-pub async fn ensure_cluster_infrastructure(client: &Client) -> anyhow::Result<()> {
+pub async fn ensure_cluster_infrastructure(
+    client: &Client,
+    installer: &dyn CapiInstaller,
+) -> anyhow::Result<()> {
     let is_bootstrap = lattice_common::is_bootstrap_cluster();
 
     tracing::info!(
@@ -136,7 +139,7 @@ pub async fn ensure_cluster_infrastructure(client: &Client) -> anyhow::Result<()
         apply_manifests_with_retry(client, &manifests, "core infrastructure").await?;
 
         tracing::info!("Installing CAPI on bootstrap cluster...");
-        ensure_capi_on_bootstrap(client).await?;
+        ensure_capi_on_bootstrap(client, installer).await?;
     } else {
         // Workload cluster: Read provider/bootstrap from LatticeCluster CRD
         // This is the source of truth - same values used by bootstrap webhook
@@ -174,6 +177,14 @@ pub async fn ensure_cluster_infrastructure(client: &Client) -> anyhow::Result<()
             "applying all infrastructure (same as bootstrap webhook)"
         );
         apply_manifests_with_retry(client, &manifests, "full infrastructure").await?;
+
+        // Install CAPI providers so this cluster can self-manage.
+        // Pivot moves CAPI *resources* but not the provider controllers.
+        let provider_type = cluster.spec.provider.provider_type();
+        let cloud_providers: Api<CloudProvider> =
+            Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let cp = cloud_providers.get(&cluster.spec.provider_ref).await.ok();
+        ensure_capi(client, provider_type, cp.as_ref(), installer).await?;
     }
 
     tracing::info!("Infrastructure installation complete");
@@ -182,17 +193,15 @@ pub async fn ensure_cluster_infrastructure(client: &Client) -> anyhow::Result<()
 
 /// Install CAPI on the bootstrap cluster.
 ///
-/// The bootstrap cluster needs CAPI installed BEFORE a LatticeCluster is created,
-/// because the installer waits for CAPI CRDs to be available. Without this, the
-/// installer hangs in Phase 2 waiting for CRDs that would only be installed when
-/// a LatticeCluster is reconciled (Phase 3).
-///
+/// The bootstrap cluster needs CAPI installed BEFORE a LatticeCluster is created.
 /// Uses LATTICE_PROVIDER env var to determine which infrastructure provider to install.
-/// Reads CloudProvider CRD (created by install command) for credentials.
 ///
 /// NOTE: CloudProvider is created by the install command AFTER the operator starts,
 /// so this function waits for it to exist before proceeding.
-async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
+async fn ensure_capi_on_bootstrap(
+    client: &Client,
+    installer: &dyn CapiInstaller,
+) -> anyhow::Result<()> {
     let provider_str = std::env::var("LATTICE_PROVIDER").unwrap_or_else(|_| "docker".to_string());
     let provider_ref =
         std::env::var("LATTICE_PROVIDER_REF").unwrap_or_else(|_| provider_str.clone());
@@ -200,8 +209,6 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
     let infrastructure: ProviderType = provider_str
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid LATTICE_PROVIDER '{}': {}", provider_str, e))?;
-
-    tracing::info!(infrastructure = %provider_str, "Installing CAPI providers for bootstrap cluster");
 
     // Wait for CloudProvider to be created by install command
     let cloud_providers: Api<CloudProvider> =
@@ -227,20 +234,37 @@ async fn ensure_capi_on_bootstrap(client: &Client) -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("{}", e))?;
     tracing::info!(provider_ref = %provider_ref, "CloudProvider found");
 
-    // Copy credentials to CAPI provider namespace if present
-    if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
-        copy_credentials_to_provider_namespace(client, infrastructure, secret_ref)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to copy provider credentials: {}", e))?;
+    ensure_capi(client, infrastructure, Some(&cp), installer).await
+}
+
+/// Install CAPI providers with optional credential copying.
+///
+/// Shared by both bootstrap and self-managed cluster paths.
+/// The caller is responsible for resolving the CloudProvider (blocking wait on
+/// bootstrap, best-effort lookup on self-managed clusters).
+async fn ensure_capi(
+    client: &Client,
+    provider_type: ProviderType,
+    cloud_provider: Option<&CloudProvider>,
+    installer: &dyn CapiInstaller,
+) -> anyhow::Result<()> {
+    tracing::info!(infrastructure = ?provider_type, "Installing CAPI providers");
+
+    if let Some(cp) = cloud_provider {
+        if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
+            copy_credentials_to_provider_namespace(client, provider_type, secret_ref)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to copy provider credentials: {}", e))?;
+        }
     }
 
-    let config = CapiProviderConfig::new(infrastructure)
+    let config = CapiProviderConfig::new(provider_type)
         .map_err(|e| anyhow::anyhow!("failed to create CAPI config: {}", e))?;
-    NativeInstaller::new()
+    installer
         .ensure(&config)
         .await
         .map_err(|e| anyhow::anyhow!("CAPI installation failed: {}", e))?;
 
-    tracing::info!(infrastructure = %provider_str, "CAPI providers installed successfully");
+    tracing::info!(infrastructure = ?provider_type, "CAPI providers installed successfully");
     Ok(())
 }

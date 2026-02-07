@@ -41,6 +41,7 @@ use lattice_common::{
     lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
     DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
 };
+use lattice_capi::installer::{CapiInstaller, NativeInstaller};
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
 use lattice_operator::forwarder::SubtreeForwarder;
@@ -263,11 +264,13 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 /// Cluster slice: LatticeCluster CRDs, cluster infra (CAPI, network policies),
 /// Cedar + watcher, cell infra (gRPC, bootstrap, auth proxy), cluster controller
 async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
+    let capi_installer: Arc<dyn CapiInstaller> = Arc::new(NativeInstaller::new());
+
     // 1. Install cluster CRDs
     ensure_cluster_crds(client).await?;
 
     // 2. Install cluster infrastructure (CAPI, network policies)
-    ensure_cluster_infrastructure(client).await?;
+    ensure_cluster_infrastructure(client, &*capi_installer).await?;
 
     // 3. Wait for API readiness using LatticeCluster
     wait_for_api_ready_for::<LatticeCluster>(client).await?;
@@ -286,6 +289,7 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         client.clone(),
         self_cluster_name,
         Some(parent_servers.clone()),
+        capi_installer,
     );
 
     Ok(SliceHandle {
@@ -356,13 +360,15 @@ async fn run_provider_slice(client: &kube::Client) -> anyhow::Result<SliceHandle
 /// All slices: union of Cluster + Service + Provider. Same behavior as the
 /// monolithic path, but composed from the individual pieces.
 async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
+    let capi_installer: Arc<dyn CapiInstaller> = Arc::new(NativeInstaller::new());
+
     // 1. Install ALL CRDs (union of all modes)
     ensure_cluster_crds(client).await?;
     ensure_service_crds(client).await?;
     ensure_provider_crds(client).await?;
 
     // 2. Install full infrastructure (reads from LatticeCluster CRD)
-    ensure_cluster_infrastructure(client).await?;
+    ensure_cluster_infrastructure(client, &*capi_installer).await?;
 
     // 3. Wait for API readiness
     wait_for_api_ready_for::<LatticeCluster>(client).await?;
@@ -381,6 +387,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
         client.clone(),
         self_cluster_name.clone(),
         Some(parent_servers.clone()),
+        capi_installer,
     );
 
     // Service controllers need provider type from LatticeCluster
