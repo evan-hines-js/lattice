@@ -3,7 +3,8 @@
 //! This module handles:
 //! - PVC generation for owned volumes (volumes with size)
 //! - Pod affinity for RWO volume co-location (references follow owner's node)
-//! - Model cache PVCs (content-addressable, read-only, with scheduling gates)
+//! - Model resources: pod volume references, scheduling gates (PVCs are created
+//!   by the ModelCache controller, owned by the ModelArtifact CRD)
 //! - Volume mounts in container specs
 
 use std::collections::BTreeMap;
@@ -126,7 +127,7 @@ pub struct PvcVolumeSource {
 /// Collection of volume-related resources generated for a service
 #[derive(Clone, Debug, Default)]
 pub struct GeneratedVolumes {
-    /// PVCs to create (for owned volumes and model caches)
+    /// PVCs to create (for owned volumes only; model PVCs are managed by ModelCache controller)
     pub pvcs: Vec<PersistentVolumeClaim>,
     /// Pod labels to add (for volume ownership)
     pub pod_labels: BTreeMap<String, String>,
@@ -287,21 +288,8 @@ impl VolumeCompiler {
 
             let pvc_name = params.cache_pvc_name();
 
-            // Generate content-addressable PVC for model cache
-            output.pvcs.push(PersistentVolumeClaim {
-                api_version: "v1".to_string(),
-                kind: "PersistentVolumeClaim".to_string(),
-                metadata: ObjectMeta::new(&pvc_name, namespace),
-                spec: PvcSpec {
-                    access_modes: vec!["ReadWriteOnce".to_string()],
-                    resources: PvcResources {
-                        requests: PvcStorage {
-                            storage: params.pvc_size().to_string(),
-                        },
-                    },
-                    storage_class_name: params.storage_class.clone(),
-                },
-            });
+            // PVC is created by the ModelCache controller (owned by ModelArtifact).
+            // We only generate the pod volume reference here.
 
             // Generate pod volume (read-only — model data is immutable once cached)
             output.volumes.push(PodVolume {
@@ -898,20 +886,15 @@ mod tests {
     }
 
     #[test]
-    fn story_generates_model_cache_pvc() {
+    fn story_no_pvc_for_model_resources() {
+        // Model PVCs are created by the ModelCache controller, not VolumeCompiler
         let spec = make_model_spec(vec![("/models", "llm")]);
         let output = VolumeCompiler::compile("llm-service", "prod", &spec).unwrap();
 
-        assert_eq!(output.pvcs.len(), 1);
-        let pvc = &output.pvcs[0];
         assert!(
-            pvc.metadata.name.starts_with("model-cache-"),
-            "PVC name should be content-addressable: {}",
-            pvc.metadata.name
+            output.pvcs.is_empty(),
+            "VolumeCompiler should not create PVCs for model resources"
         );
-        assert_eq!(pvc.metadata.namespace, "prod");
-        assert_eq!(pvc.spec.resources.requests.storage, "140Gi");
-        assert_eq!(pvc.spec.access_modes, vec!["ReadWriteOnce"]);
     }
 
     #[test]
@@ -960,15 +943,25 @@ mod tests {
     }
 
     #[test]
-    fn story_model_pvc_is_content_addressable() {
-        // Same model URI should produce the same PVC name regardless of service name
+    fn story_model_pod_volume_is_content_addressable() {
+        // Same model URI should produce the same PVC claim_name regardless of service name
         let spec1 = make_model_spec(vec![("/models", "llm")]);
         let spec2 = make_model_spec(vec![("/models", "llm")]);
 
         let out1 = VolumeCompiler::compile("service-a", "prod", &spec1).unwrap();
         let out2 = VolumeCompiler::compile("service-b", "prod", &spec2).unwrap();
 
-        assert_eq!(out1.pvcs[0].metadata.name, out2.pvcs[0].metadata.name);
+        let claim1 = &out1.volumes[0]
+            .persistent_volume_claim
+            .as_ref()
+            .unwrap()
+            .claim_name;
+        let claim2 = &out2.volumes[0]
+            .persistent_volume_claim
+            .as_ref()
+            .unwrap()
+            .claim_name;
+        assert_eq!(claim1, claim2);
     }
 
     // =========================================================================
@@ -1071,8 +1064,8 @@ mod tests {
 
         let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 
-        // 2 PVCs: one regular volume, one model cache
-        assert_eq!(output.pvcs.len(), 2);
+        // 1 PVC: only the regular volume (model PVC is created by ModelCache controller)
+        assert_eq!(output.pvcs.len(), 1);
 
         // 2 pod volumes
         assert_eq!(output.volumes.len(), 2);
