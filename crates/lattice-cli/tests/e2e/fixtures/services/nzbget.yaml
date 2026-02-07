@@ -66,10 +66,6 @@ spec:
     sonarr:
       type: service
       direction: inbound
-      inbound:
-        rateLimit:
-          requestsPerInterval: 1000
-          intervalSeconds: 60
 
   replicas:
     min: 1

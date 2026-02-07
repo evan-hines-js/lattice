@@ -24,8 +24,12 @@ pub const ISTIOD_XDS_PORT: u16 = 15012;
 /// Istio waypoint GatewayClass for ambient mesh L7 enforcement.
 pub const WAYPOINT_GATEWAY_CLASS: &str = "istio-waypoint";
 
-/// Envoy Gateway GatewayClass for north-south ingress.
-pub const INGRESS_GATEWAY_CLASS: &str = "eg";
+/// Istio GatewayClass for north-south ingress.
+///
+/// Istiod natively reconciles Gateway API resources. Gateway proxy pods are
+/// created per-Gateway in the service namespace, automatically enrolled in
+/// ambient mesh with SPIFFE identity.
+pub const INGRESS_GATEWAY_CLASS: &str = "istio";
 
 // =============================================================================
 // Labels
@@ -68,6 +72,14 @@ pub fn waypoint_name(namespace: &str) -> String {
     format!("{}-waypoint", namespace)
 }
 
+/// Get the shared ingress Gateway name for a namespace.
+///
+/// A single shared Gateway per namespace reduces resource overhead.
+/// Individual services bind to it via listener `section_name` references.
+pub fn ingress_gateway_name(namespace: &str) -> String {
+    format!("{}-ingress", namespace)
+}
+
 // =============================================================================
 // Trust Domain Helpers
 // =============================================================================
@@ -104,12 +116,14 @@ pub mod trust_domain {
         principal(cluster_name, namespace, &super::waypoint_name(namespace))
     }
 
-    /// Build a SPIFFE principal for the Envoy Gateway.
+    /// Build a SPIFFE principal for the namespace's shared ingress gateway proxy.
     ///
-    /// Envoy Gateway runs in `envoy-gateway-system` namespace with
-    /// service account `envoy-default`.
-    pub fn gateway_principal(cluster_name: &str) -> String {
-        principal(cluster_name, "envoy-gateway-system", "envoy-default")
+    /// The gateway name is derived deterministically from the namespace
+    /// (`{namespace}-ingress`), so only cluster_name and namespace are needed.
+    /// Istio creates a service account `{gateway_name}-istio` for the proxy.
+    pub fn gateway_principal(cluster_name: &str, namespace: &str) -> String {
+        let gw_name = super::ingress_gateway_name(namespace);
+        principal(cluster_name, namespace, &format!("{}-istio", gw_name))
     }
 }
 
@@ -147,11 +161,17 @@ mod tests {
 
     #[test]
     fn gateway_principal_format() {
-        let principal = trust_domain::gateway_principal("prod");
+        let principal = trust_domain::gateway_principal("prod", "my-ns");
         assert_eq!(
             principal,
-            "lattice.prod.local/ns/envoy-gateway-system/sa/envoy-default"
+            "lattice.prod.local/ns/my-ns/sa/my-ns-ingress-istio"
         );
+    }
+
+    #[test]
+    fn ingress_gateway_name_format() {
+        assert_eq!(ingress_gateway_name("prod"), "prod-ingress");
+        assert_eq!(ingress_gateway_name("my-ns"), "my-ns-ingress");
     }
 
     #[test]

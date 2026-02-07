@@ -491,10 +491,6 @@ spec:
     web-frontend:
       type: service
       direction: inbound                               # "web-frontend can call me"
-      inbound:
-        rateLimit:
-          requestsPerInterval: 1000
-          intervalSeconds: 60
 
     # ── External Services (controlled egress) ──────────────────────
     stripe-api:
@@ -615,7 +611,7 @@ Remove either service's declaration and traffic stops immediately. No stale allo
 
 #### L7 Traffic Policies
 
-Outbound dependencies support retries and timeouts. Inbound dependencies support rate limiting.
+Outbound dependencies support retries and timeouts.
 
 ```yaml
 resources:
@@ -629,14 +625,6 @@ resources:
         retryOn: ["5xx", "connect-failure"]
       timeout:
         request: 30s
-
-  web-frontend:
-    type: service
-    direction: inbound
-    inbound:
-      rateLimit:
-        requestsPerInterval: 500
-        intervalSeconds: 60
 ```
 
 ---
@@ -967,11 +955,7 @@ ingress:
     issuerRef:
       name: letsencrypt-prod
       kind: ClusterIssuer
-  rateLimit:
-    requestsPerInterval: 100
-    intervalSeconds: 60
-    burst: 150
-  gatewayClass: eg                      # Envoy Gateway (default)
+  gatewayClass: istio                    # Istio Gateway API (default)
 ```
 
 Lattice generates a `Gateway`, `HTTPRoute`, and optionally a cert-manager `Certificate`. Set `tls.mode: manual` and provide a `secretName` if you manage certificates yourself.

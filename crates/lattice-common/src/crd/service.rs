@@ -244,11 +244,7 @@ pub struct ResourceSpec {
 /// L7 policies for inbound traffic (Lattice extension)
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct InboundPolicy {
-    /// Rate limiting configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limit: Option<RateLimitConfig>,
-}
+pub struct InboundPolicy {}
 
 /// L7 policies for outbound traffic (Lattice extension)
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -260,17 +256,6 @@ pub struct OutboundPolicy {
     /// Timeout configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<TimeoutConfig>,
-}
-
-/// Rate limiting configuration
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RateLimitConfig {
-    /// Maximum requests per interval
-    pub requests_per_interval: u32,
-    /// Interval in seconds (default: 60)
-    #[serde(default = "default_rate_limit_interval")]
-    pub interval_seconds: u32,
 }
 
 /// Retry configuration
@@ -1024,33 +1009,9 @@ pub struct IngressSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<IngressTls>,
 
-    /// Rate limiting configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limit: Option<RateLimitSpec>,
-
-    /// GatewayClass name (default: "eg" for Envoy Gateway)
+    /// GatewayClass name (default: "istio")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_class: Option<String>,
-}
-
-/// Rate limiting configuration using token bucket algorithm
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RateLimitSpec {
-    /// Maximum requests per interval
-    pub requests_per_interval: u32,
-
-    /// Interval in seconds (default: 60)
-    #[serde(default = "default_rate_limit_interval")]
-    pub interval_seconds: u32,
-
-    /// Burst capacity (default: same as requests_per_interval)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub burst: Option<u32>,
-}
-
-fn default_rate_limit_interval() -> u32 {
-    60
 }
 
 /// Path configuration for ingress routing
@@ -2688,10 +2649,7 @@ resources:
   sonarr:
     type: service
     direction: inbound
-    inbound:
-      rateLimit:
-        requestsPerInterval: 100
-        intervalSeconds: 60
+    inbound: {}
   nzbget:
     type: service
     direction: outbound
@@ -2712,16 +2670,7 @@ resources:
         // Verify inbound policy
         let sonarr = spec.resources.get("sonarr").expect("sonarr should exist");
         assert_eq!(sonarr.direction, DependencyDirection::Inbound);
-        let inbound = sonarr
-            .inbound
-            .as_ref()
-            .expect("inbound policy should exist");
-        let rate_limit = inbound
-            .rate_limit
-            .as_ref()
-            .expect("rate limit should exist");
-        assert_eq!(rate_limit.requests_per_interval, 100);
-        assert_eq!(rate_limit.interval_seconds, 60);
+        assert!(sonarr.inbound.is_some());
 
         // Verify outbound policy
         let nzbget = spec.resources.get("nzbget").expect("nzbget should exist");
@@ -2785,10 +2734,6 @@ resources:
   sonarr:
     type: service
     direction: inbound
-    inbound:
-      rateLimit:
-        requestsPerInterval: 100
-        intervalSeconds: 60
 ingress:
   hosts:
     - jellyfin.home.local
