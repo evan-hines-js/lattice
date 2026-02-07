@@ -17,6 +17,7 @@
 //! │  ├─ integration/cedar.rs         - Cedar policy enforcement     │
 //! │  ├─ integration/cedar_secrets.rs - Cedar secret authorization   │
 //! │  ├─ integration/secrets.rs       - Vault secrets integration    │
+//! │  ├─ integration/model_cache.rs   - Model cache lifecycle        │
 //! │  ├─ integration/oidc.rs          - OIDC authentication          │
 //! │  ├─ integration/multi_hop.rs     - Multi-hop proxy operations   │
 //! │  └─ integration/pivot.rs         - Unpivot verification         │
@@ -30,6 +31,7 @@
 //! │  ├─ cedar_e2e.rs             - Cedar only                       │
 //! │  ├─ cedar_secrets_e2e.rs     - Cedar secrets only               │
 //! │  ├─ secrets_e2e.rs           - Vault secrets only               │
+//! │  ├─ model_cache_e2e.rs       - Model cache only                 │
 //! │  ├─ oidc_e2e.rs              - OIDC only                        │
 //! │  ├─ multi_hop_e2e.rs         - Multi-hop proxy only             │
 //! │  └─ pivot_standalone_e2e.rs  - Pivot/unpivot only               │
@@ -93,6 +95,7 @@ mod cedar_e2e;
 mod cedar_secrets_e2e;
 mod kubeconfig_e2e;
 mod mesh_e2e;
+mod model_cache_e2e;
 mod multi_hop_e2e;
 mod oidc_e2e;
 mod pivot_standalone_e2e;

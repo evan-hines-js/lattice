@@ -391,8 +391,7 @@ impl VolumeCompiler {
         let mut mounts = Vec::new();
 
         for (mount_path, volume_mount) in volumes {
-            if let Some(resource_name) =
-                Self::parse_volume_source(&volume_mount.source.to_string())
+            if let Some(resource_name) = Self::parse_volume_source(&volume_mount.source.to_string())
             {
                 if mountable_resources
                     .iter()

@@ -29,13 +29,13 @@ pub use cloud_provider::{
 pub use cluster::{
     ChildClusterHealth, LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, WorkerPoolStatus,
 };
-pub use model::{
-    ModelArtifact, ModelArtifactPhase, ModelArtifactSpec, ModelArtifactStatus, ModelParams,
-    MODEL_READY_GATE,
-};
 pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,
+};
+pub use model::{
+    ModelArtifact, ModelArtifactPhase, ModelArtifactSpec, ModelArtifactStatus, ModelParams,
+    MODEL_READY_GATE,
 };
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,

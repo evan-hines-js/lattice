@@ -2047,6 +2047,71 @@ pub async fn teardown_mgmt_cluster(
 }
 
 // =============================================================================
+// ModelArtifact Helpers
+// =============================================================================
+
+/// Wait for a ModelArtifact to reach the expected phase.
+///
+/// Polls the artifact status via kubectl until the phase matches or timeout expires.
+#[cfg(feature = "provider-e2e")]
+pub async fn wait_for_model_artifact_phase(
+    kubeconfig: &str,
+    namespace: &str,
+    name: &str,
+    phase: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let kc = kubeconfig.to_string();
+    let ns = namespace.to_string();
+    let artifact_name = name.to_string();
+    let expected_phase = phase.to_string();
+
+    wait_for_condition(
+        &format!("ModelArtifact {}/{} to reach {}", namespace, name, phase),
+        timeout,
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let ns = ns.clone();
+            let artifact_name = artifact_name.clone();
+            let expected_phase = expected_phase.clone();
+            async move {
+                let output = run_cmd(
+                    "kubectl",
+                    &[
+                        "--kubeconfig",
+                        &kc,
+                        "get",
+                        "modelartifact",
+                        &artifact_name,
+                        "-n",
+                        &ns,
+                        "-o",
+                        "jsonpath={.status.phase}",
+                    ],
+                );
+
+                match output {
+                    Ok(current_phase) => {
+                        let current = current_phase.trim();
+                        info!("ModelArtifact {}/{} phase: {}", ns, artifact_name, current);
+                        Ok(current == expected_phase)
+                    }
+                    Err(e) => {
+                        info!(
+                            "Error checking ModelArtifact {}/{} phase: {}",
+                            ns, artifact_name, e
+                        );
+                        Ok(false)
+                    }
+                }
+            }
+        },
+    )
+    .await
+}
+
+// =============================================================================
 // Namespace Helpers
 // =============================================================================
 
