@@ -7,6 +7,7 @@ mod cedar_policy;
 mod cloud_provider;
 mod cluster;
 mod external_service;
+mod model;
 mod oidc_provider;
 mod providers;
 mod restore;
@@ -27,6 +28,10 @@ pub use cloud_provider::{
 };
 pub use cluster::{
     ChildClusterHealth, LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, WorkerPoolStatus,
+};
+pub use model::{
+    ModelArtifact, ModelArtifactPhase, ModelArtifactSpec, ModelArtifactStatus, ModelParams,
+    MODEL_READY_GATE,
 };
 pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,

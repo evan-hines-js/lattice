@@ -3,6 +3,7 @@
 //! This module handles:
 //! - PVC generation for owned volumes (volumes with size)
 //! - Pod affinity for RWO volume co-location (references follow owner's node)
+//! - Model cache PVCs (content-addressable, read-only, with scheduling gates)
 //! - Volume mounts in container specs
 
 use std::collections::BTreeMap;
@@ -125,7 +126,7 @@ pub struct PvcVolumeSource {
 /// Collection of volume-related resources generated for a service
 #[derive(Clone, Debug, Default)]
 pub struct GeneratedVolumes {
-    /// PVCs to create (only for owned volumes)
+    /// PVCs to create (for owned volumes and model caches)
     pub pvcs: Vec<PersistentVolumeClaim>,
     /// Pod labels to add (for volume ownership)
     pub pod_labels: BTreeMap<String, String>,
@@ -135,6 +136,8 @@ pub struct GeneratedVolumes {
     pub volumes: Vec<PodVolume>,
     /// Volume mounts per container (container_name -> mounts)
     pub volume_mounts: BTreeMap<String, Vec<super::VolumeMount>>,
+    /// Scheduling gates to add to pod spec (for model cache readiness)
+    pub scheduling_gates: Vec<super::SchedulingGate>,
 }
 
 /// Volume definition for pod spec
@@ -161,6 +164,7 @@ impl GeneratedVolumes {
             && self.affinity.is_none()
             && self.volumes.is_empty()
             && self.volume_mounts.is_empty()
+            && self.scheduling_gates.is_empty()
     }
 }
 
@@ -175,17 +179,20 @@ pub const VOLUME_OWNER_LABEL_PREFIX: &str = "lattice.dev/volume-owner-";
 pub struct VolumeCompiler;
 
 impl VolumeCompiler {
-    /// Compile volume resources for a LatticeService
+    /// Compile volume and model resources for a LatticeService
+    ///
+    /// Handles both `type: volume` and `type: model` resources:
+    /// - Volumes: PVCs with owner/reference pattern, RWO affinity
+    /// - Models: Content-addressable PVCs, read-only mounts, scheduling gates
     ///
     /// # Arguments
     /// * `service_name` - Name of the service
     /// * `namespace` - Target namespace
     /// * `spec` - LatticeService spec
-    /// * `graph` - Optional service graph for cross-owner affinity computation
     ///
     /// # Returns
     /// Generated volume resources including PVCs, pod labels, affinity rules,
-    /// and volume mounts, or an error if volume params are invalid.
+    /// volume mounts, and scheduling gates.
     pub fn compile(
         service_name: &str,
         namespace: &str,
@@ -193,18 +200,15 @@ impl VolumeCompiler {
     ) -> Result<GeneratedVolumes, String> {
         let mut output = GeneratedVolumes::new();
 
-        // Collect all volume resources
+        // -----------------------------------------------------------------
+        // Process regular volume resources
+        // -----------------------------------------------------------------
         let volume_resources: Vec<_> = spec
             .resources
             .iter()
             .filter(|(_, r)| r.type_.is_volume())
             .collect();
 
-        if volume_resources.is_empty() {
-            return Ok(output);
-        }
-
-        // Process each volume resource
         for (resource_name, resource_spec) in &volume_resources {
             let pvc_name = resource_spec
                 .volume_pvc_name(service_name, resource_name)
@@ -232,9 +236,6 @@ impl VolumeCompiler {
             // Generate pod affinity for RWO volume references
             if resource_spec.is_volume_reference() {
                 if let Some(id) = &resource_spec.id {
-                    // For references, we need affinity to the owner pod
-                    // Note: We assume RWO for references since we can't know the owner's access mode
-                    // In practice, the owner decides and references must comply
                     let label_key = format!("{}{}", VOLUME_OWNER_LABEL_PREFIX, id);
 
                     let affinity_term = PodAffinityTerm {
@@ -249,7 +250,6 @@ impl VolumeCompiler {
                         namespaces: Some(vec![namespace.to_string()]),
                     };
 
-                    // Add to affinity
                     let affinity = output.affinity.get_or_insert_with(Affinity::default);
                     let pod_affinity = affinity
                         .pod_affinity
@@ -270,60 +270,80 @@ impl VolumeCompiler {
             });
         }
 
-        // Generate volume mounts from container specs
+        // -----------------------------------------------------------------
+        // Process model resources
+        // -----------------------------------------------------------------
+        let model_resources: Vec<_> = spec
+            .resources
+            .iter()
+            .filter(|(_, r)| r.type_.is_model())
+            .collect();
+
+        for (resource_name, resource_spec) in &model_resources {
+            let params = resource_spec
+                .model_params()
+                .map_err(|e| format!("resource '{}': {}", resource_name, e))?
+                .ok_or_else(|| format!("resource '{}': expected model params", resource_name))?;
+
+            let pvc_name = params.cache_pvc_name();
+
+            // Generate content-addressable PVC for model cache
+            output.pvcs.push(PersistentVolumeClaim {
+                api_version: "v1".to_string(),
+                kind: "PersistentVolumeClaim".to_string(),
+                metadata: ObjectMeta::new(&pvc_name, namespace),
+                spec: PvcSpec {
+                    access_modes: vec!["ReadWriteOnce".to_string()],
+                    resources: PvcResources {
+                        requests: PvcStorage {
+                            storage: params.pvc_size().to_string(),
+                        },
+                    },
+                    storage_class_name: params.storage_class.clone(),
+                },
+            });
+
+            // Generate pod volume (read-only — model data is immutable once cached)
+            output.volumes.push(PodVolume {
+                name: resource_name.to_string(),
+                persistent_volume_claim: Some(PvcVolumeSource {
+                    claim_name: pvc_name,
+                    read_only: Some(true),
+                }),
+            });
+        }
+
+        // Add scheduling gate if any model resources are present
+        if !model_resources.is_empty() {
+            output.scheduling_gates.push(super::SchedulingGate {
+                name: crate::crd::MODEL_READY_GATE.to_string(),
+            });
+        }
+
+        // -----------------------------------------------------------------
+        // Generate volume mounts (for both volume and model resources)
+        // -----------------------------------------------------------------
+        let all_mountable: Vec<_> = spec
+            .resources
+            .iter()
+            .filter(|(_, r)| r.type_.is_volume_like())
+            .collect();
+
+        if all_mountable.is_empty() {
+            return Ok(output);
+        }
+
+        // Container volume mounts
         for (container_name, container_spec) in &spec.containers {
-            let mut mounts = Vec::new();
-
-            for (mount_path, volume_mount) in &container_spec.volumes {
-                // Parse the source to find the resource name
-                // Source is like "${resources.config}" or "${resources.downloads}"
-                if let Some(resource_name) =
-                    Self::parse_volume_source(&volume_mount.source.to_string())
-                {
-                    // Only add mount if we have this volume resource
-                    if volume_resources
-                        .iter()
-                        .any(|(name, _)| name.as_str() == resource_name)
-                    {
-                        mounts.push(super::VolumeMount {
-                            name: resource_name.to_string(),
-                            mount_path: mount_path.clone(),
-                            sub_path: volume_mount.path.clone(),
-                            read_only: volume_mount.read_only,
-                        });
-                    }
-                }
-            }
-
+            let mounts = Self::resolve_mounts(&container_spec.volumes, &all_mountable);
             if !mounts.is_empty() {
                 output.volume_mounts.insert(container_name.clone(), mounts);
             }
         }
 
-        // Generate volume mounts from sidecar specs
+        // Sidecar volume mounts
         for (sidecar_name, sidecar_spec) in &spec.sidecars {
-            let mut mounts = Vec::new();
-
-            for (mount_path, volume_mount) in &sidecar_spec.volumes {
-                // Parse the source to find the resource name
-                if let Some(resource_name) =
-                    Self::parse_volume_source(&volume_mount.source.to_string())
-                {
-                    // Only add mount if we have this volume resource
-                    if volume_resources
-                        .iter()
-                        .any(|(name, _)| name.as_str() == resource_name)
-                    {
-                        mounts.push(super::VolumeMount {
-                            name: resource_name.to_string(),
-                            mount_path: mount_path.clone(),
-                            sub_path: volume_mount.path.clone(),
-                            read_only: volume_mount.read_only,
-                        });
-                    }
-                }
-            }
-
+            let mounts = Self::resolve_mounts(&sidecar_spec.volumes, &all_mountable);
             if !mounts.is_empty() {
                 output.volume_mounts.insert(sidecar_name.clone(), mounts);
             }
@@ -360,6 +380,37 @@ impl VolumeCompiler {
         }
     }
 
+    /// Resolve volume mounts from a container's volume declarations
+    ///
+    /// Matches `${resources.name}` template strings against the set of
+    /// mountable resources (volumes and models).
+    fn resolve_mounts(
+        volumes: &BTreeMap<String, crate::crd::VolumeMount>,
+        mountable_resources: &[(&String, &crate::crd::ResourceSpec)],
+    ) -> Vec<super::VolumeMount> {
+        let mut mounts = Vec::new();
+
+        for (mount_path, volume_mount) in volumes {
+            if let Some(resource_name) =
+                Self::parse_volume_source(&volume_mount.source.to_string())
+            {
+                if mountable_resources
+                    .iter()
+                    .any(|(name, _)| name.as_str() == resource_name)
+                {
+                    mounts.push(super::VolumeMount {
+                        name: resource_name.to_string(),
+                        mount_path: mount_path.clone(),
+                        sub_path: volume_mount.path.clone(),
+                        read_only: volume_mount.read_only,
+                    });
+                }
+            }
+        }
+
+        mounts
+    }
+
     /// Parse volume source template to extract resource name
     /// e.g., "${resources.config}" -> "config"
     fn parse_volume_source(source: &str) -> Option<String> {
@@ -381,6 +432,7 @@ mod tests {
     use super::*;
     use crate::crd::{
         ContainerSpec, DependencyDirection, DeploySpec, ReplicaSpec, ResourceSpec, ResourceType,
+        MODEL_READY_GATE,
     };
     use lattice_common::template::TemplateString;
 
@@ -769,5 +821,269 @@ mod tests {
         let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 
         assert!(output.is_empty());
+    }
+
+    // =========================================================================
+    // Story: Model Cache PVC Generation
+    // =========================================================================
+
+    fn make_model_spec(
+        model_mounts: Vec<(&str, &str)>, // (mount_path, resource_name)
+    ) -> LatticeServiceSpec {
+        let mut resources = BTreeMap::new();
+        let mut params = BTreeMap::new();
+        params.insert(
+            "uri".to_string(),
+            serde_json::json!("huggingface://meta-llama/Llama-3.3-70B-Instruct"),
+        );
+        params.insert("size".to_string(), serde_json::json!("140Gi"));
+        resources.insert(
+            "llm".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Model,
+                direction: DependencyDirection::default(),
+                id: None,
+                class: None,
+                metadata: None,
+                params: Some(params),
+                namespace: None,
+                inbound: None,
+                outbound: None,
+            },
+        );
+
+        let mut volumes = BTreeMap::new();
+        for (mount_path, resource_name) in model_mounts {
+            volumes.insert(
+                mount_path.to_string(),
+                crate::crd::VolumeMount {
+                    source: TemplateString::from(format!("${{resources.{}}}", resource_name)),
+                    path: None,
+                    read_only: None,
+                },
+            );
+        }
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "vllm/vllm-openai:latest".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                files: BTreeMap::new(),
+                volumes,
+                resources: None,
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+                security: None,
+            },
+        );
+
+        LatticeServiceSpec {
+            containers,
+            resources,
+            service: None,
+            replicas: ReplicaSpec::default(),
+            deploy: DeploySpec::default(),
+            ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
+            backup: None,
+            gpu: None,
+        }
+    }
+
+    #[test]
+    fn story_generates_model_cache_pvc() {
+        let spec = make_model_spec(vec![("/models", "llm")]);
+        let output = VolumeCompiler::compile("llm-service", "prod", &spec).unwrap();
+
+        assert_eq!(output.pvcs.len(), 1);
+        let pvc = &output.pvcs[0];
+        assert!(
+            pvc.metadata.name.starts_with("model-cache-"),
+            "PVC name should be content-addressable: {}",
+            pvc.metadata.name
+        );
+        assert_eq!(pvc.metadata.namespace, "prod");
+        assert_eq!(pvc.spec.resources.requests.storage, "140Gi");
+        assert_eq!(pvc.spec.access_modes, vec!["ReadWriteOnce"]);
+    }
+
+    #[test]
+    fn story_model_volume_is_read_only() {
+        let spec = make_model_spec(vec![("/models", "llm")]);
+        let output = VolumeCompiler::compile("llm-service", "prod", &spec).unwrap();
+
+        let pod_vol = &output.volumes[0];
+        let pvc_source = pod_vol.persistent_volume_claim.as_ref().unwrap();
+        assert_eq!(pvc_source.read_only, Some(true));
+    }
+
+    #[test]
+    fn story_model_adds_scheduling_gate() {
+        let spec = make_model_spec(vec![("/models", "llm")]);
+        let output = VolumeCompiler::compile("llm-service", "prod", &spec).unwrap();
+
+        assert_eq!(output.scheduling_gates.len(), 1);
+        assert_eq!(output.scheduling_gates[0].name, MODEL_READY_GATE);
+    }
+
+    #[test]
+    fn story_model_generates_volume_mount() {
+        let spec = make_model_spec(vec![("/models", "llm")]);
+        let output = VolumeCompiler::compile("llm-service", "prod", &spec).unwrap();
+
+        let mounts = output
+            .volume_mounts
+            .get("main")
+            .expect("should have mounts for main");
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].name, "llm");
+        assert_eq!(mounts[0].mount_path, "/models");
+    }
+
+    #[test]
+    fn story_no_scheduling_gate_without_model() {
+        let spec = make_spec_with_volumes(
+            vec![("config", None, "5Gi", None)],
+            vec![],
+            vec![("/config", "config")],
+        );
+
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+        assert!(output.scheduling_gates.is_empty());
+    }
+
+    #[test]
+    fn story_model_pvc_is_content_addressable() {
+        // Same model URI should produce the same PVC name regardless of service name
+        let spec1 = make_model_spec(vec![("/models", "llm")]);
+        let spec2 = make_model_spec(vec![("/models", "llm")]);
+
+        let out1 = VolumeCompiler::compile("service-a", "prod", &spec1).unwrap();
+        let out2 = VolumeCompiler::compile("service-b", "prod", &spec2).unwrap();
+
+        assert_eq!(out1.pvcs[0].metadata.name, out2.pvcs[0].metadata.name);
+    }
+
+    // =========================================================================
+    // Story: Mixed Volume and Model Resources
+    // =========================================================================
+
+    #[test]
+    fn story_mixed_volumes_and_models() {
+        let mut resources = BTreeMap::new();
+
+        // Regular volume
+        let mut vol_params = BTreeMap::new();
+        vol_params.insert("size".to_string(), serde_json::json!("10Gi"));
+        resources.insert(
+            "data".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Volume,
+                direction: DependencyDirection::default(),
+                id: None,
+                class: None,
+                metadata: None,
+                params: Some(vol_params),
+                namespace: None,
+                inbound: None,
+                outbound: None,
+            },
+        );
+
+        // Model resource
+        let mut model_params = BTreeMap::new();
+        model_params.insert(
+            "uri".to_string(),
+            serde_json::json!("huggingface://meta-llama/Llama-3.3-70B-Instruct"),
+        );
+        resources.insert(
+            "llm".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Model,
+                direction: DependencyDirection::default(),
+                id: None,
+                class: None,
+                metadata: None,
+                params: Some(model_params),
+                namespace: None,
+                inbound: None,
+                outbound: None,
+            },
+        );
+
+        let mut volumes = BTreeMap::new();
+        volumes.insert(
+            "/data".to_string(),
+            crate::crd::VolumeMount {
+                source: TemplateString::from("${resources.data}"),
+                path: None,
+                read_only: None,
+            },
+        );
+        volumes.insert(
+            "/models".to_string(),
+            crate::crd::VolumeMount {
+                source: TemplateString::from("${resources.llm}"),
+                path: None,
+                read_only: None,
+            },
+        );
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "myapp:latest".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                files: BTreeMap::new(),
+                volumes,
+                resources: None,
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+                security: None,
+            },
+        );
+
+        let spec = LatticeServiceSpec {
+            containers,
+            resources,
+            service: None,
+            replicas: ReplicaSpec::default(),
+            deploy: DeploySpec::default(),
+            ingress: None,
+            sidecars: BTreeMap::new(),
+            sysctls: BTreeMap::new(),
+            host_network: None,
+            share_process_namespace: None,
+            backup: None,
+            gpu: None,
+        };
+
+        let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
+
+        // 2 PVCs: one regular volume, one model cache
+        assert_eq!(output.pvcs.len(), 2);
+
+        // 2 pod volumes
+        assert_eq!(output.volumes.len(), 2);
+
+        // Scheduling gate from model
+        assert_eq!(output.scheduling_gates.len(), 1);
+        assert_eq!(output.scheduling_gates[0].name, MODEL_READY_GATE);
+
+        // Both mounts present
+        let mounts = output.volume_mounts.get("main").unwrap();
+        assert_eq!(mounts.len(), 2);
     }
 }

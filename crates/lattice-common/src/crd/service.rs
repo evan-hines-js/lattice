@@ -64,6 +64,8 @@ pub enum ResourceType {
     Volume,
     /// Secret from SecretsProvider (ESO ExternalSecret)
     Secret,
+    /// Model artifact (pre-fetched to PVC, managed by ModelCache controller)
+    Model,
     /// Custom resource type (escape hatch for extensibility)
     /// Validated at parse time: lowercase alphanumeric with hyphens, starts with letter
     Custom(String),
@@ -81,7 +83,7 @@ impl JsonSchema for ResourceType {
             instance_type: Some(schemars::schema::InstanceType::String.into()),
             metadata: Some(Box::new(schemars::schema::Metadata {
                 description: Some(
-                    "Resource type: 'service', 'external-service', 'volume', 'secret', or custom type"
+                    "Resource type: 'service', 'external-service', 'volume', 'secret', 'model', or custom type"
                         .to_string(),
                 ),
                 ..Default::default()
@@ -108,6 +110,7 @@ impl ResourceType {
             Self::ExternalService => "external-service",
             Self::Volume => "volume",
             Self::Secret => "secret",
+            Self::Model => "model",
             Self::Custom(s) => s.as_str(),
         }
     }
@@ -125,6 +128,19 @@ impl ResourceType {
     /// Returns true if this is a secret resource
     pub fn is_secret(&self) -> bool {
         matches!(self, Self::Secret)
+    }
+
+    /// Returns true if this is a model resource
+    pub fn is_model(&self) -> bool {
+        matches!(self, Self::Model)
+    }
+
+    /// Returns true if this is a volume-like resource (volume or model)
+    ///
+    /// Model resources are a specialized volume type — pre-fetched to a PVC
+    /// from a remote URI.
+    pub fn is_volume_like(&self) -> bool {
+        matches!(self, Self::Volume | Self::Model)
     }
 
     /// Returns true if this is a custom resource type
@@ -151,6 +167,7 @@ impl<'de> Deserialize<'de> for ResourceType {
             "external-service" => Ok(Self::ExternalService),
             "volume" => Ok(Self::Volume),
             "secret" => Ok(Self::Secret),
+            "model" => Ok(Self::Model),
             _ => {
                 validate_custom_type(&s).map_err(serde::de::Error::custom)?;
                 Ok(Self::Custom(s))
@@ -423,6 +440,29 @@ impl ResourceSpec {
             Some(id) => format!("vol-{id}"),
             None => format!("{service_name}-{resource_name}"),
         })
+    }
+
+    /// Parse model params from the generic Score `params` field
+    ///
+    /// Returns:
+    /// - `Ok(None)` if this is not a model resource
+    /// - `Ok(Some(params))` if params parsed successfully
+    /// - `Err(msg)` if JSON conversion failed or required fields missing
+    pub fn model_params(&self) -> Result<Option<super::model::ModelParams>, String> {
+        if !self.type_.is_model() {
+            return Ok(None);
+        }
+        match &self.params {
+            Some(params) => {
+                let value = serde_json::to_value(params)
+                    .map_err(|e| format!("failed to serialize model params: {}", e))?;
+                let model_params: super::model::ModelParams = serde_json::from_value(value)
+                    .map_err(|e| format!("invalid model params: {}", e))?;
+                model_params.validate()?;
+                Ok(Some(model_params))
+            }
+            None => Err("model resource requires params with at least 'uri'".to_string()),
+        }
     }
 
     /// Returns true if this is a secret resource
@@ -2797,6 +2837,10 @@ replicas:
         let t: ResourceType = serde_json::from_str("\"volume\"").unwrap();
         assert!(matches!(t, ResourceType::Volume));
         assert!(!t.is_custom());
+
+        let t: ResourceType = serde_json::from_str("\"model\"").unwrap();
+        assert!(matches!(t, ResourceType::Model));
+        assert!(!t.is_custom());
     }
 
     /// Story: Valid custom types are accepted
@@ -2844,11 +2888,24 @@ replicas:
         // is_volume
         assert!(ResourceType::Volume.is_volume());
         assert!(!ResourceType::Service.is_volume());
+        assert!(!ResourceType::Model.is_volume());
         assert!(!ResourceType::Custom("postgres".to_string()).is_volume());
+
+        // is_model
+        assert!(ResourceType::Model.is_model());
+        assert!(!ResourceType::Service.is_model());
+        assert!(!ResourceType::Volume.is_model());
+
+        // is_volume_like
+        assert!(ResourceType::Volume.is_volume_like());
+        assert!(ResourceType::Model.is_volume_like());
+        assert!(!ResourceType::Service.is_volume_like());
+        assert!(!ResourceType::Custom("postgres".to_string()).is_volume_like());
 
         // is_custom
         assert!(!ResourceType::Service.is_custom());
         assert!(!ResourceType::Volume.is_custom());
+        assert!(!ResourceType::Model.is_custom());
         assert!(ResourceType::Custom("redis".to_string()).is_custom());
     }
 
@@ -2858,6 +2915,7 @@ replicas:
         assert_eq!(ResourceType::Service.as_str(), "service");
         assert_eq!(ResourceType::ExternalService.as_str(), "external-service");
         assert_eq!(ResourceType::Volume.as_str(), "volume");
+        assert_eq!(ResourceType::Model.as_str(), "model");
         assert_eq!(
             ResourceType::Custom("postgres".to_string()).as_str(),
             "postgres"
@@ -2899,6 +2957,86 @@ resources:
             .get("my-postgres")
             .expect("my-postgres should exist");
         assert!(matches!(resource.type_, ResourceType::Custom(ref s) if s == "postgres"));
+    }
+
+    // =========================================================================
+    // Model Resource Tests
+    // =========================================================================
+
+    /// Story: model_params() parses valid model resource from YAML
+    #[test]
+    fn test_model_params_from_yaml() {
+        let yaml = r#"
+containers:
+  main:
+    image: vllm/vllm-openai:latest
+resources:
+  llm:
+    type: model
+    params:
+      uri: "huggingface://meta-llama/Llama-3.3-70B-Instruct"
+      revision: main
+      size: "140Gi"
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let spec: LatticeServiceSpec =
+            serde_json::from_value(value).expect("model resource should parse");
+
+        let resource = spec.resources.get("llm").expect("llm should exist");
+        assert!(resource.type_.is_model());
+        assert!(resource.type_.is_volume_like());
+
+        let params = resource.model_params().expect("should parse model params");
+        let params = params.expect("should be Some for model resource");
+        assert_eq!(params.uri, "huggingface://meta-llama/Llama-3.3-70B-Instruct");
+        assert_eq!(params.revision.as_deref(), Some("main"));
+        assert_eq!(params.pvc_size(), "140Gi");
+    }
+
+    /// Story: model_params() returns Ok(None) for non-model resources
+    #[test]
+    fn test_model_params_returns_none_for_non_model() {
+        let resource = ResourceSpec {
+            type_: ResourceType::Volume,
+            direction: DependencyDirection::default(),
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        };
+        assert!(resource.model_params().unwrap().is_none());
+    }
+
+    /// Story: model_params() errors when model resource has no params
+    #[test]
+    fn test_model_params_errors_without_params() {
+        let resource = ResourceSpec {
+            type_: ResourceType::Model,
+            direction: DependencyDirection::default(),
+            id: None,
+            class: None,
+            metadata: None,
+            params: None,
+            namespace: None,
+            inbound: None,
+            outbound: None,
+        };
+        let err = resource.model_params().unwrap_err();
+        assert!(err.contains("requires params"));
+    }
+
+    /// Story: Model type round-trips through serialization
+    #[test]
+    fn test_model_type_serialization() {
+        let model = ResourceType::Model;
+        let serialized = serde_json::to_string(&model).unwrap();
+        assert_eq!(serialized, "\"model\"");
+
+        let deserialized: ResourceType = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, model);
     }
 
     // =========================================================================
