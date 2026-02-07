@@ -1,8 +1,8 @@
 //! Infrastructure manifest generation
 //!
-//! Single source of truth for ALL infrastructure manifests. Used by:
-//! - Bootstrap webhook: pre-installs everything in parallel with operator
-//! - Operator startup: re-applies (idempotent via server-side apply)
+//! Single source of truth for ALL infrastructure manifests.
+//! Used by operator startup (`ensure_cluster_infrastructure` / `ensure_service_infrastructure`)
+//! to install Istio, Gateway API CRDs, ESO, Velero, VictoriaMetrics, KEDA, and GPU stack.
 //!
 //! Server-side apply handles idempotency - no need to check if installed.
 //!
@@ -19,7 +19,7 @@ pub mod velero;
 use std::sync::LazyLock;
 
 use kube::ResourceExt;
-use tracing::{debug, info};
+use tracing::debug;
 
 use lattice_common::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 use lattice_common::DEFAULT_GRPC_PORT;
@@ -100,7 +100,7 @@ impl From<&LatticeCluster> for InfrastructureConfig {
 ///
 /// Used by both operator startup and full cluster bootstrap.
 /// All manifests are pre-rendered at build time — no subprocess execution.
-/// NOTE: cert-manager and CAPI providers are installed via `clusterctl init`,
+/// NOTE: cert-manager and CAPI providers are installed via the native CAPI installer,
 /// which manages their lifecycle (including upgrades).
 pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
     let mut manifests = Vec::new();
@@ -134,23 +134,6 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
         manifests.extend(gpu::generate_gpu_stack().iter().cloned());
     }
 
-    Ok(manifests)
-}
-
-/// Generate ALL infrastructure manifests for a self-managing cluster
-///
-/// Includes core infrastructure (Istio, Gateway API, ESO, Cilium policies).
-/// NOTE: cert-manager and CAPI providers are installed via the native CAPI installer,
-/// which manages their lifecycle (including upgrades).
-pub async fn generate_all(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
-    // Core infrastructure (Istio, Gateway API, ESO, Cilium policies)
-    // cert-manager and CAPI are installed via the native CAPI installer
-    let manifests = generate_core(config).await?;
-
-    info!(
-        total = manifests.len(),
-        "generated infrastructure manifests"
-    );
     Ok(manifests)
 }
 

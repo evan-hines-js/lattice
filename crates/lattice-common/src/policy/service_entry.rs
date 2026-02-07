@@ -25,7 +25,7 @@ pub struct ServiceEntry {
 }
 
 impl HasApiResource for ServiceEntry {
-    const API_VERSION: &'static str = "networking.istio.io/v1beta1";
+    const API_VERSION: &'static str = "networking.istio.io/v1";
     const KIND: &'static str = "ServiceEntry";
 }
 

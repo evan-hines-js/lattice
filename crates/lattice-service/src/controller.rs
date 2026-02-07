@@ -509,7 +509,7 @@ impl ServiceKubeClientImpl {
 
         for external_secret in &compiled.workloads.external_secrets {
             let name = external_secret.metadata.name.clone();
-            let json = serialize_resource("ExternalSecret", external_secret)?;
+            let json = serialize_resource_discovered("ExternalSecret", external_secret, &es_ar)?;
             let api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), namespace, &es_ar);
             let params = params.clone();
@@ -539,7 +539,8 @@ impl ServiceKubeClientImpl {
                 Some(cnp_ar) => {
                     for cnp in &compiled.policies.cilium_policies {
                         let name = cnp.metadata.name.clone();
-                        let json = serialize_resource("CiliumNetworkPolicy", cnp)?;
+                        let json =
+                            serialize_resource_discovered("CiliumNetworkPolicy", cnp, cnp_ar)?;
                         let api: Api<DynamicObject> =
                             Api::namespaced_with(self.client.clone(), namespace, cnp_ar);
                         let params = params.clone();
@@ -565,7 +566,8 @@ impl ServiceKubeClientImpl {
                 Some(authz_ar) => {
                     for authz in &compiled.policies.authorization_policies {
                         let name = authz.metadata.name.clone();
-                        let json = serialize_resource("AuthorizationPolicy", authz)?;
+                        let json =
+                            serialize_resource_discovered("AuthorizationPolicy", authz, authz_ar)?;
                         let api: Api<DynamicObject> =
                             Api::namespaced_with(self.client.clone(), namespace, authz_ar);
                         let params = params.clone();
@@ -591,7 +593,7 @@ impl ServiceKubeClientImpl {
                 Some(se_ar) => {
                     for entry in &compiled.policies.service_entries {
                         let name = entry.metadata.name.clone();
-                        let json = serialize_resource("ServiceEntry", entry)?;
+                        let json = serialize_resource_discovered("ServiceEntry", entry, se_ar)?;
                         let api: Api<DynamicObject> =
                             Api::namespaced_with(self.client.clone(), namespace, se_ar);
                         let params = params.clone();
@@ -629,7 +631,7 @@ impl ServiceKubeClientImpl {
             match &self.crds.gateway {
                 Some(gw_ar) => {
                     let name = gateway.metadata.name.clone();
-                    let json = serialize_resource("Gateway", gateway)?;
+                    let json = serialize_resource_discovered("Gateway", gateway, gw_ar)?;
                     let api: Api<DynamicObject> =
                         Api::namespaced_with(self.client.clone(), namespace, gw_ar);
                     let params = params.clone();
@@ -650,7 +652,7 @@ impl ServiceKubeClientImpl {
             match &self.crds.http_route {
                 Some(route_ar) => {
                     let name = route.metadata.name.clone();
-                    let json = serialize_resource("HTTPRoute", route)?;
+                    let json = serialize_resource_discovered("HTTPRoute", route, route_ar)?;
                     let api: Api<DynamicObject> =
                         Api::namespaced_with(self.client.clone(), namespace, route_ar);
                     let params = params.clone();
@@ -671,7 +673,7 @@ impl ServiceKubeClientImpl {
             match &self.crds.certificate {
                 Some(cert_ar) => {
                     let name = cert.metadata.name.clone();
-                    let json = serialize_resource("Certificate", cert)?;
+                    let json = serialize_resource_discovered("Certificate", cert, cert_ar)?;
                     let api: Api<DynamicObject> =
                         Api::namespaced_with(self.client.clone(), namespace, cert_ar);
                     let params = params.clone();
@@ -705,7 +707,7 @@ impl ServiceKubeClientImpl {
             match &self.crds.gateway {
                 Some(gw_ar) => {
                     let name = gateway.metadata.name.clone();
-                    let json = serialize_resource("Waypoint Gateway", gateway)?;
+                    let json = serialize_resource_discovered("Waypoint Gateway", gateway, gw_ar)?;
                     let api: Api<DynamicObject> =
                         Api::namespaced_with(self.client.clone(), namespace, gw_ar);
                     let params = params.clone();
@@ -728,7 +730,11 @@ impl ServiceKubeClientImpl {
             match &self.crds.authorization_policy {
                 Some(authz_ar) => {
                     let name = policy.metadata.name.clone();
-                    let json = serialize_resource("Waypoint AuthorizationPolicy", policy)?;
+                    let json = serialize_resource_discovered(
+                        "Waypoint AuthorizationPolicy",
+                        policy,
+                        authz_ar,
+                    )?;
                     let api: Api<DynamicObject> =
                         Api::namespaced_with(self.client.clone(), namespace, authz_ar);
                     let params = params.clone();
@@ -757,6 +763,29 @@ fn serialize_resource<T: serde::Serialize>(
     resource: &T,
 ) -> Result<serde_json::Value, Error> {
     serde_json::to_value(resource).map_err(|e| Error::serialization(format!("{}: {}", name, e)))
+}
+
+/// Serialize a Kubernetes resource and override the `apiVersion` with the
+/// version discovered from the API server.
+///
+/// Custom resource types (ServiceEntry, AuthorizationPolicy, etc.) hardcode an
+/// `apiVersion` in their struct default. If the cluster serves a different
+/// version (e.g. `networking.istio.io/v1` instead of `v1beta1`), server-side
+/// apply rejects the mismatch. This helper patches the serialized JSON to use
+/// the discovered version.
+fn serialize_resource_discovered<T: serde::Serialize>(
+    name: &str,
+    resource: &T,
+    discovered: &ApiResource,
+) -> Result<serde_json::Value, Error> {
+    let mut json = serialize_resource(name, resource)?;
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "apiVersion".to_string(),
+            serde_json::Value::String(discovered.api_version.clone()),
+        );
+    }
+    Ok(json)
 }
 
 // =============================================================================

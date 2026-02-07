@@ -548,10 +548,7 @@ impl Installer {
             proxmox_ipv4_pool,
             cluster_name: self.cluster_name(),
             provider: self.provider(),
-            bootstrap: self.cluster.spec.provider.kubernetes.bootstrap.clone(),
             k8s_version: &self.cluster.spec.provider.kubernetes.version,
-            parent_host: None, // Management cluster has no parent
-            parent_grpc_port: lattice_common::DEFAULT_GRPC_PORT,
             relax_fips: self
                 .cluster
                 .spec
@@ -566,11 +563,6 @@ impl Installer {
                 .worker_pools
                 .values()
                 .any(|p| p.is_autoscaling_enabled()),
-            services: self.cluster.spec.services,
-            gpu: self.cluster.spec.gpu,
-            monitoring: self.cluster.spec.monitoring,
-            backups: self.cluster.spec.backups,
-            external_secrets: self.cluster.spec.external_secrets,
             cluster_manifest: &self.cluster_yaml,
         };
 

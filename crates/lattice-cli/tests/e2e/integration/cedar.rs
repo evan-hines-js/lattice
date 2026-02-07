@@ -28,16 +28,19 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     apply_cedar_policy_crd, apply_yaml_with_retry, delete_cedar_policies_by_label,
-    get_child_cluster_name, get_or_create_proxy, get_sa_token, http_get_with_retry,
-    proxy_service_exists, run_cmd,
+    delete_namespace, get_child_cluster_name, get_or_create_proxy, get_sa_token,
+    http_get_with_retry, proxy_service_exists, run_cmd,
 };
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-/// Test namespace for Cedar tests
-const CEDAR_TEST_NAMESPACE: &str = "cedar-test";
+/// Namespace for Cedar proxy SA tests
+const CEDAR_PROXY_TEST_NS: &str = "cedar-proxy-test";
+
+/// Namespace for Cedar group policy tests
+const CEDAR_GROUP_TEST_NS: &str = "cedar-group-test";
 
 /// Test ServiceAccount name that will be allowed
 const ALLOWED_SA_NAME: &str = "cedar-allowed-sa";
@@ -50,8 +53,11 @@ const DENIED_SA_NAME: &str = "cedar-denied-sa";
 // =============================================================================
 
 /// Create test namespace and ServiceAccounts for Cedar tests
-pub async fn setup_cedar_test_resources(kubeconfig: &str) -> Result<(), String> {
-    info!("[Integration/Cedar] Creating test namespace and ServiceAccounts...");
+async fn setup_cedar_test_resources(kubeconfig: &str, namespace: &str) -> Result<(), String> {
+    info!(
+        "[Integration/Cedar] Creating test namespace {} and ServiceAccounts...",
+        namespace
+    );
 
     // Create namespace
     let namespace_yaml = format!(
@@ -59,7 +65,7 @@ pub async fn setup_cedar_test_resources(kubeconfig: &str) -> Result<(), String> 
 kind: Namespace
 metadata:
   name: {}"#,
-        CEDAR_TEST_NAMESPACE
+        namespace
     );
     apply_yaml_with_retry(kubeconfig, &namespace_yaml).await?;
 
@@ -70,7 +76,7 @@ kind: ServiceAccount
 metadata:
   name: {}
   namespace: {}"#,
-        ALLOWED_SA_NAME, CEDAR_TEST_NAMESPACE
+        ALLOWED_SA_NAME, namespace
     );
     apply_yaml_with_retry(kubeconfig, &allowed_sa_yaml).await?;
 
@@ -81,7 +87,7 @@ kind: ServiceAccount
 metadata:
   name: {}
   namespace: {}"#,
-        DENIED_SA_NAME, CEDAR_TEST_NAMESPACE
+        DENIED_SA_NAME, namespace
     );
     apply_yaml_with_retry(kubeconfig, &denied_sa_yaml).await?;
 
@@ -90,7 +96,7 @@ metadata:
 }
 
 /// Apply a CedarPolicy that allows a specific ServiceAccount to access a cluster
-pub async fn apply_cedar_policy_allow_sa(
+async fn apply_cedar_policy_allow_sa(
     kubeconfig: &str,
     policy_name: &str,
     sa_namespace: &str,
@@ -148,13 +154,9 @@ pub fn delete_cedar_policy(kubeconfig: &str, policy_name: &str) -> Result<(), St
     Ok(())
 }
 
-/// Clean up test resources (policies only, namespace persists for subsequent tests)
-pub fn cleanup_cedar_test_resources(kubeconfig: &str) {
-    info!("[Integration/Cedar] Cleaning up test resources...");
-    // Delete test policies only - namespace persists to avoid race conditions
-    // between consecutive tests. Namespace gets cleaned up with cluster deletion.
+/// Clean up all Cedar test policies (safety net for failures)
+pub fn cleanup_cedar_test_policies(kubeconfig: &str) {
     delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=cedar");
-    info!("[Integration/Cedar] Cleanup complete");
 }
 
 /// E2E default policy name
@@ -175,24 +177,6 @@ pub async fn apply_e2e_default_policy(kubeconfig: &str) -> Result<(), String> {
     ).await?;
     info!("[Integration/Cedar] Default E2E policy applied");
     Ok(())
-}
-
-/// Remove the default E2E Cedar policy.
-pub fn remove_e2e_default_policy(kubeconfig: &str) {
-    info!("[Integration/Cedar] Removing default E2E policy...");
-    let _ = run_cmd(
-        "kubectl",
-        &[
-            "--kubeconfig",
-            kubeconfig,
-            "delete",
-            "cedarpolicy",
-            E2E_DEFAULT_POLICY_NAME,
-            "-n",
-            LATTICE_SYSTEM_NAMESPACE,
-            "--ignore-not-found",
-        ],
-    );
 }
 
 // =============================================================================
@@ -276,46 +260,32 @@ pub async fn run_cedar_proxy_test(
         child_cluster_name
     );
 
-    // Remove any existing default E2E policy that would override our test policies
-    // This is important for standalone tests where the E2E setup might have left it behind
-    remove_e2e_default_policy(parent_kubeconfig);
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Get or create proxy connection
     let (proxy_url, _port_forward) =
         get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
 
-    // Setup test resources on parent cluster
-    setup_cedar_test_resources(parent_kubeconfig).await?;
+    setup_cedar_test_resources(parent_kubeconfig, CEDAR_PROXY_TEST_NS).await?;
 
-    // Apply policy allowing the "allowed" SA to access the child cluster
+    let policy_name = format!("cedar-test-allow-{}", child_cluster_name);
     apply_cedar_policy_allow_sa(
         parent_kubeconfig,
-        &format!("cedar-test-allow-{}", child_cluster_name),
-        CEDAR_TEST_NAMESPACE,
+        &policy_name,
+        CEDAR_PROXY_TEST_NS,
         ALLOWED_SA_NAME,
         child_cluster_name,
     )
     .await?;
 
-    // Get tokens from parent cluster
-    let allowed_token = get_sa_token(parent_kubeconfig, CEDAR_TEST_NAMESPACE, ALLOWED_SA_NAME)?;
-    let denied_token = get_sa_token(parent_kubeconfig, CEDAR_TEST_NAMESPACE, DENIED_SA_NAME)?;
+    let allowed_token = get_sa_token(parent_kubeconfig, CEDAR_PROXY_TEST_NS, ALLOWED_SA_NAME)?;
+    let denied_token = get_sa_token(parent_kubeconfig, CEDAR_PROXY_TEST_NS, DENIED_SA_NAME)?;
 
-    // Verify allowed SA has access
     info!("[Integration/Cedar] Testing allowed SA access...");
     verify_sa_access_allowed(&proxy_url, &allowed_token, child_cluster_name).await?;
 
-    // Verify denied SA is denied
     info!("[Integration/Cedar] Testing denied SA access...");
     verify_sa_access_denied(&proxy_url, &denied_token, child_cluster_name).await?;
 
-    // Cleanup
-    delete_cedar_policy(
-        parent_kubeconfig,
-        &format!("cedar-test-allow-{}", child_cluster_name),
-    )?;
-    cleanup_cedar_test_resources(parent_kubeconfig);
+    delete_cedar_policy(parent_kubeconfig, &policy_name)?;
+    delete_namespace(parent_kubeconfig, CEDAR_PROXY_TEST_NS);
 
     info!(
         "[Integration/Cedar] Cedar proxy test for {} passed!",
@@ -342,61 +312,46 @@ pub async fn run_cedar_group_test(
         child_cluster_name
     );
 
-    // Remove any existing default E2E policy that would override our test policies
-    remove_e2e_default_policy(parent_kubeconfig);
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Get or create proxy connection
     let (proxy_url, _port_forward) =
         get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
 
-    // Setup
-    setup_cedar_test_resources(parent_kubeconfig).await?;
+    setup_cedar_test_resources(parent_kubeconfig, CEDAR_GROUP_TEST_NS).await?;
 
-    // Apply policy allowing all SAs in the test namespace group
-    let group_name = format!("system:serviceaccounts:{}", CEDAR_TEST_NAMESPACE);
+    let policy_name = format!("cedar-test-group-{}", child_cluster_name);
+    let group_name = format!("system:serviceaccounts:{}", CEDAR_GROUP_TEST_NS);
     apply_cedar_policy_allow_group(
         parent_kubeconfig,
-        &format!("cedar-test-group-{}", child_cluster_name),
+        &policy_name,
         &group_name,
         child_cluster_name,
     )
     .await?;
 
-    // Get tokens for SAs in the group (both should be allowed)
-    let in_group_token1 = get_sa_token(parent_kubeconfig, CEDAR_TEST_NAMESPACE, ALLOWED_SA_NAME)?;
-    let in_group_token2 = get_sa_token(parent_kubeconfig, CEDAR_TEST_NAMESPACE, DENIED_SA_NAME)?;
-
-    // Get token for SA outside the group (should be denied)
+    let in_group_token1 = get_sa_token(parent_kubeconfig, CEDAR_GROUP_TEST_NS, ALLOWED_SA_NAME)?;
+    let in_group_token2 = get_sa_token(parent_kubeconfig, CEDAR_GROUP_TEST_NS, DENIED_SA_NAME)?;
     let outside_group_token = get_sa_token(parent_kubeconfig, LATTICE_SYSTEM_NAMESPACE, "default")?;
 
-    // SAs in the group should have access
     info!("[Integration/Cedar] Testing SA in group (should be allowed)...");
     verify_sa_access_allowed(&proxy_url, &in_group_token1, child_cluster_name).await?;
 
     info!("[Integration/Cedar] Testing second SA in group (should be allowed)...");
     verify_sa_access_allowed(&proxy_url, &in_group_token2, child_cluster_name).await?;
 
-    // SA outside the group should be denied
     info!("[Integration/Cedar] Testing SA outside group (should be denied)...");
     verify_sa_access_denied(&proxy_url, &outside_group_token, child_cluster_name).await?;
 
-    // Cleanup
-    delete_cedar_policy(
-        parent_kubeconfig,
-        &format!("cedar-test-group-{}", child_cluster_name),
-    )?;
-    cleanup_cedar_test_resources(parent_kubeconfig);
+    delete_cedar_policy(parent_kubeconfig, &policy_name)?;
+    delete_namespace(parent_kubeconfig, CEDAR_GROUP_TEST_NS);
 
     info!("[Integration/Cedar] Group policy test passed!");
     Ok(())
 }
 
-/// Run all Cedar integration tests for a parent-child cluster pair
+/// Run all Cedar integration tests for a parent-child cluster pair.
 ///
-/// This is the main entry point for E2E tests.
-/// If the proxy service is not deployed, tests are skipped gracefully.
-/// Uses the proxy URL from the context if available to avoid creating redundant port-forwards.
+/// Main entry point for E2E tests. Each test uses its own namespace so both
+/// run concurrently. The E2E default policy is removed before tests (so deny
+/// checks work) and restored after (so subsequent tests have access).
 pub async fn run_cedar_hierarchy_tests(
     ctx: &InfraContext,
     child_cluster_name: &str,
@@ -406,26 +361,30 @@ pub async fn run_cedar_hierarchy_tests(
         child_cluster_name
     );
 
-    // Check if proxy service exists
     if !proxy_service_exists(&ctx.mgmt_kubeconfig) {
         info!("[Integration/Cedar] Proxy service not deployed - skipping Cedar tests");
-        info!("[Integration/Cedar] (This is expected if lattice-api is not yet implemented)");
         return Ok(());
     }
 
-    // Use existing proxy URL from context if available
+    // Remove default E2E policy so deny checks work correctly
+    let _ = delete_cedar_policy(&ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     let proxy_url = ctx.mgmt_proxy_url.as_deref();
+    let kubeconfig = &ctx.mgmt_kubeconfig;
 
-    // Run SA-specific policy test
-    run_cedar_proxy_test(&ctx.mgmt_kubeconfig, child_cluster_name, proxy_url).await?;
+    let result = tokio::try_join!(
+        run_cedar_proxy_test(kubeconfig, child_cluster_name, proxy_url),
+        run_cedar_group_test(kubeconfig, child_cluster_name, proxy_url),
+    );
 
-    // Run group policy test
-    run_cedar_group_test(&ctx.mgmt_kubeconfig, child_cluster_name, proxy_url).await?;
+    // Safety net: clean up any leftover policies on failure
+    cleanup_cedar_test_policies(kubeconfig);
 
-    // Restore the default E2E policy after tests complete
-    // This is critical - subsequent tests (mesh, secrets) use the proxy kubeconfig
-    // and will fail without a Cedar policy allowing access
-    apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
+    // Restore default policy for subsequent tests (mesh, secrets, etc.)
+    apply_e2e_default_policy(kubeconfig).await?;
+
+    result.map_err(|e| e.to_string())?;
 
     info!("[Integration/Cedar] All Cedar hierarchy tests passed!");
     Ok(())
@@ -436,9 +395,6 @@ pub async fn run_cedar_hierarchy_tests(
 // =============================================================================
 
 /// Standalone test - test SA token authentication with Cedar policies
-///
-/// Requires `LATTICE_MGMT_KUBECONFIG` and `LATTICE_CHILD_CLUSTER_NAME` environment variables.
-/// Uses TestSession to automatically manage port-forwards for proxy access.
 #[tokio::test]
 #[ignore]
 async fn test_cedar_sa_auth_standalone() {
@@ -447,6 +403,9 @@ async fn test_cedar_sa_auth_standalone() {
             .await
             .unwrap();
     let child_cluster_name = get_child_cluster_name();
+
+    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME);
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     run_cedar_proxy_test(
         &session.ctx.mgmt_kubeconfig,
@@ -458,8 +417,6 @@ async fn test_cedar_sa_auth_standalone() {
 }
 
 /// Standalone test - test group-based Cedar policies
-///
-/// Uses TestSession to automatically manage port-forwards for proxy access.
 #[tokio::test]
 #[ignore]
 async fn test_cedar_group_policy_standalone() {
@@ -468,6 +425,9 @@ async fn test_cedar_group_policy_standalone() {
             .await
             .unwrap();
     let child_cluster_name = get_child_cluster_name();
+
+    let _ = delete_cedar_policy(&session.ctx.mgmt_kubeconfig, E2E_DEFAULT_POLICY_NAME);
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     run_cedar_group_test(
         &session.ctx.mgmt_kubeconfig,
@@ -479,8 +439,6 @@ async fn test_cedar_group_policy_standalone() {
 }
 
 /// Standalone test - run all Cedar tests
-///
-/// Uses TestSession to automatically manage port-forwards for proxy access.
 #[tokio::test]
 #[ignore]
 async fn test_cedar_all_standalone() {

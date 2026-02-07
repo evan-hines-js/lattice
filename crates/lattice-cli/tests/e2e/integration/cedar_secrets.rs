@@ -31,19 +31,22 @@ use tracing::info;
 use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_policy_crd, client_from_kubeconfig, create_service_with_secrets,
-    delete_cedar_policies_by_label, ensure_fresh_namespace, wait_for_service_phase,
-    wait_for_service_phase_with_message,
+    delete_cedar_policies_by_label, delete_namespace, ensure_fresh_namespace,
+    wait_for_service_phase, wait_for_service_phase_with_message,
 };
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-/// Test namespace for Cedar secret tests
-const CEDAR_SECRET_TEST_NAMESPACE: &str = "cedar-secret-test";
-
-/// Secondary namespace for isolation tests
-const CEDAR_SECRET_TEST_NAMESPACE_B: &str = "cedar-secret-test-b";
+/// Per-test namespace prefixes (each test gets its own namespace, cleaned up at end)
+const NS_DEFAULT_DENY: &str = "cedar-secret-t1";
+const NS_PERMIT_PATH: &str = "cedar-secret-t2";
+const NS_FORBID_OVERRIDE: &str = "cedar-secret-t3";
+const NS_ISOLATION_A: &str = "cedar-secret-t4a";
+const NS_ISOLATION_B: &str = "cedar-secret-t4b";
+const NS_LIFECYCLE: &str = "cedar-secret-t5";
+const NS_PROVIDER: &str = "cedar-secret-t6";
 
 /// Test SecretsProvider name (does not need to exist — Cedar checks happen before ESO)
 const TEST_PROVIDER: &str = "vault-test";
@@ -205,14 +208,14 @@ async fn deploy_and_assert(
 /// Test 1: Default deny — no CedarPolicy, service with secrets → Failed
 async fn test_default_deny(kubeconfig: &str) -> Result<(), String> {
     info!("[CedarSecrets] Test 1: Default deny (no policies)...");
-    ensure_fresh_namespace(kubeconfig, CEDAR_SECRET_TEST_NAMESPACE).await?;
+    ensure_fresh_namespace(kubeconfig, NS_DEFAULT_DENY).await?;
 
     deploy_and_assert(
         kubeconfig,
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_DEFAULT_DENY,
         cedar_test_service(
             "svc-no-policy",
-            CEDAR_SECRET_TEST_NAMESPACE,
+            NS_DEFAULT_DENY,
             vec![("db-creds", "database/prod/creds", TEST_PROVIDER)],
         ),
         "Failed",
@@ -221,6 +224,7 @@ async fn test_default_deny(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
+    delete_namespace(kubeconfig, NS_DEFAULT_DENY);
     info!("[CedarSecrets] Test 1 passed: default deny works");
     Ok(())
 }
@@ -228,22 +232,22 @@ async fn test_default_deny(kubeconfig: &str) -> Result<(), String> {
 /// Test 2: Permit specific path — apply permit policy → service reaches Ready
 async fn test_permit_specific_path(kubeconfig: &str) -> Result<(), String> {
     info!("[CedarSecrets] Test 2: Permit specific path...");
-    ensure_fresh_namespace(kubeconfig, CEDAR_SECRET_TEST_NAMESPACE).await?;
+    ensure_fresh_namespace(kubeconfig, NS_PERMIT_PATH).await?;
 
     apply_cedar_secret_permit_policy(
         kubeconfig,
         "permit-test2-path",
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_PERMIT_PATH,
         "database/staging/*",
     )
     .await?;
 
     deploy_and_assert(
         kubeconfig,
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_PERMIT_PATH,
         cedar_test_service(
             "svc-permitted",
-            CEDAR_SECRET_TEST_NAMESPACE,
+            NS_PERMIT_PATH,
             vec![("db-creds", "database/staging/creds", TEST_PROVIDER)],
         ),
         "Ready",
@@ -252,6 +256,7 @@ async fn test_permit_specific_path(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
+    delete_namespace(kubeconfig, NS_PERMIT_PATH);
     info!("[CedarSecrets] Test 2 passed: permit specific path works");
     Ok(())
 }
@@ -259,23 +264,18 @@ async fn test_permit_specific_path(kubeconfig: &str) -> Result<(), String> {
 /// Test 3: Forbid overrides permit — permit-all + forbid prod path → service fails
 async fn test_forbid_overrides_permit(kubeconfig: &str) -> Result<(), String> {
     info!("[CedarSecrets] Test 3: Forbid overrides permit...");
-    ensure_fresh_namespace(kubeconfig, CEDAR_SECRET_TEST_NAMESPACE).await?;
+    ensure_fresh_namespace(kubeconfig, NS_FORBID_OVERRIDE).await?;
 
-    apply_cedar_secret_permit_policy(
-        kubeconfig,
-        "permit-test3-all",
-        CEDAR_SECRET_TEST_NAMESPACE,
-        "*",
-    )
-    .await?;
+    apply_cedar_secret_permit_policy(kubeconfig, "permit-test3-all", NS_FORBID_OVERRIDE, "*")
+        .await?;
     apply_cedar_secret_forbid_policy(kubeconfig, "forbid-test3-prod", "*/prod/*").await?;
 
     deploy_and_assert(
         kubeconfig,
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_FORBID_OVERRIDE,
         cedar_test_service(
             "svc-prod-denied",
-            CEDAR_SECRET_TEST_NAMESPACE,
+            NS_FORBID_OVERRIDE,
             vec![("db-creds", "database/prod/creds", TEST_PROVIDER)],
         ),
         "Failed",
@@ -284,6 +284,7 @@ async fn test_forbid_overrides_permit(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
+    delete_namespace(kubeconfig, NS_FORBID_OVERRIDE);
     info!("[CedarSecrets] Test 3 passed: forbid overrides permit");
     Ok(())
 }
@@ -291,13 +292,13 @@ async fn test_forbid_overrides_permit(kubeconfig: &str) -> Result<(), String> {
 /// Test 4: Namespace isolation — permit for ns-a, service in ns-b denied
 async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
     info!("[CedarSecrets] Test 4: Namespace isolation...");
-    ensure_fresh_namespace(kubeconfig, CEDAR_SECRET_TEST_NAMESPACE).await?;
-    ensure_fresh_namespace(kubeconfig, CEDAR_SECRET_TEST_NAMESPACE_B).await?;
+    ensure_fresh_namespace(kubeconfig, NS_ISOLATION_A).await?;
+    ensure_fresh_namespace(kubeconfig, NS_ISOLATION_B).await?;
 
     apply_cedar_secret_permit_policy(
         kubeconfig,
         "permit-test4-ns-a",
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_ISOLATION_A,
         "services/*",
     )
     .await?;
@@ -305,10 +306,10 @@ async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
     // Service in namespace B (not permitted) → should fail
     deploy_and_assert(
         kubeconfig,
-        CEDAR_SECRET_TEST_NAMESPACE_B,
+        NS_ISOLATION_B,
         cedar_test_service(
             "svc-wrong-ns",
-            CEDAR_SECRET_TEST_NAMESPACE_B,
+            NS_ISOLATION_B,
             vec![("api-key", "services/api-key", TEST_PROVIDER)],
         ),
         "Failed",
@@ -320,10 +321,10 @@ async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
     // Service in namespace A (permitted) → should succeed
     deploy_and_assert(
         kubeconfig,
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_ISOLATION_A,
         cedar_test_service(
             "svc-right-ns",
-            CEDAR_SECRET_TEST_NAMESPACE,
+            NS_ISOLATION_A,
             vec![("api-key", "services/api-key", TEST_PROVIDER)],
         ),
         "Ready",
@@ -332,6 +333,8 @@ async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
+    delete_namespace(kubeconfig, NS_ISOLATION_A);
+    delete_namespace(kubeconfig, NS_ISOLATION_B);
     info!("[CedarSecrets] Test 4 passed: namespace isolation works");
     Ok(())
 }
@@ -339,15 +342,15 @@ async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
 /// Test 5: Policy lifecycle — service fails → apply permit → service recovers to Ready
 async fn test_policy_lifecycle(kubeconfig: &str) -> Result<(), String> {
     info!("[CedarSecrets] Test 5: Policy lifecycle (fail → permit → recover)...");
-    ensure_fresh_namespace(kubeconfig, CEDAR_SECRET_TEST_NAMESPACE).await?;
+    ensure_fresh_namespace(kubeconfig, NS_LIFECYCLE).await?;
 
     // Deploy without policy → should fail
     deploy_and_assert(
         kubeconfig,
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_LIFECYCLE,
         cedar_test_service(
             "svc-lifecycle",
-            CEDAR_SECRET_TEST_NAMESPACE,
+            NS_LIFECYCLE,
             vec![("config", "services/config", TEST_PROVIDER)],
         ),
         "Failed",
@@ -362,20 +365,21 @@ async fn test_policy_lifecycle(kubeconfig: &str) -> Result<(), String> {
     apply_cedar_secret_permit_policy(
         kubeconfig,
         "permit-test5-lifecycle",
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_LIFECYCLE,
         "services/*",
     )
     .await?;
 
     wait_for_service_phase(
         kubeconfig,
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_LIFECYCLE,
         "svc-lifecycle",
         "Ready",
         Duration::from_secs(90),
     )
     .await?;
 
+    delete_namespace(kubeconfig, NS_LIFECYCLE);
     info!("[CedarSecrets] Test 5 passed: policy lifecycle recovery works");
     Ok(())
 }
@@ -383,12 +387,12 @@ async fn test_policy_lifecycle(kubeconfig: &str) -> Result<(), String> {
 /// Test 6: Provider-scoped access — permit for one provider, deny for another
 async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
     info!("[CedarSecrets] Test 6: Provider-scoped access...");
-    ensure_fresh_namespace(kubeconfig, CEDAR_SECRET_TEST_NAMESPACE).await?;
+    ensure_fresh_namespace(kubeconfig, NS_PROVIDER).await?;
 
     apply_cedar_secret_provider_policy(
         kubeconfig,
         "permit-test6-provider",
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_PROVIDER,
         TEST_PROVIDER,
     )
     .await?;
@@ -396,10 +400,10 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
     // Wrong provider → denied
     deploy_and_assert(
         kubeconfig,
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_PROVIDER,
         cedar_test_service(
             "svc-wrong-provider",
-            CEDAR_SECRET_TEST_NAMESPACE,
+            NS_PROVIDER,
             vec![("secret", "admin/key", TEST_PROVIDER_ALT)],
         ),
         "Failed",
@@ -411,10 +415,10 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
     // Right provider → allowed
     deploy_and_assert(
         kubeconfig,
-        CEDAR_SECRET_TEST_NAMESPACE,
+        NS_PROVIDER,
         cedar_test_service(
             "svc-right-provider",
-            CEDAR_SECRET_TEST_NAMESPACE,
+            NS_PROVIDER,
             vec![("secret", "admin/key", TEST_PROVIDER)],
         ),
         "Ready",
@@ -423,6 +427,7 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
+    delete_namespace(kubeconfig, NS_PROVIDER);
     info!("[CedarSecrets] Test 6 passed: provider-scoped access works");
     Ok(())
 }
@@ -434,11 +439,12 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
 /// Run all Cedar secret authorization tests.
 ///
 /// Called from unified_e2e.rs and per-integration cedar_secrets_e2e.rs.
+/// Each test uses its own namespace so all tests run concurrently.
 pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
     let kubeconfig = ctx.require_workload()?;
 
     info!(
-        "[CedarSecrets] Running Cedar secret authorization tests on {}",
+        "[CedarSecrets] Running Cedar secret authorization tests concurrently on {}",
         kubeconfig
     );
 
@@ -446,38 +452,20 @@ pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
     cleanup_cedar_secret_policies(kubeconfig);
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Run tests sequentially, cleaning up policies between each
-    let result = async {
-        test_default_deny(kubeconfig).await?;
-        cleanup_cedar_secret_policies(kubeconfig);
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    // Run all tests concurrently — each uses its own namespace
+    let result = tokio::try_join!(
+        test_default_deny(kubeconfig),
+        test_permit_specific_path(kubeconfig),
+        test_forbid_overrides_permit(kubeconfig),
+        test_namespace_isolation(kubeconfig),
+        test_policy_lifecycle(kubeconfig),
+        test_provider_scoped_access(kubeconfig),
+    );
 
-        test_permit_specific_path(kubeconfig).await?;
-        cleanup_cedar_secret_policies(kubeconfig);
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        test_forbid_overrides_permit(kubeconfig).await?;
-        cleanup_cedar_secret_policies(kubeconfig);
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        test_namespace_isolation(kubeconfig).await?;
-        cleanup_cedar_secret_policies(kubeconfig);
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        test_policy_lifecycle(kubeconfig).await?;
-        cleanup_cedar_secret_policies(kubeconfig);
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        test_provider_scoped_access(kubeconfig).await?;
-
-        Ok::<(), String>(())
-    }
-    .await;
-
-    // Always clean up, even on failure
+    // Always clean up policies, even on failure
     cleanup_cedar_secret_policies(kubeconfig);
 
-    result?;
+    result.map_err(|e| e.to_string())?;
 
     info!("[CedarSecrets] All Cedar secret authorization tests passed!");
     Ok(())

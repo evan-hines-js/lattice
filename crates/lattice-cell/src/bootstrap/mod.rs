@@ -61,7 +61,7 @@ use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
 use lattice_common::crd::{LatticeCluster, ProviderType};
 use lattice_common::{
-    CellEndpoint, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_ENDPOINT_KEY,
+    LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_ENDPOINT_KEY,
     PARENT_CONFIG_SECRET, REGISTRY_CREDENTIALS_SECRET,
 };
 #[cfg(test)]
@@ -186,28 +186,16 @@ pub struct ClusterRegistration {
     pub k8s_version: String,
     /// Whether any worker pool has autoscaling enabled (min/max set)
     pub autoscaling_enabled: bool,
-    /// Whether LatticeService support is enabled (Istio + mesh policies)
-    pub services: bool,
-    /// Whether GPU infrastructure is enabled (NFD + NVIDIA device plugin + HAMi)
-    pub gpu: bool,
-    /// Whether monitoring infrastructure is enabled (VictoriaMetrics + Prometheus Adapter)
-    pub monitoring: bool,
-    /// Whether backup infrastructure is enabled (Velero)
-    pub backups: bool,
-    /// Whether external secrets infrastructure is enabled (ESO for Vault)
-    pub external_secrets: bool,
 }
 
 /// Bootstrap manifest generator
 #[async_trait::async_trait]
 pub trait ManifestGenerator: Send + Sync {
-    /// Generate bootstrap manifests for a cluster
+    /// Generate CNI and operator manifests for a cluster
     ///
-    /// These manifests are applied during initial bootstrap (before pivot).
-    /// They include CNI, operator, and LatticeCluster CRD/instance.
-    ///
-    /// Note: The LatticeCluster instance is added by generate_response(), not here.
-    /// This method generates: Cilium, operator deployment, namespace, RBAC, etc.
+    /// Returns Cilium CNI manifests and operator deployment (namespace, RBAC,
+    /// ServiceAccount, Deployment). Called by `generate_bootstrap_bundle()` which
+    /// adds LB-IPAM, provider addons, and LatticeCluster CRD/instance on top.
     ///
     /// This is an async function to avoid blocking the tokio runtime during
     /// helm template execution for Cilium manifests.
@@ -220,12 +208,19 @@ pub trait ManifestGenerator: Send + Sync {
     ) -> Vec<String>;
 }
 
-/// Configuration for generating bootstrap manifests
+/// Configuration for generating a complete bootstrap bundle
 ///
-/// Groups related parameters for `generate_all_manifests` to improve readability
-/// and allow easier extension without breaking call sites.
+/// The bootstrap bundle includes only what's essential for the cluster to start:
+/// - CNI (Cilium)
+/// - Operator deployment + namespace + RBAC
+/// - LB-IPAM resources (if configured)
+/// - Provider addons (CCM, CSI, local-path-provisioner, cluster-autoscaler)
+/// - LatticeCluster CRD definition + instance
+///
+/// Infrastructure components (Istio, ESO, Velero, VictoriaMetrics, KEDA, GPU stack)
+/// are deferred to operator startup via `ensure_cluster_infrastructure()`.
 #[derive(Debug, Clone)]
-pub struct ManifestConfig<'a> {
+pub struct BootstrapBundleConfig<'a> {
     /// Container image for the operator
     pub image: &'a str,
     /// Optional registry credentials (image pull secret)
@@ -234,47 +229,38 @@ pub struct ManifestConfig<'a> {
     pub networking: Option<&'a lattice_common::crd::NetworkingSpec>,
     /// Optional Proxmox ipv4_pool config (for auto-deriving LB-IPAM when networking is None)
     pub proxmox_ipv4_pool: Option<&'a lattice_common::crd::Ipv4PoolConfig>,
-    /// Cluster name (for operator identity)
-    pub cluster_name: Option<&'a str>,
+    /// Cluster name
+    pub cluster_name: &'a str,
     /// Provider type
-    pub provider: Option<ProviderType>,
-    /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons
-    pub k8s_version: Option<&'a str>,
-    /// Parent host (None for root/cell clusters)
-    pub parent_host: Option<&'a str>,
-    /// Parent gRPC port
-    pub parent_grpc_port: u16,
-    /// Whether to relax FIPS mode (add GODEBUG=fips140=on)
-    /// Used for bootstrap cluster and kubeadm-based clusters connecting to non-FIPS API servers
+    pub provider: ProviderType,
+    /// Kubernetes version (e.g., "1.32.0")
+    pub k8s_version: &'a str,
+    /// Whether to relax FIPS mode
     pub relax_fips: bool,
-    /// Whether cluster has autoscaling-enabled pools (min/max set)
-    /// When true, deploys the CAPI cluster-autoscaler
+    /// Whether cluster has autoscaling-enabled pools
     pub autoscaling_enabled: bool,
+    /// The LatticeCluster manifest (JSON or YAML) to include
+    pub cluster_manifest: &'a str,
 }
 
-/// Generate all bootstrap manifests including provider-specific addons
+/// Generate a complete bootstrap bundle for a cluster
 ///
-/// This is the single entry point for manifest generation - both CRS (management cluster)
-/// and bootstrap webhook (child clusters) MUST call this function to ensure consistency.
+/// This is the single source of truth for bootstrap manifests. Both the install command
+/// (management cluster) and bootstrap webhook (child clusters) MUST call this function.
+/// See [`BootstrapBundleConfig`] for what's included vs deferred.
 ///
-/// Includes:
-/// - CNI (Cilium)
-/// - Lattice operator
-/// - LB-IPAM resources (if networking configured)
-/// - Provider-specific addons (AWS CCM/CSI)
-///
-/// This is an async function to avoid blocking the tokio runtime during
-/// helm template execution for Cilium manifests.
-pub async fn generate_all_manifests<G: ManifestGenerator>(
+/// Does NOT include parent connection config - that's webhook-specific.
+pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
     generator: &G,
-    config: &ManifestConfig<'_>,
+    config: &BootstrapBundleConfig<'_>,
 ) -> Result<Vec<String>, BootstrapError> {
+    // Generate operator + CNI manifests
     let mut manifests = generator
         .generate(
             config.image,
             config.registry_credentials,
-            config.cluster_name,
-            config.provider,
+            Some(config.cluster_name),
+            Some(config.provider),
         )
         .await;
 
@@ -300,7 +286,6 @@ pub async fn generate_all_manifests<G: ManifestGenerator>(
         })?;
         manifests.extend(lb_resources);
     } else if let Some(ipv4_pool) = config.proxmox_ipv4_pool {
-        // Auto-derive LB pool from Proxmox ipv4_pool (uses .200/27 range from same subnet)
         let lb_resources =
             crate::cilium::generate_lb_resources_from_proxmox(ipv4_pool).map_err(|e| {
                 BootstrapError::Internal(format!("failed to generate Cilium LB resources: {}", e))
@@ -309,117 +294,12 @@ pub async fn generate_all_manifests<G: ManifestGenerator>(
     }
 
     // Add provider-specific addons (CCM, CSI, storage, autoscaler)
-    if let (Some(provider), Some(k8s_version), Some(cluster_name)) =
-        (config.provider, config.k8s_version, config.cluster_name)
-    {
-        manifests.extend(addons::generate_for_provider(
-            provider,
-            k8s_version,
-            cluster_name,
-            config.autoscaling_enabled,
-        ));
-    }
-
-    Ok(manifests)
-}
-
-/// Configuration for generating a complete bootstrap bundle
-#[derive(Debug, Clone)]
-pub struct BootstrapBundleConfig<'a> {
-    /// Container image for the operator
-    pub image: &'a str,
-    /// Optional registry credentials (image pull secret)
-    pub registry_credentials: Option<&'a str>,
-    /// Optional networking configuration (for LB-IPAM)
-    pub networking: Option<&'a lattice_common::crd::NetworkingSpec>,
-    /// Optional Proxmox ipv4_pool config (for auto-deriving LB-IPAM when networking is None)
-    pub proxmox_ipv4_pool: Option<&'a lattice_common::crd::Ipv4PoolConfig>,
-    /// Cluster name
-    pub cluster_name: &'a str,
-    /// Provider type
-    pub provider: ProviderType,
-    /// Bootstrap mechanism (kubeadm or rke2)
-    pub bootstrap: lattice_common::crd::BootstrapProvider,
-    /// Kubernetes version (e.g., "1.32.0")
-    pub k8s_version: &'a str,
-    /// Parent host (None for root/management clusters)
-    pub parent_host: Option<&'a str>,
-    /// Parent gRPC port
-    pub parent_grpc_port: u16,
-    /// Whether to relax FIPS mode
-    pub relax_fips: bool,
-    /// Whether cluster has autoscaling-enabled pools
-    pub autoscaling_enabled: bool,
-    /// Whether LatticeService support is enabled (Istio + mesh policies)
-    pub services: bool,
-    /// Whether GPU infrastructure is enabled (NFD + NVIDIA device plugin + HAMi)
-    pub gpu: bool,
-    /// Whether monitoring infrastructure is enabled (VictoriaMetrics + Prometheus Adapter)
-    pub monitoring: bool,
-    /// Whether backup infrastructure is enabled (Velero)
-    pub backups: bool,
-    /// Whether external secrets infrastructure is enabled (ESO for Vault)
-    pub external_secrets: bool,
-    /// The LatticeCluster manifest (JSON or YAML) to include
-    pub cluster_manifest: &'a str,
-}
-
-/// Generate a complete bootstrap bundle for a cluster
-///
-/// This is the single source of truth for bootstrap manifests. Both the install command
-/// (management cluster) and bootstrap webhook (child clusters) MUST call this function.
-///
-/// Includes:
-/// - Operator manifests (CNI, operator deployment)
-/// - Infrastructure manifests (cert-manager, CAPI, Istio, Cilium)
-/// - LatticeCluster CRD definition
-/// - LatticeCluster instance
-///
-/// Does NOT include parent connection config - that's webhook-specific.
-pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
-    generator: &G,
-    config: &BootstrapBundleConfig<'_>,
-) -> Result<Vec<String>, BootstrapError> {
-    // Generate operator + CNI manifests
-    let manifest_config = ManifestConfig {
-        image: config.image,
-        registry_credentials: config.registry_credentials,
-        networking: config.networking,
-        proxmox_ipv4_pool: config.proxmox_ipv4_pool,
-        cluster_name: Some(config.cluster_name),
-        provider: Some(config.provider),
-        k8s_version: Some(config.k8s_version),
-        parent_host: config.parent_host,
-        parent_grpc_port: config.parent_grpc_port,
-        relax_fips: config.relax_fips,
-        autoscaling_enabled: config.autoscaling_enabled,
-    };
-    let mut manifests = generate_all_manifests(generator, &manifest_config).await?;
-
-    // Generate infrastructure manifests (cert-manager, CAPI, Istio, Cilium)
-    let infra_config = lattice_infra::bootstrap::InfrastructureConfig {
-        provider: config.provider,
-        bootstrap: config.bootstrap.clone(),
-        cluster_name: config.cluster_name.to_string(),
-        skip_cilium_policies: false,
-        skip_service_mesh: !config.services,
-        parent_host: config.parent_host.map(|s| s.to_string()),
-        parent_grpc_port: config.parent_grpc_port,
-        gpu: config.gpu,
-        monitoring: config.monitoring,
-        backups: config.backups,
-        external_secrets: config.external_secrets,
-    };
-    let infra_manifests = lattice_infra::bootstrap::generate_core(&infra_config)
-        .await
-        .map_err(|e| {
-            BootstrapError::Internal(format!("failed to generate infrastructure: {}", e))
-        })?;
-    info!(
-        count = infra_manifests.len(),
-        "generated infrastructure manifests"
-    );
-    manifests.extend(infra_manifests);
+    manifests.extend(addons::generate_for_provider(
+        config.provider,
+        config.k8s_version,
+        config.cluster_name,
+        config.autoscaling_enabled,
+    ));
 
     // Add LatticeCluster CRD definition
     let crd_definition = serde_json::to_string(&LatticeCluster::crd()).map_err(|e| {
@@ -453,7 +333,6 @@ impl DefaultManifestGenerator {
     /// Environment variables set:
     /// - LATTICE_CLUSTER_NAME: So controller knows which cluster it's on
     /// - LATTICE_PROVIDER: So agent knows which infrastructure provider to install
-    /// - LATTICE_BOOTSTRAP: So agent knows which bootstrap provider to use
     fn generate_operator_manifests(
         &self,
         image: &str,
@@ -805,16 +684,6 @@ pub struct ClusterBootstrapInfo {
     pub k8s_version: String,
     /// Whether any worker pool has autoscaling enabled (min/max set)
     pub autoscaling_enabled: bool,
-    /// Whether LatticeService support is enabled (Istio + mesh policies)
-    pub services: bool,
-    /// Whether GPU infrastructure is enabled (NFD + NVIDIA device plugin + HAMi)
-    pub gpu: bool,
-    /// Whether monitoring infrastructure is enabled (VictoriaMetrics + Prometheus Adapter)
-    pub monitoring: bool,
-    /// Whether backup infrastructure is enabled (Velero)
-    pub backups: bool,
-    /// Whether external secrets infrastructure is enabled (ESO for Vault)
-    pub external_secrets: bool,
 }
 
 /// Bootstrap endpoint state
@@ -940,11 +809,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             bootstrap: registration.bootstrap,
             k8s_version: registration.k8s_version,
             autoscaling_enabled: registration.autoscaling_enabled,
-            services: registration.services,
-            gpu: registration.gpu,
-            monitoring: registration.monitoring,
-            backups: registration.backups,
-            external_secrets: registration.external_secrets,
         };
 
         self.clusters.insert(cluster_id, info);
@@ -1035,28 +899,13 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
     /// Generate bootstrap response for a cluster
     ///
-    /// Generates ALL manifests needed for a self-managing cluster:
-    /// - CNI (Cilium)
-    /// - Lattice operator
-    /// - cert-manager, CAPI, Istio (infrastructure)
-    /// - LatticeCluster CRD definition
-    /// - Parent connection config Secret
-    ///
-    /// Everything installs in parallel with the operator starting up.
-    /// Operator will "adopt" pre-installed components (server-side apply is idempotent).
-    ///
-    /// This is an async function to avoid blocking the tokio runtime during
-    /// helm template execution for Cilium and Istio manifests.
+    /// Calls [`generate_bootstrap_bundle`] and adds the parent connection config
+    /// Secret (webhook-specific). See [`BootstrapBundleConfig`] for what's included.
     pub async fn generate_response(
         &self,
         info: &ClusterBootstrapInfo,
     ) -> Result<BootstrapResponse, BootstrapError> {
-        // Parse parent endpoint for network policy
-        let (parent_host, grpc_port) = CellEndpoint::parse(&info.cell_endpoint)
-            .map(|e| (Some(e.host), e.grpc_port))
-            .unwrap_or((None, lattice_common::DEFAULT_GRPC_PORT));
-
-        // Generate the complete bootstrap bundle (operator, infra, LatticeCluster)
+        // Generate the complete bootstrap bundle (operator, CNI, addons, LatticeCluster)
         let bundle_config = BootstrapBundleConfig {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
@@ -1064,17 +913,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             proxmox_ipv4_pool: info.proxmox_ipv4_pool.as_ref(),
             cluster_name: &info.cluster_id,
             provider: info.provider,
-            bootstrap: info.bootstrap.clone(),
             k8s_version: &info.k8s_version,
-            parent_host: parent_host.as_deref(),
-            parent_grpc_port: grpc_port,
             relax_fips: info.bootstrap.needs_fips_relax(),
             autoscaling_enabled: info.autoscaling_enabled,
-            services: info.services,
-            gpu: info.gpu,
-            monitoring: info.monitoring,
-            backups: info.backups,
-            external_secrets: info.external_secrets,
             cluster_manifest: &info.cluster_manifest,
         };
         let mut manifests =
@@ -1427,11 +1268,6 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::default(),
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
-                services: true,
-                gpu: false,
-                monitoring: true,
-                backups: true,
-                external_secrets: true,
             })
             .await
     }
@@ -2566,11 +2402,6 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
-                services: true,
-                gpu: false,
-                monitoring: true,
-                backups: true,
-                external_secrets: true,
             },
         );
 
@@ -2627,11 +2458,6 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Rke2,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
-                services: true,
-                gpu: false,
-                monitoring: true,
-                backups: true,
-                external_secrets: true,
             },
         );
 
@@ -2669,7 +2495,7 @@ mod tests {
 
     /// Story: AWS clusters get CCM and EBS CSI driver in bootstrap manifests
     ///
-    /// Both CRS path (CLI) and webhook path use generate_all_manifests(),
+    /// Both CRS path (CLI) and webhook path use generate_bootstrap_bundle(),
     /// which includes AWS addons when provider is "aws".
     #[tokio::test]
     async fn story_aws_clusters_include_ccm_and_csi() {
@@ -2701,11 +2527,6 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
-                services: true,
-                gpu: false,
-                monitoring: true,
-                backups: true,
-                external_secrets: true,
             },
         );
 
@@ -2769,11 +2590,6 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
-                services: true,
-                gpu: false,
-                monitoring: true,
-                backups: true,
-                external_secrets: true,
             },
         );
 

@@ -21,7 +21,7 @@
 //! - [`bootstrap::IstioConfig`], [`bootstrap::IstioReconciler`]: Istio manifest generation
 //! - [`bootstrap::cilium`]: Cilium manifests and network policy generators
 //! - [`bootstrap::eso`]: External Secrets Operator manifests
-//! - [`bootstrap::generate_core`]: Top-level generator
+//! - [`bootstrap::generate_core`]: Top-level generator (used by operator startup)
 //!
 //! ## PKI
 //! - [`pki::CertificateAuthority`]: CA operations for signing CSRs

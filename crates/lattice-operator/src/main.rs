@@ -31,6 +31,7 @@ use kube::{Api, CustomResourceExt};
 use once_cell::sync::OnceCell;
 
 use lattice_api::{AuthChain, OidcValidator, SaValidator, ServerConfig as AuthProxyConfig};
+use lattice_capi::installer::{CapiInstaller, NativeInstaller};
 use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::{ParentConfig, ParentServers};
@@ -41,7 +42,6 @@ use lattice_common::{
     lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
     DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
 };
-use lattice_capi::installer::{CapiInstaller, NativeInstaller};
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
 use lattice_operator::forwarder::SubtreeForwarder;
