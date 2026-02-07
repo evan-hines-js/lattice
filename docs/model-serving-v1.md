@@ -1,7 +1,7 @@
 # Model Serving for LatticeService
 
 > **Native model serving compiled from LatticeService — no KServe, no new controllers fighting
-> over HPA/Gateway/mesh. The ServiceCompiler gains a `model` field that injects model-loading
+> over autoscaling/Gateway/mesh. The ServiceCompiler gains a `model` field that injects model-loading
 > infrastructure into the existing Deployment pipeline. All models are pre-fetched to nodes
 > via a ModelCache controller + ModelArtifact CRD — one loading strategy, no size-based branching.**
 
@@ -9,21 +9,21 @@
 
 ## Why Not KServe
 
-KServe is a full serving platform — it creates and manages its own Deployment, Service, HPA,
+KServe is a full serving platform — it creates and manages its own Deployment, Service, ScaledObject,
 Gateway, and autoscaler. Lattice's `ServiceCompiler` already owns all of these, and does so
 with bilateral mesh agreements that KServe has no concept of.
 
 Integrating KServe would mean either:
 1. **Disabling KServe's sub-resource management** — fragile, incomplete flags, breaks on upgrades
 2. **Letting KServe own everything when `model` is present** — two divergent deployment paths,
-   lose Lattice's HPA logic, GPU-aware scaling, bilateral ingress, and policy compilation
+   lose Lattice's KEDA ScaledObject logic, GPU-aware scaling, bilateral ingress, and policy compilation
 
-Instead, we take the two things KServe does that are genuinely hard to build:
+Instead, we take the two things KServe does that are genuinely useful:
 - **Model artifact loading** (download from S3/GCS/HuggingFace into the serving container)
 - **Serving runtime catalog** (know how to configure vLLM, TorchServe, Triton, etc.)
 
 And compile them directly into the existing `ServiceCompiler` output. Everything else —
-HPA, Gateway API, Cilium/Istio policies, canary deploys — stays exactly as-is.
+KEDA ScaledObject, Gateway API, Cilium/Istio policies, canary deploys — stays exactly as-is.
 
 ---
 
@@ -68,7 +68,7 @@ ModelCache Controller (separate, watches LatticeService + Nodes)
 | `WorkloadCompiler` | No change — receives the same inputs |
 | `PolicyCompiler` | No change — bilateral agreements work identically |
 | `IngressCompiler` | No change |
-| `HPA` | No change — same `replicas.autoscaling` field |
+| `ScaledObject` | No change — same `replicas.autoscaling` field |
 
 ---
 
@@ -451,14 +451,14 @@ LatticeService created with spec.model
 ### Why not init containers
 
 An init container with emptyDir re-downloads on every pod restart, reschedule, and
-scale-up event. Even a 2GB embedding model re-downloading on every HPA scale-out is
+scale-up event. Even a 2GB embedding model re-downloading on every ScaledObject scale-out is
 wasted time and bandwidth. Pre-fetching once to the node and sharing read-only across
 all pods eliminates this entirely.
 
 | | Init container (emptyDir) | Always pre-fetch (hostPath) |
 |---|---|---|
 | **Pod restart** | Re-downloads | Instant (model on disk) |
-| **HPA scale-up** | Re-downloads per new pod | Instant (shared read-only) |
+| **ScaledObject scale-up** | Re-downloads per new pod | Instant (shared read-only) |
 | **Node reschedule** | Re-downloads on new node | Pre-fetch Job runs on new node once |
 | **Multiple services, same model** | Each downloads independently | Shared cache, downloaded once |
 | **Code paths** | Two strategies + size branching | One strategy |
@@ -1035,7 +1035,7 @@ spec:
 ```
 
 Compiled output: a Deployment with vLLM runtime container, hostPath model cache volume,
-scheduling gate (removed when model is cached), GPU resources, SHM volume, HPA, Gateway,
+scheduling gate (removed when model is cached), GPU resources, SHM volume, KEDA ScaledObject, Gateway,
 HTTPRoute, Certificate, AuthorizationPolicy (3 inbound principals allowed), CiliumNetworkPolicy (bilateral L4),
 ServiceEntry (for feature-store outbound), Waypoint Gateway.
 

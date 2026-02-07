@@ -1,8 +1,8 @@
 # Lattice Autoscaling v1
 
-> **Generalized HPA with custom metrics for LatticeService workloads.**
+> **Generalized autoscaling with KEDA ScaledObjects for LatticeService workloads.**
 >
-> Today, every LatticeService with `replicas.max` gets an HPA hardcoded to CPU 80%.
+> Today, every LatticeService with `replicas.max` gets a ScaledObject hardcoded to CPU 80%.
 > This is wrong for GPU inference (scale on queue depth), memory-bound workloads,
 > and anything where CPU utilization is not the right signal. v1 generalizes the
 > autoscaling spec so users declare what to scale on and at what threshold.
@@ -11,19 +11,18 @@
 
 ## Problem
 
-The service compiler hardcodes a single HPA metric:
+The service compiler hardcodes a single ScaledObject trigger:
 
 ```rust
 // crates/lattice-service/src/workload/mod.rs:1359-1367
-metrics: vec![MetricSpec {
-    type_: "Resource".to_string(),
-    resource: Some(ResourceMetricSource {
-        name: "cpu".to_string(),
-        target: MetricTarget {
-            type_: "Utilization".to_string(),
-            average_utilization: Some(80),
-        },
-    }),
+triggers: vec![ScaledObjectTrigger {
+    type_: "resource".to_string(),
+    metadata: BTreeMap::from([
+        ("type".to_string(), "Utilization".to_string()),
+        ("value".to_string(), "80".to_string()),
+    ]),
+    metric_type: Some("Utilization".to_string()),
+    name: Some("cpu".to_string()),
 }],
 ```
 
@@ -36,12 +35,13 @@ Users cannot:
 ## Solution
 
 1. Add an `autoscaling` field to `ReplicaSpec` with user-defined metrics
-2. The compiler translates each metric into the correct HPA v2 metric type
+2. The compiler translates each metric into the correct KEDA ScaledObject trigger
 3. Default to CPU 80% when `autoscaling` is empty (backwards compatible)
-4. Deploy KEDA on GPU-enabled clusters for custom metrics
+4. Deploy KEDA on all clusters; ScaledObjects query VictoriaMetrics for custom metrics
 
-KEDA ScaledObjects query Prometheus directly and manage scaling for custom
-metrics like vLLM inference queue depth, token throughput, and latency.
+KEDA ScaledObjects query VictoriaMetrics via Prometheus-compatible endpoints and
+manage scaling for all metric types, including vLLM inference queue depth, token
+throughput, and latency.
 
 ---
 
@@ -57,11 +57,11 @@ pub struct ReplicaSpec {
     /// Minimum replicas (default: 1)
     pub min: u32,
 
-    /// Maximum replicas (enables HPA when set)
+    /// Maximum replicas (enables ScaledObject when set)
     pub max: Option<u32>,
 
     /// Autoscaling metrics. Defaults to [{metric: "cpu", target: 80}] if empty.
-    /// HPA scales when ANY metric exceeds its target (OR logic).
+    /// ScaledObject scales when ANY trigger exceeds its target (OR logic).
     pub autoscaling: Vec<AutoscalingMetric>,
 }
 
@@ -85,7 +85,7 @@ pub struct AutoscalingMetric {
 replicas:
   min: 1
   max: 4
-# → HPA with CPU 80% (default)
+# → ScaledObject with cpu resource trigger at 80% (default)
 
 # Lower CPU threshold for bursty workloads
 replicas:
@@ -126,29 +126,29 @@ replicas:
 
 ## Compiler Changes
 
-### Metric Type Mapping
+### Trigger Type Mapping
 
-The compiler maps metric names to HPA v2 metric types:
+The compiler maps metric names to KEDA ScaledObject trigger types:
 
-| Metric Name | HPA Type | Target Field | Example |
+| Metric Name | KEDA Trigger Type | Metric Type | Example |
 |---|---|---|---|
-| `cpu` | `Resource` | `averageUtilization` (%) | 80 → scale at 80% CPU |
-| `memory` | `Resource` | `averageUtilization` (%) | 75 → scale at 75% memory |
-| anything else | `Pods` | `averageValue` (absolute) | 5 → scale when avg > 5 |
+| `cpu` | `resource` | `Utilization` | 80 → scale at 80% CPU |
+| `memory` | `resource` | `Utilization` | 75 → scale at 75% memory |
+| anything else | `prometheus` | `AverageValue` | 5 → scale when avg > 5 |
 
-`Resource` metrics are built into Kubernetes (metrics-server). `Pods` metrics
-are handled by KEDA ScaledObjects with Prometheus triggers.
+`resource` triggers use the built-in Kubernetes metrics-server. `prometheus`
+triggers query VictoriaMetrics via its Prometheus-compatible endpoint.
 
-### compile_hpa Changes
+### compile_scaled_object Changes
 
 ```rust
 // crates/lattice-service/src/workload/mod.rs
 
-fn compile_hpa(
+fn compile_scaled_object(
     name: &str,
     namespace: &str,
     spec: &LatticeServiceSpec,
-) -> HorizontalPodAutoscaler {
+) -> ScaledObject {
     // Default to CPU 80% if no autoscaling metrics specified
     let metrics = if spec.replicas.autoscaling.is_empty() {
         vec![AutoscalingMetric {
@@ -159,41 +159,44 @@ fn compile_hpa(
         spec.replicas.autoscaling.clone()
     };
 
-    let hpa_metrics = metrics.iter().map(|m| match m.metric.as_str() {
-        "cpu" | "memory" => MetricSpec {
-            type_: "Resource".to_string(),
-            resource: Some(ResourceMetricSource {
-                name: m.metric.clone(),
-                target: MetricTarget {
-                    type_: "Utilization".to_string(),
-                    average_utilization: Some(m.target),
-                },
-            }),
-            pods: None,
+    let triggers = metrics.iter().map(|m| match m.metric.as_str() {
+        "cpu" | "memory" => ScaledObjectTrigger {
+            type_: "resource".to_string(),
+            name: Some(m.metric.clone()),
+            metric_type: Some("Utilization".to_string()),
+            metadata: BTreeMap::from([
+                ("type".to_string(), "Utilization".to_string()),
+                ("value".to_string(), m.target.to_string()),
+            ]),
         },
-        _ => MetricSpec {
-            type_: "Pods".to_string(),
-            resource: None,
-            pods: Some(PodsMetricSource {
-                metric: MetricIdentifier {
-                    name: m.metric.clone(),
-                },
-                target: MetricTarget {
-                    type_: "AverageValue".to_string(),
-                    average_value: Some(m.target.to_string()),
-                    average_utilization: None,
-                },
-            }),
+        _ => ScaledObjectTrigger {
+            type_: "prometheus".to_string(),
+            name: Some(m.metric.clone()),
+            metric_type: Some("AverageValue".to_string()),
+            metadata: BTreeMap::from([
+                ("serverAddress".to_string(), VICTORIAMETRICS_URL.to_string()),
+                ("query".to_string(), format!(
+                    "avg({}{{namespace=\"{}\",pod=~\"{}-.*\"}})",
+                    m.metric, namespace, name
+                )),
+                ("threshold".to_string(), m.target.to_string()),
+            ]),
         },
     }).collect();
 
-    HorizontalPodAutoscaler {
-        // ... existing fields ...
-        spec: HpaSpec {
+    ScaledObject {
+        api_version: "keda.sh/v1alpha1".to_string(),
+        kind: "ScaledObject".to_string(),
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        spec: ScaledObjectSpec {
             scale_target_ref: /* unchanged */,
-            min_replicas: spec.replicas.min,
-            max_replicas: spec.replicas.max.unwrap_or(spec.replicas.min),
-            metrics: hpa_metrics,
+            min_replica_count: Some(spec.replicas.min),
+            max_replica_count: Some(spec.replicas.max.unwrap_or(spec.replicas.min)),
+            triggers,
         },
     }
 }
@@ -202,33 +205,24 @@ fn compile_hpa(
 ### New Structs in workload/mod.rs
 
 ```rust
-/// Pods metric source (for custom metrics)
-pub struct PodsMetricSource {
-    pub metric: MetricIdentifier,
-    pub target: MetricTarget,
-}
-
-/// Metric identifier
-pub struct MetricIdentifier {
-    pub name: String,
-}
-```
-
-### MetricSpec Extension
-
-```rust
-// Extend existing MetricSpec
-pub struct MetricSpec {
+/// A single KEDA ScaledObject trigger
+pub struct ScaledObjectTrigger {
+    /// Trigger type: "resource" or "prometheus"
     pub type_: String,
-    pub resource: Option<ResourceMetricSource>,
-    pub pods: Option<PodsMetricSource>,  // NEW
+    /// Optional trigger name (used in metric naming)
+    pub name: Option<String>,
+    /// Metric type: "Utilization" or "AverageValue"
+    pub metric_type: Option<String>,
+    /// Trigger-specific metadata (keys vary by trigger type)
+    pub metadata: BTreeMap<String, String>,
 }
 
-// Extend existing MetricTarget
-pub struct MetricTarget {
-    pub type_: String,
-    pub average_utilization: Option<u32>,
-    pub average_value: Option<String>,   // NEW — for Pods metrics
+/// ScaledObject spec
+pub struct ScaledObjectSpec {
+    pub scale_target_ref: ScaleTargetRef,
+    pub min_replica_count: Option<u32>,
+    pub max_replica_count: Option<u32>,
+    pub triggers: Vec<ScaledObjectTrigger>,
 }
 ```
 
@@ -236,13 +230,14 @@ pub struct MetricTarget {
 
 ## Infrastructure: KEDA
 
-Custom metrics (anything besides `cpu`/`memory`) are handled by KEDA ScaledObjects,
-which query Prometheus directly and manage scaling. KEDA is deployed automatically on
-GPU-enabled clusters (where vLLM metrics are the primary use case).
+All autoscaling is handled by KEDA ScaledObjects. Resource metrics (`cpu`/`memory`)
+use KEDA's built-in `resource` trigger type. Custom metrics use KEDA's `prometheus`
+trigger type, querying VictoriaMetrics via its Prometheus-compatible endpoint. KEDA is
+deployed on all clusters as part of the standard bootstrap.
 
 ### Default Metrics
 
-For vLLM / TGI workloads, KEDA ScaledObjects query the following Prometheus metrics:
+For vLLM / TGI workloads, KEDA ScaledObjects query the following metrics from VictoriaMetrics:
 
 | Prometheus Metric | ScaledObject Trigger Metric | What It Measures |
 |---|---|---|
@@ -289,8 +284,8 @@ if !self.replicas.autoscaling.is_empty() && self.replicas.max.is_none() {
 | File | Change |
 |---|---|
 | `crates/lattice-common/src/crd/service.rs` | Add `autoscaling: Vec<AutoscalingMetric>` to `ReplicaSpec`, add `AutoscalingMetric` struct |
-| `crates/lattice-service/src/workload/mod.rs` | Generalize `compile_hpa`, add `PodsMetricSource`, `MetricIdentifier`, extend `MetricSpec`/`MetricTarget` |
-| `crates/lattice-infra/src/bootstrap/mod.rs` | Add `pub mod keda;` (GPU clusters only) |
+| `crates/lattice-service/src/workload/mod.rs` | Replace `compile_hpa` with `compile_scaled_object`, add `ScaledObjectTrigger`, `ScaledObjectSpec` structs |
+| `crates/lattice-infra/src/bootstrap/mod.rs` | Add `pub mod keda;` |
 | `crates/lattice-infra/src/bootstrap/keda.rs` | New — helm template for KEDA |
 | `versions.toml` | Pin `KEDA_VERSION` |
 
@@ -301,11 +296,8 @@ if !self.replicas.autoscaling.is_empty() && self.replicas.max.is_none() {
 - **Scale-to-zero** — Min replicas is always >= 1. Cold starts on GPU workloads
   (30-120s model load) make scale-to-zero impractical for production inference.
   Revisit with Knative if demand emerges.
-- **KEDA on non-GPU clusters** — v1 deploys KEDA on GPU clusters only.
-  Non-GPU services use built-in `cpu`/`memory` metrics (no KEDA needed).
-  Easy to extend later.
 - **Custom KEDA trigger rules** — v1 ships with sensible defaults for vLLM/TGI.
-  Advanced users who need custom metric triggers can configure KEDA ScaledObjects
+  Advanced users who need custom trigger configurations can create KEDA ScaledObjects
   directly. A `metricsConfig` CRD field is a v2 concern.
 
 ---
@@ -315,22 +307,22 @@ if !self.replicas.autoscaling.is_empty() && self.replicas.max.is_none() {
 ### Phase A: CRD + Compiler (no new infra)
 
 1. Add `AutoscalingMetric` struct and `autoscaling` field to `ReplicaSpec`
-2. Add `PodsMetricSource`, `MetricIdentifier` to workload module
-3. Extend `MetricSpec` and `MetricTarget` with pods metric fields
-4. Generalize `compile_hpa` to iterate user-defined metrics
+2. Add `ScaledObjectTrigger`, `ScaledObjectSpec` to workload module
+3. Replace `compile_hpa` with `compile_scaled_object` to generate KEDA ScaledObjects
+4. Map `cpu`/`memory` to KEDA `resource` triggers, custom metrics to `prometheus` triggers
 5. Default to CPU 80% when `autoscaling` is empty
 6. Add validation rules
 7. Update tests
 
 **Result**: Users can configure CPU/memory thresholds. Custom metrics compile
-correctly but require KEDA to actually resolve at runtime.
+correctly into ScaledObject prometheus triggers querying VictoriaMetrics.
 
-### Phase B: KEDA Bootstrap (GPU clusters)
+### Phase B: KEDA Bootstrap
 
 1. Add `keda.rs` to bootstrap module
 2. Pin version in `versions.toml`
-3. Include in GPU cluster bootstrap path
+3. Include in standard cluster bootstrap path
 4. Configure default KEDA ScaledObject triggers for vLLM/TGI
 
-**Result**: GPU clusters get KEDA automatically. Custom metrics
+**Result**: All clusters get KEDA automatically. Custom metrics
 like `vllm_num_requests_waiting` work end-to-end with KEDA ScaledObjects.

@@ -30,7 +30,7 @@
 │  └──────────┬───────────┘            └──────────┬────────────┘       │
 │             │ compiles to                       │ compiles to        │
 │             ▼                                   ▼                    │
-│        Deployment + HPA                    VolcanoJob                │
+│        Deployment + ScaledObject            VolcanoJob                │
 │        (long-running, autoscaled)          (gang-scheduled,         │
 │                                             run-to-completion)      │
 └──────────────────────────────────────────────────────────────────────┘
@@ -41,11 +41,11 @@
 │  GPU Cluster Infrastructure (auto-deployed)                          │
 │                                                                      │
 │  ┌────────────────┐  ┌──────────┐  ┌────────────┐  ┌────────────┐  │
-│  │ NVIDIA GPU      │  │ HAMi     │  │ Volcano    │  │ Prometheus │  │
-│  │ Operator        │  │ (CNCF)   │  │ (CNCF)     │  │ Adapter    │  │
+│  │ NVIDIA GPU      │  │ HAMi     │  │ Volcano    │  │ KEDA       │  │
+│  │ Operator        │  │ (CNCF)   │  │ (CNCF)     │  │ (CNCF)     │  │
 │  │                 │  │          │  │            │  │            │  │
-│  │ Drivers, device │  │ Frac GPU │  │ Gang sched │  │ Custom HPA │  │
-│  │ plugin, NFD,    │  │ sharing, │  │ job queues │  │ metrics    │  │
+│  │ Drivers, device │  │ Frac GPU │  │ Gang sched │  │ ScaledObj  │  │
+│  │ plugin, NFD,    │  │ sharing, │  │ job queues │  │ autoscale  │  │
 │  │ DCGM, toolkit   │  │ isolation│  │ priority   │  │ (vLLM etc) │  │
 │  └────────────────┘  └──────────┘  └────────────┘  └────────────┘  │
 │                                                                      │
@@ -67,7 +67,7 @@
 |---|---|---|
 | K8s primitive | Deployment | VolcanoJob |
 | Lifecycle | Long-running, always on | Run-to-completion |
-| Scaling | HPA 1→N on custom metrics | Fixed worker count, gang-scheduled |
+| Scaling | KEDA ScaledObject 1→N on custom metrics | Fixed worker count, gang-scheduled |
 | GPU pattern | Fractional OK (HAMi sharing) | Usually full GPUs, multi-GPU |
 | Networking | Needs ingress (serve requests) | Needs NCCL between workers |
 | Storage | Model cache read-only | Read/write (checkpoints, datasets) |
@@ -553,10 +553,10 @@ replicas:
       target: 70
 ```
 
-- `cpu`/`memory` → HPA v2 Resource metric (built-in)
-- Anything else → KEDA ScaledObject (via Prometheus triggers)
+- `cpu`/`memory` → KEDA ScaledObject with cpu/memory trigger
+- Anything else → KEDA ScaledObject with Prometheus trigger (queries VictoriaMetrics directly)
 - Default: CPU 80% when `autoscaling` is empty (backwards compatible)
-- No Knative, no scale-to-zero
+- No Prometheus Adapter needed, no Knative, no scale-to-zero
 
 ---
 
@@ -908,7 +908,7 @@ if spec.gpu.is_some() && container.startup_probe.is_none() {
 | `crates/lattice-common/src/crd/mod.rs` | Add `pub mod job;` |
 | `crates/lattice-common/src/crd/cluster.rs` | Add `ComplianceSpec` with `allow_unencrypted_traffic` |
 | `crates/lattice-common/src/crd/service.rs` | Add `AutoscalingMetric` to `ReplicaSpec` |
-| `crates/lattice-service/src/workload/mod.rs` | Generalize `compile_hpa`, add SHM/runtimeClass/schedulerName, extract shared GPU helpers |
+| `crates/lattice-service/src/workload/mod.rs` | Generalize autoscaling compilation (KEDA ScaledObject), add SHM/runtimeClass/schedulerName, extract shared GPU helpers |
 | `crates/lattice-infra/src/bootstrap/mod.rs` | Add `pub mod volcano;`, include in GPU bootstrap |
 | `crates/lattice-infra/src/system_namespaces.rs` | Add `volcano-system` to GPU exclusions |
 | `crates/lattice-operator/src/startup/crds.rs` | Register LatticeJob CRD |
@@ -921,12 +921,12 @@ if spec.gpu.is_some() && container.startup_probe.is_none() {
 
 ### Phase 1: Compiler Gaps + Autoscaling
 
-Fix the known gaps in the existing LatticeService GPU compiler and generalize HPA.
+Fix the known gaps in the existing LatticeService GPU compiler and generalize autoscaling.
 
 1. Add `runtimeClassName: nvidia` and `schedulerName: volcano` on GPU pods
 2. Add SHM volume when `gpu.count > 1`
 3. Add `AutoscalingMetric` to `ReplicaSpec`
-4. Generalize `compile_hpa` to support custom metrics
+4. Compile autoscaling rules to KEDA ScaledObject (cpu, memory, and custom Prometheus metrics)
 5. Update tests
 
 **Result**: LatticeService GPU inference works end-to-end with correct pod specs
