@@ -1,15 +1,10 @@
 //! Cilium CNI manifest generation
 //!
-//! Generates Cilium manifests using `helm template` for consistent deployment.
-//! The same generator is used by bootstrap and day-2 reconciliation.
-//!
+//! Embeds pre-rendered Cilium manifests from build time.
 //! Also provides CiliumNetworkPolicy generation for Lattice components.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
-
-use tokio::sync::OnceCell;
-use tracing::info;
+use std::sync::LazyLock;
 
 use lattice_common::mesh::{
     CILIUM_WAYPOINT_FOR_LABEL, HBONE_PORT, ISTIOD_XDS_PORT, WAYPOINT_FOR_SERVICE,
@@ -26,88 +21,19 @@ use lattice_common::{
     LATTICE_SYSTEM_NAMESPACE,
 };
 
-use super::{charts_dir, run_helm_template};
+use super::split_yaml_documents;
 use crate::system_namespaces;
 
-/// Cached Cilium manifests to avoid repeated helm template calls.
-/// Uses Arc for efficient sharing without cloning the full Vec on each access.
-static CILIUM_MANIFESTS: OnceCell<Result<Arc<Vec<String>>, String>> = OnceCell::const_new();
+/// Pre-rendered Cilium manifests, split into individual YAML documents.
+static CILIUM_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    split_yaml_documents(include_str!(concat!(env!("OUT_DIR"), "/cilium.yaml")))
+});
 
 /// Generate Cilium manifests for a cluster
 ///
-/// Renders via `helm template` on-demand with caching. The first call executes helm
-/// and caches the result; subsequent calls return the cached manifests.
-///
-/// This is an async function to avoid blocking the tokio runtime during helm execution.
-pub async fn generate_cilium_manifests() -> Result<Arc<Vec<String>>, String> {
-    CILIUM_MANIFESTS
-        .get_or_init(|| async { render_cilium_helm().await.map(Arc::new) })
-        .await
-        .clone()
-}
-
-/// Internal function to render Cilium manifests via helm template
-async fn render_cilium_helm() -> Result<Vec<String>, String> {
-    let charts = charts_dir();
-    let version = env!("CILIUM_VERSION");
-    let chart_path = format!("{}/cilium-{}.tgz", charts, version);
-
-    info!("Rendering Cilium manifests");
-
-    let manifests = run_helm_template(
-        "cilium",
-        &chart_path,
-        "kube-system",
-        &[
-            "--set",
-            "hubble.enabled=false",
-            "--set",
-            "hubble.relay.enabled=false",
-            "--set",
-            "hubble.ui.enabled=false",
-            "--set",
-            "prometheus.enabled=false",
-            "--set",
-            "operator.prometheus.enabled=false",
-            "--set",
-            "cni.exclusive=false",
-            // Don't replace kube-proxy - less invasive
-            "--set",
-            "kubeProxyReplacement=false",
-            // Enable L2 announcements for LoadBalancer IPs (required for VIP reachability)
-            "--set",
-            "l2announcements.enabled=true",
-            "--set",
-            "externalIPs.enabled=true",
-            // Disable host firewall - prevents blocking bridge traffic
-            "--set",
-            "hostFirewall.enabled=false",
-            // VXLAN tunnel mode with reduced MTU (tunnelProtocol replaces deprecated tunnel option)
-            "--set",
-            "routingMode=tunnel",
-            "--set",
-            "tunnelProtocol=vxlan",
-            "--set",
-            "mtu=1450",
-            // Use Kubernetes IPAM - gets pod CIDR from kubeadm (192.168.0.0/16)
-            // Default cluster-pool mode uses 10.0.0.0/8 which conflicts with common LANs
-            "--set",
-            "ipam.mode=kubernetes",
-            // Disable BPF-based masquerading - use iptables instead (less invasive)
-            "--set",
-            "bpf.masquerade=false",
-            // Disable host routing via BPF - use kernel routing
-            "--set",
-            "bpf.hostLegacyRouting=true",
-        ],
-    )
-    .await?;
-
-    info!(
-        count = manifests.len(),
-        version, "Rendered Cilium manifests"
-    );
-    Ok(manifests)
+/// Returns pre-rendered manifests embedded at build time.
+pub fn generate_cilium_manifests() -> &'static [String] {
+    &CILIUM_MANIFESTS
 }
 
 /// Get Cilium version
@@ -452,16 +378,14 @@ pub fn generate_operator_network_policy(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_cilium_manifests() {
-        // Only runs if helm is available
-        if let Ok(manifests) = generate_cilium_manifests().await {
-            assert!(!manifests.is_empty());
-            let combined = manifests.join("\n");
-            // Check for core Cilium components
-            assert!(combined.contains("kind: DaemonSet"));
-            assert!(combined.contains("cilium-agent"));
-        }
+    #[test]
+    fn test_cilium_manifests() {
+        let manifests = generate_cilium_manifests();
+        assert!(!manifests.is_empty());
+        let combined = manifests.join("\n");
+        // Check for core Cilium components
+        assert!(combined.contains("kind: DaemonSet"));
+        assert!(combined.contains("cilium-agent"));
     }
 
     #[test]

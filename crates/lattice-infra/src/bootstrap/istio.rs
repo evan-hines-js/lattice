@@ -1,9 +1,10 @@
 //! Istio service mesh manifest generation
 //!
-//! Generates Istio manifests using Helm charts with ambient mesh mode.
+//! Embeds pre-rendered Istio manifests from build time.
 //! Installs four charts: base (CRDs), istiod (control plane), istio-cni, and ztunnel.
 
 use std::collections::BTreeMap;
+use std::sync::{LazyLock, OnceLock};
 
 use lattice_common::policy::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
@@ -11,10 +12,29 @@ use lattice_common::policy::{
     TargetRef, WorkloadSelector,
 };
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
-use tokio::sync::OnceCell;
-use tracing::info;
 
-use super::{charts_dir, run_helm_template};
+use super::split_yaml_documents;
+
+/// Pre-rendered static Istio manifests (base, cni, ztunnel) — no dynamic values.
+static ISTIO_STATIC_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let mut manifests = Vec::new();
+    manifests.extend(split_yaml_documents(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/istio-base.yaml"
+    ))));
+    manifests.extend(split_yaml_documents(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/istio-cni.yaml"
+    ))));
+    manifests.extend(split_yaml_documents(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/ztunnel.yaml"
+    ))));
+    manifests
+});
+
+/// Pre-rendered istiod template with __LATTICE_CLUSTER_NAME__ placeholder.
+static ISTIOD_TEMPLATE: &str = include_str!(concat!(env!("OUT_DIR"), "/istiod.yaml"));
 
 /// Istio configuration
 #[derive(Debug, Clone)]
@@ -38,7 +58,7 @@ impl IstioConfig {
 /// Istio manifest generator
 pub struct IstioReconciler {
     config: IstioConfig,
-    manifests: OnceCell<Result<Vec<String>, String>>,
+    manifests: OnceLock<Vec<String>>,
 }
 
 impl IstioReconciler {
@@ -46,7 +66,7 @@ impl IstioReconciler {
     pub fn new(cluster_name: impl Into<String>) -> Self {
         Self {
             config: IstioConfig::new(cluster_name),
-            manifests: OnceCell::new(),
+            manifests: OnceLock::new(),
         }
     }
 
@@ -55,19 +75,21 @@ impl IstioReconciler {
         self.config.version
     }
 
-    /// Get manifests (lazily rendered, async)
-    ///
-    /// This is an async function to avoid blocking the tokio runtime during
-    /// helm template execution.
-    pub async fn manifests(&self) -> Result<&[String], String> {
-        let result = self
-            .manifests
-            .get_or_init(|| async { Self::render_manifests(&self.config).await })
-            .await;
-        match result {
-            Ok(m) => Ok(m),
-            Err(e) => Err(e.clone()),
-        }
+    /// Get manifests (lazily rendered from embedded templates)
+    pub fn manifests(&self) -> &[String] {
+        self.manifests.get_or_init(|| {
+            let mut all = Vec::new();
+
+            // Static charts (base, cni, ztunnel)
+            all.extend(ISTIO_STATIC_MANIFESTS.iter().cloned());
+
+            // Istiod with cluster-specific trust domain
+            let istiod_yaml = ISTIOD_TEMPLATE
+                .replace("__LATTICE_CLUSTER_NAME__", &self.config.cluster_name);
+            all.extend(split_yaml_documents(&istiod_yaml));
+
+            all
+        })
     }
 
     /// Generate default PeerAuthentication for STRICT mTLS
@@ -103,7 +125,7 @@ impl IstioReconciler {
     ///
     /// This targets the istio-waypoint GatewayClass to ensure default-deny is
     /// enforced AT the waypoint, not just at ztunnel. Without this, once
-    /// waypoint→target is allowed, the waypoint becomes permissive to all sources.
+    /// waypoint->target is allowed, the waypoint becomes permissive to all sources.
     ///
     /// See: https://github.com/istio/istio/issues/54696
     pub fn generate_waypoint_default_deny() -> AuthorizationPolicy {
@@ -153,78 +175,6 @@ impl IstioReconciler {
             },
         )
     }
-
-    async fn render_manifests(config: &IstioConfig) -> Result<Vec<String>, String> {
-        let mut all_manifests = Vec::new();
-
-        // Use local chart tarballs (pulled at Docker build time or by build.rs)
-        let charts = charts_dir();
-        let base_chart = format!("{}/base-{}.tgz", charts, config.version);
-        let istiod_chart = format!("{}/istiod-{}.tgz", charts, config.version);
-        let cni_chart = format!("{}/cni-{}.tgz", charts, config.version);
-        let ztunnel_chart = format!("{}/ztunnel-{}.tgz", charts, config.version);
-
-        // 1. Render istio base chart (CRDs)
-        info!(version = config.version, "Rendering Istio base chart");
-        all_manifests
-            .extend(run_helm_template("istio-base", &base_chart, "istio-system", &[]).await?);
-
-        // 2. Render istio-cni chart (must be installed before ztunnel)
-        info!(version = config.version, "Rendering Istio CNI chart");
-        all_manifests.extend(
-            run_helm_template(
-                "istio-cni",
-                &cni_chart,
-                "istio-system",
-                &[
-                    "--set",
-                    "profile=ambient",
-                    // Chain with Cilium CNI
-                    "--set",
-                    "cni.cniConfFileName=05-cilium.conflist",
-                ],
-            )
-            .await?,
-        );
-
-        // 3. Render istiod chart (control plane with ambient mode)
-        info!(
-            version = config.version,
-            "Rendering Istiod chart with ambient mode"
-        );
-        // Configure trust domain to match Lattice SPIFFE identity format
-        // Each cluster gets its own trust domain: lattice.{cluster}.local
-        let trust_domain_arg = format!(
-            "meshConfig.trustDomain=lattice.{}.local",
-            config.cluster_name
-        );
-        all_manifests.extend(
-            run_helm_template(
-                "istiod",
-                &istiod_chart,
-                "istio-system",
-                &[
-                    "--set",
-                    "profile=ambient",
-                    "--set",
-                    &trust_domain_arg,
-                    "--set",
-                    "pilot.resources.requests.cpu=100m",
-                    "--set",
-                    "pilot.resources.requests.memory=128Mi",
-                ],
-            )
-            .await?,
-        );
-
-        // 4. Render ztunnel chart (L4 data plane for ambient mode)
-        info!(version = config.version, "Rendering ztunnel chart");
-        all_manifests
-            .extend(run_helm_template("ztunnel", &ztunnel_chart, "istio-system", &[]).await?);
-
-        info!(count = all_manifests.len(), "Rendered Istio manifests");
-        Ok(all_manifests)
-    }
 }
 
 #[cfg(test)]
@@ -252,32 +202,37 @@ mod tests {
         assert_eq!(reconciler.version(), env!("ISTIO_VERSION"));
     }
 
-    #[tokio::test]
-    async fn test_manifest_rendering() {
-        // Only runs if helm is available with istio repo
+    #[test]
+    fn test_manifest_rendering() {
         let reconciler = IstioReconciler::new("test-cluster");
-        if let Ok(manifests) = reconciler.manifests().await {
-            // Should have rendered some manifests
-            assert!(!manifests.is_empty());
+        let manifests = reconciler.manifests();
 
-            // Should contain CRDs from base chart
-            let has_crd = manifests
-                .iter()
-                .any(|m| m.contains("kind: CustomResourceDefinition"));
-            assert!(has_crd, "Should contain Istio CRDs");
+        // Should have rendered some manifests
+        assert!(!manifests.is_empty());
 
-            // Should contain istiod deployment
-            let has_istiod = manifests.iter().any(|m| m.contains("name: istiod"));
-            assert!(has_istiod, "Should contain istiod");
+        // Should contain CRDs from base chart
+        let has_crd = manifests
+            .iter()
+            .any(|m| m.contains("kind: CustomResourceDefinition"));
+        assert!(has_crd, "Should contain Istio CRDs");
 
-            // Should contain ztunnel daemonset (ambient mode)
-            let has_ztunnel = manifests.iter().any(|m| m.contains("name: ztunnel"));
-            assert!(has_ztunnel, "Should contain ztunnel for ambient mode");
+        // Should contain istiod deployment
+        let has_istiod = manifests.iter().any(|m| m.contains("name: istiod"));
+        assert!(has_istiod, "Should contain istiod");
 
-            // Should contain istio-cni daemonset
-            let has_cni = manifests.iter().any(|m| m.contains("name: istio-cni"));
-            assert!(has_cni, "Should contain istio-cni for ambient mode");
-        }
+        // Should contain ztunnel daemonset (ambient mode)
+        let has_ztunnel = manifests.iter().any(|m| m.contains("name: ztunnel"));
+        assert!(has_ztunnel, "Should contain ztunnel for ambient mode");
+
+        // Should contain istio-cni daemonset
+        let has_cni = manifests.iter().any(|m| m.contains("name: istio-cni"));
+        assert!(has_cni, "Should contain istio-cni for ambient mode");
+
+        // Should contain the cluster-specific trust domain
+        let has_trust = manifests
+            .iter()
+            .any(|m| m.contains("lattice.test-cluster.local"));
+        assert!(has_trust, "Should contain cluster-specific trust domain");
     }
 
     #[test]

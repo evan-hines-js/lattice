@@ -5,6 +5,8 @@
 //! - Operator startup: re-applies (idempotent via server-side apply)
 //!
 //! Server-side apply handles idempotency - no need to check if installed.
+//!
+//! All Helm charts are pre-rendered at build time and embedded into the binary.
 
 pub mod cilium;
 pub mod eso;
@@ -14,19 +16,13 @@ pub mod prometheus;
 pub mod prometheus_adapter;
 pub mod velero;
 
+use std::sync::LazyLock;
+
 use kube::ResourceExt;
-use tokio::process::Command;
 use tracing::{debug, info};
 
 use lattice_common::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 use lattice_common::DEFAULT_GRPC_PORT;
-
-// Re-export submodule types
-pub use cilium::{
-    cilium_version, generate_cilium_manifests, generate_default_deny,
-    generate_operator_network_policy, generate_waypoint_egress_policy, generate_ztunnel_allowlist,
-};
-pub use istio::{IstioConfig, IstioReconciler};
 
 /// Configuration for infrastructure manifest generation
 #[derive(Debug, Clone)]
@@ -103,45 +99,36 @@ impl From<&LatticeCluster> for InfrastructureConfig {
 /// Generate core infrastructure manifests (Istio, Gateway API, ESO)
 ///
 /// Used by both operator startup and full cluster bootstrap.
-/// This is an async function to avoid blocking the tokio runtime during
-/// helm template execution.
+/// All manifests are pre-rendered at build time — no subprocess execution.
 pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
     let mut manifests = Vec::new();
 
     if !config.skip_service_mesh {
         // Istio ambient + Cilium policies
-        manifests.extend(generate_istio(config).await?);
+        manifests.extend(generate_istio(config)?);
 
         // Gateway API CRDs (required for Istio Gateway and waypoints)
-        let gw_api = generate_gateway_api_crds()?;
+        let gw_api = generate_gateway_api_crds();
         debug!(count = gw_api.len(), "generated Gateway API CRDs");
-        manifests.extend(gw_api);
+        manifests.extend(gw_api.iter().cloned());
     }
 
     // External Secrets Operator (for Vault integration)
-    if config.external_secrets {
-        manifests.extend(eso::generate_eso().await?.iter().cloned());
-    }
+
+    manifests.extend(eso::generate_eso().iter().cloned());
 
     // Velero (for backup and restore)
-    if config.backups {
-        manifests.extend(velero::generate_velero().await?.iter().cloned());
-    }
+    manifests.extend(velero::generate_velero().iter().cloned());
 
-    // VictoriaMetrics K8s Stack (HA metrics backend) + Prometheus Adapter (custom metrics HPA)
-    if config.monitoring {
-        manifests.extend(prometheus::generate_prometheus().await?.iter().cloned());
-        manifests.extend(
-            prometheus_adapter::generate_prometheus_adapter()
-                .await?
-                .iter()
-                .cloned(),
-        );
-    }
+    // VictoriaMetrics K8s Stack (HA metrics backend)
+    manifests.extend(prometheus::generate_prometheus().iter().cloned());
+
+    // Prometheus Adapter (custom metrics HPA)
+    manifests.extend(prometheus_adapter::generate_prometheus_adapter().iter().cloned());
 
     // GPU stack (NFD + NVIDIA device plugin + HAMi)
     if config.gpu {
-        manifests.extend(gpu::generate_gpu_stack().await?.iter().cloned());
+        manifests.extend(gpu::generate_gpu_stack().iter().cloned());
     }
 
     Ok(manifests)
@@ -152,9 +139,6 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
 /// Includes core infrastructure (Istio, Gateway API, ESO, Cilium policies).
 /// NOTE: cert-manager and CAPI providers are installed via `clusterctl init`,
 /// which manages their lifecycle (including upgrades).
-///
-/// This is an async function to avoid blocking the tokio runtime during
-/// helm execution.
 pub async fn generate_all(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
     // Core infrastructure (Istio, Gateway API, ESO, Cilium policies)
     // cert-manager and CAPI are installed via clusterctl init
@@ -168,31 +152,28 @@ pub async fn generate_all(config: &InfrastructureConfig) -> Result<Vec<String>, 
 }
 
 /// Generate Istio and Cilium policy manifests
-///
-/// This is an async function to avoid blocking the tokio runtime during
-/// helm template execution.
-pub async fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
+pub fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
     let mut manifests = vec![namespace_yaml("istio-system")];
 
-    let reconciler = IstioReconciler::new(&config.cluster_name);
-    let istio = reconciler.manifests().await?;
+    let reconciler = istio::IstioReconciler::new(&config.cluster_name);
+    let istio = reconciler.manifests();
     manifests.extend(istio.iter().cloned());
 
     // Istio policies - serialize typed structs to JSON
     manifests.push(
-        serde_json::to_string_pretty(&IstioReconciler::generate_peer_authentication())
+        serde_json::to_string_pretty(&istio::IstioReconciler::generate_peer_authentication())
             .map_err(|e| format!("Failed to serialize PeerAuthentication: {}", e))?,
     );
     manifests.push(
-        serde_json::to_string_pretty(&IstioReconciler::generate_default_deny())
+        serde_json::to_string_pretty(&istio::IstioReconciler::generate_default_deny())
             .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
     );
     manifests.push(
-        serde_json::to_string_pretty(&IstioReconciler::generate_waypoint_default_deny())
+        serde_json::to_string_pretty(&istio::IstioReconciler::generate_waypoint_default_deny())
             .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
     );
     manifests.push(
-        serde_json::to_string_pretty(&IstioReconciler::generate_operator_allow_policy())
+        serde_json::to_string_pretty(&istio::IstioReconciler::generate_operator_allow_policy())
             .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
     );
 
@@ -226,67 +207,20 @@ pub async fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>
     Ok(manifests)
 }
 
+/// Pre-rendered Gateway API CRDs embedded at build time.
+static GATEWAY_API_CRDS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    split_yaml_documents(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/gateway-api-crds.yaml"
+    )))
+});
+
 /// Generate Gateway API CRDs
-pub fn generate_gateway_api_crds() -> Result<Vec<String>, String> {
-    let charts_dir = charts_dir();
-    let version = option_env!("GATEWAY_API_VERSION").unwrap_or("1.2.1");
-    let crds_path = format!("{}/gateway-api-crds-v{}.yaml", charts_dir, version);
-
-    let content =
-        std::fs::read_to_string(&crds_path).map_err(|e| format!("read {}: {}", crds_path, e))?;
-
-    Ok(split_yaml_documents(&content))
+pub fn generate_gateway_api_crds() -> &'static [String] {
+    &GATEWAY_API_CRDS
 }
 
 // Helpers
-
-/// Run `helm template` command and return parsed manifests
-///
-/// This is the centralized helper for all helm template execution.
-/// Handles error conversion and YAML parsing consistently.
-///
-/// # Arguments
-/// * `release_name` - Helm release name (e.g., "cilium", "istio-base")
-/// * `chart_path` - Path to chart tarball
-/// * `namespace` - Target namespace
-/// * `extra_args` - Additional helm arguments (e.g., "--set", "key=value")
-pub(crate) async fn run_helm_template(
-    release_name: &str,
-    chart_path: &str,
-    namespace: &str,
-    extra_args: &[&str],
-) -> Result<Vec<String>, String> {
-    let output = Command::new("helm")
-        .args([
-            "template",
-            release_name,
-            chart_path,
-            "--namespace",
-            namespace,
-            "--include-crds",
-        ])
-        .args(extra_args)
-        .output()
-        .await
-        .map_err(|e| format!("failed to run helm: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("helm template {} failed: {}", release_name, stderr));
-    }
-
-    let yaml_str = String::from_utf8_lossy(&output.stdout);
-    Ok(split_yaml_documents(&yaml_str))
-}
-
-/// Get charts directory from environment or use default
-pub fn charts_dir() -> String {
-    std::env::var("LATTICE_CHARTS_DIR").unwrap_or_else(|_| {
-        option_env!("LATTICE_CHARTS_DIR")
-            .unwrap_or("/charts")
-            .to_string()
-    })
-}
 
 pub(crate) fn namespace_yaml(name: &str) -> String {
     format!(
@@ -333,5 +267,12 @@ mod tests {
         let ns = namespace_yaml("test");
         assert!(ns.contains("kind: Namespace"));
         assert!(ns.contains("name: test"));
+    }
+
+    #[test]
+    fn test_gateway_api_crds() {
+        let crds = generate_gateway_api_crds();
+        assert!(!crds.is_empty());
+        assert!(crds.iter().any(|c| c.contains("CustomResourceDefinition")));
     }
 }

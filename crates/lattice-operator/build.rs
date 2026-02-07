@@ -62,10 +62,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Set environment variables for runtime
     println!(
-        "cargo:rustc-env=LATTICE_CHARTS_DIR={}",
-        charts_dir.display()
-    );
-    println!(
         "cargo:rustc-env=LATTICE_SCRIPTS_DIR={}",
         scripts_dir.display()
     );
