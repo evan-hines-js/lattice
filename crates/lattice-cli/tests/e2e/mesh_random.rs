@@ -20,7 +20,10 @@ use lattice_common::crd::{
     LatticeExternalService, LatticeExternalServiceSpec, LatticeService, Resolution,
 };
 
-use super::helpers::{client_from_kubeconfig, delete_namespace, ensure_fresh_namespace, run_cmd};
+use super::helpers::{
+    client_from_kubeconfig, delete_namespace, ensure_fresh_namespace, run_cmd,
+    setup_regcreds_infrastructure,
+};
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,
     nginx_container, outbound_dep,
@@ -574,6 +577,10 @@ impl RandomMesh {
 
 async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<(), String> {
     ensure_fresh_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE).await?;
+
+    // Set up regcreds infrastructure — all services need ghcr-creds for image pulls
+    info!("[Random Mesh] Setting up regcreds infrastructure...");
+    setup_regcreds_infrastructure(kubeconfig_path).await?;
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
 

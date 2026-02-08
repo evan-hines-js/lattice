@@ -16,7 +16,7 @@
 //! │  ├─ integration/kubeconfig.rs    - Kubeconfig patching verify   │
 //! │  ├─ integration/cedar.rs         - Cedar policy enforcement     │
 //! │  ├─ integration/cedar_secrets.rs - Cedar secret authorization   │
-//! │  ├─ integration/secrets.rs       - Vault secrets integration    │
+//! │  ├─ integration/secrets.rs       - Local secrets integration    │
 //! │  ├─ integration/model_cache.rs   - Model cache lifecycle        │
 //! │  ├─ integration/oidc.rs          - OIDC authentication          │
 //! │  ├─ integration/multi_hop.rs     - Multi-hop proxy operations   │
@@ -30,7 +30,7 @@
 //! │  ├─ kubeconfig_e2e.rs        - Kubeconfig only                  │
 //! │  ├─ cedar_e2e.rs             - Cedar only                       │
 //! │  ├─ cedar_secrets_e2e.rs     - Cedar secrets only               │
-//! │  ├─ secrets_e2e.rs           - Vault secrets only               │
+//! │  ├─ secrets_e2e.rs           - Local secrets only               │
 //! │  ├─ model_cache_e2e.rs       - Model cache only                 │
 //! │  ├─ oidc_e2e.rs              - OIDC only                        │
 //! │  ├─ multi_hop_e2e.rs         - Multi-hop proxy only             │

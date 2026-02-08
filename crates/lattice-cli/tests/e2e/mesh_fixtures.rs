@@ -14,7 +14,7 @@ use lattice_common::crd::{
     ResourceType, ServicePortsSpec,
 };
 
-use super::helpers::{CURL_IMAGE, NGINX_IMAGE};
+use super::helpers::{CURL_IMAGE, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY};
 use super::mesh_helpers::{generate_test_script, TestTarget};
 
 // =============================================================================
@@ -44,7 +44,7 @@ pub fn curl_container(script: String) -> ContainerSpec {
     }
 }
 
-pub fn http_port() -> ServicePortsSpec {
+fn http_port() -> ServicePortsSpec {
     let mut ports = BTreeMap::new();
     ports.insert(
         "http".to_string(),
@@ -126,6 +126,31 @@ pub fn external_outbound_dep(name: &str) -> (String, ResourceSpec) {
 }
 
 // =============================================================================
+// Registry Credentials Resource
+// =============================================================================
+
+/// Build the `ghcr-creds` secret resource that every service needs for imagePullSecrets.
+///
+/// All test images come from GHCR, so every LatticeService must declare this
+/// resource and reference it in `image_pull_secrets`. The resource points at the
+/// seeded `local-regcreds` K8s Secret via the local SecretsProvider.
+fn ghcr_creds_resource() -> (String, ResourceSpec) {
+    let mut params = BTreeMap::new();
+    params.insert("provider".to_string(), serde_json::json!(REGCREDS_PROVIDER));
+    params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+
+    (
+        "ghcr-creds".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some(REGCREDS_REMOTE_KEY.to_string()),
+            params: Some(params),
+            ..Default::default()
+        },
+    )
+}
+
+// =============================================================================
 // Generic Service Construction
 // =============================================================================
 
@@ -133,10 +158,13 @@ pub fn external_outbound_dep(name: &str) -> (String, ResourceSpec) {
 ///
 /// Used by both the fixed mesh test (via convenience wrappers below) and the
 /// random mesh generator to avoid duplicating the spec-assembly boilerplate.
+///
+/// Every service automatically includes `ghcr-creds` as an imagePullSecret
+/// since all test images come from GHCR.
 pub fn build_lattice_service(
     name: &str,
     namespace: &str,
-    resources: BTreeMap<String, ResourceSpec>,
+    mut resources: BTreeMap<String, ResourceSpec>,
     has_port: bool,
     container: ContainerSpec,
 ) -> LatticeService {
@@ -145,6 +173,10 @@ pub fn build_lattice_service(
 
     let mut labels = BTreeMap::new();
     labels.insert("lattice.dev/environment".to_string(), namespace.to_string());
+
+    // Every service needs ghcr-creds for pulling GHCR images
+    let (creds_key, creds_spec) = ghcr_creds_resource();
+    resources.insert(creds_key, creds_spec);
 
     LatticeService {
         metadata: ObjectMeta {
@@ -157,6 +189,7 @@ pub fn build_lattice_service(
             containers,
             resources,
             service: if has_port { Some(http_port()) } else { None },
+            image_pull_secrets: vec!["ghcr-creds".to_string()],
             ..Default::default()
         },
         status: None,

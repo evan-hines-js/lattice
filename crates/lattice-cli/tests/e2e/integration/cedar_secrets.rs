@@ -1,8 +1,8 @@
 //! Cedar secret authorization integration tests
 //!
 //! Tests that Cedar policies control which LatticeServices can access secrets.
-//! These tests do NOT require Vault — they validate the CedarPolicy CRD →
-//! PolicyEngine reload → ServiceCompiler deny/allow pipeline.
+//! Validates the CedarPolicy CRD → PolicyEngine reload → ServiceCompiler
+//! deny/allow pipeline. No secret backend needed — Cedar checks happen before ESO.
 //!
 //! # Architecture
 //!
@@ -24,15 +24,14 @@
 
 use std::time::Duration;
 
-use kube::api::{Api, PostParams};
 use lattice_common::crd::LatticeService;
 use tracing::info;
 
 use super::super::context::InfraContext;
 use super::super::helpers::{
-    apply_cedar_policy_crd, client_from_kubeconfig, create_service_with_secrets,
-    delete_cedar_policies_by_label, delete_namespace, ensure_fresh_namespace,
-    wait_for_service_phase, wait_for_service_phase_with_message,
+    apply_cedar_policy_crd, create_service_with_secrets, delete_cedar_policies_by_label,
+    delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace,
+    setup_regcreds_infrastructure, wait_for_service_phase,
 };
 
 // =============================================================================
@@ -49,10 +48,10 @@ const NS_LIFECYCLE: &str = "cedar-secret-t5";
 const NS_PROVIDER: &str = "cedar-secret-t6";
 
 /// Test SecretsProvider name (does not need to exist — Cedar checks happen before ESO)
-const TEST_PROVIDER: &str = "vault-test";
+const TEST_PROVIDER: &str = "test-provider";
 
 /// Alternative provider name for provider-scoped tests
-const TEST_PROVIDER_ALT: &str = "vault-denied";
+const TEST_PROVIDER_ALT: &str = "test-provider-denied";
 
 // =============================================================================
 // Cedar Policy Helpers
@@ -116,23 +115,6 @@ async fn apply_cedar_secret_provider_policy(
     apply_cedar_policy_crd(kubeconfig, name, "cedar-secret", 100, &cedar).await
 }
 
-/// Apply a CedarPolicy that permits all secrets (for use by other tests like secrets.rs)
-pub async fn apply_cedar_secret_permit_all(kubeconfig: &str) -> Result<(), String> {
-    apply_cedar_policy_crd(
-        kubeconfig,
-        "e2e-permit-all-secrets",
-        "cedar-secret",
-        50,
-        "// E2E test policy — permit all services to access all secrets\npermit(\n  principal,\n  action == Lattice::Action::\"AccessSecret\",\n  resource\n);",
-    )
-    .await
-}
-
-/// Remove the permit-all-secrets policy
-pub fn remove_cedar_secret_permit_all(kubeconfig: &str) {
-    let _ = super::cedar::delete_cedar_policy(kubeconfig, "e2e-permit-all-secrets");
-}
-
 // =============================================================================
 // Verification Helpers
 // =============================================================================
@@ -166,51 +148,12 @@ fn cedar_test_service(
 // Test Scenarios
 // =============================================================================
 
-/// Deploy a service and assert it reaches the expected phase with optional message check.
-async fn deploy_and_assert(
-    kubeconfig: &str,
-    namespace: &str,
-    service: LatticeService,
-    expected_phase: &str,
-    expected_message: Option<&str>,
-    timeout: Duration,
-) -> Result<(), String> {
-    let name = service
-        .metadata
-        .name
-        .as_deref()
-        .ok_or("service missing name")?
-        .to_string();
-
-    let client = client_from_kubeconfig(kubeconfig).await?;
-    let api: Api<LatticeService> = Api::namespaced(client, namespace);
-
-    api.create(&PostParams::default(), &service)
-        .await
-        .map_err(|e| format!("Failed to create service {}: {}", name, e))?;
-
-    match expected_message {
-        Some(substring) => {
-            wait_for_service_phase_with_message(
-                kubeconfig,
-                namespace,
-                &name,
-                expected_phase,
-                substring,
-                timeout,
-            )
-            .await
-        }
-        None => wait_for_service_phase(kubeconfig, namespace, &name, expected_phase, timeout).await,
-    }
-}
-
 /// Test 1: Default deny — no CedarPolicy, service with secrets → Failed
 async fn test_default_deny(kubeconfig: &str) -> Result<(), String> {
     info!("[CedarSecrets] Test 1: Default deny (no policies)...");
     ensure_fresh_namespace(kubeconfig, NS_DEFAULT_DENY).await?;
 
-    deploy_and_assert(
+    deploy_and_wait_for_phase(
         kubeconfig,
         NS_DEFAULT_DENY,
         cedar_test_service(
@@ -242,7 +185,7 @@ async fn test_permit_specific_path(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    deploy_and_assert(
+    deploy_and_wait_for_phase(
         kubeconfig,
         NS_PERMIT_PATH,
         cedar_test_service(
@@ -270,7 +213,7 @@ async fn test_forbid_overrides_permit(kubeconfig: &str) -> Result<(), String> {
         .await?;
     apply_cedar_secret_forbid_policy(kubeconfig, "forbid-test3-prod", "*/prod/*").await?;
 
-    deploy_and_assert(
+    deploy_and_wait_for_phase(
         kubeconfig,
         NS_FORBID_OVERRIDE,
         cedar_test_service(
@@ -304,7 +247,7 @@ async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     // Service in namespace B (not permitted) → should fail
-    deploy_and_assert(
+    deploy_and_wait_for_phase(
         kubeconfig,
         NS_ISOLATION_B,
         cedar_test_service(
@@ -319,7 +262,7 @@ async fn test_namespace_isolation(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     // Service in namespace A (permitted) → should succeed
-    deploy_and_assert(
+    deploy_and_wait_for_phase(
         kubeconfig,
         NS_ISOLATION_A,
         cedar_test_service(
@@ -345,7 +288,7 @@ async fn test_policy_lifecycle(kubeconfig: &str) -> Result<(), String> {
     ensure_fresh_namespace(kubeconfig, NS_LIFECYCLE).await?;
 
     // Deploy without policy → should fail
-    deploy_and_assert(
+    deploy_and_wait_for_phase(
         kubeconfig,
         NS_LIFECYCLE,
         cedar_test_service(
@@ -398,7 +341,7 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     // Wrong provider → denied
-    deploy_and_assert(
+    deploy_and_wait_for_phase(
         kubeconfig,
         NS_PROVIDER,
         cedar_test_service(
@@ -413,7 +356,7 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     // Right provider → allowed
-    deploy_and_assert(
+    deploy_and_wait_for_phase(
         kubeconfig,
         NS_PROVIDER,
         cedar_test_service(
@@ -447,6 +390,9 @@ pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
         "[CedarSecrets] Running Cedar secret authorization tests concurrently on {}",
         kubeconfig
     );
+
+    // Set up regcreds infrastructure — all services now include ghcr-creds
+    setup_regcreds_infrastructure(kubeconfig).await?;
 
     // Clean up any leftover policies from previous runs
     cleanup_cedar_secret_policies(kubeconfig);
