@@ -442,7 +442,9 @@ impl AgentClient {
         &mut self,
         channel: tonic::transport::Channel,
     ) -> Result<(), ClientError> {
-        let mut client = LatticeAgentClient::new(channel.clone());
+        let mut client = LatticeAgentClient::new(channel.clone())
+            .max_decoding_message_size(16 * 1024 * 1024)
+            .max_encoding_message_size(16 * 1024 * 1024);
 
         // Create message channel
         let (message_tx, message_rx) = mpsc::channel::<AgentMessage>(32);
