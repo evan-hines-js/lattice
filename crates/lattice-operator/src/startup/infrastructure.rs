@@ -225,7 +225,7 @@ async fn ensure_capi(
     tracing::info!(infrastructure = ?provider_type, "Installing CAPI providers");
 
     if let Some(cp) = cloud_provider {
-        if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
+        if let Some(ref secret_ref) = cp.k8s_secret_ref() {
             copy_credentials_to_provider_namespace(client, provider_type, secret_ref)
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to copy provider credentials: {}", e))?;

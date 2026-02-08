@@ -144,17 +144,17 @@ async fn handle_child_cluster(
 
     // Validate CloudProvider has credentials for non-Docker providers
     if provider_type != lattice_common::crd::ProviderType::Docker
-        && cloud_provider.spec.credentials_secret_ref.is_none()
+        && cloud_provider.k8s_secret_ref().is_none()
     {
         return Err(Error::validation(format!(
-            "CloudProvider '{}' requires credentials_secret_ref for {} provider",
+            "CloudProvider '{}' requires credentials for {} provider",
             cluster.spec.provider_ref, provider_type
         )));
     }
 
     // Copy provider credentials from CloudProvider's secret to provider namespace
     if let (Some(ref client), Some(ref secret_ref)) =
-        (&ctx.client, &cloud_provider.spec.credentials_secret_ref)
+        (&ctx.client, &cloud_provider.k8s_secret_ref())
     {
         lattice_capi::installer::copy_credentials_to_provider_namespace(
             client,

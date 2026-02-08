@@ -476,6 +476,14 @@ impl ResourceSpec {
         self.type_.is_secret()
     }
 
+    /// Returns true if this is a wildcard mesh resource (`id: "*"`).
+    ///
+    /// Wildcard resources are policy declarations meaning "accept from any caller"
+    /// and cannot be resolved to template outputs (no service to look up in the graph).
+    pub fn is_mesh_wildcard(&self) -> bool {
+        self.type_.is_service_like() && self.id.as_deref() == Some("*")
+    }
+
     /// Parse secret params from the generic Score `params` field
     ///
     /// Returns:
