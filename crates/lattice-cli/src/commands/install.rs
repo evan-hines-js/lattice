@@ -1025,12 +1025,23 @@ async fn is_capi_cluster_control_plane_ready(
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
 
     match api.get(cluster_name).await {
-        Ok(cluster) => cluster
-            .data
-            .get("status")
-            .and_then(|s| s.get("controlPlaneReady"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        Ok(cluster) => {
+            let status = cluster.data.get("status");
+
+            // CAPI v1beta2: check conditions array for ControlPlaneAvailable
+            if let Some(conditions) = status.and_then(|s| s.get("conditions")).and_then(|c| c.as_array()) {
+                return conditions.iter().any(|c| {
+                    c.get("type").and_then(|t| t.as_str()) == Some("ControlPlaneAvailable")
+                        && c.get("status").and_then(|s| s.as_str()) == Some("True")
+                });
+            }
+
+            // CAPI v1beta1 fallback: top-level boolean
+            status
+                .and_then(|s| s.get("controlPlaneReady"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        }
         Err(_) => false,
     }
 }
