@@ -200,7 +200,7 @@ impl ServiceSelector {
 }
 
 /// Phase of a LatticeServicePolicy
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum ServicePolicyPhase {
     /// Policy is pending processing
     #[default]

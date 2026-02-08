@@ -13,8 +13,8 @@ use kube::api::Api;
 use lattice_common::crd::LatticeService;
 
 use super::helpers::{
-    client_from_kubeconfig, create_with_retry, ensure_fresh_namespace, load_service_config, run_cmd,
-    run_kubectl_with_retry, setup_regcreds_infrastructure, wait_for_condition,
+    client_from_kubeconfig, create_with_retry, ensure_fresh_namespace, load_service_config,
+    run_cmd, run_kubectl_with_retry, setup_regcreds_infrastructure, wait_for_condition,
 };
 
 const NAMESPACE: &str = "media";

@@ -65,7 +65,7 @@ pub async fn reconcile(
         "Policy selector matched services"
     );
 
-    // Update status
+    // Build new status
     let status = LatticeServicePolicyStatus {
         phase: ServicePolicyPhase::Active,
         matched_services: matched_count,
@@ -74,6 +74,17 @@ pub async fn reconcile(
         message: Some(format!("Matching {} services", matched_count)),
         observed_generation: policy.metadata.generation,
     };
+
+    // Idempotency guard: skip if phase, count, and refs already match
+    if let Some(ref current) = policy.status {
+        if current.phase == status.phase
+            && current.matched_services == status.matched_services
+            && current.matched_service_refs == status.matched_service_refs
+        {
+            debug!(policy = %name, "status unchanged, skipping update");
+            return Ok(Action::requeue(Duration::from_secs(120)));
+        }
+    }
 
     let status_patch = serde_json::json!({ "status": status });
     let policies: Api<LatticeServicePolicy> = Api::namespaced(client.clone(), &namespace);

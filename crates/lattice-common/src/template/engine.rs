@@ -571,9 +571,7 @@ mod tests {
             .metadata("api", HashMap::new())
             .resource(
                 "my-db",
-                ResourceOutputs::builder()
-                    .output("host", "db.svc")
-                    .build(),
+                ResourceOutputs::builder().output("host", "db.svc").build(),
             )
             .build();
 

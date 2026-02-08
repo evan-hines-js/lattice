@@ -167,7 +167,7 @@ pub struct BackupRetentionSpec {
 }
 
 /// Phase of a LatticeBackupPolicy
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum BackupPolicyPhase {
     /// Policy is pending configuration
     #[default]

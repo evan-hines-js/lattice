@@ -111,14 +111,8 @@ pub async fn reconcile(
             match check_cluster_secret_store_ready(client, &name).await {
                 Ok(Some((true, _))) => {
                     info!(secrets_provider = %name, "ClusterSecretStore is Ready");
-                    update_status(
-                        client,
-                        &sp,
-                        SecretProviderPhase::Ready,
-                        None,
-                        provider_type,
-                    )
-                    .await?;
+                    update_status(client, &sp, SecretProviderPhase::Ready, None, provider_type)
+                        .await?;
                     Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
                 }
                 Ok(Some((false, msg))) => {
@@ -266,8 +260,7 @@ async fn check_cluster_secret_store_ready(
     if let Some(conditions) = conditions {
         for condition in conditions {
             if condition.get("type").and_then(|t| t.as_str()) == Some("Ready") {
-                let is_ready =
-                    condition.get("status").and_then(|s| s.as_str()) == Some("True");
+                let is_ready = condition.get("status").and_then(|s| s.as_str()) == Some("True");
                 let message = condition
                     .get("message")
                     .and_then(|m| m.as_str())

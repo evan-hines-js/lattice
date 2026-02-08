@@ -175,8 +175,7 @@ impl ExternalSecret {
         match &mut self.spec.target.template {
             Some(t) => t.type_ = Some(secret_type.into()),
             None => {
-                self.spec.target.template =
-                    Some(ExternalSecretTemplate::with_type(secret_type));
+                self.spec.target.template = Some(ExternalSecretTemplate::with_type(secret_type));
             }
         }
         self

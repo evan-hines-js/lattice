@@ -178,7 +178,7 @@ pub struct ModelArtifactSpec {
 }
 
 /// Status of a ModelArtifact
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelArtifactStatus {
     /// Current phase
@@ -204,7 +204,7 @@ pub const RETRY_BASE_DELAY_SECS: u64 = 30;
 pub const RETRY_MAX_DELAY_SECS: u64 = 300;
 
 /// Phase of a ModelArtifact
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum ModelArtifactPhase {
     /// Waiting for download to begin
     #[default]

@@ -771,14 +771,14 @@ pub async fn watch_cluster_phases(
                         let current_phase = cluster
                             .status
                             .as_ref()
-                            .map(|s| s.phase.clone())
+                            .map(|s| s.phase)
                             .unwrap_or(ClusterPhase::Pending);
 
                         {
                             let mut lp = last_phase.lock().unwrap();
                             if lp.as_ref() != Some(&current_phase) {
                                 info!("Cluster {} phase: {:?}", cluster_name, current_phase);
-                                *lp = Some(current_phase.clone());
+                                *lp = Some(current_phase);
                             }
                         }
 
@@ -2420,7 +2420,7 @@ pub async fn wait_for_secrets_provider_ready(
 
     wait_for_condition(
         &format!("SecretProvider '{}' to be Ready", provider_name),
-        Duration::from_secs(120),
+        Duration::from_secs(600),
         Duration::from_secs(5),
         || async move {
             let output = run_cmd(
@@ -2451,10 +2451,7 @@ pub async fn wait_for_secrets_provider_ready(
                     Ok(false)
                 }
                 Err(e) => {
-                    info!(
-                        "[SecretProvider] Error checking '{}': {}",
-                        provider_name, e
-                    );
+                    info!("[SecretProvider] Error checking '{}': {}", provider_name, e);
                     Ok(false)
                 }
             }

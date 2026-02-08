@@ -775,7 +775,7 @@ impl ServiceRef {
 // =============================================================================
 
 /// Cluster lifecycle phase
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum ClusterPhase {
     /// Cluster is waiting to be provisioned
     #[default]

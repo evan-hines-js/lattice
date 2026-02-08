@@ -191,17 +191,15 @@ pub fn build_provider_controllers(client: Client) -> Vec<Pin<Box<dyn Future<Outp
         )
         .for_each(log_reconcile_result("CloudProvider"));
 
-    let secrets_ctrl = Controller::new(
-        Api::<SecretProvider>::all(client.clone()),
-        watcher_config(),
-    )
-    .shutdown_on_signal()
-    .run(
-        secrets_provider_ctrl::reconcile,
-        lattice_common::default_error_policy,
-        ctx.clone(),
-    )
-    .for_each(log_reconcile_result("SecretProvider"));
+    let secrets_ctrl =
+        Controller::new(Api::<SecretProvider>::all(client.clone()), watcher_config())
+            .shutdown_on_signal()
+            .run(
+                secrets_provider_ctrl::reconcile,
+                lattice_common::default_error_policy,
+                ctx.clone(),
+            )
+            .for_each(log_reconcile_result("SecretProvider"));
 
     let cedar_ctrl = Controller::new(Api::<CedarPolicy>::all(client.clone()), watcher_config())
         .shutdown_on_signal()
