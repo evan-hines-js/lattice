@@ -24,7 +24,7 @@ pub enum RestoreOrdering {
 }
 
 /// Phase of a LatticeRestore
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum RestorePhase {
     /// Restore is pending
     #[default]

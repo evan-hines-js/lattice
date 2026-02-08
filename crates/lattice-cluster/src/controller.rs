@@ -1149,7 +1149,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     let current_phase = cluster
         .status
         .as_ref()
-        .map(|s| s.phase.clone())
+        .map(|s| s.phase)
         .unwrap_or(ClusterPhase::Pending);
 
     debug!(?current_phase, is_self, "current cluster phase");
@@ -1589,7 +1589,7 @@ async fn handle_deletion(
     let current_phase = cluster
         .status
         .as_ref()
-        .map(|s| s.phase.clone())
+        .map(|s| s.phase)
         .unwrap_or(ClusterPhase::Pending);
 
     if current_phase != ClusterPhase::Unpivoting {

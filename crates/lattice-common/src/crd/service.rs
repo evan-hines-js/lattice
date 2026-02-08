@@ -1240,7 +1240,7 @@ pub struct ServiceBackupSpec {
 }
 
 /// Service lifecycle phase
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum ServicePhase {
     /// Service is waiting for configuration
     #[default]

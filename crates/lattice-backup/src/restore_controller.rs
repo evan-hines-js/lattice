@@ -10,7 +10,7 @@ use std::time::Duration;
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use lattice_common::crd::{LatticeRestore, LatticeRestoreStatus, RestoreOrdering, RestorePhase};
 use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
@@ -51,7 +51,7 @@ pub async fn reconcile(
     let current_phase = restore
         .status
         .as_ref()
-        .map(|s| s.phase.clone())
+        .map(|s| s.phase)
         .unwrap_or(RestorePhase::Pending);
 
     match current_phase {
@@ -207,6 +207,14 @@ async fn update_status(
     phase: RestorePhase,
     message: Option<String>,
 ) -> Result<(), ReconcileError> {
+    // Idempotency guard: skip if phase + message already match
+    if let Some(ref current) = restore.status {
+        if current.phase == phase && current.message == message {
+            debug!(restore = %restore.name_any(), "status unchanged, skipping update");
+            return Ok(());
+        }
+    }
+
     let name = restore.name_any();
     let namespace = restore
         .namespace()

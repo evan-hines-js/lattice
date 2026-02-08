@@ -47,10 +47,9 @@ use lattice_common::crd::LatticeCluster;
 use super::super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::super::context::{ClusterLevel, InfraContext};
 use super::super::helpers::{
-    build_and_push_lattice_image, client_from_kubeconfig, create_with_retry,
-    ensure_docker_network, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd, wait_for_operator_ready, watch_cluster_phases,
-    ProxySession,
+    build_and_push_lattice_image, client_from_kubeconfig, create_with_retry, ensure_docker_network,
+    get_docker_kubeconfig, kubeconfig_path, load_cluster_config, load_registry_credentials,
+    run_cmd, wait_for_operator_ready, watch_cluster_phases, ProxySession,
 };
 use super::super::providers::InfraProvider;
 use super::{capi, cedar, scaling};

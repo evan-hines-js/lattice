@@ -82,7 +82,7 @@ pub async fn reconcile(
     let phase = artifact
         .status
         .as_ref()
-        .map(|s| s.phase.clone())
+        .map(|s| s.phase)
         .unwrap_or_default();
 
     info!(artifact = %name, ?phase, "Reconciling ModelArtifact");
@@ -334,6 +334,9 @@ async fn reconcile_failed(
 
 /// Read-modify-write the ModelArtifact status, preserving fields not touched
 /// by the caller's closure. Uses JSON merge patch.
+///
+/// Includes an idempotency guard: skips the patch if the closure didn't
+/// actually change anything, preventing reconcile storms.
 async fn patch_status(
     client: &Client,
     name: &str,
@@ -347,8 +350,15 @@ async fn patch_status(
         .await
         .map_err(|e| ReconcileError::Kube(format!("failed to read current status: {}", e)))?;
     let mut status = current.status.unwrap_or_default();
+    let original = status.clone();
 
     modify(&mut status);
+
+    // Idempotency guard: skip if nothing changed
+    if status == original {
+        debug!(artifact = %name, "status unchanged, skipping update");
+        return Ok(());
+    }
 
     let patch = serde_json::json!({ "status": status });
     api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))

@@ -254,6 +254,14 @@ async fn update_status(
     velero_schedule_name: Option<String>,
     velero_bsl_name: Option<String>,
 ) -> Result<(), ReconcileError> {
+    // Idempotency guard: skip if phase + message already match
+    if let Some(ref current) = policy.status {
+        if current.phase == phase && current.message == message {
+            debug!(backup_policy = %policy.name_any(), "status unchanged, skipping update");
+            return Ok(());
+        }
+    }
+
     let name = policy.name_any();
     let namespace = policy
         .namespace()

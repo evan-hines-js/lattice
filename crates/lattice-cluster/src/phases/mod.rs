@@ -129,12 +129,31 @@ pub async fn update_status(
         ),
     };
 
+    // Idempotency guard: skip update if phase + message already match.
+    // This prevents reconcile storms from Condition timestamps.
+    // Still patch if set_pivot_complete is requested and not yet set.
+    let pivot_already_set = cluster
+        .status
+        .as_ref()
+        .map(|s| s.pivot_complete)
+        .unwrap_or(false);
+    let needs_pivot_update = set_pivot_complete && !pivot_already_set;
+
+    if !needs_pivot_update {
+        if let Some(ref current) = cluster.status {
+            if current.phase == phase && current.message.as_deref() == Some(message) {
+                debug!("cluster status unchanged, skipping update");
+                return Ok(());
+            }
+        }
+    }
+
     let condition = Condition::new(condition_type, condition_status, reason, message);
 
     // Preserve existing status fields (worker_pools, ready_workers, etc.)
     let current_status = cluster.status.clone().unwrap_or_default();
     let mut status = LatticeClusterStatus {
-        phase: phase.clone(),
+        phase,
         message: Some(message.to_string()),
         conditions: vec![condition],
         // Preserve persistent fields

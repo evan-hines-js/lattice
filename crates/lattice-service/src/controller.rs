@@ -983,7 +983,7 @@ pub async fn reconcile(
     let current_phase = service
         .status
         .as_ref()
-        .map(|s| s.phase.clone())
+        .map(|s| s.phase)
         .unwrap_or(ServicePhase::Pending);
 
     debug!(?current_phase, "current service phase");
@@ -1135,22 +1135,30 @@ async fn compile_and_apply(
     let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {
-            let event_reason = if e.is_access_denied() {
-                reasons::SECRET_ACCESS_DENIED
-            } else {
-                reasons::COMPILATION_FAILED
-            };
             let msg = e.to_string();
-            ctx.events
-                .publish(
-                    &service.object_ref(&()),
-                    EventType::Warning,
-                    event_reason,
-                    actions::COMPILE,
-                    Some(msg.clone()),
-                )
-                .await;
-            warn!(error = %msg, "compilation failed");
+
+            // Skip redundant events when status hasn't changed (status update
+            // itself is guarded by update_service_status's idempotency check).
+            if !is_status_unchanged(service, ServicePhase::Failed, &msg) {
+                let event_reason = if e.is_access_denied() {
+                    reasons::SECRET_ACCESS_DENIED
+                } else {
+                    reasons::COMPILATION_FAILED
+                };
+                ctx.events
+                    .publish(
+                        &service.object_ref(&()),
+                        EventType::Warning,
+                        event_reason,
+                        actions::COMPILE,
+                        Some(msg.clone()),
+                    )
+                    .await;
+                warn!(error = %msg, "compilation failed");
+            } else {
+                debug!(error = %msg, "compilation still failing");
+            }
+
             update_service_status_failed(service, ctx, &msg).await?;
             return Err(Error::from(e));
         }
@@ -1165,8 +1173,13 @@ async fn compile_and_apply(
         .apply_compiled_service(name, namespace, &compiled)
         .await
     {
-        error!(error = %e, "failed to apply compiled resources");
-        update_service_status_failed(service, ctx, &e.to_string()).await?;
+        let msg = e.to_string();
+        if !is_status_unchanged(service, ServicePhase::Failed, &msg) {
+            error!(error = %msg, "failed to apply compiled resources");
+        } else {
+            debug!(error = %msg, "apply still failing");
+        }
+        update_service_status_failed(service, ctx, &msg).await?;
         return Err(e);
     }
 
@@ -1210,17 +1223,8 @@ pub async fn reconcile_external(
     ctx.graph
         .put_external_service(namespace, &name, &external.spec);
 
-    // Only update status if not already Ready (avoid reconcile loop)
-    let is_ready = external
-        .status
-        .as_ref()
-        .map(|s| s.phase == crate::crd::ExternalServicePhase::Ready)
-        .unwrap_or(false);
-
-    if !is_ready {
-        info!(namespace = %namespace, "external service transitioning to Ready");
-        update_external_status_ready(&external, &ctx).await?;
-    }
+    // update_external_status skips the patch if already Ready with same message
+    update_external_status_ready(&external, &ctx).await?;
 
     Ok(Action::requeue(Duration::from_secs(60)))
 }
@@ -1335,12 +1339,35 @@ impl<'a> ServiceStatusUpdate<'a> {
     }
 }
 
-/// Update LatticeService status with the given configuration
+/// Check if the service status already matches — avoids update loop.
+///
+/// Same pattern as CloudProvider and SecretProvider: skip redundant patches
+/// because `Condition::new()` stamps a fresh `lastTransitionTime` on every call,
+/// making every merge patch "different" and generating a watch event that triggers
+/// another reconcile.
+fn is_status_unchanged(service: &LatticeService, phase: ServicePhase, message: &str) -> bool {
+    service
+        .status
+        .as_ref()
+        .map(|s| s.phase == phase && s.message.as_deref() == Some(message))
+        .unwrap_or(false)
+}
+
+/// Update LatticeService status with the given configuration.
+///
+/// Skips the patch if phase and message already match the current status,
+/// preventing a self-triggering reconcile storm.
 async fn update_service_status(
     service: &LatticeService,
     ctx: &ServiceContext,
     update: ServiceStatusUpdate<'_>,
 ) -> Result<(), Error> {
+    // Check if status already matches — avoid update loop
+    if is_status_unchanged(service, update.phase, update.message) {
+        debug!("status unchanged, skipping update");
+        return Ok(());
+    }
+
     let name = service.name_any();
     let namespace = service.namespace().unwrap_or_default();
 
@@ -1418,12 +1445,26 @@ impl<'a> ExternalStatusUpdate<'a> {
     }
 }
 
-/// Update LatticeExternalService status with the given configuration
+/// Update LatticeExternalService status with the given configuration.
+///
+/// Skips the patch if phase and message already match the current status,
+/// preventing a self-triggering reconcile storm.
 async fn update_external_status(
     external: &LatticeExternalService,
     ctx: &ServiceContext,
     update: ExternalStatusUpdate<'_>,
 ) -> Result<(), Error> {
+    // Check if status already matches — avoid update loop
+    let unchanged = external
+        .status
+        .as_ref()
+        .map(|s| s.phase == update.phase && s.message.as_deref() == Some(update.message))
+        .unwrap_or(false);
+    if unchanged {
+        debug!("external service status unchanged, skipping update");
+        return Ok(());
+    }
+
     let name = external.name_any();
     let namespace = external.namespace().unwrap_or_default();
     let status = LatticeExternalServiceStatus::with_phase(update.phase)

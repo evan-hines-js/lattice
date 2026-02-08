@@ -33,7 +33,7 @@ impl Resolution {
 }
 
 /// External service lifecycle phase
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum ExternalServicePhase {
     /// Waiting to be processed
     #[default]
