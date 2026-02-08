@@ -22,12 +22,6 @@ pub struct OpenStackConfig {
     /// External network name for floating IPs and API server load balancer
     pub external_network: String,
 
-    /// OpenStack flavor for control plane nodes (e.g., "b2-30")
-    pub cp_flavor: String,
-
-    /// OpenStack flavor for worker nodes (e.g., "b2-15")
-    pub worker_flavor: String,
-
     /// Image name or ID for node VMs (e.g., "Ubuntu 22.04")
     pub image_name: String,
 
@@ -82,25 +76,6 @@ pub struct OpenStackConfig {
     pub worker_availability_zone: Option<String>,
 
     // ==========================================================================
-    // Root Volume (Optional)
-    // ==========================================================================
-    /// Root volume size in GB for control plane (default: use flavor disk)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_root_volume_size_gb: Option<u32>,
-
-    /// Root volume type for control plane (e.g., "high-speed")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_root_volume_type: Option<String>,
-
-    /// Root volume size in GB for workers (default: use flavor disk)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_root_volume_size_gb: Option<u32>,
-
-    /// Root volume type for workers
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_root_volume_type: Option<String>,
-
-    // ==========================================================================
     // SSH Access (Optional)
     // ==========================================================================
     /// Additional SSH authorized keys for node access
@@ -116,8 +91,6 @@ mod tests {
     fn minimal_config() {
         let yaml = r#"
 externalNetwork: ext-net
-cpFlavor: m1.large
-workerFlavor: m1.medium
 imageName: ubuntu-22.04
 sshKeyName: default
 "#;
@@ -125,7 +98,6 @@ sshKeyName: default
         let config: OpenStackConfig = serde_json::from_value(value)
             .expect("minimal OpenStackConfig deserialization should succeed");
         assert_eq!(config.external_network, "ext-net");
-        assert_eq!(config.cp_flavor, "m1.large");
         assert!(config.cloud_name.is_none());
     }
 
@@ -133,8 +105,6 @@ sshKeyName: default
     fn full_config_with_options() {
         let yaml = r#"
 externalNetwork: Ext-Net
-cpFlavor: b2-30
-workerFlavor: b2-15
 imageName: Ubuntu 22.04
 sshKeyName: lattice-key
 cloudName: ovh
@@ -142,15 +112,11 @@ dnsNameservers:
   - 8.8.8.8
   - 8.8.4.4
 nodeCidr: 10.6.0.0/24
-cpRootVolumeSizeGb: 50
-cpRootVolumeType: high-speed
-workerRootVolumeSizeGb: 100
 cpAvailabilityZone: nova
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let config: OpenStackConfig = serde_json::from_value(value)
             .expect("full OpenStackConfig deserialization should succeed");
-        assert_eq!(config.cp_root_volume_size_gb, Some(50));
         assert_eq!(config.cp_availability_zone, Some("nova".to_string()));
     }
 }

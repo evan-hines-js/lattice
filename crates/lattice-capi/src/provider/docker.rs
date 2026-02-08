@@ -310,7 +310,7 @@ impl Provider for DockerProvider {
         };
 
         let cp_config = ControlPlaneConfig {
-            replicas: cluster.spec.nodes.control_plane,
+            replicas: cluster.spec.nodes.control_plane.replicas,
             cert_sans,
             post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
             vip: None,
@@ -395,8 +395,8 @@ mod tests {
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        BootstrapProvider, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec,
-        ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
+        BootstrapProvider, ControlPlaneSpec, EndpointsSpec, KubernetesSpec, LatticeClusterSpec,
+        NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
     };
 
     /// Helper to create a sample LatticeCluster for testing
@@ -431,7 +431,11 @@ mod tests {
                     credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
-                    control_plane: 1,
+                    control_plane: ControlPlaneSpec {
+                        replicas: 1,
+                        instance_type: None,
+                        root_volume: None,
+                    },
                     worker_pools,
                 },
                 networking: None,
@@ -636,7 +640,7 @@ mod tests {
         async fn control_plane_respects_replica_count() {
             let provider = DockerProvider::new();
             let mut cluster = sample_cluster("my-cluster", 2);
-            cluster.spec.nodes.control_plane = 3;
+            cluster.spec.nodes.control_plane.replicas = 3;
             let bootstrap = BootstrapInfo::default();
 
             let manifests = provider
@@ -1126,7 +1130,7 @@ mod tests {
         async fn ha_cluster_has_three_control_plane_nodes() {
             let provider = DockerProvider::new();
             let mut cluster = sample_cluster("ha-cluster", 3);
-            cluster.spec.nodes.control_plane = 3;
+            cluster.spec.nodes.control_plane.replicas = 3;
             let bootstrap = BootstrapInfo::default();
 
             let manifests = provider

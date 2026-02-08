@@ -170,7 +170,7 @@ pub async fn discover_tree(
                 phase: st.phase.to_string(),
                 provider: cluster.spec.provider.provider_type().to_string(),
                 k8s_version: cluster.spec.provider.kubernetes.version.clone(),
-                control_plane_total: cluster.spec.nodes.control_plane,
+                control_plane_total: cluster.spec.nodes.control_plane.replicas,
                 control_plane_ready: st.ready_control_plane.unwrap_or(0),
                 workers_total: cluster.spec.nodes.total_workers(),
                 workers_ready: st.ready_workers.unwrap_or(0),

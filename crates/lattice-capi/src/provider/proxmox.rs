@@ -263,7 +263,7 @@ impl Provider for ProxmoxProvider {
         ));
 
         let cp_config = ControlPlaneConfig {
-            replicas: spec.nodes.control_plane,
+            replicas: spec.nodes.control_plane.replicas,
             cert_sans,
             post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
             vip,
@@ -272,21 +272,32 @@ impl Provider for ProxmoxProvider {
 
         let infra = self.infra_ref();
 
+        // Read CP sizing from node spec (ResourceSpec uses GiB; Proxmox needs MiB for memory)
+        let cp_resources = spec
+            .nodes
+            .control_plane
+            .instance_type
+            .as_ref()
+            .and_then(|it| it.as_resources());
+        let cp_sizing = cp_resources
+            .map(|r| MachineSizing {
+                cores: r.cores,
+                memory_mib: r.memory_gib * 1024,
+                disk_size_gb: r.disk_gib,
+                sockets: r.sockets,
+            })
+            .unwrap_or(MachineSizing {
+                cores: 4,
+                memory_mib: 8192,
+                disk_size_gb: 50,
+                sockets: 1,
+            });
+
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_proxmox_cluster(cluster)?,
             generate_control_plane(&config, &infra, &cp_config)?,
-            self.generate_machine_template(
-                name,
-                cfg,
-                MachineSizing {
-                    cores: cfg.cp_cores,
-                    memory_mib: cfg.cp_memory_mib,
-                    disk_size_gb: cfg.cp_disk_size_gb,
-                    sockets: cfg.cp_sockets.unwrap_or(1),
-                },
-                "control-plane",
-            ),
+            self.generate_machine_template(name, cfg, cp_sizing, "control-plane"),
         ];
 
         // Generate worker pool resources
@@ -297,22 +308,31 @@ impl Provider for ProxmoxProvider {
             };
             let suffix = pool_resource_suffix(pool_id);
 
+            // Read per-pool sizing from worker pool spec
+            let worker_resources = pool_spec
+                .instance_type
+                .as_ref()
+                .and_then(|it| it.as_resources());
+            let worker_sizing = worker_resources
+                .map(|r| MachineSizing {
+                    cores: r.cores,
+                    memory_mib: r.memory_gib * 1024,
+                    disk_size_gb: r.disk_gib,
+                    sockets: r.sockets,
+                })
+                .unwrap_or(MachineSizing {
+                    cores: 4,
+                    memory_mib: 8192,
+                    disk_size_gb: 100,
+                    sockets: 1,
+                });
+
             manifests.push(generate_machine_deployment_for_pool(
                 &config,
                 &infra,
                 &pool_config,
             ));
-            manifests.push(self.generate_machine_template(
-                name,
-                cfg,
-                MachineSizing {
-                    cores: cfg.worker_cores,
-                    memory_mib: cfg.worker_memory_mib,
-                    disk_size_gb: cfg.worker_disk_size_gb,
-                    sockets: cfg.worker_sockets.unwrap_or(1),
-                },
-                &suffix,
-            ));
+            manifests.push(self.generate_machine_template(name, cfg, worker_sizing, &suffix));
             manifests.push(generate_bootstrap_config_template_for_pool(
                 &config,
                 &pool_config,
@@ -336,7 +356,8 @@ mod tests {
     use super::*;
     use kube::api::ObjectMeta;
     use lattice_common::crd::{
-        BootstrapProvider, KubernetesSpec, NodeSpec, ProviderConfig, ProviderSpec, WorkerPoolSpec,
+        BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec, NodeResourceSpec,
+        NodeSpec, ProviderConfig, ProviderSpec, WorkerPoolSpec,
     };
     use lattice_common::crd::{Ipv4PoolConfig, LatticeClusterSpec};
 
@@ -347,12 +368,6 @@ mod tests {
                 range: "10.0.0.101-120/24".to_string(),
                 gateway: "10.0.0.1".to_string(),
             },
-            cp_cores: 4,
-            cp_memory_mib: 8192,
-            cp_disk_size_gb: 50,
-            worker_cores: 4,
-            worker_memory_mib: 8192,
-            worker_disk_size_gb: 100,
             source_node: None,
             template_id: None,
             template_tags: None,
@@ -375,8 +390,6 @@ mod tests {
             vmid_max: None,
             skip_cloud_init_status: None,
             skip_qemu_guest_agent: None,
-            cp_sockets: None,
-            worker_sockets: None,
         }
     }
 
@@ -399,11 +412,26 @@ mod tests {
                     credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
-                    control_plane: 3,
+                    control_plane: ControlPlaneSpec {
+                        replicas: 3,
+                        instance_type: Some(InstanceType::Resources(NodeResourceSpec {
+                            cores: 4,
+                            memory_gib: 8,
+                            disk_gib: 50,
+                            sockets: 1,
+                        })),
+                        root_volume: None,
+                    },
                     worker_pools: std::collections::BTreeMap::from([(
                         "default".to_string(),
                         WorkerPoolSpec {
                             replicas: 5,
+                            instance_type: Some(InstanceType::Resources(NodeResourceSpec {
+                                cores: 4,
+                                memory_gib: 8,
+                                disk_gib: 100,
+                                sockets: 1,
+                            })),
                             ..Default::default()
                         },
                     )]),

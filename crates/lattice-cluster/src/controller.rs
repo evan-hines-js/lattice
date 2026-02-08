@@ -1631,9 +1631,9 @@ mod tests {
     use lattice_capi::installer::CapiProviderConfig;
     use lattice_capi::provider::CAPIManifest;
     use lattice_common::crd::{
-        BootstrapProvider, CloudProvider, Condition, ConditionStatus, EndpointsSpec,
-        KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
-        WorkerPoolSpec,
+        BootstrapProvider, CloudProvider, Condition, ConditionStatus, ControlPlaneSpec,
+        EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderConfig, ProviderSpec,
+        ServiceSpec, WorkerPoolSpec,
     };
     use mockall::mock;
 
@@ -1685,7 +1685,11 @@ mod tests {
                     credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
-                    control_plane: 1,
+                    control_plane: ControlPlaneSpec {
+                        replicas: 1,
+                        instance_type: None,
+                        root_volume: None,
+                    },
                     worker_pools: std::collections::BTreeMap::from([(
                         "default".to_string(),
                         WorkerPoolSpec {
@@ -1753,7 +1757,7 @@ mod tests {
     /// Create a cluster with invalid spec (zero control plane nodes)
     fn invalid_cluster(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name);
-        cluster.spec.nodes.control_plane = 0;
+        cluster.spec.nodes.control_plane.replicas = 0;
         cluster
     }
 
@@ -2252,7 +2256,11 @@ mod tests {
                         credentials_secret_ref: None,
                     },
                     nodes: NodeSpec {
-                        control_plane: 1,
+                        control_plane: ControlPlaneSpec {
+                            replicas: 1,
+                            instance_type: None,
+                            root_volume: None,
+                        },
                         worker_pools: std::collections::BTreeMap::from([(
                             "default".to_string(),
                             WorkerPoolSpec {

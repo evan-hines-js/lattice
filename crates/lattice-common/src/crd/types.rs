@@ -345,6 +345,99 @@ pub struct NodeTaint {
     pub effect: TaintEffect,
 }
 
+// =============================================================================
+// Instance Type / Sizing Configuration
+// =============================================================================
+
+/// Explicit resource specification for providers without named instance types (e.g., Proxmox)
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeResourceSpec {
+    /// Number of CPU cores
+    pub cores: u32,
+
+    /// Memory in GiB
+    pub memory_gib: u32,
+
+    /// Disk size in GiB
+    pub disk_gib: u32,
+
+    /// Number of CPU sockets (default: 1)
+    #[serde(
+        default = "default_sockets",
+        skip_serializing_if = "is_default_sockets"
+    )]
+    pub sockets: u32,
+}
+
+fn default_sockets() -> u32 {
+    1
+}
+
+fn is_default_sockets(v: &u32) -> bool {
+    *v == 1
+}
+
+/// Instance type specification — either a named type (AWS/OpenStack) or explicit resources (Proxmox)
+///
+/// Uses `#[serde(untagged)]` for clean YAML:
+/// - `instanceType: m5.xlarge` → `Named("m5.xlarge")`
+/// - `instanceType: { cores: 16, memoryGib: 32, diskGib: 50 }` → `Resources(NodeResourceSpec)`
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(untagged)]
+pub enum InstanceType {
+    /// Named instance type (e.g., "m5.xlarge", "b2-30")
+    Named(String),
+    /// Explicit resource specification
+    Resources(NodeResourceSpec),
+}
+
+impl InstanceType {
+    /// Get the named instance type string, if this is a Named variant
+    pub fn as_named(&self) -> Option<&str> {
+        match self {
+            Self::Named(s) => Some(s),
+            Self::Resources(_) => None,
+        }
+    }
+
+    /// Get the resource specification, if this is a Resources variant
+    pub fn as_resources(&self) -> Option<&NodeResourceSpec> {
+        match self {
+            Self::Named(_) => None,
+            Self::Resources(r) => Some(r),
+        }
+    }
+}
+
+/// Root volume configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RootVolume {
+    /// Volume size in GB
+    pub size_gb: u32,
+
+    /// Volume type (provider-interpreted, e.g., "gp3", "io1", "high-speed")
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub type_: Option<String>,
+}
+
+/// Control plane specification
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlPlaneSpec {
+    /// Number of control plane nodes (must be positive odd number for HA)
+    pub replicas: u32,
+
+    /// Instance type for control plane nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_type: Option<InstanceType>,
+
+    /// Root volume configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_volume: Option<RootVolume>,
+}
+
 /// Worker pool specification for named worker pools
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -356,9 +449,13 @@ pub struct WorkerPoolSpec {
     /// Number of worker nodes in this pool (ignored when autoscaling is enabled)
     pub replicas: u32,
 
-    /// Node class/size for this pool (provider-specific: instance type, flavor, etc.)
+    /// Instance type for nodes in this pool
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_class: Option<String>,
+    pub instance_type: Option<InstanceType>,
+
+    /// Root volume configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_volume: Option<RootVolume>,
 
     /// Labels to apply to nodes in this pool
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -409,9 +506,9 @@ impl WorkerPoolSpec {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeSpec {
-    /// Number of control plane nodes (must be positive odd number for HA)
+    /// Control plane configuration (replicas, instance type, root volume)
     #[serde(rename = "controlPlane")]
-    pub control_plane: u32,
+    pub control_plane: ControlPlaneSpec,
 
     /// Named worker pools with independent scaling
     ///
@@ -429,17 +526,17 @@ impl NodeSpec {
 
     /// Returns the total number of nodes (control plane + all workers)
     pub fn total_nodes(&self) -> u32 {
-        self.control_plane + self.total_workers()
+        self.control_plane.replicas + self.total_workers()
     }
 
     /// Validates the node specification
     pub fn validate(&self) -> Result<(), crate::Error> {
-        if self.control_plane == 0 {
+        if self.control_plane.replicas == 0 {
             return Err(crate::Error::validation(
                 "control plane count must be at least 1",
             ));
         }
-        if self.control_plane > 1 && self.control_plane.is_multiple_of(2) {
+        if self.control_plane.replicas > 1 && self.control_plane.replicas.is_multiple_of(2) {
             return Err(crate::Error::validation(
                 "control plane count must be odd for HA (1, 3, 5, ...)",
             ));
@@ -911,6 +1008,14 @@ mod tests {
     mod node_spec {
         use super::*;
 
+        fn cp(replicas: u32) -> ControlPlaneSpec {
+            ControlPlaneSpec {
+                replicas,
+                instance_type: None,
+                root_volume: None,
+            }
+        }
+
         fn pool(replicas: u32) -> WorkerPoolSpec {
             WorkerPoolSpec {
                 replicas,
@@ -921,7 +1026,7 @@ mod tests {
         #[test]
         fn test_total_nodes_single_pool() {
             let spec = NodeSpec {
-                control_plane: 1,
+                control_plane: cp(1),
                 worker_pools: std::collections::BTreeMap::from([("default".to_string(), pool(2))]),
             };
             assert_eq!(spec.total_workers(), 2);
@@ -931,7 +1036,7 @@ mod tests {
         #[test]
         fn test_total_nodes_multiple_pools() {
             let spec = NodeSpec {
-                control_plane: 1,
+                control_plane: cp(1),
                 worker_pools: std::collections::BTreeMap::from([
                     ("general".to_string(), pool(3)),
                     ("gpu".to_string(), pool(2)),
@@ -944,7 +1049,7 @@ mod tests {
         #[test]
         fn test_total_nodes_no_pools() {
             let spec = NodeSpec {
-                control_plane: 3,
+                control_plane: cp(3),
                 worker_pools: std::collections::BTreeMap::new(),
             };
             assert_eq!(spec.total_workers(), 0);
@@ -954,7 +1059,7 @@ mod tests {
         #[test]
         fn test_validate_single_control_plane() {
             let spec = NodeSpec {
-                control_plane: 1,
+                control_plane: cp(1),
                 worker_pools: std::collections::BTreeMap::new(),
             };
             assert!(spec.validate().is_ok());
@@ -963,13 +1068,13 @@ mod tests {
         #[test]
         fn test_validate_ha_control_plane() {
             let spec = NodeSpec {
-                control_plane: 3,
+                control_plane: cp(3),
                 worker_pools: std::collections::BTreeMap::from([("default".to_string(), pool(2))]),
             };
             assert!(spec.validate().is_ok());
 
             let spec = NodeSpec {
-                control_plane: 5,
+                control_plane: cp(5),
                 worker_pools: std::collections::BTreeMap::from([("default".to_string(), pool(2))]),
             };
             assert!(spec.validate().is_ok());
@@ -978,7 +1083,7 @@ mod tests {
         #[test]
         fn test_validate_zero_control_plane_fails() {
             let spec = NodeSpec {
-                control_plane: 0,
+                control_plane: cp(0),
                 worker_pools: std::collections::BTreeMap::from([("default".to_string(), pool(2))]),
             };
             let result = spec.validate();
@@ -989,7 +1094,7 @@ mod tests {
         #[test]
         fn test_validate_even_control_plane_fails() {
             let spec = NodeSpec {
-                control_plane: 2,
+                control_plane: cp(2),
                 worker_pools: std::collections::BTreeMap::from([("default".to_string(), pool(2))]),
             };
             let result = spec.validate();
@@ -1000,7 +1105,7 @@ mod tests {
         #[test]
         fn test_validate_pool_id_valid() {
             let spec = NodeSpec {
-                control_plane: 1,
+                control_plane: cp(1),
                 worker_pools: std::collections::BTreeMap::from([
                     ("general-purpose-pool".to_string(), pool(2)),
                     ("gpu2".to_string(), pool(1)),
@@ -1012,7 +1117,7 @@ mod tests {
         #[test]
         fn test_validate_pool_id_invalid_uppercase() {
             let spec = NodeSpec {
-                control_plane: 1,
+                control_plane: cp(1),
                 worker_pools: std::collections::BTreeMap::from([("GPU".to_string(), pool(2))]),
             };
             let result = spec.validate();
@@ -1026,11 +1131,66 @@ mod tests {
         #[test]
         fn test_validate_pool_id_invalid_starts_with_number() {
             let spec = NodeSpec {
-                control_plane: 1,
+                control_plane: cp(1),
                 worker_pools: std::collections::BTreeMap::from([("2gpu".to_string(), pool(2))]),
             };
             let result = spec.validate();
             assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_instance_type_named_serde() {
+            let it = InstanceType::Named("m5.xlarge".to_string());
+            let json = serde_json::to_string(&it).unwrap();
+            assert_eq!(json, r#""m5.xlarge""#);
+            let parsed: InstanceType = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.as_named(), Some("m5.xlarge"));
+            assert!(parsed.as_resources().is_none());
+        }
+
+        #[test]
+        fn test_instance_type_resources_serde() {
+            let it = InstanceType::Resources(NodeResourceSpec {
+                cores: 16,
+                memory_gib: 32,
+                disk_gib: 50,
+                sockets: 1,
+            });
+            let json = serde_json::to_string(&it).unwrap();
+            let parsed: InstanceType = serde_json::from_str(&json).unwrap();
+            assert!(parsed.as_named().is_none());
+            let res = parsed.as_resources().unwrap();
+            assert_eq!(res.cores, 16);
+            assert_eq!(res.memory_gib, 32);
+            assert_eq!(res.disk_gib, 50);
+            assert_eq!(res.sockets, 1);
+        }
+
+        #[test]
+        fn test_control_plane_spec_serde() {
+            let spec = ControlPlaneSpec {
+                replicas: 3,
+                instance_type: Some(InstanceType::Named("m5.xlarge".to_string())),
+                root_volume: Some(RootVolume {
+                    size_gb: 50,
+                    type_: Some("gp3".to_string()),
+                }),
+            };
+            let json = serde_json::to_string(&spec).unwrap();
+            let parsed: ControlPlaneSpec = serde_json::from_str(&json).unwrap();
+            assert_eq!(spec, parsed);
+        }
+
+        #[test]
+        fn test_root_volume_serde() {
+            let vol = RootVolume {
+                size_gb: 100,
+                type_: None,
+            };
+            let json = serde_json::to_string(&vol).unwrap();
+            assert!(!json.contains("type"));
+            let parsed: RootVolume = serde_json::from_str(&json).unwrap();
+            assert_eq!(vol, parsed);
         }
     }
 
@@ -1042,7 +1202,8 @@ mod tests {
             let pool = WorkerPoolSpec::default();
             assert_eq!(pool.replicas, 0);
             assert!(pool.display_name.is_none());
-            assert!(pool.node_class.is_none());
+            assert!(pool.instance_type.is_none());
+            assert!(pool.root_volume.is_none());
             assert!(pool.labels.is_empty());
             assert!(pool.taints.is_empty());
         }
@@ -1052,7 +1213,8 @@ mod tests {
             let pool = WorkerPoolSpec {
                 display_name: Some("GPU Workers".to_string()),
                 replicas: 3,
-                node_class: Some("gpu-large".to_string()),
+                instance_type: Some(InstanceType::Named("gpu-large".to_string())),
+                root_volume: None,
                 labels: std::collections::BTreeMap::from([(
                     "nvidia.com/gpu".to_string(),
                     "true".to_string(),
@@ -1326,12 +1488,6 @@ mod tests {
                     range: "10.0.0.101-120/24".to_string(),
                     gateway: "10.0.0.1".to_string(),
                 },
-                cp_cores: 4,
-                cp_memory_mib: 8192,
-                cp_disk_size_gb: 50,
-                worker_cores: 4,
-                worker_memory_mib: 8192,
-                worker_disk_size_gb: 100,
                 source_node: None,
                 template_id: None,
                 template_tags: None,
@@ -1354,8 +1510,6 @@ mod tests {
                 vmid_max: None,
                 skip_cloud_init_status: None,
                 skip_qemu_guest_agent: None,
-                cp_sockets: None,
-                worker_sockets: None,
             };
             let config = ProviderConfig::proxmox(proxmox);
             assert!(config.proxmox.is_some());
@@ -1367,8 +1521,6 @@ mod tests {
         fn test_aws_config() {
             let aws = AwsConfig {
                 region: "us-west-2".to_string(),
-                cp_instance_type: "m5.xlarge".to_string(),
-                worker_instance_type: "m5.large".to_string(),
                 ssh_key_name: "lattice-key".to_string(),
                 ..Default::default()
             };
@@ -1382,8 +1534,6 @@ mod tests {
         fn test_openstack_config() {
             let openstack = OpenStackConfig {
                 external_network: "ext-net".to_string(),
-                cp_flavor: "m1.large".to_string(),
-                worker_flavor: "m1.medium".to_string(),
                 image_name: "Ubuntu 22.04".to_string(),
                 ssh_key_name: "lattice-key".to_string(),
                 ..Default::default()
@@ -1480,8 +1630,6 @@ mod tests {
             let config = ProviderConfig {
                 aws: Some(AwsConfig {
                     region: "us-west-2".to_string(),
-                    cp_instance_type: "m5.xlarge".to_string(),
-                    worker_instance_type: "m5.large".to_string(),
                     ssh_key_name: "key".to_string(),
                     ..Default::default()
                 }),

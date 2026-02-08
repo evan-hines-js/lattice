@@ -294,7 +294,8 @@ impl LatticeCluster {
 mod tests {
     use super::*;
     use crate::crd::types::{
-        BootstrapProvider, KubernetesSpec, ProviderConfig, ServiceSpec, WorkerPoolSpec,
+        BootstrapProvider, ControlPlaneSpec, KubernetesSpec, ProviderConfig, ServiceSpec,
+        WorkerPoolSpec,
     };
 
     // =========================================================================
@@ -315,7 +316,11 @@ mod tests {
 
     fn sample_node_spec() -> NodeSpec {
         NodeSpec {
-            control_plane: 1,
+            control_plane: ControlPlaneSpec {
+                replicas: 1,
+                instance_type: None,
+                root_volume: None,
+            },
             worker_pools: std::collections::BTreeMap::from([(
                 "default".to_string(),
                 WorkerPoolSpec {
@@ -453,7 +458,11 @@ mod tests {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: NodeSpec {
-                control_plane: 0,
+                control_plane: ControlPlaneSpec {
+                    replicas: 0,
+                    instance_type: None,
+                    root_volume: None,
+                },
                 worker_pools: std::collections::BTreeMap::from([(
                     "default".to_string(),
                     WorkerPoolSpec {
@@ -597,7 +606,8 @@ provider:
   config:
     docker: {}
 nodes:
-  controlPlane: 1
+  controlPlane:
+    replicas: 1
   workerPools:
     default:
       replicas: 2
@@ -614,7 +624,7 @@ parentConfig:
             serde_json::from_value(value).expect("parent cluster YAML should parse successfully");
 
         assert!(spec.is_parent(), "Should be a parent cluster");
-        assert_eq!(spec.nodes.control_plane, 1);
+        assert_eq!(spec.nodes.control_plane.replicas, 1);
         assert_eq!(spec.nodes.total_workers(), 2);
         assert_eq!(spec.provider.kubernetes.version, "1.35.0");
         assert_eq!(
@@ -642,7 +652,8 @@ provider:
   config:
     docker: {}
 nodes:
-  controlPlane: 1
+  controlPlane:
+    replicas: 1
   workerPools:
     general:
       replicas: 3

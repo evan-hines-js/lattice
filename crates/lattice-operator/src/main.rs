@@ -350,7 +350,12 @@ async fn run_provider_slice(client: &kube::Client) -> anyhow::Result<SliceHandle
     // 3. Build controller futures (no Cedar, no cell infra)
     let controllers = controller_runner::build_provider_controllers(client.clone());
 
-    // 4. Start local secrets webhook (lightweight, harmless if no Local provider configured)
+    // 4. Ensure local webhook infrastructure (namespace, Service, ClusterSecretStore)
+    lattice_secrets_provider::ensure_local_webhook_infrastructure(client)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to ensure local webhook infrastructure: {e}"))?;
+
+    // 5. Start local secrets webhook
     tokio::spawn(lattice_secrets_provider::start_webhook_server(
         client.clone(),
     ));
@@ -414,7 +419,10 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
         client.clone(),
     ));
 
-    // Start local secrets webhook (lightweight, harmless if no Local provider configured)
+    // Ensure local webhook infrastructure + start webhook server
+    lattice_secrets_provider::ensure_local_webhook_infrastructure(client)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to ensure local webhook infrastructure: {e}"))?;
     tokio::spawn(lattice_secrets_provider::start_webhook_server(
         client.clone(),
     ));

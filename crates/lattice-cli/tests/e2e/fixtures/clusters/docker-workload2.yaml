@@ -22,7 +22,8 @@ spec:
     config:
       docker: {}
   nodes:
-    controlPlane: 1
+    controlPlane:
+      replicas: 1
     workerPools:
       default:
         replicas: 1

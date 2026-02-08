@@ -28,17 +28,20 @@ spec:
         dnsServers:
           - "10.0.0.1"
         virtualIpNetworkInterface: "ens18"
-        cpCores: 16
-        cpMemoryMib: 32768
-        cpDiskSizeGb: 50
-        workerCores: 16
-        workerMemoryMib: 32768
-        workerDiskSizeGb: 100
   nodes:
-    controlPlane: 1
+    controlPlane:
+      replicas: 1
+      instanceType:
+        cores: 16
+        memoryGib: 32
+        diskGib: 50
     workerPools:
       default:
         replicas: 1
+        instanceType:
+          cores: 16
+          memoryGib: 32
+          diskGib: 100
   parentConfig:
     # Must be in Cilium LB pool (auto-derived as 10.0.0.200/27 from gateway)
     host: "10.0.0.201"

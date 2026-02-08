@@ -16,12 +16,6 @@ pub struct AwsConfig {
     /// AWS region (e.g., "us-west-2")
     pub region: String,
 
-    /// EC2 instance type for control plane nodes (e.g., "m5.xlarge")
-    pub cp_instance_type: String,
-
-    /// EC2 instance type for worker nodes (e.g., "m5.large")
-    pub worker_instance_type: String,
-
     /// SSH key name registered in AWS for node access
     pub ssh_key_name: String,
 
@@ -55,22 +49,6 @@ pub struct AwsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_load_balancer: Option<bool>,
 
-    /// Root volume size in GB for control plane (default: 80)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_root_volume_size_gb: Option<u32>,
-
-    /// Root volume type for control plane (e.g., "gp3", "io1")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_root_volume_type: Option<String>,
-
-    /// Root volume size in GB for workers (default: 80)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_root_volume_size_gb: Option<u32>,
-
-    /// Root volume type for workers
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_root_volume_type: Option<String>,
-
     /// AMI ID for nodes (CAPA uses latest Ubuntu if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ami_id: Option<String>,
@@ -95,8 +73,6 @@ mod tests {
     fn minimal_config() {
         let yaml = r#"
 region: us-east-1
-cpInstanceType: m5.xlarge
-workerInstanceType: m5.large
 sshKeyName: default
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
@@ -109,8 +85,6 @@ sshKeyName: default
     fn byoi_config() {
         let yaml = r#"
 region: us-west-2
-cpInstanceType: m5.xlarge
-workerInstanceType: m5.large
 sshKeyName: lattice-key
 vpcId: vpc-0425c335226437144
 subnetIds:
@@ -128,18 +102,12 @@ subnetIds:
     fn full_managed_config() {
         let yaml = r#"
 region: eu-west-1
-cpInstanceType: m5.2xlarge
-workerInstanceType: m5.xlarge
 sshKeyName: lattice-key
 loadBalancerType: nlb
-cpRootVolumeSizeGb: 100
-cpRootVolumeType: gp3
-workerRootVolumeSizeGb: 200
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let config: AwsConfig = serde_json::from_value(value).expect("deserialization");
         assert!(!config.is_byoi());
-        assert_eq!(config.cp_root_volume_size_gb, Some(100));
         assert_eq!(config.load_balancer_type, Some("nlb".to_string()));
     }
 
@@ -147,8 +115,6 @@ workerRootVolumeSizeGb: 200
     fn private_cluster_config() {
         let yaml = r#"
 region: us-west-2
-cpInstanceType: m5.xlarge
-workerInstanceType: m5.large
 sshKeyName: lattice-key
 internalLoadBalancer: true
 "#;
