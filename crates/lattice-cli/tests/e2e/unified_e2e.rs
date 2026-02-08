@@ -24,8 +24,10 @@
 
 #![cfg(feature = "provider-e2e")]
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Semaphore;
 use tracing::info;
 
 use super::context::init_e2e_test;
@@ -33,6 +35,7 @@ use super::helpers::{
     run_id, teardown_mgmt_cluster, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
 use super::integration::{self, setup};
+use super::providers::InfraProvider;
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(3600);
 
@@ -127,77 +130,111 @@ async fn run_full_e2e() -> Result<(), String> {
     }
 
     // =========================================================================
-    // Phase 7: Run mesh + secrets + Cedar secret tests + delete workload2 (parallel)
+    // Phase 7: Run mesh + secrets + Cedar secret tests + delete workload2 (pool)
     // =========================================================================
     if ctx.has_workload2() {
-        info!("[Phase 7] Running mesh/secrets/cedar tests + deleting workload2...");
+        info!("[Phase 7] Running mesh/secrets/cedar tests + deleting workload2 (pool=3)...");
     } else {
-        info!("[Phase 7] Running mesh/secrets/cedar tests (workload2 disabled)...");
+        info!("[Phase 7] Running mesh/secrets/cedar tests (pool=3, workload2 disabled)...");
     }
 
-    // Start mesh tests in background
-    let mesh_handle = if integration::mesh::mesh_tests_enabled() {
-        let is_docker = integration::mesh::is_docker_provider(&ctx);
-        Some(integration::mesh::start_mesh_tests_async(&ctx, is_docker).await?)
-    } else {
-        None
-    };
+    // Limit concurrent proxy load — at most 3 tasks run simultaneously
+    // (some tasks may spawn internal concurrency, e.g. secrets runs up to 3 sub-tests)
+    let pool = Arc::new(Semaphore::new(3));
+    let mut handles: Vec<(&str, tokio::task::JoinHandle<Result<(), String>>)> = Vec::new();
 
-    // Start secrets tests in background
-    info!("[Phase 7] Starting secrets tests...");
-    let secrets_handle = Some(integration::secrets::start_secrets_tests_async(&ctx).await?);
-
-    // Start Cedar secret authorization tests in background
-    info!("[Phase 7] Starting Cedar secret authorization tests...");
-    let cedar_handle =
-        Some(integration::cedar_secrets::start_cedar_secret_tests_async(&ctx).await?);
-
-    // Start workload2 deletion in background (if workload2 exists)
-    let delete_handle = if ctx.has_workload2() {
-        Some(integration::pivot::start_cluster_deletion_async(
-            ctx.require_workload2()?.to_string(),
-            ctx.require_workload()?.to_string(),
-            WORKLOAD2_CLUSTER_NAME.to_string(),
-            ctx.provider,
-        ))
-    } else {
-        None
-    };
-
-    // Wait for mesh tests
-    if let Some(handle) = mesh_handle {
-        info!("[Phase 7] Waiting for mesh tests to complete...");
-        handle
-            .await
-            .map_err(|e| format!("Mesh test task panicked: {}", e))??;
-        info!("SUCCESS: Mesh tests complete!");
+    // Mesh: fixed test
+    if integration::mesh::mesh_tests_enabled() {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Fixed mesh",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                super::mesh_tests::run_mesh_test(&kc).await
+            }),
+        ));
     }
 
-    // Wait for secrets tests
-    if let Some(handle) = secrets_handle {
-        info!("[Phase 7] Waiting for secrets tests to complete...");
-        handle
-            .await
-            .map_err(|e| format!("Secrets test task panicked: {}", e))??;
-        info!("SUCCESS: Secrets tests complete!");
+    // Mesh: random test
+    if integration::mesh::mesh_tests_enabled() {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Random mesh",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                super::mesh_tests::run_random_mesh_test(&kc).await
+            }),
+        ));
     }
 
-    // Wait for Cedar secret authorization tests
-    if let Some(handle) = cedar_handle {
-        info!("[Phase 7] Waiting for Cedar secret tests to complete...");
-        handle
-            .await
-            .map_err(|e| format!("Cedar secret test task panicked: {}", e))??;
-        info!("SUCCESS: Cedar secret authorization tests verified!");
+    // Mesh: media server test (Docker only)
+    if integration::mesh::mesh_tests_enabled() && ctx.provider == InfraProvider::Docker {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Media server",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                super::media_server_e2e::run_media_server_test(&kc).await
+            }),
+        ));
     }
 
-    // Wait for workload2 deletion (if started)
-    if let Some(handle) = delete_handle {
-        info!("[Phase 7] Waiting for workload2 deletion...");
+    // Secrets tests
+    {
+        let ctx2 = ctx.clone();
+        let sem = pool.clone();
+        handles.push((
+            "Secrets",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::secrets::run_secrets_tests(&ctx2).await
+            }),
+        ));
+    }
+
+    // Cedar secret authorization tests
+    {
+        let ctx2 = ctx.clone();
+        let sem = pool.clone();
+        handles.push((
+            "Cedar secrets",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::cedar_secrets::run_cedar_secret_tests(&ctx2).await
+            }),
+        ));
+    }
+
+    // Workload2 deletion (if exists)
+    if ctx.has_workload2() {
+        let child_kc = ctx.require_workload2()?.to_string();
+        let parent_kc = ctx.require_workload()?.to_string();
+        let provider = ctx.provider;
+        let sem = pool.clone();
+        handles.push((
+            "Workload2 deletion",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::pivot::delete_and_verify_unpivot(
+                    &child_kc,
+                    &parent_kc,
+                    WORKLOAD2_CLUSTER_NAME,
+                    provider,
+                )
+                .await
+            }),
+        ));
+    }
+
+    // Wait for all tasks
+    for (name, handle) in handles {
         handle
             .await
-            .map_err(|e| format!("Delete task panicked: {}", e))??;
-        info!("SUCCESS: Workload2 deleted and unpivoted!");
+            .map_err(|e| format!("{} task panicked: {}", name, e))??;
+        info!("SUCCESS: {} complete!", name);
     }
 
     // =========================================================================

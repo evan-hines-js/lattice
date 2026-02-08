@@ -2362,6 +2362,7 @@ dependencies = [
  "chrono",
  "kube",
  "lattice-common",
+ "lattice-secrets-provider",
  "serde_json",
  "tokio",
  "tracing",

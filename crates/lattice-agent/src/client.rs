@@ -872,14 +872,14 @@ impl AgentClient {
                     ))
                 })?;
 
-            let secret_ref = cp.spec.credentials_secret_ref.as_ref().ok_or_else(|| {
+            let secret_ref = cp.k8s_secret_ref().ok_or_else(|| {
                 std::io::Error::other(format!(
-                    "CloudProvider '{}' missing credentials_secret_ref",
+                    "CloudProvider '{}' missing credentials",
                     cluster.spec.provider_ref
                 ))
             })?;
 
-            copy_credentials_to_provider_namespace(&client, infrastructure, secret_ref)
+            copy_credentials_to_provider_namespace(&client, infrastructure, &secret_ref)
                 .await
                 .map_err(|e| {
                     std::io::Error::other(format!("Failed to copy provider credentials: {}", e))

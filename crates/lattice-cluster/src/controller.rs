@@ -1731,6 +1731,8 @@ mod tests {
                 provider_type: CloudProviderType::Docker,
                 region: None,
                 credentials_secret_ref: None,
+                credentials: None,
+                credential_data: None,
                 aws: None,
                 proxmox: None,
                 openstack: None,

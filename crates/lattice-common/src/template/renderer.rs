@@ -222,6 +222,81 @@ pub struct RenderedVolume {
     pub read_only: Option<bool>,
 }
 
+/// Extract `${secret.RESOURCE.KEY}` references from content and replace with ESO Go templates.
+///
+/// In **normal mode** (`reverse_expand = false`):
+///   `${secret.RESOURCE.KEY}` → `{{ .RESOURCE_KEY }}`
+///
+/// In **reverse mode** (`reverse_expand = true`):
+///   `$${secret.RESOURCE.KEY}` → `{{ .RESOURCE_KEY }}`
+///   `${secret.RESOURCE.KEY}` stays literal (it's a shell variable)
+///
+/// Returns the modified content plus a list of `FileSecretRef` entries.
+pub fn extract_secret_refs(content: &str, reverse_expand: bool) -> (String, Vec<FileSecretRef>) {
+    // In reverse mode, the secret prefix is `$${secret.` (3 extra chars)
+    let prefix = if reverse_expand {
+        "$${secret."
+    } else {
+        "${secret."
+    };
+
+    let mut result = String::with_capacity(content.len());
+    let mut refs = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut remaining = content;
+
+    while let Some(start) = remaining.find(prefix) {
+        // Copy everything before this match
+        result.push_str(&remaining[..start]);
+
+        let after_prefix = &remaining[start + prefix.len()..];
+        if let Some(end) = after_prefix.find('}') {
+            let inner = &after_prefix[..end];
+            if let Some(ref_data) = parse_secret_ref_inner(inner) {
+                let (resource, key, eso_data_key) = ref_data;
+
+                if seen_keys.insert(eso_data_key.clone()) {
+                    refs.push(FileSecretRef {
+                        resource_name: resource,
+                        key,
+                        eso_data_key: eso_data_key.clone(),
+                    });
+                }
+
+                result.push_str(&format!("{{{{ .{} }}}}", eso_data_key));
+                remaining = &after_prefix[end + 1..];
+                continue;
+            }
+            // Not a valid secret ref, keep as-is
+            result.push_str(&remaining[..start + prefix.len() + end + 1]);
+            remaining = &after_prefix[end + 1..];
+        } else {
+            // No closing brace, keep rest as-is (from the match position onward)
+            result.push_str(&remaining[start..]);
+            remaining = "";
+        }
+    }
+
+    result.push_str(remaining);
+    (result, refs)
+}
+
+/// Parse the inner part of a secret ref (`RESOURCE.KEY`) into
+/// `(resource_name, key, eso_data_key)` or `None` if invalid.
+pub fn parse_secret_ref_inner(inner: &str) -> Option<(String, String, String)> {
+    let dot = inner.find('.')?;
+    let resource = &inner[..dot];
+    let key = &inner[dot + 1..];
+
+    if resource.is_empty() || key.is_empty() || key.contains('.') {
+        return None;
+    }
+
+    let eso_data_key = format!("{}_{}", resource.replace('-', "_"), key.replace('-', "_"));
+
+    Some((resource.to_string(), key.to_string(), eso_data_key))
+}
+
 /// Template renderer for LatticeService specs
 pub struct TemplateRenderer {
     engine: TemplateEngine,
@@ -355,8 +430,7 @@ impl TemplateRenderer {
             // Case 2: Mixed content with ${secret.*} — extract secrets, render
             // non-secret parts, produce ESO Go template content
             if template_str.contains("${secret.") {
-                let (preprocessed, refs) =
-                    Self::extract_secret_refs_from_content(template_str, false);
+                let (preprocessed, refs) = extract_secret_refs(template_str, false);
                 let rendered = self.engine.render(&preprocessed, ctx)?;
                 eso_templated_variables.insert(
                     k.clone(),
@@ -463,8 +537,7 @@ impl TemplateRenderer {
                 // In normal mode: `${secret.*}` is the secret syntax
                 // In reverse mode: `$${secret.*}` is the secret syntax
                 //   (because `$${...}` means "expand this Lattice template")
-                let (preprocessed, refs) =
-                    Self::extract_secret_refs_from_content(raw, reverse_expand);
+                let (preprocessed, refs) = extract_secret_refs(raw, reverse_expand);
                 secret_refs = refs;
                 let rendered =
                     self.render_file_content(&preprocessed, ctx, false, reverse_expand)?;
@@ -487,84 +560,6 @@ impl TemplateRenderer {
             mode: file.mode.clone(),
             secret_refs,
         })
-    }
-
-    /// Extract secret references from content and replace with ESO Go templates.
-    ///
-    /// In **normal mode** (`reverse_expand = false`):
-    ///   `${secret.RESOURCE.KEY}` → `{{ .RESOURCE_KEY }}`
-    ///
-    /// In **reverse mode** (`reverse_expand = true`):
-    ///   `$${secret.RESOURCE.KEY}` → `{{ .RESOURCE_KEY }}`
-    ///   `${secret.RESOURCE.KEY}` stays literal (it's a shell variable)
-    ///
-    /// Returns the modified content plus a list of `FileSecretRef` entries.
-    fn extract_secret_refs_from_content(
-        content: &str,
-        reverse_expand: bool,
-    ) -> (String, Vec<FileSecretRef>) {
-        // In reverse mode, the secret prefix is `$${secret.` (3 extra chars)
-        let prefix = if reverse_expand {
-            "$${secret."
-        } else {
-            "${secret."
-        };
-
-        let mut result = String::with_capacity(content.len());
-        let mut refs = Vec::new();
-        let mut seen_keys = std::collections::HashSet::new();
-        let mut remaining = content;
-
-        while let Some(start) = remaining.find(prefix) {
-            // Copy everything before this match
-            result.push_str(&remaining[..start]);
-
-            let after_prefix = &remaining[start + prefix.len()..];
-            if let Some(end) = after_prefix.find('}') {
-                let inner = &after_prefix[..end];
-                if let Some(ref_data) = Self::parse_secret_ref_inner(inner) {
-                    let (resource, key, eso_data_key) = ref_data;
-
-                    if seen_keys.insert(eso_data_key.clone()) {
-                        refs.push(FileSecretRef {
-                            resource_name: resource,
-                            key,
-                            eso_data_key: eso_data_key.clone(),
-                        });
-                    }
-
-                    result.push_str(&format!("{{{{ .{} }}}}", eso_data_key));
-                    remaining = &after_prefix[end + 1..];
-                    continue;
-                }
-                // Not a valid secret ref, keep as-is
-                result.push_str(&remaining[..start + prefix.len() + end + 1]);
-                remaining = &after_prefix[end + 1..];
-            } else {
-                // No closing brace, keep rest as-is (from the match position onward)
-                result.push_str(&remaining[start..]);
-                remaining = "";
-            }
-        }
-
-        result.push_str(remaining);
-        (result, refs)
-    }
-
-    /// Parse the inner part of a secret ref (`RESOURCE.KEY`) into
-    /// (resource_name, key, eso_data_key) or None if invalid.
-    fn parse_secret_ref_inner(inner: &str) -> Option<(String, String, String)> {
-        let dot = inner.find('.')?;
-        let resource = &inner[..dot];
-        let key = &inner[dot + 1..];
-
-        if resource.is_empty() || key.is_empty() || key.contains('.') {
-            return None;
-        }
-
-        let eso_data_key = format!("{}_{}", resource.replace('-', "_"), key.replace('-', "_"));
-
-        Some((resource.to_string(), key.to_string(), eso_data_key))
     }
 
     /// Render file content with expansion options
@@ -1636,7 +1631,7 @@ mod tests {
     fn test_extract_secret_refs_from_content() {
         let content =
             "database:\n  host: ${resources.db.host}\n  password: ${secret.db-creds.password}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].resource_name, "db-creds");
@@ -1652,7 +1647,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_multiple() {
         let content = "user=${secret.db.username} pass=${secret.db.password}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert_eq!(refs.len(), 2);
         assert!(result.contains("{{ .db_username }}"));
@@ -1662,7 +1657,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_deduplicates() {
         let content = "${secret.db.pass} and again ${secret.db.pass}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         // Should only have one ref even though the pattern appears twice
         assert_eq!(refs.len(), 1);
@@ -1673,7 +1668,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_no_secrets() {
         let content = "just ${resources.db.host} and ${config.key}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert!(refs.is_empty());
         assert_eq!(result, content);
@@ -1682,7 +1677,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_at_start_of_content() {
         let content = "${secret.db.pass} is the password";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert_eq!(refs.len(), 1);
         assert_eq!(result, "{{ .db_pass }} is the password");
@@ -1691,7 +1686,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_at_end_of_content() {
         let content = "password: ${secret.db.pass}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert_eq!(refs.len(), 1);
         assert_eq!(result, "password: {{ .db_pass }}");
@@ -1700,7 +1695,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_entire_content() {
         let content = "${secret.db.pass}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert_eq!(refs.len(), 1);
         assert_eq!(result, "{{ .db_pass }}");
@@ -1709,7 +1704,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_adjacent() {
         let content = "${secret.db.user}${secret.db.pass}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert_eq!(refs.len(), 2);
         assert_eq!(result, "{{ .db_user }}{{ .db_pass }}");
@@ -1718,7 +1713,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_hyphenated_resource_name() {
         let content = "${secret.my-db-creds.password}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].resource_name, "my-db-creds");
@@ -1731,7 +1726,7 @@ mod tests {
     fn test_extract_secret_refs_ignores_nested_dots() {
         // ${secret.db.nested.key} has too many dots — not a valid secret ref
         let content = "${secret.db.nested.key}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         // Should not be parsed (key contains a dot)
         assert!(refs.is_empty());
@@ -1742,7 +1737,7 @@ mod tests {
     fn test_extract_secret_refs_empty_parts() {
         // ${secret..key} is invalid
         let content = "${secret..key}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert!(refs.is_empty());
         assert_eq!(result, content);
@@ -1751,7 +1746,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_no_closing_brace() {
         let content = "before ${secret.db.pass and after";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert!(refs.is_empty());
         assert_eq!(result, content);
@@ -1760,7 +1755,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_mixed_with_other_templates() {
         let content = "host=${resources.db.host} port=${resources.db.port} pass=${secret.creds.pw}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].resource_name, "creds");
@@ -1775,7 +1770,7 @@ mod tests {
     fn test_extract_secret_refs_multiline() {
         let content =
             "database:\n  host: ${resources.db.host}\n  password: ${secret.db.pass}\n  port: 5432";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert_eq!(refs.len(), 1);
         assert!(result.contains("host: ${resources.db.host}"));
@@ -1786,7 +1781,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_from_different_resources() {
         let content = "${secret.db.pass} and ${secret.api.key}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
 
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].resource_name, "db");
@@ -1798,7 +1793,7 @@ mod tests {
 
     #[test]
     fn test_extract_secret_refs_empty_content() {
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content("", false);
+        let (result, refs) = extract_secret_refs("", false);
         assert!(refs.is_empty());
         assert_eq!(result, "");
     }
@@ -1806,7 +1801,7 @@ mod tests {
     #[test]
     fn test_extract_secret_refs_plain_text() {
         let content = "just plain text without any templates";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, false);
+        let (result, refs) = extract_secret_refs(content, false);
         assert!(refs.is_empty());
         assert_eq!(result, content);
     }
@@ -1819,7 +1814,7 @@ mod tests {
     fn test_extract_secret_refs_reverse_mode_double_dollar() {
         // In reverse mode, $${secret.*} is the Lattice template syntax
         let content = "pass=$${secret.db.password}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, true);
+        let (result, refs) = extract_secret_refs(content, true);
 
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].resource_name, "db");
@@ -1831,7 +1826,7 @@ mod tests {
     fn test_extract_secret_refs_reverse_mode_single_dollar_stays_literal() {
         // In reverse mode, ${secret.*} should stay literal (bash variable)
         let content = "pass=${secret.db.password}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, true);
+        let (result, refs) = extract_secret_refs(content, true);
 
         assert!(refs.is_empty());
         assert_eq!(result, content);
@@ -1841,7 +1836,7 @@ mod tests {
     fn test_extract_secret_refs_reverse_mode_mixed() {
         // Mix of reverse-mode Lattice templates and bash variables
         let content = "DB_PASS=$${secret.db.password}\nSHELL_VAR=${SOME_BASH_VAR}";
-        let (result, refs) = TemplateRenderer::extract_secret_refs_from_content(content, true);
+        let (result, refs) = extract_secret_refs(content, true);
 
         assert_eq!(refs.len(), 1);
         // $${secret.*} replaced with Go template

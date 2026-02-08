@@ -475,6 +475,151 @@ pub struct ExternalSecretExtract {
 }
 
 // =============================================================================
+// Shared ExternalSecret Builders
+// =============================================================================
+
+use lattice_common::template::FileSecretRef;
+
+/// Build an ExternalSecret that syncs from a ClusterSecretStore.
+///
+/// - `keys` is `Some` → `spec.data` entries with `RemoteRef::with_property()` per key
+/// - `keys` is `None` → `spec.dataFrom` extract (all keys)
+pub fn build_external_secret(
+    name: &str,
+    namespace: &str,
+    store_name: &str,
+    remote_key: &str,
+    keys: Option<&[String]>,
+    refresh_interval: Option<String>,
+) -> ExternalSecret {
+    let data = match keys {
+        Some(keys) => keys
+            .iter()
+            .map(|key| {
+                ExternalSecretData::new(key.clone(), RemoteRef::with_property(remote_key, key))
+            })
+            .collect(),
+        None => vec![],
+    };
+
+    let data_from = if keys.is_none() {
+        Some(vec![ExternalSecretDataFrom {
+            extract: Some(ExternalSecretExtract {
+                key: remote_key.to_string(),
+            }),
+        }])
+    } else {
+        None
+    };
+
+    ExternalSecret::new(
+        name,
+        namespace,
+        ExternalSecretSpec {
+            secret_store_ref: SecretStoreRef::cluster_secret_store(store_name),
+            target: ExternalSecretTarget::new(name),
+            data,
+            data_from,
+            refresh_interval,
+        },
+    )
+}
+
+/// Build an ExternalSecret with `target.template` for `${secret.*}` rendering.
+///
+/// `template_data`: key → rendered Go template content (e.g., `"password: {{ .creds_password }}"`)
+/// `file_refs`: parsed `FileSecretRef`s from `extract_secret_refs()`
+/// `available_keys`: if `Some`, validates each ref's key exists in this list
+pub fn build_templated_external_secret(
+    name: &str,
+    namespace: &str,
+    store_name: &str,
+    remote_key: &str,
+    available_keys: Option<&[String]>,
+    template_data: BTreeMap<String, String>,
+    file_refs: &[FileSecretRef],
+) -> Result<ExternalSecret, String> {
+    let mut eso_data: Vec<ExternalSecretData> = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
+
+    for fref in file_refs {
+        if !seen_keys.insert(fref.eso_data_key.clone()) {
+            continue;
+        }
+
+        if let Some(keys) = available_keys {
+            if !keys.contains(&fref.key) {
+                return Err(format!(
+                    "secret reference uses key '{}' but available keys are: {:?}",
+                    fref.key, keys
+                ));
+            }
+        }
+
+        eso_data.push(ExternalSecretData::new(
+            &fref.eso_data_key,
+            RemoteRef::with_property(remote_key, &fref.key),
+        ));
+    }
+
+    Ok(ExternalSecret::new(
+        name,
+        namespace,
+        ExternalSecretSpec {
+            secret_store_ref: SecretStoreRef::cluster_secret_store(store_name),
+            target: ExternalSecretTarget::with_template(
+                name,
+                ExternalSecretTemplate::new(template_data),
+            ),
+            data: eso_data,
+            data_from: None,
+            refresh_interval: Some("1h".to_string()),
+        },
+    ))
+}
+
+/// Apply an ExternalSecret to the cluster via server-side apply.
+pub async fn apply_external_secret(
+    client: &kube::Client,
+    external_secret: &ExternalSecret,
+    field_manager: &str,
+) -> Result<(), lattice_common::ReconcileError> {
+    use kube::api::{Api, DynamicObject, Patch, PatchParams};
+    use lattice_common::kube_utils::HasApiResource;
+
+    let es_json = serde_json::to_value(external_secret).map_err(|e| {
+        lattice_common::ReconcileError::Internal(format!("failed to serialize ExternalSecret: {e}"))
+    })?;
+
+    let api_resource = ExternalSecret::api_resource();
+    let es_api: Api<DynamicObject> = Api::namespaced_with(
+        client.clone(),
+        &external_secret.metadata.namespace,
+        &api_resource,
+    );
+    let es_obj: DynamicObject = serde_json::from_value(es_json).map_err(|e| {
+        lattice_common::ReconcileError::Internal(format!("failed to build ExternalSecret: {e}"))
+    })?;
+
+    let params = PatchParams::apply(field_manager).force();
+    es_api
+        .patch(
+            &external_secret.metadata.name,
+            &params,
+            &Patch::Apply(&es_obj),
+        )
+        .await
+        .map_err(|e| {
+            lattice_common::ReconcileError::Kube(format!(
+                "failed to apply ExternalSecret '{}': {e}",
+                external_secret.metadata.name
+            ))
+        })?;
+
+    Ok(())
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -650,5 +795,145 @@ mod tests {
         let json = r#"{"url":"http://example.com","result":{"jsonPath":"$"}}"#;
         let parsed: WebhookProvider = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.method, "GET");
+    }
+
+    // =========================================================================
+    // Shared Builder Tests
+    // =========================================================================
+
+    #[test]
+    fn test_build_external_secret_with_keys() {
+        let keys = vec!["username".to_string(), "password".to_string()];
+        let es = build_external_secret(
+            "my-secret",
+            "prod",
+            "vault-prod",
+            "database/prod/creds",
+            Some(&keys),
+            Some("1h".to_string()),
+        );
+
+        assert_eq!(es.metadata.name, "my-secret");
+        assert_eq!(es.metadata.namespace, "prod");
+        assert_eq!(es.spec.secret_store_ref.name, "vault-prod");
+        assert_eq!(es.spec.data.len(), 2);
+        assert_eq!(es.spec.data[0].secret_key, "username");
+        assert_eq!(es.spec.data[0].remote_ref.key, "database/prod/creds");
+        assert_eq!(
+            es.spec.data[0].remote_ref.property,
+            Some("username".to_string())
+        );
+        assert!(es.spec.data_from.is_none());
+        assert_eq!(es.spec.refresh_interval, Some("1h".to_string()));
+    }
+
+    #[test]
+    fn test_build_external_secret_without_keys() {
+        let es = build_external_secret("my-secret", "prod", "vault", "path/to/secrets", None, None);
+
+        assert!(es.spec.data.is_empty());
+        assert!(es.spec.data_from.is_some());
+        let data_from = es.spec.data_from.as_ref().unwrap();
+        assert_eq!(data_from.len(), 1);
+        assert_eq!(
+            data_from[0].extract.as_ref().unwrap().key,
+            "path/to/secrets"
+        );
+        assert!(es.spec.refresh_interval.is_none());
+    }
+
+    #[test]
+    fn test_build_templated_external_secret() {
+        let mut template_data = BTreeMap::new();
+        template_data.insert(
+            "config.yaml".to_string(),
+            "password: {{ .creds_password }}".to_string(),
+        );
+
+        let refs = vec![FileSecretRef {
+            resource_name: "creds".to_string(),
+            key: "password".to_string(),
+            eso_data_key: "creds_password".to_string(),
+        }];
+
+        let es = build_templated_external_secret(
+            "my-files",
+            "prod",
+            "vault",
+            "database/prod/creds",
+            None,
+            template_data,
+            &refs,
+        )
+        .unwrap();
+
+        assert_eq!(es.metadata.name, "my-files");
+        assert_eq!(es.spec.data.len(), 1);
+        assert_eq!(es.spec.data[0].secret_key, "creds_password");
+        assert!(es.spec.target.template.is_some());
+        let template = es.spec.target.template.as_ref().unwrap();
+        assert!(template.data.contains_key("config.yaml"));
+    }
+
+    #[test]
+    fn test_build_templated_validates_keys() {
+        let mut template_data = BTreeMap::new();
+        template_data.insert("key".to_string(), "{{ .creds_badkey }}".to_string());
+
+        let refs = vec![FileSecretRef {
+            resource_name: "creds".to_string(),
+            key: "badkey".to_string(),
+            eso_data_key: "creds_badkey".to_string(),
+        }];
+
+        let available = vec!["password".to_string()];
+        let result = build_templated_external_secret(
+            "my-files",
+            "prod",
+            "vault",
+            "database/prod/creds",
+            Some(&available),
+            template_data,
+            &refs,
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("badkey"));
+    }
+
+    #[test]
+    fn test_build_templated_deduplicates_refs() {
+        let mut template_data = BTreeMap::new();
+        template_data.insert(
+            "config".to_string(),
+            "{{ .db_pass }} and {{ .db_pass }}".to_string(),
+        );
+
+        let refs = vec![
+            FileSecretRef {
+                resource_name: "db".to_string(),
+                key: "pass".to_string(),
+                eso_data_key: "db_pass".to_string(),
+            },
+            FileSecretRef {
+                resource_name: "db".to_string(),
+                key: "pass".to_string(),
+                eso_data_key: "db_pass".to_string(),
+            },
+        ];
+
+        let es = build_templated_external_secret(
+            "my-files",
+            "prod",
+            "vault",
+            "db/creds",
+            None,
+            template_data,
+            &refs,
+        )
+        .unwrap();
+
+        // Should deduplicate to 1 data entry
+        assert_eq!(es.spec.data.len(), 1);
     }
 }

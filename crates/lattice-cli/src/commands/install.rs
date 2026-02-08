@@ -895,6 +895,8 @@ impl Installer {
                 provider_type,
                 region,
                 credentials_secret_ref,
+                credentials: None,
+                credential_data: None,
                 aws: None,
                 proxmox: None,
                 openstack: None,

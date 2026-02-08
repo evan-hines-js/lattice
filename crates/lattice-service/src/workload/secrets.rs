@@ -6,10 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_secrets_provider::{
-    ExternalSecret, ExternalSecretData, ExternalSecretDataFrom, ExternalSecretExtract,
-    ExternalSecretSpec, ExternalSecretTarget, RemoteRef, SecretStoreRef,
-};
+use lattice_secrets_provider::{build_external_secret, ExternalSecret};
 
 use super::error::CompilationError;
 use crate::crd::LatticeServiceSpec;
@@ -113,39 +110,13 @@ impl SecretsCompiler {
                 .secret_k8s_name(service_name, resource_name)
                 .unwrap_or_else(|| format!("{}-{}", service_name, resource_name));
 
-            let data = match &params.keys {
-                Some(keys) => keys
-                    .iter()
-                    .map(|key| {
-                        ExternalSecretData::new(
-                            key.clone(),
-                            RemoteRef::with_property(&remote_key, key),
-                        )
-                    })
-                    .collect(),
-                None => vec![],
-            };
-
-            let data_from = if params.keys.is_none() {
-                Some(vec![ExternalSecretDataFrom {
-                    extract: Some(ExternalSecretExtract {
-                        key: remote_key.clone(),
-                    }),
-                }])
-            } else {
-                None
-            };
-
-            let external_secret = ExternalSecret::new(
+            let external_secret = build_external_secret(
                 &k8s_secret_name,
                 namespace,
-                ExternalSecretSpec {
-                    secret_store_ref: SecretStoreRef::cluster_secret_store(&params.provider),
-                    target: ExternalSecretTarget::new(&k8s_secret_name),
-                    data,
-                    data_from,
-                    refresh_interval: params.refresh_interval,
-                },
+                &params.provider,
+                &remote_key,
+                params.keys.as_deref(),
+                params.refresh_interval.clone(),
             );
 
             output.external_secrets.push(external_secret);

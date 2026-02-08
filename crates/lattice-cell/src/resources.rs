@@ -68,8 +68,8 @@ pub async fn fetch_distributable_resources(
     if let Some(cp_list) = list_crd_optional(&cp_api, &lp, "CloudProvider").await? {
         for cp in &cp_list.items {
             cloud_providers.push(serialize_for_distribution(cp)?);
-            if let Some(ref secret_ref) = cp.spec.credentials_secret_ref {
-                secret_names.insert(secret_ref.name.clone());
+            if let Some(secret_ref) = cp.k8s_secret_ref() {
+                secret_names.insert(secret_ref.name);
             }
         }
     }
@@ -221,6 +221,8 @@ mod tests {
                 provider_type: CloudProviderType::Docker,
                 region: None,
                 credentials_secret_ref: None,
+                credentials: None,
+                credential_data: None,
                 aws: None,
                 proxmox: None,
                 openstack: None,

@@ -2,12 +2,14 @@
 //!
 //! A CloudProvider represents a named cloud account that clusters can reference.
 
-use kube::CustomResource;
+use kube::{CustomResource, ResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use super::service::ResourceSpec;
 use super::types::SecretRef;
+use crate::LATTICE_SYSTEM_NAMESPACE;
 
 /// CloudProvider defines a cloud account/region that clusters can be deployed to.
 ///
@@ -48,10 +50,24 @@ pub struct CloudProviderSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
 
-    /// Reference to secret containing provider credentials
-    /// Optional for Docker provider, required for cloud providers
+    /// Reference to secret containing provider credentials.
+    /// Manual mode: operator creates a K8s Secret and references it here.
+    /// Mutually exclusive with `credentials`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_secret_ref: Option<SecretRef>,
+
+    /// ESO-managed credential source. Same ResourceSpec as LatticeService secrets.
+    /// The controller creates an ExternalSecret that syncs credentials from a
+    /// ClusterSecretStore. Mutually exclusive with `credentialsSecretRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<ResourceSpec>,
+
+    /// Template data for shaping credentials using `${secret.*}` syntax.
+    /// Each key becomes a key in the resulting K8s Secret.
+    /// Values can use `${secret.credentials.KEY}` to inject secret values.
+    /// Only valid when `credentials` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_data: Option<BTreeMap<String, String>>,
 
     /// AWS-specific configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,15 +197,32 @@ impl CloudProvider {
         self.spec.region.as_deref()
     }
 
-    /// Get the credentials secret reference
-    pub fn credentials_secret_ref(&self) -> Option<&SecretRef> {
-        self.spec.credentials_secret_ref.as_ref()
+    /// Resolve the K8s Secret that contains provider credentials.
+    ///
+    /// - ESO mode (`credentials` set): returns a synthetic ref pointing to the
+    ///   ESO-synced secret `{name}-credentials` in `lattice-system`.
+    /// - Manual mode (`credentialsSecretRef` set): returns the user-provided ref.
+    /// - Neither set: returns `None`.
+    pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
+        if self.spec.credentials.is_some() {
+            Some(SecretRef {
+                name: format!("{}-credentials", self.name_any()),
+                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
+            })
+        } else {
+            self.spec.credentials_secret_ref.clone()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crd::ResourceType;
+
+    fn make_provider(name: &str, spec: CloudProviderSpec) -> CloudProvider {
+        CloudProvider::new(name, spec)
+    }
 
     #[test]
     fn aws_provider_yaml() {
@@ -234,5 +267,169 @@ spec:
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let provider: CloudProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type, CloudProviderType::Proxmox);
+    }
+
+    // =========================================================================
+    // k8s_secret_ref() Tests
+    // =========================================================================
+
+    #[test]
+    fn k8s_secret_ref_manual_mode() {
+        let cp = make_provider(
+            "aws-prod",
+            CloudProviderSpec {
+                provider_type: CloudProviderType::AWS,
+                region: None,
+                credentials_secret_ref: Some(SecretRef {
+                    name: "my-manual-secret".to_string(),
+                    namespace: "lattice-system".to_string(),
+                }),
+                credentials: None,
+                credential_data: None,
+                aws: None,
+                proxmox: None,
+                openstack: None,
+                labels: Default::default(),
+            },
+        );
+
+        let secret_ref = cp.k8s_secret_ref().expect("should have secret ref");
+        assert_eq!(secret_ref.name, "my-manual-secret");
+        assert_eq!(secret_ref.namespace, "lattice-system");
+    }
+
+    #[test]
+    fn k8s_secret_ref_eso_mode() {
+        let mut params = BTreeMap::new();
+        params.insert("provider".to_string(), serde_json::json!("vault-prod"));
+
+        let cp = make_provider(
+            "aws-prod",
+            CloudProviderSpec {
+                provider_type: CloudProviderType::AWS,
+                region: None,
+                credentials_secret_ref: None,
+                credentials: Some(ResourceSpec {
+                    type_: ResourceType::Secret,
+                    id: Some("infrastructure/aws/prod".to_string()),
+                    params: Some(params),
+                    ..Default::default()
+                }),
+                credential_data: None,
+                aws: None,
+                proxmox: None,
+                openstack: None,
+                labels: Default::default(),
+            },
+        );
+
+        let secret_ref = cp.k8s_secret_ref().expect("should have secret ref");
+        assert_eq!(secret_ref.name, "aws-prod-credentials");
+        assert_eq!(secret_ref.namespace, LATTICE_SYSTEM_NAMESPACE);
+    }
+
+    #[test]
+    fn k8s_secret_ref_none() {
+        let cp = make_provider(
+            "docker",
+            CloudProviderSpec {
+                provider_type: CloudProviderType::Docker,
+                region: None,
+                credentials_secret_ref: None,
+                credentials: None,
+                credential_data: None,
+                aws: None,
+                proxmox: None,
+                openstack: None,
+                labels: Default::default(),
+            },
+        );
+
+        assert!(cp.k8s_secret_ref().is_none());
+    }
+
+    #[test]
+    fn credential_data_yaml_parsing() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: CloudProvider
+metadata:
+  name: openstack-prod
+spec:
+  type: openstack
+  credentials:
+    type: secret
+    id: infrastructure/openstack/credentials
+    params:
+      provider: vault-prod
+      keys:
+        - username
+        - password
+        - auth_url
+  credentialData:
+    clouds.yaml: |
+      clouds:
+        openstack:
+          auth:
+            username: "${secret.credentials.username}"
+            password: "${secret.credentials.password}"
+            auth_url: "${secret.credentials.auth_url}"
+  openstack:
+    authUrl: https://openstack.example.com:5000/v3
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: CloudProvider = serde_json::from_value(value).expect("parse");
+
+        assert_eq!(provider.spec.provider_type, CloudProviderType::OpenStack);
+        assert!(provider.spec.credentials.is_some());
+        assert!(provider.spec.credential_data.is_some());
+
+        let creds = provider.spec.credentials.as_ref().unwrap();
+        assert!(creds.is_secret());
+        assert_eq!(
+            creds.id,
+            Some("infrastructure/openstack/credentials".to_string())
+        );
+
+        let data = provider.spec.credential_data.as_ref().unwrap();
+        assert!(data.contains_key("clouds.yaml"));
+        assert!(data["clouds.yaml"].contains("${secret.credentials.username}"));
+
+        // ESO mode should generate synthetic ref
+        let secret_ref = provider.k8s_secret_ref().expect("should have secret ref");
+        assert_eq!(secret_ref.name, "openstack-prod-credentials");
+    }
+
+    #[test]
+    fn eso_credentials_take_priority_over_manual() {
+        let mut params = BTreeMap::new();
+        params.insert("provider".to_string(), serde_json::json!("vault"));
+
+        let cp = make_provider(
+            "test",
+            CloudProviderSpec {
+                provider_type: CloudProviderType::AWS,
+                region: None,
+                credentials_secret_ref: Some(SecretRef {
+                    name: "manual".to_string(),
+                    namespace: "default".to_string(),
+                }),
+                credentials: Some(ResourceSpec {
+                    type_: ResourceType::Secret,
+                    id: Some("path".to_string()),
+                    params: Some(params),
+                    ..Default::default()
+                }),
+                credential_data: None,
+                aws: None,
+                proxmox: None,
+                openstack: None,
+                labels: Default::default(),
+            },
+        );
+
+        // ESO mode takes priority
+        let secret_ref = cp.k8s_secret_ref().unwrap();
+        assert_eq!(secret_ref.name, "test-credentials");
     }
 }

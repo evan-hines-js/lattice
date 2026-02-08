@@ -355,6 +355,12 @@ impl ProvisionerRegistry {
         let mut outputs = std::collections::HashMap::new();
 
         for (name, resource) in &spec.resources {
+            // Wildcard mesh resources (id: "*") are policy declarations meaning
+            // "accept from any caller". They can't be resolved to template outputs.
+            if resource.is_mesh_wildcard() {
+                continue;
+            }
+
             if let Some(provisioner) = self.get_for_resource(resource) {
                 let resource_outputs = provisioner.resolve(name, resource, ctx)?;
                 outputs.insert(name.clone(), resource_outputs);
@@ -381,6 +387,11 @@ impl ProvisionerRegistry {
         let mut combined = ProvisionOutput::default();
 
         for (name, resource) in &spec.resources {
+            // Skip wildcard mesh resources (same rationale as resolve_all)
+            if resource.is_mesh_wildcard() {
+                continue;
+            }
+
             if let Some(provisioner) = self.get_for_resource(resource) {
                 let output = provisioner.provision(name, resource, ctx)?;
                 combined.merge(output);
