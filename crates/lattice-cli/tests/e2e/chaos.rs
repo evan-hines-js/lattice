@@ -371,6 +371,8 @@ spec:
     spec:
       serviceAccountName: chaos-blackout
       restartPolicy: Never
+      imagePullSecrets:
+      - name: lattice-registry
       tolerations:
       - operator: Exists
       containers:
