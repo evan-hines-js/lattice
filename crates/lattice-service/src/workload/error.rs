@@ -67,6 +67,14 @@ pub enum CompilationError {
         /// The metric names that require monitoring
         metrics: Vec<String>,
     },
+
+    /// Error from a compiler extension phase
+    Extension {
+        /// Phase name
+        phase: String,
+        /// Error message
+        message: String,
+    },
 }
 
 impl fmt::Display for CompilationError {
@@ -102,6 +110,9 @@ impl fmt::Display for CompilationError {
                     "custom Prometheus metrics [{}] require monitoring to be enabled on the cluster",
                     metrics.join(", ")
                 )
+            }
+            Self::Extension { phase, message } => {
+                write!(f, "extension phase '{}': {}", phase, message)
             }
         }
     }
@@ -162,6 +173,14 @@ impl CompilationError {
     /// Create a file compilation error
     pub fn file_compilation(message: impl Into<String>) -> Self {
         Self::FileCompilation {
+            message: message.into(),
+        }
+    }
+
+    /// Create an extension phase error
+    pub fn extension(phase: &str, message: impl Into<String>) -> Self {
+        Self::Extension {
+            phase: phase.to_string(),
             message: message.into(),
         }
     }
@@ -248,6 +267,15 @@ mod tests {
         assert!(CompilationError::secret_access_denied("x").is_access_denied());
         assert!(!CompilationError::secret("x").is_access_denied());
         assert!(!CompilationError::volume("x").is_access_denied());
+    }
+
+    #[test]
+    fn test_extension_error_display() {
+        let err = CompilationError::extension("flagger", "canary spec invalid");
+        let display = err.to_string();
+        assert!(display.contains("flagger"));
+        assert!(display.contains("canary spec invalid"));
+        assert!(!err.is_access_denied());
     }
 
     #[test]

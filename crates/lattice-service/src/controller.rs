@@ -31,7 +31,7 @@ use lattice_common::KubeEventPublisher;
 #[cfg(test)]
 use lattice_common::NoopEventPublisher;
 
-use crate::compiler::{CompiledService, ServiceCompiler};
+use crate::compiler::{ApplyLayer, CompiledService, CompilerPhase, ServiceCompiler};
 use crate::crd::{
     Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
     LatticeService, LatticeServiceSpec, LatticeServiceStatus, ProviderType, ServicePhase,
@@ -475,6 +475,13 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }
         }
 
+        // Extension resources — infrastructure layer
+        for ext in &compiled.extensions {
+            if ext.layer == ApplyLayer::Infrastructure {
+                layer1.push_dynamic(ext)?;
+            }
+        }
+
         let layer1_count = layer1.run("infrastructure").await?;
 
         // ── Wait: imagePullSecrets must exist before the Deployment ──
@@ -483,7 +490,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         self.wait_for_image_pull_secrets(namespace, &compiled.workloads.deployment)
             .await?;
 
-        // ── Layer 2: Deployment ──
+        // ── Layer 2: Deployment + workload extensions ──
         let mut layer2 = ApplyBatch::new(self.client.clone(), namespace, &params);
         if let Some(deployment) = &compiled.workloads.deployment {
             layer2.push(
@@ -492,6 +499,11 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
                 deployment,
                 &ar_deploy,
             )?;
+        }
+        for ext in &compiled.extensions {
+            if ext.layer == ApplyLayer::Workload {
+                layer2.push_dynamic(ext)?;
+            }
         }
         let layer2_count = layer2.run("deployment").await?;
 
@@ -535,10 +547,7 @@ impl<'a> ApplyBatch<'a> {
         }
     }
 
-    /// Serialize a resource and queue a server-side-apply patch.
-    ///
-    /// Overrides `apiVersion` from the `ApiResource` so CRD versions always
-    /// match what the server actually serves.
+    /// Serialize a typed resource and queue a server-side-apply patch.
     fn push(
         &mut self,
         kind: &str,
@@ -546,10 +555,29 @@ impl<'a> ApplyBatch<'a> {
         resource: &impl serde::Serialize,
         ar: &ApiResource,
     ) -> Result<(), Error> {
+        let json = serde_json::to_value(resource)
+            .map_err(|e| Error::serialization(format!("{}: {}", kind, e)))?;
+        self.push_json(kind, name, json, ar)
+    }
+
+    /// Queue a server-side-apply patch for a `DynamicResource` (pre-serialized JSON).
+    fn push_dynamic(&mut self, ext: &crate::compiler::DynamicResource) -> Result<(), Error> {
+        self.push_json(&ext.kind, &ext.name, ext.json.clone(), &ext.api_resource)
+    }
+
+    /// Queue a server-side-apply patch from raw JSON.
+    ///
+    /// Overrides `apiVersion` from the `ApiResource` so CRD versions always
+    /// match what the server actually serves.
+    fn push_json(
+        &mut self,
+        kind: &str,
+        name: &str,
+        mut json: serde_json::Value,
+        ar: &ApiResource,
+    ) -> Result<(), Error> {
         use kube::api::DynamicObject;
 
-        let mut json = serde_json::to_value(resource)
-            .map_err(|e| Error::serialization(format!("{}: {}", kind, e)))?;
         if let Some(obj) = json.as_object_mut() {
             obj.insert(
                 "apiVersion".to_string(),
@@ -692,6 +720,8 @@ pub struct ServiceContext {
     pub events: Arc<dyn EventPublisher>,
     /// Whether monitoring (VictoriaMetrics) is enabled on this cluster
     pub monitoring_enabled: bool,
+    /// Extension phases that run after core compilation
+    pub extension_phases: Vec<Arc<dyn CompilerPhase>>,
 }
 
 impl ServiceContext {
@@ -713,6 +743,7 @@ impl ServiceContext {
             cedar,
             events,
             monitoring_enabled,
+            extension_phases: Vec::new(),
         }
     }
 
@@ -740,6 +771,7 @@ impl ServiceContext {
             cedar,
             events,
             monitoring_enabled,
+            extension_phases: Vec::new(),
         }
     }
 
@@ -757,6 +789,7 @@ impl ServiceContext {
             cedar: Arc::new(PolicyEngine::new()),
             events: Arc::new(NoopEventPublisher),
             monitoring_enabled: true,
+            extension_phases: Vec::new(),
         }
     }
 }
@@ -946,7 +979,8 @@ async fn compile_and_apply(
         ctx.provider_type,
         &ctx.cedar,
         ctx.monitoring_enabled,
-    );
+    )
+    .with_phases(&ctx.extension_phases);
     let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {

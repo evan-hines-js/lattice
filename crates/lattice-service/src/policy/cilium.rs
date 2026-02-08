@@ -1,16 +1,6 @@
 //! L4 policy compilation: CiliumNetworkPolicy
 //!
 //! Generates eBPF-based network enforcement at the kernel level using Cilium.
-//!
-//! # Future: Trait Extraction
-//!
-//! These methods form the `L4Provider` trait interface:
-//! ```ignore
-//! trait L4Provider {
-//!     fn compile_cilium_policy(&self, service: &ServiceNode, namespace: &str,
-//!         inbound_edges: &[ActiveEdge], outbound_edges: &[ActiveEdge]) -> CiliumNetworkPolicy;
-//! }
-//! ```
 
 use std::collections::BTreeMap;
 
