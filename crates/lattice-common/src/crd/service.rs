@@ -377,6 +377,13 @@ pub enum VolumeAccessMode {
 ///         - username
 ///         - password
 ///       refreshInterval: 1h
+///   tls-cert:
+///     type: secret
+///     id: certs/my-service
+///     params:
+///       provider: vault-prod
+///       keys: [tls.crt, tls.key]
+///       secretType: kubernetes.io/tls
 /// ```
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -391,6 +398,13 @@ pub struct SecretParams {
     /// Refresh interval for syncing the secret (e.g., "1h", "30m")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_interval: Option<String>,
+
+    /// K8s Secret type for the synced secret (defaults to Opaque)
+    ///
+    /// Common values: `kubernetes.io/tls`, `kubernetes.io/dockerconfigjson`,
+    /// `kubernetes.io/basic-auth`, `kubernetes.io/ssh-auth`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_type: Option<String>,
 }
 
 impl ResourceSpec {

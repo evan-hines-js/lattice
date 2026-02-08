@@ -111,6 +111,16 @@ impl SecretsCompiler {
                 .secret_k8s_name(service_name, resource_name)
                 .unwrap_or_else(|| format!("{}-{}", service_name, resource_name));
 
+            // Determine K8s Secret type: explicit param > imagePullSecrets inference > Opaque
+            let secret_type = params
+                .secret_type
+                .as_deref()
+                .or_else(|| {
+                    spec.image_pull_secrets
+                        .contains(resource_name)
+                        .then_some("kubernetes.io/dockerconfigjson")
+                });
+
             let mut external_secret = build_external_secret(
                 &k8s_secret_name,
                 namespace,
@@ -120,10 +130,8 @@ impl SecretsCompiler {
                 params.refresh_interval.clone(),
             );
 
-            // imagePullSecrets need kubernetes.io/dockerconfigjson type
-            if spec.image_pull_secrets.contains(resource_name) {
-                external_secret = external_secret
-                    .with_secret_type("kubernetes.io/dockerconfigjson");
+            if let Some(st) = secret_type {
+                external_secret = external_secret.with_secret_type(st);
             }
 
             output.external_secrets.push(external_secret);
