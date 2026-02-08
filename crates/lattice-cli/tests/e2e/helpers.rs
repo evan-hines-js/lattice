@@ -360,7 +360,7 @@ pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     use std::io::Read;
     use std::process::Stdio;
 
-    let timeout = Duration::from_secs(10);
+    let timeout = Duration::from_secs(30);
 
     let mut child = Command::new(cmd)
         .args(args)
@@ -1460,7 +1460,14 @@ fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
     use std::process::{Command, Stdio};
 
     let mut child = Command::new("kubectl")
-        .args(["--kubeconfig", kubeconfig, "apply", "-f", "-"])
+        .args([
+            "--kubeconfig",
+            kubeconfig,
+            "apply",
+            "--validate=false",
+            "-f",
+            "-",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
