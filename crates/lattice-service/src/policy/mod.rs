@@ -7,17 +7,12 @@
 //!
 //! For policy generation, use [`PolicyCompiler`].
 //!
-//! # Future: Trait-Based Provider Abstraction
-//!
 //! Policy compilation is split into provider-specific sub-modules:
 //! - [`istio_ambient`]: L7 policies (AuthorizationPolicy, ServiceEntry)
 //! - [`cilium`]: L4 policies (CiliumNetworkPolicy)
 //!
-//! To support alternative mesh/CNI providers:
-//! 1. Define `trait L7Provider` with methods matching `istio_ambient.rs` signatures
-//! 2. Define `trait L4Provider` with methods matching `cilium.rs` signatures
-//! 3. Make `PolicyCompiler` generic: `PolicyCompiler<L4, L7>`
-//! 4. The existing sub-modules become the first trait implementations
+//! To support alternative mesh/CNI providers (Linkerd, Calico), extract `L7Provider`
+//! and `L4Provider` traits from these modules when a second implementation is needed.
 
 mod cilium;
 mod istio_ambient;

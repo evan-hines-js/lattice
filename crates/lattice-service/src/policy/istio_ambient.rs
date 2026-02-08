@@ -2,24 +2,6 @@
 //!
 //! Generates mTLS identity-based access control using SPIFFE principals
 //! within the Istio ambient mesh.
-//!
-//! # Future: Trait Extraction
-//!
-//! These methods form the `L7Provider` trait interface:
-//! ```ignore
-//! trait L7Provider {
-//!     fn compile_authorization_policy(&self, service: &ServiceNode, namespace: &str,
-//!         inbound_edges: &[ActiveEdge]) -> Option<AuthorizationPolicy>;
-//!     fn compile_waypoint_policy(&self, service: &ServiceNode, namespace: &str)
-//!         -> Option<AuthorizationPolicy>;
-//!     fn compile_service_entry(&self, service: &ServiceNode, namespace: &str)
-//!         -> Option<ServiceEntry>;
-//!     fn compile_external_access_policy(&self, caller: &str, external_service: &ServiceNode,
-//!         namespace: &str) -> AuthorizationPolicy;
-//!     fn compile_gateway_allow_policy(&self, service_name: &str, namespace: &str,
-//!         ports: &[u16]) -> AuthorizationPolicy;
-//! }
-//! ```
 
 use std::collections::BTreeMap;
 

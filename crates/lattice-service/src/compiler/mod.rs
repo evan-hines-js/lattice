@@ -26,6 +26,12 @@
 //! 1. Label `lattice.dev/environment` on the service
 //! 2. Falls back to namespace
 
+mod phase;
+pub use phase::{CompilationContext, CompilerPhase};
+
+use std::sync::Arc;
+
+use kube::discovery::ApiResource;
 use lattice_cedar::{PolicyEngine, SecretAuthzRequest};
 
 use lattice_common::mesh;
@@ -51,6 +57,37 @@ impl From<CompilationError> for crate::Error {
     }
 }
 
+/// Which layer a dynamic resource should be applied in.
+///
+/// Layer 1 (Infrastructure) is applied first — policies, config, secrets.
+/// Layer 2 (Workload) is applied after infrastructure is ready — Deployments, etc.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApplyLayer {
+    /// Applied alongside policies, secrets, and other infrastructure (Layer 1)
+    Infrastructure,
+    /// Applied alongside Deployments (Layer 2, after infrastructure is ready)
+    Workload,
+}
+
+/// A dynamically-typed Kubernetes resource produced by a compiler extension.
+///
+/// This lets `CompilerPhase` implementations emit arbitrary resource types
+/// (Flagger Canary, Argo Rollout, ServiceMonitor, etc.) without adding
+/// a named field to `CompiledService` for each one.
+#[derive(Clone, Debug)]
+pub struct DynamicResource {
+    /// Kubernetes kind (for logging)
+    pub kind: String,
+    /// Resource name (for logging and the SSA patch key)
+    pub name: String,
+    /// Serialized resource JSON
+    pub json: serde_json::Value,
+    /// API group/version/resource metadata for the SSA patch
+    pub api_resource: ApiResource,
+    /// Which apply layer this resource belongs to
+    pub layer: ApplyLayer,
+}
+
 /// Combined output from compiling a LatticeService
 #[derive(Clone, Debug, Default)]
 pub struct CompiledService {
@@ -62,6 +99,8 @@ pub struct CompiledService {
     pub ingress: GeneratedIngress,
     /// Generated waypoint Gateway for east-west L7 policy enforcement
     pub waypoint: GeneratedWaypoint,
+    /// Dynamic resources from compiler extension phases
+    pub extensions: Vec<DynamicResource>,
 }
 
 impl CompiledService {
@@ -76,6 +115,7 @@ impl CompiledService {
             && self.policies.is_empty()
             && self.ingress.is_empty()
             && self.waypoint.is_empty()
+            && self.extensions.is_empty()
     }
 
     /// Total count of all generated resources
@@ -100,6 +140,7 @@ impl CompiledService {
             + self.policies.total_count()
             + self.ingress.total_count()
             + self.waypoint.total_count()
+            + self.extensions.len()
     }
 }
 
@@ -117,6 +158,7 @@ pub struct ServiceCompiler<'a> {
     cedar: &'a PolicyEngine,
     monitoring_enabled: bool,
     renderer: TemplateRenderer,
+    extension_phases: &'a [Arc<dyn CompilerPhase>],
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -142,7 +184,17 @@ impl<'a> ServiceCompiler<'a> {
             cedar,
             monitoring_enabled,
             renderer: TemplateRenderer::new(),
+            extension_phases: &[],
         }
+    }
+
+    /// Attach extension phases that run after core compilation.
+    ///
+    /// Phases can inspect the service and compiled output, then append
+    /// `DynamicResource` entries to `compiled.extensions`.
+    pub fn with_phases(mut self, phases: &'a [Arc<dyn CompilerPhase>]) -> Self {
+        self.extension_phases = phases;
+        self
     }
 
     /// Compile a LatticeService into Kubernetes resources
@@ -362,12 +414,33 @@ impl<'a> ServiceCompiler<'a> {
             GeneratedIngress::new()
         };
 
-        Ok(CompiledService {
+        let mut compiled = CompiledService {
             workloads,
             policies,
             ingress,
             waypoint,
-        })
+            extensions: Vec::new(),
+        };
+
+        // Run extension phases (Flagger, ServiceMonitor, rate limiting, etc.)
+        if !self.extension_phases.is_empty() {
+            let phase_ctx = CompilationContext {
+                service,
+                name,
+                namespace,
+                graph: self.graph,
+                cluster_name: &self.cluster_name,
+                provider_type: self.provider_type,
+                monitoring_enabled: self.monitoring_enabled,
+            };
+            for phase in self.extension_phases {
+                phase
+                    .compile(&phase_ctx, &mut compiled)
+                    .map_err(|e| CompilationError::extension(phase.name(), e))?;
+            }
+        }
+
+        Ok(compiled)
     }
 
     /// Authorize secret access via Cedar policies.
@@ -971,5 +1044,198 @@ mod tests {
 
         // No backup-related annotations
         assert!(annotations.keys().all(|k| !k.contains("velero")));
+    }
+
+    // =========================================================================
+    // Story: DynamicResource Extensions
+    // =========================================================================
+
+    #[test]
+    fn story_extensions_counted_in_resource_count() {
+        let mut compiled = CompiledService::new();
+        assert_eq!(compiled.resource_count(), 0);
+
+        compiled.extensions.push(DynamicResource {
+            kind: "ServiceMonitor".to_string(),
+            name: "my-monitor".to_string(),
+            json: serde_json::json!({"metadata": {"name": "my-monitor"}}),
+            api_resource: kube::discovery::ApiResource::erase::<
+                k8s_openapi::api::core::v1::ConfigMap,
+            >(&()),
+            layer: ApplyLayer::Infrastructure,
+        });
+
+        assert_eq!(compiled.resource_count(), 1);
+    }
+
+    #[test]
+    fn story_extensions_included_in_is_empty() {
+        let mut compiled = CompiledService::new();
+        assert!(compiled.is_empty());
+
+        compiled.extensions.push(DynamicResource {
+            kind: "Canary".to_string(),
+            name: "my-canary".to_string(),
+            json: serde_json::json!({}),
+            api_resource: kube::discovery::ApiResource::erase::<
+                k8s_openapi::api::core::v1::ConfigMap,
+            >(&()),
+            layer: ApplyLayer::Workload,
+        });
+
+        assert!(!compiled.is_empty());
+    }
+
+    // =========================================================================
+    // Story: CompilerPhase Extension Hook
+    // =========================================================================
+
+    /// A no-op phase that records it was called
+    struct TrackingPhase {
+        called: std::sync::atomic::AtomicBool,
+    }
+
+    impl TrackingPhase {
+        fn new() -> Self {
+            Self {
+                called: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn was_called(&self) -> bool {
+            self.called.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl CompilerPhase for TrackingPhase {
+        fn name(&self) -> &str {
+            "tracking"
+        }
+
+        fn compile(
+            &self,
+            _ctx: &CompilationContext<'_>,
+            _output: &mut CompiledService,
+        ) -> Result<(), String> {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn story_compiler_phase_gets_called() {
+        let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
+        let service = make_service("my-app", "default");
+
+        let phase = Arc::new(TrackingPhase::new());
+        let phases: Vec<Arc<dyn CompilerPhase>> = vec![phase.clone()];
+
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true)
+                .with_phases(&phases);
+        compiler.compile(&service).await.unwrap();
+
+        assert!(phase.was_called());
+    }
+
+    #[tokio::test]
+    async fn story_phase_can_add_dynamic_resource() {
+        struct AddResourcePhase;
+
+        impl CompilerPhase for AddResourcePhase {
+            fn name(&self) -> &str {
+                "add-resource"
+            }
+
+            fn compile(
+                &self,
+                ctx: &CompilationContext<'_>,
+                output: &mut CompiledService,
+            ) -> Result<(), String> {
+                output.extensions.push(DynamicResource {
+                    kind: "ServiceMonitor".to_string(),
+                    name: format!("{}-monitor", ctx.name),
+                    json: serde_json::json!({
+                        "apiVersion": "monitoring.coreos.com/v1",
+                        "kind": "ServiceMonitor",
+                        "metadata": {"name": format!("{}-monitor", ctx.name), "namespace": ctx.namespace}
+                    }),
+                    api_resource: kube::discovery::ApiResource::erase::<k8s_openapi::api::core::v1::ConfigMap>(&()),
+                    layer: ApplyLayer::Infrastructure,
+                });
+                Ok(())
+            }
+        }
+
+        let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
+        let service = make_service("my-app", "default");
+
+        let phases: Vec<Arc<dyn CompilerPhase>> = vec![Arc::new(AddResourcePhase)];
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true)
+                .with_phases(&phases);
+        let output = compiler.compile(&service).await.unwrap();
+
+        assert_eq!(output.extensions.len(), 1);
+        assert_eq!(output.extensions[0].kind, "ServiceMonitor");
+        assert_eq!(output.extensions[0].name, "my-app-monitor");
+        assert_eq!(output.extensions[0].layer, ApplyLayer::Infrastructure);
+    }
+
+    #[tokio::test]
+    async fn story_phase_error_stops_compilation() {
+        struct FailingPhase;
+
+        impl CompilerPhase for FailingPhase {
+            fn name(&self) -> &str {
+                "failing"
+            }
+
+            fn compile(
+                &self,
+                _ctx: &CompilationContext<'_>,
+                _output: &mut CompiledService,
+            ) -> Result<(), String> {
+                Err("something went wrong".to_string())
+            }
+        }
+
+        let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
+        let service = make_service("my-app", "default");
+
+        let phases: Vec<Arc<dyn CompilerPhase>> = vec![Arc::new(FailingPhase)];
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true)
+                .with_phases(&phases);
+        let err = compiler.compile(&service).await.unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failing"),
+            "error should name the phase: {}",
+            msg
+        );
+        assert!(
+            msg.contains("something went wrong"),
+            "error should contain phase message: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn story_no_phases_no_extensions() {
+        let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new();
+        let service = make_service("my-app", "default");
+
+        // No with_phases call — default empty
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let output = compiler.compile(&service).await.unwrap();
+
+        assert!(output.extensions.is_empty());
     }
 }
