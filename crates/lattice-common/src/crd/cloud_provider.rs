@@ -187,16 +187,6 @@ pub enum CloudProviderPhase {
 }
 
 impl CloudProvider {
-    /// Get the provider type
-    pub fn provider_type(&self) -> CloudProviderType {
-        self.spec.provider_type
-    }
-
-    /// Get the region
-    pub fn region(&self) -> Option<&str> {
-        self.spec.region.as_deref()
-    }
-
     /// Resolve the K8s Secret that contains provider credentials.
     ///
     /// - ESO mode (`credentials` set): returns a synthetic ref pointing to the

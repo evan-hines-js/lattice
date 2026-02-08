@@ -362,7 +362,6 @@ mod tests {
             gpu: false,
             monitoring: true,
             backups: true,
-            external_secrets: true,
         };
 
         assert!(spec.is_parent(), "Should be recognized as a parent");
@@ -384,7 +383,6 @@ mod tests {
             gpu: false,
             monitoring: true,
             backups: true,
-            external_secrets: true,
         };
 
         assert!(!spec.is_parent(), "Leaf cluster cannot have children");
@@ -411,7 +409,6 @@ mod tests {
             gpu: false,
             monitoring: true,
             backups: true,
-            external_secrets: true,
         };
 
         assert!(
@@ -435,7 +432,6 @@ mod tests {
             gpu: false,
             monitoring: true,
             backups: true,
-            external_secrets: true,
         };
 
         assert!(
@@ -472,7 +468,6 @@ mod tests {
             gpu: false,
             monitoring: true,
             backups: true,
-            external_secrets: true,
         };
 
         assert!(
@@ -496,7 +491,6 @@ mod tests {
             gpu: false,
             monitoring: true,
             backups: true,
-            external_secrets: true,
         };
 
         assert!(
@@ -677,7 +671,6 @@ nodes:
             gpu: false,
             monitoring: true,
             backups: true,
-            external_secrets: true,
         };
 
         let json =

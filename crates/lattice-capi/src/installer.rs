@@ -21,10 +21,11 @@ use mockall::automock;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{ProviderType, SecretRef};
+use lattice_common::credentials::{AwsCredentials, CredentialProvider};
 use lattice_common::kube_utils::{self, ApplyOptions};
 use lattice_common::{
-    AwsCredentials, CredentialProvider, Error, AWS_CAPA_CREDENTIALS_SECRET, CAPA_NAMESPACE,
-    CAPMOX_NAMESPACE, CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
+    Error, AWS_CAPA_CREDENTIALS_SECRET, CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE,
+    OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
 
 /// Timeout for waiting on cert-manager and provider deployments
