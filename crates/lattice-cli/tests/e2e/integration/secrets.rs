@@ -36,10 +36,10 @@ use tracing::info;
 use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_secret_policy_for_service, create_service_with_all_secret_routes,
-    create_service_with_secrets, delete_cedar_policies_by_label, deploy_and_wait_for_phase,
-    ensure_fresh_namespace, run_cmd, seed_all_local_test_secrets, seed_local_secret,
-    setup_regcreds_infrastructure, verify_pod_env_var, verify_pod_file_content,
-    verify_pod_image_pull_secrets, verify_synced_secret_keys,
+    create_service_with_secrets, delete_cedar_policies_by_label, delete_namespace,
+    deploy_and_wait_for_phase, ensure_fresh_namespace, run_cmd, seed_all_local_test_secrets,
+    seed_local_secret, service_pod_selector, setup_regcreds_infrastructure, verify_pod_env_var,
+    verify_pod_file_content, verify_pod_image_pull_secrets, verify_synced_secret_keys,
 };
 use super::cedar::apply_e2e_default_policy;
 
@@ -219,6 +219,9 @@ pub async fn run_secrets_tests(ctx: &InfraContext) -> Result<(), String> {
 
     let result = run_basic_secret_test(kubeconfig).await;
 
+    // Clean up services before policies — the controller re-checks Cedar on every
+    // reconcile, so deleting policies while services still exist causes them to fail.
+    delete_namespace(kubeconfig, BASIC_TEST_NAMESPACE);
     delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=local-secrets");
     result?;
 
@@ -318,10 +321,11 @@ async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String>
     )
     .await?;
 
+    let selector = service_pod_selector("route1-pure-env");
     verify_pod_env_var(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        "app=route1-pure-env",
+        &selector,
         "DB_PASSWORD",
         "s3cret-p@ss",
     )
@@ -330,7 +334,7 @@ async fn run_route1_pure_secret_env_test(kubeconfig: &str) -> Result<(), String>
     verify_pod_env_var(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        "app=route1-pure-env",
+        &selector,
         "DB_USERNAME",
         "admin",
     )
@@ -379,7 +383,7 @@ async fn run_route2_mixed_content_env_test(kubeconfig: &str) -> Result<(), Strin
     verify_pod_env_var(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        "app=route2-mixed-env",
+        &service_pod_selector("route2-mixed-env"),
         "DATABASE_URL",
         "postgres://admin:s3cret-p@ss@db.svc:5432/mydb",
     )
@@ -412,10 +416,11 @@ async fn run_route3_file_mount_secret_test(kubeconfig: &str) -> Result<(), Strin
     )
     .await?;
 
+    let selector = service_pod_selector("route3-file-mount");
     verify_pod_file_content(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        "app=route3-file-mount",
+        &selector,
         "/etc/app/config.yaml",
         "password: s3cret-p@ss",
     )
@@ -424,7 +429,7 @@ async fn run_route3_file_mount_secret_test(kubeconfig: &str) -> Result<(), Strin
     verify_pod_file_content(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        "app=route3-file-mount",
+        &selector,
         "/etc/app/config.yaml",
         "api_key: ak-test-12345",
     )
@@ -460,7 +465,7 @@ async fn run_route4_image_pull_secrets_test(kubeconfig: &str) -> Result<(), Stri
     verify_pod_image_pull_secrets(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        "app=route4-pull-secrets",
+        &service_pod_selector("route4-pull-secrets"),
         "route4-pull-secrets-ghcr-creds",
     )
     .await?;
@@ -539,13 +544,13 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    let label = "app=secret-routes-combined";
+    let label = service_pod_selector("secret-routes-combined");
 
     // Route 1: Pure secret env vars
     verify_pod_env_var(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        label,
+        &label,
         "DB_PASSWORD",
         "s3cret-p@ss",
     )
@@ -553,7 +558,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     verify_pod_env_var(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        label,
+        &label,
         "DB_USERNAME",
         "admin",
     )
@@ -563,7 +568,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     verify_pod_env_var(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        label,
+        &label,
         "DATABASE_URL",
         "postgres://admin:s3cret-p@ss@db.svc:5432/mydb",
     )
@@ -573,7 +578,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     verify_pod_env_var(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        label,
+        &label,
         "APP_NAME",
         "secret-routes-test",
     )
@@ -583,7 +588,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     verify_pod_file_content(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        label,
+        &label,
         "/etc/app/config.yaml",
         "password: s3cret-p@ss",
     )
@@ -593,7 +598,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
     verify_pod_image_pull_secrets(
         kubeconfig,
         ROUTES_TEST_NAMESPACE,
-        label,
+        &label,
         "secret-routes-combined-ghcr-creds",
     )
     .await?;
@@ -658,6 +663,9 @@ pub async fn run_secrets_route_tests(ctx: &InfraContext) -> Result<(), String> {
     }
     .await;
 
+    // Clean up services before policies — the controller re-checks Cedar on every
+    // reconcile, so deleting policies while services still exist causes them to fail.
+    delete_namespace(kubeconfig, ROUTES_TEST_NAMESPACE);
     delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=secret-routes");
     result?;
 
