@@ -637,6 +637,8 @@ impl AgentServer {
     /// Convert to a tonic service
     pub fn into_service(self) -> LatticeAgentServer<Self> {
         LatticeAgentServer::new(self)
+            .max_decoding_message_size(16 * 1024 * 1024)
+            .max_encoding_message_size(16 * 1024 * 1024)
     }
 
     /// Start the gRPC server with mTLS on the given address
