@@ -191,7 +191,7 @@ impl Provider for AwsProvider {
 
         // No kube-vip for AWS - we use NLB
         let cp_config = ControlPlaneConfig {
-            replicas: spec.nodes.control_plane,
+            replicas: spec.nodes.control_plane.replicas,
             cert_sans: build_cert_sans(cluster),
             post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
             vip: None,
@@ -210,6 +210,27 @@ impl Provider for AwsProvider {
             .as_deref()
             .unwrap_or("nodes.cluster-api-provider-aws.sigs.k8s.io");
 
+        // Read CP instance type and root volume from node spec
+        let cp_instance_type = spec
+            .nodes
+            .control_plane
+            .instance_type
+            .as_ref()
+            .and_then(|it| it.as_named())
+            .unwrap_or("m5.xlarge");
+        let cp_root_volume_size = spec
+            .nodes
+            .control_plane
+            .root_volume
+            .as_ref()
+            .map(|v| v.size_gb);
+        let cp_root_volume_type = spec
+            .nodes
+            .control_plane
+            .root_volume
+            .as_ref()
+            .and_then(|v| v.type_.as_deref());
+
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_aws_cluster(cluster)?,
@@ -217,10 +238,10 @@ impl Provider for AwsProvider {
             self.generate_machine_template(MachineTemplateConfig {
                 name,
                 aws_cfg: cfg,
-                instance_type: &cfg.cp_instance_type,
+                instance_type: cp_instance_type,
                 iam_profile: Some(cp_iam),
-                root_volume_size: cfg.cp_root_volume_size_gb,
-                root_volume_type: cfg.cp_root_volume_type.as_deref(),
+                root_volume_size: cp_root_volume_size,
+                root_volume_type: cp_root_volume_type,
                 suffix: "control-plane",
             }),
         ];
@@ -233,6 +254,18 @@ impl Provider for AwsProvider {
             };
             let suffix = pool_resource_suffix(pool_id);
 
+            // Read per-pool instance type and root volume from worker pool spec
+            let worker_instance_type = pool_spec
+                .instance_type
+                .as_ref()
+                .and_then(|it| it.as_named())
+                .unwrap_or("m5.large");
+            let worker_root_volume_size = pool_spec.root_volume.as_ref().map(|v| v.size_gb);
+            let worker_root_volume_type = pool_spec
+                .root_volume
+                .as_ref()
+                .and_then(|v| v.type_.as_deref());
+
             manifests.push(generate_machine_deployment_for_pool(
                 &config,
                 &infra,
@@ -241,10 +274,10 @@ impl Provider for AwsProvider {
             manifests.push(self.generate_machine_template(MachineTemplateConfig {
                 name,
                 aws_cfg: cfg,
-                instance_type: &cfg.worker_instance_type,
+                instance_type: worker_instance_type,
                 iam_profile: Some(worker_iam),
-                root_volume_size: cfg.worker_root_volume_size_gb,
-                root_volume_type: cfg.worker_root_volume_type.as_deref(),
+                root_volume_size: worker_root_volume_size,
+                root_volume_type: worker_root_volume_type,
                 suffix: &suffix,
             }));
             manifests.push(generate_bootstrap_config_template_for_pool(
@@ -263,12 +296,6 @@ impl Provider for AwsProvider {
         if let Some(ref cfg) = spec.config.aws {
             if cfg.region.is_empty() {
                 return Err(Error::validation("aws config requires region"));
-            }
-            if cfg.cp_instance_type.is_empty() {
-                return Err(Error::validation("aws config requires cpInstanceType"));
-            }
-            if cfg.worker_instance_type.is_empty() {
-                return Err(Error::validation("aws config requires workerInstanceType"));
             }
             if cfg.ssh_key_name.is_empty() {
                 return Err(Error::validation("aws config requires sshKeyName"));
@@ -296,14 +323,13 @@ mod tests {
     use kube::api::ObjectMeta;
     use lattice_common::crd::LatticeClusterSpec;
     use lattice_common::crd::{
-        BootstrapProvider, KubernetesSpec, NodeSpec, ProviderConfig, ProviderSpec, WorkerPoolSpec,
+        BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec, NodeSpec,
+        ProviderConfig, ProviderSpec, RootVolume, WorkerPoolSpec,
     };
 
     fn test_aws_config() -> AwsConfig {
         AwsConfig {
             region: "us-west-2".to_string(),
-            cp_instance_type: "m5.xlarge".to_string(),
-            worker_instance_type: "m5.large".to_string(),
             ssh_key_name: "lattice-key".to_string(),
             ..Default::default()
         }
@@ -328,11 +354,16 @@ mod tests {
                     credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
-                    control_plane: 3,
+                    control_plane: ControlPlaneSpec {
+                        replicas: 3,
+                        instance_type: Some(InstanceType::Named("m5.xlarge".to_string())),
+                        root_volume: None,
+                    },
                     worker_pools: std::collections::BTreeMap::from([(
                         "default".to_string(),
                         WorkerPoolSpec {
                             replicas: 5,
+                            instance_type: Some(InstanceType::Named("m5.large".to_string())),
                             ..Default::default()
                         },
                     )]),
@@ -501,10 +532,16 @@ mod tests {
         let provider = AwsProvider::with_namespace("capi-system");
         let mut cluster = test_cluster("test");
 
-        if let Some(ref mut cfg) = cluster.spec.provider.config.aws {
-            cfg.cp_root_volume_size_gb = Some(100);
-            cfg.cp_root_volume_type = Some("io1".to_string());
-            cfg.worker_root_volume_size_gb = Some(200);
+        // Root volumes are now on node spec, not provider config
+        cluster.spec.nodes.control_plane.root_volume = Some(RootVolume {
+            size_gb: 100,
+            type_: Some("io1".to_string()),
+        });
+        if let Some(ref mut pool) = cluster.spec.nodes.worker_pools.get_mut("default") {
+            pool.root_volume = Some(RootVolume {
+                size_gb: 200,
+                type_: None,
+            });
         }
 
         let manifests = provider

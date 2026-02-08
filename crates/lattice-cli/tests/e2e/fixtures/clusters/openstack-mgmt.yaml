@@ -18,21 +18,24 @@ spec:
     config:
       openstack:
         externalNetwork: "Ext-Net"
-        cpFlavor: "b2-30"
-        workerFlavor: "b2-15"
         imageName: "Ubuntu 22.04"
         sshKeyName: "lattice-e2e"
         cloudName: "openstack"
         dnsNameservers:
           - "8.8.8.8"
           - "8.8.4.4"
-        cpRootVolumeSizeGb: 50
-        workerRootVolumeSizeGb: 50
   nodes:
-    controlPlane: 1
+    controlPlane:
+      replicas: 1
+      instanceType: "b2-30"
+      rootVolume:
+        sizeGb: 50
     workerPools:
       default:
         replicas: 1
+        instanceType: "b2-15"
+        rootVolume:
+          sizeGb: 50
   parentConfig:
     # host is auto-discovered from Octavia LB
     grpcPort: 50051

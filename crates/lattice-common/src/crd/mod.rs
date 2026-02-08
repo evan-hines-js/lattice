@@ -63,10 +63,11 @@ pub use service_policy::{
     ServiceSelector,
 };
 pub use types::{
-    AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, DockerConfig,
-    EndpointsSpec, Ipv4PoolConfig, Ipv6PoolConfig, KubernetesSpec, NetworkPool, NetworkingSpec,
-    NodeSpec, NodeTaint, OpenStackConfig, ProviderConfig, ProviderSpec, ProviderType,
-    ProxmoxConfig, SecretRef, ServiceRef, ServiceSpec, TaintEffect, WorkerPoolSpec,
+    AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec,
+    DockerConfig, EndpointsSpec, InstanceType, Ipv4PoolConfig, Ipv6PoolConfig, KubernetesSpec,
+    NetworkPool, NetworkingSpec, NodeResourceSpec, NodeSpec, NodeTaint, OpenStackConfig,
+    ProviderConfig, ProviderSpec, ProviderType, ProxmoxConfig, RootVolume, SecretRef, ServiceRef,
+    ServiceSpec, TaintEffect, WorkerPoolSpec,
 };
 
 // =============================================================================

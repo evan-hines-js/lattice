@@ -181,7 +181,7 @@ impl Provider for OpenStackProvider {
 
         // No kube-vip for OpenStack - we use Octavia LB
         let cp_config = ControlPlaneConfig {
-            replicas: spec.nodes.control_plane,
+            replicas: spec.nodes.control_plane.replicas,
             cert_sans: build_cert_sans(cluster),
             post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
             vip: None,
@@ -190,6 +190,27 @@ impl Provider for OpenStackProvider {
 
         let infra = self.infra_ref();
 
+        // Read CP instance type (flavor) and root volume from node spec
+        let cp_flavor = spec
+            .nodes
+            .control_plane
+            .instance_type
+            .as_ref()
+            .and_then(|it| it.as_named())
+            .unwrap_or("b2-15");
+        let cp_root_volume_size = spec
+            .nodes
+            .control_plane
+            .root_volume
+            .as_ref()
+            .map(|v| v.size_gb);
+        let cp_root_volume_type = spec
+            .nodes
+            .control_plane
+            .root_volume
+            .as_ref()
+            .and_then(|v| v.type_.as_deref());
+
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_openstack_cluster(cluster)?,
@@ -197,9 +218,9 @@ impl Provider for OpenStackProvider {
             self.generate_machine_template(MachineTemplateConfig {
                 name,
                 openstack_cfg: cfg,
-                flavor: &cfg.cp_flavor,
-                root_volume_size: cfg.cp_root_volume_size_gb,
-                root_volume_type: cfg.cp_root_volume_type.as_deref(),
+                flavor: cp_flavor,
+                root_volume_size: cp_root_volume_size,
+                root_volume_type: cp_root_volume_type,
                 availability_zone: cfg.cp_availability_zone.as_deref(),
                 suffix: "control-plane",
             }),
@@ -213,6 +234,18 @@ impl Provider for OpenStackProvider {
             };
             let suffix = pool_resource_suffix(pool_id);
 
+            // Read per-pool instance type (flavor) and root volume from worker pool spec
+            let worker_flavor = pool_spec
+                .instance_type
+                .as_ref()
+                .and_then(|it| it.as_named())
+                .unwrap_or("b2-7");
+            let worker_root_volume_size = pool_spec.root_volume.as_ref().map(|v| v.size_gb);
+            let worker_root_volume_type = pool_spec
+                .root_volume
+                .as_ref()
+                .and_then(|v| v.type_.as_deref());
+
             manifests.push(generate_machine_deployment_for_pool(
                 &config,
                 &infra,
@@ -221,9 +254,9 @@ impl Provider for OpenStackProvider {
             manifests.push(self.generate_machine_template(MachineTemplateConfig {
                 name,
                 openstack_cfg: cfg,
-                flavor: &cfg.worker_flavor,
-                root_volume_size: cfg.worker_root_volume_size_gb,
-                root_volume_type: cfg.worker_root_volume_type.as_deref(),
+                flavor: worker_flavor,
+                root_volume_size: worker_root_volume_size,
+                root_volume_type: worker_root_volume_type,
                 availability_zone: cfg.worker_availability_zone.as_deref(),
                 suffix: &suffix,
             }));
@@ -245,12 +278,6 @@ impl Provider for OpenStackProvider {
                 return Err(Error::validation(
                     "openstack config requires externalNetwork",
                 ));
-            }
-            if cfg.cp_flavor.is_empty() {
-                return Err(Error::validation("openstack config requires cpFlavor"));
-            }
-            if cfg.worker_flavor.is_empty() {
-                return Err(Error::validation("openstack config requires workerFlavor"));
             }
             if cfg.image_name.is_empty() {
                 return Err(Error::validation("openstack config requires imageName"));
@@ -274,14 +301,13 @@ mod tests {
     use kube::api::ObjectMeta;
     use lattice_common::crd::LatticeClusterSpec;
     use lattice_common::crd::{
-        BootstrapProvider, KubernetesSpec, NodeSpec, ProviderConfig, ProviderSpec, WorkerPoolSpec,
+        BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec, NodeSpec,
+        ProviderConfig, ProviderSpec, RootVolume, WorkerPoolSpec,
     };
 
     fn test_openstack_config() -> OpenStackConfig {
         OpenStackConfig {
             external_network: "ext-net-123".to_string(),
-            cp_flavor: "b2-30".to_string(),
-            worker_flavor: "b2-15".to_string(),
             image_name: "Ubuntu 22.04".to_string(),
             ssh_key_name: "lattice-key".to_string(),
             ..Default::default()
@@ -307,11 +333,16 @@ mod tests {
                     credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
-                    control_plane: 3,
+                    control_plane: ControlPlaneSpec {
+                        replicas: 3,
+                        instance_type: Some(InstanceType::Named("b2-30".to_string())),
+                        root_volume: None,
+                    },
                     worker_pools: std::collections::BTreeMap::from([(
                         "default".to_string(),
                         WorkerPoolSpec {
                             replicas: 5,
+                            instance_type: Some(InstanceType::Named("b2-15".to_string())),
                             ..Default::default()
                         },
                     )]),
@@ -436,10 +467,16 @@ mod tests {
         let provider = OpenStackProvider::with_namespace("capi-system");
         let mut cluster = test_cluster("test");
 
-        if let Some(ref mut cfg) = cluster.spec.provider.config.openstack {
-            cfg.cp_root_volume_size_gb = Some(50);
-            cfg.cp_root_volume_type = Some("high-speed".to_string());
-            cfg.worker_root_volume_size_gb = Some(100);
+        // Root volumes are now on node spec, not provider config
+        cluster.spec.nodes.control_plane.root_volume = Some(RootVolume {
+            size_gb: 50,
+            type_: Some("high-speed".to_string()),
+        });
+        if let Some(ref mut pool) = cluster.spec.nodes.worker_pools.get_mut("default") {
+            pool.root_volume = Some(RootVolume {
+                size_gb: 100,
+                type_: None,
+            });
         }
 
         let manifests = provider

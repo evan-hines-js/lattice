@@ -3,11 +3,15 @@
 //! A SecretsProvider represents a connection to HashiCorp Vault that can be
 //! distributed to child clusters, creating ESO ClusterSecretStore automatically.
 
-use kube::CustomResource;
+use std::collections::BTreeMap;
+
+use kube::{CustomResource, ResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::service::ResourceSpec;
 use super::types::SecretRef;
+use crate::LATTICE_SYSTEM_NAMESPACE;
 
 /// SecretsProvider defines a Vault connection for ESO integration.
 ///
@@ -61,8 +65,19 @@ pub struct SecretsProviderSpec {
     /// Reference to secret containing Vault credentials
     /// Required for token auth (contains VAULT_TOKEN)
     /// Optional for kubernetes auth (uses ServiceAccount)
+    /// Mutually exclusive with `credentials`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_secret_ref: Option<SecretRef>,
+
+    /// ESO-managed credential source. Fetched via the local webhook
+    /// ClusterSecretStore. Mutually exclusive with `credentialsSecretRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<ResourceSpec>,
+
+    /// Template data for shaping credentials using `${secret.*}` syntax.
+    /// Only valid when `credentials` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_data: Option<BTreeMap<String, String>>,
 
     /// Kubernetes auth mount path (default: "kubernetes")
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,6 +153,25 @@ pub enum SecretsProviderPhase {
     Failed,
 }
 
+impl SecretsProvider {
+    /// Resolve the K8s Secret that contains provider credentials.
+    ///
+    /// - ESO mode (`credentials` set): returns a synthetic ref pointing to the
+    ///   ESO-synced secret `{name}-credentials` in `lattice-system`.
+    /// - Manual mode (`credentialsSecretRef` set): returns the user-provided ref.
+    /// - Neither set: returns `None`.
+    pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
+        if self.spec.credentials.is_some() {
+            Some(SecretRef {
+                name: format!("{}-credentials", self.name_any()),
+                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
+            })
+        } else {
+            self.spec.credentials_secret_ref.clone()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +245,139 @@ spec:
         let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.backend, SecretsBackend::Local);
         assert_eq!(provider.spec.server, "");
+    }
+
+    // =========================================================================
+    // k8s_secret_ref() Tests
+    // =========================================================================
+
+    #[test]
+    fn k8s_secret_ref_manual_mode() {
+        let sp = SecretsProvider::new(
+            "vault-prod",
+            SecretsProviderSpec {
+                backend: SecretsBackend::default(),
+                server: "https://vault.example.com".to_string(),
+                path: None,
+                auth_method: VaultAuthMethod::Token,
+                credentials_secret_ref: Some(SecretRef {
+                    name: "my-token".to_string(),
+                    namespace: "default".to_string(),
+                }),
+                credentials: None,
+                credential_data: None,
+                kubernetes_mount_path: None,
+                kubernetes_role: None,
+                approle_mount_path: None,
+                namespace: None,
+                ca_bundle: None,
+            },
+        );
+        let secret_ref = sp.k8s_secret_ref().expect("should have secret ref");
+        assert_eq!(secret_ref.name, "my-token");
+        assert_eq!(secret_ref.namespace, "default");
+    }
+
+    #[test]
+    fn k8s_secret_ref_eso_mode() {
+        use crate::crd::ResourceType;
+
+        let sp = SecretsProvider::new(
+            "vault-prod",
+            SecretsProviderSpec {
+                backend: SecretsBackend::default(),
+                server: "https://vault.example.com".to_string(),
+                path: None,
+                auth_method: VaultAuthMethod::Token,
+                credentials_secret_ref: None,
+                credentials: Some(ResourceSpec {
+                    type_: ResourceType::Secret,
+                    id: Some("vault/token".to_string()),
+                    ..Default::default()
+                }),
+                credential_data: None,
+                kubernetes_mount_path: None,
+                kubernetes_role: None,
+                approle_mount_path: None,
+                namespace: None,
+                ca_bundle: None,
+            },
+        );
+        let secret_ref = sp.k8s_secret_ref().expect("should have secret ref");
+        assert_eq!(secret_ref.name, "vault-prod-credentials");
+        assert_eq!(secret_ref.namespace, LATTICE_SYSTEM_NAMESPACE);
+    }
+
+    #[test]
+    fn k8s_secret_ref_none() {
+        let sp = SecretsProvider::new(
+            "vault-k8s",
+            SecretsProviderSpec {
+                backend: SecretsBackend::default(),
+                server: "https://vault.example.com".to_string(),
+                path: None,
+                auth_method: VaultAuthMethod::Kubernetes,
+                credentials_secret_ref: None,
+                credentials: None,
+                credential_data: None,
+                kubernetes_mount_path: None,
+                kubernetes_role: None,
+                approle_mount_path: None,
+                namespace: None,
+                ca_bundle: None,
+            },
+        );
+        assert!(sp.k8s_secret_ref().is_none());
+    }
+
+    #[test]
+    fn credentials_yaml_parsing() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: SecretsProvider
+metadata:
+  name: vault-prod
+spec:
+  server: https://vault.example.com
+  authMethod: token
+  credentials:
+    type: secret
+    id: vault/token
+    params:
+      provider: lattice-local
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
+        assert!(provider.spec.credentials.is_some());
+        assert!(provider.spec.credentials_secret_ref.is_none());
+        let secret_ref = provider.k8s_secret_ref().expect("should have ref");
+        assert_eq!(secret_ref.name, "vault-prod-credentials");
+    }
+
+    #[test]
+    fn credential_data_yaml_parsing() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: SecretsProvider
+metadata:
+  name: vault-prod
+spec:
+  server: https://vault.example.com
+  authMethod: appRole
+  credentials:
+    type: secret
+    id: vault/approle
+    params:
+      provider: lattice-local
+      keys: [role_id, secret_id]
+  credentialData:
+    approle.json: '{"role_id": "${secret.credentials.role_id}"}'
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: SecretsProvider = serde_json::from_value(value).expect("parse");
+        assert!(provider.spec.credentials.is_some());
+        assert!(provider.spec.credential_data.is_some());
+        let data = provider.spec.credential_data.unwrap();
+        assert!(data.contains_key("approle.json"));
     }
 }

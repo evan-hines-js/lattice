@@ -10,7 +10,7 @@ mod controller;
 mod eso;
 mod webhook;
 
-pub use controller::reconcile;
+pub use controller::{ensure_local_webhook_infrastructure, reconcile};
 pub use eso::{
     apply_external_secret, build_external_secret, build_templated_external_secret, ExternalSecret,
     ExternalSecretData, ExternalSecretDataFrom, ExternalSecretExtract, ExternalSecretSpec,

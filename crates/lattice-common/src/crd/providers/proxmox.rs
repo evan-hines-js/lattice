@@ -131,24 +131,6 @@ pub struct ProxmoxConfig {
     /// IPv4 address pool for automatic node IP allocation via CAPI IPAM
     pub ipv4_pool: Ipv4PoolConfig,
 
-    /// CPU cores for control plane nodes
-    pub cp_cores: u32,
-
-    /// Memory in MiB for control plane nodes
-    pub cp_memory_mib: u32,
-
-    /// Disk size in GB for control plane nodes
-    pub cp_disk_size_gb: u32,
-
-    /// CPU cores for worker nodes
-    pub worker_cores: u32,
-
-    /// Memory in MiB for worker nodes
-    pub worker_memory_mib: u32,
-
-    /// Disk size in GB for worker nodes
-    pub worker_disk_size_gb: u32,
-
     // ==========================================================================
     // Template Source Configuration (Optional)
     // ==========================================================================
@@ -261,17 +243,6 @@ pub struct ProxmoxConfig {
     /// Skip QEMU guest agent check
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_qemu_guest_agent: Option<bool>,
-
-    // ==========================================================================
-    // VM Sizing - Optional Overrides
-    // ==========================================================================
-    /// CPU sockets for control plane nodes (default: 1)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cp_sockets: Option<u32>,
-
-    /// CPU sockets for worker nodes (default: 1)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_sockets: Option<u32>,
 }
 
 #[cfg(test)]
