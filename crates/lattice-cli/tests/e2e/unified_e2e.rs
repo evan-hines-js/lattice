@@ -147,14 +147,9 @@ async fn run_full_e2e() -> Result<(), String> {
         None
     };
 
-    // Start secrets tests in background (if Vault is configured)
-    let secrets_handle = if integration::secrets::secrets_tests_enabled() {
-        info!("[Phase 7] Vault configured - starting secrets tests...");
-        Some(integration::secrets::start_secrets_tests_async(&ctx).await?)
-    } else {
-        info!("[Phase 7] Vault not configured - skipping secrets tests");
-        None
-    };
+    // Start secrets tests in background
+    info!("[Phase 7] Starting secrets tests...");
+    let secrets_handle = Some(integration::secrets::start_secrets_tests_async(&ctx).await?);
 
     // Start workload2 deletion in background (if workload2 exists)
     let delete_handle = if ctx.has_workload2() {

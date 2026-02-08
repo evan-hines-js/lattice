@@ -3683,4 +3683,139 @@ gpu:
         }];
         assert!(spec.validate().is_ok());
     }
+
+    // =========================================================================
+    // Secret Resource Construction Tests
+    // =========================================================================
+
+    /// Build a secret resource with provider, optional keys, and refresh interval.
+    fn secret_resource(
+        remote_key: &str,
+        provider: &str,
+        keys: Option<&[&str]>,
+    ) -> ResourceSpec {
+        let mut params = BTreeMap::new();
+        params.insert("provider".to_string(), serde_json::json!(provider));
+        params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+        if let Some(keys) = keys {
+            params.insert("keys".to_string(), serde_json::json!(keys));
+        }
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some(remote_key.to_string()),
+            params: Some(params),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn secret_resource_with_explicit_keys() {
+        let mut resources = BTreeMap::new();
+        resources.insert("db-creds".to_string(), secret_resource(
+            "path/to/db", "local-test", Some(&["user", "pass"]),
+        ));
+
+        let spec = LatticeServiceSpec {
+            containers: {
+                let mut c = BTreeMap::new();
+                c.insert("main".to_string(), simple_container());
+                c
+            },
+            resources,
+            ..Default::default()
+        };
+
+        let db = spec.resources.get("db-creds").expect("db-creds resource");
+        assert!(matches!(db.type_, ResourceType::Secret));
+        assert_eq!(db.id, Some("path/to/db".to_string()));
+
+        let params = db.params.as_ref().expect("params");
+        assert_eq!(params["provider"], serde_json::json!("local-test"));
+        assert_eq!(params["keys"], serde_json::json!(["user", "pass"]));
+    }
+
+    #[test]
+    fn secret_resource_without_keys_omits_keys_param() {
+        let res = secret_resource("path/to/all", "local-test", None);
+        let params = res.params.as_ref().expect("params");
+
+        assert!(params.get("provider").is_some());
+        assert!(params.get("keys").is_none());
+    }
+
+    #[test]
+    fn service_with_image_pull_secrets() {
+        let mut resources = BTreeMap::new();
+        resources.insert("ghcr-creds".to_string(), secret_resource(
+            "local-regcreds", "local-test", None,
+        ));
+
+        let spec = LatticeServiceSpec {
+            containers: {
+                let mut c = BTreeMap::new();
+                c.insert("main".to_string(), simple_container());
+                c
+            },
+            resources,
+            image_pull_secrets: vec!["ghcr-creds".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(spec.image_pull_secrets, vec!["ghcr-creds"]);
+        assert!(spec.resources.contains_key("ghcr-creds"));
+    }
+
+    #[test]
+    fn service_with_secret_env_vars_and_file_mount() {
+        use crate::template::TemplateString;
+
+        let mut variables = BTreeMap::new();
+        variables.insert(
+            "DB_PASSWORD".to_string(),
+            TemplateString::new("${secret.db-creds.password}"),
+        );
+        variables.insert(
+            "DATABASE_URL".to_string(),
+            TemplateString::new(
+                "postgres://${secret.db-creds.username}:${secret.db-creds.password}@db:5432/mydb",
+            ),
+        );
+
+        let mut files = BTreeMap::new();
+        files.insert(
+            "/etc/app/config.yaml".to_string(),
+            FileMount {
+                content: Some(TemplateString::new("password: ${secret.db-creds.password}")),
+                ..Default::default()
+            },
+        );
+
+        let container = ContainerSpec {
+            image: "busybox:latest".to_string(),
+            variables,
+            files,
+            ..Default::default()
+        };
+
+        let mut resources = BTreeMap::new();
+        resources.insert("db-creds".to_string(), secret_resource(
+            "local-db-creds", "local-test", Some(&["username", "password"]),
+        ));
+
+        let spec = LatticeServiceSpec {
+            containers: {
+                let mut c = BTreeMap::new();
+                c.insert("main".to_string(), container);
+                c
+            },
+            resources,
+            ..Default::default()
+        };
+
+        let main = spec.containers.get("main").expect("main container");
+        assert!(main.variables.contains_key("DB_PASSWORD"));
+        assert!(main.variables.contains_key("DATABASE_URL"));
+        assert!(main.files.contains_key("/etc/app/config.yaml"));
+        assert!(spec.resources.contains_key("db-creds"));
+    }
 }

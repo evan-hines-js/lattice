@@ -1,12 +1,8 @@
-//! Per-integration E2E test: Vault secrets integration
+//! Per-integration E2E test: Secrets integration (local webhook ESO)
 //!
-//! Sets up mgmt + workload, runs secrets tests if Vault is reachable, then tears down.
-//! Skips gracefully if Vault is not configured (docker-compose not running).
+//! Sets up mgmt + workload, runs secrets tests (local webhook ESO backend), then tears down.
 //!
 //! ```bash
-//! # Start Vault first
-//! docker compose up -d
-//!
 //! cargo test --features provider-e2e --test e2e test_secrets_e2e -- --nocapture
 //! ```
 
@@ -42,11 +38,6 @@ async fn test_secrets_e2e() {
 }
 
 async fn run() -> Result<(), String> {
-    if !integration::secrets::secrets_tests_enabled() {
-        info!("Vault not reachable - skipping secrets E2E test");
-        return Ok(());
-    }
-
     let result = setup::setup_mgmt_and_workload(&setup::SetupConfig::default()).await?;
     integration::secrets::run_secrets_tests(&result.ctx).await?;
     teardown_mgmt_cluster(&result.ctx.mgmt_kubeconfig, MGMT_CLUSTER_NAME).await

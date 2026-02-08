@@ -9,11 +9,12 @@ use std::{process::Command, time::Duration};
 
 #[cfg(feature = "provider-e2e")]
 use kube::{
+    api::{Api, PostParams},
     config::{KubeConfigOptions, Kubeconfig},
     Client,
 };
 #[cfg(feature = "provider-e2e")]
-use lattice_common::crd::{BootstrapProvider, ClusterPhase};
+use lattice_common::crd::{BootstrapProvider, ClusterPhase, LatticeService};
 #[cfg(feature = "provider-e2e")]
 use lattice_common::{
     retry::{retry_with_backoff, RetryConfig},
@@ -86,6 +87,17 @@ pub const CURL_IMAGE: &str = "ghcr.io/evan-hines-js/curl:latest";
 /// Busybox image for lightweight test pods
 #[cfg(feature = "provider-e2e")]
 pub const BUSYBOX_IMAGE: &str = "ghcr.io/evan-hines-js/busybox:latest";
+
+/// SecretsProvider name used for GHCR registry credentials across all tests.
+///
+/// Every test that deploys LatticeServices needs a local SecretsProvider with
+/// this name, plus a seeded `local-regcreds` source secret.
+#[cfg(feature = "provider-e2e")]
+pub const REGCREDS_PROVIDER: &str = "local-test";
+
+/// Remote key for the GHCR registry credentials secret in the local webhook store.
+#[cfg(feature = "provider-e2e")]
+pub const REGCREDS_REMOTE_KEY: &str = "local-regcreds";
 
 /// Standard cluster names for E2E tests
 #[cfg(feature = "provider-e2e")]
@@ -171,7 +183,7 @@ pub fn kubeconfig_path(cluster_name: &str) -> String {
 /// Generate a unique localhost-patched kubeconfig path for a cluster.
 /// Example: `/tmp/e2e-mgmt-kubeconfig-local-8156-965202`
 #[cfg(feature = "provider-e2e")]
-pub fn kubeconfig_local_path(cluster_name: &str) -> String {
+fn kubeconfig_local_path(cluster_name: &str) -> String {
     format!("/tmp/{}-kubeconfig-local-{}", cluster_name, run_id())
 }
 
@@ -416,7 +428,7 @@ impl HttpResponse {
 /// Uses curl with the provided bearer token and returns both status code and body.
 /// Returns status_code 0 on connection failure or timeout.
 #[cfg(feature = "provider-e2e")]
-pub fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpResponse {
+fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpResponse {
     // Use -w to append status code after body with a delimiter
     let output = match run_cmd(
         "curl",
@@ -512,7 +524,7 @@ pub async fn http_get_with_retry(
 
 /// Get the kubeconfig path inside the container based on bootstrap provider
 #[cfg(feature = "provider-e2e")]
-pub fn get_kubeconfig_path_for_bootstrap(bootstrap: &BootstrapProvider) -> &'static str {
+fn get_kubeconfig_path_for_bootstrap(bootstrap: &BootstrapProvider) -> &'static str {
     match bootstrap {
         BootstrapProvider::Kubeadm => "/etc/kubernetes/admin.conf",
         BootstrapProvider::Rke2 => "/etc/rancher/rke2/rke2.yaml",
@@ -805,7 +817,7 @@ use lattice_common::crd::LatticeCluster;
 
 /// Get the workspace root directory
 #[cfg(feature = "provider-e2e")]
-pub fn workspace_root() -> PathBuf {
+fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("lattice-cli crate should have a parent directory")
@@ -816,13 +828,13 @@ pub fn workspace_root() -> PathBuf {
 
 /// Get the fixtures directory for cluster configs
 #[cfg(feature = "provider-e2e")]
-pub fn cluster_fixtures_dir() -> PathBuf {
+fn cluster_fixtures_dir() -> PathBuf {
     workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/clusters")
 }
 
 /// Get the fixtures directory for service configs
 #[cfg(feature = "provider-e2e")]
-pub fn service_fixtures_dir() -> PathBuf {
+fn service_fixtures_dir() -> PathBuf {
     workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/services")
 }
 
@@ -911,7 +923,7 @@ pub async fn rebuild_and_restart_operators(
 
 /// Delete operator pods to trigger image pull.
 #[cfg(feature = "provider-e2e")]
-pub fn delete_operator_pods(cluster_name: &str, kubeconfig: &str) {
+fn delete_operator_pods(cluster_name: &str, kubeconfig: &str) {
     let msg = match run_cmd(
         "kubectl",
         &[
@@ -1191,7 +1203,7 @@ pub fn proxy_service_exists(kubeconfig: &str) -> bool {
 ///
 /// Waits up to 2 minutes for the LoadBalancer to get an external IP.
 #[cfg(feature = "provider-e2e")]
-pub async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> {
+async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> {
     use std::sync::Mutex;
 
     let result_url: Mutex<Option<String>> = Mutex::new(None);
@@ -1238,11 +1250,8 @@ pub async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, Stri
         .ok_or_else(|| "LoadBalancer IP not available".to_string())
 }
 
-/// Re-export the shared PortForward as ResilientPortForward for backwards compatibility.
-/// The shared module provides zombie cleanup, active health checking, exponential backoff,
-/// and restart counting in addition to the basic watchdog.
 #[cfg(feature = "provider-e2e")]
-pub use lattice_cli::commands::port_forward::PortForward as ResilientPortForward;
+use lattice_cli::commands::port_forward::PortForward as ResilientPortForward;
 
 /// Get proxy URL, creating a resilient port-forward if necessary.
 ///
@@ -1285,7 +1294,7 @@ pub fn get_sa_token(kubeconfig: &str, namespace: &str, sa_name: &str) -> Result<
 
 /// Get a ServiceAccount token with custom duration
 #[cfg(feature = "provider-e2e")]
-pub fn get_sa_token_with_duration(
+fn get_sa_token_with_duration(
     kubeconfig: &str,
     namespace: &str,
     sa_name: &str,
@@ -1500,6 +1509,20 @@ pub fn create_service_with_secrets(
         );
     }
 
+    // Every service needs ghcr-creds for pulling GHCR images
+    let mut reg_params = BTreeMap::new();
+    reg_params.insert("provider".to_string(), serde_json::json!(REGCREDS_PROVIDER));
+    reg_params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
+    resources.insert(
+        "ghcr-creds".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some(REGCREDS_REMOTE_KEY.to_string()),
+            params: Some(reg_params),
+            ..Default::default()
+        },
+    );
+
     let mut containers = BTreeMap::new();
     containers.insert(
         "main".to_string(),
@@ -1530,6 +1553,7 @@ pub fn create_service_with_secrets(
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
+            image_pull_secrets: vec!["ghcr-creds".to_string()],
             ..Default::default()
         },
         status: None,
@@ -1661,6 +1685,50 @@ pub async fn wait_for_service_phase_with_message(
         },
     )
     .await
+}
+
+/// Deploy a LatticeService and wait until it reaches the expected phase.
+///
+/// Encapsulates the common pattern of creating a kube client, creating the service
+/// via the API, and waiting for the status phase to match. When `expected_message`
+/// is provided, also asserts that the status condition message contains the substring.
+#[cfg(feature = "provider-e2e")]
+pub async fn deploy_and_wait_for_phase(
+    kubeconfig: &str,
+    namespace: &str,
+    service: LatticeService,
+    expected_phase: &str,
+    expected_message: Option<&str>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let name = service
+        .metadata
+        .name
+        .as_deref()
+        .ok_or("service missing metadata.name")?
+        .to_string();
+
+    let client = client_from_kubeconfig(kubeconfig).await?;
+    let api: Api<LatticeService> = Api::namespaced(client, namespace);
+
+    api.create(&PostParams::default(), &service)
+        .await
+        .map_err(|e| format!("Failed to create service {}: {}", name, e))?;
+
+    match expected_message {
+        Some(substring) => {
+            wait_for_service_phase_with_message(
+                kubeconfig,
+                namespace,
+                &name,
+                expected_phase,
+                substring,
+                timeout,
+            )
+            .await
+        }
+        None => wait_for_service_phase(kubeconfig, namespace, &name, expected_phase, timeout).await,
+    }
 }
 
 // =============================================================================
@@ -2167,7 +2235,7 @@ pub const LOCAL_SECRETS_NAMESPACE: &str = "lattice-secrets";
 
 /// Create a SecretsProvider CRD with `backend: local`
 #[cfg(feature = "provider-e2e")]
-pub async fn create_local_secrets_provider(kubeconfig: &str, name: &str) -> Result<(), String> {
+async fn create_local_secrets_provider(kubeconfig: &str, name: &str) -> Result<(), String> {
     info!(
         "[LocalSecrets] Creating SecretsProvider '{}' with backend: local...",
         name
@@ -2256,7 +2324,7 @@ metadata:
 /// Wait for a SecretsProvider CRD to reach the Ready phase.
 ///
 /// Polls the `.status.phase` field until it reads "Ready" or "Failed".
-/// Used by both Vault-backed and local-backed secret provider tests.
+/// Used by local-backed secret provider tests.
 #[cfg(feature = "provider-e2e")]
 pub async fn wait_for_secrets_provider_ready(
     kubeconfig: &str,
@@ -2322,7 +2390,7 @@ pub async fn wait_for_secrets_provider_ready(
 /// and stores it as a labeled K8s Secret in the `lattice-secrets` namespace
 /// so the webhook can serve it to ESO.
 #[cfg(feature = "provider-e2e")]
-pub async fn seed_local_regcreds(kubeconfig: &str, secret_name: &str) -> Result<(), String> {
+async fn seed_local_regcreds(kubeconfig: &str, secret_name: &str) -> Result<(), String> {
     let docker_config = load_registry_credentials()
         .ok_or("No GHCR credentials (check .env or GHCR_USER/GHCR_TOKEN env vars)")?;
     let mut data = std::collections::BTreeMap::new();
@@ -2688,7 +2756,7 @@ pub async fn verify_pod_image_pull_secrets(
 
 /// Wait for at least one pod matching `label_selector` to reach the Running phase.
 #[cfg(feature = "provider-e2e")]
-pub async fn wait_for_pod_running(
+async fn wait_for_pod_running(
     kubeconfig: &str,
     namespace: &str,
     label_selector: &str,
@@ -2731,11 +2799,7 @@ pub async fn wait_for_pod_running(
 
 /// Get the name of the first pod matching `label_selector`.
 #[cfg(feature = "provider-e2e")]
-pub fn get_pod_name(
-    kubeconfig: &str,
-    namespace: &str,
-    label_selector: &str,
-) -> Result<String, String> {
+fn get_pod_name(kubeconfig: &str, namespace: &str, label_selector: &str) -> Result<String, String> {
     let output = run_cmd(
         "kubectl",
         &[
@@ -2844,4 +2908,83 @@ pub async fn verify_synced_secret_keys(
         secret_name, expected_keys
     );
     Ok(())
+}
+
+// =============================================================================
+// Regcreds Infrastructure Setup
+// =============================================================================
+
+/// Set up the local SecretsProvider, seed GHCR regcreds, and apply a broad
+/// Cedar policy permitting all services to access them.
+///
+/// Call this before deploying any LatticeService in a test — every service
+/// declares `ghcr-creds` as an imagePullSecret resource pointing at
+/// `local-regcreds`, so the local webhook must be ready to serve it.
+#[cfg(feature = "provider-e2e")]
+pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), String> {
+    // Create the local SecretsProvider (idempotent — uses kubectl apply)
+    create_local_secrets_provider(kubeconfig, REGCREDS_PROVIDER).await?;
+    wait_for_secrets_provider_ready(kubeconfig, REGCREDS_PROVIDER).await?;
+
+    // Seed the GHCR credentials as a source secret for the webhook
+    seed_local_regcreds(kubeconfig, REGCREDS_REMOTE_KEY).await?;
+
+    // Broad Cedar policy: permit all services to access regcreds
+    apply_cedar_policy_crd(
+        kubeconfig,
+        "permit-regcreds",
+        "regcreds",
+        50,
+        r#"permit(
+  principal,
+  action == Lattice::Action::"AccessSecret",
+  resource
+) when {
+  resource.path == "local-regcreds"
+};"#,
+    )
+    .await?;
+
+    info!("[Regcreds] Infrastructure ready (provider + source secret + Cedar policy)");
+    Ok(())
+}
+
+// =============================================================================
+// Fine-Grained Cedar Policy Helpers
+// =============================================================================
+
+/// Apply a Cedar policy permitting services in `namespace` to access specific secret IDs.
+///
+/// Unlike the broad `permit-regcreds` policy (which only covers image pull credentials),
+/// this scopes access to exactly the secrets a service needs — validating that the Cedar
+/// authorization pipeline works correctly with fine-grained policies.
+///
+/// The `label` is used for `lattice.dev/test={label}` so callers can clean up with
+/// `delete_cedar_policies_by_label`.
+#[cfg(feature = "provider-e2e")]
+pub async fn apply_cedar_secret_policy_for_service(
+    kubeconfig: &str,
+    policy_name: &str,
+    label: &str,
+    namespace: &str,
+    secret_ids: &[&str],
+) -> Result<(), String> {
+    let path_conditions: Vec<String> = secret_ids
+        .iter()
+        .map(|id| format!("resource.path == \"{}\"", id))
+        .collect();
+    let path_expr = path_conditions.join(" || ");
+
+    let cedar = format!(
+        r#"permit(
+  principal,
+  action == Lattice::Action::"AccessSecret",
+  resource
+) when {{
+  principal.namespace == "{namespace}" &&
+  ({path_expr})
+}};"#,
+    );
+
+    apply_cedar_policy_crd(kubeconfig, policy_name, label, 100, &cedar).await
 }
