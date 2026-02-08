@@ -198,12 +198,6 @@ impl ExternalSecretMetadata {
             labels,
         }
     }
-
-    /// Add a label
-    pub fn with_label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.labels.insert(key.into(), value.into());
-        self
-    }
 }
 
 /// ExternalSecret spec
@@ -358,14 +352,6 @@ pub struct RemoteRef {
 }
 
 impl RemoteRef {
-    /// Create a reference to a full secret path
-    pub fn new(key: impl Into<String>) -> Self {
-        Self {
-            key: key.into(),
-            property: None,
-        }
-    }
-
     /// Create a reference to a specific property within a secret
     pub fn with_property(key: impl Into<String>, property: impl Into<String>) -> Self {
         Self {

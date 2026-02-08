@@ -20,9 +20,6 @@ pub mod telemetry;
 pub mod template;
 pub mod yaml;
 
-pub use credentials::{
-    AwsCredentials, CredentialError, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
-};
 pub use error::{default_error_policy, ControllerContext, Error, ReconcileError};
 pub use events::{EventPublisher, KubeEventPublisher, NoopEventPublisher};
 pub use kube_utils::{

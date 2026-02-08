@@ -78,7 +78,7 @@
   <g filter="url(#glow)">
     <!-- Parent to child connections -->
     <line x1="190" y1="135" x2="90" y2="210" stroke="url(#line1)" stroke-width="2" stroke-dasharray="6,4"/>
-    <line x1="190" y1="135" x2="195" y2="210" stroke="url(#line1)" stroke-width="2" stroke-dasharray="6,4"/>
+    <line x1="190" y1="135" x2="191" y2="210" stroke="url(#line1)" stroke-width="2" stroke-dasharray="6,4"/>
     <line x1="190" y1="135" x2="300" y2="210" stroke="url(#line1)" stroke-width="2" stroke-dasharray="6,4"/>
 
     <!-- Animated data flow dots on connections -->
@@ -86,7 +86,7 @@
       <animateMotion dur="2.5s" repeatCount="indefinite" path="M190,135 L90,210"/>
     </circle>
     <circle r="2.5" fill="#38bdf8" opacity="0.9">
-      <animateMotion dur="3s" repeatCount="indefinite" path="M190,135 L195,210"/>
+      <animateMotion dur="3s" repeatCount="indefinite" path="M190,135 L191,210"/>
     </circle>
     <circle r="2.5" fill="#38bdf8" opacity="0.9">
       <animateMotion dur="2.8s" repeatCount="indefinite" path="M190,135 L300,210"/>
@@ -115,16 +115,6 @@
     </circle>
   </g>
 
-  <!-- Pivot arc arrows (showing self-management) -->
-  <g opacity="0.35">
-    <path d="M 105 225 A 18 18 0 1 1 77 225" fill="none" stroke="#38bdf8" stroke-width="1"/>
-    <polygon points="77,225 81,219 73,221" fill="#38bdf8"/>
-    <path d="M 210 225 A 18 18 0 1 1 182 225" fill="none" stroke="#38bdf8" stroke-width="1"/>
-    <polygon points="182,225 186,219 178,221" fill="#38bdf8"/>
-    <path d="M 315 225 A 18 18 0 1 1 287 225" fill="none" stroke="#818cf8" stroke-width="1"/>
-    <polygon points="287,225 291,219 283,221" fill="#818cf8"/>
-  </g>
-
   <!-- Cluster nodes -->
   <!-- Root parent -->
   <use href="#node-parent" x="168" y="100" width="44" height="44" filter="url(#glow-strong)"/>
@@ -134,8 +124,8 @@
   <use href="#node-parent" x="71" y="200" width="38" height="38" filter="url(#glow)"/>
   <text x="90" y="248" text-anchor="middle" font-family="monospace" font-size="9" fill="#94a3b8">prod</text>
 
-  <use href="#node-child" x="178" y="205" width="34" height="34" filter="url(#glow)"/>
-  <text x="195" y="252" text-anchor="middle" font-family="monospace" font-size="9" fill="#94a3b8">edge</text>
+  <use href="#node-child" x="173" y="202" width="34" height="34" filter="url(#glow)"/>
+  <text x="190" y="248" text-anchor="middle" font-family="monospace" font-size="9" fill="#94a3b8">edge</text>
 
   <use href="#node-parent" x="281" y="200" width="38" height="38" filter="url(#glow)"/>
   <text x="300" y="248" text-anchor="middle" font-family="monospace" font-size="9" fill="#94a3b8">staging</text>
@@ -153,6 +143,16 @@
 
   <use href="#node-child" x="315" y="300" width="30" height="30" filter="url(#glow)"/>
   <text x="330" y="342" text-anchor="middle" font-family="monospace" font-size="8" fill="#64748b">dev-2</text>
+
+  <!-- Pivot arc arrows (showing self-management, drawn after nodes so they render on top) -->
+  <g opacity="0.35">
+    <path d="M 105 225 A 18 18 0 1 1 77 225" fill="none" stroke="#38bdf8" stroke-width="1"/>
+    <polygon points="77,225 81,219 73,221" fill="#38bdf8"/>
+    <path d="M 205 225 A 18 18 0 1 1 177 225" fill="none" stroke="#38bdf8" stroke-width="1"/>
+    <polygon points="177,225 181,219 173,221" fill="#38bdf8"/>
+    <path d="M 315 225 A 18 18 0 1 1 287 225" fill="none" stroke="#818cf8" stroke-width="1"/>
+    <polygon points="287,225 291,219 283,221" fill="#818cf8"/>
+  </g>
 
   <!-- Divider line -->
   <line x1="390" y1="40" x2="390" y2="360" stroke="#334155" stroke-width="1" stroke-dasharray="2,6"/>

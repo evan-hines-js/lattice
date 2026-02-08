@@ -42,12 +42,13 @@ use lattice_common::crd::{
     BootstrapProvider, CloudProvider, CloudProviderSpec, CloudProviderType, LatticeCluster,
     ProviderType, SecretRef,
 };
+use lattice_common::credentials::{
+    AwsCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
+};
 use lattice_common::fips;
 use lattice_common::kube_utils;
-use lattice_common::CredentialProvider;
 use lattice_common::{
-    capi_namespace, kubeconfig_secret_name, AwsCredentials, OpenStackCredentials,
-    ProxmoxCredentials, AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE,
+    capi_namespace, kubeconfig_secret_name, AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE,
     OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
 
