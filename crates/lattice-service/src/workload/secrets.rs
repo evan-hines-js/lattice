@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use lattice_secret_provider::{build_external_secret, ExternalSecret};
 
 use super::error::CompilationError;
-use crate::crd::LatticeServiceSpec;
+use crate::crd::WorkloadSpec;
 
 // =============================================================================
 // Generated Secrets Container
@@ -59,7 +59,7 @@ impl GeneratedSecrets {
 pub struct SecretsCompiler;
 
 impl SecretsCompiler {
-    /// Compile secret resources for a LatticeService
+    /// Compile secret resources for a workload
     ///
     /// For each secret resource in the spec:
     /// 1. Validates the resource has required fields (`id` for remote key, `params.provider`)
@@ -69,12 +69,11 @@ impl SecretsCompiler {
     pub fn compile(
         service_name: &str,
         namespace: &str,
-        spec: &LatticeServiceSpec,
+        workload: &WorkloadSpec,
     ) -> Result<GeneratedSecrets, CompilationError> {
         let mut output = GeneratedSecrets::new();
 
-        let secret_resources: Vec<_> = spec
-            .workload
+        let secret_resources: Vec<_> = workload
             .resources
             .iter()
             .filter(|(_, r)| r.is_secret())
@@ -114,7 +113,7 @@ impl SecretsCompiler {
 
             // Determine K8s Secret type: explicit param > imagePullSecrets inference > Opaque
             let secret_type = params.secret_type.as_deref().or_else(|| {
-                spec.workload
+                workload
                     .image_pull_secrets
                     .contains(resource_name)
                     .then_some("kubernetes.io/dockerconfigjson")
@@ -169,7 +168,7 @@ mod tests {
         Option<&'a str>,
     );
 
-    fn make_spec_with_secrets(secrets: Vec<SecretTuple<'_>>) -> LatticeServiceSpec {
+    fn make_spec_with_secrets(secrets: Vec<SecretTuple<'_>>) -> WorkloadSpec {
         let mut resources = BTreeMap::new();
 
         for (name, remote_key, provider, keys, refresh_interval) in secrets {
@@ -202,12 +201,9 @@ mod tests {
             },
         );
 
-        LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                resources,
-                ..Default::default()
-            },
+        WorkloadSpec {
+            containers,
+            resources,
             ..Default::default()
         }
     }
@@ -312,7 +308,7 @@ mod tests {
         )]);
 
         // Remove the id
-        if let Some(resource) = spec.workload.resources.get_mut("db-creds") {
+        if let Some(resource) = spec.resources.get_mut("db-creds") {
             resource.id = None;
         }
 
@@ -335,7 +331,7 @@ mod tests {
         )]);
 
         // Remove the provider from params
-        if let Some(resource) = spec.workload.resources.get_mut("db-creds") {
+        if let Some(resource) = spec.resources.get_mut("db-creds") {
             if let Some(params) = resource.params.as_mut() {
                 params.remove("provider");
             }
@@ -383,7 +379,7 @@ mod tests {
 
     #[test]
     fn story_no_secrets_returns_empty() {
-        let spec = LatticeServiceSpec::default();
+        let spec = WorkloadSpec::default();
 
         let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
 

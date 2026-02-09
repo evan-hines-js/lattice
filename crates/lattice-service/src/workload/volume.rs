@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::CompilationError;
 use super::ObjectMeta;
-use crate::crd::{LatticeServiceSpec, VolumeAccessMode};
+use crate::crd::{VolumeAccessMode, WorkloadSpec};
 
 // =============================================================================
 // Kubernetes PVC Types
@@ -213,7 +213,7 @@ pub const VOLUME_OWNER_LABEL_PREFIX: &str = "lattice.dev/volume-owner-";
 pub struct VolumeCompiler;
 
 impl VolumeCompiler {
-    /// Compile volume and model resources for a LatticeService
+    /// Compile volume and model resources for a workload
     ///
     /// Handles both `type: volume` and `type: model` resources:
     /// - Volumes: PVCs with owner/reference pattern, RWO affinity
@@ -222,7 +222,7 @@ impl VolumeCompiler {
     /// # Arguments
     /// * `service_name` - Name of the service
     /// * `namespace` - Target namespace
-    /// * `spec` - LatticeService spec
+    /// * `workload` - Workload spec (shared across LatticeService, LatticeJob, LatticeModel)
     ///
     /// # Returns
     /// Generated volume resources including PVCs, pod labels, affinity rules,
@@ -230,15 +230,14 @@ impl VolumeCompiler {
     pub fn compile(
         service_name: &str,
         namespace: &str,
-        spec: &LatticeServiceSpec,
+        workload: &WorkloadSpec,
     ) -> Result<GeneratedVolumes, CompilationError> {
         let mut output = GeneratedVolumes::new();
 
         // -----------------------------------------------------------------
         // Process regular volume resources
         // -----------------------------------------------------------------
-        let volume_resources: Vec<_> = spec
-            .workload
+        let volume_resources: Vec<_> = workload
             .resources
             .iter()
             .filter(|(_, r)| r.type_.is_volume())
@@ -311,8 +310,7 @@ impl VolumeCompiler {
         // -----------------------------------------------------------------
         // Process model resources
         // -----------------------------------------------------------------
-        let model_resources: Vec<_> = spec
-            .workload
+        let model_resources: Vec<_> = workload
             .resources
             .iter()
             .filter(|(_, r)| r.type_.is_model())
@@ -357,15 +355,14 @@ impl VolumeCompiler {
         // -----------------------------------------------------------------
         // Generate volume mounts (for both volume/model resources and emptyDir)
         // -----------------------------------------------------------------
-        let all_mountable: Vec<_> = spec
-            .workload
+        let all_mountable: Vec<_> = workload
             .resources
             .iter()
             .filter(|(_, r)| r.type_.is_volume_like())
             .collect();
 
         // Container volume mounts
-        for (container_name, container_spec) in &spec.workload.containers {
+        for (container_name, container_spec) in &workload.containers {
             let (mounts, extra_vols) =
                 Self::resolve_mounts(&container_spec.volumes, &all_mountable);
             if !mounts.is_empty() {
@@ -375,7 +372,7 @@ impl VolumeCompiler {
         }
 
         // Sidecar volume mounts
-        for (sidecar_name, sidecar_spec) in &spec.workload.sidecars {
+        for (sidecar_name, sidecar_spec) in &workload.sidecars {
             let (mounts, extra_vols) = Self::resolve_mounts(&sidecar_spec.volumes, &all_mountable);
             if !mounts.is_empty() {
                 output.volume_mounts.insert(sidecar_name.clone(), mounts);
@@ -495,7 +492,7 @@ mod tests {
         owned: Vec<(&str, Option<&str>, &str, Option<VolumeAccessMode>)>, // (name, id, size, access_mode)
         refs: Vec<(&str, &str)>,                                          // (name, id)
         container_mounts: Vec<(&str, &str)>, // (mount_path, resource_name)
-    ) -> LatticeServiceSpec {
+    ) -> WorkloadSpec {
         let mut resources = BTreeMap::new();
 
         // Add owned volumes
@@ -561,12 +558,9 @@ mod tests {
             },
         );
 
-        LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                resources,
-                ..Default::default()
-            },
+        WorkloadSpec {
+            containers,
+            resources,
             ..Default::default()
         }
     }
@@ -617,7 +611,7 @@ mod tests {
         );
 
         // Add storage class to volume config via params
-        if let Some(resource) = spec.workload.resources.get_mut("config") {
+        if let Some(resource) = spec.resources.get_mut("config") {
             if let Some(params) = resource.params.as_mut() {
                 params.insert("storageClass".to_string(), serde_json::json!("local-path"));
             }
@@ -838,7 +832,7 @@ mod tests {
 
     #[test]
     fn story_no_volumes_returns_empty() {
-        let spec = LatticeServiceSpec::default();
+        let spec = WorkloadSpec::default();
 
         let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 
@@ -851,7 +845,7 @@ mod tests {
 
     fn make_model_spec(
         model_mounts: Vec<(&str, &str)>, // (mount_path, resource_name)
-    ) -> LatticeServiceSpec {
+    ) -> WorkloadSpec {
         let mut resources = BTreeMap::new();
         let mut params = BTreeMap::new();
         params.insert(
@@ -895,12 +889,9 @@ mod tests {
             },
         );
 
-        LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                resources,
-                ..Default::default()
-            },
+        WorkloadSpec {
+            containers,
+            resources,
             ..Default::default()
         }
     }
@@ -1051,12 +1042,9 @@ mod tests {
             },
         );
 
-        let spec = LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                resources,
-                ..Default::default()
-            },
+        let spec = WorkloadSpec {
+            containers,
+            resources,
             ..Default::default()
         };
 
@@ -1083,7 +1071,7 @@ mod tests {
 
     fn make_emptydir_spec(
         mounts: Vec<(&str, Option<&str>, Option<&str>)>, // (path, medium, size_limit)
-    ) -> LatticeServiceSpec {
+    ) -> WorkloadSpec {
         let mut volumes = BTreeMap::new();
         for (path, medium, size_limit) in mounts {
             volumes.insert(
@@ -1108,11 +1096,8 @@ mod tests {
             },
         );
 
-        LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                ..Default::default()
-            },
+        WorkloadSpec {
+            containers,
             ..Default::default()
         }
     }
@@ -1169,7 +1154,7 @@ mod tests {
         );
 
         // Add emptyDir volumes to the same container
-        let container = spec.workload.containers.get_mut("main").unwrap();
+        let container = spec.containers.get_mut("main").unwrap();
         container.volumes.insert(
             "/tmp".to_string(),
             crate::crd::VolumeMount {
@@ -1233,20 +1218,17 @@ mod tests {
     fn story_sidecar_emptydir_volumes() {
         use crate::crd::SidecarSpec;
 
-        let mut spec = LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers: {
-                    let mut c = BTreeMap::new();
-                    c.insert(
-                        "main".to_string(),
-                        ContainerSpec {
-                            image: "app:latest".to_string(),
-                            ..Default::default()
-                        },
-                    );
-                    c
-                },
-                ..Default::default()
+        let mut spec = WorkloadSpec {
+            containers: {
+                let mut c = BTreeMap::new();
+                c.insert(
+                    "main".to_string(),
+                    ContainerSpec {
+                        image: "app:latest".to_string(),
+                        ..Default::default()
+                    },
+                );
+                c
             },
             ..Default::default()
         };
@@ -1263,7 +1245,7 @@ mod tests {
             },
         );
 
-        spec.workload.sidecars.insert(
+        spec.sidecars.insert(
             "logger".to_string(),
             SidecarSpec {
                 image: "fluentbit:latest".to_string(),
@@ -1289,7 +1271,7 @@ mod tests {
     fn story_emptydir_only_no_resources_needed() {
         // EmptyDir volumes should work even with zero resource declarations
         let spec = make_emptydir_spec(vec![("/tmp", None, None), ("/var/run", None, None)]);
-        assert!(spec.workload.resources.is_empty());
+        assert!(spec.resources.is_empty());
 
         let output = VolumeCompiler::compile("myapp", "prod", &spec).unwrap();
 

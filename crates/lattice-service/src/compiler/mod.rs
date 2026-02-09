@@ -232,18 +232,19 @@ impl<'a> ServiceCompiler<'a> {
             .as_deref()
             .ok_or(CompilationError::missing_metadata("namespace"))?;
 
+        let workload = &service.spec.workload;
+
         // Compile volumes first (PVCs must exist before Deployment references them)
-        let compiled_volumes = VolumeCompiler::compile(name, namespace, &service.spec)?;
+        let compiled_volumes = VolumeCompiler::compile(name, namespace, workload)?;
 
         // Compile secrets (ExternalSecrets for syncing from Vault via ESO)
-        let compiled_secrets = SecretsCompiler::compile(name, namespace, &service.spec)?;
+        let compiled_secrets = SecretsCompiler::compile(name, namespace, workload)?;
 
         // Authorize secret access via Cedar — default-deny
-        self.authorize_secrets(name, namespace, &service.spec)
-            .await?;
+        self.authorize_secrets(name, namespace, workload).await?;
 
         // Authorize security overrides via Cedar — default-deny
-        self.authorize_security_overrides(name, namespace, &service.spec)
+        self.authorize_security_overrides(name, namespace, workload)
             .await?;
 
         // Build template context and render all containers
@@ -251,11 +252,16 @@ impl<'a> ServiceCompiler<'a> {
             .with_cluster("name", &self.cluster_name);
         let template_ctx = self
             .renderer
-            .build_context(service, &render_config)
+            .build_context(
+                name,
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                workload,
+                &render_config,
+            )
             .map_err(CompilationError::from)?;
         let rendered_containers = self
             .renderer
-            .render_all_containers(&service.spec.workload, &template_ctx)
+            .render_all_containers(workload, &template_ctx)
             .map_err(CompilationError::from)?;
 
         // Compile rendered env vars and files per-container
@@ -360,7 +366,7 @@ impl<'a> ServiceCompiler<'a> {
         }
 
         // Inject Velero backup annotations into pod template if backup is configured
-        if let Some(ref backup_spec) = service.spec.workload.backup {
+        if let Some(ref backup_spec) = workload.backup {
             let backup_annotations =
                 crate::workload::backup::compile_backup_annotations(backup_spec);
             if let Some(ref mut deployment) = workloads.deployment {
@@ -380,9 +386,7 @@ impl<'a> ServiceCompiler<'a> {
         let waypoint = WaypointCompiler::compile(namespace);
 
         // Get primary service port for ingress routing
-        let service_port = service
-            .spec
-            .workload
+        let service_port = workload
             .service
             .as_ref()
             .and_then(|s| s.ports.values().next())
@@ -394,9 +398,7 @@ impl<'a> ServiceCompiler<'a> {
             let ingress = IngressCompiler::compile(name, namespace, ingress_spec, service_port);
 
             // Add gateway allow policy for north-south traffic
-            let ports: Vec<u16> = service
-                .spec
-                .workload
+            let ports: Vec<u16> = workload
                 .service
                 .as_ref()
                 .map(|s| s.ports.values().map(|p| p.port).collect())
@@ -461,10 +463,9 @@ impl<'a> ServiceCompiler<'a> {
         &self,
         name: &str,
         namespace: &str,
-        spec: &crate::crd::LatticeServiceSpec,
+        workload: &crate::crd::WorkloadSpec,
     ) -> Result<(), CompilationError> {
-        let secret_paths: Vec<_> = spec
-            .workload
+        let secret_paths: Vec<_> = workload
             .resources
             .iter()
             .filter(|(_, r)| r.is_secret())
@@ -511,9 +512,9 @@ impl<'a> ServiceCompiler<'a> {
         &self,
         name: &str,
         namespace: &str,
-        spec: &crate::crd::LatticeServiceSpec,
+        workload: &crate::crd::WorkloadSpec,
     ) -> Result<(), CompilationError> {
-        let overrides = collect_security_overrides(&spec.workload);
+        let overrides = collect_security_overrides(workload);
 
         if overrides.is_empty() {
             return Ok(());
