@@ -1684,6 +1684,63 @@ pub fn create_service_with_secrets(
     }
 }
 
+/// Create a test LatticeService with security overrides.
+///
+/// Builds a minimal service with the specified security context on the main container
+/// and optional pod-level settings. Used by Cedar security override integration tests.
+pub fn create_service_with_security_overrides(
+    name: &str,
+    namespace: &str,
+    security: lattice_common::crd::SecurityContext,
+    host_network: Option<bool>,
+) -> lattice_common::crd::LatticeService {
+    use std::collections::BTreeMap;
+
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use lattice_common::crd::{
+        ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ServicePortsSpec, WorkloadSpec,
+    };
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            security: Some(security),
+            ..Default::default()
+        },
+    );
+
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 8080,
+            target_port: None,
+            protocol: None,
+        },
+    );
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            workload: WorkloadSpec {
+                containers,
+                service: Some(ServicePortsSpec { ports }),
+                host_network,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        status: None,
+    }
+}
+
 /// Wait for a LatticeService to reach the expected phase.
 ///
 /// Polls the service status via kubectl until the phase matches or timeout expires.

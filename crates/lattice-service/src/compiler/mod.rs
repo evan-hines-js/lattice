@@ -34,7 +34,7 @@ pub use service_monitor::ServiceMonitorPhase;
 use std::sync::Arc;
 
 use kube::discovery::ApiResource;
-use lattice_cedar::{PolicyEngine, SecretAuthzRequest};
+use lattice_cedar::{PolicyEngine, SecretAuthzRequest, SecurityAuthzRequest, SecurityOverrideRequest};
 
 use lattice_common::mesh;
 use lattice_common::template::{EsoTemplatedEnvVar, RenderConfig, TemplateRenderer};
@@ -240,6 +240,10 @@ impl<'a> ServiceCompiler<'a> {
 
         // Authorize secret access via Cedar — default-deny
         self.authorize_secrets(name, namespace, &service.spec)
+            .await?;
+
+        // Authorize security overrides via Cedar — default-deny
+        self.authorize_security_overrides(name, namespace, &service.spec)
             .await?;
 
         // Build template context and render all containers
@@ -496,6 +500,147 @@ impl<'a> ServiceCompiler<'a> {
 
         Ok(())
     }
+
+    /// Authorize security overrides via Cedar policies.
+    ///
+    /// Scans the spec for any deviation from PSS restricted defaults (capabilities,
+    /// privileged, host network, etc.), builds a batch authorization request, and
+    /// evaluates it. Returns an error if any override is denied.
+    /// No-ops if the service has no security overrides.
+    async fn authorize_security_overrides(
+        &self,
+        name: &str,
+        namespace: &str,
+        spec: &crate::crd::LatticeServiceSpec,
+    ) -> Result<(), CompilationError> {
+        let overrides = collect_security_overrides(&spec.workload);
+
+        if overrides.is_empty() {
+            return Ok(());
+        }
+
+        let result = self
+            .cedar
+            .authorize_security_overrides(&SecurityAuthzRequest {
+                service_name: name.to_string(),
+                namespace: namespace.to_string(),
+                overrides,
+            })
+            .await;
+
+        if !result.is_allowed() {
+            let details = result
+                .denied
+                .iter()
+                .map(|d| {
+                    if let Some(ref c) = d.container {
+                        format!("'{}' (container '{}'): {}", d.override_id, c, d.reason)
+                    } else {
+                        format!("'{}': {}", d.override_id, d.reason)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(CompilationError::security_override_denied(details));
+        }
+
+        Ok(())
+    }
+}
+
+/// Collect security overrides from a WorkloadSpec.
+///
+/// Scans pod-level and container-level fields for any deviation from the
+/// PSS restricted profile defaults. Returns an empty vec if the service
+/// doesn't relax any security defaults.
+fn collect_security_overrides(workload: &crate::crd::WorkloadSpec) -> Vec<SecurityOverrideRequest> {
+    let mut overrides = Vec::new();
+
+    // Pod-level overrides
+    if workload.host_network == Some(true) {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "hostNetwork".into(),
+            category: "pod".into(),
+            container: None,
+        });
+    }
+    if workload.share_process_namespace == Some(true) {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "shareProcessNamespace".into(),
+            category: "pod".into(),
+            container: None,
+        });
+    }
+
+    // Container-level overrides (main containers + sidecars)
+    for (name, container) in &workload.containers {
+        collect_container_overrides(&mut overrides, name, container.security.as_ref());
+    }
+    for (name, sidecar) in &workload.sidecars {
+        collect_container_overrides(&mut overrides, name, sidecar.security.as_ref());
+    }
+
+    overrides
+}
+
+/// Collect security overrides from a single container's SecurityContext.
+fn collect_container_overrides(
+    overrides: &mut Vec<SecurityOverrideRequest>,
+    container_name: &str,
+    security: Option<&crate::crd::SecurityContext>,
+) {
+    let Some(s) = security else { return };
+    let cname = Some(container_name.to_string());
+
+    for cap in &s.capabilities {
+        overrides.push(SecurityOverrideRequest {
+            override_id: format!("capability:{cap}"),
+            category: "capability".into(),
+            container: cname.clone(),
+        });
+    }
+    if s.privileged == Some(true) {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "privileged".into(),
+            category: "container".into(),
+            container: cname.clone(),
+        });
+    }
+    if s.run_as_user == Some(0) || s.run_as_non_root == Some(false) {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "runAsRoot".into(),
+            category: "container".into(),
+            container: cname.clone(),
+        });
+    }
+    if s.read_only_root_filesystem == Some(false) {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "readWriteRootFilesystem".into(),
+            category: "container".into(),
+            container: cname.clone(),
+        });
+    }
+    if s.allow_privilege_escalation == Some(true) {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "allowPrivilegeEscalation".into(),
+            category: "container".into(),
+            container: cname.clone(),
+        });
+    }
+    if s.seccomp_profile.as_deref() == Some("Unconfined") {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "unconfined:seccomp".into(),
+            category: "profile".into(),
+            container: cname.clone(),
+        });
+    }
+    if s.apparmor_profile.as_deref() == Some("Unconfined") {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "unconfined:apparmor".into(),
+            category: "profile".into(),
+            container: cname,
+        });
+    }
 }
 
 /// Compile ESO-templated env vars into ExternalSecrets + envFrom references.
@@ -637,7 +782,7 @@ mod tests {
     use super::*;
     use crate::crd::{
         CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, IngressTls, PortSpec,
-        ResourceSpec, ServicePortsSpec, TlsMode, WorkloadSpec,
+        ResourceSpec, SecurityContext, ServicePortsSpec, SidecarSpec, TlsMode, WorkloadSpec,
     };
     use std::collections::BTreeMap;
 
@@ -1249,5 +1394,250 @@ mod tests {
         let output = compiler.compile(&service).await.unwrap();
 
         assert!(output.extensions.is_empty());
+    }
+
+    // =========================================================================
+    // Story: Security Override Detection (collect_security_overrides)
+    // =========================================================================
+
+    #[test]
+    fn story_collect_security_overrides_empty() {
+        // Default service has no security overrides
+        let service = make_service("my-app", "default");
+        let overrides = collect_security_overrides(&service.spec.workload);
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn story_collect_security_overrides_capabilities() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.containers.get_mut("main").unwrap().security =
+            Some(SecurityContext {
+                capabilities: vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()],
+                ..Default::default()
+            });
+
+        let overrides = collect_security_overrides(&service.spec.workload);
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(overrides[0].override_id, "capability:NET_ADMIN");
+        assert_eq!(overrides[0].category, "capability");
+        assert_eq!(overrides[0].container.as_deref(), Some("main"));
+        assert_eq!(overrides[1].override_id, "capability:SYS_MODULE");
+    }
+
+    #[test]
+    fn story_collect_security_overrides_privileged() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.containers.get_mut("main").unwrap().security =
+            Some(SecurityContext {
+                privileged: Some(true),
+                ..Default::default()
+            });
+
+        let overrides = collect_security_overrides(&service.spec.workload);
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].override_id, "privileged");
+        assert_eq!(overrides[0].category, "container");
+    }
+
+    #[test]
+    fn story_collect_security_overrides_run_as_root() {
+        // runAsUser: 0
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.containers.get_mut("main").unwrap().security =
+            Some(SecurityContext {
+                run_as_user: Some(0),
+                ..Default::default()
+            });
+        let overrides = collect_security_overrides(&service.spec.workload);
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].override_id, "runAsRoot");
+
+        // runAsNonRoot: false
+        let mut service2 = make_service("my-app", "default");
+        service2
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            run_as_non_root: Some(false),
+            ..Default::default()
+        });
+        let overrides2 = collect_security_overrides(&service2.spec.workload);
+        assert_eq!(overrides2.len(), 1);
+        assert_eq!(overrides2[0].override_id, "runAsRoot");
+    }
+
+    #[test]
+    fn story_collect_security_overrides_pod_level() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.host_network = Some(true);
+        service.spec.workload.share_process_namespace = Some(true);
+
+        let overrides = collect_security_overrides(&service.spec.workload);
+        assert_eq!(overrides.len(), 2);
+
+        let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
+        assert!(ids.contains(&"hostNetwork"));
+        assert!(ids.contains(&"shareProcessNamespace"));
+        assert!(overrides.iter().all(|o| o.category == "pod"));
+        assert!(overrides.iter().all(|o| o.container.is_none()));
+    }
+
+    #[test]
+    fn story_collect_security_overrides_profiles() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.containers.get_mut("main").unwrap().security =
+            Some(SecurityContext {
+                seccomp_profile: Some("Unconfined".to_string()),
+                apparmor_profile: Some("Unconfined".to_string()),
+                ..Default::default()
+            });
+
+        let overrides = collect_security_overrides(&service.spec.workload);
+        assert_eq!(overrides.len(), 2);
+
+        let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
+        assert!(ids.contains(&"unconfined:seccomp"));
+        assert!(ids.contains(&"unconfined:apparmor"));
+        assert!(overrides.iter().all(|o| o.category == "profile"));
+    }
+
+    #[test]
+    fn story_collect_security_overrides_read_write_root_fs() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.containers.get_mut("main").unwrap().security =
+            Some(SecurityContext {
+                read_only_root_filesystem: Some(false),
+                ..Default::default()
+            });
+
+        let overrides = collect_security_overrides(&service.spec.workload);
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].override_id, "readWriteRootFilesystem");
+    }
+
+    #[test]
+    fn story_collect_security_overrides_allow_priv_escalation() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.containers.get_mut("main").unwrap().security =
+            Some(SecurityContext {
+                allow_privilege_escalation: Some(true),
+                ..Default::default()
+            });
+
+        let overrides = collect_security_overrides(&service.spec.workload);
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].override_id, "allowPrivilegeEscalation");
+    }
+
+    #[test]
+    fn story_collect_security_overrides_sidecars() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.sidecars.insert(
+            "vpn".to_string(),
+            SidecarSpec {
+                image: "vpn:latest".to_string(),
+                security: Some(SecurityContext {
+                    capabilities: vec!["NET_ADMIN".to_string()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        let overrides = collect_security_overrides(&service.spec.workload);
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].override_id, "capability:NET_ADMIN");
+        assert_eq!(overrides[0].container.as_deref(), Some("vpn"));
+    }
+
+    #[test]
+    fn story_collect_security_overrides_defaults_not_flagged() {
+        // Explicitly setting defaults should not trigger overrides
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.containers.get_mut("main").unwrap().security =
+            Some(SecurityContext {
+                privileged: Some(false),
+                read_only_root_filesystem: Some(true),
+                run_as_non_root: Some(true),
+                allow_privilege_escalation: Some(false),
+                seccomp_profile: Some("RuntimeDefault".to_string()),
+                apparmor_profile: Some("RuntimeDefault".to_string()),
+                ..Default::default()
+            });
+
+        let overrides = collect_security_overrides(&service.spec.workload);
+        assert!(overrides.is_empty());
+    }
+
+    // =========================================================================
+    // Story: Security Override Authorization in Compilation
+    // =========================================================================
+
+    #[tokio::test]
+    async fn story_compile_fails_when_security_override_denied() {
+        let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new(); // default-deny
+
+        let mut service = make_service("my-app", "prod");
+        service.spec.workload.containers.get_mut("main").unwrap().security =
+            Some(SecurityContext {
+                capabilities: vec!["NET_ADMIN".to_string()],
+                ..Default::default()
+            });
+
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let err = compiler.compile(&service).await.unwrap_err();
+
+        assert!(err.is_policy_denied());
+        let msg = err.to_string();
+        assert!(msg.contains("security override denied"));
+        assert!(msg.contains("capability:NET_ADMIN"));
+    }
+
+    #[tokio::test]
+    async fn story_compile_succeeds_when_security_override_permitted() {
+        let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::with_policies(
+            r#"
+            permit(
+                principal == Lattice::Service::"prod/my-app",
+                action == Lattice::Action::"OverrideSecurity",
+                resource == Lattice::SecurityOverride::"capability:NET_ADMIN"
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut service = make_service("my-app", "prod");
+        service.spec.workload.containers.get_mut("main").unwrap().security =
+            Some(SecurityContext {
+            capabilities: vec!["NET_ADMIN".to_string()],
+            ..Default::default()
+        });
+
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let output = compiler.compile(&service).await.unwrap();
+
+        assert!(output.workloads.deployment.is_some());
+    }
+
+    #[tokio::test]
+    async fn story_compile_no_overrides_no_policy_needed() {
+        let graph = ServiceGraph::new();
+        let cedar = PolicyEngine::new(); // default-deny — but no overrides, so should pass
+
+        let service = make_service("my-app", "default");
+
+        let compiler =
+            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let output = compiler.compile(&service).await.unwrap();
+
+        assert!(output.workloads.deployment.is_some());
     }
 }

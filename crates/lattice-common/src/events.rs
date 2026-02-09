@@ -139,6 +139,8 @@ pub mod reasons {
     pub const COMPILATION_FAILED: &str = "CompilationFailed";
     /// Cedar denied secret access
     pub const SECRET_ACCESS_DENIED: &str = "SecretAccessDenied";
+    /// Cedar denied security override
+    pub const SECURITY_OVERRIDE_DENIED: &str = "SecurityOverrideDenied";
 }
 
 /// Well-known event action strings.

@@ -832,7 +832,7 @@ pub struct SecurityContext {
 /// Identical to ContainerSpec but with additional sidecar-specific options.
 /// Sidecars are infrastructure containers (VPN, logging, metrics) that support
 /// the main application containers.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SidecarSpec {
     /// Container image

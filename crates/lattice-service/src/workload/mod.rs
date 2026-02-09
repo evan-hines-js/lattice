@@ -2835,17 +2835,7 @@ mod tests {
             "logger".to_string(),
             SidecarSpec {
                 image: "fluentbit:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                resources: None,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                init: None,
-                security: None, // No security → defaults apply
+                ..Default::default()
             },
         );
 
@@ -3210,32 +3200,16 @@ mod tests {
                 image: "busybox:latest".to_string(),
                 command: Some(vec!["sh".to_string(), "-c".to_string()]),
                 args: Some(vec!["echo hello".to_string()]),
-                variables: BTreeMap::new(),
-                resources: None,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
                 init: Some(true),
-                security: None,
+                ..Default::default()
             },
         );
         service.spec.workload.sidecars.insert(
             "vpn".to_string(),
             SidecarSpec {
                 image: "wireguard:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                resources: None,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
                 init: Some(false),
-                security: None,
+                ..Default::default()
             },
         );
 
@@ -3280,20 +3254,11 @@ mod tests {
             "vpn".to_string(),
             SidecarSpec {
                 image: "wireguard:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                resources: None,
-                files: BTreeMap::new(),
-                volumes: BTreeMap::new(),
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                init: None,
                 security: Some(SecurityContext {
                     capabilities: vec!["NET_ADMIN".to_string()],
                     ..Default::default()
                 }),
+                ..Default::default()
             },
         );
 
