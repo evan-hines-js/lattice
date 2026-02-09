@@ -8,6 +8,8 @@ spec:
     containers:
       main:
         image: docker.io/linuxserver/sonarr:latest
+        security:
+          apparmorProfile: Unconfined
         variables:
           PUID: "1000"
           PGID: "1000"

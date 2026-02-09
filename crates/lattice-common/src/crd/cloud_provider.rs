@@ -7,8 +7,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::workload::resources::ResourceSpec;
 use super::types::SecretRef;
+use super::workload::resources::ResourceSpec;
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
 /// CloudProvider defines a cloud account/region that clusters can be deployed to.

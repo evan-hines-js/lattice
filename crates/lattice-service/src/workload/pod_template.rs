@@ -11,13 +11,13 @@ use crate::crd::{GpuParams, ProviderType, RuntimeSpec, WorkloadSpec};
 use super::error::CompilationError;
 use super::volume::GeneratedVolumes;
 use super::{
+    gpu_node_selector, gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources,
+    SecretRef, TopologySpreadConstraint,
+};
+use super::{
     AppArmorProfile, Capabilities, Container, ContainerCompilationData, ContainerPort, EnvVar,
     K8sSecurityContext, LabelSelector, LocalObjectReference, PodSecurityContext, ResourceQuantity,
     ResourceRequirements, SeccompProfile, Sysctl, Volume,
-};
-use super::{
-    gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources,
-    SecretRef, TopologySpreadConstraint,
 };
 
 /// Compiled pod template — all the fields needed to build a K8s PodTemplateSpec.
@@ -146,10 +146,7 @@ impl PodTemplateCompiler {
                 label_selector: LabelSelector {
                     match_labels: {
                         let mut labels = BTreeMap::new();
-                        labels.insert(
-                            lattice_common::LABEL_NAME.to_string(),
-                            name.to_string(),
-                        );
+                        labels.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
                         labels
                     },
                 },

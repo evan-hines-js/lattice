@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 // =============================================================================
 // Dependency Direction
 // =============================================================================
@@ -142,7 +141,8 @@ impl ResourceType {
 
 /// Validate custom type: lowercase alphanumeric with hyphens, starts with letter
 fn validate_custom_type(s: &str) -> Result<(), String> {
-    crate::crd::validate_dns_identifier(s, true).map_err(|e| e.replace("identifier", "resource type"))
+    crate::crd::validate_dns_identifier(s, true)
+        .map_err(|e| e.replace("identifier", "resource type"))
 }
 
 impl<'de> Deserialize<'de> for ResourceType {
@@ -659,7 +659,11 @@ impl ResourceQuantity {
 }
 
 /// Validate CPU quantity format (e.g., "100m", "1", "0.5")
-pub(crate) fn validate_cpu_quantity(qty: &str, container_name: &str, field: &str) -> Result<(), crate::Error> {
+pub(crate) fn validate_cpu_quantity(
+    qty: &str,
+    container_name: &str,
+    field: &str,
+) -> Result<(), crate::Error> {
     let is_valid = if let Some(stripped) = qty.strip_suffix('m') {
         stripped.parse::<u64>().is_ok()
     } else {

@@ -54,6 +54,18 @@ pub use secrets_provider::{
     SecretProvider, SecretProviderPhase, SecretProviderSpec, SecretProviderStatus,
 };
 pub use service::{LatticeService, LatticeServiceSpec, LatticeServiceStatus, ServicePhase};
+pub use service_policy::{
+    LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,
+    LatticeServicePolicySpec, LatticeServicePolicyStatus, NamespaceSelector, ServicePolicyPhase,
+    ServiceSelector,
+};
+pub use types::{
+    AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec,
+    DockerConfig, EndpointsSpec, InstanceType, Ipv4PoolConfig, Ipv6PoolConfig, KubernetesSpec,
+    NetworkPool, NetworkingSpec, NodeResourceSpec, NodeSpec, NodeTaint, OpenStackConfig,
+    ProviderConfig, ProviderSpec, ProviderType, ProxmoxConfig, RootVolume, SecretRef, ServiceRef,
+    ServiceSpec, TaintEffect, WorkerPoolSpec,
+};
 pub use workload::backup::{
     BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,
     VolumeBackupSpec,
@@ -73,18 +85,6 @@ pub use workload::resources::{
 };
 pub use workload::scaling::{AutoscalingMetric, ReplicaSpec};
 pub use workload::spec::{RuntimeSpec, WorkloadSpec};
-pub use service_policy::{
-    LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,
-    LatticeServicePolicySpec, LatticeServicePolicyStatus, NamespaceSelector, ServicePolicyPhase,
-    ServiceSelector,
-};
-pub use types::{
-    AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec,
-    DockerConfig, EndpointsSpec, InstanceType, Ipv4PoolConfig, Ipv6PoolConfig, KubernetesSpec,
-    NetworkPool, NetworkingSpec, NodeResourceSpec, NodeSpec, NodeTaint, OpenStackConfig,
-    ProviderConfig, ProviderSpec, ProviderType, ProxmoxConfig, RootVolume, SecretRef, ServiceRef,
-    ServiceSpec, TaintEffect, WorkerPoolSpec,
-};
 
 // =============================================================================
 

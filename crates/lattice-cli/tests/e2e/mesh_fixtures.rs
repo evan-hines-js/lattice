@@ -11,8 +11,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use lattice_common::crd::{
     ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec,
-    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, ServicePortsSpec,
-    VolumeMount, WorkloadSpec,
+    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, SecurityContext,
+    ServicePortsSpec, VolumeMount, WorkloadSpec,
 };
 
 use super::helpers::{CURL_IMAGE, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY};
@@ -65,6 +65,10 @@ pub fn nginx_container() -> ContainerSpec {
                 memory: Some("128Mi".to_string()),
             }),
         }),
+        security: Some(SecurityContext {
+            apparmor_profile: Some("Unconfined".to_string()),
+            ..Default::default()
+        }),
         ..Default::default()
     }
 }
@@ -91,6 +95,10 @@ pub fn curl_container(script: String) -> ContainerSpec {
                 cpu: Some("200m".to_string()),
                 memory: Some("128Mi".to_string()),
             }),
+        }),
+        security: Some(SecurityContext {
+            apparmor_profile: Some("Unconfined".to_string()),
+            ..Default::default()
         }),
         ..Default::default()
     }

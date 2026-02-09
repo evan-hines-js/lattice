@@ -8,6 +8,8 @@ spec:
     containers:
       main:
         image: docker.io/library/busybox:latest
+        security:
+          apparmorProfile: Unconfined
         command: ["sleep", "infinity"]
         volumes:
           /models:

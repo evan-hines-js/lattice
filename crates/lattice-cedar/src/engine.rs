@@ -292,9 +292,8 @@ impl PolicyEngine {
         let principal_uid = principal.uid().clone();
         let resource_uid = resource.uid().clone();
 
-        let entities =
-            Entities::from_entities(vec![principal.clone(), resource.clone()], None)
-                .map_err(|_| DenialReason::NoPermitPolicy)?;
+        let entities = Entities::from_entities(vec![principal.clone(), resource.clone()], None)
+            .map_err(|_| DenialReason::NoPermitPolicy)?;
 
         let response = self
             .evaluate_raw(

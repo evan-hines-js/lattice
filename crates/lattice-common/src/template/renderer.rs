@@ -331,8 +331,10 @@ impl TemplateRenderer {
         config: &RenderConfig<'_>,
     ) -> Result<TemplateContext, TemplateError> {
         // Build metadata context (convert BTreeMap to HashMap)
-        let annotations: HashMap<String, String> =
-            annotations.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let annotations: HashMap<String, String> = annotations
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         // Resolve resource outputs via provisioners
         let prov_ctx = ProvisionerContext::new(

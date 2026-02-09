@@ -227,9 +227,12 @@ impl WorkloadSpec {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::resources::{DependencyDirection, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType};
     use super::super::container::ContainerSpec;
+    use super::super::resources::{
+        DependencyDirection, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
+    };
+    use super::super::scaling::{AutoscalingMetric, ReplicaSpec};
+    use super::*;
 
     fn simple_container() -> ContainerSpec {
         ContainerSpec {

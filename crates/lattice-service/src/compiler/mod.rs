@@ -34,7 +34,9 @@ pub use service_monitor::ServiceMonitorPhase;
 use std::sync::Arc;
 
 use kube::discovery::ApiResource;
-use lattice_cedar::{PolicyEngine, SecretAuthzRequest, SecurityAuthzRequest, SecurityOverrideRequest};
+use lattice_cedar::{
+    PolicyEngine, SecretAuthzRequest, SecurityAuthzRequest, SecurityOverrideRequest,
+};
 
 use lattice_common::mesh;
 use lattice_common::template::{EsoTemplatedEnvVar, RenderConfig, TemplateRenderer};
@@ -1421,11 +1423,16 @@ mod tests {
     #[test]
     fn story_collect_security_overrides_capabilities() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.containers.get_mut("main").unwrap().security =
-            Some(SecurityContext {
-                capabilities: vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()],
-                ..Default::default()
-            });
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            capabilities: vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()],
+            ..Default::default()
+        });
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 2);
@@ -1438,11 +1445,16 @@ mod tests {
     #[test]
     fn story_collect_security_overrides_privileged() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.containers.get_mut("main").unwrap().security =
-            Some(SecurityContext {
-                privileged: Some(true),
-                ..Default::default()
-            });
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            privileged: Some(true),
+            ..Default::default()
+        });
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
@@ -1454,11 +1466,16 @@ mod tests {
     fn story_collect_security_overrides_run_as_root() {
         // runAsUser: 0
         let mut service = make_service("my-app", "default");
-        service.spec.workload.containers.get_mut("main").unwrap().security =
-            Some(SecurityContext {
-                run_as_user: Some(0),
-                ..Default::default()
-            });
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            run_as_user: Some(0),
+            ..Default::default()
+        });
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].override_id, "runAsRoot");
@@ -1499,12 +1516,17 @@ mod tests {
     #[test]
     fn story_collect_security_overrides_profiles() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.containers.get_mut("main").unwrap().security =
-            Some(SecurityContext {
-                seccomp_profile: Some("Unconfined".to_string()),
-                apparmor_profile: Some("Unconfined".to_string()),
-                ..Default::default()
-            });
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            seccomp_profile: Some("Unconfined".to_string()),
+            apparmor_profile: Some("Unconfined".to_string()),
+            ..Default::default()
+        });
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 2);
@@ -1518,11 +1540,16 @@ mod tests {
     #[test]
     fn story_collect_security_overrides_read_write_root_fs() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.containers.get_mut("main").unwrap().security =
-            Some(SecurityContext {
-                read_only_root_filesystem: Some(false),
-                ..Default::default()
-            });
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            read_only_root_filesystem: Some(false),
+            ..Default::default()
+        });
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
@@ -1532,11 +1559,16 @@ mod tests {
     #[test]
     fn story_collect_security_overrides_allow_priv_escalation() {
         let mut service = make_service("my-app", "default");
-        service.spec.workload.containers.get_mut("main").unwrap().security =
-            Some(SecurityContext {
-                allow_privilege_escalation: Some(true),
-                ..Default::default()
-            });
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            allow_privilege_escalation: Some(true),
+            ..Default::default()
+        });
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert_eq!(overrides.len(), 1);
@@ -1568,16 +1600,21 @@ mod tests {
     fn story_collect_security_overrides_defaults_not_flagged() {
         // Explicitly setting defaults should not trigger overrides
         let mut service = make_service("my-app", "default");
-        service.spec.workload.containers.get_mut("main").unwrap().security =
-            Some(SecurityContext {
-                privileged: Some(false),
-                read_only_root_filesystem: Some(true),
-                run_as_non_root: Some(true),
-                allow_privilege_escalation: Some(false),
-                seccomp_profile: Some("RuntimeDefault".to_string()),
-                apparmor_profile: Some("RuntimeDefault".to_string()),
-                ..Default::default()
-            });
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            privileged: Some(false),
+            read_only_root_filesystem: Some(true),
+            run_as_non_root: Some(true),
+            allow_privilege_escalation: Some(false),
+            seccomp_profile: Some("RuntimeDefault".to_string()),
+            apparmor_profile: Some("RuntimeDefault".to_string()),
+            ..Default::default()
+        });
 
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
         assert!(overrides.is_empty());
@@ -1593,11 +1630,16 @@ mod tests {
         let cedar = PolicyEngine::new(); // default-deny
 
         let mut service = make_service("my-app", "prod");
-        service.spec.workload.containers.get_mut("main").unwrap().security =
-            Some(SecurityContext {
-                capabilities: vec!["NET_ADMIN".to_string()],
-                ..Default::default()
-            });
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            capabilities: vec!["NET_ADMIN".to_string()],
+            ..Default::default()
+        });
 
         let compiler =
             ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
@@ -1624,8 +1666,13 @@ mod tests {
         .unwrap();
 
         let mut service = make_service("my-app", "prod");
-        service.spec.workload.containers.get_mut("main").unwrap().security =
-            Some(SecurityContext {
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
             capabilities: vec!["NET_ADMIN".to_string()],
             ..Default::default()
         });
