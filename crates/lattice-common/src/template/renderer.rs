@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::crd::{ContainerSpec, FileMount, LatticeService, LatticeServiceSpec, VolumeMount};
+use crate::crd::{ContainerSpec, FileMount, LatticeService, VolumeMount, WorkloadSpec};
 use crate::graph::ServiceGraph;
 
 use super::context::TemplateContext;
@@ -346,7 +346,9 @@ impl TemplateRenderer {
             config.namespace,
             config.cluster_domain,
         );
-        let resources = self.registry.resolve_all(&service.spec, &prov_ctx)?;
+        let resources = self
+            .registry
+            .resolve_all(&service.spec.workload, &prov_ctx)?;
 
         // Build the full context
         let mut builder = TemplateContext::builder().metadata(name, annotations);
@@ -617,10 +619,10 @@ impl TemplateRenderer {
         })
     }
 
-    /// Render all containers in a service spec
+    /// Render all containers in a workload spec
     pub fn render_all_containers(
         &self,
-        spec: &LatticeServiceSpec,
+        spec: &WorkloadSpec,
         ctx: &TemplateContext,
     ) -> Result<BTreeMap<String, RenderedContainer>, TemplateError> {
         let mut rendered = BTreeMap::new();
@@ -648,7 +650,7 @@ mod tests {
     use super::*;
     use crate::crd::{
         ContainerSpec, DependencyDirection, LatticeServiceSpec, PortSpec, ResourceSpec,
-        ResourceType, ServicePortsSpec,
+        ResourceType, ServicePortsSpec, WorkloadSpec,
     };
     use crate::template::TemplateString;
     use kube::api::ObjectMeta;
@@ -676,8 +678,11 @@ mod tests {
         );
 
         let spec = LatticeServiceSpec {
-            containers,
-            service: Some(ServicePortsSpec { ports }),
+            workload: WorkloadSpec {
+                containers,
+                service: Some(ServicePortsSpec { ports }),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -752,8 +757,11 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
-                resources,
+                workload: WorkloadSpec {
+                    containers,
+                    resources,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -776,7 +784,7 @@ mod tests {
             .build_context(&service, &config)
             .expect("template context should build successfully");
         let rendered = renderer
-            .render_container("main", &service.spec.containers["main"], &ctx)
+            .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .expect("container rendering should succeed");
 
         assert_eq!(
@@ -820,7 +828,7 @@ mod tests {
             .build_context(&service, &config)
             .expect("template context should build successfully");
         let rendered = renderer
-            .render_container("main", &service.spec.containers["main"], &ctx)
+            .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .expect("container rendering should succeed");
 
         let file = &rendered.files["/etc/app/config.yaml"];
@@ -867,7 +875,10 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
+                workload: WorkloadSpec {
+                    containers,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -880,7 +891,7 @@ mod tests {
             .expect("template context should build successfully");
 
         let rendered = renderer
-            .render_container("main", &service.spec.containers["main"], &ctx)
+            .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .expect("container rendering should succeed");
 
         // Should preserve the ${VAR} literally
@@ -943,8 +954,11 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
-                resources,
+                workload: WorkloadSpec {
+                    containers,
+                    resources,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -957,7 +971,7 @@ mod tests {
             .expect("template context should build successfully");
 
         let rendered = renderer
-            .render_container("main", &service.spec.containers["main"], &ctx)
+            .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .expect("container rendering should succeed");
 
         let content = rendered.files["/etc/script.sh"]
@@ -991,7 +1005,7 @@ mod tests {
             .build_context(&service, &config)
             .expect("template context should build successfully");
         let rendered = renderer
-            .render_all_containers(&service.spec, &ctx)
+            .render_all_containers(&service.spec.workload, &ctx)
             .expect("all containers should render successfully");
 
         assert!(rendered.contains_key("main"));
@@ -1031,7 +1045,10 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
+                workload: WorkloadSpec {
+                    containers,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -1044,7 +1061,7 @@ mod tests {
             .expect("template context should build successfully");
 
         let rendered = renderer
-            .render_container("main", &service.spec.containers["main"], &ctx)
+            .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .expect("container rendering should succeed");
 
         // $${HOME} should become ${HOME}
@@ -1081,7 +1098,10 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
+                workload: WorkloadSpec {
+                    containers,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -1096,7 +1116,7 @@ mod tests {
             .build_context(&service, &config)
             .expect("template context should build successfully");
         let rendered = renderer
-            .render_container("main", &service.spec.containers["main"], &ctx)
+            .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .expect("container rendering should succeed");
 
         assert_eq!(
@@ -1215,7 +1235,10 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
+                workload: WorkloadSpec {
+                    containers,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -1229,7 +1252,7 @@ mod tests {
             .build_context(&service, &config)
             .expect("template context should build successfully");
         let rendered = renderer
-            .render_container("main", &service.spec.containers["main"], &ctx)
+            .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .expect("container rendering should succeed");
 
         assert_eq!(rendered.image, "gcr.io/myproject/my-app:v1.2.3");
@@ -1262,7 +1285,10 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
+                workload: WorkloadSpec {
+                    containers,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -1278,10 +1304,14 @@ mod tests {
             .expect("template context should build successfully");
 
         let main_rendered = renderer
-            .render_container("main", &service.spec.containers["main"], &ctx)
+            .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .expect("main container rendering should succeed");
         let sidecar_rendered = renderer
-            .render_container("sidecar", &service.spec.containers["sidecar"], &ctx)
+            .render_container(
+                "sidecar",
+                &service.spec.workload.containers["sidecar"],
+                &ctx,
+            )
             .expect("sidecar container rendering should succeed");
 
         assert_eq!(main_rendered.image, "gcr.io/myproject/main:v1");
@@ -1308,7 +1338,10 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
+                workload: WorkloadSpec {
+                    containers,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -1320,7 +1353,8 @@ mod tests {
         let ctx = renderer
             .build_context(&service, &config)
             .expect("template context should build successfully");
-        let result = renderer.render_container("main", &service.spec.containers["main"], &ctx);
+        let result =
+            renderer.render_container("main", &service.spec.workload.containers["main"], &ctx);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1348,7 +1382,10 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
+                workload: WorkloadSpec {
+                    containers,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -1361,7 +1398,7 @@ mod tests {
             .build_context(&service, &config)
             .expect("template context should build successfully");
         let rendered = renderer
-            .render_container("main", &service.spec.containers["main"], &ctx)
+            .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .expect("container rendering should succeed");
 
         assert_eq!(rendered.image, "nginx:latest");
@@ -1925,8 +1962,11 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
-                resources,
+                workload: WorkloadSpec {
+                    containers,
+                    resources,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -1936,7 +1976,7 @@ mod tests {
         let config = RenderConfig::new(&graph, "prod", "prod-ns");
         let ctx = renderer.build_context(&service, &config).unwrap();
         let rendered = renderer
-            .render_container("main", &service.spec.containers["main"], &ctx)
+            .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .unwrap();
 
         let file = &rendered.files["/etc/app/config.yaml"];

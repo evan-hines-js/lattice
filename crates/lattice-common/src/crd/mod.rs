@@ -7,7 +7,9 @@ mod cedar_policy;
 mod cloud_provider;
 mod cluster;
 mod external_service;
+mod job;
 mod model;
+mod model_serving;
 mod oidc_provider;
 mod providers;
 mod restore;
@@ -33,10 +35,12 @@ pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,
 };
+pub use job::{JobPhase, LatticeJob, LatticeJobSpec, LatticeJobStatus};
 pub use model::{
     ModelArtifact, ModelArtifactPhase, ModelArtifactSpec, ModelArtifactStatus, ModelParams,
     MODEL_READY_GATE, RETRY_BASE_DELAY_SECS, RETRY_MAX_DELAY_SECS,
 };
+pub use model_serving::{LatticeModel, LatticeModelSpec, LatticeModelStatus, ModelServingPhase};
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,
 };
@@ -54,7 +58,7 @@ pub use service::{
     PortSpec, Probe, ReplicaSpec, ResourceMetadata, ResourceQuantity, ResourceRequirements,
     ResourceSpec, ResourceType, RetryConfig, SecurityContext, ServiceBackupSpec, ServicePhase,
     ServicePortsSpec, SidecarSpec, TimeoutConfig, TlsMode, VolumeAccessMode, VolumeBackupDefault,
-    VolumeBackupSpec, VolumeMount, VolumeParams,
+    VolumeBackupSpec, VolumeMount, VolumeParams, WorkloadSpec,
 };
 pub use service_policy::{
     LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,

@@ -4,77 +4,78 @@ metadata:
   name: nzbget
   namespace: media
 spec:
-  containers:
-    main:
-      image: docker.io/linuxserver/nzbget:latest
-      variables:
-        PUID: "1000"
-        PGID: "1000"
-        TZ: "America/New_York"
-      volumes:
-        /config:
-          source: ${resources.config}
-        /downloads:
-          source: ${resources.media-storage}
-          path: downloads
-      resources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
-        limits:
-          cpu: 2000m
-          memory: 2Gi
-      readinessProbe:
-        exec:
-          command: ["nc", "-z", "127.0.0.1", "6789"]
+  workload:
+    containers:
+      main:
+        image: docker.io/linuxserver/nzbget:latest
+        variables:
+          PUID: "1000"
+          PGID: "1000"
+          TZ: "America/New_York"
+        volumes:
+          /config:
+            source: ${resources.config}
+          /downloads:
+            source: ${resources.media-storage}
+            path: downloads
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        readinessProbe:
+          exec:
+            command: ["nc", "-z", "127.0.0.1", "6789"]
 
-  # VPN sidecar for killswitch
-  sidecars:
-    vpn:
-      image: docker.io/linuxserver/wireguard:latest
-      variables:
-        PUID: "1000"
-        PGID: "1000"
-      volumes:
-        /config:
-          source: ${resources.wg-config}
-      security:
-        capabilities: [NET_ADMIN, SYS_MODULE]
+    # VPN sidecar for killswitch
+    sidecars:
+      vpn:
+        image: docker.io/linuxserver/wireguard:latest
+        variables:
+          PUID: "1000"
+          PGID: "1000"
+        volumes:
+          /config:
+            source: ${resources.wg-config}
+        security:
+          capabilities: [NET_ADMIN, SYS_MODULE]
 
-  service:
-    ports:
-      http:
-        port: 6789
-        protocol: TCP
+    service:
+      ports:
+        http:
+          port: 6789
+          protocol: TCP
 
-  imagePullSecrets:
-    - ghcr-creds
-  resources:
-    # Registry credentials for GHCR images
-    ghcr-creds:
-      type: secret
-      id: local-regcreds
-      params:
-        provider: local-test
-        refreshInterval: 1h
-    # Owned volume (private to this service)
-    config:
-      type: volume
-      params:
-        size: 1Gi
-    # Shared media storage (REFERENCE - no size)
-    media-storage:
-      type: volume
-      id: media-storage
-    # Wireguard config volume
-    wg-config:
-      type: volume
-      params:
-        size: 100Mi
-    # Service dependencies (bilateral agreement)
-    sonarr:
-      type: service
-      direction: inbound
+    imagePullSecrets:
+      - ghcr-creds
+    resources:
+      # Registry credentials for GHCR images
+      ghcr-creds:
+        type: secret
+        id: local-regcreds
+        params:
+          provider: local-test
+          refreshInterval: 1h
+      # Owned volume (private to this service)
+      config:
+        type: volume
+        params:
+          size: 1Gi
+      # Shared media storage (REFERENCE - no size)
+      media-storage:
+        type: volume
+        id: media-storage
+      # Wireguard config volume
+      wg-config:
+        type: volume
+        params:
+          size: 100Mi
+      # Service dependencies (bilateral agreement)
+      sonarr:
+        type: service
+        direction: inbound
 
-  replicas:
-    min: 1
+    replicas:
+      min: 1

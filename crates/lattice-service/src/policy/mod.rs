@@ -172,7 +172,7 @@ mod tests {
     use super::PolicyCompiler;
     use crate::crd::{
         ContainerSpec, DependencyDirection, LatticeExternalServiceSpec, PortSpec, Resolution,
-        ResourceSpec, ServicePortsSpec,
+        ResourceSpec, ServicePortsSpec, WorkloadSpec,
     };
     use crate::graph::ServiceGraph;
     use lattice_common::mesh;
@@ -232,9 +232,12 @@ mod tests {
         );
 
         crate::crd::LatticeServiceSpec {
-            containers,
-            resources,
-            service: Some(ServicePortsSpec { ports }),
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                service: Some(ServicePortsSpec { ports }),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }

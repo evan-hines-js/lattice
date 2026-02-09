@@ -1597,7 +1597,7 @@ pub fn create_service_with_secrets(
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
         ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec, ResourceType,
-        ServicePortsSpec,
+        ServicePortsSpec, WorkloadSpec,
     };
 
     let mut resources = BTreeMap::new();
@@ -1661,10 +1661,13 @@ pub fn create_service_with_secrets(
             ..Default::default()
         },
         spec: LatticeServiceSpec {
-            containers,
-            resources,
-            service: Some(ServicePortsSpec { ports }),
-            image_pull_secrets: vec!["ghcr-creds".to_string()],
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                service: Some(ServicePortsSpec { ports }),
+                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                ..Default::default()
+            },
             ..Default::default()
         },
         status: None,
@@ -2553,7 +2556,7 @@ pub fn create_service_with_all_secret_routes(
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
         ContainerSpec, FileMount, LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec,
-        ResourceType, ServicePortsSpec,
+        ResourceType, ServicePortsSpec, WorkloadSpec,
     };
     use lattice_common::template::TemplateString;
 
@@ -2686,10 +2689,13 @@ pub fn create_service_with_all_secret_routes(
             ..Default::default()
         },
         spec: LatticeServiceSpec {
-            containers,
-            resources,
-            service: Some(ServicePortsSpec { ports }),
-            image_pull_secrets: vec!["ghcr-creds".to_string()],
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                service: Some(ServicePortsSpec { ports }),
+                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                ..Default::default()
+            },
             ..Default::default()
         },
         status: None,

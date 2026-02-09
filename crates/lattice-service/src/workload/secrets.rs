@@ -74,6 +74,7 @@ impl SecretsCompiler {
         let mut output = GeneratedSecrets::new();
 
         let secret_resources: Vec<_> = spec
+            .workload
             .resources
             .iter()
             .filter(|(_, r)| r.is_secret())
@@ -113,7 +114,8 @@ impl SecretsCompiler {
 
             // Determine K8s Secret type: explicit param > imagePullSecrets inference > Opaque
             let secret_type = params.secret_type.as_deref().or_else(|| {
-                spec.image_pull_secrets
+                spec.workload
+                    .image_pull_secrets
                     .contains(resource_name)
                     .then_some("kubernetes.io/dockerconfigjson")
             });
@@ -155,7 +157,7 @@ impl SecretsCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ContainerSpec, ResourceSpec, ResourceType};
+    use crate::crd::{ContainerSpec, ResourceSpec, ResourceType, WorkloadSpec};
     use std::collections::BTreeMap;
 
     /// (name, remote_key, provider, keys, refresh_interval)
@@ -201,8 +203,11 @@ mod tests {
         );
 
         LatticeServiceSpec {
-            containers,
-            resources,
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -307,7 +312,7 @@ mod tests {
         )]);
 
         // Remove the id
-        if let Some(resource) = spec.resources.get_mut("db-creds") {
+        if let Some(resource) = spec.workload.resources.get_mut("db-creds") {
             resource.id = None;
         }
 
@@ -330,7 +335,7 @@ mod tests {
         )]);
 
         // Remove the provider from params
-        if let Some(resource) = spec.resources.get_mut("db-creds") {
+        if let Some(resource) = spec.workload.resources.get_mut("db-creds") {
             if let Some(params) = resource.params.as_mut() {
                 params.remove("provider");
             }

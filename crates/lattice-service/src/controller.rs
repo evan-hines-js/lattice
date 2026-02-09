@@ -830,7 +830,7 @@ pub async fn reconcile(
     info!("reconciling service");
 
     // Validate the service spec
-    if let Err(e) = service.spec.validate() {
+    if let Err(e) = service.spec.workload.validate() {
         warn!(error = %e, "service validation failed");
         update_service_status_failed(&service, &ctx, &e.to_string()).await?;
         // Don't requeue for validation errors - they require spec changes
@@ -951,7 +951,8 @@ fn check_missing_dependencies(
     graph: &ServiceGraph,
     namespace: &str,
 ) -> Vec<String> {
-    spec.internal_dependencies(namespace)
+    spec.workload
+        .internal_dependencies(namespace)
         .into_iter()
         .filter(|dep| {
             // Check if dependency exists (not Unknown type)
@@ -1366,6 +1367,7 @@ mod tests {
     use super::*;
     use crate::crd::{
         ContainerSpec, DependencyDirection, LatticeExternalServiceSpec, Resolution, ResourceSpec,
+        WorkloadSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::collections::BTreeMap;
@@ -1386,7 +1388,10 @@ mod tests {
         containers.insert("main".to_string(), simple_container());
 
         LatticeServiceSpec {
-            containers,
+            workload: WorkloadSpec {
+                containers,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -1406,7 +1411,7 @@ mod tests {
     fn service_with_deps(name: &str, deps: Vec<&str>) -> LatticeService {
         let mut spec = sample_service_spec();
         for dep in deps {
-            spec.resources.insert(
+            spec.workload.resources.insert(
                 dep.to_string(),
                 ResourceSpec {
                     direction: DependencyDirection::Outbound,
@@ -1429,7 +1434,7 @@ mod tests {
     fn service_with_callers(name: &str, callers: Vec<&str>) -> LatticeService {
         let mut spec = sample_service_spec();
         for caller in callers {
-            spec.resources.insert(
+            spec.workload.resources.insert(
                 caller.to_string(),
                 ResourceSpec {
                     direction: DependencyDirection::Inbound,
@@ -1582,7 +1587,7 @@ mod tests {
     async fn story_invalid_service_fails() {
         let mut service = sample_service("bad-service");
         // Make it invalid by removing containers
-        service.spec.containers.clear();
+        service.spec.workload.containers.clear();
         let service = Arc::new(service);
 
         let mock_kube = mock_kube_success();

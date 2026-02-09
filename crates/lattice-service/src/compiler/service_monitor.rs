@@ -60,6 +60,7 @@ impl CompilerPhase for ServiceMonitorPhase {
         let has_metrics_port = ctx
             .service
             .spec
+            .workload
             .service
             .as_ref()
             .map(|svc| svc.ports.contains_key("metrics"))
@@ -117,7 +118,7 @@ impl CompilerPhase for ServiceMonitorPhase {
 mod tests {
     use super::*;
     use crate::crd::{
-        ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ServicePortsSpec,
+        ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ServicePortsSpec, WorkloadSpec,
     };
     use std::collections::BTreeMap;
 
@@ -160,11 +161,14 @@ mod tests {
                 ..Default::default()
             },
             spec: LatticeServiceSpec {
-                containers,
-                service: if ports.is_empty() {
-                    None
-                } else {
-                    Some(ServicePortsSpec { ports })
+                workload: WorkloadSpec {
+                    containers,
+                    service: if ports.is_empty() {
+                        None
+                    } else {
+                        Some(ServicePortsSpec { ports })
+                    },
+                    ..Default::default()
                 },
                 ..Default::default()
             },
