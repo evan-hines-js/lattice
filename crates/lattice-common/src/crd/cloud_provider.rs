@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::service::ResourceSpec;
+use super::workload::resources::ResourceSpec;
 use super::types::SecretRef;
 use crate::LATTICE_SYSTEM_NAMESPACE;
 

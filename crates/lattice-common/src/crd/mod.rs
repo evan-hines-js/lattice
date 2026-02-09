@@ -17,6 +17,7 @@ mod secrets_provider;
 mod service;
 mod service_policy;
 mod types;
+pub mod workload;
 
 pub use backup_policy::{
     BackupPolicyPhase, BackupRetentionSpec, BackupScopeSpec, BackupStorageProvider,
@@ -50,16 +51,27 @@ pub use restore::{
 pub use secrets_provider::{
     SecretProvider, SecretProviderPhase, SecretProviderSpec, SecretProviderStatus,
 };
-pub use service::{
-    AutoscalingMetric, BackupHook, BackupHooksSpec, CertIssuerRef, ContainerSpec,
-    DependencyDirection, DeploySpec, DeployStrategy, ExecProbe, FileMount, GPUSpec,
-    HookErrorAction, HttpGetProbe, HttpHeader, IngressPath, IngressSpec, IngressTls,
-    LatticeService, LatticeServiceSpec, LatticeServiceStatus, PathMatchType, PortSpec, Probe,
-    ReplicaSpec, ResourceMetadata, ResourceQuantity, ResourceRequirements, ResourceSpec,
-    ResourceType, SecurityContext, ServiceBackupSpec, ServicePhase, ServicePortsSpec, SidecarSpec,
-    TlsMode, VolumeAccessMode, VolumeBackupDefault, VolumeBackupSpec, VolumeMount, VolumeParams,
-    WorkloadSpec,
+pub use service::{LatticeService, LatticeServiceSpec, LatticeServiceStatus, ServicePhase};
+pub use workload::backup::{
+    BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,
+    VolumeBackupSpec,
 };
+pub use workload::container::{
+    ContainerSpec, ExecProbe, FileMount, HttpGetProbe, HttpHeader, Probe, SecurityContext,
+    SidecarSpec, VolumeMount,
+};
+pub use workload::deploy::{CanarySpec, DeploySpec, DeployStrategy};
+pub use workload::gpu::GPUSpec;
+pub use workload::ingress::{
+    CertIssuerRef, IngressPath, IngressSpec, IngressTls, PathMatchType, TlsMode,
+};
+pub use workload::ports::{PortSpec, ServicePortsSpec};
+pub use workload::resources::{
+    DependencyDirection, ResourceMetadata, ResourceQuantity, ResourceRequirements, ResourceSpec,
+    ResourceType, VolumeAccessMode, VolumeParams,
+};
+pub use workload::scaling::{AutoscalingMetric, ReplicaSpec};
+pub use workload::spec::WorkloadSpec;
 pub use service_policy::{
     LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,
     LatticeServicePolicySpec, LatticeServicePolicyStatus, NamespaceSelector, ServicePolicyPhase,

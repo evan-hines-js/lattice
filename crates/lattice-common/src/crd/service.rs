@@ -1,6 +1,6 @@
 //! LatticeService Custom Resource Definition
 //!
-//! The LatticeService CRD represents a workload deployed by Lattice.
+//! The LatticeService CRD represents a long-running workload deployed by Lattice.
 //! Services declare their dependencies and allowed callers for automatic
 //! network policy generation.
 //!
@@ -21,1202 +21,14 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::types::{Condition, ServiceRef};
-use crate::template::TemplateString;
-
-/// Direction of a service dependency
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DependencyDirection {
-    /// This service calls the target (outbound traffic)
-    #[default]
-    Outbound,
-    /// The target calls this service (inbound traffic)
-    Inbound,
-    /// Bidirectional communication
-    Both,
-}
-
-impl DependencyDirection {
-    /// Returns true if this direction includes outbound traffic
-    pub fn is_outbound(&self) -> bool {
-        matches!(self, Self::Outbound | Self::Both)
-    }
-
-    /// Returns true if this direction includes inbound traffic
-    pub fn is_inbound(&self) -> bool {
-        matches!(self, Self::Inbound | Self::Both)
-    }
-}
-
-/// Type of resource dependency
-///
-/// Built-in types have strong typing; custom types use `Custom(String)` for extensibility.
-/// Built-ins always win during deserialization - explicit match before Custom.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub enum ResourceType {
-    /// Internal service (another LatticeService)
-    #[default]
-    Service,
-    /// External service (LatticeExternalService)
-    ExternalService,
-    /// Persistent volume (Score-compatible)
-    Volume,
-    /// Secret from SecretProvider (ESO ExternalSecret)
-    Secret,
-    /// Model artifact (pre-fetched to PVC, managed by ModelCache controller)
-    Model,
-    /// Custom resource type (escape hatch for extensibility)
-    /// Validated at parse time: lowercase alphanumeric with hyphens, starts with letter
-    Custom(String),
-}
-
-impl std::fmt::Display for ResourceType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl JsonSchema for ResourceType {
-    fn schema_name() -> String {
-        "ResourceType".to_string()
-    }
-
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        // Accept any string - built-in values are "service", "external-service", "volume", "secret"
-        // Custom types are validated at parse time
-        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(
-                    "Resource type: 'service', 'external-service', 'volume', 'secret', 'model', or custom type"
-                        .to_string(),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
-        })
-    }
-}
-
-impl Serialize for ResourceType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl ResourceType {
-    /// Get the string representation of this resource type
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Service => "service",
-            Self::ExternalService => "external-service",
-            Self::Volume => "volume",
-            Self::Secret => "secret",
-            Self::Model => "model",
-            Self::Custom(s) => s.as_str(),
-        }
-    }
-
-    /// Returns true if this is a service-like resource type (handles network traffic)
-    pub fn is_service_like(&self) -> bool {
-        matches!(self, Self::Service | Self::ExternalService)
-    }
-
-    /// Returns true if this is a volume resource
-    pub fn is_volume(&self) -> bool {
-        matches!(self, Self::Volume)
-    }
-
-    /// Returns true if this is a secret resource
-    pub fn is_secret(&self) -> bool {
-        matches!(self, Self::Secret)
-    }
-
-    /// Returns true if this is a model resource
-    pub fn is_model(&self) -> bool {
-        matches!(self, Self::Model)
-    }
-
-    /// Returns true if this is a volume-like resource (volume or model)
-    ///
-    /// Model resources are a specialized volume type — pre-fetched to a PVC
-    /// from a remote URI.
-    pub fn is_volume_like(&self) -> bool {
-        matches!(self, Self::Volume | Self::Model)
-    }
-
-    /// Returns true if this is a custom resource type
-    pub fn is_custom(&self) -> bool {
-        matches!(self, Self::Custom(_))
-    }
-}
-
-/// Validate custom type: lowercase alphanumeric with hyphens, starts with letter
-fn validate_custom_type(s: &str) -> Result<(), String> {
-    super::validate_dns_identifier(s, true).map_err(|e| e.replace("identifier", "resource type"))
-}
-
-impl<'de> Deserialize<'de> for ResourceType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-
-        // Built-ins always win - explicit match before Custom
-        match s.as_str() {
-            "service" => Ok(Self::Service),
-            "external-service" => Ok(Self::ExternalService),
-            "volume" => Ok(Self::Volume),
-            "secret" => Ok(Self::Secret),
-            "model" => Ok(Self::Model),
-            _ => {
-                validate_custom_type(&s).map_err(serde::de::Error::custom)?;
-                Ok(Self::Custom(s))
-            }
-        }
-    }
-}
-
-/// Resource metadata (Score-compatible)
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ResourceMetadata {
-    /// Annotations for the resource
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub annotations: BTreeMap<String, String>,
-}
-
-/// Resource dependency specification (Score-compatible with Lattice extensions)
-///
-/// ## Score Standard Fields
-/// - `type`: Resource type (volume, service, etc.)
-/// - `class`: Optional specialization
-/// - `id`: Resource identifier for sharing across workloads
-/// - `metadata`: Annotations and other metadata
-/// - `params`: Provisioner-interpreted parameters (generic object)
-///
-/// ## Lattice Extensions
-/// - `direction`: Bilateral agreement direction (inbound/outbound/both)
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ResourceSpec {
-    // =========================================================================
-    // Score Standard Fields
-    // =========================================================================
-    /// Type of resource (Score: type)
-    #[serde(rename = "type")]
-    pub type_: ResourceType,
-
-    /// Optional specialization class (Score: class)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub class: Option<String>,
-
-    /// Optional identifier for resource sharing (Score: id)
-    ///
-    /// When two resources share the same type, class, and id, they are
-    /// considered the same resource when used across related Workloads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-
-    /// Resource metadata (Score: metadata)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<ResourceMetadata>,
-
-    /// Provisioner-interpreted parameters (Score: params)
-    ///
-    /// Generic parameters that Lattice interprets based on resource type:
-    /// - volume: size, storageClass, accessMode
-    /// - service: (none - uses Lattice extensions)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub params: Option<BTreeMap<String, serde_json::Value>>,
-
-    // =========================================================================
-    // Lattice Extensions (additions to Score, not replacements)
-    // =========================================================================
-    /// Direction of the dependency (Lattice extension)
-    ///
-    /// Used for bilateral service mesh agreements:
-    /// - outbound: This service calls the target
-    /// - inbound: The target calls this service
-    /// - both: Bidirectional communication
-    #[serde(default)]
-    pub direction: DependencyDirection,
-
-    /// Target namespace for cross-namespace dependencies (Lattice extension)
-    ///
-    /// When omitted, defaults to the same namespace as the owning service.
-    /// Use this to reference services in other namespaces.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
-}
+use super::types::Condition;
+use super::workload::deploy::DeploySpec;
+use super::workload::ingress::IngressSpec;
+use super::workload::spec::WorkloadSpec;
 
 // =============================================================================
-// Volume Resource Configuration (parsed from Score params)
+// Service Phase
 // =============================================================================
-
-/// Parsed volume parameters from Score's generic `params` field
-///
-/// Volume ownership is determined by the presence of `size`:
-/// - With `size`: This service OWNS the volume (creates the PVC)
-/// - Without `size`: This service REFERENCES a shared volume
-///
-/// ```yaml
-/// # Owner (has size in params)
-/// resources:
-///   downloads:
-///     type: volume
-///     id: media-downloads
-///     params:
-///       size: 500Gi
-///       storageClass: local-path
-///
-/// # Reference (no params or no size)
-/// resources:
-///   downloads:
-///     type: volume
-///     id: media-downloads
-/// ```
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct VolumeParams {
-    /// Storage size (e.g., "10Gi", "500Gi")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size: Option<String>,
-
-    /// Kubernetes storage class name
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_class: Option<String>,
-
-    /// Access mode: ReadWriteOnce (default), ReadWriteMany, ReadOnlyMany
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_mode: Option<VolumeAccessMode>,
-}
-
-/// Volume access mode
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub enum VolumeAccessMode {
-    /// Single node read-write (default)
-    #[default]
-    ReadWriteOnce,
-    /// Multi-node read-write (requires RWX-capable storage)
-    ReadWriteMany,
-    /// Multi-node read-only
-    ReadOnlyMany,
-}
-
-// =============================================================================
-// Secret Resource Configuration (parsed from Score params)
-// =============================================================================
-
-/// Parsed secret parameters from Score's generic `params` field
-///
-/// Secrets are synced from a SecretProvider (Vault) via ESO ExternalSecret.
-/// The `id` field on ResourceSpec specifies the Vault path.
-///
-/// ```yaml
-/// resources:
-///   db-creds:
-///     type: secret
-///     id: database/prod/credentials  # Vault path
-///     params:
-///       provider: vault-prod         # SecretProvider name
-///       keys:
-///         - username
-///         - password
-///       refreshInterval: 1h
-///   tls-cert:
-///     type: secret
-///     id: certs/my-service
-///     params:
-///       provider: vault-prod
-///       keys: [tls.crt, tls.key]
-///       secretType: kubernetes.io/tls
-/// ```
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SecretParams {
-    /// SecretProvider name (references a ClusterSecretStore)
-    pub provider: String,
-
-    /// Specific keys to sync from the secret (optional, syncs all if omitted)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keys: Option<Vec<String>>,
-
-    /// Refresh interval for syncing the secret (e.g., "1h", "30m")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refresh_interval: Option<String>,
-
-    /// K8s Secret type for the synced secret (defaults to Opaque)
-    ///
-    /// Common values: `kubernetes.io/tls`, `kubernetes.io/dockerconfigjson`,
-    /// `kubernetes.io/basic-auth`, `kubernetes.io/ssh-auth`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret_type: Option<String>,
-}
-
-impl ResourceSpec {
-    /// Parse volume params from the generic Score `params` field
-    ///
-    /// Returns:
-    /// - `Ok(None)` if this is not a volume resource
-    /// - `Ok(Some(params))` if params parsed successfully (or defaults if missing)
-    /// - `Err(msg)` if JSON conversion failed (invalid params structure)
-    pub fn volume_params(&self) -> Result<Option<VolumeParams>, String> {
-        if !self.type_.is_volume() {
-            return Ok(None);
-        }
-        match &self.params {
-            Some(params) => {
-                let value = serde_json::to_value(params)
-                    .map_err(|e| format!("failed to serialize volume params: {}", e))?;
-                let volume_params = serde_json::from_value(value)
-                    .map_err(|e| format!("invalid volume params: {}", e))?;
-                Ok(Some(volume_params))
-            }
-            None => Ok(Some(VolumeParams::default())),
-        }
-    }
-
-    /// Returns true if this is a volume resource that owns (creates) the PVC
-    pub fn is_volume_owner(&self) -> bool {
-        self.volume_params()
-            .ok()
-            .flatten()
-            .map(|p| p.size.is_some())
-            .unwrap_or(false)
-    }
-
-    /// Returns true if this is a volume resource that references a shared PVC
-    pub fn is_volume_reference(&self) -> bool {
-        self.type_.is_volume()
-            && self.id.is_some()
-            && self
-                .volume_params()
-                .ok()
-                .flatten()
-                .map(|p| p.size.is_none())
-                .unwrap_or(true)
-    }
-
-    /// Get the PVC name for this volume resource
-    pub fn volume_pvc_name(&self, service_name: &str, resource_name: &str) -> Option<String> {
-        if !self.type_.is_volume() {
-            return None;
-        }
-        Some(match &self.id {
-            Some(id) => format!("vol-{id}"),
-            None => format!("{service_name}-{resource_name}"),
-        })
-    }
-
-    /// Parse model params from the generic Score `params` field
-    ///
-    /// Returns:
-    /// - `Ok(None)` if this is not a model resource
-    /// - `Ok(Some(params))` if params parsed successfully
-    /// - `Err(msg)` if JSON conversion failed or required fields missing
-    pub fn model_params(&self) -> Result<Option<super::model::ModelParams>, String> {
-        if !self.type_.is_model() {
-            return Ok(None);
-        }
-        match &self.params {
-            Some(params) => {
-                let value = serde_json::to_value(params)
-                    .map_err(|e| format!("failed to serialize model params: {}", e))?;
-                let model_params: super::model::ModelParams = serde_json::from_value(value)
-                    .map_err(|e| format!("invalid model params: {}", e))?;
-                model_params.validate()?;
-                Ok(Some(model_params))
-            }
-            None => Err("model resource requires params with at least 'uri'".to_string()),
-        }
-    }
-
-    /// Returns true if this is a secret resource
-    pub fn is_secret(&self) -> bool {
-        self.type_.is_secret()
-    }
-
-    /// Returns true if this is a wildcard mesh resource (`id: "*"`).
-    ///
-    /// Wildcard resources are policy declarations meaning "accept from any caller"
-    /// and cannot be resolved to template outputs (no service to look up in the graph).
-    pub fn is_mesh_wildcard(&self) -> bool {
-        self.type_.is_service_like() && self.id.as_deref() == Some("*")
-    }
-
-    /// Parse secret params from the generic Score `params` field
-    ///
-    /// Returns:
-    /// - `Ok(None)` if this is not a secret resource
-    /// - `Ok(Some(params))` if params parsed successfully
-    /// - `Err(msg)` if JSON conversion failed or required fields missing
-    pub fn secret_params(&self) -> Result<Option<SecretParams>, String> {
-        if !self.type_.is_secret() {
-            return Ok(None);
-        }
-        match &self.params {
-            Some(params) => {
-                let value = serde_json::to_value(params)
-                    .map_err(|e| format!("failed to serialize secret params: {}", e))?;
-                let secret_params: SecretParams = serde_json::from_value(value)
-                    .map_err(|e| format!("invalid secret params: {}", e))?;
-
-                // Validate provider is specified
-                if secret_params.provider.is_empty() {
-                    return Err("secret resource requires 'provider' in params".to_string());
-                }
-
-                Ok(Some(secret_params))
-            }
-            None => Err("secret resource requires 'params' with 'provider'".to_string()),
-        }
-    }
-
-    /// Get the remote key for this secret resource (from the `id` field).
-    ///
-    /// This is the key/path used to look up the secret in the external store
-    /// (e.g., a Vault path, AWS Secrets Manager ARN, GCP secret name).
-    pub fn secret_remote_key(&self) -> Option<&str> {
-        if !self.type_.is_secret() {
-            return None;
-        }
-        self.id.as_deref()
-    }
-
-    /// Get the K8s Secret name that will be created by ESO for this secret resource
-    pub fn secret_k8s_name(&self, service_name: &str, resource_name: &str) -> Option<String> {
-        if !self.type_.is_secret() {
-            return None;
-        }
-        Some(format!("{}-{}", service_name, resource_name))
-    }
-}
-
-/// Container resource limits and requests
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ResourceRequirements {
-    /// Resource requests
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requests: Option<ResourceQuantity>,
-
-    /// Resource limits
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limits: Option<ResourceQuantity>,
-}
-
-/// Resource quantity for CPU and memory
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ResourceQuantity {
-    /// CPU quantity (e.g., "100m", "1")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu: Option<String>,
-
-    /// Memory quantity (e.g., "128Mi", "1Gi")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory: Option<String>,
-}
-
-/// Parse a GPU memory string into MiB.
-///
-/// Accepts "20Gi" → 20480, "512Mi" → 512, bare number → MiB.
-pub(crate) fn parse_gpu_memory_mib(memory: &str) -> Result<u64, String> {
-    let memory = memory.trim();
-    if memory.ends_with("Gi") {
-        let num = memory
-            .trim_end_matches("Gi")
-            .parse::<u64>()
-            .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))?;
-        Ok(num * 1024)
-    } else if memory.ends_with("Mi") {
-        memory
-            .trim_end_matches("Mi")
-            .parse::<u64>()
-            .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))
-    } else {
-        // Bare number treated as MiB
-        memory
-            .parse::<u64>()
-            .map_err(|_| format!("invalid gpu memory: {memory}, use Gi or Mi suffix"))
-    }
-}
-
-/// GPU resource specification
-///
-/// Configures GPU allocation for a service. Supports both full GPU allocation
-/// (standard NVIDIA device plugin) and fractional sharing via HAMi.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct GPUSpec {
-    /// Number of GPUs requested (must be > 0)
-    pub count: u32,
-
-    /// GPU memory limit (e.g., "20Gi", "512Mi"). Enables HAMi fractional sharing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory: Option<String>,
-
-    /// GPU compute percentage (1-100). Enables HAMi fractional sharing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compute: Option<u32>,
-
-    /// GPU model selector (e.g., "H100", "A100", "L4"). Maps to node selector.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-
-    /// Whether to add nvidia.com/gpu toleration (default: true)
-    #[serde(default = "super::default_true")]
-    pub tolerations: bool,
-}
-
-impl Default for GPUSpec {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            memory: None,
-            compute: None,
-            model: None,
-            tolerations: true,
-        }
-    }
-}
-
-impl GPUSpec {
-    /// Returns true if HAMi fractional sharing is needed (memory or compute set)
-    pub fn needs_hami(&self) -> bool {
-        self.memory.is_some() || self.compute.is_some()
-    }
-
-    /// Returns true if this is a full GPU allocation (no fractional fields)
-    pub fn is_full_gpu(&self) -> bool {
-        !self.needs_hami()
-    }
-
-    /// Validate the GPU specification
-    pub fn validate(&self) -> Result<(), String> {
-        if self.count == 0 {
-            return Err("gpu.count must be greater than 0".to_string());
-        }
-
-        if let Some(compute) = self.compute {
-            if compute == 0 || compute > 100 {
-                return Err("gpu.compute must be between 1 and 100".to_string());
-            }
-        }
-
-        if let Some(ref memory) = self.memory {
-            parse_gpu_memory_mib(memory)?;
-        }
-
-        Ok(())
-    }
-
-    /// Parse the memory field into MiB, if present.
-    pub fn memory_mib(&self) -> Option<Result<u64, String>> {
-        self.memory.as_ref().map(|m| parse_gpu_memory_mib(m))
-    }
-
-    /// Map a short GPU model name to the `nvidia.com/gpu.product` NFD label value.
-    ///
-    /// Known models are mapped to their full NVIDIA product names.
-    /// Unknown models are passed through as-is.
-    /// Returns None if no model is set.
-    pub fn product_label(&self) -> Option<String> {
-        self.model
-            .as_ref()
-            .map(|model| match model.to_uppercase().as_str() {
-                "H100" => "NVIDIA-H100-80GB-HBM3".to_string(),
-                "H100SXM" => "NVIDIA-H100-80GB-HBM3".to_string(),
-                "H100PCIE" => "NVIDIA-H100-PCIe".to_string(),
-                "A100" => "NVIDIA-A100-SXM4-80GB".to_string(),
-                "A100-80G" => "NVIDIA-A100-SXM4-80GB".to_string(),
-                "A100-40G" => "NVIDIA-A100-SXM4-40GB".to_string(),
-                "A10G" => "NVIDIA-A10G".to_string(),
-                "L40S" => "NVIDIA-L40S".to_string(),
-                "L40" => "NVIDIA-L40".to_string(),
-                "L4" => "NVIDIA-L4".to_string(),
-                "T4" => "NVIDIA-Tesla-T4".to_string(),
-                "V100" => "NVIDIA-Tesla-V100-SXM2-16GB".to_string(),
-                _ => model.to_string(),
-            })
-    }
-
-    /// Build a node selector map for GPU model selection.
-    ///
-    /// Returns a BTreeMap with `nvidia.com/gpu.product` set to the product label
-    /// if a model is specified, or None otherwise.
-    pub fn node_selector(&self) -> Option<std::collections::BTreeMap<String, String>> {
-        self.product_label().map(|label| {
-            let mut selector = std::collections::BTreeMap::new();
-            selector.insert("nvidia.com/gpu.product".to_string(), label);
-            selector
-        })
-    }
-}
-
-/// HTTP probe configuration
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct HttpGetProbe {
-    /// Path to probe
-    pub path: String,
-
-    /// Port to probe
-    pub port: u16,
-
-    /// HTTP scheme (HTTP or HTTPS)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scheme: Option<String>,
-
-    /// Optional host header
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-
-    /// Optional HTTP headers
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub http_headers: Option<Vec<HttpHeader>>,
-}
-
-/// HTTP header for probes
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct HttpHeader {
-    /// Header name
-    pub name: String,
-    /// Header value
-    pub value: String,
-}
-
-/// Exec probe configuration
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ExecProbe {
-    /// Command to execute
-    pub command: Vec<String>,
-}
-
-/// Probe configuration (liveness or readiness)
-///
-/// Score-compliant probe specification. Supports HTTP GET and exec probe types.
-/// Timing parameters use platform defaults (initialDelaySeconds: 0, periodSeconds: 10).
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Probe {
-    /// HTTP GET probe - performs an HTTP GET request
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub http_get: Option<HttpGetProbe>,
-
-    /// Exec probe - executes a command inside the container
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exec: Option<ExecProbe>,
-}
-
-/// File mount specification
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct FileMount {
-    /// Inline file content (UTF-8, supports `${...}` placeholders)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<TemplateString>,
-
-    /// Base64-encoded binary content
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binary_content: Option<String>,
-
-    /// Path to content file (supports `${...}` placeholders)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<TemplateString>,
-
-    /// File mode in octal
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-
-    /// Disable placeholder expansion entirely
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub no_expand: bool,
-
-    /// Reverse expansion mode for bash scripts: `${...}` stays literal,
-    /// `$${...}` expands. Useful when shell variables are more common
-    /// than Lattice templates.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reverse_expand: bool,
-}
-
-/// Volume mount specification
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct VolumeMount {
-    /// External volume reference (supports `${...}` placeholders).
-    /// When omitted, creates an emptyDir volume.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<TemplateString>,
-
-    /// Sub path in the volume
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-
-    /// Mount as read-only
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read_only: Option<bool>,
-
-    /// Storage medium for emptyDir ("Memory" for tmpfs). Only used when source is None.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub medium: Option<String>,
-
-    /// Size limit for emptyDir (e.g., "1Gi"). Only used when source is None.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_limit: Option<String>,
-}
-
-/// Container security context
-///
-/// Controls Linux security settings for a container. All fields are optional.
-/// When omitted entirely, the compiler applies Pod Security Standards "restricted"
-/// profile defaults: drop ALL caps, no privilege escalation, non-root, read-only
-/// rootfs, RuntimeDefault seccomp and AppArmor profiles.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SecurityContext {
-    /// Linux capabilities to add (e.g., NET_ADMIN, SYS_MODULE)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub capabilities: Vec<String>,
-
-    /// Capabilities to drop (default: [ALL])
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drop_capabilities: Option<Vec<String>>,
-
-    /// Run container in privileged mode (strongly discouraged)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub privileged: Option<bool>,
-
-    /// Mount root filesystem as read-only (default: true)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read_only_root_filesystem: Option<bool>,
-
-    /// Require the container to run as a non-root user (default: true)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_non_root: Option<bool>,
-
-    /// UID to run the container as
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_user: Option<i64>,
-
-    /// GID to run the container as
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_group: Option<i64>,
-
-    /// Allow privilege escalation via setuid binaries (default: false)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_privilege_escalation: Option<bool>,
-
-    /// Seccomp profile type: "RuntimeDefault", "Unconfined", or "Localhost"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seccomp_profile: Option<String>,
-
-    /// Localhost seccomp profile path (only when seccomp_profile is "Localhost")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seccomp_localhost_profile: Option<String>,
-
-    /// AppArmor profile type: "RuntimeDefault", "Unconfined", or "Localhost"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub apparmor_profile: Option<String>,
-
-    /// Localhost AppArmor profile name (only when apparmor_profile is "Localhost")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub apparmor_localhost_profile: Option<String>,
-}
-
-/// Sidecar container specification
-///
-/// Identical to ContainerSpec but with additional sidecar-specific options.
-/// Sidecars are infrastructure containers (VPN, logging, metrics) that support
-/// the main application containers.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SidecarSpec {
-    /// Container image
-    pub image: String,
-
-    /// Override container entrypoint
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<Vec<String>>,
-
-    /// Override container arguments
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<Vec<String>>,
-
-    /// Environment variables (values support `${...}` placeholders)
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub variables: BTreeMap<String, TemplateString>,
-
-    /// Resource requirements
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<ResourceRequirements>,
-
-    /// Files to mount in the container
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub files: BTreeMap<String, FileMount>,
-
-    /// Volumes to mount
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub volumes: BTreeMap<String, VolumeMount>,
-
-    /// Liveness probe - restarts container when it fails
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub liveness_probe: Option<Probe>,
-
-    /// Readiness probe - removes container from service endpoints when it fails
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub readiness_probe: Option<Probe>,
-
-    /// Startup probe - delays liveness/readiness checks until container is ready
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub startup_probe: Option<Probe>,
-
-    /// Run as init container (runs once before main containers)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub init: Option<bool>,
-
-    /// Security context for the container
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub security: Option<SecurityContext>,
-}
-
-/// Container specification (Score-compatible)
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ContainerSpec {
-    /// Container image (use "." for runtime-supplied image via config)
-    pub image: String,
-
-    /// Override container entrypoint
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<Vec<String>>,
-
-    /// Override container arguments
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<Vec<String>>,
-
-    /// Environment variables (values support `${...}` placeholders)
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub variables: BTreeMap<String, TemplateString>,
-
-    /// Resource requirements
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<ResourceRequirements>,
-
-    /// Files to mount in the container
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub files: BTreeMap<String, FileMount>,
-
-    /// Volumes to mount
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub volumes: BTreeMap<String, VolumeMount>,
-
-    /// Liveness probe - restarts container when it fails
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub liveness_probe: Option<Probe>,
-
-    /// Readiness probe - removes container from service endpoints when it fails
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub readiness_probe: Option<Probe>,
-
-    /// Startup probe - delays liveness/readiness checks until container is ready
-    ///
-    /// Useful for slow-starting containers. Liveness and readiness probes
-    /// will not run until the startup probe succeeds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub startup_probe: Option<Probe>,
-
-    /// Security context for the container
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub security: Option<SecurityContext>,
-}
-
-/// Service port specification
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PortSpec {
-    /// Service port
-    pub port: u16,
-
-    /// Target port (defaults to port)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_port: Option<u16>,
-
-    /// Protocol (TCP or UDP)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol: Option<String>,
-}
-
-/// Service exposure specification
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ServicePortsSpec {
-    /// Named network ports
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub ports: BTreeMap<String, PortSpec>,
-}
-
-/// Replica scaling specification
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ReplicaSpec {
-    /// Minimum replicas
-    #[serde(default)]
-    pub min: u32,
-
-    /// Maximum replicas
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max: Option<u32>,
-
-    /// Custom autoscaling metrics (defaults to cpu at 80% if empty)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub autoscaling: Vec<AutoscalingMetric>,
-}
-
-impl Default for ReplicaSpec {
-    fn default() -> Self {
-        Self {
-            min: 1,
-            max: None,
-            autoscaling: vec![],
-        }
-    }
-}
-
-/// Autoscaling metric specification
-///
-/// Built-in metrics ("cpu", "memory") use resource utilization percentage.
-/// Custom metrics (e.g. "vllm_num_requests_waiting") use pods average value.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct AutoscalingMetric {
-    /// Metric name ("cpu", "memory", or a custom Prometheus metric)
-    pub metric: String,
-    /// Target value (percentage for cpu/memory, absolute for custom metrics)
-    pub target: u32,
-}
-
-/// Deployment strategy
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DeployStrategy {
-    /// Rolling update strategy
-    #[default]
-    Rolling,
-    /// Canary deployment with progressive traffic shifting
-    Canary,
-}
-
-/// Canary deployment configuration
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CanarySpec {
-    /// Interval between steps
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval: Option<String>,
-
-    /// Error threshold before rollback
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threshold: Option<u32>,
-
-    /// Maximum traffic weight
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_weight: Option<u32>,
-
-    /// Weight increment per step
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub step_weight: Option<u32>,
-}
-
-/// Deployment specification
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct DeploySpec {
-    /// Deployment strategy
-    #[serde(default)]
-    pub strategy: DeployStrategy,
-
-    /// Canary configuration (only if strategy is canary)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canary: Option<CanarySpec>,
-}
-
-// =============================================================================
-// Ingress Specification (Gateway API)
-// =============================================================================
-
-/// Ingress specification for exposing services externally via Gateway API
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct IngressSpec {
-    /// Hostnames for the ingress (e.g., "api.example.com")
-    pub hosts: Vec<String>,
-
-    /// URL paths to route (defaults to ["/"])
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paths: Option<Vec<IngressPath>>,
-
-    /// TLS configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls: Option<IngressTls>,
-
-    /// GatewayClass name (default: "istio")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gateway_class: Option<String>,
-}
-
-/// Path configuration for ingress routing
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct IngressPath {
-    /// The URL path to match
-    pub path: String,
-
-    /// Path match type (PathPrefix or Exact)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_type: Option<PathMatchType>,
-}
-
-/// Path match type for Gateway API HTTPRoute
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-pub enum PathMatchType {
-    /// Exact path match
-    Exact,
-    /// Prefix-based path match (default)
-    #[default]
-    PathPrefix,
-}
-
-/// TLS configuration for ingress
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct IngressTls {
-    /// TLS mode: auto (cert-manager) or manual (pre-existing secret)
-    #[serde(default)]
-    pub mode: TlsMode,
-
-    /// Secret name containing TLS certificate (for manual mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret_name: Option<String>,
-
-    /// Cert-manager issuer reference (for auto mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issuer_ref: Option<CertIssuerRef>,
-}
-
-/// TLS provisioning mode
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum TlsMode {
-    /// Automatic certificate provisioning via cert-manager
-    #[default]
-    Auto,
-    /// Manual certificate management (use pre-existing secret)
-    Manual,
-}
-
-/// Reference to a cert-manager issuer
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CertIssuerRef {
-    /// Name of the issuer
-    pub name: String,
-
-    /// Kind of issuer (default: ClusterIssuer)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-}
-
-// =============================================================================
-// Backup Configuration
-// =============================================================================
-
-/// Error action for backup hooks
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-pub enum HookErrorAction {
-    /// Continue backup even if hook fails (default)
-    #[default]
-    Continue,
-    /// Fail the backup if hook fails
-    Fail,
-}
-
-/// A single backup hook (pre or post)
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct BackupHook {
-    /// Hook name (used in Velero annotation suffix)
-    pub name: String,
-
-    /// Target container name
-    pub container: String,
-
-    /// Command to execute
-    pub command: Vec<String>,
-
-    /// Timeout for hook execution (e.g., "600s", "10m")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<String>,
-
-    /// Action on hook failure
-    #[serde(default)]
-    pub on_error: HookErrorAction,
-}
-
-/// Pre and post backup hooks
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct BackupHooksSpec {
-    /// Hooks to run before backup
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pre: Vec<BackupHook>,
-
-    /// Hooks to run after backup
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub post: Vec<BackupHook>,
-}
-
-/// Default volume backup behavior
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum VolumeBackupDefault {
-    /// All volumes are backed up unless explicitly excluded (default)
-    #[default]
-    OptOut,
-    /// Only explicitly included volumes are backed up
-    OptIn,
-}
-
-/// Volume backup configuration
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct VolumeBackupSpec {
-    /// Volumes to explicitly include in backup
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub include: Vec<String>,
-
-    /// Volumes to explicitly exclude from backup
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exclude: Vec<String>,
-
-    /// Default backup policy for volumes not in include/exclude lists
-    #[serde(default)]
-    pub default_policy: VolumeBackupDefault,
-}
-
-/// Service-level backup configuration
-///
-/// Defines Velero backup hooks and volume backup policies for a service.
-/// This spec is shared between `LatticeService.spec.backup` (inline) and
-/// `LatticeServicePolicy.spec.backup` (policy overlay).
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ServiceBackupSpec {
-    /// Pre/post backup hooks for application-aware backups
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hooks: Option<BackupHooksSpec>,
-
-    /// Volume backup configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub volumes: Option<VolumeBackupSpec>,
-}
 
 /// Service lifecycle phase
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -1243,60 +55,9 @@ impl std::fmt::Display for ServicePhase {
     }
 }
 
-/// Shared workload specification (Score core + Lattice extensions)
-///
-/// Contains the container/resource/service core shared across all Lattice
-/// workload types: LatticeService, LatticeJob, LatticeModel.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkloadSpec {
-    /// Named container specifications (Score-compatible)
-    pub containers: BTreeMap<String, ContainerSpec>,
-
-    /// External dependencies (service, route, postgres, redis, etc.)
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub resources: BTreeMap<String, ResourceSpec>,
-
-    /// Service port configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service: Option<ServicePortsSpec>,
-
-    /// Replica scaling configuration
-    #[serde(default)]
-    pub replicas: ReplicaSpec,
-
-    /// Sidecar containers (VPN, logging, metrics, etc.)
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sidecars: BTreeMap<String, SidecarSpec>,
-
-    /// Pod-level sysctls (e.g., net.ipv4.conf.all.src_valid_mark)
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sysctls: BTreeMap<String, String>,
-
-    /// Use host network namespace
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_network: Option<bool>,
-
-    /// Share PID namespace between containers
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub share_process_namespace: Option<bool>,
-
-    /// Backup configuration (Velero hooks and volume policies)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup: Option<ServiceBackupSpec>,
-
-    /// GPU resource specification
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpu: Option<GPUSpec>,
-
-    /// Image pull secrets — resource names referencing `type: secret` resources
-    ///
-    /// Each entry is a resource name from `resources` that must have `type: secret`.
-    /// The compiled K8s Secret name is resolved at compile time and added to the
-    /// pod's `imagePullSecrets` field.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub image_pull_secrets: Vec<String>,
-}
+// =============================================================================
+// LatticeService CRD
+// =============================================================================
 
 /// Specification for a LatticeService
 #[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -1326,395 +87,9 @@ pub struct LatticeServiceSpec {
     pub ingress: Option<IngressSpec>,
 }
 
-impl WorkloadSpec {
-    /// Extract all service dependencies (outbound) with namespace resolution
-    ///
-    /// Returns ServiceRefs for both internal and external services.
-    /// If a resource doesn't specify a namespace, it defaults to `own_namespace`.
-    pub fn dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
-        self.resources
-            .iter()
-            .filter(|(_, spec)| spec.direction.is_outbound() && spec.type_.is_service_like())
-            .map(|(name, spec)| {
-                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                let svc_name = spec.id.as_deref().unwrap_or(name);
-                ServiceRef::new(ns, svc_name)
-            })
-            .collect()
-    }
-
-    /// Extract services allowed to call this service (inbound) with namespace resolution
-    ///
-    /// Returns ServiceRefs for callers. If a resource doesn't specify a namespace,
-    /// it defaults to `own_namespace`.
-    pub fn allowed_callers(&self, own_namespace: &str) -> Vec<ServiceRef> {
-        self.resources
-            .iter()
-            .filter(|(_, spec)| {
-                spec.direction.is_inbound() && matches!(spec.type_, ResourceType::Service)
-            })
-            .map(|(name, spec)| {
-                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                let svc_name = spec.id.as_deref().unwrap_or(name);
-                ServiceRef::new(ns, svc_name)
-            })
-            .collect()
-    }
-
-    /// Extract external service dependencies with namespace resolution
-    pub fn external_dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
-        self.resources
-            .iter()
-            .filter(|(_, spec)| {
-                spec.direction.is_outbound() && matches!(spec.type_, ResourceType::ExternalService)
-            })
-            .map(|(name, spec)| {
-                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                let svc_name = spec.id.as_deref().unwrap_or(name);
-                ServiceRef::new(ns, svc_name)
-            })
-            .collect()
-    }
-
-    /// Extract internal service dependencies with namespace resolution
-    pub fn internal_dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
-        self.resources
-            .iter()
-            .filter(|(_, spec)| {
-                spec.direction.is_outbound() && matches!(spec.type_, ResourceType::Service)
-            })
-            .map(|(name, spec)| {
-                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                let svc_name = spec.id.as_deref().unwrap_or(name);
-                ServiceRef::new(ns, svc_name)
-            })
-            .collect()
-    }
-
-    /// Get the primary container image
-    pub fn primary_image(&self) -> Option<&str> {
-        self.containers
-            .get("main")
-            .or_else(|| self.containers.values().next())
-            .map(|c| c.image.as_str())
-    }
-
-    /// Get shared volume IDs that this workload owns (has size defined)
-    /// Returns: Vec<(resource_name, volume_id)>
-    pub fn owned_volume_ids(&self) -> Vec<(&str, &str)> {
-        self.resources
-            .iter()
-            .filter(|(_, spec)| spec.is_volume_owner() && spec.id.is_some())
-            .filter_map(|(name, spec)| spec.id.as_ref().map(|id| (name.as_str(), id.as_str())))
-            .collect()
-    }
-
-    /// Get shared volume IDs that this workload references (no size, just id)
-    /// Returns: Vec<(resource_name, volume_id)>
-    pub fn referenced_volume_ids(&self) -> Vec<(&str, &str)> {
-        self.resources
-            .iter()
-            .filter(|(_, spec)| spec.is_volume_reference())
-            .filter_map(|(name, spec)| spec.id.as_ref().map(|id| (name.as_str(), id.as_str())))
-            .collect()
-    }
-
-    /// Get the ports this workload exposes
-    pub fn ports(&self) -> BTreeMap<&str, u16> {
-        self.service
-            .as_ref()
-            .map(|s| {
-                s.ports
-                    .iter()
-                    .map(|(name, spec)| (name.as_str(), spec.port))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Validate the workload specification
-    pub fn validate(&self) -> Result<(), crate::Error> {
-        if self.containers.is_empty() {
-            return Err(crate::Error::validation(
-                "service must have at least one container",
-            ));
-        }
-
-        // Validate replica counts
-        if let Some(max) = self.replicas.max {
-            if self.replicas.min > max {
-                return Err(crate::Error::validation(
-                    "min replicas cannot exceed max replicas",
-                ));
-            }
-        }
-
-        // Validate autoscaling metrics
-        if !self.replicas.autoscaling.is_empty() && self.replicas.max.is_none() {
-            return Err(crate::Error::validation(
-                "autoscaling metrics require max replicas to be set",
-            ));
-        }
-        for m in &self.replicas.autoscaling {
-            if m.target == 0 {
-                return Err(crate::Error::validation(format!(
-                    "autoscaling metric '{}' target must be greater than 0",
-                    m.metric
-                )));
-            }
-            if (m.metric == "cpu" || m.metric == "memory") && m.target > 100 {
-                return Err(crate::Error::validation(format!(
-                    "autoscaling metric '{}' target cannot exceed 100%",
-                    m.metric
-                )));
-            }
-        }
-
-        // Validate containers
-        for (name, container) in &self.containers {
-            container.validate(name)?;
-        }
-
-        // Validate service ports
-        if let Some(ref svc) = self.service {
-            svc.validate()?;
-        }
-
-        // Validate GPU spec
-        if let Some(ref gpu) = self.gpu {
-            gpu.validate().map_err(crate::Error::validation)?;
-        }
-
-        Ok(())
-    }
-}
-
-// No methods on LatticeServiceSpec — all shared behavior lives on WorkloadSpec.
-// Mesh methods (dependencies, allowed_callers, etc.) operate on WorkloadSpec.resources.
-// Validation lives on WorkloadSpec::validate().
-// Callers access via spec.workload.dependencies(), spec.workload.validate(), etc.
-
-impl ContainerSpec {
-    /// Validate container specification
-    pub fn validate(&self, container_name: &str) -> Result<(), crate::Error> {
-        // Validate image format
-        validate_image(&self.image, container_name)?;
-
-        // Resource limits are required for every container
-        let resources = self.resources.as_ref().ok_or_else(|| {
-            crate::Error::validation(format!(
-                "container '{}' must have resource limits",
-                container_name
-            ))
-        })?;
-        if resources.limits.is_none() {
-            return Err(crate::Error::validation(format!(
-                "container '{}' must have resource limits",
-                container_name
-            )));
-        }
-
-        // Validate resource quantities
-        resources.validate(container_name)?;
-
-        // Validate file mount modes
-        for (path, file_mount) in &self.files {
-            file_mount.validate(container_name, path)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl ResourceRequirements {
-    /// Validate resource requirements
-    pub fn validate(&self, container_name: &str) -> Result<(), crate::Error> {
-        if let Some(ref requests) = self.requests {
-            requests.validate(container_name, "requests")?;
-        }
-        if let Some(ref limits) = self.limits {
-            limits.validate(container_name, "limits")?;
-        }
-        Ok(())
-    }
-}
-
-impl ResourceQuantity {
-    /// Validate resource quantity values
-    pub fn validate(&self, container_name: &str, field: &str) -> Result<(), crate::Error> {
-        if let Some(ref cpu) = self.cpu {
-            validate_cpu_quantity(cpu, container_name, field)?;
-        }
-        if let Some(ref memory) = self.memory {
-            validate_memory_quantity(memory, container_name, field)?;
-        }
-        Ok(())
-    }
-}
-
-impl FileMount {
-    /// Validate file mount specification
-    pub fn validate(&self, container_name: &str, path: &str) -> Result<(), crate::Error> {
-        // Validate mode is valid octal
-        if let Some(ref mode) = self.mode {
-            validate_file_mode(mode, container_name, path)?;
-        }
-
-        // Ensure at least one content source is specified
-        let has_content =
-            self.content.is_some() || self.binary_content.is_some() || self.source.is_some();
-        if !has_content {
-            return Err(crate::Error::validation(format!(
-                "container '{}' file '{}': must specify content, binary_content, or source",
-                container_name, path
-            )));
-        }
-
-        Ok(())
-    }
-}
-
-impl ServicePortsSpec {
-    /// Validate service port specification
-    pub fn validate(&self) -> Result<(), crate::Error> {
-        let mut seen_ports: std::collections::HashSet<u16> = std::collections::HashSet::new();
-
-        for (name, port_spec) in &self.ports {
-            // Validate port is not zero
-            if port_spec.port == 0 {
-                return Err(crate::Error::validation(format!(
-                    "service port '{}': port cannot be 0",
-                    name
-                )));
-            }
-
-            // Validate target_port is not zero
-            if let Some(target_port) = port_spec.target_port {
-                if target_port == 0 {
-                    return Err(crate::Error::validation(format!(
-                        "service port '{}': target_port cannot be 0",
-                        name
-                    )));
-                }
-            }
-
-            // Check for duplicate port numbers
-            if !seen_ports.insert(port_spec.port) {
-                return Err(crate::Error::validation(format!(
-                    "duplicate service port number: {}",
-                    port_spec.port
-                )));
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Validate container image format
-///
-/// Accepts:
-/// - Standard image references: "nginx:latest", "gcr.io/project/image:v1"
-/// - Runtime placeholder: "." (Score spec - image supplied via config at render time)
-///
-/// Note: Per Score spec, `${...}` placeholders are NOT supported in image field.
-/// Use "." for runtime-supplied images instead.
-fn validate_image(image: &str, container_name: &str) -> Result<(), crate::Error> {
-    if image.is_empty() {
-        return Err(crate::Error::validation(format!(
-            "container '{}': image cannot be empty",
-            container_name
-        )));
-    }
-
-    // "." is the Score placeholder for runtime-supplied image
-    if image == "." {
-        return Ok(());
-    }
-
-    // Basic validation: image must not contain whitespace or control characters
-    if image.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(crate::Error::validation(format!(
-            "container '{}': image '{}' contains invalid characters",
-            container_name, image
-        )));
-    }
-
-    Ok(())
-}
-
-/// Validate CPU quantity format (e.g., "100m", "1", "0.5")
-fn validate_cpu_quantity(qty: &str, container_name: &str, field: &str) -> Result<(), crate::Error> {
-    // CPU can be: integer, decimal, or integer with 'm' suffix
-    let is_valid = if let Some(stripped) = qty.strip_suffix('m') {
-        // Millicores: must be integer
-        stripped.parse::<u64>().is_ok()
-    } else {
-        // Cores: can be integer or decimal
-        qty.parse::<f64>().is_ok()
-    };
-
-    if !is_valid {
-        return Err(crate::Error::validation(format!(
-            "container '{}' {}.cpu: invalid quantity '{}' (expected e.g., '100m', '1', '0.5')",
-            container_name, field, qty
-        )));
-    }
-
-    Ok(())
-}
-
-/// Validate memory quantity format (e.g., "128Mi", "1Gi", "1000000")
-fn validate_memory_quantity(
-    qty: &str,
-    container_name: &str,
-    field: &str,
-) -> Result<(), crate::Error> {
-    // Memory can have these suffixes: Ki, Mi, Gi, Ti, Pi, Ei, k, M, G, T, P, E
-    let suffixes = [
-        "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "k", "M", "G", "T", "P", "E",
-    ];
-
-    let is_valid = if let Some(suffix) = suffixes.iter().find(|s| qty.ends_with(*s)) {
-        // Has suffix: prefix must be a number
-        let prefix = &qty[..qty.len() - suffix.len()];
-        prefix.parse::<u64>().is_ok() || prefix.parse::<f64>().is_ok()
-    } else {
-        // No suffix: must be integer (bytes)
-        qty.parse::<u64>().is_ok()
-    };
-
-    if !is_valid {
-        return Err(crate::Error::validation(format!(
-            "container '{}' {}.memory: invalid quantity '{}' (expected e.g., '128Mi', '1Gi')",
-            container_name, field, qty
-        )));
-    }
-
-    Ok(())
-}
-
-/// Validate file mode is valid octal (e.g., "0644", "0755")
-fn validate_file_mode(mode: &str, container_name: &str, path: &str) -> Result<(), crate::Error> {
-    // Mode should be 3-4 octal digits, optionally prefixed with 0
-    let mode_str = mode.strip_prefix('0').unwrap_or(mode);
-
-    if mode_str.len() < 3 || mode_str.len() > 4 {
-        return Err(crate::Error::validation(format!(
-            "container '{}' file '{}': mode '{}' must be 3-4 octal digits (e.g., '0644')",
-            container_name, path, mode
-        )));
-    }
-
-    if !mode_str.chars().all(|c| ('0'..='7').contains(&c)) {
-        return Err(crate::Error::validation(format!(
-            "container '{}' file '{}': mode '{}' contains non-octal digits",
-            container_name, path, mode
-        )));
-    }
-
-    Ok(())
-}
+// =============================================================================
+// LatticeService Status
+// =============================================================================
 
 /// Status for a LatticeService
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -1780,10 +155,25 @@ impl LatticeServiceStatus {
     }
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crd::types::ConditionStatus;
+    use crate::crd::workload::backup::{HookErrorAction, VolumeBackupDefault};
+    use crate::crd::workload::container::{ContainerSpec, FileMount};
+    use crate::crd::workload::deploy::DeployStrategy;
+    use crate::crd::workload::gpu::GPUSpec;
+    use crate::crd::workload::ports::{PortSpec, ServicePortsSpec};
+    use crate::crd::workload::resources::{
+        DependencyDirection, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
+        VolumeAccessMode,
+    };
+    use crate::crd::workload::scaling::{AutoscalingMetric, ReplicaSpec};
+    use crate::template::TemplateString;
 
     // =========================================================================
     // Test Fixtures
@@ -1817,231 +207,46 @@ mod tests {
     }
 
     // =========================================================================
-    // Dependency Direction Tests
+    // Service Phase Tests
     // =========================================================================
 
     #[test]
-    fn test_dependency_direction_outbound() {
-        let dir = DependencyDirection::Outbound;
-        assert!(dir.is_outbound());
-        assert!(!dir.is_inbound());
-    }
-
-    #[test]
-    fn test_dependency_direction_inbound() {
-        let dir = DependencyDirection::Inbound;
-        assert!(!dir.is_outbound());
-        assert!(dir.is_inbound());
-    }
-
-    #[test]
-    fn test_dependency_direction_both() {
-        let dir = DependencyDirection::Both;
-        assert!(dir.is_outbound());
-        assert!(dir.is_inbound());
+    fn test_service_phase_display() {
+        assert_eq!(ServicePhase::Pending.to_string(), "Pending");
+        assert_eq!(ServicePhase::Compiling.to_string(), "Compiling");
+        assert_eq!(ServicePhase::Ready.to_string(), "Ready");
+        assert_eq!(ServicePhase::Failed.to_string(), "Failed");
     }
 
     // =========================================================================
-    // Dependency Extraction Stories
+    // Status Builder Stories
     // =========================================================================
 
-    /// Story: Service declares outbound dependencies on other services
     #[test]
-    fn story_service_declares_outbound_dependencies() {
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            "redis".to_string(),
-            ResourceSpec {
-                type_: ResourceType::ExternalService,
-                direction: DependencyDirection::Outbound,
-                id: None,
-                class: None,
-                metadata: None,
-                params: None,
-                namespace: None,
-            },
-        );
-        resources.insert(
-            "api-gateway".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Service,
-                direction: DependencyDirection::Outbound,
-                id: None,
-                class: None,
-                metadata: None,
-                params: None,
-                namespace: None,
-            },
+    fn story_controller_builds_status_fluently() {
+        let condition = Condition::new(
+            "Ready",
+            ConditionStatus::True,
+            "ServiceReady",
+            "All replicas are healthy",
         );
 
-        let mut spec = sample_service_spec();
-        spec.workload.resources = resources;
+        let status = LatticeServiceStatus::default()
+            .phase(ServicePhase::Ready)
+            .message("Service is operational")
+            .condition(condition)
+            .compiled_at(Utc::now());
 
-        let deps = spec.workload.dependencies("test");
-        assert_eq!(deps.len(), 2);
-        assert!(deps.iter().any(|r| r.name == "redis"));
-        assert!(deps.iter().any(|r| r.name == "api-gateway"));
-    }
-
-    /// Story: Service declares which callers are allowed
-    #[test]
-    fn story_service_declares_allowed_callers() {
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            "curl-tester".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Service,
-                direction: DependencyDirection::Inbound,
-                id: None,
-                class: None,
-                metadata: None,
-                params: None,
-                namespace: None,
-            },
-        );
-        resources.insert(
-            "frontend".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Service,
-                direction: DependencyDirection::Inbound,
-                id: None,
-                class: None,
-                metadata: None,
-                params: None,
-                namespace: None,
-            },
-        );
-
-        let mut spec = sample_service_spec();
-        spec.workload.resources = resources;
-
-        let callers = spec.workload.allowed_callers("test");
-        assert_eq!(callers.len(), 2);
-        assert!(callers.iter().any(|r| r.name == "curl-tester"));
-        assert!(callers.iter().any(|r| r.name == "frontend"));
-    }
-
-    /// Story: Bidirectional relationships are counted in both directions
-    #[test]
-    fn story_bidirectional_relationships() {
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            "cache".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Service,
-                direction: DependencyDirection::Both,
-                id: None,
-                class: None,
-                metadata: None,
-                params: None,
-                namespace: None,
-            },
-        );
-
-        let mut spec = sample_service_spec();
-        spec.workload.resources = resources;
-
-        // Should appear in both dependencies and allowed_callers
-        assert!(spec
-            .workload
-            .dependencies("test")
-            .iter()
-            .any(|r| r.name == "cache"));
-        assert!(spec
-            .workload
-            .allowed_callers("test")
-            .iter()
-            .any(|r| r.name == "cache"));
-    }
-
-    /// Story: External services are separated from internal
-    #[test]
-    fn story_external_vs_internal_dependencies() {
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            "google".to_string(),
-            ResourceSpec {
-                type_: ResourceType::ExternalService,
-                direction: DependencyDirection::Outbound,
-                id: None,
-                class: None,
-                metadata: None,
-                params: None,
-                namespace: None,
-            },
-        );
-        resources.insert(
-            "backend".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Service,
-                direction: DependencyDirection::Outbound,
-                id: None,
-                class: None,
-                metadata: None,
-                params: None,
-                namespace: None,
-            },
-        );
-
-        let mut spec = sample_service_spec();
-        spec.workload.resources = resources;
-
-        let external = spec.workload.external_dependencies("test");
-        let internal = spec.workload.internal_dependencies("test");
-
-        assert_eq!(external.len(), 1);
-        assert_eq!(external[0].name, "google");
-        assert_eq!(internal.len(), 1);
-        assert_eq!(internal[0].name, "backend");
-    }
-
-    // =========================================================================
-    // Validation Stories
-    // =========================================================================
-
-    /// Story: Valid service passes validation
-    #[test]
-    fn story_valid_service_passes_validation() {
-        let spec = sample_service_spec();
-        assert!(spec.workload.validate().is_ok());
-    }
-
-    /// Story: Service without containers fails validation
-    #[test]
-    fn story_service_without_containers_fails() {
-        let spec = WorkloadSpec {
-            containers: BTreeMap::new(),
-            ..Default::default()
-        };
-
-        let result = spec.validate();
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("at least one container"));
-    }
-
-    /// Story: Invalid replica configuration fails validation
-    #[test]
-    fn story_invalid_replicas_fails() {
-        let mut spec = sample_service_spec();
-        spec.workload.replicas = ReplicaSpec {
-            min: 5,
-            max: Some(3),
-            autoscaling: vec![],
-        };
-
-        let result = spec.workload.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("min replicas"));
+        assert_eq!(status.phase, ServicePhase::Ready);
+        assert_eq!(status.message.as_deref(), Some("Service is operational"));
+        assert_eq!(status.conditions.len(), 1);
+        assert!(status.last_compiled_at.is_some());
     }
 
     // =========================================================================
     // YAML Serialization Stories
     // =========================================================================
 
-    /// Story: User defines simple nginx service
     #[test]
     fn story_yaml_simple_service() {
         let yaml = r#"
@@ -2070,7 +275,6 @@ workload:
         assert_eq!(ports.get("http"), Some(&80));
     }
 
-    /// Story: User defines service with dependencies and callers
     #[test]
     fn story_yaml_service_with_dependencies() {
         let yaml = r#"
@@ -2099,17 +303,14 @@ workload:
         let spec: LatticeServiceSpec = serde_json::from_value(value)
             .expect("service with dependencies YAML should parse successfully");
 
-        // Check dependencies
         let deps = spec.workload.dependencies("test");
         assert!(deps.iter().any(|r| r.name == "google"));
         assert!(deps.iter().any(|r| r.name == "cache"));
 
-        // Check allowed callers
         let callers = spec.workload.allowed_callers("test");
         assert!(callers.iter().any(|r| r.name == "curl-tester"));
         assert!(callers.iter().any(|r| r.name == "cache"));
 
-        // Check variables
         assert_eq!(
             spec.workload.containers["main"]
                 .variables
@@ -2119,7 +320,6 @@ workload:
         );
     }
 
-    /// Story: Service with canary deployment
     #[test]
     fn story_yaml_canary_deployment() {
         let yaml = r#"
@@ -2147,7 +347,6 @@ deploy:
         assert_eq!(canary.step_weight, Some(10));
     }
 
-    /// Story: Spec survives serialization roundtrip
     #[test]
     fn story_spec_survives_yaml_roundtrip() {
         let spec = sample_service_spec();
@@ -2160,252 +359,9 @@ deploy:
     }
 
     // =========================================================================
-    // Status Builder Stories
-    // =========================================================================
-
-    /// Story: Controller builds status fluently
-    #[test]
-    fn story_controller_builds_status_fluently() {
-        let condition = Condition::new(
-            "Ready",
-            ConditionStatus::True,
-            "ServiceReady",
-            "All replicas are healthy",
-        );
-
-        let status = LatticeServiceStatus::default()
-            .phase(ServicePhase::Ready)
-            .message("Service is operational")
-            .condition(condition)
-            .compiled_at(Utc::now());
-
-        assert_eq!(status.phase, ServicePhase::Ready);
-        assert_eq!(status.message.as_deref(), Some("Service is operational"));
-        assert_eq!(status.conditions.len(), 1);
-        assert!(status.last_compiled_at.is_some());
-    }
-
-    // =========================================================================
-    // Helper Method Tests
-    // =========================================================================
-
-    #[test]
-    fn test_primary_image() {
-        let spec = sample_service_spec();
-        assert_eq!(spec.workload.primary_image(), Some("nginx:latest"));
-    }
-
-    #[test]
-    fn test_primary_image_without_main() {
-        let mut containers = BTreeMap::new();
-        containers.insert("worker".to_string(), simple_container());
-
-        let spec = WorkloadSpec {
-            containers,
-            ..Default::default()
-        };
-
-        assert_eq!(spec.primary_image(), Some("nginx:latest"));
-    }
-
-    #[test]
-    fn test_service_phase_display() {
-        assert_eq!(ServicePhase::Pending.to_string(), "Pending");
-        assert_eq!(ServicePhase::Compiling.to_string(), "Compiling");
-        assert_eq!(ServicePhase::Ready.to_string(), "Ready");
-        assert_eq!(ServicePhase::Failed.to_string(), "Failed");
-    }
-
-    // =========================================================================
-    // Field Validation Tests
-    // =========================================================================
-
-    /// Story: Valid CPU quantities pass validation
-    #[test]
-    fn test_valid_cpu_quantities() {
-        assert!(validate_cpu_quantity("100m", "main", "requests").is_ok());
-        assert!(validate_cpu_quantity("1", "main", "limits").is_ok());
-        assert!(validate_cpu_quantity("0.5", "main", "requests").is_ok());
-        assert!(validate_cpu_quantity("2000m", "main", "limits").is_ok());
-    }
-
-    /// Story: Invalid CPU quantities fail validation
-    #[test]
-    fn test_invalid_cpu_quantities() {
-        assert!(validate_cpu_quantity("", "main", "requests").is_err());
-        assert!(validate_cpu_quantity("abc", "main", "limits").is_err());
-        assert!(validate_cpu_quantity("100x", "main", "requests").is_err());
-        assert!(validate_cpu_quantity("1.5m", "main", "limits").is_err()); // millicores must be int
-    }
-
-    /// Story: Valid memory quantities pass validation
-    #[test]
-    fn test_valid_memory_quantities() {
-        assert!(validate_memory_quantity("128Mi", "main", "requests").is_ok());
-        assert!(validate_memory_quantity("1Gi", "main", "limits").is_ok());
-        assert!(validate_memory_quantity("1000000", "main", "requests").is_ok()); // bytes
-        assert!(validate_memory_quantity("512Ki", "main", "limits").is_ok());
-        assert!(validate_memory_quantity("1M", "main", "requests").is_ok());
-    }
-
-    /// Story: Invalid memory quantities fail validation
-    #[test]
-    fn test_invalid_memory_quantities() {
-        assert!(validate_memory_quantity("", "main", "requests").is_err());
-        assert!(validate_memory_quantity("abc", "main", "limits").is_err());
-        assert!(validate_memory_quantity("128Xi", "main", "requests").is_err());
-        // invalid suffix
-    }
-
-    /// Story: Valid file modes pass validation
-    #[test]
-    fn test_valid_file_modes() {
-        assert!(validate_file_mode("0644", "main", "/etc/config").is_ok());
-        assert!(validate_file_mode("0755", "main", "/usr/bin/script").is_ok());
-        assert!(validate_file_mode("644", "main", "/etc/config").is_ok()); // without leading 0
-        assert!(validate_file_mode("0777", "main", "/tmp/file").is_ok());
-    }
-
-    /// Story: Invalid file modes fail validation
-    #[test]
-    fn test_invalid_file_modes() {
-        assert!(validate_file_mode("0999", "main", "/etc/config").is_err()); // 9 is not octal
-        assert!(validate_file_mode("abc", "main", "/etc/config").is_err());
-        assert!(validate_file_mode("12", "main", "/etc/config").is_err()); // too short
-        assert!(validate_file_mode("12345", "main", "/etc/config").is_err()); // too long
-    }
-
-    /// Story: Empty image fails validation
-    #[test]
-    fn test_empty_image_fails() {
-        assert!(validate_image("", "main").is_err());
-    }
-
-    /// Story: Image with whitespace fails validation
-    #[test]
-    fn test_image_with_whitespace_fails() {
-        assert!(validate_image("nginx latest", "main").is_err());
-        assert!(validate_image("nginx\tlatest", "main").is_err());
-    }
-
-    /// Story: Valid images pass validation
-    #[test]
-    fn test_valid_images() {
-        assert!(validate_image("nginx:latest", "main").is_ok());
-        assert!(validate_image("registry.example.com/app:v1.2.3", "main").is_ok());
-        assert!(validate_image("gcr.io/project/image@sha256:abc123", "main").is_ok());
-    }
-
-    /// Story: Score "." image placeholder is valid
-    #[test]
-    fn test_dot_image_placeholder_valid() {
-        assert!(validate_image(".", "main").is_ok());
-    }
-
-    /// Story: Container without resource limits fails validation
-    #[test]
-    fn test_container_without_resource_limits_fails() {
-        let container = ContainerSpec {
-            image: "nginx:latest".to_string(),
-            ..Default::default()
-        };
-        let result = container.validate("main");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("must have resource limits"));
-    }
-
-    /// Story: Container with limits but no memory still passes (limits exist)
-    #[test]
-    fn test_container_with_limits_passes() {
-        let container = ContainerSpec {
-            image: "nginx:latest".to_string(),
-            resources: Some(ResourceRequirements {
-                limits: Some(ResourceQuantity {
-                    cpu: Some("1".to_string()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(container.validate("main").is_ok());
-    }
-
-    /// Story: Duplicate service ports fail validation
-    #[test]
-    fn test_duplicate_service_ports_fail() {
-        let mut ports = BTreeMap::new();
-        ports.insert(
-            "http".to_string(),
-            PortSpec {
-                port: 80,
-                target_port: None,
-                protocol: None,
-            },
-        );
-        ports.insert(
-            "http2".to_string(),
-            PortSpec {
-                port: 80, // duplicate!
-                target_port: None,
-                protocol: None,
-            },
-        );
-
-        let svc = ServicePortsSpec { ports };
-        assert!(svc.validate().is_err());
-    }
-
-    /// Story: Port zero fails validation
-    #[test]
-    fn test_port_zero_fails() {
-        let mut ports = BTreeMap::new();
-        ports.insert(
-            "http".to_string(),
-            PortSpec {
-                port: 0,
-                target_port: None,
-                protocol: None,
-            },
-        );
-
-        let svc = ServicePortsSpec { ports };
-        assert!(svc.validate().is_err());
-    }
-
-    /// Story: File mount must have content source
-    #[test]
-    fn test_file_mount_requires_content() {
-        let file = FileMount {
-            content: None,
-            binary_content: None,
-            source: None,
-            mode: None,
-            no_expand: false,
-            reverse_expand: false,
-        };
-        assert!(file.validate("main", "/etc/config").is_err());
-
-        // With content, it passes
-        let file_with_content = FileMount {
-            content: Some(TemplateString::from("data")),
-            binary_content: None,
-            source: None,
-            mode: None,
-            no_expand: false,
-            reverse_expand: false,
-        };
-        assert!(file_with_content.validate("main", "/etc/config").is_ok());
-    }
-
-    // =========================================================================
     // Template String Tests
     // =========================================================================
 
-    /// Story: Environment variables support Score placeholders
     #[test]
     fn test_variables_support_templates() {
         let yaml = r#"
@@ -2428,7 +384,6 @@ workload:
         assert!(!vars["STATIC"].has_placeholders());
     }
 
-    /// Story: File content supports Score placeholders
     #[test]
     fn test_file_content_supports_templates() {
         let yaml = r#"
@@ -2455,7 +410,6 @@ workload:
             .has_placeholders());
     }
 
-    /// Story: Volume source supports Score placeholders
     #[test]
     fn test_volume_source_supports_templates() {
         let yaml = r#"
@@ -2526,13 +480,11 @@ workload:
     }
 
     // =========================================================================
-    // Probe Tests (Score/K8s compatible)
+    // Probe Tests
     // =========================================================================
 
-    /// Story: Full probe configuration with all timing parameters
     #[test]
     fn test_probe_with_timing_parameters() {
-        // Score-compliant probe: only httpGet, no timing fields
         let yaml = r#"
 workload:
   containers:
@@ -2559,7 +511,6 @@ workload:
         assert_eq!(http.port, 8080);
     }
 
-    /// Story: HTTP probe with all Score options (scheme, host, headers)
     #[test]
     fn test_http_probe_full() {
         let yaml = r#"
@@ -2596,7 +547,6 @@ workload:
         assert!(http.http_headers.is_some());
     }
 
-    /// Story: Exec probe with command (Score-compliant)
     #[test]
     fn test_exec_probe() {
         let yaml = r#"
@@ -2625,7 +575,6 @@ workload:
         assert_eq!(exec.command, vec!["cat", "/tmp/healthy"]);
     }
 
-    /// Story: Image "." placeholder parses correctly
     #[test]
     fn test_image_dot_placeholder_yaml() {
         let yaml = r#"
@@ -2645,67 +594,9 @@ workload:
     }
 
     // =========================================================================
-    // Volume Ownership Tests
-    // =========================================================================
-
-    fn workload_with_owned_volume(id: &str, size: &str) -> WorkloadSpec {
-        let mut spec = sample_service_spec().workload;
-        spec.resources.insert(
-            "data".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Volume,
-                direction: DependencyDirection::default(),
-                id: Some(id.to_string()),
-                class: None,
-                metadata: None,
-                params: Some(BTreeMap::from([(
-                    "size".to_string(),
-                    serde_json::json!(size),
-                )])),
-                namespace: None,
-            },
-        );
-        spec
-    }
-
-    fn workload_with_volume_reference(id: &str) -> WorkloadSpec {
-        let mut spec = sample_service_spec().workload;
-        spec.resources.insert(
-            "data".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Volume,
-                direction: DependencyDirection::default(),
-                id: Some(id.to_string()),
-                class: None,
-                metadata: None,
-                params: None, // No params = reference
-                namespace: None,
-            },
-        );
-        spec
-    }
-
-    #[test]
-    fn test_volume_owner_detection() {
-        let spec = workload_with_owned_volume("shared-data", "10Gi");
-        let owned = spec.owned_volume_ids();
-        assert_eq!(owned.len(), 1);
-        assert_eq!(owned[0], ("data", "shared-data"));
-    }
-
-    #[test]
-    fn test_volume_reference_detection() {
-        let spec = workload_with_volume_reference("shared-data");
-        let refs = spec.referenced_volume_ids();
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0], ("data", "shared-data"));
-    }
-
-    // =========================================================================
     // Score Compatibility Tests
     // =========================================================================
 
-    /// Story: Score-compatible params field parses for volumes
     #[test]
     fn test_score_compatible_volume_params() {
         let yaml = r#"
@@ -2731,7 +622,6 @@ workload:
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Score-compatible YAML should parse");
 
-        // Verify config volume
         let config = spec
             .workload
             .resources
@@ -2745,7 +635,6 @@ workload:
         assert_eq!(config_params.size, Some("10Gi".to_string()));
         assert_eq!(config_params.storage_class, Some("local-path".to_string()));
 
-        // Verify media volume with id
         let media = spec
             .workload
             .resources
@@ -2764,7 +653,6 @@ workload:
         );
     }
 
-    /// Story: Score-compatible volume reference (no params)
     #[test]
     fn test_score_compatible_volume_reference() {
         let yaml = r#"
@@ -2786,12 +674,11 @@ workload:
             .resources
             .get("media")
             .expect("media should exist");
-        assert!(!media.is_volume_owner()); // No params means not an owner
-        assert!(media.is_volume_reference()); // Has id but no size
+        assert!(!media.is_volume_owner());
+        assert!(media.is_volume_reference());
         assert_eq!(media.id, Some("media-library".to_string()));
     }
 
-    /// Story: Lattice bilateral agreement directions parse correctly
     #[test]
     fn test_lattice_bilateral_agreement_directions() {
         let yaml = r#"
@@ -2811,7 +698,6 @@ workload:
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Bilateral agreement YAML should parse");
 
-        // Verify inbound direction
         let sonarr = spec
             .workload
             .resources
@@ -2819,7 +705,6 @@ workload:
             .expect("sonarr should exist");
         assert_eq!(sonarr.direction, DependencyDirection::Inbound);
 
-        // Verify outbound direction
         let nzbget = spec
             .workload
             .resources
@@ -2828,7 +713,77 @@ workload:
         assert_eq!(nzbget.direction, DependencyDirection::Outbound);
     }
 
-    /// Story: Full media-server jellyfin-style spec parses correctly
+    #[test]
+    fn test_custom_type_in_yaml_spec() {
+        let yaml = r#"
+workload:
+  containers:
+    main:
+      image: myapp:latest
+  resources:
+    my-postgres:
+      type: postgres
+      params:
+        size: 10Gi
+        version: "15"
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let spec: LatticeServiceSpec =
+            serde_json::from_value(value).expect("Custom resource type in YAML should parse");
+
+        let resource = spec
+            .workload
+            .resources
+            .get("my-postgres")
+            .expect("my-postgres should exist");
+        assert!(matches!(resource.type_, ResourceType::Custom(ref s) if s == "postgres"));
+    }
+
+    // =========================================================================
+    // Model Resource Tests
+    // =========================================================================
+
+    #[test]
+    fn test_model_params_from_yaml() {
+        let yaml = r#"
+workload:
+  containers:
+    main:
+      image: vllm/vllm-openai:latest
+  resources:
+    llm:
+      type: model
+      params:
+        uri: "huggingface://meta-llama/Llama-3.3-70B-Instruct"
+        revision: main
+        size: "140Gi"
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let spec: LatticeServiceSpec =
+            serde_json::from_value(value).expect("model resource should parse");
+
+        let resource = spec
+            .workload
+            .resources
+            .get("llm")
+            .expect("llm should exist");
+        assert!(resource.type_.is_model());
+        assert!(resource.type_.is_volume_like());
+
+        let params = resource.model_params().expect("should parse model params");
+        let params = params.expect("should be Some for model resource");
+        assert_eq!(
+            params.uri,
+            "huggingface://meta-llama/Llama-3.3-70B-Instruct"
+        );
+        assert_eq!(params.revision.as_deref(), Some("main"));
+        assert_eq!(params.pvc_size(), "140Gi");
+    }
+
+    // =========================================================================
+    // Full Integration Tests
+    // =========================================================================
+
     #[test]
     fn test_media_server_style_spec() {
         let yaml = r#"
@@ -2890,7 +845,6 @@ ingress:
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Media server YAML should parse");
 
-        // Verify containers
         assert_eq!(spec.workload.containers.len(), 1);
         let main = spec
             .workload
@@ -2900,7 +854,6 @@ ingress:
         assert_eq!(main.image, "jellyfin/jellyfin:latest");
         assert!(!main.volumes.is_empty());
 
-        // Verify resources
         assert_eq!(spec.workload.resources.len(), 3);
         assert!(spec
             .workload
@@ -2915,7 +868,6 @@ ingress:
             .expect("media")
             .is_volume_owner());
 
-        // Verify service
         let service = spec
             .workload
             .service
@@ -2923,245 +875,16 @@ ingress:
             .expect("service should exist");
         assert!(service.ports.contains_key("http"));
 
-        // Verify ingress
         let ingress = spec.ingress.as_ref().expect("ingress should exist");
         assert_eq!(ingress.hosts, vec!["jellyfin.home.local"]);
 
-        // Validate the spec
         spec.workload.validate().expect("spec should be valid");
-    }
-
-    // =========================================================================
-    // ResourceType Custom Variant Tests
-    // =========================================================================
-
-    /// Story: Built-in types always win during deserialization
-    #[test]
-    fn test_builtin_type_not_custom() {
-        let t: ResourceType = serde_json::from_str("\"service\"").unwrap();
-        assert!(matches!(t, ResourceType::Service));
-        assert!(!t.is_custom());
-
-        let t: ResourceType = serde_json::from_str("\"external-service\"").unwrap();
-        assert!(matches!(t, ResourceType::ExternalService));
-        assert!(!t.is_custom());
-
-        let t: ResourceType = serde_json::from_str("\"volume\"").unwrap();
-        assert!(matches!(t, ResourceType::Volume));
-        assert!(!t.is_custom());
-
-        let t: ResourceType = serde_json::from_str("\"model\"").unwrap();
-        assert!(matches!(t, ResourceType::Model));
-        assert!(!t.is_custom());
-    }
-
-    /// Story: Valid custom types are accepted
-    #[test]
-    fn test_valid_custom_accepted() {
-        let t: ResourceType = serde_json::from_str("\"postgres\"").unwrap();
-        assert!(matches!(t, ResourceType::Custom(ref s) if s == "postgres"));
-        assert!(t.is_custom());
-
-        let t: ResourceType = serde_json::from_str("\"my-custom-db\"").unwrap();
-        assert!(matches!(t, ResourceType::Custom(ref s) if s == "my-custom-db"));
-
-        let t: ResourceType = serde_json::from_str("\"redis123\"").unwrap();
-        assert!(matches!(t, ResourceType::Custom(ref s) if s == "redis123"));
-    }
-
-    /// Story: Invalid custom types are rejected
-    #[test]
-    fn test_invalid_custom_rejected() {
-        // Uppercase - rejected
-        assert!(serde_json::from_str::<ResourceType>("\"Postgres\"").is_err());
-
-        // Special chars - rejected
-        assert!(serde_json::from_str::<ResourceType>("\"postgres!\"").is_err());
-
-        // Starts with number - rejected
-        assert!(serde_json::from_str::<ResourceType>("\"123db\"").is_err());
-
-        // Empty - rejected
-        assert!(serde_json::from_str::<ResourceType>("\"\"").is_err());
-
-        // Underscore - rejected (only hyphens allowed)
-        assert!(serde_json::from_str::<ResourceType>("\"my_db\"").is_err());
-    }
-
-    /// Story: ResourceType helper methods work correctly
-    #[test]
-    fn test_resource_type_helper_methods() {
-        // is_service_like
-        assert!(ResourceType::Service.is_service_like());
-        assert!(ResourceType::ExternalService.is_service_like());
-        assert!(!ResourceType::Volume.is_service_like());
-        assert!(!ResourceType::Custom("postgres".to_string()).is_service_like());
-
-        // is_volume
-        assert!(ResourceType::Volume.is_volume());
-        assert!(!ResourceType::Service.is_volume());
-        assert!(!ResourceType::Model.is_volume());
-        assert!(!ResourceType::Custom("postgres".to_string()).is_volume());
-
-        // is_model
-        assert!(ResourceType::Model.is_model());
-        assert!(!ResourceType::Service.is_model());
-        assert!(!ResourceType::Volume.is_model());
-
-        // is_volume_like
-        assert!(ResourceType::Volume.is_volume_like());
-        assert!(ResourceType::Model.is_volume_like());
-        assert!(!ResourceType::Service.is_volume_like());
-        assert!(!ResourceType::Custom("postgres".to_string()).is_volume_like());
-
-        // is_custom
-        assert!(!ResourceType::Service.is_custom());
-        assert!(!ResourceType::Volume.is_custom());
-        assert!(!ResourceType::Model.is_custom());
-        assert!(ResourceType::Custom("redis".to_string()).is_custom());
-    }
-
-    /// Story: ResourceType as_str returns correct values
-    #[test]
-    fn test_resource_type_as_str() {
-        assert_eq!(ResourceType::Service.as_str(), "service");
-        assert_eq!(ResourceType::ExternalService.as_str(), "external-service");
-        assert_eq!(ResourceType::Volume.as_str(), "volume");
-        assert_eq!(ResourceType::Model.as_str(), "model");
-        assert_eq!(
-            ResourceType::Custom("postgres".to_string()).as_str(),
-            "postgres"
-        );
-    }
-
-    /// Story: Custom types serialize correctly
-    #[test]
-    fn test_custom_type_serialization() {
-        let custom = ResourceType::Custom("postgres".to_string());
-        let serialized = serde_json::to_string(&custom).unwrap();
-        assert_eq!(serialized, "\"postgres\"");
-
-        // Round-trip
-        let deserialized: ResourceType = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized, custom);
-    }
-
-    /// Story: Custom type in YAML spec parses correctly
-    #[test]
-    fn test_custom_type_in_yaml_spec() {
-        let yaml = r#"
-workload:
-  containers:
-    main:
-      image: myapp:latest
-  resources:
-    my-postgres:
-      type: postgres
-      params:
-        size: 10Gi
-        version: "15"
-"#;
-        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let spec: LatticeServiceSpec =
-            serde_json::from_value(value).expect("Custom resource type in YAML should parse");
-
-        let resource = spec
-            .workload
-            .resources
-            .get("my-postgres")
-            .expect("my-postgres should exist");
-        assert!(matches!(resource.type_, ResourceType::Custom(ref s) if s == "postgres"));
-    }
-
-    // =========================================================================
-    // Model Resource Tests
-    // =========================================================================
-
-    /// Story: model_params() parses valid model resource from YAML
-    #[test]
-    fn test_model_params_from_yaml() {
-        let yaml = r#"
-workload:
-  containers:
-    main:
-      image: vllm/vllm-openai:latest
-  resources:
-    llm:
-      type: model
-      params:
-        uri: "huggingface://meta-llama/Llama-3.3-70B-Instruct"
-        revision: main
-        size: "140Gi"
-"#;
-        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
-        let spec: LatticeServiceSpec =
-            serde_json::from_value(value).expect("model resource should parse");
-
-        let resource = spec
-            .workload
-            .resources
-            .get("llm")
-            .expect("llm should exist");
-        assert!(resource.type_.is_model());
-        assert!(resource.type_.is_volume_like());
-
-        let params = resource.model_params().expect("should parse model params");
-        let params = params.expect("should be Some for model resource");
-        assert_eq!(
-            params.uri,
-            "huggingface://meta-llama/Llama-3.3-70B-Instruct"
-        );
-        assert_eq!(params.revision.as_deref(), Some("main"));
-        assert_eq!(params.pvc_size(), "140Gi");
-    }
-
-    /// Story: model_params() returns Ok(None) for non-model resources
-    #[test]
-    fn test_model_params_returns_none_for_non_model() {
-        let resource = ResourceSpec {
-            type_: ResourceType::Volume,
-            direction: DependencyDirection::default(),
-            id: None,
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-        };
-        assert!(resource.model_params().unwrap().is_none());
-    }
-
-    /// Story: model_params() errors when model resource has no params
-    #[test]
-    fn test_model_params_errors_without_params() {
-        let resource = ResourceSpec {
-            type_: ResourceType::Model,
-            direction: DependencyDirection::default(),
-            id: None,
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-        };
-        let err = resource.model_params().unwrap_err();
-        assert!(err.contains("requires params"));
-    }
-
-    /// Story: Model type round-trips through serialization
-    #[test]
-    fn test_model_type_serialization() {
-        let model = ResourceType::Model;
-        let serialized = serde_json::to_string(&model).unwrap();
-        assert_eq!(serialized, "\"model\"");
-
-        let deserialized: ResourceType = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized, model);
     }
 
     // =========================================================================
     // Security Context Tests
     // =========================================================================
 
-    /// Story: SecurityContext parses from YAML with all fields
     #[test]
     fn story_security_context_parses() {
         let yaml = r#"
@@ -3197,7 +920,6 @@ workload:
         assert_eq!(security.allow_privilege_escalation, Some(false));
     }
 
-    /// Story: SecurityContext with only capabilities
     #[test]
     fn story_security_context_minimal() {
         let yaml = r#"
@@ -3225,7 +947,6 @@ workload:
     // Sidecar Tests
     // =========================================================================
 
-    /// Story: Sidecars parse with init flag
     #[test]
     fn story_sidecars_parse_with_init_flag() {
         let yaml = r#"
@@ -3274,7 +995,6 @@ workload:
         );
     }
 
-    /// Story: Sidecar with all fields parses
     #[test]
     fn story_sidecar_full_spec() {
         let yaml = r#"
@@ -3319,7 +1039,6 @@ workload:
     // Pod-Level Settings Tests
     // =========================================================================
 
-    /// Story: Sysctls parse correctly
     #[test]
     fn story_pod_level_settings_parse() {
         let yaml = r#"
@@ -3352,7 +1071,6 @@ workload:
         assert_eq!(spec.workload.share_process_namespace, Some(true));
     }
 
-    /// Story: VPN killswitch example parses (full nzbget spec)
     #[test]
     fn story_vpn_killswitch_example() {
         let yaml = r#"
@@ -3378,16 +1096,12 @@ workload:
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("VPN killswitch example should parse");
 
-        // Verify main container
         assert!(spec.workload.containers.contains_key("main"));
-
-        // Verify sysctl
         assert!(spec
             .workload
             .sysctls
             .contains_key("net.ipv4.conf.all.src_valid_mark"));
 
-        // Verify VPN sidecar
         let vpn = spec
             .workload
             .sidecars
@@ -3402,7 +1116,6 @@ workload:
         assert!(caps.contains(&"SYS_MODULE".to_string()));
     }
 
-    /// Story: Empty sidecars and sysctls are allowed
     #[test]
     fn story_empty_sidecars_and_sysctls() {
         let yaml = r#"
@@ -3491,12 +1204,9 @@ workload:
         let backup = spec.workload.backup.expect("should have backup");
         let hooks = backup.hooks.expect("should have hooks");
 
-        // Default onError is Continue
         assert!(matches!(hooks.pre[0].on_error, HookErrorAction::Continue));
         assert!(hooks.pre[0].timeout.is_none());
         assert!(hooks.post.is_empty());
-
-        // Default volume policy is opt-out
         assert!(backup.volumes.is_none());
     }
 
@@ -3514,205 +1224,9 @@ workload:
         assert!(spec.workload.backup.is_none());
     }
 
-    #[test]
-    fn test_hook_error_action_serde() {
-        assert_eq!(
-            serde_json::to_string(&HookErrorAction::Continue).unwrap(),
-            r#""Continue""#
-        );
-        assert_eq!(
-            serde_json::to_string(&HookErrorAction::Fail).unwrap(),
-            r#""Fail""#
-        );
-    }
-
-    #[test]
-    fn test_volume_backup_default_serde() {
-        assert_eq!(
-            serde_json::to_string(&VolumeBackupDefault::OptOut).unwrap(),
-            r#""opt-out""#
-        );
-        assert_eq!(
-            serde_json::to_string(&VolumeBackupDefault::OptIn).unwrap(),
-            r#""opt-in""#
-        );
-    }
-
     // =========================================================================
-    // GPU Spec Tests
+    // GPU YAML Integration Tests
     // =========================================================================
-
-    #[test]
-    fn gpu_valid_full_gpu() {
-        let gpu = GPUSpec {
-            count: 1,
-            ..Default::default()
-        };
-        assert!(gpu.validate().is_ok());
-        assert!(gpu.is_full_gpu());
-        assert!(!gpu.needs_hami());
-    }
-
-    #[test]
-    fn gpu_valid_multi_gpu() {
-        let gpu = GPUSpec {
-            count: 4,
-            model: Some("H100".to_string()),
-            ..Default::default()
-        };
-        assert!(gpu.validate().is_ok());
-        assert!(gpu.is_full_gpu());
-    }
-
-    #[test]
-    fn gpu_valid_fractional() {
-        let gpu = GPUSpec {
-            count: 1,
-            memory: Some("20Gi".to_string()),
-            compute: Some(30),
-            ..Default::default()
-        };
-        assert!(gpu.validate().is_ok());
-        assert!(gpu.needs_hami());
-        assert!(!gpu.is_full_gpu());
-    }
-
-    #[test]
-    fn gpu_zero_count_fails() {
-        let gpu = GPUSpec {
-            count: 0,
-            ..Default::default()
-        };
-        let err = gpu.validate().unwrap_err();
-        assert!(err.contains("count must be greater than 0"));
-    }
-
-    #[test]
-    fn gpu_compute_out_of_range() {
-        let gpu = GPUSpec {
-            count: 1,
-            compute: Some(0),
-            ..Default::default()
-        };
-        assert!(gpu.validate().is_err());
-
-        let gpu = GPUSpec {
-            count: 1,
-            compute: Some(101),
-            ..Default::default()
-        };
-        assert!(gpu.validate().is_err());
-    }
-
-    #[test]
-    fn gpu_invalid_memory_format() {
-        let gpu = GPUSpec {
-            count: 1,
-            memory: Some("notanumber".to_string()),
-            ..Default::default()
-        };
-        assert!(gpu.validate().is_err());
-    }
-
-    #[test]
-    fn parse_gpu_memory_gi() {
-        assert_eq!(parse_gpu_memory_mib("20Gi").unwrap(), 20480);
-        assert_eq!(parse_gpu_memory_mib("1Gi").unwrap(), 1024);
-    }
-
-    #[test]
-    fn parse_gpu_memory_mi() {
-        assert_eq!(parse_gpu_memory_mib("512Mi").unwrap(), 512);
-        assert_eq!(parse_gpu_memory_mib("8192Mi").unwrap(), 8192);
-    }
-
-    #[test]
-    fn parse_gpu_memory_bare_number() {
-        assert_eq!(parse_gpu_memory_mib("1024").unwrap(), 1024);
-    }
-
-    #[test]
-    fn parse_gpu_memory_invalid() {
-        assert!(parse_gpu_memory_mib("abc").is_err());
-        assert!(parse_gpu_memory_mib("").is_err());
-        assert!(parse_gpu_memory_mib("10Xi").is_err());
-    }
-
-    #[test]
-    fn gpu_memory_mib_method() {
-        let gpu = GPUSpec {
-            count: 1,
-            memory: Some("8Gi".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(gpu.memory_mib().unwrap().unwrap(), 8192);
-
-        let gpu_none = GPUSpec {
-            count: 1,
-            ..Default::default()
-        };
-        assert!(gpu_none.memory_mib().is_none());
-    }
-
-    #[test]
-    fn gpu_product_label_known_models() {
-        let gpu = |model: &str| GPUSpec {
-            count: 1,
-            model: Some(model.to_string()),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            gpu("H100").product_label().unwrap(),
-            "NVIDIA-H100-80GB-HBM3"
-        );
-        assert_eq!(
-            gpu("A100").product_label().unwrap(),
-            "NVIDIA-A100-SXM4-80GB"
-        );
-        assert_eq!(gpu("L4").product_label().unwrap(), "NVIDIA-L4");
-        assert_eq!(gpu("T4").product_label().unwrap(), "NVIDIA-Tesla-T4");
-        assert_eq!(gpu("L40S").product_label().unwrap(), "NVIDIA-L40S");
-    }
-
-    #[test]
-    fn gpu_product_label_unknown_passthrough() {
-        let gpu = GPUSpec {
-            count: 1,
-            model: Some("custom-gpu-xyz".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(gpu.product_label().unwrap(), "custom-gpu-xyz");
-    }
-
-    #[test]
-    fn gpu_product_label_none_when_no_model() {
-        let gpu = GPUSpec {
-            count: 1,
-            ..Default::default()
-        };
-        assert!(gpu.product_label().is_none());
-    }
-
-    #[test]
-    fn gpu_node_selector_with_model() {
-        let gpu = GPUSpec {
-            count: 1,
-            model: Some("L4".to_string()),
-            ..Default::default()
-        };
-        let selector = gpu.node_selector().unwrap();
-        assert_eq!(selector.get("nvidia.com/gpu.product").unwrap(), "NVIDIA-L4");
-    }
-
-    #[test]
-    fn gpu_node_selector_none_without_model() {
-        let gpu = GPUSpec {
-            count: 1,
-            ..Default::default()
-        };
-        assert!(gpu.node_selector().is_none());
-    }
 
     #[test]
     fn gpu_yaml_roundtrip() {
@@ -3736,7 +1250,7 @@ workload:
         assert_eq!(gpu.memory, Some("8Gi".to_string()));
         assert_eq!(gpu.compute, Some(20));
         assert_eq!(gpu.model, Some("L4".to_string()));
-        assert!(gpu.tolerations); // default true
+        assert!(gpu.tolerations);
     }
 
     #[test]
@@ -3772,88 +1286,10 @@ workload:
         assert!(!gpu.tolerations);
     }
 
-    #[test]
-    fn gpu_validation_wired_into_spec() {
-        let mut spec = sample_service_spec();
-        spec.workload.gpu = Some(GPUSpec {
-            count: 0,
-            ..Default::default()
-        });
-        assert!(spec.workload.validate().is_err());
-    }
-
     // =========================================================================
-    // Autoscaling Validation Tests
+    // Secret Resource Tests
     // =========================================================================
 
-    #[test]
-    fn autoscaling_target_zero_fails() {
-        let mut spec = sample_service_spec();
-        spec.workload.replicas.max = Some(10);
-        spec.workload.replicas.autoscaling = vec![AutoscalingMetric {
-            metric: "cpu".to_string(),
-            target: 0,
-        }];
-        let result = spec.workload.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("greater than 0"));
-    }
-
-    #[test]
-    fn autoscaling_cpu_over_100_fails() {
-        let mut spec = sample_service_spec();
-        spec.workload.replicas.max = Some(10);
-        spec.workload.replicas.autoscaling = vec![AutoscalingMetric {
-            metric: "cpu".to_string(),
-            target: 120,
-        }];
-        let result = spec.workload.validate();
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot exceed 100%"));
-    }
-
-    #[test]
-    fn autoscaling_memory_over_100_fails() {
-        let mut spec = sample_service_spec();
-        spec.workload.replicas.max = Some(10);
-        spec.workload.replicas.autoscaling = vec![AutoscalingMetric {
-            metric: "memory".to_string(),
-            target: 150,
-        }];
-        assert!(spec.workload.validate().is_err());
-    }
-
-    #[test]
-    fn autoscaling_without_max_fails() {
-        let mut spec = sample_service_spec();
-        spec.workload.replicas.autoscaling = vec![AutoscalingMetric {
-            metric: "cpu".to_string(),
-            target: 80,
-        }];
-        let result = spec.workload.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("max replicas"));
-    }
-
-    #[test]
-    fn autoscaling_custom_metric_over_100_allowed() {
-        let mut spec = sample_service_spec();
-        spec.workload.replicas.max = Some(10);
-        spec.workload.replicas.autoscaling = vec![AutoscalingMetric {
-            metric: "vllm_num_requests_waiting".to_string(),
-            target: 200,
-        }];
-        assert!(spec.workload.validate().is_ok());
-    }
-
-    // =========================================================================
-    // Secret Resource Construction Tests
-    // =========================================================================
-
-    /// Build a secret resource with provider, optional keys, and refresh interval.
     fn secret_resource(remote_key: &str, provider: &str, keys: Option<&[&str]>) -> ResourceSpec {
         let mut params = BTreeMap::new();
         params.insert("provider".to_string(), serde_json::json!(provider));
@@ -3940,8 +1376,6 @@ workload:
 
     #[test]
     fn service_with_secret_env_vars_and_file_mount() {
-        use crate::template::TemplateString;
-
         let mut variables = BTreeMap::new();
         variables.insert(
             "DB_PASSWORD".to_string(),
