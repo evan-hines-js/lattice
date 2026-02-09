@@ -13,10 +13,12 @@ pub mod backup;
 pub mod env;
 pub mod error;
 pub mod files;
+pub mod pod_template;
 pub mod secrets;
 pub mod volume;
 
 pub use error::CompilationError;
+pub use pod_template::{CompiledPodTemplate, PodTemplateCompiler};
 pub use secrets::{GeneratedSecrets, SecretRef, SecretsCompiler};
 pub use volume::{
     Affinity, GeneratedVolumes, PersistentVolumeClaim, PodAffinity, PodVolume, PvcVolumeSource,
@@ -1026,6 +1028,7 @@ impl GeneratedWorkloads {
 
 use crate::crd::{
     AutoscalingMetric, DeployStrategy, GPUSpec, LatticeService, LatticeServiceSpec, ProviderType,
+    WorkloadSpec,
 };
 use lattice_common::mesh;
 use lattice_common::template::RenderedContainer;
@@ -1035,7 +1038,7 @@ use lattice_common::template::RenderedContainer;
 /// For full GPU mode (count only), adds `nvidia.com/gpu` to limits.
 /// For HAMi fractional mode (memory/compute set), also adds
 /// `nvidia.com/gpumem` and/or `nvidia.com/gpucores`.
-fn merge_gpu_resources(
+pub(crate) fn merge_gpu_resources(
     resources: Option<ResourceRequirements>,
     gpu: &Option<GPUSpec>,
 ) -> Option<ResourceRequirements> {
@@ -1061,7 +1064,7 @@ fn merge_gpu_resources(
 }
 
 /// Build GPU tolerations for a pod spec.
-fn gpu_tolerations(gpu: &Option<GPUSpec>) -> Vec<Toleration> {
+pub(crate) fn gpu_tolerations(gpu: &Option<GPUSpec>) -> Vec<Toleration> {
     match gpu {
         Some(g) if g.tolerations => vec![Toleration {
             key: Some("nvidia.com/gpu".to_string()),
@@ -1074,7 +1077,7 @@ fn gpu_tolerations(gpu: &Option<GPUSpec>) -> Vec<Toleration> {
 }
 
 /// Build GPU node selector for a pod spec.
-fn gpu_node_selector(gpu: &Option<GPUSpec>) -> Option<BTreeMap<String, String>> {
+pub(crate) fn gpu_node_selector(gpu: &Option<GPUSpec>) -> Option<BTreeMap<String, String>> {
     gpu.as_ref().and_then(|g| g.node_selector())
 }
 
@@ -1083,7 +1086,7 @@ fn gpu_node_selector(gpu: &Option<GPUSpec>) -> Option<BTreeMap<String, String>> 
 /// GPU workloads (NCCL, PyTorch DataLoader) require a large `/dev/shm` for
 /// shared-memory IPC. The default 64MB is insufficient. This adds an emptyDir
 /// volume with `medium: Memory` (tmpfs) mounted at `/dev/shm`.
-fn gpu_shm_volume(gpu: &Option<GPUSpec>) -> Option<(Volume, VolumeMount)> {
+pub(crate) fn gpu_shm_volume(gpu: &Option<GPUSpec>) -> Option<(Volume, VolumeMount)> {
     gpu.as_ref().map(|_| {
         (
             Volume {
@@ -1110,7 +1113,7 @@ fn gpu_shm_volume(gpu: &Option<GPUSpec>) -> Option<(Volume, VolumeMount)> {
 ///
 /// Returns `Always` when the tag is `:latest` or absent (bare image name),
 /// `IfNotPresent` for any other explicit tag or digest.
-fn image_pull_policy(image: &str) -> String {
+pub(crate) fn image_pull_policy(image: &str) -> String {
     if image.ends_with(":latest") || !image.contains(':') {
         "Always".to_string()
     } else {
@@ -1122,8 +1125,7 @@ fn image_pull_policy(image: &str) -> String {
 ///
 /// Groups the five per-container maps that flow from `SecretsCompiler`,
 /// `TemplateRenderer`, `env::compile`, and `files::compile` into a single
-/// parameter object. This avoids passing each map individually through
-/// `WorkloadCompiler::compile` → `compile_deployment` → `compile_containers`.
+/// parameter object.
 pub struct ContainerCompilationData<'a> {
     /// Secret references from ESO for `${secret.*}` resolution
     pub secret_refs: &'a BTreeMap<String, SecretRef>,
@@ -1137,34 +1139,14 @@ pub struct ContainerCompilationData<'a> {
     pub per_container_file_mounts: &'a BTreeMap<String, Vec<VolumeMount>>,
 }
 
-/// Compiler for generating Kubernetes workload resources from LatticeService
+/// Compiler for generating LatticeService-specific Kubernetes workload resources.
 ///
-/// This compiler generates:
-/// - ServiceAccount: For SPIFFE identity (always)
-/// - Deployment: Container orchestration (always)
-/// - Service: Network exposure (if ports defined)
-/// - ScaledObject: KEDA-based auto-scaling (if max replicas set)
-///
-/// For webhook-based injection, use [`compile_pod_spec`] to get just the
-/// container and volume specifications.
+/// Uses `PodTemplateCompiler` for the shared pod template, then wraps it in
+/// service-specific resources: Deployment, Service, ServiceAccount, PDB, ScaledObject.
 pub struct WorkloadCompiler;
 
 impl WorkloadCompiler {
-    /// Compile a LatticeService into workload resources
-    ///
-    /// # Arguments
-    /// * `name` - Service name
-    /// * `service` - The LatticeService to compile
-    /// * `namespace` - Target namespace (from CRD metadata)
-    /// * `volumes` - Pre-compiled volume resources (affinity, labels, etc.)
-    /// * `provider_type` - Infrastructure provider for topology-aware scheduling
-    /// * `monitoring_enabled` - Whether the cluster has monitoring (VictoriaMetrics) enabled
-    /// * `container_data` - Per-container compilation data (secrets, rendered containers, env, files)
-    ///
-    /// # Errors
-    ///
-    /// Returns `CompilationError::MonitoringRequired` if custom Prometheus metrics are
-    /// requested but monitoring is disabled on the cluster.
+    /// Compile a LatticeService into workload resources.
     pub fn compile(
         name: &str,
         service: &LatticeService,
@@ -1174,37 +1156,41 @@ impl WorkloadCompiler {
         monitoring_enabled: bool,
         container_data: &ContainerCompilationData<'_>,
     ) -> Result<GeneratedWorkloads, CompilationError> {
+        let spec = &service.spec;
+        let workload = &spec.workload;
         let mut output = GeneratedWorkloads::new();
 
         // Always generate ServiceAccount for SPIFFE identity
         output.service_account = Some(Self::compile_service_account(name, namespace));
 
-        // Always generate Deployment
-        output.deployment = Some(Self::compile_deployment(
+        // Compile shared pod template via PodTemplateCompiler
+        let pod_template = PodTemplateCompiler::compile(
             name,
-            namespace,
-            &service.spec,
+            workload,
             volumes,
             provider_type,
             container_data,
-        )?);
+        )?;
+
+        // Wrap pod template in a Deployment with service-specific fields
+        output.deployment = Some(Self::build_deployment(name, namespace, spec, pod_template));
 
         // Generate Service if ports are defined
-        if service.spec.workload.service.is_some() {
-            output.service = Some(Self::compile_service(name, namespace, &service.spec));
+        if workload.service.is_some() {
+            output.service = Some(Self::compile_service(name, namespace, workload));
         }
 
         // Generate PDB for HA services (min replicas >= 2)
-        if service.spec.workload.replicas.min >= 2 {
-            output.pdb = Some(Self::compile_pdb(name, namespace, &service.spec));
+        if workload.replicas.min >= 2 {
+            output.pdb = Some(Self::compile_pdb(name, namespace, workload));
         }
 
         // Generate KEDA ScaledObject if max replicas is set
-        if service.spec.workload.replicas.max.is_some() {
+        if workload.replicas.max.is_some() {
             output.scaled_object = Some(Self::compile_scaled_object(
                 name,
                 namespace,
-                &service.spec,
+                workload,
                 monitoring_enabled,
             )?);
         }
@@ -1212,246 +1198,66 @@ impl WorkloadCompiler {
         Ok(output)
     }
 
-    /// Compile containers from a LatticeServiceSpec using rendered container data
-    ///
-    /// Uses pre-rendered templates from TemplateRenderer. Secret variable references
-    /// (`${secret.RESOURCE.KEY}`) are compiled to K8s `secretKeyRef` env vars.
-    /// Non-secret env vars come via `envFrom` (ConfigMap/Secret from env::compile).
-    /// File volumes/mounts come from files::compile.
-    fn compile_containers(
+    fn compile_service_account(name: &str, namespace: &str) -> ServiceAccount {
+        ServiceAccount {
+            api_version: "v1".to_string(),
+            kind: "ServiceAccount".to_string(),
+            metadata: ObjectMeta::new(name, namespace),
+            automount_service_account_token: Some(false),
+        }
+    }
+
+    /// Build a Deployment from a compiled pod template and service-specific config.
+    fn build_deployment(
+        name: &str,
+        namespace: &str,
         spec: &LatticeServiceSpec,
-        volumes: &GeneratedVolumes,
-        container_data: &ContainerCompilationData<'_>,
-    ) -> Result<Vec<Container>, CompilationError> {
-        spec.workload
-            .containers
-            .iter()
-            .enumerate()
-            .map(|(idx, (container_name, container_spec))| {
-                let rendered = container_data.rendered_containers.get(container_name);
+        pod_template: CompiledPodTemplate,
+    ) -> Deployment {
+        let strategy = Self::compile_strategy(spec);
 
-                // Build secret env vars from rendered secret_variables
-                let env = if let Some(rc) = rendered {
-                    Self::compile_secret_env_vars(
-                        container_name,
-                        &rc.secret_variables,
-                        container_data.secret_refs,
-                        &spec.workload.resources,
-                    )?
-                } else {
-                    vec![]
-                };
-
-                // EnvFrom refs from env::compile (ConfigMap/Secret for non-secret vars)
-                let env_from = container_data
-                    .per_container_env_from
-                    .get(container_name)
-                    .cloned()
-                    .unwrap_or_default();
-
-                // Use rendered image if available, fall back to spec
-                let image = rendered
-                    .map(|rc| rc.image.clone())
-                    .unwrap_or_else(|| container_spec.image.clone());
-
-                // Use rendered command/args if available
-                let command = rendered
-                    .and_then(|rc| rc.command.clone())
-                    .or_else(|| container_spec.command.clone());
-                let args = rendered
-                    .and_then(|rc| rc.args.clone())
-                    .or_else(|| container_spec.args.clone());
-
-                // Get ports from service spec
-                let ports: Vec<ContainerPort> = spec
-                    .workload
-                    .service
-                    .as_ref()
-                    .map(|svc| {
-                        svc.ports
-                            .iter()
-                            .map(|(port_name, port_spec)| ContainerPort {
-                                name: Some(port_name.clone()),
-                                container_port: port_spec.target_port.unwrap_or(port_spec.port),
-                                protocol: port_spec.protocol.clone(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                // Convert resources
-                let resources = container_spec
-                    .resources
-                    .as_ref()
-                    .map(|r| ResourceRequirements {
-                        requests: r.requests.as_ref().map(|req| ResourceQuantity {
-                            cpu: req.cpu.clone(),
-                            memory: req.memory.clone(),
-                            ..Default::default()
-                        }),
-                        limits: r.limits.as_ref().map(|lim| ResourceQuantity {
-                            cpu: lim.cpu.clone(),
-                            memory: lim.memory.clone(),
-                            ..Default::default()
-                        }),
-                    });
-
-                // Merge GPU resources into limits (first container only)
-                let resources = if idx == 0 {
-                    merge_gpu_resources(resources, &spec.workload.gpu)
-                } else {
-                    resources
-                };
-
-                // Convert probes using helper
-                let liveness_probe = container_spec
-                    .liveness_probe
-                    .as_ref()
-                    .map(Self::compile_probe);
-                let readiness_probe = container_spec
-                    .readiness_probe
-                    .as_ref()
-                    .map(Self::compile_probe);
-                let startup_probe = container_spec
-                    .startup_probe
-                    .as_ref()
-                    .map(Self::compile_probe);
-
-                // Get volume mounts for this container (PVC volumes)
-                let mut volume_mounts = volumes
-                    .volume_mounts
-                    .get(container_name)
-                    .cloned()
-                    .unwrap_or_default();
-
-                // Add file volume mounts from files::compile
-                if let Some(file_mounts) =
-                    container_data.per_container_file_mounts.get(container_name)
-                {
-                    volume_mounts.extend(file_mounts.iter().cloned());
-                }
-
-                // Add SHM volume mount for GPU pods (first container only)
-                if idx == 0 {
-                    if let Some((_, shm_mount)) = gpu_shm_volume(&spec.workload.gpu) {
-                        volume_mounts.push(shm_mount);
-                    }
-                }
-
-                // Compile security context (always returns secure defaults)
-                let security_context =
-                    Self::compile_security_context(container_spec.security.as_ref());
-
-                Ok(Container {
-                    name: container_name.clone(),
-                    image_pull_policy: Some(image_pull_policy(&image)),
-                    image,
-                    command,
-                    args,
-                    env,
-                    env_from,
-                    ports,
-                    resources,
-                    liveness_probe,
-                    readiness_probe,
-                    startup_probe,
-                    volume_mounts,
-                    security_context: Some(security_context),
-                })
-            })
-            .collect()
-    }
-
-    /// Compile `${secret.RESOURCE.KEY}` references into K8s `secretKeyRef` env vars
-    ///
-    /// These are pure secret references that bypassed template rendering.
-    /// They compile to `EnvVar::from_secret` pointing at ESO-synced K8s Secrets.
-    fn compile_secret_env_vars(
-        container_name: &str,
-        secret_variables: &BTreeMap<String, lattice_common::template::SecretVariableRef>,
-        secret_refs: &BTreeMap<String, SecretRef>,
-        resources: &BTreeMap<String, crate::crd::ResourceSpec>,
-    ) -> Result<Vec<EnvVar>, CompilationError> {
-        let mut env = Vec::with_capacity(secret_variables.len());
-        for (var_name, secret_var) in secret_variables {
-            // Validate the resource exists and is type: secret
-            let resource = resources.get(&secret_var.resource_name).ok_or_else(|| {
-                CompilationError::container(
-                    container_name,
-                    format!(
-                        "variable '{}' references secret resource '{}' which does not exist",
-                        var_name, secret_var.resource_name
-                    ),
-                )
-            })?;
-
-            if !resource.is_secret() {
-                return Err(CompilationError::container(
-                    container_name,
-                    format!(
-                        "variable '{}' references resource '{}' via ${{secret.*}} but it is type '{}', not 'secret'",
-                        var_name, secret_var.resource_name, resource.type_
-                    ),
-                ));
-            }
-
-            let secret_ref = secret_refs.get(&secret_var.resource_name).ok_or_else(|| {
-                CompilationError::container(
-                    container_name,
-                    format!(
-                        "variable '{}' references secret resource '{}' but no SecretRef was compiled (missing vault path or params?)",
-                        var_name, secret_var.resource_name
-                    ),
-                )
-            })?;
-
-            // Validate key if keys are specified
-            if let Some(ref keys) = secret_ref.keys {
-                if !keys.contains(&secret_var.key) {
-                    return Err(CompilationError::container(
-                        container_name,
-                        format!(
-                            "variable '{}' references key '{}' in secret '{}' but available keys are: {:?}",
-                            var_name, secret_var.key, secret_var.resource_name, keys
-                        ),
-                    ));
-                }
-            }
-
-            env.push(EnvVar::from_secret(
-                var_name,
-                &secret_ref.secret_name,
-                &secret_var.key,
-            ));
-        }
-        Ok(env)
-    }
-
-    /// Compile a Score-compliant Probe to a K8s ProbeSpec
-    fn compile_probe(p: &crate::crd::Probe) -> ProbeSpec {
-        ProbeSpec {
-            http_get: p.http_get.as_ref().map(|h| HttpGetAction {
-                path: h.path.clone(),
-                port: h.port,
-                scheme: h.scheme.clone(),
-                host: h.host.clone(),
-                http_headers: h.http_headers.as_ref().map(|headers| {
-                    headers
-                        .iter()
-                        .map(|hdr| HttpHeader {
-                            name: hdr.name.clone(),
-                            value: hdr.value.clone(),
-                        })
-                        .collect()
-                }),
-            }),
-            exec: p.exec.as_ref().map(|e| ExecAction {
-                command: e.command.clone(),
-            }),
+        Deployment {
+            api_version: "apps/v1".to_string(),
+            kind: "Deployment".to_string(),
+            metadata: ObjectMeta::new(name, namespace),
+            spec: DeploymentSpec {
+                replicas: spec.workload.replicas.min,
+                selector: LabelSelector {
+                    match_labels: {
+                        let mut selector = BTreeMap::new();
+                        selector.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
+                        selector
+                    },
+                },
+                template: PodTemplateSpec {
+                    metadata: PodMeta {
+                        labels: pod_template.labels,
+                        annotations: BTreeMap::new(),
+                    },
+                    spec: PodSpec {
+                        service_account_name: pod_template.service_account_name,
+                        automount_service_account_token: Some(false),
+                        containers: pod_template.containers,
+                        init_containers: pod_template.init_containers,
+                        volumes: pod_template.volumes,
+                        affinity: pod_template.affinity,
+                        security_context: pod_template.security_context,
+                        host_network: pod_template.host_network,
+                        share_process_namespace: pod_template.share_process_namespace,
+                        topology_spread_constraints: pod_template.topology_spread_constraints,
+                        node_selector: pod_template.node_selector,
+                        tolerations: pod_template.tolerations,
+                        runtime_class_name: pod_template.runtime_class_name,
+                        scheduling_gates: pod_template.scheduling_gates,
+                        image_pull_secrets: pod_template.image_pull_secrets,
+                    },
+                },
+                strategy,
+            },
         }
     }
 
-    /// Compile deployment strategy
+    /// Compile deployment strategy from deploy config.
     fn compile_strategy(spec: &LatticeServiceSpec) -> Option<DeploymentStrategy> {
         match spec.deploy.strategy {
             DeployStrategy::Rolling => Some(DeploymentStrategy {
@@ -1471,427 +1277,14 @@ impl WorkloadCompiler {
         }
     }
 
-    /// Compile a CRD SecurityContext to a K8s SecurityContext with PSS restricted defaults.
-    ///
-    /// Always returns a security context. When `security` is None (user omitted the field),
-    /// all defaults apply. User-specified values override defaults.
-    ///
-    /// Defaults (Pod Security Standards "restricted" profile):
-    /// - capabilities.drop: [ALL]
-    /// - allowPrivilegeEscalation: false
-    /// - runAsNonRoot: true (auto-disabled when runAsUser: 0)
-    /// - readOnlyRootFilesystem: true
-    /// - seccompProfile: RuntimeDefault
-    /// - appArmorProfile: RuntimeDefault
-    ///
-    /// Special cases:
-    /// - `privileged: true` skips drop-ALL and allowPrivilegeEscalation restriction
-    /// - `runAsUser: 0` auto-sets runAsNonRoot: false
-    fn compile_security_context(
-        security: Option<&crate::crd::SecurityContext>,
-    ) -> K8sSecurityContext {
-        let default = crate::crd::SecurityContext::default();
-        let s = security.unwrap_or(&default);
-
-        let is_privileged = s.privileged == Some(true);
-
-        // Capabilities: always drop ALL unless privileged, add user-requested caps
-        let capabilities = if is_privileged && s.capabilities.is_empty() {
-            None
-        } else {
-            Some(Capabilities {
-                add: if s.capabilities.is_empty() {
-                    None
-                } else {
-                    Some(s.capabilities.clone())
-                },
-                drop: if is_privileged {
-                    None
-                } else {
-                    Some(
-                        s.drop_capabilities
-                            .clone()
-                            .unwrap_or_else(|| vec!["ALL".to_string()]),
-                    )
-                },
-            })
-        };
-
-        // runAsNonRoot: default true, auto-false when runAsUser: 0
-        let run_as_non_root = if s.run_as_user == Some(0) {
-            Some(s.run_as_non_root.unwrap_or(false))
-        } else {
-            Some(s.run_as_non_root.unwrap_or(true))
-        };
-
-        // allowPrivilegeEscalation: default false, skip for privileged
-        let allow_privilege_escalation = if is_privileged {
-            s.allow_privilege_escalation
-        } else {
-            Some(s.allow_privilege_escalation.unwrap_or(false))
-        };
-
-        // Seccomp profile: default RuntimeDefault
-        let seccomp_profile = Some(SeccompProfile {
-            type_: s
-                .seccomp_profile
-                .clone()
-                .unwrap_or_else(|| "RuntimeDefault".to_string()),
-            localhost_profile: s.seccomp_localhost_profile.clone(),
-        });
-
-        // AppArmor profile: default RuntimeDefault
-        let app_armor_profile = Some(AppArmorProfile {
-            type_: s
-                .apparmor_profile
-                .clone()
-                .unwrap_or_else(|| "RuntimeDefault".to_string()),
-            localhost_profile: s.apparmor_localhost_profile.clone(),
-        });
-
-        K8sSecurityContext {
-            capabilities,
-            privileged: s.privileged,
-            read_only_root_filesystem: Some(s.read_only_root_filesystem.unwrap_or(true)),
-            run_as_non_root,
-            run_as_user: s.run_as_user,
-            run_as_group: s.run_as_group,
-            allow_privilege_escalation,
-            seccomp_profile,
-            app_armor_profile,
-        }
-    }
-
-    /// Compile pod-level security context with secure defaults.
-    ///
-    /// Always returns a PodSecurityContext with:
-    /// - runAsNonRoot: true
-    /// - seccompProfile: RuntimeDefault
-    /// - Any user-specified sysctls
-    fn compile_pod_security_context(spec: &LatticeServiceSpec) -> PodSecurityContext {
-        let sysctls = if spec.workload.sysctls.is_empty() {
-            None
-        } else {
-            Some(
-                spec.workload
-                    .sysctls
-                    .iter()
-                    .map(|(name, value)| Sysctl {
-                        name: name.clone(),
-                        value: value.clone(),
-                    })
-                    .collect(),
-            )
-        };
-
-        PodSecurityContext {
-            run_as_non_root: Some(true),
-            fs_group: Some(65534),
-            fs_group_change_policy: Some("OnRootMismatch".to_string()),
-            seccomp_profile: Some(SeccompProfile {
-                type_: "RuntimeDefault".to_string(),
-                localhost_profile: None,
-            }),
-            sysctls,
-        }
-    }
-
-    /// Compile sidecars into init containers and regular sidecar containers
-    ///
-    /// Returns (init_containers, sidecar_containers)
-    fn compile_sidecars(
-        spec: &LatticeServiceSpec,
-        volumes: &GeneratedVolumes,
-    ) -> (Vec<Container>, Vec<Container>) {
-        let mut init_containers = Vec::new();
-        let mut sidecar_containers = Vec::new();
-
-        for (sidecar_name, sidecar_spec) in &spec.workload.sidecars {
-            // Build env vars
-            let env: Vec<EnvVar> = sidecar_spec
-                .variables
-                .iter()
-                .map(|(k, v)| EnvVar::literal(k, v.to_string()))
-                .collect();
-
-            // Convert resources
-            let resources = sidecar_spec
-                .resources
-                .as_ref()
-                .map(|r| ResourceRequirements {
-                    requests: r.requests.as_ref().map(|req| ResourceQuantity {
-                        cpu: req.cpu.clone(),
-                        memory: req.memory.clone(),
-                        ..Default::default()
-                    }),
-                    limits: r.limits.as_ref().map(|lim| ResourceQuantity {
-                        cpu: lim.cpu.clone(),
-                        memory: lim.memory.clone(),
-                        ..Default::default()
-                    }),
-                });
-
-            // Convert probes (only for non-init containers)
-            let is_init = sidecar_spec.init.unwrap_or(false);
-            let (liveness_probe, readiness_probe, startup_probe) = if is_init {
-                (None, None, None)
-            } else {
-                (
-                    sidecar_spec
-                        .liveness_probe
-                        .as_ref()
-                        .map(Self::compile_probe),
-                    sidecar_spec
-                        .readiness_probe
-                        .as_ref()
-                        .map(Self::compile_probe),
-                    sidecar_spec.startup_probe.as_ref().map(Self::compile_probe),
-                )
-            };
-
-            // Get volume mounts for this sidecar
-            let volume_mounts = volumes
-                .volume_mounts
-                .get(sidecar_name)
-                .cloned()
-                .unwrap_or_default();
-
-            // Compile security context (always returns secure defaults)
-            let security_context = Self::compile_security_context(sidecar_spec.security.as_ref());
-
-            let container = Container {
-                name: sidecar_name.clone(),
-                image_pull_policy: Some(image_pull_policy(&sidecar_spec.image)),
-                image: sidecar_spec.image.clone(),
-                command: sidecar_spec.command.clone(),
-                args: sidecar_spec.args.clone(),
-                env,
-                env_from: vec![],
-                ports: vec![], // Sidecars typically don't expose ports
-                resources,
-                liveness_probe,
-                readiness_probe,
-                startup_probe,
-                volume_mounts,
-                security_context: Some(security_context),
-            };
-
-            if is_init {
-                init_containers.push(container);
-            } else {
-                sidecar_containers.push(container);
-            }
-        }
-
-        (init_containers, sidecar_containers)
-    }
-
-    fn compile_service_account(name: &str, namespace: &str) -> ServiceAccount {
-        ServiceAccount {
-            api_version: "v1".to_string(),
-            kind: "ServiceAccount".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
-            automount_service_account_token: Some(false),
-        }
-    }
-
-    /// Compile a complete Deployment from the LatticeService spec.
-    ///
-    /// Generates a fully-specified Deployment with:
-    /// - Containers with rendered image, env vars via envFrom, ports, probes, volume mounts
-    /// - Init containers and sidecars
-    /// - Volumes for PVCs and file mounts
-    /// - Pod affinity for RWO volume co-location
-    /// - Volume ownership labels
-    /// - Pod-level security context (sysctls)
-    /// - Topology spread constraints for HA distribution
-    /// - imagePullSecrets resolved from secret resources
-    fn compile_deployment(
-        name: &str,
-        namespace: &str,
-        spec: &LatticeServiceSpec,
-        volumes: &GeneratedVolumes,
-        provider_type: ProviderType,
-        container_data: &ContainerCompilationData<'_>,
-    ) -> Result<Deployment, CompilationError> {
-        // Compile main containers with volume mounts
-        let mut containers = Self::compile_containers(spec, volumes, container_data)?;
-
-        // Compile sidecars (init + regular)
-        let (init_containers, sidecar_containers) = Self::compile_sidecars(spec, volumes);
-
-        // Merge sidecar containers with main containers
-        containers.extend(sidecar_containers);
-
-        // Build pod labels
-        let mut labels = BTreeMap::new();
-        labels.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
-        labels.insert(
-            lattice_common::LABEL_MANAGED_BY.to_string(),
-            lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
-        );
-
-        // Add volume ownership labels (for RWO affinity)
-        for (k, v) in &volumes.pod_labels {
-            labels.insert(k.clone(), v.clone());
-        }
-
-        // Build pod volumes from PVCs and emptyDir
-        let mut pod_volumes: Vec<Volume> = volumes
-            .volumes
-            .iter()
-            .map(|pv| Volume {
-                name: pv.name.clone(),
-                config_map: None,
-                secret: None,
-                empty_dir: pv.empty_dir.clone(),
-                persistent_volume_claim: pv.persistent_volume_claim.clone(),
-            })
-            .collect();
-
-        // Add SHM volume for GPU pods
-        if let Some((shm_vol, _)) = gpu_shm_volume(&spec.workload.gpu) {
-            pod_volumes.push(shm_vol);
-        }
-
-        // Add file volumes from files::compile (deduplicate by name)
-        let existing_vol_names: std::collections::HashSet<_> =
-            pod_volumes.iter().map(|v| v.name.clone()).collect();
-        for file_vols in container_data.per_container_file_volumes.values() {
-            for vol in file_vols {
-                if !existing_vol_names.contains(&vol.name) {
-                    pod_volumes.push(vol.clone());
-                }
-            }
-        }
-
-        let strategy = Self::compile_strategy(spec);
-
-        // Compile pod-level security context (always returns secure defaults)
-        let security_context = Some(Self::compile_pod_security_context(spec));
-
-        // Resolve imagePullSecrets from spec resource names to K8s Secret names
-        let image_pull_secrets =
-            Self::compile_image_pull_secrets(spec, container_data.secret_refs)?;
-
-        Ok(Deployment {
-            api_version: "apps/v1".to_string(),
-            kind: "Deployment".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
-            spec: DeploymentSpec {
-                replicas: spec.workload.replicas.min,
-                selector: LabelSelector {
-                    match_labels: {
-                        let mut selector = BTreeMap::new();
-                        selector.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
-                        selector
-                    },
-                },
-                template: PodTemplateSpec {
-                    metadata: PodMeta {
-                        labels,
-                        annotations: BTreeMap::new(),
-                    },
-                    spec: PodSpec {
-                        service_account_name: name.to_string(),
-                        automount_service_account_token: Some(false),
-                        containers,
-                        init_containers,
-                        volumes: pod_volumes,
-                        affinity: volumes.affinity.clone(),
-                        security_context,
-                        host_network: spec.workload.host_network,
-                        share_process_namespace: spec.workload.share_process_namespace,
-                        topology_spread_constraints: vec![TopologySpreadConstraint {
-                            max_skew: 1,
-                            topology_key: provider_type.topology_spread_key().to_string(),
-                            when_unsatisfiable: "ScheduleAnyway".to_string(),
-                            label_selector: LabelSelector {
-                                match_labels: {
-                                    let mut labels = BTreeMap::new();
-                                    labels.insert(
-                                        lattice_common::LABEL_NAME.to_string(),
-                                        name.to_string(),
-                                    );
-                                    labels
-                                },
-                            },
-                        }],
-                        node_selector: gpu_node_selector(&spec.workload.gpu),
-                        tolerations: gpu_tolerations(&spec.workload.gpu),
-                        runtime_class_name: spec
-                            .workload
-                            .gpu
-                            .as_ref()
-                            .map(|_| "nvidia".to_string()),
-                        scheduling_gates: volumes.scheduling_gates.clone(),
-                        image_pull_secrets,
-                    },
-                },
-                strategy,
-            },
-        })
-    }
-
-    /// Resolve `imagePullSecrets` resource names to K8s Secret names
-    fn compile_image_pull_secrets(
-        spec: &LatticeServiceSpec,
-        secret_refs: &BTreeMap<String, SecretRef>,
-    ) -> Result<Vec<LocalObjectReference>, CompilationError> {
-        spec.workload.image_pull_secrets
-            .iter()
-            .map(|resource_name| {
-                // Validate resource exists
-                let resource = spec.workload.resources.get(resource_name).ok_or_else(|| {
-                    CompilationError::resource(
-                        resource_name,
-                        format!(
-                            "imagePullSecrets references resource '{}' which does not exist",
-                            resource_name
-                        ),
-                    )
-                })?;
-
-                // Validate resource is type: secret
-                if !resource.is_secret() {
-                    return Err(CompilationError::resource(
-                        resource_name,
-                        format!(
-                            "imagePullSecrets references resource '{}' but it is type '{}', not 'secret'",
-                            resource_name, resource.type_
-                        ),
-                    ));
-                }
-
-                // Look up K8s secret name
-                let secret_ref = secret_refs.get(resource_name).ok_or_else(|| {
-                    CompilationError::resource(
-                        resource_name,
-                        format!(
-                            "imagePullSecrets references resource '{}' but no SecretRef was compiled",
-                            resource_name
-                        ),
-                    )
-                })?;
-
-                Ok(LocalObjectReference {
-                    name: secret_ref.secret_name.clone(),
-                })
-            })
-            .collect()
-    }
-
     /// Compile a PodDisruptionBudget for HA services.
-    ///
-    /// Only generated when `replicas.min >= 2`. Sets `minAvailable` to
-    /// `replicas.min - 1`, allowing exactly one pod to be disrupted at a time.
-    fn compile_pdb(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> PodDisruptionBudget {
+    fn compile_pdb(name: &str, namespace: &str, workload: &WorkloadSpec) -> PodDisruptionBudget {
         PodDisruptionBudget {
             api_version: "policy/v1".to_string(),
             kind: "PodDisruptionBudget".to_string(),
             metadata: ObjectMeta::new(name, namespace),
             spec: PdbSpec {
-                min_available: Some(spec.workload.replicas.min.saturating_sub(1).max(1)),
+                min_available: Some(workload.replicas.min.saturating_sub(1).max(1)),
                 selector: LabelSelector {
                     match_labels: {
                         let mut labels = BTreeMap::new();
@@ -1903,12 +1296,11 @@ impl WorkloadCompiler {
         }
     }
 
-    fn compile_service(name: &str, namespace: &str, spec: &LatticeServiceSpec) -> Service {
+    fn compile_service(name: &str, namespace: &str, workload: &WorkloadSpec) -> Service {
         let mut selector = BTreeMap::new();
         selector.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
 
-        let ports: Vec<ServicePort> = spec
-            .workload
+        let ports: Vec<ServicePort> = workload
             .service
             .as_ref()
             .map(|svc| {
@@ -1941,28 +1333,23 @@ impl WorkloadCompiler {
     }
 
     /// Compile a KEDA ScaledObject from the service's autoscaling config.
-    ///
-    /// cpu/memory → KEDA resource triggers (no monitoring required).
-    /// Anything else → KEDA prometheus trigger querying VictoriaMetrics (requires monitoring).
     fn compile_scaled_object(
         name: &str,
         namespace: &str,
-        spec: &LatticeServiceSpec,
+        workload: &WorkloadSpec,
         monitoring_enabled: bool,
     ) -> Result<ScaledObject, CompilationError> {
         use lattice_infra::bootstrap::prometheus::{vmselect_url, VMSELECT_PATH, VMSELECT_PORT};
 
-        // Default to cpu at 80% if no autoscaling metrics specified
-        let autoscaling = if spec.workload.replicas.autoscaling.is_empty() {
+        let autoscaling = if workload.replicas.autoscaling.is_empty() {
             vec![AutoscalingMetric {
                 metric: "cpu".to_string(),
                 target: 80,
             }]
         } else {
-            spec.workload.replicas.autoscaling.clone()
+            workload.replicas.autoscaling.clone()
         };
 
-        // Reject custom Prometheus metrics when monitoring is disabled
         let custom_metrics: Vec<String> = autoscaling
             .iter()
             .filter(|m| !matches!(m.metric.as_str(), "cpu" | "memory"))
@@ -2016,12 +1403,8 @@ impl WorkloadCompiler {
                     kind: "Deployment".to_string(),
                     name: name.to_string(),
                 },
-                min_replica_count: spec.workload.replicas.min,
-                max_replica_count: spec
-                    .workload
-                    .replicas
-                    .max
-                    .unwrap_or(spec.workload.replicas.min),
+                min_replica_count: workload.replicas.min,
+                max_replica_count: workload.replicas.max.unwrap_or(workload.replicas.min),
                 triggers,
             },
         })
@@ -2108,7 +1491,7 @@ mod tests {
             .namespace
             .as_deref()
             .expect("test service must have a namespace");
-        let volumes = VolumeCompiler::compile(name, namespace, &service.spec)
+        let volumes = VolumeCompiler::compile(name, namespace, &service.spec.workload)
             .expect("test volume compilation should succeed");
 
         let rendered_containers = build_test_rendered_containers(service);
@@ -2807,7 +2190,7 @@ mod tests {
     #[test]
     fn story_default_security_context_applied() {
         // No security context specified → full restricted defaults
-        let k8s_ctx = WorkloadCompiler::compile_security_context(None);
+        let k8s_ctx = PodTemplateCompiler::compile_security_context(None);
 
         let caps = k8s_ctx.capabilities.expect("should have capabilities");
         assert_eq!(caps.add, None);
@@ -2878,7 +2261,7 @@ mod tests {
             ..Default::default()
         };
 
-        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
 
         let caps = k8s_ctx.capabilities.expect("should have capabilities");
         assert_eq!(
@@ -2903,7 +2286,7 @@ mod tests {
             ..Default::default()
         };
 
-        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
 
         assert_eq!(k8s_ctx.privileged, Some(true));
         // Privileged: no drop ALL, no allowPrivilegeEscalation restriction
@@ -2924,7 +2307,7 @@ mod tests {
             ..Default::default()
         };
 
-        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
 
         let caps = k8s_ctx
             .capabilities
@@ -2942,7 +2325,7 @@ mod tests {
             ..Default::default()
         };
 
-        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
 
         assert_eq!(k8s_ctx.run_as_user, Some(0));
         assert_eq!(k8s_ctx.run_as_non_root, Some(false));
@@ -2957,13 +2340,13 @@ mod tests {
             ..Default::default()
         };
 
-        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
         assert_eq!(k8s_ctx.read_only_root_filesystem, Some(false));
     }
 
     #[test]
     fn story_seccomp_profile_defaults() {
-        let k8s_ctx = WorkloadCompiler::compile_security_context(None);
+        let k8s_ctx = PodTemplateCompiler::compile_security_context(None);
         let seccomp = k8s_ctx
             .seccomp_profile
             .expect("should have seccomp profile");
@@ -2980,7 +2363,7 @@ mod tests {
             ..Default::default()
         };
 
-        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
         let seccomp = k8s_ctx
             .seccomp_profile
             .expect("should have seccomp profile");
@@ -2989,7 +2372,7 @@ mod tests {
 
     #[test]
     fn story_apparmor_profile_defaults() {
-        let k8s_ctx = WorkloadCompiler::compile_security_context(None);
+        let k8s_ctx = PodTemplateCompiler::compile_security_context(None);
         let apparmor = k8s_ctx
             .app_armor_profile
             .expect("should have apparmor profile");
@@ -3007,7 +2390,7 @@ mod tests {
             ..Default::default()
         };
 
-        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
         let apparmor = k8s_ctx
             .app_armor_profile
             .expect("should have apparmor profile");

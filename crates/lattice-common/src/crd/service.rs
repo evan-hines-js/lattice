@@ -166,13 +166,10 @@ mod tests {
     use crate::crd::workload::backup::{HookErrorAction, VolumeBackupDefault};
     use crate::crd::workload::container::{ContainerSpec, FileMount};
     use crate::crd::workload::deploy::DeployStrategy;
-    use crate::crd::workload::gpu::GPUSpec;
-    use crate::crd::workload::ports::{PortSpec, ServicePortsSpec};
     use crate::crd::workload::resources::{
         DependencyDirection, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
         VolumeAccessMode,
     };
-    use crate::crd::workload::scaling::{AutoscalingMetric, ReplicaSpec};
     use crate::template::TemplateString;
 
     // =========================================================================

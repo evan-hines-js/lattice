@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::crd::{ContainerSpec, FileMount, LatticeService, VolumeMount, WorkloadSpec};
+use crate::crd::{ContainerSpec, FileMount, VolumeMount, WorkloadSpec};
 use crate::graph::ServiceGraph;
 
 use super::context::TemplateContext;
@@ -325,19 +325,14 @@ impl TemplateRenderer {
     /// Build template context for a service
     pub fn build_context(
         &self,
-        service: &LatticeService,
+        name: &str,
+        annotations: &BTreeMap<String, String>,
+        workload: &WorkloadSpec,
         config: &RenderConfig<'_>,
     ) -> Result<TemplateContext, TemplateError> {
-        let name = service.metadata.name.as_deref().unwrap_or("unknown");
-
         // Build metadata context (convert BTreeMap to HashMap)
-        let annotations: HashMap<String, String> = service
-            .metadata
-            .annotations
-            .clone()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        let annotations: HashMap<String, String> =
+            annotations.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         // Resolve resource outputs via provisioners
         let prov_ctx = ProvisionerContext::new(
@@ -346,9 +341,7 @@ impl TemplateRenderer {
             config.namespace,
             config.cluster_domain,
         );
-        let resources = self
-            .registry
-            .resolve_all(&service.spec.workload, &prov_ctx)?;
+        let resources = self.registry.resolve_all(workload, &prov_ctx)?;
 
         // Build the full context
         let mut builder = TemplateContext::builder().metadata(name, annotations);
@@ -649,8 +642,8 @@ impl TemplateRenderer {
 mod tests {
     use super::*;
     use crate::crd::{
-        ContainerSpec, DependencyDirection, LatticeServiceSpec, PortSpec, ResourceSpec,
-        ResourceType, ServicePortsSpec, WorkloadSpec,
+        ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec,
+        ResourceSpec, ResourceType, ServicePortsSpec, WorkloadSpec,
     };
     use crate::template::TemplateString;
     use kube::api::ObjectMeta;
@@ -779,7 +772,12 @@ mod tests {
         let config = RenderConfig::new(&graph, "prod", "prod-ns").with_config("log_level", "debug");
 
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
         let rendered = renderer
             .render_container("main", &service.spec.workload.containers["main"], &ctx)
@@ -823,7 +821,12 @@ mod tests {
         let config = RenderConfig::new(&graph, "prod", "prod-ns").with_config("log_level", "info"); // Required by the test fixture
 
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
         let rendered = renderer
             .render_container("main", &service.spec.workload.containers["main"], &ctx)
@@ -885,7 +888,12 @@ mod tests {
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "test", "test-ns");
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
 
         let rendered = renderer
@@ -963,7 +971,12 @@ mod tests {
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "prod", "prod-ns");
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
 
         let rendered = renderer
@@ -998,7 +1011,12 @@ mod tests {
         let config = RenderConfig::new(&graph, "prod", "prod-ns").with_config("log_level", "info");
 
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
         let rendered = renderer
             .render_all_containers(&service.spec.workload, &ctx)
@@ -1053,7 +1071,12 @@ mod tests {
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "test", "test-ns");
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
 
         let rendered = renderer
@@ -1109,7 +1132,12 @@ mod tests {
             .with_env("version", "1.2.3");
 
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
         let rendered = renderer
             .render_container("main", &service.spec.workload.containers["main"], &ctx)
@@ -1245,7 +1273,12 @@ mod tests {
             .with_config("image", "gcr.io/myproject/my-app:v1.2.3");
 
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
         let rendered = renderer
             .render_container("main", &service.spec.workload.containers["main"], &ctx)
@@ -1296,7 +1329,12 @@ mod tests {
             .with_config("image.sidecar", "gcr.io/myproject/sidecar:v2");
 
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
 
         let main_rendered = renderer
@@ -1347,7 +1385,12 @@ mod tests {
         let config = RenderConfig::new(&graph, "prod", "prod-ns"); // No image config!
 
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
         let result =
             renderer.render_container("main", &service.spec.workload.containers["main"], &ctx);
@@ -1391,7 +1434,12 @@ mod tests {
         let config = RenderConfig::new(&graph, "prod", "prod-ns");
 
         let ctx = renderer
-            .build_context(&service, &config)
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
             .expect("template context should build successfully");
         let rendered = renderer
             .render_container("main", &service.spec.workload.containers["main"], &ctx)
@@ -2022,7 +2070,14 @@ mod tests {
 
         let renderer = TemplateRenderer::new();
         let config = RenderConfig::new(&graph, "prod", "prod-ns");
-        let ctx = renderer.build_context(&service, &config).unwrap();
+        let ctx = renderer
+            .build_context(
+                service.metadata.name.as_deref().unwrap_or("unknown"),
+                &service.metadata.annotations.clone().unwrap_or_default(),
+                &service.spec.workload,
+                &config,
+            )
+            .unwrap();
         let rendered = renderer
             .render_container("main", &service.spec.workload.containers["main"], &ctx)
             .unwrap();
