@@ -820,8 +820,10 @@ pub struct VolumeMount {
 
 /// Container security context
 ///
-/// Controls Linux security settings for a container. All fields are optional
-/// with secure defaults. Most services never need to set these.
+/// Controls Linux security settings for a container. All fields are optional.
+/// When omitted entirely, the compiler applies Pod Security Standards "restricted"
+/// profile defaults: drop ALL caps, no privilege escalation, non-root, read-only
+/// rootfs, RuntimeDefault seccomp and AppArmor profiles.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityContext {
@@ -829,7 +831,7 @@ pub struct SecurityContext {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
 
-    /// Capabilities to drop (default: [ALL] for security)
+    /// Capabilities to drop (default: [ALL])
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drop_capabilities: Option<Vec<String>>,
 
@@ -837,11 +839,11 @@ pub struct SecurityContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privileged: Option<bool>,
 
-    /// Mount root filesystem as read-only
+    /// Mount root filesystem as read-only (default: true)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_root_filesystem: Option<bool>,
 
-    /// Require the container to run as a non-root user
+    /// Require the container to run as a non-root user (default: true)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_as_non_root: Option<bool>,
 
@@ -853,9 +855,25 @@ pub struct SecurityContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_as_group: Option<i64>,
 
-    /// Allow privilege escalation (setuid binaries)
+    /// Allow privilege escalation via setuid binaries (default: false)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_privilege_escalation: Option<bool>,
+
+    /// Seccomp profile type: "RuntimeDefault", "Unconfined", or "Localhost"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_profile: Option<String>,
+
+    /// Localhost seccomp profile path (only when seccomp_profile is "Localhost")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_localhost_profile: Option<String>,
+
+    /// AppArmor profile type: "RuntimeDefault", "Unconfined", or "Localhost"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apparmor_profile: Option<String>,
+
+    /// Localhost AppArmor profile name (only when apparmor_profile is "Localhost")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apparmor_localhost_profile: Option<String>,
 }
 
 /// Sidecar container specification

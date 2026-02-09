@@ -658,6 +658,36 @@ pub struct K8sSecurityContext {
     /// Allow privilege escalation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_privilege_escalation: Option<bool>,
+    /// Seccomp profile
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_profile: Option<SeccompProfile>,
+    /// AppArmor profile
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_armor_profile: Option<AppArmorProfile>,
+}
+
+/// Seccomp profile for container or pod security context
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SeccompProfile {
+    /// Profile type: RuntimeDefault, Unconfined, or Localhost
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Localhost profile path (only for Localhost type)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub localhost_profile: Option<String>,
+}
+
+/// AppArmor profile for container security context
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppArmorProfile {
+    /// Profile type: RuntimeDefault, Unconfined, or Localhost
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Localhost profile name (only for Localhost type)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub localhost_profile: Option<String>,
 }
 
 /// Linux capabilities for containers
@@ -676,6 +706,12 @@ pub struct Capabilities {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PodSecurityContext {
+    /// Require all containers to run as non-root
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_non_root: Option<bool>,
+    /// Pod-level seccomp profile
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_profile: Option<SeccompProfile>,
     /// Sysctls for the pod
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sysctls: Option<Vec<Sysctl>>,
@@ -1236,11 +1272,9 @@ impl WorkloadCompiler {
                     }
                 }
 
-                // Compile security context
-                let security_context = container_spec
-                    .security
-                    .as_ref()
-                    .and_then(Self::compile_security_context);
+                // Compile security context (always returns secure defaults)
+                let security_context =
+                    Self::compile_security_context(container_spec.security.as_ref());
 
                 Ok(Container {
                     name: container_name.clone(),
@@ -1255,7 +1289,7 @@ impl WorkloadCompiler {
                     readiness_probe,
                     startup_probe,
                     volume_mounts,
-                    security_context,
+                    security_context: Some(security_context),
                 })
             })
             .collect()
@@ -1370,61 +1404,106 @@ impl WorkloadCompiler {
         }
     }
 
-    /// Compile a CRD SecurityContext to a K8s SecurityContext
-    fn compile_security_context(
-        security: &crate::crd::SecurityContext,
-    ) -> Option<K8sSecurityContext> {
-        // Only generate security context if any field is set
-        let has_caps = !security.capabilities.is_empty() || security.drop_capabilities.is_some();
-        let has_other = security.privileged.is_some()
-            || security.read_only_root_filesystem.is_some()
-            || security.run_as_non_root.is_some()
-            || security.run_as_user.is_some()
-            || security.run_as_group.is_some()
-            || security.allow_privilege_escalation.is_some();
+    /// Compile a CRD SecurityContext to a K8s SecurityContext with PSS restricted defaults.
+    ///
+    /// Always returns a security context. When `security` is None (user omitted the field),
+    /// all defaults apply. User-specified values override defaults.
+    ///
+    /// Defaults (Pod Security Standards "restricted" profile):
+    /// - capabilities.drop: [ALL]
+    /// - allowPrivilegeEscalation: false
+    /// - runAsNonRoot: true (auto-disabled when runAsUser: 0)
+    /// - readOnlyRootFilesystem: true
+    /// - seccompProfile: RuntimeDefault
+    /// - appArmorProfile: RuntimeDefault
+    ///
+    /// Special cases:
+    /// - `privileged: true` skips drop-ALL and allowPrivilegeEscalation restriction
+    /// - `runAsUser: 0` auto-sets runAsNonRoot: false
+    fn compile_security_context(security: Option<&crate::crd::SecurityContext>) -> K8sSecurityContext {
+        let default = crate::crd::SecurityContext::default();
+        let s = security.unwrap_or(&default);
 
-        if !has_caps && !has_other {
-            return None;
-        }
+        let is_privileged = s.privileged == Some(true);
 
-        let capabilities = if has_caps {
+        // Capabilities: always drop ALL unless privileged, add user-requested caps
+        let capabilities = if is_privileged && s.capabilities.is_empty() {
+            None
+        } else {
             Some(Capabilities {
-                add: if security.capabilities.is_empty() {
+                add: if s.capabilities.is_empty() {
                     None
                 } else {
-                    Some(security.capabilities.clone())
+                    Some(s.capabilities.clone())
                 },
-                // Default: drop ALL capabilities for security when any capability setting is used
-                drop: Some(
-                    security
-                        .drop_capabilities
-                        .clone()
-                        .unwrap_or_else(|| vec!["ALL".to_string()]),
-                ),
+                drop: if is_privileged {
+                    None
+                } else {
+                    Some(
+                        s.drop_capabilities
+                            .clone()
+                            .unwrap_or_else(|| vec!["ALL".to_string()]),
+                    )
+                },
             })
-        } else {
-            None
         };
 
-        Some(K8sSecurityContext {
+        // runAsNonRoot: default true, auto-false when runAsUser: 0
+        let run_as_non_root = if s.run_as_user == Some(0) {
+            Some(s.run_as_non_root.unwrap_or(false))
+        } else {
+            Some(s.run_as_non_root.unwrap_or(true))
+        };
+
+        // allowPrivilegeEscalation: default false, skip for privileged
+        let allow_privilege_escalation = if is_privileged {
+            s.allow_privilege_escalation
+        } else {
+            Some(s.allow_privilege_escalation.unwrap_or(false))
+        };
+
+        // Seccomp profile: default RuntimeDefault
+        let seccomp_profile = Some(SeccompProfile {
+            type_: s
+                .seccomp_profile
+                .clone()
+                .unwrap_or_else(|| "RuntimeDefault".to_string()),
+            localhost_profile: s.seccomp_localhost_profile.clone(),
+        });
+
+        // AppArmor profile: default RuntimeDefault
+        let app_armor_profile = Some(AppArmorProfile {
+            type_: s
+                .apparmor_profile
+                .clone()
+                .unwrap_or_else(|| "RuntimeDefault".to_string()),
+            localhost_profile: s.apparmor_localhost_profile.clone(),
+        });
+
+        K8sSecurityContext {
             capabilities,
-            privileged: security.privileged,
-            read_only_root_filesystem: security.read_only_root_filesystem,
-            run_as_non_root: security.run_as_non_root,
-            run_as_user: security.run_as_user,
-            run_as_group: security.run_as_group,
-            allow_privilege_escalation: security.allow_privilege_escalation,
-        })
+            privileged: s.privileged,
+            read_only_root_filesystem: Some(s.read_only_root_filesystem.unwrap_or(true)),
+            run_as_non_root,
+            run_as_user: s.run_as_user,
+            run_as_group: s.run_as_group,
+            allow_privilege_escalation,
+            seccomp_profile,
+            app_armor_profile,
+        }
     }
 
-    /// Compile pod-level security context from sysctls
-    fn compile_pod_security_context(spec: &LatticeServiceSpec) -> Option<PodSecurityContext> {
-        if spec.sysctls.is_empty() {
-            return None;
-        }
-
-        Some(PodSecurityContext {
-            sysctls: Some(
+    /// Compile pod-level security context with secure defaults.
+    ///
+    /// Always returns a PodSecurityContext with:
+    /// - runAsNonRoot: true
+    /// - seccompProfile: RuntimeDefault
+    /// - Any user-specified sysctls
+    fn compile_pod_security_context(spec: &LatticeServiceSpec) -> PodSecurityContext {
+        let sysctls = if spec.sysctls.is_empty() {
+            None
+        } else {
+            Some(
                 spec.sysctls
                     .iter()
                     .map(|(name, value)| Sysctl {
@@ -1432,8 +1511,17 @@ impl WorkloadCompiler {
                         value: value.clone(),
                     })
                     .collect(),
-            ),
-        })
+            )
+        };
+
+        PodSecurityContext {
+            run_as_non_root: Some(true),
+            seccomp_profile: Some(SeccompProfile {
+                type_: "RuntimeDefault".to_string(),
+                localhost_profile: None,
+            }),
+            sysctls,
+        }
     }
 
     /// Compile sidecars into init containers and regular sidecar containers
@@ -1496,11 +1584,9 @@ impl WorkloadCompiler {
                 .cloned()
                 .unwrap_or_default();
 
-            // Compile security context
-            let security_context = sidecar_spec
-                .security
-                .as_ref()
-                .and_then(Self::compile_security_context);
+            // Compile security context (always returns secure defaults)
+            let security_context =
+                Self::compile_security_context(sidecar_spec.security.as_ref());
 
             let container = Container {
                 name: sidecar_name.clone(),
@@ -1515,7 +1601,7 @@ impl WorkloadCompiler {
                 readiness_probe,
                 startup_probe,
                 volume_mounts,
-                security_context,
+                security_context: Some(security_context),
             };
 
             if is_init {
@@ -1608,8 +1694,8 @@ impl WorkloadCompiler {
 
         let strategy = Self::compile_strategy(spec);
 
-        // Compile pod-level security context
-        let security_context = Self::compile_pod_security_context(spec);
+        // Compile pod-level security context (always returns secure defaults)
+        let security_context = Some(Self::compile_pod_security_context(spec));
 
         // Resolve imagePullSecrets from spec resource names to K8s Secret names
         let image_pull_secrets =
@@ -2552,36 +2638,92 @@ mod tests {
     }
 
     // =========================================================================
-    // Story: Security Context Compilation
+    // Story: Security Context — Secure Defaults (PSS Restricted)
     // =========================================================================
 
     #[test]
-    fn story_security_context_compilation() {
+    fn story_default_security_context_applied() {
+        // No security context specified → full restricted defaults
+        let k8s_ctx = WorkloadCompiler::compile_security_context(None);
+
+        let caps = k8s_ctx.capabilities.expect("should have capabilities");
+        assert_eq!(caps.add, None);
+        assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
+        assert_eq!(k8s_ctx.privileged, None);
+        assert_eq!(k8s_ctx.read_only_root_filesystem, Some(true));
+        assert_eq!(k8s_ctx.run_as_non_root, Some(true));
+        assert_eq!(k8s_ctx.allow_privilege_escalation, Some(false));
+        assert_eq!(k8s_ctx.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
+        assert_eq!(k8s_ctx.app_armor_profile.as_ref().unwrap().type_, "RuntimeDefault");
+    }
+
+    #[test]
+    fn story_default_security_context_for_sidecars() {
+        use crate::crd::SidecarSpec;
+
+        let mut service = make_service("my-app", "default");
+        service.spec.sidecars.insert(
+            "logger".to_string(),
+            SidecarSpec {
+                image: "fluentbit:latest".to_string(),
+                command: None,
+                args: None,
+                variables: BTreeMap::new(),
+                resources: None,
+                files: BTreeMap::new(),
+                volumes: BTreeMap::new(),
+                liveness_probe: None,
+                readiness_probe: None,
+                startup_probe: None,
+                init: None,
+                security: None, // No security → defaults apply
+            },
+        );
+
+        let output = compile_service(&service);
+        let deployment = output.deployment.expect("should have deployment");
+
+        let logger = deployment
+            .spec
+            .template
+            .spec
+            .containers
+            .iter()
+            .find(|c| c.name == "logger")
+            .expect("logger sidecar should exist");
+
+        let sec = logger.security_context.as_ref().expect("should have security context");
+        assert_eq!(sec.allow_privilege_escalation, Some(false));
+        assert_eq!(sec.read_only_root_filesystem, Some(true));
+        assert_eq!(sec.run_as_non_root, Some(true));
+        let caps = sec.capabilities.as_ref().expect("should have capabilities");
+        assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
+    }
+
+    #[test]
+    fn story_security_context_with_user_overrides() {
         use crate::crd::SecurityContext;
 
         let security = SecurityContext {
             capabilities: vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()],
-            drop_capabilities: None, // Should default to [ALL]
+            drop_capabilities: None,
             privileged: Some(false),
             read_only_root_filesystem: Some(true),
             run_as_non_root: Some(true),
             run_as_user: Some(1000),
             run_as_group: Some(1000),
             allow_privilege_escalation: Some(false),
+            ..Default::default()
         };
 
-        let k8s_ctx = WorkloadCompiler::compile_security_context(&security)
-            .expect("should produce security context");
+        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
 
-        // Check capabilities
         let caps = k8s_ctx.capabilities.expect("should have capabilities");
         assert_eq!(
             caps.add,
             Some(vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()])
         );
-        assert_eq!(caps.drop, Some(vec!["ALL".to_string()])); // Default drop ALL
-
-        // Check other fields
+        assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
         assert_eq!(k8s_ctx.privileged, Some(false));
         assert_eq!(k8s_ctx.read_only_root_filesystem, Some(true));
         assert_eq!(k8s_ctx.run_as_non_root, Some(true));
@@ -2591,12 +2733,114 @@ mod tests {
     }
 
     #[test]
-    fn story_security_context_empty_returns_none() {
+    fn story_privileged_mode_relaxes_defaults() {
         use crate::crd::SecurityContext;
 
-        let security = SecurityContext::default();
-        let k8s_ctx = WorkloadCompiler::compile_security_context(&security);
-        assert!(k8s_ctx.is_none());
+        let security = SecurityContext {
+            privileged: Some(true),
+            ..Default::default()
+        };
+
+        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+
+        assert_eq!(k8s_ctx.privileged, Some(true));
+        // Privileged: no drop ALL, no allowPrivilegeEscalation restriction
+        assert!(k8s_ctx.capabilities.is_none());
+        assert_eq!(k8s_ctx.allow_privilege_escalation, None);
+        // Other defaults still apply
+        assert_eq!(k8s_ctx.read_only_root_filesystem, Some(true));
+        assert_eq!(k8s_ctx.run_as_non_root, Some(true));
+    }
+
+    #[test]
+    fn story_privileged_with_caps_keeps_add() {
+        use crate::crd::SecurityContext;
+
+        let security = SecurityContext {
+            privileged: Some(true),
+            capabilities: vec!["NET_ADMIN".to_string()],
+            ..Default::default()
+        };
+
+        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+
+        let caps = k8s_ctx.capabilities.expect("should have capabilities for add");
+        assert_eq!(caps.add, Some(vec!["NET_ADMIN".to_string()]));
+        assert_eq!(caps.drop, None); // Privileged: no drop
+    }
+
+    #[test]
+    fn story_run_as_user_zero_disables_run_as_non_root() {
+        use crate::crd::SecurityContext;
+
+        let security = SecurityContext {
+            run_as_user: Some(0),
+            ..Default::default()
+        };
+
+        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+
+        assert_eq!(k8s_ctx.run_as_user, Some(0));
+        assert_eq!(k8s_ctx.run_as_non_root, Some(false));
+    }
+
+    #[test]
+    fn story_user_can_override_readonly_root_fs() {
+        use crate::crd::SecurityContext;
+
+        let security = SecurityContext {
+            read_only_root_filesystem: Some(false),
+            ..Default::default()
+        };
+
+        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+        assert_eq!(k8s_ctx.read_only_root_filesystem, Some(false));
+    }
+
+    #[test]
+    fn story_seccomp_profile_defaults() {
+        let k8s_ctx = WorkloadCompiler::compile_security_context(None);
+        let seccomp = k8s_ctx.seccomp_profile.expect("should have seccomp profile");
+        assert_eq!(seccomp.type_, "RuntimeDefault");
+        assert!(seccomp.localhost_profile.is_none());
+    }
+
+    #[test]
+    fn story_seccomp_profile_user_override() {
+        use crate::crd::SecurityContext;
+
+        let security = SecurityContext {
+            seccomp_profile: Some("Unconfined".to_string()),
+            ..Default::default()
+        };
+
+        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+        let seccomp = k8s_ctx.seccomp_profile.expect("should have seccomp profile");
+        assert_eq!(seccomp.type_, "Unconfined");
+    }
+
+    #[test]
+    fn story_apparmor_profile_defaults() {
+        let k8s_ctx = WorkloadCompiler::compile_security_context(None);
+        let apparmor = k8s_ctx.app_armor_profile.expect("should have apparmor profile");
+        assert_eq!(apparmor.type_, "RuntimeDefault");
+        assert!(apparmor.localhost_profile.is_none());
+    }
+
+    #[test]
+    fn story_apparmor_profile_localhost() {
+        use crate::crd::SecurityContext;
+
+        let security = SecurityContext {
+            apparmor_profile: Some("Localhost".to_string()),
+            apparmor_localhost_profile: Some("my-custom-profile".to_string()),
+            ..Default::default()
+        };
+
+        let k8s_ctx = WorkloadCompiler::compile_security_context(Some(&security));
+        let apparmor = k8s_ctx.app_armor_profile.expect("should have apparmor profile");
+        assert_eq!(apparmor.type_, "Localhost");
+        assert_eq!(apparmor.localhost_profile, Some("my-custom-profile".to_string()));
     }
 
     // =========================================================================
@@ -2636,12 +2880,21 @@ mod tests {
     }
 
     #[test]
-    fn story_empty_sysctls_no_security_context() {
+    fn story_pod_security_context_has_secure_defaults() {
         let service = make_service("my-app", "default");
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
 
-        assert!(deployment.spec.template.spec.security_context.is_none());
+        let pod_sec = deployment
+            .spec
+            .template
+            .spec
+            .security_context
+            .expect("should always have pod security context");
+
+        assert_eq!(pod_sec.run_as_non_root, Some(true));
+        assert_eq!(pod_sec.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
+        assert!(pod_sec.sysctls.is_none()); // No sysctls when none specified
     }
 
     // =========================================================================
