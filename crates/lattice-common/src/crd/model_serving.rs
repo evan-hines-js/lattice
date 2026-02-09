@@ -7,7 +7,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::WorkloadSpec;
+use super::workload::spec::WorkloadSpec;
 
 // =============================================================================
 // Phase
