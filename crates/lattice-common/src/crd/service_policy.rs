@@ -9,8 +9,8 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::workload::backup::ServiceBackupSpec;
 use super::types::Condition;
+use super::workload::backup::ServiceBackupSpec;
 
 /// Operator for label selector requirements
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]

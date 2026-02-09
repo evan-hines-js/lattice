@@ -31,7 +31,7 @@ use tracing::info;
 
 use super::super::context::InfraContext;
 use super::super::helpers::{
-    apply_cedar_policy_crd, create_service_with_security_overrides,
+    apply_apparmor_override_policy, apply_cedar_policy_crd, create_service_with_security_overrides,
     delete_cedar_policies_by_label, delete_namespace, deploy_and_wait_for_phase,
     ensure_fresh_namespace, wait_for_service_phase,
 };
@@ -134,12 +134,7 @@ fn service_with_privileged(name: &str, namespace: &str) -> LatticeService {
 }
 
 fn service_no_overrides(name: &str, namespace: &str) -> LatticeService {
-    create_service_with_security_overrides(
-        name,
-        namespace,
-        SecurityContext::default(),
-        None,
-    )
+    create_service_with_security_overrides(name, namespace, SecurityContext::default(), None)
 }
 
 // =============================================================================
@@ -343,6 +338,11 @@ pub async fn run_cedar_security_tests(ctx: &InfraContext) -> Result<(), String> 
     // Clean up any leftover policies from previous runs
     cleanup_cedar_security_policies(kubeconfig).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Docker KIND clusters don't have AppArmor — permit the Unconfined override.
+    // Uses "e2e" label so the cedar-security cleanup (which deletes by "cedar-security"
+    // label) doesn't remove it.
+    apply_apparmor_override_policy(kubeconfig).await?;
 
     // Run all tests concurrently — each uses its own namespace
     let result = tokio::try_join!(

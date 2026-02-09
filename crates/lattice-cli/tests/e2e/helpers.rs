@@ -1650,6 +1650,10 @@ pub fn create_service_with_secrets(
                     memory: Some("128Mi".to_string()),
                 }),
             }),
+            security: Some(lattice_common::crd::SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
@@ -1688,10 +1692,12 @@ pub fn create_service_with_secrets(
 ///
 /// Builds a minimal service with the specified security context on the main container
 /// and optional pod-level settings. Used by Cedar security override integration tests.
+/// Always sets `apparmor_profile: Unconfined` if not already specified, since Docker
+/// KIND clusters don't have AppArmor.
 pub fn create_service_with_security_overrides(
     name: &str,
     namespace: &str,
-    security: lattice_common::crd::SecurityContext,
+    mut security: lattice_common::crd::SecurityContext,
     host_network: Option<bool>,
 ) -> lattice_common::crd::LatticeService {
     use std::collections::BTreeMap;
@@ -1700,6 +1706,11 @@ pub fn create_service_with_security_overrides(
     use lattice_common::crd::{
         ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ServicePortsSpec, WorkloadSpec,
     };
+
+    // Docker KIND clusters don't have AppArmor — ensure Unconfined
+    if security.apparmor_profile.is_none() {
+        security.apparmor_profile = Some("Unconfined".to_string());
+    }
 
     let mut containers = BTreeMap::new();
     containers.insert(
@@ -1964,6 +1975,27 @@ spec:
     );
     tokio::time::sleep(Duration::from_secs(3)).await;
     Ok(())
+}
+
+/// Apply a Cedar policy permitting AppArmor Unconfined for all services.
+///
+/// Docker KIND clusters don't have AppArmor enabled, so all e2e fixtures
+/// set `apparmor_profile: Unconfined`. This policy permits that security
+/// override. Uses the "e2e" label so it persists across test phases.
+#[cfg(feature = "provider-e2e")]
+pub async fn apply_apparmor_override_policy(kubeconfig: &str) -> Result<(), String> {
+    apply_cedar_policy_crd(
+        kubeconfig,
+        "permit-apparmor-unconfined",
+        "e2e",
+        50,
+        r#"permit(
+  principal,
+  action == Lattice::Action::"OverrideSecurity",
+  resource == Lattice::SecurityOverride::"unconfined:apparmor"
+);"#,
+    )
+    .await
 }
 
 /// Delete all CedarPolicy CRDs matching a label selector.
@@ -3105,7 +3137,10 @@ pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), Strin
     )
     .await?;
 
-    info!("[Regcreds] Infrastructure ready (provider + source secret + Cedar policy)");
+    // Docker KIND clusters don't have AppArmor — permit the Unconfined override
+    apply_apparmor_override_policy(kubeconfig).await?;
+
+    info!("[Regcreds] Infrastructure ready (provider + source secret + Cedar policies)");
     Ok(())
 }
 

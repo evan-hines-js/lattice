@@ -12,7 +12,6 @@ use crate::template::TemplateString;
 
 use super::resources::ResourceRequirements;
 
-
 // =============================================================================
 // Probes
 // =============================================================================
@@ -405,7 +404,11 @@ pub(crate) fn validate_image(image: &str, container_name: &str) -> Result<(), cr
 }
 
 /// Validate file mode is valid octal (e.g., "0644", "0755")
-pub(crate) fn validate_file_mode(mode: &str, container_name: &str, path: &str) -> Result<(), crate::Error> {
+pub(crate) fn validate_file_mode(
+    mode: &str,
+    container_name: &str,
+    path: &str,
+) -> Result<(), crate::Error> {
     // Mode should be 3-4 octal digits, optionally prefixed with 0
     let mode_str = mode.strip_prefix('0').unwrap_or(mode);
 

@@ -346,9 +346,7 @@ mod tests {
             "app",
             vec![("privileged", "container", Some("main"))],
         );
-        let result = engine
-            .authorize_security_overrides(&denied_request)
-            .await;
+        let result = engine.authorize_security_overrides(&denied_request).await;
         assert!(!result.is_allowed());
         assert_eq!(result.denied[0].reason, DenialReason::ExplicitForbid);
     }
@@ -374,8 +372,8 @@ mod tests {
             "media",
             "nzbget",
             vec![
-                ("capability:NET_ADMIN", "capability", Some("vpn")),   // allowed
-                ("capability:SYS_MODULE", "capability", Some("vpn")),  // denied
+                ("capability:NET_ADMIN", "capability", Some("vpn")), // allowed
+                ("capability:SYS_MODULE", "capability", Some("vpn")), // denied
             ],
         );
 
