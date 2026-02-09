@@ -15,7 +15,7 @@ use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
     CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, IngressTls, LatticeService,
     LatticeServiceSpec, PortSpec, ProviderType, ResourceSpec, ResourceType, ServicePortsSpec,
-    TlsMode,
+    TlsMode, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_service::compiler::ServiceCompiler;
@@ -61,8 +61,11 @@ fn baseline_spec() -> LatticeServiceSpec {
     containers.insert("main".to_string(), simple_container());
 
     LatticeServiceSpec {
-        containers,
-        service: Some(default_ports()),
+        workload: WorkloadSpec {
+            containers,
+            service: Some(default_ports()),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -71,7 +74,7 @@ fn mesh_spec(num_deps: usize, num_callers: usize) -> LatticeServiceSpec {
     let mut spec = baseline_spec();
 
     for i in 0..num_deps {
-        spec.resources.insert(
+        spec.workload.resources.insert(
             format!("dep-{}", i),
             ResourceSpec {
                 direction: DependencyDirection::Outbound,
@@ -80,7 +83,7 @@ fn mesh_spec(num_deps: usize, num_callers: usize) -> LatticeServiceSpec {
         );
     }
     for i in 0..num_callers {
-        spec.resources.insert(
+        spec.workload.resources.insert(
             format!("caller-{}", i),
             ResourceSpec {
                 direction: DependencyDirection::Inbound,
@@ -103,7 +106,7 @@ fn secrets_spec(num_secrets: usize, keys_per_secret: usize) -> LatticeServiceSpe
             params.insert("keys".to_string(), serde_json::json!(keys));
         }
 
-        spec.resources.insert(
+        spec.workload.resources.insert(
             format!("secret-{}", i),
             ResourceSpec {
                 type_: ResourceType::Secret,
@@ -145,7 +148,7 @@ fn full_spec(num_deps: usize, num_callers: usize, num_secrets: usize) -> Lattice
         let keys: Vec<String> = (0..3).map(|k| format!("key-{}", k)).collect();
         params.insert("keys".to_string(), serde_json::json!(keys));
 
-        spec.resources.insert(
+        spec.workload.resources.insert(
             format!("secret-{}", i),
             ResourceSpec {
                 type_: ResourceType::Secret,
@@ -179,11 +182,11 @@ fn setup_graph(graph: &ServiceGraph, namespace: &str, spec: &LatticeServiceSpec)
     graph.put_service(namespace, "target", spec);
 
     // Register dependency services so active edges exist
-    for (name, res) in &spec.resources {
+    for (name, res) in &spec.workload.resources {
         if res.type_ == ResourceType::Service && res.direction.is_outbound() {
             // dep allows target as caller
             let dep_spec = mesh_spec(0, 0);
-            let mut dep_resources = dep_spec.resources;
+            let mut dep_resources = dep_spec.workload.resources;
             dep_resources.insert(
                 "target".to_string(),
                 ResourceSpec {
@@ -192,13 +195,13 @@ fn setup_graph(graph: &ServiceGraph, namespace: &str, spec: &LatticeServiceSpec)
                 },
             );
             let mut dep = baseline_spec();
-            dep.resources = dep_resources;
+            dep.workload.resources = dep_resources;
             graph.put_service(namespace, name, &dep);
         }
         if res.type_ == ResourceType::Service && res.direction.is_inbound() {
             // caller declares target as outbound dep
             let mut caller = baseline_spec();
-            caller.resources.insert(
+            caller.workload.resources.insert(
                 "target".to_string(),
                 ResourceSpec {
                     direction: DependencyDirection::Outbound,

@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use tracing::warn;
 
-use crate::crd::{LatticeServiceSpec, ResourceSpec, ResourceType};
+use crate::crd::{ResourceSpec, ResourceType, WorkloadSpec};
 use crate::graph::ServiceGraph;
 
 use super::context::ResourceOutputs;
@@ -343,13 +343,13 @@ impl ProvisionerRegistry {
         )
     }
 
-    /// Resolve all resources from a service spec
+    /// Resolve all resources from a workload spec
     ///
     /// Returns a map of resource name -> outputs for use in template rendering.
     /// Emits a warning for any resource types that don't have a registered provisioner.
     pub fn resolve_all(
         &self,
-        spec: &LatticeServiceSpec,
+        spec: &WorkloadSpec,
         ctx: &ProvisionerContext<'_>,
     ) -> Result<std::collections::HashMap<String, ResourceOutputs>, TemplateError> {
         let mut outputs = std::collections::HashMap::new();
@@ -376,12 +376,12 @@ impl ProvisionerRegistry {
         Ok(outputs)
     }
 
-    /// Provision all resources from a service spec
+    /// Provision all resources from a workload spec
     ///
     /// Returns a combined ProvisionOutput with all manifests and outputs.
     pub fn provision_all(
         &self,
-        spec: &LatticeServiceSpec,
+        spec: &WorkloadSpec,
         ctx: &ProvisionerContext<'_>,
     ) -> Result<ProvisionOutput, TemplateError> {
         let mut combined = ProvisionOutput::default();
@@ -431,8 +431,11 @@ mod tests {
         );
 
         let spec = crate::crd::LatticeServiceSpec {
-            containers,
-            service: Some(crate::crd::ServicePortsSpec { ports }),
+            workload: crate::crd::WorkloadSpec {
+                containers,
+                service: Some(crate::crd::ServicePortsSpec { ports }),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -611,8 +614,8 @@ mod tests {
             },
         );
 
-        // Create a minimal spec with the resources
-        let spec = crate::crd::LatticeServiceSpec {
+        // Create a minimal workload spec with the resources
+        let spec = crate::crd::WorkloadSpec {
             containers: BTreeMap::from([(
                 "main".to_string(),
                 crate::crd::ContainerSpec {

@@ -250,7 +250,7 @@ impl<'a> ServiceCompiler<'a> {
             .map_err(CompilationError::from)?;
         let rendered_containers = self
             .renderer
-            .render_all_containers(&service.spec, &template_ctx)
+            .render_all_containers(&service.spec.workload, &template_ctx)
             .map_err(CompilationError::from)?;
 
         // Compile rendered env vars and files per-container
@@ -355,7 +355,7 @@ impl<'a> ServiceCompiler<'a> {
         }
 
         // Inject Velero backup annotations into pod template if backup is configured
-        if let Some(ref backup_spec) = service.spec.backup {
+        if let Some(ref backup_spec) = service.spec.workload.backup {
             let backup_annotations =
                 crate::workload::backup::compile_backup_annotations(backup_spec);
             if let Some(ref mut deployment) = workloads.deployment {
@@ -377,6 +377,7 @@ impl<'a> ServiceCompiler<'a> {
         // Get primary service port for ingress routing
         let service_port = service
             .spec
+            .workload
             .service
             .as_ref()
             .and_then(|s| s.ports.values().next())
@@ -390,6 +391,7 @@ impl<'a> ServiceCompiler<'a> {
             // Add gateway allow policy for north-south traffic
             let ports: Vec<u16> = service
                 .spec
+                .workload
                 .service
                 .as_ref()
                 .map(|s| s.ports.values().map(|p| p.port).collect())
@@ -457,6 +459,7 @@ impl<'a> ServiceCompiler<'a> {
         spec: &crate::crd::LatticeServiceSpec,
     ) -> Result<(), CompilationError> {
         let secret_paths: Vec<_> = spec
+            .workload
             .resources
             .iter()
             .filter(|(_, r)| r.is_secret())
@@ -633,7 +636,7 @@ mod tests {
     use super::*;
     use crate::crd::{
         CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, IngressTls, PortSpec,
-        ResourceSpec, ServicePortsSpec, TlsMode,
+        ResourceSpec, ServicePortsSpec, TlsMode, WorkloadSpec,
     };
     use std::collections::BTreeMap;
 
@@ -664,8 +667,11 @@ mod tests {
                 ..Default::default()
             },
             spec: crate::crd::LatticeServiceSpec {
-                containers,
-                service: Some(ServicePortsSpec { ports }),
+                workload: WorkloadSpec {
+                    containers,
+                    service: Some(ServicePortsSpec { ports }),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             status: None,
@@ -734,9 +740,12 @@ mod tests {
         );
 
         crate::crd::LatticeServiceSpec {
-            containers,
-            resources,
-            service: Some(ServicePortsSpec { ports }),
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                service: Some(ServicePortsSpec { ports }),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -984,7 +993,7 @@ mod tests {
         let cedar = PolicyEngine::new();
 
         let mut service = make_service("my-db", "prod");
-        service.spec.backup = Some(ServiceBackupSpec {
+        service.spec.workload.backup = Some(ServiceBackupSpec {
             hooks: Some(BackupHooksSpec {
                 pre: vec![BackupHook {
                     name: "freeze".to_string(),

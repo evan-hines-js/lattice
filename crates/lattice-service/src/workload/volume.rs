@@ -185,7 +185,13 @@ impl GeneratedVolumes {
 fn sanitize_volume_name(mount_path: &str) -> String {
     let sanitized: String = mount_path
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = sanitized.trim_matches('-');
     let name = format!("emptydir-{}", trimmed);
@@ -232,6 +238,7 @@ impl VolumeCompiler {
         // Process regular volume resources
         // -----------------------------------------------------------------
         let volume_resources: Vec<_> = spec
+            .workload
             .resources
             .iter()
             .filter(|(_, r)| r.type_.is_volume())
@@ -305,6 +312,7 @@ impl VolumeCompiler {
         // Process model resources
         // -----------------------------------------------------------------
         let model_resources: Vec<_> = spec
+            .workload
             .resources
             .iter()
             .filter(|(_, r)| r.type_.is_model())
@@ -350,13 +358,14 @@ impl VolumeCompiler {
         // Generate volume mounts (for both volume/model resources and emptyDir)
         // -----------------------------------------------------------------
         let all_mountable: Vec<_> = spec
+            .workload
             .resources
             .iter()
             .filter(|(_, r)| r.type_.is_volume_like())
             .collect();
 
         // Container volume mounts
-        for (container_name, container_spec) in &spec.containers {
+        for (container_name, container_spec) in &spec.workload.containers {
             let (mounts, extra_vols) =
                 Self::resolve_mounts(&container_spec.volumes, &all_mountable);
             if !mounts.is_empty() {
@@ -366,9 +375,8 @@ impl VolumeCompiler {
         }
 
         // Sidecar volume mounts
-        for (sidecar_name, sidecar_spec) in &spec.sidecars {
-            let (mounts, extra_vols) =
-                Self::resolve_mounts(&sidecar_spec.volumes, &all_mountable);
+        for (sidecar_name, sidecar_spec) in &spec.workload.sidecars {
+            let (mounts, extra_vols) = Self::resolve_mounts(&sidecar_spec.volumes, &all_mountable);
             if !mounts.is_empty() {
                 output.volume_mounts.insert(sidecar_name.clone(), mounts);
             }
@@ -480,7 +488,7 @@ impl VolumeCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ContainerSpec, ResourceSpec, ResourceType, MODEL_READY_GATE};
+    use crate::crd::{ContainerSpec, ResourceSpec, ResourceType, WorkloadSpec, MODEL_READY_GATE};
     use lattice_common::template::TemplateString;
 
     fn make_spec_with_volumes(
@@ -554,8 +562,11 @@ mod tests {
         );
 
         LatticeServiceSpec {
-            containers,
-            resources,
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -606,7 +617,7 @@ mod tests {
         );
 
         // Add storage class to volume config via params
-        if let Some(resource) = spec.resources.get_mut("config") {
+        if let Some(resource) = spec.workload.resources.get_mut("config") {
             if let Some(params) = resource.params.as_mut() {
                 params.insert("storageClass".to_string(), serde_json::json!("local-path"));
             }
@@ -885,8 +896,11 @@ mod tests {
         );
 
         LatticeServiceSpec {
-            containers,
-            resources,
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -1038,8 +1052,11 @@ mod tests {
         );
 
         let spec = LatticeServiceSpec {
-            containers,
-            resources,
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                ..Default::default()
+            },
             ..Default::default()
         };
 

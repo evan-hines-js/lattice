@@ -4,76 +4,79 @@ metadata:
   name: sonarr
   namespace: media
 spec:
-  containers:
-    main:
-      image: docker.io/linuxserver/sonarr:latest
-      variables:
-        PUID: "1000"
-        PGID: "1000"
-        TZ: "America/New_York"
-      volumes:
-        /config:
-          source: ${resources.config}
-        /downloads:
-          source: ${resources.media-storage}
-          path: downloads
-        /tv:
-          source: ${resources.media-storage}
-          path: library
-      resources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
-        limits:
-          cpu: 1000m
-          memory: 1Gi
-      readinessProbe:
-        httpGet:
-          path: /ping
+  workload:
+    containers:
+      main:
+        image: docker.io/linuxserver/sonarr:latest
+        variables:
+          PUID: "1000"
+          PGID: "1000"
+          TZ: "America/New_York"
+        volumes:
+          /config:
+            source: ${resources.config}
+          /downloads:
+            source: ${resources.media-storage}
+            path: downloads
+          /tv:
+            source: ${resources.media-storage}
+            path: library
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: 8989
+    service:
+      ports:
+        http:
           port: 8989
-  service:
-    ports:
-      http:
-        port: 8989
-        protocol: TCP
-  imagePullSecrets:
-    - ghcr-creds
-  resources:
-    # Registry credentials for GHCR images
-    ghcr-creds:
-      type: secret
-      id: local-regcreds
-      params:
-        provider: local-test
-        refreshInterval: 1h
-    # Owned volume (private to this service)
-    config:
-      type: volume
-      params:
-        size: 5Gi
-    # Shared media storage (REFERENCE - no size)
-    media-storage:
-      type: volume
-      id: media-storage
-    # Service dependencies (bilateral agreements)
-    nzbget:
-      type: service
-      direction: outbound
-      outbound:
-        retries:
-          attempts: 3
-          perTryTimeout: 10s
-          retryOn:
-            - 5xx
-            - connect-failure
-        timeout:
-          request: 30s
-    jellyfin:
-      type: service
-      direction: outbound
-      outbound:
-        timeout:
-          request: 60s
+          protocol: TCP
+    imagePullSecrets:
+      - ghcr-creds
+    resources:
+      # Registry credentials for GHCR images
+      ghcr-creds:
+        type: secret
+        id: local-regcreds
+        params:
+          provider: local-test
+          refreshInterval: 1h
+      # Owned volume (private to this service)
+      config:
+        type: volume
+        params:
+          size: 5Gi
+      # Shared media storage (REFERENCE - no size)
+      media-storage:
+        type: volume
+        id: media-storage
+      # Service dependencies (bilateral agreements)
+      nzbget:
+        type: service
+        direction: outbound
+        outbound:
+          retries:
+            attempts: 3
+            perTryTimeout: 10s
+            retryOn:
+              - 5xx
+              - connect-failure
+          timeout:
+            request: 30s
+      jellyfin:
+        type: service
+        direction: outbound
+        outbound:
+          timeout:
+            request: 60s
+    replicas:
+      min: 1
   ingress:
     hosts:
       - sonarr.home.local
@@ -81,5 +84,3 @@ spec:
       mode: auto
       issuerRef:
         name: letsencrypt-prod
-  replicas:
-    min: 1

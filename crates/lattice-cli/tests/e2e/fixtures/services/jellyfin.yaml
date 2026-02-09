@@ -4,65 +4,68 @@ metadata:
   name: jellyfin
   namespace: media
 spec:
-  containers:
-    main:
-      image: docker.io/jellyfin/jellyfin:latest
-      variables:
-        JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"
-      volumes:
-        /config:
-          source: ${resources.config}
-        /cache:
-          source: ${resources.cache}
-        /media:
-          source: ${resources.media-storage}
-          path: library
-      resources:
-        requests:
-          cpu: 500m
-          memory: 1Gi
-        limits:
-          cpu: 4000m
-          memory: 8Gi
-      readinessProbe:
-        httpGet:
-          path: /health
+  workload:
+    containers:
+      main:
+        image: docker.io/jellyfin/jellyfin:latest
+        variables:
+          JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"
+        volumes:
+          /config:
+            source: ${resources.config}
+          /cache:
+            source: ${resources.cache}
+          /media:
+            source: ${resources.media-storage}
+            path: library
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 4000m
+            memory: 8Gi
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8096
+    service:
+      ports:
+        http:
           port: 8096
-  service:
-    ports:
-      http:
-        port: 8096
-        protocol: TCP
-  imagePullSecrets:
-    - ghcr-creds
-  resources:
-    # Registry credentials for GHCR images
-    ghcr-creds:
-      type: secret
-      id: local-regcreds
-      params:
-        provider: local-test
-        refreshInterval: 1h
-    # Owned volumes (private to this service)
-    config:
-      type: volume
-      params:
-        size: 10Gi
-    cache:
-      type: volume
-      params:
-        size: 20Gi
-    # Shared media storage (OWNER - has size)
-    media-storage:
-      type: volume
-      id: media-storage
-      params:
-        size: 1Ti
-        accessMode: ReadWriteOnce
-    # Service dependencies (bilateral agreement)
-    sonarr:
-      type: service
-      direction: inbound
+          protocol: TCP
+    imagePullSecrets:
+      - ghcr-creds
+    resources:
+      # Registry credentials for GHCR images
+      ghcr-creds:
+        type: secret
+        id: local-regcreds
+        params:
+          provider: local-test
+          refreshInterval: 1h
+      # Owned volumes (private to this service)
+      config:
+        type: volume
+        params:
+          size: 10Gi
+      cache:
+        type: volume
+        params:
+          size: 20Gi
+      # Shared media storage (OWNER - has size)
+      media-storage:
+        type: volume
+        id: media-storage
+        params:
+          size: 1Ti
+          accessMode: ReadWriteOnce
+      # Service dependencies (bilateral agreement)
+      sonarr:
+        type: service
+        direction: inbound
+    replicas:
+      min: 1
   ingress:
     hosts:
       - jellyfin.home.local
@@ -70,5 +73,3 @@ spec:
       mode: auto
       issuerRef:
         name: letsencrypt-prod
-  replicas:
-    min: 1

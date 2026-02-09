@@ -11,7 +11,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use lattice_common::crd::{
     ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec, ResourceSpec,
-    ResourceType, ServicePortsSpec,
+    ResourceType, ServicePortsSpec, WorkloadSpec,
 };
 
 use super::helpers::{CURL_IMAGE, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY};
@@ -186,10 +186,13 @@ pub fn build_lattice_service(
             ..Default::default()
         },
         spec: LatticeServiceSpec {
-            containers,
-            resources,
-            service: if has_port { Some(http_port()) } else { None },
-            image_pull_secrets: vec!["ghcr-creds".to_string()],
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                service: if has_port { Some(http_port()) } else { None },
+                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                ..Default::default()
+            },
             ..Default::default()
         },
         status: None,

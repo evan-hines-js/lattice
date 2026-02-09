@@ -386,7 +386,7 @@ pub fn discover_models(client: Client) -> impl Fn(LatticeService) -> Vec<ObjectR
 
         let mut refs = Vec::new();
 
-        for resource in service.spec.resources.values() {
+        for resource in service.spec.workload.resources.values() {
             let params = match resource.model_params() {
                 Ok(Some(p)) => p,
                 _ => continue,

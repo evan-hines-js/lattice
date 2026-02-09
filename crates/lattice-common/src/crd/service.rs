@@ -1292,22 +1292,13 @@ impl std::fmt::Display for ServicePhase {
     }
 }
 
-/// Specification for a LatticeService
-#[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[kube(
-    group = "lattice.dev",
-    version = "v1alpha1",
-    kind = "LatticeService",
-    plural = "latticeservices",
-    shortname = "ls",
-    namespaced,
-    status = "LatticeServiceStatus",
-    printcolumn = r#"{"name":"Strategy","type":"string","jsonPath":".spec.deploy.strategy"}"#,
-    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
-    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
-)]
+/// Shared workload specification (Score core + Lattice extensions)
+///
+/// Contains the container/resource/service core shared across all Lattice
+/// workload types: LatticeService, LatticeJob, LatticeModel.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct LatticeServiceSpec {
+pub struct WorkloadSpec {
     /// Named container specifications (Score-compatible)
     pub containers: BTreeMap<String, ContainerSpec>,
 
@@ -1322,14 +1313,6 @@ pub struct LatticeServiceSpec {
     /// Replica scaling configuration
     #[serde(default)]
     pub replicas: ReplicaSpec,
-
-    /// Deployment strategy configuration
-    #[serde(default)]
-    pub deploy: DeploySpec,
-
-    /// Ingress configuration for external access via Gateway API
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingress: Option<IngressSpec>,
 
     /// Sidecar containers (VPN, logging, metrics, etc.)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1364,7 +1347,35 @@ pub struct LatticeServiceSpec {
     pub image_pull_secrets: Vec<String>,
 }
 
-impl LatticeServiceSpec {
+/// Specification for a LatticeService
+#[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[kube(
+    group = "lattice.dev",
+    version = "v1alpha1",
+    kind = "LatticeService",
+    plural = "latticeservices",
+    shortname = "ls",
+    namespaced,
+    status = "LatticeServiceStatus",
+    printcolumn = r#"{"name":"Strategy","type":"string","jsonPath":".spec.deploy.strategy"}"#,
+    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+)]
+#[serde(rename_all = "camelCase")]
+pub struct LatticeServiceSpec {
+    /// Shared workload specification (containers, resources, ports, etc.)
+    pub workload: WorkloadSpec,
+
+    /// Deployment strategy configuration
+    #[serde(default)]
+    pub deploy: DeploySpec,
+
+    /// Ingress configuration for external access via Gateway API
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<IngressSpec>,
+}
+
+impl WorkloadSpec {
     /// Extract all service dependencies (outbound) with namespace resolution
     ///
     /// Returns ServiceRefs for both internal and external services.
@@ -1429,7 +1440,15 @@ impl LatticeServiceSpec {
             .collect()
     }
 
-    /// Get shared volume IDs that this service owns (has size defined)
+    /// Get the primary container image
+    pub fn primary_image(&self) -> Option<&str> {
+        self.containers
+            .get("main")
+            .or_else(|| self.containers.values().next())
+            .map(|c| c.image.as_str())
+    }
+
+    /// Get shared volume IDs that this workload owns (has size defined)
     /// Returns: Vec<(resource_name, volume_id)>
     pub fn owned_volume_ids(&self) -> Vec<(&str, &str)> {
         self.resources
@@ -1439,7 +1458,7 @@ impl LatticeServiceSpec {
             .collect()
     }
 
-    /// Get shared volume IDs that this service references (no size, just id)
+    /// Get shared volume IDs that this workload references (no size, just id)
     /// Returns: Vec<(resource_name, volume_id)>
     pub fn referenced_volume_ids(&self) -> Vec<(&str, &str)> {
         self.resources
@@ -1449,7 +1468,7 @@ impl LatticeServiceSpec {
             .collect()
     }
 
-    /// Get the ports this service exposes
+    /// Get the ports this workload exposes
     pub fn ports(&self) -> BTreeMap<&str, u16> {
         self.service
             .as_ref()
@@ -1462,15 +1481,7 @@ impl LatticeServiceSpec {
             .unwrap_or_default()
     }
 
-    /// Get the primary container image
-    pub fn primary_image(&self) -> Option<&str> {
-        self.containers
-            .get("main")
-            .or_else(|| self.containers.values().next())
-            .map(|c| c.image.as_str())
-    }
-
-    /// Validate the service specification
+    /// Validate the workload specification
     pub fn validate(&self) -> Result<(), crate::Error> {
         if self.containers.is_empty() {
             return Err(crate::Error::validation(
@@ -1526,6 +1537,11 @@ impl LatticeServiceSpec {
         Ok(())
     }
 }
+
+// No methods on LatticeServiceSpec — all shared behavior lives on WorkloadSpec.
+// Mesh methods (dependencies, allowed_callers, etc.) operate on WorkloadSpec.resources.
+// Validation lives on WorkloadSpec::validate().
+// Callers access via spec.workload.dependencies(), spec.workload.validate(), etc.
 
 impl ContainerSpec {
     /// Validate container specification
@@ -1822,7 +1838,10 @@ mod tests {
         containers.insert("main".to_string(), simple_container());
 
         LatticeServiceSpec {
-            containers,
+            workload: WorkloadSpec {
+                containers,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -1890,9 +1909,9 @@ mod tests {
         );
 
         let mut spec = sample_service_spec();
-        spec.resources = resources;
+        spec.workload.resources = resources;
 
-        let deps = spec.dependencies("test");
+        let deps = spec.workload.dependencies("test");
         assert_eq!(deps.len(), 2);
         assert!(deps.iter().any(|r| r.name == "redis"));
         assert!(deps.iter().any(|r| r.name == "api-gateway"));
@@ -1932,9 +1951,9 @@ mod tests {
         );
 
         let mut spec = sample_service_spec();
-        spec.resources = resources;
+        spec.workload.resources = resources;
 
-        let callers = spec.allowed_callers("test");
+        let callers = spec.workload.allowed_callers("test");
         assert_eq!(callers.len(), 2);
         assert!(callers.iter().any(|r| r.name == "curl-tester"));
         assert!(callers.iter().any(|r| r.name == "frontend"));
@@ -1960,11 +1979,16 @@ mod tests {
         );
 
         let mut spec = sample_service_spec();
-        spec.resources = resources;
+        spec.workload.resources = resources;
 
         // Should appear in both dependencies and allowed_callers
-        assert!(spec.dependencies("test").iter().any(|r| r.name == "cache"));
         assert!(spec
+            .workload
+            .dependencies("test")
+            .iter()
+            .any(|r| r.name == "cache"));
+        assert!(spec
+            .workload
             .allowed_callers("test")
             .iter()
             .any(|r| r.name == "cache"));
@@ -2004,10 +2028,10 @@ mod tests {
         );
 
         let mut spec = sample_service_spec();
-        spec.resources = resources;
+        spec.workload.resources = resources;
 
-        let external = spec.external_dependencies("test");
-        let internal = spec.internal_dependencies("test");
+        let external = spec.workload.external_dependencies("test");
+        let internal = spec.workload.internal_dependencies("test");
 
         assert_eq!(external.len(), 1);
         assert_eq!(external[0].name, "google");
@@ -2023,13 +2047,13 @@ mod tests {
     #[test]
     fn story_valid_service_passes_validation() {
         let spec = sample_service_spec();
-        assert!(spec.validate().is_ok());
+        assert!(spec.workload.validate().is_ok());
     }
 
     /// Story: Service without containers fails validation
     #[test]
     fn story_service_without_containers_fails() {
-        let spec = LatticeServiceSpec {
+        let spec = WorkloadSpec {
             containers: BTreeMap::new(),
             ..Default::default()
         };
@@ -2046,13 +2070,13 @@ mod tests {
     #[test]
     fn story_invalid_replicas_fails() {
         let mut spec = sample_service_spec();
-        spec.replicas = ReplicaSpec {
+        spec.workload.replicas = ReplicaSpec {
             min: 5,
             max: Some(3),
             autoscaling: vec![],
         };
 
-        let result = spec.validate();
+        let result = spec.workload.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("min replicas"));
     }
@@ -2065,27 +2089,28 @@ mod tests {
     #[test]
     fn story_yaml_simple_service() {
         let yaml = r#"
-containers:
-  main:
-    image: nginx:latest
-service:
-  ports:
-    http:
-      port: 80
-replicas:
-  min: 1
-  max: 3
+workload:
+  containers:
+    main:
+      image: nginx:latest
+  service:
+    ports:
+      http:
+        port: 80
+  replicas:
+    min: 1
+    max: 3
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("simple service YAML should parse successfully");
 
-        assert_eq!(spec.containers.len(), 1);
-        assert_eq!(spec.containers["main"].image, "nginx:latest");
-        assert_eq!(spec.replicas.min, 1);
-        assert_eq!(spec.replicas.max, Some(3));
+        assert_eq!(spec.workload.containers.len(), 1);
+        assert_eq!(spec.workload.containers["main"].image, "nginx:latest");
+        assert_eq!(spec.workload.replicas.min, 1);
+        assert_eq!(spec.workload.replicas.max, Some(3));
 
-        let ports = spec.ports();
+        let ports = spec.workload.ports();
         assert_eq!(ports.get("http"), Some(&80));
     }
 
@@ -2093,43 +2118,44 @@ replicas:
     #[test]
     fn story_yaml_service_with_dependencies() {
         let yaml = r#"
-containers:
-  main:
-    image: my-api:v1.0
-    variables:
-      LOG_LEVEL: info
-resources:
-  curl-tester:
-    type: service
-    direction: inbound
-  google:
-    type: external-service
-    direction: outbound
-  cache:
-    type: service
-    direction: both
-service:
-  ports:
-    http:
-      port: 8080
+workload:
+  containers:
+    main:
+      image: my-api:v1.0
+      variables:
+        LOG_LEVEL: info
+  resources:
+    curl-tester:
+      type: service
+      direction: inbound
+    google:
+      type: external-service
+      direction: outbound
+    cache:
+      type: service
+      direction: both
+  service:
+    ports:
+      http:
+        port: 8080
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value)
             .expect("service with dependencies YAML should parse successfully");
 
         // Check dependencies
-        let deps = spec.dependencies("test");
+        let deps = spec.workload.dependencies("test");
         assert!(deps.iter().any(|r| r.name == "google"));
         assert!(deps.iter().any(|r| r.name == "cache"));
 
         // Check allowed callers
-        let callers = spec.allowed_callers("test");
+        let callers = spec.workload.allowed_callers("test");
         assert!(callers.iter().any(|r| r.name == "curl-tester"));
         assert!(callers.iter().any(|r| r.name == "cache"));
 
         // Check variables
         assert_eq!(
-            spec.containers["main"]
+            spec.workload.containers["main"]
                 .variables
                 .get("LOG_LEVEL")
                 .map(|v| v.as_str()),
@@ -2141,9 +2167,10 @@ service:
     #[test]
     fn story_yaml_canary_deployment() {
         let yaml = r#"
-containers:
-  main:
-    image: app:v2.0
+workload:
+  containers:
+    main:
+      image: app:v2.0
 deploy:
   strategy: canary
   canary:
@@ -2209,7 +2236,7 @@ deploy:
     #[test]
     fn test_primary_image() {
         let spec = sample_service_spec();
-        assert_eq!(spec.primary_image(), Some("nginx:latest"));
+        assert_eq!(spec.workload.primary_image(), Some("nginx:latest"));
     }
 
     #[test]
@@ -2217,7 +2244,7 @@ deploy:
         let mut containers = BTreeMap::new();
         containers.insert("worker".to_string(), simple_container());
 
-        let spec = LatticeServiceSpec {
+        let spec = WorkloadSpec {
             containers,
             ..Default::default()
         };
@@ -2394,18 +2421,19 @@ deploy:
     #[test]
     fn test_variables_support_templates() {
         let yaml = r#"
-containers:
-  main:
-    image: app:latest
-    variables:
-      DB_HOST: "${resources.postgres.host}"
-      DB_PORT: "${resources.postgres.port}"
-      STATIC: "plain-value"
+workload:
+  containers:
+    main:
+      image: app:latest
+      variables:
+        DB_HOST: "${resources.postgres.host}"
+        DB_PORT: "${resources.postgres.port}"
+        STATIC: "plain-value"
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value)
             .expect("template variables YAML should parse successfully");
-        let vars = &spec.containers["main"].variables;
+        let vars = &spec.workload.containers["main"].variables;
 
         assert!(vars["DB_HOST"].has_placeholders());
         assert!(vars["DB_PORT"].has_placeholders());
@@ -2416,20 +2444,21 @@ containers:
     #[test]
     fn test_file_content_supports_templates() {
         let yaml = r#"
-containers:
-  main:
-    image: app:latest
-    files:
-      /etc/config.yaml:
-        content: |
-          database:
-            host: ${resources.db.host}
-            port: ${resources.db.port}
+workload:
+  containers:
+    main:
+      image: app:latest
+      files:
+        /etc/config.yaml:
+          content: |
+            database:
+              host: ${resources.db.host}
+              port: ${resources.db.port}
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("file content YAML should parse successfully");
-        let file = &spec.containers["main"].files["/etc/config.yaml"];
+        let file = &spec.workload.containers["main"].files["/etc/config.yaml"];
 
         assert!(file
             .content
@@ -2442,17 +2471,18 @@ containers:
     #[test]
     fn test_volume_source_supports_templates() {
         let yaml = r#"
-containers:
-  main:
-    image: app:latest
-    volumes:
-      /data:
-        source: "${resources.volume.name}"
+workload:
+  containers:
+    main:
+      image: app:latest
+      volumes:
+        /data:
+          source: "${resources.volume.name}"
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("volume source YAML should parse successfully");
-        let volume = &spec.containers["main"].volumes["/data"];
+        let volume = &spec.workload.containers["main"].volumes["/data"];
 
         assert!(volume.source.as_ref().unwrap().has_placeholders());
     }
@@ -2466,18 +2496,19 @@ containers:
     fn test_probe_with_timing_parameters() {
         // Score-compliant probe: only httpGet, no timing fields
         let yaml = r#"
-containers:
-  main:
-    image: app:latest
-    livenessProbe:
-      httpGet:
-        path: /healthz
-        port: 8080
+workload:
+  containers:
+    main:
+      image: app:latest
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("probe YAML should parse successfully");
-        let probe = spec.containers["main"]
+        let probe = spec.workload.containers["main"]
             .liveness_probe
             .as_ref()
             .expect("liveness probe should be present");
@@ -2494,23 +2525,24 @@ containers:
     #[test]
     fn test_http_probe_full() {
         let yaml = r#"
-containers:
-  main:
-    image: app:latest
-    readinessProbe:
-      httpGet:
-        path: /ready
-        port: 8080
-        scheme: HTTPS
-        host: localhost
-        httpHeaders:
-          - name: X-Custom-Header
-            value: test-value
+workload:
+  containers:
+    main:
+      image: app:latest
+      readinessProbe:
+        httpGet:
+          path: /ready
+          port: 8080
+          scheme: HTTPS
+          host: localhost
+          httpHeaders:
+            - name: X-Custom-Header
+              value: test-value
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("probe YAML should parse successfully");
-        let probe = spec.containers["main"]
+        let probe = spec.workload.containers["main"]
             .readiness_probe
             .as_ref()
             .expect("readiness probe should be present");
@@ -2530,19 +2562,20 @@ containers:
     #[test]
     fn test_exec_probe() {
         let yaml = r#"
-containers:
-  main:
-    image: app:latest
-    livenessProbe:
-      exec:
-        command:
-          - cat
-          - /tmp/healthy
+workload:
+  containers:
+    main:
+      image: app:latest
+      livenessProbe:
+        exec:
+          command:
+            - cat
+            - /tmp/healthy
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("exec probe YAML should parse successfully");
-        let probe = spec.containers["main"]
+        let probe = spec.workload.containers["main"]
             .liveness_probe
             .as_ref()
             .expect("liveness probe should be present");
@@ -2558,23 +2591,24 @@ containers:
     #[test]
     fn test_image_dot_placeholder_yaml() {
         let yaml = r#"
-containers:
-  main:
-    image: "."
+workload:
+  containers:
+    main:
+      image: "."
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value)
             .expect("image dot placeholder YAML should parse successfully");
-        assert_eq!(spec.containers["main"].image, ".");
-        assert!(spec.validate().is_ok());
+        assert_eq!(spec.workload.containers["main"].image, ".");
+        assert!(spec.workload.validate().is_ok());
     }
 
     // =========================================================================
     // Volume Ownership Tests
     // =========================================================================
 
-    fn service_with_owned_volume(id: &str, size: &str) -> LatticeServiceSpec {
-        let mut spec = sample_service_spec();
+    fn workload_with_owned_volume(id: &str, size: &str) -> WorkloadSpec {
+        let mut spec = sample_service_spec().workload;
         spec.resources.insert(
             "data".to_string(),
             ResourceSpec {
@@ -2595,8 +2629,8 @@ containers:
         spec
     }
 
-    fn service_with_volume_reference(id: &str) -> LatticeServiceSpec {
-        let mut spec = sample_service_spec();
+    fn workload_with_volume_reference(id: &str) -> WorkloadSpec {
+        let mut spec = sample_service_spec().workload;
         spec.resources.insert(
             "data".to_string(),
             ResourceSpec {
@@ -2616,7 +2650,7 @@ containers:
 
     #[test]
     fn test_volume_owner_detection() {
-        let spec = service_with_owned_volume("shared-data", "10Gi");
+        let spec = workload_with_owned_volume("shared-data", "10Gi");
         let owned = spec.owned_volume_ids();
         assert_eq!(owned.len(), 1);
         assert_eq!(owned[0], ("data", "shared-data"));
@@ -2624,7 +2658,7 @@ containers:
 
     #[test]
     fn test_volume_reference_detection() {
-        let spec = service_with_volume_reference("shared-data");
+        let spec = workload_with_volume_reference("shared-data");
         let refs = spec.referenced_volume_ids();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0], ("data", "shared-data"));
@@ -2638,29 +2672,34 @@ containers:
     #[test]
     fn test_score_compatible_volume_params() {
         let yaml = r#"
-containers:
-  main:
-    image: jellyfin/jellyfin:latest
-resources:
-  config:
-    type: volume
-    params:
-      size: 10Gi
-      storageClass: local-path
-  media:
-    type: volume
-    id: media-library
-    params:
-      size: 1Ti
-      storageClass: local-path
-      accessMode: ReadWriteOnce
+workload:
+  containers:
+    main:
+      image: jellyfin/jellyfin:latest
+  resources:
+    config:
+      type: volume
+      params:
+        size: 10Gi
+        storageClass: local-path
+    media:
+      type: volume
+      id: media-library
+      params:
+        size: 1Ti
+        storageClass: local-path
+        accessMode: ReadWriteOnce
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Score-compatible YAML should parse");
 
         // Verify config volume
-        let config = spec.resources.get("config").expect("config should exist");
+        let config = spec
+            .workload
+            .resources
+            .get("config")
+            .expect("config should exist");
         assert!(config.is_volume_owner());
         let config_params = config
             .volume_params()
@@ -2670,7 +2709,11 @@ resources:
         assert_eq!(config_params.storage_class, Some("local-path".to_string()));
 
         // Verify media volume with id
-        let media = spec.resources.get("media").expect("media should exist");
+        let media = spec
+            .workload
+            .resources
+            .get("media")
+            .expect("media should exist");
         assert!(media.is_volume_owner());
         assert_eq!(media.id, Some("media-library".to_string()));
         let media_params = media
@@ -2688,19 +2731,24 @@ resources:
     #[test]
     fn test_score_compatible_volume_reference() {
         let yaml = r#"
-containers:
-  main:
-    image: sonarr:latest
-resources:
-  media:
-    type: volume
-    id: media-library
+workload:
+  containers:
+    main:
+      image: sonarr:latest
+  resources:
+    media:
+      type: volume
+      id: media-library
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Volume reference YAML should parse");
 
-        let media = spec.resources.get("media").expect("media should exist");
+        let media = spec
+            .workload
+            .resources
+            .get("media")
+            .expect("media should exist");
         assert!(!media.is_volume_owner()); // No params means not an owner
         assert!(media.is_volume_reference()); // Has id but no size
         assert_eq!(media.id, Some("media-library".to_string()));
@@ -2710,38 +2758,47 @@ resources:
     #[test]
     fn test_lattice_bilateral_agreement_extensions() {
         let yaml = r#"
-containers:
-  main:
-    image: jellyfin/jellyfin:latest
-resources:
-  sonarr:
-    type: service
-    direction: inbound
-    inbound: {}
-  nzbget:
-    type: service
-    direction: outbound
-    outbound:
-      retries:
-        attempts: 3
-        perTryTimeout: 5s
-        retryOn:
-          - 5xx
-          - connect-failure
-      timeout:
-        request: 30s
+workload:
+  containers:
+    main:
+      image: jellyfin/jellyfin:latest
+  resources:
+    sonarr:
+      type: service
+      direction: inbound
+      inbound: {}
+    nzbget:
+      type: service
+      direction: outbound
+      outbound:
+        retries:
+          attempts: 3
+          perTryTimeout: 5s
+          retryOn:
+            - 5xx
+            - connect-failure
+        timeout:
+          request: 30s
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Bilateral agreement YAML should parse");
 
         // Verify inbound policy
-        let sonarr = spec.resources.get("sonarr").expect("sonarr should exist");
+        let sonarr = spec
+            .workload
+            .resources
+            .get("sonarr")
+            .expect("sonarr should exist");
         assert_eq!(sonarr.direction, DependencyDirection::Inbound);
         assert!(sonarr.inbound.is_some());
 
         // Verify outbound policy
-        let nzbget = spec.resources.get("nzbget").expect("nzbget should exist");
+        let nzbget = spec
+            .workload
+            .resources
+            .get("nzbget")
+            .expect("nzbget should exist");
         assert_eq!(nzbget.direction, DependencyDirection::Outbound);
         let outbound = nzbget
             .outbound
@@ -2759,49 +2816,52 @@ resources:
     #[test]
     fn test_media_server_style_spec() {
         let yaml = r#"
-containers:
-  main:
-    image: jellyfin/jellyfin:latest
-    variables:
-      JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"
-    volumes:
-      /config:
-        source: ${resources.config}
-      /media:
-        source: ${resources.media}
-    resources:
-      requests:
-        cpu: 500m
-        memory: 1Gi
-      limits:
-        cpu: 4000m
-        memory: 8Gi
-    readinessProbe:
-      httpGet:
-        path: /health
+workload:
+  containers:
+    main:
+      image: jellyfin/jellyfin:latest
+      variables:
+        JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"
+      volumes:
+        /config:
+          source: ${resources.config}
+        /media:
+          source: ${resources.media}
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          cpu: 4000m
+          memory: 8Gi
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8096
+        initialDelaySeconds: 30
+  service:
+    ports:
+      http:
         port: 8096
-      initialDelaySeconds: 30
-service:
-  ports:
-    http:
-      port: 8096
-      protocol: TCP
-resources:
-  config:
-    type: volume
-    params:
-      size: 10Gi
-      storageClass: local-path
-  media:
-    type: volume
-    id: media-library
-    params:
-      size: 1Ti
-      storageClass: local-path
-      accessMode: ReadWriteOnce
-  sonarr:
-    type: service
-    direction: inbound
+        protocol: TCP
+  resources:
+    config:
+      type: volume
+      params:
+        size: 10Gi
+        storageClass: local-path
+    media:
+      type: volume
+      id: media-library
+      params:
+        size: 1Ti
+        storageClass: local-path
+        accessMode: ReadWriteOnce
+    sonarr:
+      type: service
+      direction: inbound
+  replicas:
+    min: 1
 ingress:
   hosts:
     - jellyfin.home.local
@@ -2809,34 +2869,42 @@ ingress:
     mode: auto
     issuerRef:
       name: letsencrypt-prod
-replicas:
-  min: 1
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Media server YAML should parse");
 
         // Verify containers
-        assert_eq!(spec.containers.len(), 1);
-        let main = spec.containers.get("main").expect("main container");
+        assert_eq!(spec.workload.containers.len(), 1);
+        let main = spec
+            .workload
+            .containers
+            .get("main")
+            .expect("main container");
         assert_eq!(main.image, "jellyfin/jellyfin:latest");
         assert!(!main.volumes.is_empty());
 
         // Verify resources
-        assert_eq!(spec.resources.len(), 3);
+        assert_eq!(spec.workload.resources.len(), 3);
         assert!(spec
+            .workload
             .resources
             .get("config")
             .expect("config")
             .is_volume_owner());
         assert!(spec
+            .workload
             .resources
             .get("media")
             .expect("media")
             .is_volume_owner());
 
         // Verify service
-        let service = spec.service.as_ref().expect("service should exist");
+        let service = spec
+            .workload
+            .service
+            .as_ref()
+            .expect("service should exist");
         assert!(service.ports.contains_key("http"));
 
         // Verify ingress
@@ -2844,7 +2912,7 @@ replicas:
         assert_eq!(ingress.hosts, vec!["jellyfin.home.local"]);
 
         // Validate the spec
-        spec.validate().expect("spec should be valid");
+        spec.workload.validate().expect("spec should be valid");
     }
 
     // =========================================================================
@@ -2966,21 +3034,23 @@ replicas:
     #[test]
     fn test_custom_type_in_yaml_spec() {
         let yaml = r#"
-containers:
-  main:
-    image: myapp:latest
-resources:
-  my-postgres:
-    type: postgres
-    params:
-      size: 10Gi
-      version: "15"
+workload:
+  containers:
+    main:
+      image: myapp:latest
+  resources:
+    my-postgres:
+      type: postgres
+      params:
+        size: 10Gi
+        version: "15"
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Custom resource type in YAML should parse");
 
         let resource = spec
+            .workload
             .resources
             .get("my-postgres")
             .expect("my-postgres should exist");
@@ -2995,22 +3065,27 @@ resources:
     #[test]
     fn test_model_params_from_yaml() {
         let yaml = r#"
-containers:
-  main:
-    image: vllm/vllm-openai:latest
-resources:
-  llm:
-    type: model
-    params:
-      uri: "huggingface://meta-llama/Llama-3.3-70B-Instruct"
-      revision: main
-      size: "140Gi"
+workload:
+  containers:
+    main:
+      image: vllm/vllm-openai:latest
+  resources:
+    llm:
+      type: model
+      params:
+        uri: "huggingface://meta-llama/Llama-3.3-70B-Instruct"
+        revision: main
+        size: "140Gi"
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("model resource should parse");
 
-        let resource = spec.resources.get("llm").expect("llm should exist");
+        let resource = spec
+            .workload
+            .resources
+            .get("llm")
+            .expect("llm should exist");
         assert!(resource.type_.is_model());
         assert!(resource.type_.is_volume_like());
 
@@ -3078,24 +3153,25 @@ resources:
     #[test]
     fn story_security_context_parses() {
         let yaml = r#"
-containers:
-  main:
-    image: myapp:latest
-    security:
-      capabilities: [NET_ADMIN, SYS_MODULE]
-      dropCapabilities: [ALL]
-      privileged: false
-      readOnlyRootFilesystem: true
-      runAsNonRoot: true
-      runAsUser: 1000
-      runAsGroup: 1000
-      allowPrivilegeEscalation: false
+workload:
+  containers:
+    main:
+      image: myapp:latest
+      security:
+        capabilities: [NET_ADMIN, SYS_MODULE]
+        dropCapabilities: [ALL]
+        privileged: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        allowPrivilegeEscalation: false
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Security context YAML should parse");
 
-        let security = spec.containers["main"]
+        let security = spec.workload.containers["main"]
             .security
             .as_ref()
             .expect("security should be present");
@@ -3113,17 +3189,18 @@ containers:
     #[test]
     fn story_security_context_minimal() {
         let yaml = r#"
-containers:
-  main:
-    image: myapp:latest
-    security:
-      capabilities: [NET_BIND_SERVICE]
+workload:
+  containers:
+    main:
+      image: myapp:latest
+      security:
+        capabilities: [NET_BIND_SERVICE]
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Minimal security context should parse");
 
-        let security = spec.containers["main"]
+        let security = spec.workload.containers["main"]
             .security
             .as_ref()
             .expect("security should be present");
@@ -3140,30 +3217,35 @@ containers:
     #[test]
     fn story_sidecars_parse_with_init_flag() {
         let yaml = r#"
-containers:
-  main:
-    image: myapp:latest
-sidecars:
-  setup:
-    image: busybox:latest
-    init: true
-    command: ["sh", "-c"]
-    args: ["chown -R 1000:1000 /data"]
-    security:
-      runAsUser: 0
-  vpn:
-    image: wireguard:latest
-    init: false
-    security:
-      capabilities: [NET_ADMIN]
+workload:
+  containers:
+    main:
+      image: myapp:latest
+  sidecars:
+    setup:
+      image: busybox:latest
+      init: true
+      command: ["sh", "-c"]
+      args: ["chown -R 1000:1000 /data"]
+      security:
+        runAsUser: 0
+    vpn:
+      image: wireguard:latest
+      init: false
+      security:
+        capabilities: [NET_ADMIN]
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Sidecar YAML should parse");
 
-        assert_eq!(spec.sidecars.len(), 2);
+        assert_eq!(spec.workload.sidecars.len(), 2);
 
-        let setup = spec.sidecars.get("setup").expect("setup should exist");
+        let setup = spec
+            .workload
+            .sidecars
+            .get("setup")
+            .expect("setup should exist");
         assert_eq!(setup.image, "busybox:latest");
         assert_eq!(setup.init, Some(true));
         assert_eq!(
@@ -3171,7 +3253,7 @@ sidecars:
             Some(Some(0))
         );
 
-        let vpn = spec.sidecars.get("vpn").expect("vpn should exist");
+        let vpn = spec.workload.sidecars.get("vpn").expect("vpn should exist");
         assert_eq!(vpn.image, "wireguard:latest");
         assert_eq!(vpn.init, Some(false));
         assert_eq!(
@@ -3184,30 +3266,35 @@ sidecars:
     #[test]
     fn story_sidecar_full_spec() {
         let yaml = r#"
-containers:
-  main:
-    image: myapp:latest
-sidecars:
-  logging:
-    image: fluent-bit:latest
-    command: ["/fluent-bit/bin/fluent-bit"]
-    args: ["-c", "/config/fluent-bit.conf"]
-    variables:
-      LOG_LEVEL: info
-    resources:
-      requests:
-        cpu: 50m
-        memory: 64Mi
-    readinessProbe:
-      httpGet:
-        path: /health
-        port: 2020
+workload:
+  containers:
+    main:
+      image: myapp:latest
+  sidecars:
+    logging:
+      image: fluent-bit:latest
+      command: ["/fluent-bit/bin/fluent-bit"]
+      args: ["-c", "/config/fluent-bit.conf"]
+      variables:
+        LOG_LEVEL: info
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 2020
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Full sidecar spec should parse");
 
-        let logging = spec.sidecars.get("logging").expect("logging should exist");
+        let logging = spec
+            .workload
+            .sidecars
+            .get("logging")
+            .expect("logging should exist");
         assert_eq!(logging.image, "fluent-bit:latest");
         assert!(logging.command.is_some());
         assert!(logging.args.is_some());
@@ -3224,67 +3311,76 @@ sidecars:
     #[test]
     fn story_pod_level_settings_parse() {
         let yaml = r#"
-containers:
-  main:
-    image: myapp:latest
-sysctls:
-  net.ipv4.conf.all.src_valid_mark: "1"
-  net.core.somaxconn: "65535"
-hostNetwork: true
-shareProcessNamespace: true
+workload:
+  containers:
+    main:
+      image: myapp:latest
+  sysctls:
+    net.ipv4.conf.all.src_valid_mark: "1"
+    net.core.somaxconn: "65535"
+  hostNetwork: true
+  shareProcessNamespace: true
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Pod-level settings should parse");
 
-        assert_eq!(spec.sysctls.len(), 2);
+        assert_eq!(spec.workload.sysctls.len(), 2);
         assert_eq!(
-            spec.sysctls.get("net.ipv4.conf.all.src_valid_mark"),
+            spec.workload
+                .sysctls
+                .get("net.ipv4.conf.all.src_valid_mark"),
             Some(&"1".to_string())
         );
         assert_eq!(
-            spec.sysctls.get("net.core.somaxconn"),
+            spec.workload.sysctls.get("net.core.somaxconn"),
             Some(&"65535".to_string())
         );
-        assert_eq!(spec.host_network, Some(true));
-        assert_eq!(spec.share_process_namespace, Some(true));
+        assert_eq!(spec.workload.host_network, Some(true));
+        assert_eq!(spec.workload.share_process_namespace, Some(true));
     }
 
     /// Story: VPN killswitch example parses (full nzbget spec)
     #[test]
     fn story_vpn_killswitch_example() {
         let yaml = r#"
-containers:
-  main:
-    image: linuxserver/nzbget:latest
-    variables:
-      PUID: "1000"
-sysctls:
-  net.ipv4.conf.all.src_valid_mark: "1"
-sidecars:
-  vpn:
-    image: linuxserver/wireguard:latest
-    security:
-      capabilities: [NET_ADMIN, SYS_MODULE]
-service:
-  ports:
-    http:
-      port: 6789
+workload:
+  containers:
+    main:
+      image: linuxserver/nzbget:latest
+      variables:
+        PUID: "1000"
+  sysctls:
+    net.ipv4.conf.all.src_valid_mark: "1"
+  sidecars:
+    vpn:
+      image: linuxserver/wireguard:latest
+      security:
+        capabilities: [NET_ADMIN, SYS_MODULE]
+  service:
+    ports:
+      http:
+        port: 6789
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("VPN killswitch example should parse");
 
         // Verify main container
-        assert!(spec.containers.contains_key("main"));
+        assert!(spec.workload.containers.contains_key("main"));
 
         // Verify sysctl
         assert!(spec
+            .workload
             .sysctls
             .contains_key("net.ipv4.conf.all.src_valid_mark"));
 
         // Verify VPN sidecar
-        let vpn = spec.sidecars.get("vpn").expect("vpn sidecar should exist");
+        let vpn = spec
+            .workload
+            .sidecars
+            .get("vpn")
+            .expect("vpn sidecar should exist");
         let caps = &vpn
             .security
             .as_ref()
@@ -3298,18 +3394,19 @@ service:
     #[test]
     fn story_empty_sidecars_and_sysctls() {
         let yaml = r#"
-containers:
-  main:
-    image: myapp:latest
+workload:
+  containers:
+    main:
+      image: myapp:latest
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("Spec without sidecars should parse");
 
-        assert!(spec.sidecars.is_empty());
-        assert!(spec.sysctls.is_empty());
-        assert!(spec.host_network.is_none());
-        assert!(spec.share_process_namespace.is_none());
+        assert!(spec.workload.sidecars.is_empty());
+        assert!(spec.workload.sysctls.is_empty());
+        assert!(spec.workload.host_network.is_none());
+        assert!(spec.workload.share_process_namespace.is_none());
     }
 
     // =========================================================================
@@ -3319,31 +3416,32 @@ containers:
     #[test]
     fn test_service_backup_spec_roundtrip() {
         let yaml = r#"
-containers:
-  main:
-    image: postgres:16
-backup:
-  hooks:
-    pre:
-      - name: freeze-db
-        container: main
-        command: ["/bin/sh", "-c", "pg_dump -U postgres mydb -Fc -f /backup/dump.sql"]
-        timeout: "600s"
-        onError: Fail
-    post:
-      - name: cleanup
-        container: main
-        command: ["/bin/sh", "-c", "rm -f /backup/dump.sql"]
-  volumes:
-    include: [data, wal]
-    exclude: [tmp]
-    defaultPolicy: opt-in
+workload:
+  containers:
+    main:
+      image: postgres:16
+  backup:
+    hooks:
+      pre:
+        - name: freeze-db
+          container: main
+          command: ["/bin/sh", "-c", "pg_dump -U postgres mydb -Fc -f /backup/dump.sql"]
+          timeout: "600s"
+          onError: Fail
+      post:
+        - name: cleanup
+          container: main
+          command: ["/bin/sh", "-c", "rm -f /backup/dump.sql"]
+    volumes:
+      include: [data, wal]
+      exclude: [tmp]
+      defaultPolicy: opt-in
 "#;
 
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("should parse spec with backup");
-        let backup = spec.backup.expect("should have backup spec");
+        let backup = spec.workload.backup.expect("should have backup spec");
 
         let hooks = backup.hooks.expect("should have hooks");
         assert_eq!(hooks.pre.len(), 1);
@@ -3364,20 +3462,21 @@ backup:
     #[test]
     fn test_service_backup_defaults() {
         let yaml = r#"
-containers:
-  main:
-    image: nginx:latest
-backup:
-  hooks:
-    pre:
-      - name: sync
-        container: main
-        command: ["/bin/sh", "-c", "sync"]
+workload:
+  containers:
+    main:
+      image: nginx:latest
+  backup:
+    hooks:
+      pre:
+        - name: sync
+          container: main
+          command: ["/bin/sh", "-c", "sync"]
 "#;
 
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("should parse spec");
-        let backup = spec.backup.expect("should have backup");
+        let backup = spec.workload.backup.expect("should have backup");
         let hooks = backup.hooks.expect("should have hooks");
 
         // Default onError is Continue
@@ -3392,14 +3491,15 @@ backup:
     #[test]
     fn test_service_without_backup() {
         let yaml = r#"
-containers:
-  main:
-    image: nginx:latest
+workload:
+  containers:
+    main:
+      image: nginx:latest
 "#;
 
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("should parse spec");
-        assert!(spec.backup.is_none());
+        assert!(spec.workload.backup.is_none());
     }
 
     #[test]
@@ -3605,20 +3705,21 @@ containers:
     #[test]
     fn gpu_yaml_roundtrip() {
         let yaml = r#"
-containers:
-  main:
-    image: vllm/vllm:latest
-gpu:
-  count: 1
-  memory: 8Gi
-  compute: 20
-  model: L4
+workload:
+  containers:
+    main:
+      image: vllm/vllm:latest
+  gpu:
+    count: 1
+    memory: 8Gi
+    compute: 20
+    model: L4
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
             serde_json::from_value(value).expect("GPU YAML should parse");
 
-        let gpu = spec.gpu.expect("should have gpu");
+        let gpu = spec.workload.gpu.expect("should have gpu");
         assert_eq!(gpu.count, 1);
         assert_eq!(gpu.memory, Some("8Gi".to_string()));
         assert_eq!(gpu.compute, Some(20));
@@ -3629,42 +3730,44 @@ gpu:
     #[test]
     fn gpu_tolerations_default_true() {
         let yaml = r#"
-containers:
-  main:
-    image: myapp:latest
-gpu:
-  count: 2
+workload:
+  containers:
+    main:
+      image: myapp:latest
+  gpu:
+    count: 2
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("parse");
-        let gpu = spec.gpu.expect("should have gpu");
+        let gpu = spec.workload.gpu.expect("should have gpu");
         assert!(gpu.tolerations);
     }
 
     #[test]
     fn gpu_tolerations_explicit_false() {
         let yaml = r#"
-containers:
-  main:
-    image: myapp:latest
-gpu:
-  count: 1
-  tolerations: false
+workload:
+  containers:
+    main:
+      image: myapp:latest
+  gpu:
+    count: 1
+    tolerations: false
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("parse");
-        let gpu = spec.gpu.expect("should have gpu");
+        let gpu = spec.workload.gpu.expect("should have gpu");
         assert!(!gpu.tolerations);
     }
 
     #[test]
     fn gpu_validation_wired_into_spec() {
         let mut spec = sample_service_spec();
-        spec.gpu = Some(GPUSpec {
+        spec.workload.gpu = Some(GPUSpec {
             count: 0,
             ..Default::default()
         });
-        assert!(spec.validate().is_err());
+        assert!(spec.workload.validate().is_err());
     }
 
     // =========================================================================
@@ -3674,12 +3777,12 @@ gpu:
     #[test]
     fn autoscaling_target_zero_fails() {
         let mut spec = sample_service_spec();
-        spec.replicas.max = Some(10);
-        spec.replicas.autoscaling = vec![AutoscalingMetric {
+        spec.workload.replicas.max = Some(10);
+        spec.workload.replicas.autoscaling = vec![AutoscalingMetric {
             metric: "cpu".to_string(),
             target: 0,
         }];
-        let result = spec.validate();
+        let result = spec.workload.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("greater than 0"));
     }
@@ -3687,12 +3790,12 @@ gpu:
     #[test]
     fn autoscaling_cpu_over_100_fails() {
         let mut spec = sample_service_spec();
-        spec.replicas.max = Some(10);
-        spec.replicas.autoscaling = vec![AutoscalingMetric {
+        spec.workload.replicas.max = Some(10);
+        spec.workload.replicas.autoscaling = vec![AutoscalingMetric {
             metric: "cpu".to_string(),
             target: 120,
         }];
-        let result = spec.validate();
+        let result = spec.workload.validate();
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -3703,22 +3806,22 @@ gpu:
     #[test]
     fn autoscaling_memory_over_100_fails() {
         let mut spec = sample_service_spec();
-        spec.replicas.max = Some(10);
-        spec.replicas.autoscaling = vec![AutoscalingMetric {
+        spec.workload.replicas.max = Some(10);
+        spec.workload.replicas.autoscaling = vec![AutoscalingMetric {
             metric: "memory".to_string(),
             target: 150,
         }];
-        assert!(spec.validate().is_err());
+        assert!(spec.workload.validate().is_err());
     }
 
     #[test]
     fn autoscaling_without_max_fails() {
         let mut spec = sample_service_spec();
-        spec.replicas.autoscaling = vec![AutoscalingMetric {
+        spec.workload.replicas.autoscaling = vec![AutoscalingMetric {
             metric: "cpu".to_string(),
             target: 80,
         }];
-        let result = spec.validate();
+        let result = spec.workload.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("max replicas"));
     }
@@ -3726,12 +3829,12 @@ gpu:
     #[test]
     fn autoscaling_custom_metric_over_100_allowed() {
         let mut spec = sample_service_spec();
-        spec.replicas.max = Some(10);
-        spec.replicas.autoscaling = vec![AutoscalingMetric {
+        spec.workload.replicas.max = Some(10);
+        spec.workload.replicas.autoscaling = vec![AutoscalingMetric {
             metric: "vllm_num_requests_waiting".to_string(),
             target: 200,
         }];
-        assert!(spec.validate().is_ok());
+        assert!(spec.workload.validate().is_ok());
     }
 
     // =========================================================================
@@ -3763,16 +3866,23 @@ gpu:
         );
 
         let spec = LatticeServiceSpec {
-            containers: {
-                let mut c = BTreeMap::new();
-                c.insert("main".to_string(), simple_container());
-                c
+            workload: WorkloadSpec {
+                containers: {
+                    let mut c = BTreeMap::new();
+                    c.insert("main".to_string(), simple_container());
+                    c
+                },
+                resources,
+                ..Default::default()
             },
-            resources,
             ..Default::default()
         };
 
-        let db = spec.resources.get("db-creds").expect("db-creds resource");
+        let db = spec
+            .workload
+            .resources
+            .get("db-creds")
+            .expect("db-creds resource");
         assert!(matches!(db.type_, ResourceType::Secret));
         assert_eq!(db.id, Some("path/to/db".to_string()));
 
@@ -3799,18 +3909,21 @@ gpu:
         );
 
         let spec = LatticeServiceSpec {
-            containers: {
-                let mut c = BTreeMap::new();
-                c.insert("main".to_string(), simple_container());
-                c
+            workload: WorkloadSpec {
+                containers: {
+                    let mut c = BTreeMap::new();
+                    c.insert("main".to_string(), simple_container());
+                    c
+                },
+                resources,
+                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                ..Default::default()
             },
-            resources,
-            image_pull_secrets: vec!["ghcr-creds".to_string()],
             ..Default::default()
         };
 
-        assert_eq!(spec.image_pull_secrets, vec!["ghcr-creds"]);
-        assert!(spec.resources.contains_key("ghcr-creds"));
+        assert_eq!(spec.workload.image_pull_secrets, vec!["ghcr-creds"]);
+        assert!(spec.workload.resources.contains_key("ghcr-creds"));
     }
 
     #[test]
@@ -3856,19 +3969,26 @@ gpu:
         );
 
         let spec = LatticeServiceSpec {
-            containers: {
-                let mut c = BTreeMap::new();
-                c.insert("main".to_string(), container);
-                c
+            workload: WorkloadSpec {
+                containers: {
+                    let mut c = BTreeMap::new();
+                    c.insert("main".to_string(), container);
+                    c
+                },
+                resources,
+                ..Default::default()
             },
-            resources,
             ..Default::default()
         };
 
-        let main = spec.containers.get("main").expect("main container");
+        let main = spec
+            .workload
+            .containers
+            .get("main")
+            .expect("main container");
         assert!(main.variables.contains_key("DB_PASSWORD"));
         assert!(main.variables.contains_key("DATABASE_URL"));
         assert!(main.files.contains_key("/etc/app/config.yaml"));
-        assert!(spec.resources.contains_key("db-creds"));
+        assert!(spec.workload.resources.contains_key("db-creds"));
     }
 }

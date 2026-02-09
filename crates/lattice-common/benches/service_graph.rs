@@ -12,7 +12,7 @@ use rand::prelude::*;
 
 use lattice_common::crd::{
     ContainerSpec, DependencyDirection, LatticeServiceSpec, PortSpec, ResourceSpec, ResourceType,
-    ServicePortsSpec,
+    ServicePortsSpec, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 
@@ -76,9 +76,12 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
     );
 
     LatticeServiceSpec {
-        containers,
-        resources,
-        service: Some(ServicePortsSpec { ports }),
+        workload: WorkloadSpec {
+            containers,
+            resources,
+            service: Some(ServicePortsSpec { ports }),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

@@ -57,7 +57,7 @@ pub struct ServiceNode {
 impl ServiceNode {
     /// Create a new local service node from a LatticeService spec
     pub fn from_service_spec(namespace: &str, name: &str, spec: &LatticeServiceSpec) -> Self {
-        let caller_refs = spec.allowed_callers(namespace);
+        let caller_refs = spec.workload.allowed_callers(namespace);
         let allows_all = caller_refs.iter().any(|r| r.name == "*");
 
         // When allows_all is true, the explicit caller list is irrelevant
@@ -71,6 +71,7 @@ impl ServiceNode {
         };
 
         let dependencies: Vec<QualifiedName> = spec
+            .workload
             .dependencies(namespace)
             .into_iter()
             .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
@@ -83,8 +84,9 @@ impl ServiceNode {
             dependencies,
             allowed_callers,
             allows_all,
-            image: spec.primary_image().map(String::from),
+            image: spec.workload.primary_image().map(String::from),
             ports: spec
+                .workload
                 .ports()
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
@@ -505,7 +507,7 @@ mod tests {
     fn make_service_spec(deps: Vec<&str>, callers: Vec<&str>) -> LatticeServiceSpec {
         use crate::crd::{
             ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
-            ServicePortsSpec,
+            ServicePortsSpec, WorkloadSpec,
         };
 
         let mut containers = BTreeMap::new();
@@ -562,9 +564,12 @@ mod tests {
         );
 
         LatticeServiceSpec {
-            containers,
-            resources,
-            service: Some(ServicePortsSpec { ports }),
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                service: Some(ServicePortsSpec { ports }),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -597,7 +602,7 @@ mod tests {
     fn test_cross_namespace_dependency() {
         use crate::crd::{
             ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
-            ServicePortsSpec,
+            ServicePortsSpec, WorkloadSpec,
         };
 
         let graph = ServiceGraph::new();
@@ -629,18 +634,21 @@ mod tests {
         );
 
         let frontend_spec = LatticeServiceSpec {
-            containers,
-            resources,
-            service: Some(ServicePortsSpec {
-                ports: BTreeMap::from([(
-                    "http".to_string(),
-                    PortSpec {
-                        port: 80,
-                        target_port: None,
-                        protocol: None,
-                    },
-                )]),
-            }),
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                service: Some(ServicePortsSpec {
+                    ports: BTreeMap::from([(
+                        "http".to_string(),
+                        PortSpec {
+                            port: 80,
+                            target_port: None,
+                            protocol: None,
+                        },
+                    )]),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -804,7 +812,7 @@ mod tests {
     fn test_wildcard_cross_namespace() {
         use crate::crd::{
             ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
-            ServicePortsSpec,
+            ServicePortsSpec, WorkloadSpec,
         };
 
         let graph = ServiceGraph::new();
@@ -840,18 +848,21 @@ mod tests {
         );
 
         let frontend_spec = LatticeServiceSpec {
-            containers,
-            resources,
-            service: Some(ServicePortsSpec {
-                ports: BTreeMap::from([(
-                    "http".to_string(),
-                    PortSpec {
-                        port: 80,
-                        target_port: None,
-                        protocol: None,
-                    },
-                )]),
-            }),
+            workload: WorkloadSpec {
+                containers,
+                resources,
+                service: Some(ServicePortsSpec {
+                    ports: BTreeMap::from([(
+                        "http".to_string(),
+                        PortSpec {
+                            port: 80,
+                            target_port: None,
+                            protocol: None,
+                        },
+                    )]),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
 

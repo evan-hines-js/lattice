@@ -693,7 +693,7 @@ pub async fn start_secrets_tests_async(
 fn add_secret_env_vars(mut service: LatticeService, vars: &[(&str, &str)]) -> LatticeService {
     use lattice_common::template::TemplateString;
 
-    if let Some(container) = service.spec.containers.get_mut("main") {
+    if let Some(container) = service.spec.workload.containers.get_mut("main") {
         for (name, value) in vars {
             container
                 .variables
