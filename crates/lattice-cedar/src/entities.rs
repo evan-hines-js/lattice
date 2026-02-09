@@ -165,6 +165,34 @@ pub fn build_secret_path_entity(provider: &str, remote_key: &str) -> Result<Enti
 }
 
 // =============================================================================
+// SecurityOverride Entity (for security override authorization)
+// =============================================================================
+
+/// Build a security override entity for security override authorization
+///
+/// UID: `Lattice::SecurityOverride::"override_id"` — e.g. `"capability:NET_ADMIN"`, `"privileged"`
+///
+/// Attributes:
+/// - `category`: override category (e.g. "capability", "pod", "container", "profile")
+/// - `override_id`: the full override identifier
+pub fn build_security_override_entity(override_id: &str, category: &str) -> Result<Entity> {
+    let uid = build_entity_uid("SecurityOverride", override_id)?;
+
+    let mut attrs = HashMap::new();
+    attrs.insert(
+        "category".to_string(),
+        RestrictedExpression::new_string(category.to_string()),
+    );
+    attrs.insert(
+        "override_id".to_string(),
+        RestrictedExpression::new_string(override_id.to_string()),
+    );
+
+    Entity::new(uid, attrs, HashSet::new())
+        .map_err(|e| Error::Internal(format!("Failed to create security override entity: {}", e)))
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -179,9 +207,11 @@ mod tests {
             ("Group", "admins"),
             ("Action", "AccessCluster"),
             ("Action", "AccessSecret"),
+            ("Action", "OverrideSecurity"),
             ("Cluster", "prod-frontend"),
             ("Service", "payments/checkout"),
             ("SecretPath", "vault-prod:database/prod/creds"),
+            ("SecurityOverride", "capability:NET_ADMIN"),
         ] {
             let uid = build_entity_uid(type_name, id).unwrap();
             assert!(uid.to_string().contains(type_name));
@@ -240,5 +270,20 @@ mod tests {
         let entity_a = build_secret_path_entity("vault-a", "secret/foo").unwrap();
         let entity_b = build_secret_path_entity("vault-b", "secret/foo").unwrap();
         assert_ne!(entity_a.uid(), entity_b.uid());
+    }
+
+    #[test]
+    fn test_build_security_override_entity() {
+        let entity = build_security_override_entity("capability:NET_ADMIN", "capability").unwrap();
+        let uid_str = entity.uid().to_string();
+        assert!(uid_str.contains("SecurityOverride"));
+        assert!(uid_str.contains("capability:NET_ADMIN"));
+    }
+
+    #[test]
+    fn test_security_override_entity_different_ids() {
+        let cap = build_security_override_entity("capability:NET_ADMIN", "capability").unwrap();
+        let priv_ = build_security_override_entity("privileged", "container").unwrap();
+        assert_ne!(cap.uid(), priv_.uid());
     }
 }

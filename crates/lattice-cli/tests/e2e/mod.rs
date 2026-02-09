@@ -16,6 +16,7 @@
 //! │  ├─ integration/kubeconfig.rs    - Kubeconfig patching verify   │
 //! │  ├─ integration/cedar.rs         - Cedar policy enforcement     │
 //! │  ├─ integration/cedar_secrets.rs - Cedar secret authorization   │
+//! │  ├─ integration/cedar_security.rs- Cedar security overrides     │
 //! │  ├─ integration/secrets.rs       - Local secrets integration    │
 //! │  ├─ integration/model_cache.rs   - Model cache lifecycle        │
 //! │  ├─ integration/oidc.rs          - OIDC authentication          │
@@ -30,6 +31,7 @@
 //! │  ├─ kubeconfig_e2e.rs        - Kubeconfig only                  │
 //! │  ├─ cedar_e2e.rs             - Cedar only                       │
 //! │  ├─ cedar_secrets_e2e.rs     - Cedar secrets only               │
+//! │  ├─ cedar_security_e2e.rs   - Cedar security overrides only    │
 //! │  ├─ secrets_e2e.rs           - Local secrets only               │
 //! │  ├─ model_cache_e2e.rs       - Model cache only                 │
 //! │  ├─ oidc_e2e.rs              - OIDC only                        │
@@ -93,6 +95,7 @@ mod upgrade_e2e;
 mod capi_e2e;
 mod cedar_e2e;
 mod cedar_secrets_e2e;
+mod cedar_security_e2e;
 mod kubeconfig_e2e;
 mod mesh_e2e;
 mod model_cache_e2e;

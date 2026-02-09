@@ -1267,17 +1267,8 @@ mod tests {
             "logger".to_string(),
             SidecarSpec {
                 image: "fluentbit:latest".to_string(),
-                command: None,
-                args: None,
-                variables: BTreeMap::new(),
-                resources: None,
-                files: BTreeMap::new(),
                 volumes: sidecar_volumes,
-                liveness_probe: None,
-                readiness_probe: None,
-                startup_probe: None,
-                init: None,
-                security: None,
+                ..Default::default()
             },
         );
 

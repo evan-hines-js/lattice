@@ -50,6 +50,12 @@ pub enum CompilationError {
         details: String,
     },
 
+    /// Cedar policy denied security override
+    SecurityOverrideDenied {
+        /// Denial details
+        details: String,
+    },
+
     /// Template rendering error
     Template {
         /// The underlying template error
@@ -97,6 +103,9 @@ impl fmt::Display for CompilationError {
             }
             Self::SecretAccessDenied { details } => {
                 write!(f, "secret access denied: {}", details)
+            }
+            Self::SecurityOverrideDenied { details } => {
+                write!(f, "security override denied: {}", details)
             }
             Self::Template { source } => {
                 write!(f, "template error: {}", source)
@@ -170,6 +179,13 @@ impl CompilationError {
         }
     }
 
+    /// Create a security-override-denied error
+    pub fn security_override_denied(details: impl Into<String>) -> Self {
+        Self::SecurityOverrideDenied {
+            details: details.into(),
+        }
+    }
+
     /// Create a file compilation error
     pub fn file_compilation(message: impl Into<String>) -> Self {
         Self::FileCompilation {
@@ -185,9 +201,12 @@ impl CompilationError {
         }
     }
 
-    /// Returns true if this is a SecretAccessDenied error
-    pub fn is_access_denied(&self) -> bool {
-        matches!(self, Self::SecretAccessDenied { .. })
+    /// Returns true if this is a Cedar policy denial (secret or security override)
+    pub fn is_policy_denied(&self) -> bool {
+        matches!(
+            self,
+            Self::SecretAccessDenied { .. } | Self::SecurityOverrideDenied { .. }
+        )
     }
 }
 
@@ -253,7 +272,16 @@ mod tests {
     fn test_secret_access_denied_display() {
         let err = CompilationError::secret_access_denied("denied by policy");
         assert!(err.to_string().contains("denied by policy"));
-        assert!(err.is_access_denied());
+        assert!(err.is_policy_denied());
+    }
+
+    #[test]
+    fn test_security_override_denied_display() {
+        let err = CompilationError::security_override_denied("capability:NET_ADMIN denied");
+        let display = err.to_string();
+        assert!(display.contains("security override denied"));
+        assert!(display.contains("capability:NET_ADMIN denied"));
+        assert!(err.is_policy_denied());
     }
 
     #[test]
@@ -263,10 +291,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_access_denied() {
-        assert!(CompilationError::secret_access_denied("x").is_access_denied());
-        assert!(!CompilationError::secret("x").is_access_denied());
-        assert!(!CompilationError::volume("x").is_access_denied());
+    fn test_is_policy_denied() {
+        assert!(CompilationError::secret_access_denied("x").is_policy_denied());
+        assert!(CompilationError::security_override_denied("x").is_policy_denied());
+        assert!(!CompilationError::secret("x").is_policy_denied());
+        assert!(!CompilationError::volume("x").is_policy_denied());
+        assert!(!CompilationError::extension("p", "m").is_policy_denied());
     }
 
     #[test]
@@ -275,7 +305,7 @@ mod tests {
         let display = err.to_string();
         assert!(display.contains("flagger"));
         assert!(display.contains("canary spec invalid"));
-        assert!(!err.is_access_denied());
+        assert!(!err.is_policy_denied());
     }
 
     #[test]

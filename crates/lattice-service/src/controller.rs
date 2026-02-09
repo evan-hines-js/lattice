@@ -1000,8 +1000,13 @@ async fn compile_and_apply(
             // Skip redundant events when status hasn't changed (status update
             // itself is guarded by update_service_status's idempotency check).
             if !is_status_unchanged(service, ServicePhase::Failed, &msg) {
-                let event_reason = if e.is_access_denied() {
-                    reasons::SECRET_ACCESS_DENIED
+                let event_reason = if e.is_policy_denied() {
+                    match &e {
+                        crate::workload::CompilationError::SecurityOverrideDenied { .. } => {
+                            reasons::SECURITY_OVERRIDE_DENIED
+                        }
+                        _ => reasons::SECRET_ACCESS_DENIED,
+                    }
                 } else {
                     reasons::COMPILATION_FAILED
                 };
