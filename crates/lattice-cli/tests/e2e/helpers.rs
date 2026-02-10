@@ -1657,7 +1657,6 @@ pub fn create_service_with_secrets(
                 containers,
                 resources,
                 service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
             },
             runtime: RuntimeSpec {
                 image_pull_secrets: vec!["ghcr-creds".to_string()],
@@ -2784,7 +2783,6 @@ pub fn create_service_with_all_secret_routes(
                 containers,
                 resources,
                 service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
             },
             runtime: RuntimeSpec {
                 image_pull_secrets: vec!["ghcr-creds".to_string()],

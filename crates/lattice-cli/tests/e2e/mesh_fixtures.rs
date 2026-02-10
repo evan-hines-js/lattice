@@ -228,7 +228,6 @@ pub fn build_lattice_service(
                 containers,
                 resources,
                 service: if has_port { Some(http_port()) } else { None },
-                ..Default::default()
             },
             runtime: RuntimeSpec {
                 image_pull_secrets: vec!["ghcr-creds".to_string()],

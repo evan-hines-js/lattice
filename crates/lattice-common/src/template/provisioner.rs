@@ -164,7 +164,7 @@ impl ResourceProvisioner for ServiceProvisioner {
             .ports
             .get("http")
             .or_else(|| node.ports.values().next())
-            .copied();
+            .map(|pm| pm.service_port);
 
         let url = port.map(|p| format!("http://{}:{}", host, p));
 

@@ -29,6 +29,15 @@ pub enum ServiceType {
     Unknown,
 }
 
+/// K8s Service port mapping: service port -> container targetPort.
+#[derive(Clone, Copy, Debug)]
+pub struct PortMapping {
+    /// Service port — what clients connect to (K8s Service `.spec.ports[].port`)
+    pub service_port: u16,
+    /// Container target port — what the pod listens on (K8s Service `.spec.ports[].targetPort`)
+    pub target_port: u16,
+}
+
 /// A node in the service graph representing a service
 #[derive(Clone, Debug)]
 pub struct ServiceNode {
@@ -46,11 +55,8 @@ pub struct ServiceNode {
     pub allows_all: bool,
     /// Container image (for local services)
     pub image: Option<String>,
-    /// Exposed service ports: name -> port number
-    ///
-    /// These are the K8s Service ports (what clients connect to).
-    /// Cilium translates service ports to container targetPorts internally.
-    pub ports: BTreeMap<String, u16>,
+    /// Exposed ports: name -> port mapping
+    pub ports: BTreeMap<String, PortMapping>,
     /// Parsed endpoints (for external services)
     pub endpoints: BTreeMap<String, ParsedEndpoint>,
     /// Resolution strategy (for external services)
@@ -95,7 +101,15 @@ impl ServiceNode {
                 .map(|svc| {
                     svc.ports
                         .iter()
-                        .map(|(name, ps)| (name.clone(), ps.port))
+                        .map(|(name, ps)| {
+                            (
+                                name.clone(),
+                                PortMapping {
+                                    service_port: ps.port,
+                                    target_port: ps.target_port.unwrap_or(ps.port),
+                                },
+                            )
+                        })
                         .collect()
                 })
                 .unwrap_or_default(),
