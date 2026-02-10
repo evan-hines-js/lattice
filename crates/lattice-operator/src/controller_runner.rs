@@ -25,11 +25,10 @@ use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
-    LatticeRestore, LatticeService, LatticeServicePolicy, ModelArtifact, OIDCProvider,
-    ProviderType, SecretProvider,
+    LatticeRestore, LatticeService, LatticeServicePolicy, OIDCProvider, ProviderType,
+    SecretProvider,
 };
 use lattice_common::ControllerContext;
-use lattice_model_cache::{self as model_cache_ctrl, ModelCacheContext};
 use lattice_secret_provider as secrets_provider_ctrl;
 use lattice_service::compiler::ServiceMonitorPhase;
 use lattice_service::controller::{
@@ -152,32 +151,14 @@ pub fn build_service_controllers(
     )
     .for_each(log_reconcile_result("ServicePolicy"));
 
-    let model_ctx = Arc::new(ModelCacheContext::new(client.clone()));
-    let discover = model_cache_ctrl::discover_models(model_ctx.client.clone());
-    let model_ctrl = Controller::new(Api::<ModelArtifact>::all(client), watcher_config())
-        .watches(
-            Api::<LatticeService>::all(model_ctx.client.clone()),
-            watcher_config(),
-            discover,
-        )
-        .shutdown_on_signal()
-        .run(
-            model_cache_ctrl::reconcile,
-            model_cache_ctrl::error_policy,
-            model_ctx,
-        )
-        .for_each(log_reconcile_result("ModelArtifact"));
-
     tracing::info!("- LatticeService controller");
     tracing::info!("- LatticeExternalService controller");
     tracing::info!("- LatticeServicePolicy controller");
-    tracing::info!("- ModelArtifact controller");
 
     vec![
         Box::pin(svc_ctrl),
         Box::pin(ext_ctrl),
         Box::pin(policy_ctrl),
-        Box::pin(model_ctrl),
     ]
 }
 
