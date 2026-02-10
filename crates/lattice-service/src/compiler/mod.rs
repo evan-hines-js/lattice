@@ -408,34 +408,25 @@ impl<'a> ServiceCompiler<'a> {
             // Add gateway allow policies for north-south traffic
             let gateway_name = mesh::ingress_gateway_name(namespace);
 
-            // L7 (Istio AuthorizationPolicy): waypoint sees the service port
+            // Service ports used by both L7 (Istio) and L4 (Cilium) gateway rules.
+            // Cilium translates service ports to targetPorts internally.
             let service_ports: Vec<u16> = workload
                 .service
                 .as_ref()
                 .map(|s| s.ports.values().map(|p| p.port).collect())
                 .unwrap_or_default();
+
             let gateway_policy =
                 policy_compiler.compile_gateway_allow_policy(name, namespace, &service_ports);
             policies.authorization_policies.push(gateway_policy);
 
-            // L4 (Cilium): operates on pod network, sees container port after DNAT
-            let container_ports: Vec<u16> = workload
-                .service
-                .as_ref()
-                .map(|s| {
-                    s.ports
-                        .values()
-                        .map(|p| p.target_port.unwrap_or(p.port))
-                        .collect()
-                })
-                .unwrap_or_default();
             if let Some(cilium_policy) = policies.cilium_policies.first_mut() {
                 cilium_policy
                     .spec
                     .ingress
                     .push(PolicyCompiler::compile_gateway_ingress_rule(
                         &gateway_name,
-                        &container_ports,
+                        &service_ports,
                     ));
             }
 

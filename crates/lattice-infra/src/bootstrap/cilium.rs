@@ -261,6 +261,7 @@ pub fn generate_operator_network_policy(
                 ),
                 ("k8s:k8s-app".to_string(), "kube-dns".to_string()),
             ]))],
+            to_services: vec![],
             to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
@@ -281,6 +282,7 @@ pub fn generate_operator_network_policy(
         // K8s API server
         CiliumEgressRule {
             to_endpoints: vec![],
+            to_services: vec![],
             to_entities: vec!["kube-apiserver".to_string()],
             to_fqdns: vec![],
             to_cidr: vec![],
@@ -309,6 +311,7 @@ pub fn generate_operator_network_policy(
             // For IP addresses (Docker), use CIDR rule
             egress_rules.push(CiliumEgressRule {
                 to_endpoints: vec![],
+                to_services: vec![],
                 to_entities: vec![],
                 to_fqdns: vec![],
                 to_cidr: vec![format!("{}/32", host)],
@@ -318,6 +321,7 @@ pub fn generate_operator_network_policy(
             // For hostnames (AWS NLB, etc.), use FQDN rule
             egress_rules.push(CiliumEgressRule {
                 to_endpoints: vec![],
+                to_services: vec![],
                 to_entities: vec![],
                 to_fqdns: vec![FqdnSelector {
                     match_name: Some(host.to_string()),

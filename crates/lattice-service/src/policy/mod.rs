@@ -424,6 +424,7 @@ mod tests {
     fn story_cilium_fqdn_field_serializes_correctly() {
         let rule = CiliumEgressRule {
             to_endpoints: vec![],
+            to_services: vec![],
             to_entities: vec![],
             to_fqdns: vec![FqdnSelector {
                 match_name: Some("api.example.com".to_string()),

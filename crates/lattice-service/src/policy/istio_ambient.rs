@@ -41,11 +41,7 @@ impl<'a> PolicyCompiler<'a> {
             .map(|edge| self.spiffe_principal(&edge.caller_namespace, &edge.caller_name))
             .collect();
 
-        let ports: Vec<String> = service
-            .ports
-            .values()
-            .map(|pi| pi.service_port.to_string())
-            .collect();
+        let ports: Vec<String> = service.ports.values().map(|p| p.to_string()).collect();
 
         if ports.is_empty() {
             return None;
@@ -81,11 +77,7 @@ impl<'a> PolicyCompiler<'a> {
         service: &ServiceNode,
         namespace: &str,
     ) -> Option<AuthorizationPolicy> {
-        let ports: Vec<String> = service
-            .ports
-            .values()
-            .map(|pi| pi.service_port.to_string())
-            .collect();
+        let ports: Vec<String> = service.ports.values().map(|p| p.to_string()).collect();
 
         if ports.is_empty() {
             return None;

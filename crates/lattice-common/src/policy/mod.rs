@@ -16,7 +16,8 @@ pub use cilium::{
     CiliumClusterwideNetworkPolicy, CiliumClusterwideSpec, CiliumEgressRule, CiliumIngressRule,
     CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule,
     ClusterwideEgressRule, ClusterwideIngressRule, ClusterwideMetadata, DnsMatch, DnsRules,
-    EnableDefaultDeny, EndpointSelector, FqdnSelector, MatchExpression,
+    EnableDefaultDeny, EndpointSelector, FqdnSelector, K8sServiceRef, K8sServiceSelector,
+    MatchExpression,
 };
 pub use istio::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,

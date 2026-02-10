@@ -297,29 +297,6 @@ where
     .await
 }
 
-/// List Kubernetes resources with retry logic (survives port-forward restarts).
-#[cfg(feature = "provider-e2e")]
-pub async fn list_with_retry<K>(
-    api: &Api<K>,
-    lp: &kube::api::ListParams,
-) -> Result<kube::api::ObjectList<K>, String>
-where
-    K: kube::Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
-{
-    let api = api.clone();
-    let lp = lp.clone();
-    retry_with_backoff(&RetryConfig::infinite(), "list", || {
-        let api = api.clone();
-        let lp = lp.clone();
-        async move {
-            api.list(&lp)
-                .await
-                .map_err(|e| format!("Failed to list resources: {}", e))
-        }
-    })
-    .await
-}
-
 /// Inner function for client creation (called by retry wrapper).
 #[cfg(feature = "provider-e2e")]
 async fn client_from_kubeconfig_inner(path: &str) -> Result<Client, String> {
