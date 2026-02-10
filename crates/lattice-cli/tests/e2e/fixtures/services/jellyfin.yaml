@@ -32,9 +32,11 @@ spec:
           httpGet:
             path: /health
             port: 8096
-            protocol: TCP
-    imagePullSecrets:
-      - ghcr-creds
+    service:
+      ports:
+        http:
+          port: 8096
+          protocol: TCP
     resources:
       # Registry credentials for GHCR images
       ghcr-creds:
@@ -63,8 +65,10 @@ spec:
       sonarr:
         type: service
         direction: inbound
-    replicas:
-      min: 1
+  imagePullSecrets:
+    - ghcr-creds
+  replicas:
+    min: 1
   ingress:
     hosts:
       - jellyfin.home.local

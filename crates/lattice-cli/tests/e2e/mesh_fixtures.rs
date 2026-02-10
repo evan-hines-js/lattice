@@ -97,6 +97,7 @@ pub fn curl_container(script: String) -> ContainerSpec {
             }),
         }),
         security: Some(SecurityContext {
+            run_as_user: Some(100), // curl_user UID — K8s needs numeric to verify non-root
             apparmor_profile: Some("Unconfined".to_string()),
             ..Default::default()
         }),
@@ -110,7 +111,7 @@ fn http_port() -> ServicePortsSpec {
         "http".to_string(),
         PortSpec {
             port: 80,
-            target_port: None,
+            target_port: Some(8080),
             protocol: None,
         },
     );

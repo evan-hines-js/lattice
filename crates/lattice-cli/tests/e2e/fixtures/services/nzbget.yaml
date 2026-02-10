@@ -9,6 +9,7 @@ spec:
       main:
         image: docker.io/linuxserver/nzbget:latest
         security:
+          runAsUser: 0
           apparmorProfile: Unconfined
         variables:
           PUID: "1000"
@@ -31,30 +32,11 @@ spec:
         readinessProbe:
           exec:
             command: ["nc", "-z", "127.0.0.1", "6789"]
-
-    # VPN sidecar for killswitch
-    sidecars:
-      vpn:
-        image: docker.io/linuxserver/wireguard:latest
-        variables:
-          PUID: "1000"
-          PGID: "1000"
-        volumes:
-          /config:
-            source: ${resources.wg-config}
-          /tmp: {}
-        security:
-          capabilities: [NET_ADMIN, SYS_MODULE]
-          apparmorProfile: Unconfined
-
     service:
       ports:
         http:
           port: 6789
           protocol: TCP
-
-    imagePullSecrets:
-      - ghcr-creds
     resources:
       # Registry credentials for GHCR images
       ghcr-creds:
@@ -81,6 +63,22 @@ spec:
       sonarr:
         type: service
         direction: inbound
-
-    replicas:
-      min: 1
+  # VPN sidecar for killswitch
+  sidecars:
+    vpn:
+      image: docker.io/linuxserver/wireguard:latest
+      variables:
+        PUID: "1000"
+        PGID: "1000"
+      volumes:
+        /config:
+          source: ${resources.wg-config}
+        /tmp: {}
+      security:
+        runAsUser: 0
+        capabilities: [NET_ADMIN, SYS_MODULE]
+        apparmorProfile: Unconfined
+  imagePullSecrets:
+    - ghcr-creds
+  replicas:
+    min: 1
