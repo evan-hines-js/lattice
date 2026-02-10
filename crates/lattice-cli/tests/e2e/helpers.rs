@@ -101,7 +101,7 @@ pub fn test_image(docker_path: &str) -> String {
 /// Nginx image for mesh server containers
 #[cfg(feature = "provider-e2e")]
 pub static NGINX_IMAGE: LazyLock<String> =
-    LazyLock::new(|| test_image("docker.io/library/nginx:alpine"));
+    LazyLock::new(|| test_image("docker.io/nginxinc/nginx-unprivileged:alpine"));
 
 /// Curl image for mesh traffic generator containers
 #[cfg(feature = "provider-e2e")]
