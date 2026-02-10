@@ -1597,7 +1597,8 @@ pub fn create_service_with_secrets(
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
         ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ResourceQuantity,
-        ResourceRequirements, ResourceSpec, ResourceType, ServicePortsSpec, WorkloadSpec,
+        ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec, ServicePortsSpec,
+        WorkloadSpec,
     };
 
     let mut resources = BTreeMap::new();
@@ -1679,6 +1680,9 @@ pub fn create_service_with_secrets(
                 containers,
                 resources,
                 service: Some(ServicePortsSpec { ports }),
+                ..Default::default()
+            },
+            runtime: RuntimeSpec {
                 image_pull_secrets: vec!["ghcr-creds".to_string()],
                 ..Default::default()
             },
@@ -1704,7 +1708,8 @@ pub fn create_service_with_security_overrides(
 
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, ServicePortsSpec, WorkloadSpec,
+        ContainerSpec, LatticeService, LatticeServiceSpec, PortSpec, RuntimeSpec, ServicePortsSpec,
+        WorkloadSpec,
     };
 
     // Docker KIND clusters don't have AppArmor — ensure Unconfined
@@ -1743,6 +1748,9 @@ pub fn create_service_with_security_overrides(
             workload: WorkloadSpec {
                 containers,
                 service: Some(ServicePortsSpec { ports }),
+                ..Default::default()
+            },
+            runtime: RuntimeSpec {
                 host_network,
                 ..Default::default()
             },
@@ -2313,10 +2321,6 @@ pub async fn teardown_mgmt_cluster(
 }
 
 // =============================================================================
-// ModelArtifact Helpers
-// =============================================================================
-
-// =============================================================================
 // Namespace Helpers
 // =============================================================================
 
@@ -2655,7 +2659,8 @@ pub fn create_service_with_all_secret_routes(
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
         ContainerSpec, FileMount, LatticeService, LatticeServiceSpec, PortSpec, ResourceQuantity,
-        ResourceRequirements, ResourceSpec, ResourceType, ServicePortsSpec, WorkloadSpec,
+        ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec, ServicePortsSpec,
+        WorkloadSpec,
     };
     use lattice_common::template::TemplateString;
 
@@ -2802,6 +2807,9 @@ pub fn create_service_with_all_secret_routes(
                 containers,
                 resources,
                 service: Some(ServicePortsSpec { ports }),
+                ..Default::default()
+            },
+            runtime: RuntimeSpec {
                 image_pull_secrets: vec!["ghcr-creds".to_string()],
                 ..Default::default()
             },

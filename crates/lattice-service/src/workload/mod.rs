@@ -374,9 +374,6 @@ pub struct PodSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class_name: Option<String>,
     /// Scheduling gates — block pod scheduling until gates are removed
-    ///
-    /// Used by the ModelCache controller to prevent pods from scheduling
-    /// until model artifacts are cached in the PVC.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scheduling_gates: Vec<SchedulingGate>,
     /// Image pull secrets for authenticating to private registries
@@ -388,7 +385,7 @@ pub struct PodSpec {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchedulingGate {
-    /// Gate name (e.g., "lattice.dev/model-ready")
+    /// Gate name
     pub name: String,
 }
 

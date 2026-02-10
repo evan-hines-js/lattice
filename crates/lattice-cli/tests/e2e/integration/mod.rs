@@ -26,7 +26,6 @@ pub mod cedar_secrets;
 pub mod cedar_security;
 pub mod kubeconfig;
 pub mod mesh;
-pub mod model_cache;
 pub mod multi_hop;
 pub mod oidc;
 pub mod pivot;

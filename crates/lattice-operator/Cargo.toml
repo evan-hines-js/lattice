@@ -26,7 +26,7 @@ lattice-secret-provider.workspace = true
 lattice-api.workspace = true
 lattice-backup.workspace = true
 lattice-cedar.workspace = true
-lattice-model-cache.workspace = true
+
 
 kube.workspace = true
 k8s-openapi.workspace = true

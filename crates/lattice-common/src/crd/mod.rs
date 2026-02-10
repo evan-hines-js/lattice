@@ -8,7 +8,6 @@ mod cloud_provider;
 mod cluster;
 mod external_service;
 mod job;
-mod model;
 mod model_serving;
 mod oidc_provider;
 mod providers;
@@ -37,10 +36,6 @@ pub use external_service::{
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,
 };
 pub use job::{JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus, RestartPolicy};
-pub use model::{
-    ModelArtifact, ModelArtifactPhase, ModelArtifactSpec, ModelArtifactStatus, ModelParams,
-    MODEL_READY_GATE, RETRY_BASE_DELAY_SECS, RETRY_MAX_DELAY_SECS,
-};
 pub use model_serving::{
     LatticeModel, LatticeModelSpec, LatticeModelStatus, ModelRoleSpec, ModelServingPhase,
 };

@@ -3,8 +3,6 @@
 //! This module handles:
 //! - PVC generation for owned volumes (volumes with size)
 //! - Pod affinity for RWO volume co-location (references follow owner's node)
-//! - Model resources: pod volume references, scheduling gates (PVCs are created
-//!   by the ModelCache controller, owned by the ModelArtifact CRD)
 //! - Volume mounts in container specs
 
 use std::collections::BTreeMap;
@@ -128,7 +126,7 @@ pub struct PvcVolumeSource {
 /// Collection of volume-related resources generated for a service
 #[derive(Clone, Debug, Default)]
 pub struct GeneratedVolumes {
-    /// PVCs to create (for owned volumes only; model PVCs are managed by ModelCache controller)
+    /// PVCs to create (for owned volumes only)
     pub pvcs: Vec<PersistentVolumeClaim>,
     /// Pod labels to add (for volume ownership)
     pub pod_labels: BTreeMap<String, String>,
@@ -138,7 +136,7 @@ pub struct GeneratedVolumes {
     pub volumes: Vec<PodVolume>,
     /// Volume mounts per container (container_name -> mounts)
     pub volume_mounts: BTreeMap<String, Vec<super::VolumeMount>>,
-    /// Scheduling gates to add to pod spec (for model cache readiness)
+    /// Scheduling gates to add to pod spec
     pub scheduling_gates: Vec<super::SchedulingGate>,
 }
 
