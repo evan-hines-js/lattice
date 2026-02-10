@@ -29,18 +29,6 @@ pub enum ServiceType {
     Unknown,
 }
 
-/// Port information carrying both service-facing and container-facing ports.
-///
-/// L7 policy (Istio AuthorizationPolicy) uses `service_port` — what the waypoint sees.
-/// L4 policy (CiliumNetworkPolicy) uses `container_port` — what the pod listens on after DNAT.
-#[derive(Clone, Copy, Debug)]
-pub struct PortInfo {
-    /// Service port (what clients connect to, what L7 policy sees)
-    pub service_port: u16,
-    /// Container port (what the pod listens on, what L4 policy sees after DNAT)
-    pub container_port: u16,
-}
-
 /// A node in the service graph representing a service
 #[derive(Clone, Debug)]
 pub struct ServiceNode {
@@ -58,8 +46,11 @@ pub struct ServiceNode {
     pub allows_all: bool,
     /// Container image (for local services)
     pub image: Option<String>,
-    /// Exposed ports: name -> port info
-    pub ports: BTreeMap<String, PortInfo>,
+    /// Exposed service ports: name -> port number
+    ///
+    /// These are the K8s Service ports (what clients connect to).
+    /// Cilium translates service ports to container targetPorts internally.
+    pub ports: BTreeMap<String, u16>,
     /// Parsed endpoints (for external services)
     pub endpoints: BTreeMap<String, ParsedEndpoint>,
     /// Resolution strategy (for external services)
@@ -104,15 +95,7 @@ impl ServiceNode {
                 .map(|svc| {
                     svc.ports
                         .iter()
-                        .map(|(name, ps)| {
-                            (
-                                name.clone(),
-                                PortInfo {
-                                    service_port: ps.port,
-                                    container_port: ps.target_port.unwrap_or(ps.port),
-                                },
-                            )
-                        })
+                        .map(|(name, ps)| (name.clone(), ps.port))
                         .collect()
                 })
                 .unwrap_or_default(),

@@ -107,6 +107,9 @@ pub struct CiliumEgressRule {
     /// To endpoints (internal services)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to_endpoints: Vec<EndpointSelector>,
+    /// To K8s services (service-based policy — Cilium maps service port to targetPort)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub to_services: Vec<K8sServiceSelector>,
     /// To entities (special Cilium entities like kube-apiserver, world, host)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to_entities: Vec<String>,
@@ -121,6 +124,27 @@ pub struct CiliumEgressRule {
     /// To ports
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to_ports: Vec<CiliumPortRule>,
+}
+
+/// Cilium service-based egress selector
+///
+/// References a K8s Service by name/namespace. Cilium resolves the service's
+/// endpoints and translates service ports to targetPorts automatically.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct K8sServiceSelector {
+    /// Kubernetes service reference
+    pub k8s_service: K8sServiceRef,
+}
+
+/// Kubernetes service reference for Cilium toServices
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct K8sServiceRef {
+    /// Service name
+    pub service_name: String,
+    /// Service namespace
+    pub namespace: String,
 }
 
 /// FQDN selector for Cilium egress

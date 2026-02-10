@@ -1,13 +1,18 @@
 //! L4 policy compilation: CiliumNetworkPolicy
 //!
 //! Generates eBPF-based network enforcement at the kernel level using Cilium.
+//!
+//! Port handling: Cilium service-based policies (`toServices`) automatically
+//! translate K8s Service ports to container targetPorts. For ingress rules,
+//! we specify the service port and Cilium handles the mapping internally.
 
 use std::collections::BTreeMap;
 
 use crate::graph::{ActiveEdge, ServiceNode, ServiceType};
 use lattice_common::policy::{
     CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort,
-    CiliumPortRule, DnsMatch, DnsRules, EndpointSelector, FqdnSelector, PolicyMetadata,
+    CiliumPortRule, DnsMatch, DnsRules, EndpointSelector, FqdnSelector, K8sServiceRef,
+    K8sServiceSelector, PolicyMetadata,
 };
 use lattice_common::{mesh, CILIUM_LABEL_NAME, CILIUM_LABEL_NAMESPACE};
 
@@ -42,29 +47,7 @@ impl<'a> PolicyCompiler<'a> {
                 })
                 .collect();
 
-            let to_ports: Vec<CiliumPortRule> = if service.ports.is_empty() {
-                vec![]
-            } else {
-                vec![CiliumPortRule {
-                    ports: service
-                        .ports
-                        .values()
-                        .flat_map(|pi| {
-                            vec![
-                                CiliumPort {
-                                    port: pi.container_port.to_string(),
-                                    protocol: "TCP".to_string(),
-                                },
-                                CiliumPort {
-                                    port: pi.container_port.to_string(),
-                                    protocol: "UDP".to_string(),
-                                },
-                            ]
-                        })
-                        .collect(),
-                    rules: None,
-                }]
-            };
+            let to_ports = Self::build_service_port_rules(service);
 
             ingress_rules.push(CiliumIngressRule {
                 from_endpoints,
@@ -117,6 +100,7 @@ impl<'a> PolicyCompiler<'a> {
         kube_dns_labels.insert("k8s:k8s-app".to_string(), "kube-dns".to_string());
         egress_rules.push(CiliumEgressRule {
             to_endpoints: vec![EndpointSelector::from_labels(kube_dns_labels)],
+            to_services: vec![],
             to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
@@ -152,6 +136,7 @@ impl<'a> PolicyCompiler<'a> {
         );
         egress_rules.push(CiliumEgressRule {
             to_endpoints: vec![EndpointSelector::from_labels(waypoint_egress_labels)],
+            to_services: vec![],
             to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
@@ -193,7 +178,7 @@ impl<'a> PolicyCompiler<'a> {
             {
                 match callee.type_ {
                     ServiceType::Local => {
-                        self.build_local_dependency_rule(edge, &callee, egress_rules);
+                        Self::build_local_dependency_rule(edge, egress_rules);
                     }
                     ServiceType::External => {
                         self.build_external_dependency_rules(&callee, egress_rules);
@@ -204,28 +189,23 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
-    /// Build egress rule for a local (in-cluster) service dependency
-    fn build_local_dependency_rule(
-        &self,
-        edge: &ActiveEdge,
-        callee: &ServiceNode,
-        egress_rules: &mut Vec<CiliumEgressRule>,
-    ) {
-        let mut dep_labels = BTreeMap::new();
-        dep_labels.insert(
-            CILIUM_LABEL_NAMESPACE.to_string(),
-            edge.callee_namespace.clone(),
-        );
-        dep_labels.insert(CILIUM_LABEL_NAME.to_string(), edge.callee_name.clone());
-
-        let to_ports = Self::build_port_rules_for_service(callee);
-
+    /// Build egress rule for a local (in-cluster) service dependency.
+    ///
+    /// Uses `toServices` with `k8sService` so Cilium resolves the service's
+    /// endpoints and translates service ports to targetPorts automatically.
+    fn build_local_dependency_rule(edge: &ActiveEdge, egress_rules: &mut Vec<CiliumEgressRule>) {
         egress_rules.push(CiliumEgressRule {
-            to_endpoints: vec![EndpointSelector::from_labels(dep_labels)],
+            to_endpoints: vec![],
+            to_services: vec![K8sServiceSelector {
+                k8s_service: K8sServiceRef {
+                    service_name: edge.callee_name.clone(),
+                    namespace: edge.callee_namespace.clone(),
+                },
+            }],
             to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
-            to_ports,
+            to_ports: vec![],
         });
     }
 
@@ -244,6 +224,7 @@ impl<'a> PolicyCompiler<'a> {
         if !fqdns.is_empty() {
             egress_rules.push(CiliumEgressRule {
                 to_endpoints: vec![],
+                to_services: vec![],
                 to_entities: vec![],
                 to_fqdns: fqdns,
                 to_cidr: vec![],
@@ -255,6 +236,7 @@ impl<'a> PolicyCompiler<'a> {
         if !cidrs.is_empty() {
             egress_rules.push(CiliumEgressRule {
                 to_endpoints: vec![],
+                to_services: vec![],
                 to_entities: vec![],
                 to_fqdns: vec![],
                 to_cidr: cidrs,
@@ -286,26 +268,26 @@ impl<'a> PolicyCompiler<'a> {
         (fqdns, cidrs)
     }
 
-    /// Build port rules for a local service (TCP and UDP).
+    /// Build port rules for ingress using the K8s Service port.
     ///
-    /// Uses container_port (target_port) since Cilium operates at L4 on the pod
-    /// network and sees the post-DNAT destination port.
-    fn build_port_rules_for_service(callee: &ServiceNode) -> Vec<CiliumPortRule> {
-        if callee.ports.is_empty() {
+    /// Cilium translates service ports to container targetPorts internally,
+    /// so we always specify the service-facing port in policy rules.
+    fn build_service_port_rules(service: &ServiceNode) -> Vec<CiliumPortRule> {
+        if service.ports.is_empty() {
             vec![]
         } else {
             vec![CiliumPortRule {
-                ports: callee
+                ports: service
                     .ports
                     .values()
-                    .flat_map(|pi| {
+                    .flat_map(|&port| {
                         vec![
                             CiliumPort {
-                                port: pi.container_port.to_string(),
+                                port: port.to_string(),
                                 protocol: "TCP".to_string(),
                             },
                             CiliumPort {
-                                port: pi.container_port.to_string(),
+                                port: port.to_string(),
                                 protocol: "UDP".to_string(),
                             },
                         ]
