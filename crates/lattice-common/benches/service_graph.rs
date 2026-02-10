@@ -76,7 +76,6 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
             containers,
             resources,
             service: Some(ServicePortsSpec { ports }),
-            ..Default::default()
         },
         ..Default::default()
     }

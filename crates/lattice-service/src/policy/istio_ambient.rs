@@ -2,6 +2,13 @@
 //!
 //! Generates mTLS identity-based access control using SPIFFE principals
 //! within the Istio ambient mesh.
+//!
+//! ## Policy enforcement points
+//!
+//! - **Waypoint-enforced** (`targetRefs: Service`): evaluated by the waypoint proxy.
+//!   Uses the K8s **service port** (what clients connect to).
+//! - **Ztunnel-enforced** (`selector`): evaluated by ztunnel on the destination node.
+//!   Uses the **container target port** (what the pod listens on after HBONE delivery).
 
 use std::collections::BTreeMap;
 
@@ -26,6 +33,10 @@ impl<'a> PolicyCompiler<'a> {
         mesh::trust_domain::waypoint_principal(&self.cluster_name, namespace)
     }
 
+    /// Compile a waypoint-enforced AuthorizationPolicy (caller → service).
+    ///
+    /// Uses `targetRefs` pointing at the K8s Service, so the waypoint evaluates
+    /// this policy. Port matching uses the **service port**.
     pub(super) fn compile_authorization_policy(
         &self,
         service: &ServiceNode,
@@ -41,7 +52,11 @@ impl<'a> PolicyCompiler<'a> {
             .map(|edge| self.spiffe_principal(&edge.caller_namespace, &edge.caller_name))
             .collect();
 
-        let ports: Vec<String> = service.ports.values().map(|p| p.to_string()).collect();
+        let ports: Vec<String> = service
+            .ports
+            .values()
+            .map(|pm| pm.service_port.to_string())
+            .collect();
 
         if ports.is_empty() {
             return None;
@@ -72,12 +87,21 @@ impl<'a> PolicyCompiler<'a> {
         ))
     }
 
-    pub(super) fn compile_waypoint_policy(
+    /// Compile a ztunnel-enforced AuthorizationPolicy (waypoint → pod).
+    ///
+    /// Uses `selector` matching the pod labels, so ztunnel evaluates this policy
+    /// on the destination node. Port matching uses the **container target port**
+    /// because ztunnel delivers traffic directly to the pod after HBONE decap.
+    pub(super) fn compile_ztunnel_allow_policy(
         &self,
         service: &ServiceNode,
         namespace: &str,
     ) -> Option<AuthorizationPolicy> {
-        let ports: Vec<String> = service.ports.values().map(|p| p.to_string()).collect();
+        let ports: Vec<String> = service
+            .ports
+            .values()
+            .map(|pm| pm.target_port.to_string())
+            .collect();
 
         if ports.is_empty() {
             return None;

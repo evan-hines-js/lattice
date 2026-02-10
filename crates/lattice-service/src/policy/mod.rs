@@ -112,8 +112,10 @@ impl<'a> PolicyCompiler<'a> {
                 output.authorization_policies.push(auth_policy);
             }
 
-            // Generate waypoint allow policy
-            if let Some(waypoint_policy) = self.compile_waypoint_policy(&service_node, namespace) {
+            // Generate ztunnel-enforced allow policy (waypoint → pod)
+            if let Some(waypoint_policy) =
+                self.compile_ztunnel_allow_policy(&service_node, namespace)
+            {
                 output.authorization_policies.push(waypoint_policy);
             }
         }

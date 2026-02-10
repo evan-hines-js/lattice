@@ -280,14 +280,14 @@ impl<'a> PolicyCompiler<'a> {
                 ports: service
                     .ports
                     .values()
-                    .flat_map(|&port| {
+                    .flat_map(|pm| {
                         vec![
                             CiliumPort {
-                                port: port.to_string(),
+                                port: pm.service_port.to_string(),
                                 protocol: "TCP".to_string(),
                             },
                             CiliumPort {
-                                port: port.to_string(),
+                                port: pm.service_port.to_string(),
                                 protocol: "UDP".to_string(),
                             },
                         ]
