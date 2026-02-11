@@ -5,42 +5,315 @@
 <h3 align="center">Self-managing Kubernetes clusters with zero-trust networking</h3>
 
 <p align="center">
-  <em>Fully self-managing clusters. Bilateral service mesh. Multi-provider. FIPS-ready.</em>
-</p>
-
-<p align="center">
-  <a href="https://lattice-docs.vercel.app"><strong>Documentation</strong></a>
+  <a href="https://lattice-docs.vercel.app">
+    <img src="https://img.shields.io/badge/docs-lattice-blue?style=for-the-badge&logo=gitbook&logoColor=white" alt="Documentation"/>
+  </a>
 </p>
 
 ---
 
 ## Why Lattice
 
-Your management cluster goes down. With traditional tools, **everything goes down**.
+Deploying a service on Kubernetes means writing a Deployment, Service, ServiceAccount, ScaledObject, PVC, ExternalSecret, NetworkPolicy, AuthorizationPolicy, Gateway, and HTTPRoute — then hoping they all agree with each other. Your management cluster is a single point of failure. Your network policies are allow-lists that nobody audits. Your secrets have no access control.
 
-Lattice takes a different approach. Every cluster provisioned by Lattice becomes fully self-managing — it owns its own CAPI resources, scales its own nodes, and survives the deletion of its parent. There is no single point of failure.
-
-Networking follows the same philosophy: default-deny everywhere, traffic only flows when **both** the caller and callee explicitly declare the dependency. No forgotten allow rules, no audit surprises.
+Lattice fixes all three problems: **one CRD per service**, **self-managing clusters**, and **Cedar policy authorization** for everything.
 
 ---
 
-## What You Get
+## LatticeService
 
-**Self-managing clusters** — CAPI resources pivot into each cluster after provisioning. Scale, upgrade, and self-heal with zero dependency on any parent. Delete the parent; children don't notice.
+LatticeService is a [Score](https://score.dev)-compatible superset that replaces the entire stack of Kubernetes resources for a service. Declare your containers, dependencies, secrets, and volumes in a single file — Lattice compiles it into everything your service needs with default-deny networking enforced automatically.
 
-**Bilateral service mesh** — Dependency declarations compile to CiliumNetworkPolicy (L4 eBPF) + Istio AuthorizationPolicy (L7 mTLS). Both sides must agree or traffic is denied.
+### One CRD, Everything Generated
 
-**Outbound-only architecture** — Child clusters never accept inbound connections. All communication is outbound gRPC. Zero attack surface on workload clusters.
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: api-gateway
+  namespace: platform
+spec:
+  containers:
+    main:
+      image: myorg/api:v2.1.0
+      variables:
+        AUTH_URL: ${resources.auth-service.url}
+        DB_PASS: ${resources.db-creds.password}
+        CACHE_HOST: ${resources.redis.host}
+      volumes:
+        /data:
+          source: "${resources.data}"
 
-**Multi-provider** — Docker, Proxmox, AWS, OpenStack. Same CLI, same CRDs, same workflow everywhere.
+  service:
+    ports:
+      http:
+        port: 8080
 
-**K8s API proxy** — Access any cluster in your hierarchy from a single kubectl context. Requests travel through existing gRPC tunnels with Cedar policy authorization. No VPN required.
+  resources:
+    auth-service:
+      type: service
+      direction: outbound            # "I call auth-service"
+    web-frontend:
+      type: service
+      direction: inbound             # "web-frontend can call me"
+    db-creds:
+      type: secret
+      id: database/prod/creds
+      params:
+        provider: vault-prod
+        keys: [username, password]
+        refreshInterval: 1h
+    data:
+      type: volume
+      params:
+        size: 50Gi
+        storageClass: fast-nvme
 
-**LatticeService** — One CRD replaces Deployment + Service + ScaledObject + PVC + ExternalSecret + NetworkPolicy + AuthorizationPolicy + Gateway + HTTPRoute. Score-compatible `${...}` templates resolve dependencies automatically.
+  replicas: 2
+  autoscaling:
+    max: 10
+    metrics:
+      - metric: cpu
+        target: 80
 
-**Cedar access control** — Fine-grained policies for proxy access (who can reach which clusters) and secret access (which services can use which Vault paths). Default-deny for secrets.
+  ingress:
+    hosts:
+      - api.example.com
+    tls:
+      mode: auto
+      issuerRef:
+        name: letsencrypt-prod
 
-**FIPS 140-2 cryptography** — All TLS and signing uses `aws-lc-rs` via `rustls`. RKE2 bootstrap available for FIPS Kubernetes distributions.
+  deploy:
+    strategy: canary
+    canary:
+      interval: 1m
+      stepWeight: 10
+      maxWeight: 50
+      threshold: 5
+```
+
+Lattice compiles this into all the Kubernetes resources your service needs — handling **zero-trust networking**, **PKI & mTLS**, **secret management**, **autoscaling**, **ingress & TLS**, **storage**, and **deployment strategies** automatically.
+
+### Score-Compatible `${...}` Templates
+
+LatticeService follows the [Score](https://score.dev) specification for workload declaration, then extends it. The `${...}` placeholder syntax resolves resource references at compile time:
+
+```yaml
+variables:
+  DB_HOST: "${resources.postgres.host}"          # Service endpoint
+  DB_PASS: "${resources.db-creds.password}"      # Secret from Vault
+  CLUSTER: "${cluster.name}"                     # Cluster metadata
+  ENV: "${cluster.environment}"                  # Environment tag
+
+files:
+  /etc/config.yaml:
+    content: |
+      server:
+        host: ${resources.api.hostname}
+        port: ${resources.api.port}
+
+volumes:
+  /data:
+    source: "${resources.storage}"               # Volume reference
+```
+
+### Resource Types
+
+The `resources` block is where LatticeService becomes powerful. Every external dependency your service has — other services, secrets, volumes, GPUs — is declared here. Lattice uses these declarations to generate network policies, sync secrets, provision storage, and wire everything together.
+
+**Service dependencies** — declare who you call and who calls you:
+
+```yaml
+resources:
+  auth-service:
+    type: service
+    direction: outbound       # This service calls auth-service
+  web-frontend:
+    type: service
+    direction: inbound        # web-frontend calls this service
+  cache:
+    type: service
+    direction: both           # Bidirectional
+```
+
+**Secrets** — synced from Vault (or any ESO provider) with Cedar authorization:
+
+```yaml
+resources:
+  db-creds:
+    type: secret
+    id: database/prod/credentials     # Vault path
+    params:
+      provider: vault-prod            # SecretProvider CRD
+      keys: [username, password]      # Specific keys to sync
+      refreshInterval: 1h             # Auto-refresh
+      secretType: kubernetes.io/basic-auth
+```
+
+**Volumes** — owned or shared across services:
+
+```yaml
+resources:
+  data:
+    type: volume
+    params:
+      size: 100Gi                     # Has size = owner (creates PVC)
+      storageClass: fast-nvme
+      accessMode: ReadWriteOnce
+  shared-media:
+    type: volume
+    id: media-library                 # No size = consumer (references existing PVC)
+```
+
+**GPUs** — full or fractional allocation:
+
+```yaml
+resources:
+  accelerator:
+    type: gpu
+    params:
+      count: 2
+      memory: 8Gi                     # Per-GPU memory (enables fractional via HAMi)
+      model: A100
+```
+
+### Bilateral Service Mesh
+
+Service dependencies aren't just documentation — they're **enforced**. Traffic between services requires mutual consent. Both the caller and callee must declare the relationship or traffic is denied.
+
+```
+ api-gateway                        auth-service
+ ┌─────────────────┐                ┌─────────────────┐
+ │   auth-service:  │───────────────▶│   api-gateway:   │
+ │     direction:   │   ALLOWED      │     direction:   │
+ │       outbound   │                │       inbound    │
+ └─────────────────┘                └─────────────────┘
+
+ api-gateway                        payment-service
+ ┌─────────────────┐                ┌─────────────────┐
+ │   payment-svc:   │───────X───────▶│ (no declaration) │
+ │     direction:   │   DENIED       │                  │
+ │       outbound   │                │                  │
+ └─────────────────┘                └─────────────────┘
+```
+
+Enforced at two layers simultaneously: **Cilium L4 eBPF** + **Istio L7 mTLS**. Remove either side's declaration and traffic stops immediately.
+
+### Sidecars, Probes, and Security
+
+LatticeService supports the full range of container configuration you'd expect — plus Lattice extensions:
+
+```yaml
+containers:
+  main:
+    image: app:latest
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+    readinessProbe:
+      exec:
+        command: ["/bin/sh", "-c", "test -f /tmp/ready"]
+    security:
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+
+sidecars:
+  vpn:
+    image: ghcr.io/qdm12/gluetun:v3.38
+    security:
+      capabilities: [NET_ADMIN, SYS_MODULE]
+
+sysctls:
+  net.ipv4.conf.all.src_valid_mark: "1"
+```
+
+---
+
+## Self-Managing Clusters
+
+Every cluster provisioned by Lattice pivots to own its own Cluster API resources. The target cluster scales its own nodes, upgrades itself, and self-heals with zero dependency on any parent.
+
+When using `lattice install`, a temporary bootstrap cluster is created to provision the target. Once CAPI resources are pivoted into the target, the bootstrap cluster is deleted. For child clusters provisioned by a parent, the same pivot occurs — the child becomes fully independent. The parent can go down without affecting any child.
+
+```yaml
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: production
+spec:
+  providerRef: aws-prod
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: kubeadm            # or rke2 for FIPS
+    config:
+      aws:
+        region: us-west-2
+        cpInstanceType: m5.xlarge
+        workerInstanceType: m5.large
+  nodes:
+    controlPlane: 3
+    workerPools:
+      general:
+        replicas: 10
+      gpu:
+        replicas: 2
+        min: 1
+        max: 8
+  services: true                    # Istio ambient mesh
+  monitoring: true                  # VictoriaMetrics + KEDA
+  backups: true                     # Velero
+  externalSecrets: true             # ESO for Vault integration
+```
+
+Supports **AWS**, **Proxmox**, **OpenStack**, and **Docker** — same CRDs, same workflow everywhere.
+
+```
+ lattice install -f cluster.yaml
+          │
+          ▼
+ ┌─────────────────┐
+ │  Bootstrap       │  Temporary kind cluster
+ │  Cluster         │  CAPI + Lattice operator
+ └────────┬────────┘
+          │
+          ▼
+ ┌─────────────────┐
+ │  Provision       │  CAPI creates infrastructure
+ │  Target          │  Nodes boot and join
+ └────────┬────────┘
+          │
+          ▼
+ ┌─────────────────┐
+ │  Pivot           │  CAPI resources move into target
+ └────────┬────────┘
+          │
+          ▼
+ ┌─────────────────┐
+ │  Self-Managing   │  Bootstrap deleted (installer only)
+ │                  │  Cluster owns its own lifecycle
+ └─────────────────┘
+```
+
+When a parent cluster provisions children, the same pivot happens — but the parent stays running. The child simply becomes independent.
+
+Child clusters use an **outbound-only architecture** — they never accept inbound connections. All communication is outbound gRPC with zero attack surface on workload clusters.
+
+---
+
+## CedarPolicy
+
+Fine-grained access control powered by [Cedar](https://www.cedarpolicy.com/). Lattice uses Cedar policies to authorize three critical paths:
+
+- **Proxy access** — who can reach which clusters through the K8s API proxy
+- **Secret access** — which services can use which Vault paths via External Secrets
+- **Security overrides** — which services are allowed to use privileged capabilities, host networking, sysctls, or other security-sensitive configurations
+
+All access is **default-deny**. Policies are declared as Kubernetes CRDs and evaluated at request time. No VPN required — requests travel through existing outbound gRPC tunnels.
 
 ---
 
@@ -72,230 +345,15 @@ mgmt  [Ready] (parent)
 
 ---
 
-## Infrastructure
-
-### CloudProvider
-
-Registers cloud credentials that clusters reference via `providerRef`. Supports two credential modes:
-
-**Manual** — you create a Kubernetes Secret and reference it directly:
-
-```yaml
-apiVersion: lattice.dev/v1alpha1
-kind: CloudProvider
-metadata:
-  name: aws-prod
-spec:
-  type: aws
-  region: us-east-1
-  credentialsSecretRef:             # manual mode
-    name: aws-prod-creds
-  aws:
-    vpcId: vpc-0abc123def456
-    subnetIds: [subnet-a, subnet-b]
-```
-
-**ESO** — credentials are synced from a ClusterSecretStore via External Secrets Operator:
-
-```yaml
-apiVersion: lattice.dev/v1alpha1
-kind: CloudProvider
-metadata:
-  name: aws-prod
-spec:
-  type: aws
-  region: us-east-1
-  credentials:                      # ESO mode
-    type: secret
-    id: infrastructure/aws/prod
-    params:
-      provider: vault-prod
-      keys: [access_key_id, secret_access_key]
-  aws:
-    vpcId: vpc-0abc123def456
-    subnetIds: [subnet-a, subnet-b]
-```
-
-Supported providers: `aws`, `proxmox`, `openstack`, `docker`.
-
-### SecretProvider
-
-Wraps an ESO `ClusterSecretStore` provider configuration. The `spec.provider` field is passed through verbatim — you write native ESO provider YAML and Lattice manages the ClusterSecretStore lifecycle.
-
-```yaml
-apiVersion: lattice.dev/v1alpha1
-kind: SecretProvider
-metadata:
-  name: vault-prod
-spec:
-  provider:
-    vault:
-      server: https://vault.example.com
-      path: secret
-      version: v2
-      auth:
-        tokenSecretRef:
-          name: vault-token
-          namespace: lattice-system
-          key: token
-```
-
-Any ESO-supported provider works: `vault`, `aws`, `webhook`, `barbican`, etc.
-
-### LatticeCluster
-
-Defines a cluster's infrastructure, node topology, and lifecycle. After provisioning via Cluster API, the cluster pivots to own its own resources and becomes self-managing.
-
-```yaml
-apiVersion: lattice.dev/v1alpha1
-kind: LatticeCluster
-metadata:
-  name: production
-spec:
-  providerRef: aws-prod
-  provider:
-    kubernetes:
-      version: "1.32.0"
-      bootstrap: kubeadm            # or rke2 for FIPS
-    config:
-      aws:
-        region: us-west-2
-        cpInstanceType: m5.xlarge
-        workerInstanceType: m5.large
-  nodes:
-    controlPlane: 3
-    workerPools:
-      general:
-        replicas: 10
-      gpu:
-        replicas: 2
-        min: 1
-        max: 8
-  services: true                    # Istio ambient mesh
-  monitoring: true                  # VictoriaMetrics + KEDA
-  backups: true                     # Velero
-  externalSecrets: true             # ESO for Vault integration
-  gpu: false                        # NFD + NVIDIA device plugin
-  parentConfig:                     # enables this cluster to provision children
-    service:
-      type: LoadBalancer
-```
-
----
-
-## Workloads
-
-### LatticeService
-
-One CRD that compiles into everything your service needs:
-
-```yaml
-apiVersion: lattice.dev/v1alpha1
-kind: LatticeService
-metadata:
-  name: api-gateway
-  namespace: platform
-spec:
-  containers:
-    main:
-      image: myorg/api:v2.1.0
-      variables:
-        AUTH_URL: ${resources.auth-service.url}
-        DB_PASS: ${resources.db-creds.password}
-
-  service:
-    ports:
-      http:
-        port: 8080
-
-  resources:
-    auth-service:
-      type: service
-      direction: outbound            # "I call auth-service"
-    web-frontend:
-      type: service
-      direction: inbound             # "web-frontend can call me"
-    db-creds:
-      type: secret
-      id: database/prod/creds
-      params:
-        provider: vault-prod
-        keys: [username, password]
-
-  replicas:
-    min: 2
-    max: 10
-```
-
-Generates: Deployment, Service, ScaledObject, CiliumNetworkPolicy, AuthorizationPolicy, ExternalSecret, ServiceAccount — all wired together, default-deny enforced.
-
-### Bilateral Service Mesh
-
-Traffic requires mutual consent:
-
-```
- api-gateway                        auth-service
- ┌─────────────────┐                ┌─────────────────┐
- │   auth-service:  │───────────────▶│   api-gateway:   │
- │     direction:   │   ALLOWED      │     direction:   │
- │       outbound   │                │       inbound    │
- └─────────────────┘                └─────────────────┘
-
- api-gateway                        payment-service
- ┌─────────────────┐                ┌─────────────────┐
- │   payment-svc:   │───────X───────▶│ (no declaration) │
- │     direction:   │   DENIED       │                  │
- │       outbound   │                │                  │
- └─────────────────┘                └─────────────────┘
-```
-
-Enforced at two layers simultaneously: Cilium L4 eBPF + Istio L7 mTLS. Remove either side's declaration and traffic stops immediately.
-
----
-
-## Architecture
-
-```
- lattice install -f cluster.yaml
-          │
-          ▼
- ┌─────────────────┐
- │  Bootstrap       │  Temporary kind cluster (cluster-only mode)
- │  Cluster         │  CAPI + Lattice operator, no extra infra
- └────────┬────────┘
-          │
-          ▼
- ┌─────────────────┐
- │  Provision       │  CAPI creates infrastructure
- │  Target          │  Nodes boot and join
- └────────┬────────┘
-          │
-          ▼
- ┌─────────────────┐
- │  Pivot           │  CAPI resources move into target
- │                  │  via distributed move protocol
- └────────┬────────┘
-          │
-          ▼
- ┌─────────────────┐
- │  Self-Managing   │  Bootstrap deleted
- │                  │  Cluster owns its own lifecycle forever
- └─────────────────┘
-```
-
-After pivot, the cluster is independent. The parent can be deleted without affecting any child.
-
----
-
 ## CLI
 
 | Command | Description |
 |---------|-------------|
+| `lattice install -f cluster.yaml` | Provision a self-managing cluster |
+| `lattice uninstall -k kubeconfig` | Tear down a cluster (reverse pivot) |
 | `lattice login` | Authenticate with a Lattice cluster |
 | `lattice logout` | Clear saved credentials and proxy kubeconfig |
 | `lattice use <cluster>` | Switch active cluster context |
-| `lattice install -f cluster.yaml` | Provision a self-managing cluster |
-| `lattice uninstall -k kubeconfig` | Tear down a cluster (reverse pivot) |
 | `lattice token` | ServiceAccount token (exec credential plugin) |
 | `lattice get clusters` | List your fleet |
 | `lattice get cluster <name>` | Detail view of one cluster |
