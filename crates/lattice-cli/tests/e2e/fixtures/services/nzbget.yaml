@@ -11,6 +11,7 @@ spec:
         security:
           runAsUser: 0
           apparmorProfile: Unconfined
+          capabilities: [SETUID, SETGID]
         variables:
           PUID: "1000"
           PGID: "1000"
