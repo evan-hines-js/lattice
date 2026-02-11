@@ -37,10 +37,26 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     for svc in ["jellyfin", "nzbget", "sonarr"] {
         apply_run_as_root_override_policy(kubeconfig_path, NAMESPACE, svc).await?;
     }
-    // nzbget vpn sidecar needs NET_ADMIN + SYS_MODULE
+    // sonarr main container needs SETUID + SETGID for s6-overlay
     apply_cedar_policy_crd(
         kubeconfig_path,
-        "permit-nzbget-vpn-caps",
+        "permit-sonarr-caps",
+        "e2e",
+        50,
+        r#"permit(
+  principal == Lattice::Service::"media/sonarr",
+  action == Lattice::Action::"OverrideSecurity",
+  resource
+) when {
+  resource == Lattice::SecurityOverride::"capability:SETUID" ||
+  resource == Lattice::SecurityOverride::"capability:SETGID"
+};"#,
+    )
+    .await?;
+    // nzbget: main needs SETUID + SETGID (s6-overlay), vpn sidecar needs NET_ADMIN + SYS_MODULE
+    apply_cedar_policy_crd(
+        kubeconfig_path,
+        "permit-nzbget-caps",
         "e2e",
         50,
         r#"permit(
@@ -49,7 +65,9 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
   resource
 ) when {
   resource == Lattice::SecurityOverride::"capability:NET_ADMIN" ||
-  resource == Lattice::SecurityOverride::"capability:SYS_MODULE"
+  resource == Lattice::SecurityOverride::"capability:SYS_MODULE" ||
+  resource == Lattice::SecurityOverride::"capability:SETUID" ||
+  resource == Lattice::SecurityOverride::"capability:SETGID"
 };"#,
     )
     .await?;

@@ -2452,7 +2452,7 @@ metadata:
 spec:
   provider:
     webhook:
-      url: "http://lattice-local-secrets.lattice-system.svc:8787/secret/{{{{ .remoteRef.key }}}}"
+      url: "http://lattice-local-secrets.lattice-system.svc:8787/secret/{{{{ .remoteRef.key }}}}/{{{{ .remoteRef.property }}}}"
       method: GET
       result:
         jsonPath: "$"
