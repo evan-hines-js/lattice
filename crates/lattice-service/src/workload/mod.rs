@@ -1024,8 +1024,8 @@ impl GeneratedWorkloads {
 // =============================================================================
 
 use crate::crd::{
-    AutoscalingMetric, DeployStrategy, GpuParams, LatticeService, LatticeServiceSpec, ProviderType,
-    ReplicaSpec, WorkloadSpec,
+    AutoscalingMetric, AutoscalingSpec, DeployStrategy, GpuParams, LatticeService,
+    LatticeServiceSpec, ProviderType, WorkloadSpec,
 };
 use lattice_common::mesh;
 use lattice_common::template::RenderedContainer;
@@ -1173,17 +1173,18 @@ impl WorkloadCompiler {
             output.service = Some(Self::compile_service(name, namespace, workload));
         }
 
-        // Generate PDB for HA services (min replicas >= 2)
-        if spec.replicas.min >= 2 {
-            output.pdb = Some(Self::compile_pdb(name, namespace, &spec.replicas));
+        // Generate PDB for HA services (replicas >= 2)
+        if spec.replicas >= 2 {
+            output.pdb = Some(Self::compile_pdb(name, namespace, spec.replicas));
         }
 
-        // Generate KEDA ScaledObject if max replicas is set
-        if spec.replicas.max.is_some() {
+        // Generate KEDA ScaledObject if autoscaling is configured
+        if let Some(ref autoscaling) = spec.autoscaling {
             output.scaled_object = Some(Self::compile_scaled_object(
                 name,
                 namespace,
-                &spec.replicas,
+                spec.replicas,
+                autoscaling,
                 monitoring_enabled,
             )?);
         }
@@ -1214,7 +1215,7 @@ impl WorkloadCompiler {
             kind: "Deployment".to_string(),
             metadata: ObjectMeta::new(name, namespace),
             spec: DeploymentSpec {
-                replicas: spec.replicas.min,
+                replicas: spec.replicas,
                 selector: LabelSelector {
                     match_labels: {
                         let mut selector = BTreeMap::new();
@@ -1271,13 +1272,13 @@ impl WorkloadCompiler {
     }
 
     /// Compile a PodDisruptionBudget for HA services.
-    fn compile_pdb(name: &str, namespace: &str, replicas: &ReplicaSpec) -> PodDisruptionBudget {
+    fn compile_pdb(name: &str, namespace: &str, replicas: u32) -> PodDisruptionBudget {
         PodDisruptionBudget {
             api_version: "policy/v1".to_string(),
             kind: "PodDisruptionBudget".to_string(),
             metadata: ObjectMeta::new(name, namespace),
             spec: PdbSpec {
-                min_available: Some(replicas.min.saturating_sub(1).max(1)),
+                min_available: Some(replicas.saturating_sub(1).max(1)),
                 selector: LabelSelector {
                     match_labels: {
                         let mut labels = BTreeMap::new();
@@ -1329,21 +1330,22 @@ impl WorkloadCompiler {
     fn compile_scaled_object(
         name: &str,
         namespace: &str,
-        replicas: &ReplicaSpec,
+        replicas: u32,
+        autoscaling: &AutoscalingSpec,
         monitoring_enabled: bool,
     ) -> Result<ScaledObject, CompilationError> {
         use lattice_infra::bootstrap::prometheus::{vmselect_url, VMSELECT_PATH, VMSELECT_PORT};
 
-        let autoscaling = if replicas.autoscaling.is_empty() {
+        let metrics = if autoscaling.metrics.is_empty() {
             vec![AutoscalingMetric {
                 metric: "cpu".to_string(),
                 target: 80,
             }]
         } else {
-            replicas.autoscaling.clone()
+            autoscaling.metrics.clone()
         };
 
-        let custom_metrics: Vec<String> = autoscaling
+        let custom_metrics: Vec<String> = metrics
             .iter()
             .filter(|m| !matches!(m.metric.as_str(), "cpu" | "memory"))
             .map(|m| m.metric.clone())
@@ -1356,7 +1358,7 @@ impl WorkloadCompiler {
 
         let server_address = format!("{}:{}{}", vmselect_url(), VMSELECT_PORT, VMSELECT_PATH);
 
-        let triggers = autoscaling
+        let triggers = metrics
             .iter()
             .map(|m| match m.metric.as_str() {
                 "cpu" | "memory" => ScaledObjectTrigger {
@@ -1396,8 +1398,8 @@ impl WorkloadCompiler {
                     kind: "Deployment".to_string(),
                     name: name.to_string(),
                 },
-                min_replica_count: replicas.min,
-                max_replica_count: replicas.max.unwrap_or(replicas.min),
+                min_replica_count: replicas,
+                max_replica_count: autoscaling.max,
                 triggers,
             },
         })
@@ -1412,7 +1414,7 @@ impl WorkloadCompiler {
 mod tests {
     use super::*;
     use crate::crd::{
-        AutoscalingMetric, ContainerSpec, PortSpec, ReplicaSpec, ResourceSpec, ResourceType,
+        AutoscalingMetric, AutoscalingSpec, ContainerSpec, PortSpec, ResourceSpec, ResourceType,
         ServicePortsSpec, WorkloadSpec,
     };
     use lattice_common::template::TemplateString;
@@ -1724,11 +1726,11 @@ mod tests {
     #[test]
     fn scaled_object_generated_with_max_replicas() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 2,
-            max: Some(10),
-            autoscaling: vec![],
-        };
+        service.spec.replicas = 2;
+        service.spec.autoscaling = Some(AutoscalingSpec {
+            max: 10,
+            metrics: vec![],
+        });
 
         let output = compile_service(&service);
 
@@ -1752,11 +1754,11 @@ mod tests {
     #[test]
     fn scaled_object_default_cpu_80() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 1,
-            max: Some(5),
-            autoscaling: vec![],
-        };
+        service.spec.replicas = 1;
+        service.spec.autoscaling = Some(AutoscalingSpec {
+            max: 5,
+            metrics: vec![],
+        });
         let output = compile_service(&service);
         let so = output.scaled_object.expect("should have ScaledObject");
         assert_eq!(so.spec.triggers.len(), 1);
@@ -1769,14 +1771,14 @@ mod tests {
     #[test]
     fn scaled_object_custom_cpu_threshold() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 1,
-            max: Some(5),
-            autoscaling: vec![AutoscalingMetric {
+        service.spec.replicas = 1;
+        service.spec.autoscaling = Some(AutoscalingSpec {
+            max: 5,
+            metrics: vec![AutoscalingMetric {
                 metric: "cpu".to_string(),
                 target: 60,
             }],
-        };
+        });
         let output = compile_service(&service);
         let so = output.scaled_object.expect("should have ScaledObject");
         assert_eq!(so.spec.triggers.len(), 1);
@@ -1787,14 +1789,14 @@ mod tests {
     #[test]
     fn scaled_object_memory_trigger() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 1,
-            max: Some(5),
-            autoscaling: vec![AutoscalingMetric {
+        service.spec.replicas = 1;
+        service.spec.autoscaling = Some(AutoscalingSpec {
+            max: 5,
+            metrics: vec![AutoscalingMetric {
                 metric: "memory".to_string(),
                 target: 75,
             }],
-        };
+        });
         let output = compile_service(&service);
         let so = output.scaled_object.expect("should have ScaledObject");
         assert_eq!(so.spec.triggers.len(), 1);
@@ -1807,14 +1809,14 @@ mod tests {
     #[test]
     fn scaled_object_prometheus_trigger() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 1,
-            max: Some(10),
-            autoscaling: vec![AutoscalingMetric {
+        service.spec.replicas = 1;
+        service.spec.autoscaling = Some(AutoscalingSpec {
+            max: 10,
+            metrics: vec![AutoscalingMetric {
                 metric: "vllm_num_requests_waiting".to_string(),
                 target: 5,
             }],
-        };
+        });
         let output = compile_service(&service);
         let so = output.scaled_object.expect("should have ScaledObject");
         assert_eq!(so.spec.triggers.len(), 1);
@@ -1847,10 +1849,10 @@ mod tests {
     #[test]
     fn scaled_object_multi_signal() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 1,
-            max: Some(10),
-            autoscaling: vec![
+        service.spec.replicas = 1;
+        service.spec.autoscaling = Some(AutoscalingSpec {
+            max: 10,
+            metrics: vec![
                 AutoscalingMetric {
                     metric: "cpu".to_string(),
                     target: 70,
@@ -1860,7 +1862,7 @@ mod tests {
                     target: 5,
                 },
             ],
-        };
+        });
         let output = compile_service(&service);
         let so = output.scaled_object.expect("should have ScaledObject");
         assert_eq!(so.spec.triggers.len(), 2);
@@ -1871,11 +1873,11 @@ mod tests {
     #[test]
     fn scaled_object_defaults_to_cpu_when_no_autoscaling() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 2,
-            max: Some(8),
-            autoscaling: vec![],
-        };
+        service.spec.replicas = 2;
+        service.spec.autoscaling = Some(AutoscalingSpec {
+            max: 8,
+            metrics: vec![],
+        });
         let output = compile_service(&service);
         let so = output.scaled_object.expect("should have ScaledObject");
         assert_eq!(so.spec.min_replica_count, 2);
@@ -1887,14 +1889,14 @@ mod tests {
     #[test]
     fn scaled_object_custom_metrics_require_monitoring() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 1,
-            max: Some(10),
-            autoscaling: vec![AutoscalingMetric {
+        service.spec.replicas = 1;
+        service.spec.autoscaling = Some(AutoscalingSpec {
+            max: 10,
+            metrics: vec![AutoscalingMetric {
                 metric: "vllm_num_requests_waiting".to_string(),
                 target: 5,
             }],
-        };
+        });
 
         // With monitoring disabled, custom metrics should fail
         let result = test_compile_with_monitoring(&service, &BTreeMap::new(), false);
@@ -1907,10 +1909,10 @@ mod tests {
     #[test]
     fn scaled_object_cpu_memory_work_without_monitoring() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 1,
-            max: Some(5),
-            autoscaling: vec![
+        service.spec.replicas = 1;
+        service.spec.autoscaling = Some(AutoscalingSpec {
+            max: 5,
+            metrics: vec![
                 AutoscalingMetric {
                     metric: "cpu".to_string(),
                     target: 70,
@@ -1920,7 +1922,7 @@ mod tests {
                     target: 80,
                 },
             ],
-        };
+        });
 
         // cpu/memory should work even without monitoring
         let output = compile_service_with_monitoring(&service, false);
@@ -1937,11 +1939,7 @@ mod tests {
     #[test]
     fn pdb_generated_for_ha_services() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 3,
-            max: None,
-            autoscaling: vec![],
-        };
+        service.spec.replicas = 3;
 
         let output = compile_service(&service);
 
@@ -1969,11 +1967,7 @@ mod tests {
     #[test]
     fn pdb_min_available_for_two_replicas() {
         let mut service = make_service("my-app", "default");
-        service.spec.replicas = ReplicaSpec {
-            min: 2,
-            max: None,
-            autoscaling: vec![],
-        };
+        service.spec.replicas = 2;
 
         let output = compile_service(&service);
 

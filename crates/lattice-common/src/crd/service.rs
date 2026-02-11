@@ -25,7 +25,7 @@ use super::types::Condition;
 use super::workload::backup::ServiceBackupSpec;
 use super::workload::deploy::DeploySpec;
 use super::workload::ingress::IngressSpec;
-use super::workload::scaling::ReplicaSpec;
+use super::workload::scaling::AutoscalingSpec;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 
 // =============================================================================
@@ -62,7 +62,7 @@ impl std::fmt::Display for ServicePhase {
 // =============================================================================
 
 /// Specification for a LatticeService
-#[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "lattice.dev",
     version = "v1alpha1",
@@ -80,9 +80,13 @@ pub struct LatticeServiceSpec {
     /// Score-compatible workload specification (containers, resources, ports)
     pub workload: WorkloadSpec,
 
-    /// Replica scaling configuration
-    #[serde(default)]
-    pub replicas: ReplicaSpec,
+    /// Number of pod replicas
+    #[serde(default = "default_replicas")]
+    pub replicas: u32,
+
+    /// Optional KEDA autoscaling configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autoscaling: Option<AutoscalingSpec>,
 
     /// Lattice runtime extensions (sidecars, sysctls, hostNetwork, etc.)
     #[serde(default, flatten)]
@@ -101,39 +105,37 @@ pub struct LatticeServiceSpec {
     pub ingress: Option<IngressSpec>,
 }
 
+fn default_replicas() -> u32 {
+    1
+}
+
+impl Default for LatticeServiceSpec {
+    fn default() -> Self {
+        Self {
+            workload: WorkloadSpec::default(),
+            replicas: default_replicas(),
+            autoscaling: None,
+            runtime: RuntimeSpec::default(),
+            backup: None,
+            deploy: DeploySpec::default(),
+            ingress: None,
+        }
+    }
+}
+
 impl LatticeServiceSpec {
-    /// Validate the service specification (workload + replicas + pod)
+    /// Validate the service specification (workload + replicas + autoscaling)
     pub fn validate(&self) -> Result<(), crate::Error> {
         self.workload.validate()?;
 
-        // Validate replica counts
-        if let Some(max) = self.replicas.max {
-            if self.replicas.min > max {
+        // Validate autoscaling
+        if let Some(ref autoscaling) = self.autoscaling {
+            if self.replicas > autoscaling.max {
                 return Err(crate::Error::validation(
-                    "min replicas cannot exceed max replicas",
+                    "replicas cannot exceed autoscaling max",
                 ));
             }
-        }
-
-        // Validate autoscaling metrics
-        if !self.replicas.autoscaling.is_empty() && self.replicas.max.is_none() {
-            return Err(crate::Error::validation(
-                "autoscaling metrics require max replicas to be set",
-            ));
-        }
-        for m in &self.replicas.autoscaling {
-            if m.target == 0 {
-                return Err(crate::Error::validation(format!(
-                    "autoscaling metric '{}' target must be greater than 0",
-                    m.metric
-                )));
-            }
-            if (m.metric == "cpu" || m.metric == "memory") && m.target > 100 {
-                return Err(crate::Error::validation(format!(
-                    "autoscaling metric '{}' target cannot exceed 100%",
-                    m.metric
-                )));
-            }
+            autoscaling.validate()?;
         }
 
         Ok(())
@@ -308,8 +310,8 @@ workload:
     ports:
       http:
         port: 80
-replicas:
-  min: 1
+replicas: 1
+autoscaling:
   max: 3
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
@@ -318,8 +320,9 @@ replicas:
 
         assert_eq!(spec.workload.containers.len(), 1);
         assert_eq!(spec.workload.containers["main"].image, "nginx:latest");
-        assert_eq!(spec.replicas.min, 1);
-        assert_eq!(spec.replicas.max, Some(3));
+        assert_eq!(spec.replicas, 1);
+        let autoscaling = spec.autoscaling.expect("autoscaling should be present");
+        assert_eq!(autoscaling.max, 3);
 
         let ports = spec.workload.ports();
         assert_eq!(ports.get("http"), Some(&80));
@@ -864,8 +867,7 @@ workload:
     sonarr:
       type: service
       direction: inbound
-replicas:
-  min: 1
+replicas: 1
 ingress:
   hosts:
     - jellyfin.home.local

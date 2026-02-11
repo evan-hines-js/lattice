@@ -3,29 +3,38 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Replica scaling specification
+/// Autoscaling specification for KEDA-based horizontal pod autoscaling.
+///
+/// When present, KEDA scales the workload between `replicas` (from the parent spec)
+/// and `max` replicas based on the configured metrics.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ReplicaSpec {
-    /// Minimum replicas
-    #[serde(default)]
-    pub min: u32,
-
-    /// Maximum replicas
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max: Option<u32>,
+pub struct AutoscalingSpec {
+    /// Maximum replicas KEDA can scale to
+    pub max: u32,
 
     /// Custom autoscaling metrics (defaults to cpu at 80% if empty)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub autoscaling: Vec<AutoscalingMetric>,
+    pub metrics: Vec<AutoscalingMetric>,
 }
 
-impl Default for ReplicaSpec {
-    fn default() -> Self {
-        Self {
-            min: 1,
-            max: None,
-            autoscaling: vec![],
+impl AutoscalingSpec {
+    /// Validate autoscaling metric targets.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        for m in &self.metrics {
+            if m.target == 0 {
+                return Err(crate::Error::validation(format!(
+                    "autoscaling metric '{}' target must be greater than 0",
+                    m.metric
+                )));
+            }
+            if (m.metric == "cpu" || m.metric == "memory") && m.target > 100 {
+                return Err(crate::Error::validation(format!(
+                    "autoscaling metric '{}' target cannot exceed 100%",
+                    m.metric
+                )));
+            }
         }
+        Ok(())
     }
 }
 

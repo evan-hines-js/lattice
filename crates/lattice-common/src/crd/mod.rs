@@ -78,7 +78,7 @@ pub use workload::resources::{
     DependencyDirection, GpuParams, ResourceMetadata, ResourceQuantity, ResourceRequirements,
     ResourceSpec, ResourceType, VolumeAccessMode, VolumeParams,
 };
-pub use workload::scaling::{AutoscalingMetric, ReplicaSpec};
+pub use workload::scaling::{AutoscalingMetric, AutoscalingSpec};
 pub use workload::spec::{RuntimeSpec, WorkloadSpec};
 
 // =============================================================================
