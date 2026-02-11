@@ -244,7 +244,10 @@ pub async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
 
 /// Create a Kubernetes resource with retry logic (survives port-forward restarts).
 ///
-/// Wraps `api.create()` with exponential backoff (up to 5 attempts).
+/// Wraps `api.create()` with exponential backoff. If a transient error caused
+/// the resource to be created server-side but the response was lost, subsequent
+/// retries will get `AlreadyExists` (409). We handle this by fetching the
+/// existing resource instead of retrying forever.
 #[cfg(feature = "provider-e2e")]
 pub async fn create_with_retry<K>(api: &Api<K>, resource: &K, name: &str) -> Result<K, String>
 where
@@ -259,9 +262,17 @@ where
         let resource = resource.clone();
         let name = name.clone();
         async move {
-            api.create(&PostParams::default(), &resource)
-                .await
-                .map_err(|e| format!("Failed to create {}: {}", name, e))
+            match api.create(&PostParams::default(), &resource).await {
+                Ok(created) => Ok(created),
+                Err(kube::Error::Api(ref err_resp)) if err_resp.code == 409 => {
+                    // AlreadyExists — a previous attempt succeeded but we lost the response.
+                    // Fetch the existing resource so callers get a valid object back.
+                    api.get(&name)
+                        .await
+                        .map_err(|e| format!("Failed to get existing {}: {}", name, e))
+                }
+                Err(e) => Err(format!("Failed to create {}: {}", name, e)),
+            }
         }
     })
     .await

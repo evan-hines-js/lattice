@@ -8,6 +8,10 @@
   <em>Fully self-managing clusters. Bilateral service mesh. Multi-provider. FIPS-ready.</em>
 </p>
 
+<p align="center">
+  <a href="https://lattice-docs.vercel.app"><strong>Documentation</strong></a>
+</p>
+
 ---
 
 ## Why Lattice
