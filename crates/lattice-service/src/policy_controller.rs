@@ -8,11 +8,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{debug, info, warn};
+
+use crate::controller::fetch_namespace_labels;
 
 use lattice_common::crd::{
     LatticeService, LatticeServicePolicy, LatticeServicePolicyStatus, ServicePolicyPhase,
@@ -41,7 +42,6 @@ pub async fn reconcile(
         .map_err(|e| ReconcileError::Kube(format!("failed to list services: {}", e)))?;
 
     // Fetch namespace labels for selector matching (cache to avoid refetching)
-    let ns_api: Api<Namespace> = Api::all(client.clone());
     let mut ns_label_cache: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
     // Check which services match this policy's selector
@@ -55,10 +55,9 @@ pub async fn reconcile(
         let ns_labels = if let Some(cached) = ns_label_cache.get(&svc_namespace) {
             cached.clone()
         } else {
-            let labels = match ns_api.get_opt(&svc_namespace).await {
-                Ok(Some(ns)) => ns.metadata.labels.unwrap_or_default().into_iter().collect(),
-                _ => BTreeMap::new(),
-            };
+            let labels = fetch_namespace_labels(client, &svc_namespace)
+                .await
+                .unwrap_or_default();
             ns_label_cache.insert(svc_namespace.clone(), labels.clone());
             labels
         };

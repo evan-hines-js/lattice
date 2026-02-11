@@ -231,6 +231,20 @@ pub struct ServiceKubeClientImpl {
     crds: Arc<DiscoveredCrds>,
 }
 
+/// Fetch labels for a Kubernetes namespace. Returns empty map if not found.
+pub(crate) async fn fetch_namespace_labels(
+    client: &Client,
+    name: &str,
+) -> Result<BTreeMap<String, String>, kube::Error> {
+    use k8s_openapi::api::core::v1::Namespace;
+    let api: Api<Namespace> = Api::all(client.clone());
+    Ok(api
+        .get_opt(name)
+        .await?
+        .and_then(|ns| ns.metadata.labels)
+        .unwrap_or_default())
+}
+
 impl ServiceKubeClientImpl {
     /// Create a new ServiceKubeClientImpl wrapping the given client and discovered CRDs
     pub fn new(client: Client, crds: Arc<DiscoveredCrds>) -> Self {
@@ -357,13 +371,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
     }
 
     async fn get_namespace_labels(&self, name: &str) -> Result<BTreeMap<String, String>, Error> {
-        use k8s_openapi::api::core::v1::Namespace;
-
-        let api: Api<Namespace> = Api::all(self.client.clone());
-        match api.get_opt(name).await? {
-            Some(ns) => Ok(ns.metadata.labels.unwrap_or_default().into_iter().collect()),
-            None => Ok(BTreeMap::new()),
-        }
+        Ok(fetch_namespace_labels(&self.client, name).await?)
     }
 
     async fn apply_compiled_service(
@@ -1468,8 +1476,9 @@ async fn update_external_status_failed(
 mod tests {
     use super::*;
     use crate::crd::{
-        ContainerSpec, DependencyDirection, LatticeExternalServiceSpec, Resolution, ResourceSpec,
-        WorkloadSpec,
+        BackupHook, BackupHooksSpec, ContainerSpec, DependencyDirection, HookErrorAction,
+        LatticeExternalServiceSpec, LatticeServicePolicySpec, Resolution, ResourceSpec,
+        ServiceSelector, VolumeBackupDefault, VolumeBackupSpec, WorkloadSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
@@ -1607,8 +1616,14 @@ mod tests {
         mock
     }
 
-    fn mock_kube_success() -> MockServiceKubeClient {
-        mock_kube_with_policies(vec![])
+    fn make_hook(name: &str, cmd: &str) -> BackupHook {
+        BackupHook {
+            name: name.to_string(),
+            container: "main".to_string(),
+            command: vec!["/bin/sh".to_string(), "-c".to_string(), cmd.to_string()],
+            timeout: None,
+            on_error: HookErrorAction::Continue,
+        }
     }
 
     // =========================================================================
@@ -1619,7 +1634,7 @@ mod tests {
     #[tokio::test]
     async fn story_new_service_transitions_to_compiling() {
         let service = Arc::new(sample_service("my-service"));
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         let action = reconcile(service, ctx.clone())
@@ -1641,7 +1656,7 @@ mod tests {
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
         let service = Arc::new(service);
 
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Put the service in the graph first
@@ -1662,7 +1677,7 @@ mod tests {
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
         let service = Arc::new(service);
 
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Add both services to graph
@@ -1685,7 +1700,7 @@ mod tests {
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Ready));
         let service = Arc::new(service);
 
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         ctx.graph.put_service("test", "my-service", &service.spec);
@@ -1706,7 +1721,7 @@ mod tests {
         service.spec.workload.containers.clear();
         let service = Arc::new(service);
 
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         let action = reconcile(service, ctx)
@@ -1721,7 +1736,7 @@ mod tests {
     #[tokio::test]
     async fn story_external_service_becomes_ready() {
         let external = Arc::new(sample_external_service("stripe"));
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         let action = reconcile_external(external, ctx.clone())
@@ -1743,7 +1758,7 @@ mod tests {
     /// Story: Graph tracks active edges with bilateral agreements
     #[tokio::test]
     async fn story_graph_tracks_bilateral_agreements() {
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Frontend depends on backend
@@ -1763,7 +1778,7 @@ mod tests {
     /// Story: Graph handles service deletion
     #[tokio::test]
     async fn story_graph_handles_deletion() {
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Add a service
@@ -1787,7 +1802,7 @@ mod tests {
     #[test]
     fn story_error_policy_requeues() {
         let service = Arc::new(sample_service("my-service"));
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Validation errors are NOT retryable - should await spec change
@@ -1836,7 +1851,7 @@ mod tests {
     /// Story: Services are isolated by environment
     #[tokio::test]
     async fn story_services_isolated_by_environment() {
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
         // Add same-named service to different environments
@@ -1861,8 +1876,8 @@ mod tests {
     /// Story: Context can share graph across instances
     #[test]
     fn story_shared_graph_across_contexts() {
-        let mock_kube1 = Arc::new(mock_kube_success());
-        let mock_kube2 = Arc::new(mock_kube_success());
+        let mock_kube1 = Arc::new(mock_kube_with_policies(vec![]));
+        let mock_kube2 = Arc::new(mock_kube_with_policies(vec![]));
         let shared_graph = Arc::new(ServiceGraph::new());
         let cedar = Arc::new(PolicyEngine::new());
 
@@ -1901,10 +1916,8 @@ mod tests {
         name: &str,
         namespace: &str,
         priority: i32,
-        backup: Option<crate::crd::ServiceBackupSpec>,
+        backup: Option<ServiceBackupSpec>,
     ) -> LatticeServicePolicy {
-        use crate::crd::{LatticeServicePolicySpec, ServiceSelector};
-
         LatticeServicePolicy {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
@@ -1925,19 +1938,12 @@ mod tests {
     /// produces backup annotations on the deployment
     #[tokio::test]
     async fn story_policy_backup_applied_to_service() {
-        use crate::crd::{
-            BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,
-            VolumeBackupSpec,
-        };
-
         let policy_backup = ServiceBackupSpec {
             hooks: Some(BackupHooksSpec {
-                pre: vec![crate::crd::BackupHook {
-                    name: "policy-freeze".to_string(),
-                    container: "main".to_string(),
-                    command: vec!["/bin/sh".to_string(), "-c".to_string(), "sync".to_string()],
+                pre: vec![BackupHook {
                     timeout: Some("60s".to_string()),
                     on_error: HookErrorAction::Fail,
+                    ..make_hook("policy-freeze", "sync")
                 }],
                 post: vec![],
             }),
@@ -1964,11 +1970,6 @@ mod tests {
     /// Story: resolve_effective_backup merges policy + inline correctly
     #[tokio::test]
     async fn story_resolve_effective_backup_merges_policies() {
-        use crate::crd::{
-            BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,
-            VolumeBackupSpec,
-        };
-
         // Low-priority policy: hooks + volumes
         let low_policy = make_policy(
             "low",
@@ -1976,13 +1977,7 @@ mod tests {
             10,
             Some(ServiceBackupSpec {
                 hooks: Some(BackupHooksSpec {
-                    pre: vec![BackupHook {
-                        name: "low-hook".to_string(),
-                        container: "main".to_string(),
-                        command: vec!["/bin/sh".to_string(), "-c".to_string(), "low".to_string()],
-                        timeout: None,
-                        on_error: HookErrorAction::Continue,
-                    }],
+                    pre: vec![make_hook("low-hook", "low")],
                     post: vec![],
                 }),
                 volumes: Some(VolumeBackupSpec {
@@ -2000,13 +1995,7 @@ mod tests {
             100,
             Some(ServiceBackupSpec {
                 hooks: Some(BackupHooksSpec {
-                    pre: vec![BackupHook {
-                        name: "high-hook".to_string(),
-                        container: "main".to_string(),
-                        command: vec!["/bin/sh".to_string(), "-c".to_string(), "high".to_string()],
-                        timeout: None,
-                        on_error: HookErrorAction::Continue,
-                    }],
+                    pre: vec![make_hook("high-hook", "high")],
                     post: vec![],
                 }),
                 volumes: None,
@@ -2031,7 +2020,7 @@ mod tests {
     /// Story: No matching policies returns None
     #[tokio::test]
     async fn story_resolve_effective_backup_no_policies() {
-        let mock_kube = mock_kube_success();
+        let mock_kube = mock_kube_with_policies(vec![]);
         let service = sample_service("my-app");
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
@@ -2045,8 +2034,6 @@ mod tests {
     /// Story: Policy matches only same namespace when no namespace selector
     #[tokio::test]
     async fn story_resolve_effective_backup_namespace_scoping() {
-        use crate::crd::{BackupHooksSpec, HookErrorAction, ServiceBackupSpec};
-
         // Policy in "other" namespace — should NOT match service in "test"
         let policy = make_policy(
             "other-ns-policy",
@@ -2054,13 +2041,7 @@ mod tests {
             100,
             Some(ServiceBackupSpec {
                 hooks: Some(BackupHooksSpec {
-                    pre: vec![crate::crd::BackupHook {
-                        name: "should-not-match".to_string(),
-                        container: "main".to_string(),
-                        command: vec!["true".to_string()],
-                        timeout: None,
-                        on_error: HookErrorAction::Continue,
-                    }],
+                    pre: vec![make_hook("should-not-match", "true")],
                     post: vec![],
                 }),
                 volumes: None,
