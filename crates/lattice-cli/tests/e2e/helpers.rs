@@ -440,17 +440,62 @@ pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
 ///
 /// ALL kubectl invocations should go through this function so transient
 /// proxy / port-forward hiccups don't kill the test run.
+///
+/// Retries transient errors (connection refused, timeout, etc.) forever.
+/// Returns permanent errors (NotFound, Forbidden, etc.) immediately.
 pub async fn run_kubectl(args: &[&str]) -> Result<String, String> {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
 
-    retry_with_backoff(&RetryConfig::with_max_attempts(3), "kubectl", || {
-        let args = args.clone();
-        async move {
-            let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            run_cmd("kubectl", &args_ref)
-        }
-    })
-    .await
+    // The inner closure returns Ok(Ok(output)) for success, Ok(Err(e)) for
+    // permanent errors (stops retrying), and Err(e) for transient errors (retried).
+    // AlreadyExists is treated as success — the desired state is achieved.
+    let result: Result<Result<String, String>, String> =
+        retry_with_backoff(&RetryConfig::infinite(), "kubectl", || {
+            let args = args.clone();
+            async move {
+                let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                match run_cmd("kubectl", &args_ref) {
+                    Ok(output) => Ok(Ok(output)),
+                    Err(e) if is_already_exists(&e) => Ok(Ok(e)),
+                    Err(e) if is_transient_kubectl_error(&e) => Err(e),
+                    Err(e) => Ok(Err(e)),
+                }
+            }
+        })
+        .await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(e) => Err(e),
+    }
+}
+
+fn is_already_exists(error: &str) -> bool {
+    error.contains("AlreadyExists") || error.contains("already exists")
+}
+
+/// Whether a kubectl error is transient (connection-level) and worth retrying.
+///
+/// Permanent errors (NotFound, Forbidden, etc.) return immediately since retrying
+/// won't change the outcome. Transient errors (connection refused, timeout, etc.)
+/// are retried because they resolve when the API server recovers.
+fn is_transient_kubectl_error(error: &str) -> bool {
+    error.contains("Unable to connect to the server")
+        || error.contains("connection refused")
+        || error.contains("connection reset")
+        || error.contains("i/o timeout")
+        || error.contains("TLS handshake timeout")
+        || error.contains("no such host")
+        || error.contains("dial tcp")
+        || error.contains("EOF")
+        || error.contains("broken pipe")
+        || error.contains("transport is closing")
+        || error.contains("context deadline exceeded")
+        || error.contains("the object has been modified")
+        || error.contains("InternalError")
+        || error.contains("ServiceUnavailable")
+        || error.contains("client rate limiter")
+        || error.contains("net/http")
 }
 
 // =============================================================================
@@ -2276,6 +2321,7 @@ pub async fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
         "namespace",
         namespace,
         "--wait=false",
+        "--ignore-not-found",
     ])
     .await;
 }

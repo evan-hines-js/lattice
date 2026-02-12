@@ -141,11 +141,6 @@ pub struct GeneratedVolumes {
 }
 
 impl GeneratedVolumes {
-    /// Create empty generated volumes
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Check if no volumes were generated
     pub fn is_empty(&self) -> bool {
         self.pvcs.is_empty()
@@ -213,7 +208,7 @@ impl VolumeCompiler {
         workload: &WorkloadSpec,
         sidecars: &BTreeMap<String, crate::crd::SidecarSpec>,
     ) -> Result<GeneratedVolumes, CompilationError> {
-        let mut output = GeneratedVolumes::new();
+        let mut output = GeneratedVolumes::default();
 
         // -----------------------------------------------------------------
         // Process volume resources

@@ -208,7 +208,7 @@ mod tests {
         let svc = make_service_with_ports("my-app", "default", &[("http", 80)]);
         let ctx = make_ctx(&svc, false);
         let phase = ServiceMonitorPhase::new(Some(fake_ar()));
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
@@ -219,7 +219,7 @@ mod tests {
         let svc = make_service_with_ports("my-app", "default", &[("http", 80)]);
         let ctx = make_ctx(&svc, true);
         let phase = ServiceMonitorPhase::new(None);
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
@@ -230,7 +230,7 @@ mod tests {
         let svc = make_service_with_ports("my-app", "default", &[]);
         let ctx = make_ctx(&svc, true);
         let phase = ServiceMonitorPhase::new(Some(fake_ar()));
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
@@ -241,7 +241,7 @@ mod tests {
         let svc = make_service_with_ports("my-app", "default", &[("http", 80), ("grpc", 9090)]);
         let ctx = make_ctx(&svc, true);
         let phase = ServiceMonitorPhase::new(Some(fake_ar()));
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
@@ -256,7 +256,7 @@ mod tests {
         let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
         let phase = ServiceMonitorPhase::new(Some(fake_ar()));
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
 
@@ -282,7 +282,7 @@ mod tests {
         );
         let ctx = make_ctx(&svc, true);
         let phase = ServiceMonitorPhase::new(Some(fake_ar()));
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
 
@@ -299,7 +299,7 @@ mod tests {
         let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
         let phase = ServiceMonitorPhase::new(Some(fake_ar()));
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
 
@@ -320,7 +320,7 @@ mod tests {
         let svc = make_service_with_ports("my-app", "staging", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
         let phase = ServiceMonitorPhase::new(Some(fake_ar()));
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
 
@@ -335,7 +335,7 @@ mod tests {
         let svc = make_service_with_ports("my-app", "default", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
         let phase = ServiceMonitorPhase::new(Some(fake_ar()));
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
 

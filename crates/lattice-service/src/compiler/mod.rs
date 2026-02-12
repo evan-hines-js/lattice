@@ -109,11 +109,6 @@ pub struct CompiledService {
 }
 
 impl CompiledService {
-    /// Create empty compiled service
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Check if any resources were generated
     pub fn is_empty(&self) -> bool {
         self.workloads.is_empty()
@@ -442,7 +437,7 @@ impl<'a> ServiceCompiler<'a> {
 
             ingress
         } else {
-            GeneratedIngress::new()
+            GeneratedIngress::default()
         };
 
         let mut compiled = CompiledService {
@@ -1118,7 +1113,7 @@ mod tests {
 
     #[tokio::test]
     async fn compiled_service_is_empty() {
-        let empty = CompiledService::new();
+        let empty = CompiledService::default();
         assert!(empty.is_empty());
 
         let graph = ServiceGraph::new();
@@ -1297,7 +1292,7 @@ mod tests {
 
     #[test]
     fn extensions_counted_in_resource_count() {
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
         assert_eq!(compiled.resource_count(), 0);
 
         compiled.extensions.push(DynamicResource {
@@ -1315,7 +1310,7 @@ mod tests {
 
     #[test]
     fn extensions_included_in_is_empty() {
-        let mut compiled = CompiledService::new();
+        let mut compiled = CompiledService::default();
         assert!(compiled.is_empty());
 
         compiled.extensions.push(DynamicResource {

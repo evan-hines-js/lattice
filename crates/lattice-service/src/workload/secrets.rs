@@ -40,11 +40,6 @@ pub struct SecretRef {
 }
 
 impl GeneratedSecrets {
-    /// Create empty generated secrets
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Check if no secrets were generated
     pub fn is_empty(&self) -> bool {
         self.external_secrets.is_empty() && self.secret_refs.is_empty()
@@ -72,7 +67,7 @@ impl SecretsCompiler {
         workload: &WorkloadSpec,
         image_pull_secrets: &[String],
     ) -> Result<GeneratedSecrets, CompilationError> {
-        let mut output = GeneratedSecrets::new();
+        let mut output = GeneratedSecrets::default();
 
         let secret_resources: Vec<_> = workload
             .resources
