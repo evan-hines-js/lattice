@@ -70,20 +70,34 @@ pub struct RuntimeSpec {
 }
 
 impl WorkloadSpec {
-    /// Extract all service dependencies (outbound) with namespace resolution
+    /// Collect ServiceRefs from resources matching a filter predicate.
     ///
-    /// Returns ServiceRefs for both internal and external services.
-    /// If a resource doesn't specify a namespace, it defaults to `own_namespace`.
-    pub fn dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
+    /// Shared helper for dependency/caller extraction. Handles namespace resolution
+    /// (defaults to `own_namespace`) and id resolution (defaults to resource name).
+    fn collect_service_refs(
+        &self,
+        own_namespace: &str,
+        filter: impl Fn(&ResourceSpec) -> bool,
+    ) -> Vec<ServiceRef> {
         self.resources
             .iter()
-            .filter(|(_, spec)| spec.direction.is_outbound() && spec.type_.is_service_like())
+            .filter(|(_, spec)| filter(spec))
             .map(|(name, spec)| {
                 let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
                 let svc_name = spec.id.as_deref().unwrap_or(name);
                 ServiceRef::new(ns, svc_name)
             })
             .collect()
+    }
+
+    /// Extract all service dependencies (outbound) with namespace resolution
+    ///
+    /// Returns ServiceRefs for both internal and external services.
+    /// If a resource doesn't specify a namespace, it defaults to `own_namespace`.
+    pub fn dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
+        self.collect_service_refs(own_namespace, |spec| {
+            spec.direction.is_outbound() && spec.type_.is_service_like()
+        })
     }
 
     /// Extract services allowed to call this service (inbound) with namespace resolution
@@ -91,47 +105,23 @@ impl WorkloadSpec {
     /// Returns ServiceRefs for callers. If a resource doesn't specify a namespace,
     /// it defaults to `own_namespace`.
     pub fn allowed_callers(&self, own_namespace: &str) -> Vec<ServiceRef> {
-        self.resources
-            .iter()
-            .filter(|(_, spec)| {
-                spec.direction.is_inbound() && matches!(spec.type_, ResourceType::Service)
-            })
-            .map(|(name, spec)| {
-                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                let svc_name = spec.id.as_deref().unwrap_or(name);
-                ServiceRef::new(ns, svc_name)
-            })
-            .collect()
+        self.collect_service_refs(own_namespace, |spec| {
+            spec.direction.is_inbound() && matches!(spec.type_, ResourceType::Service)
+        })
     }
 
     /// Extract external service dependencies with namespace resolution
     pub fn external_dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
-        self.resources
-            .iter()
-            .filter(|(_, spec)| {
-                spec.direction.is_outbound() && matches!(spec.type_, ResourceType::ExternalService)
-            })
-            .map(|(name, spec)| {
-                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                let svc_name = spec.id.as_deref().unwrap_or(name);
-                ServiceRef::new(ns, svc_name)
-            })
-            .collect()
+        self.collect_service_refs(own_namespace, |spec| {
+            spec.direction.is_outbound() && matches!(spec.type_, ResourceType::ExternalService)
+        })
     }
 
     /// Extract internal service dependencies with namespace resolution
     pub fn internal_dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
-        self.resources
-            .iter()
-            .filter(|(_, spec)| {
-                spec.direction.is_outbound() && matches!(spec.type_, ResourceType::Service)
-            })
-            .map(|(name, spec)| {
-                let ns = spec.namespace.as_deref().unwrap_or(own_namespace);
-                let svc_name = spec.id.as_deref().unwrap_or(name);
-                ServiceRef::new(ns, svc_name)
-            })
-            .collect()
+        self.collect_service_refs(own_namespace, |spec| {
+            spec.direction.is_outbound() && matches!(spec.type_, ResourceType::Service)
+        })
     }
 
     /// Get the primary container image
@@ -496,6 +486,43 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("exceeds 63 character"));
+    }
+
+    #[test]
+    fn ports_returns_service_ports() {
+        use super::super::ports::{PortSpec, ServicePortsSpec};
+
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "http".to_string(),
+            PortSpec {
+                port: 8080,
+                target_port: Some(80),
+                protocol: None,
+            },
+        );
+        ports.insert(
+            "grpc".to_string(),
+            PortSpec {
+                port: 9090,
+                target_port: None,
+                protocol: Some("TCP".to_string()),
+            },
+        );
+
+        let mut spec = sample_workload();
+        spec.service = Some(ServicePortsSpec { ports });
+
+        let result = spec.ports();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result["http"], 8080);
+        assert_eq!(result["grpc"], 9090);
+    }
+
+    #[test]
+    fn ports_returns_empty_when_no_service() {
+        let spec = sample_workload();
+        assert!(spec.ports().is_empty());
     }
 
     #[test]

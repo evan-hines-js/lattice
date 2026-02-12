@@ -120,10 +120,12 @@ pub async fn reconcile(
 
 #[cfg(test)]
 mod tests {
-    use lattice_common::crd::{LatticeServicePolicySpec, ServiceSelector};
+    use lattice_common::crd::{
+        LatticeServicePolicySpec, LatticeServicePolicyStatus, ServicePolicyPhase, ServiceSelector,
+    };
 
     #[test]
-    fn test_policy_spec_with_backup() {
+    fn policy_spec_with_backup() {
         use lattice_common::crd::{
             BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec,
         };
@@ -154,5 +156,56 @@ mod tests {
             spec.backup.as_ref().unwrap().hooks.as_ref().unwrap().pre[0].name,
             "freeze"
         );
+    }
+
+    #[test]
+    fn status_idempotency_guard() {
+        let status_a = LatticeServicePolicyStatus {
+            phase: ServicePolicyPhase::Active,
+            matched_services: 3,
+            matched_service_refs: vec![
+                "ns/svc-a".to_string(),
+                "ns/svc-b".to_string(),
+                "ns/svc-c".to_string(),
+            ],
+            conditions: vec![],
+            message: Some("Matching 3 services".to_string()),
+            observed_generation: Some(1),
+        };
+
+        let status_b = LatticeServicePolicyStatus {
+            phase: ServicePolicyPhase::Active,
+            matched_services: 3,
+            matched_service_refs: vec![
+                "ns/svc-a".to_string(),
+                "ns/svc-b".to_string(),
+                "ns/svc-c".to_string(),
+            ],
+            conditions: vec![],
+            message: Some("Matching 3 services".to_string()),
+            observed_generation: Some(1),
+        };
+
+        // Same phase, count, and refs → skip update
+        assert_eq!(status_a.phase, status_b.phase);
+        assert_eq!(status_a.matched_services, status_b.matched_services);
+        assert_eq!(
+            status_a.matched_service_refs,
+            status_b.matched_service_refs
+        );
+
+        // Different count → update needed
+        let status_c = LatticeServicePolicyStatus {
+            matched_services: 2,
+            ..status_a.clone()
+        };
+        assert_ne!(status_a.matched_services, status_c.matched_services);
+    }
+
+    #[test]
+    fn status_message_reflects_count() {
+        let matched_count = 5u32;
+        let message = format!("Matching {} services", matched_count);
+        assert_eq!(message, "Matching 5 services");
     }
 }

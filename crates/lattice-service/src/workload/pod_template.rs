@@ -152,7 +152,7 @@ impl PodTemplateCompiler {
     }
 
     /// Compile containers from a WorkloadSpec using rendered container data
-    pub fn compile_containers(
+    pub(crate) fn compile_containers(
         workload: &WorkloadSpec,
         gpu: Option<&GpuParams>,
         volumes: &GeneratedVolumes,
@@ -357,7 +357,7 @@ impl PodTemplateCompiler {
     }
 
     /// Compile a Score-compliant Probe to a K8s ProbeSpec
-    pub fn compile_probe(p: &crate::crd::Probe) -> super::ProbeSpec {
+    pub(crate) fn compile_probe(p: &crate::crd::Probe) -> super::ProbeSpec {
         super::ProbeSpec {
             http_get: p.http_get.as_ref().map(|h| super::HttpGetAction {
                 path: h.path.clone(),
@@ -381,7 +381,7 @@ impl PodTemplateCompiler {
     }
 
     /// Compile a CRD SecurityContext to a K8s SecurityContext with PSS restricted defaults.
-    pub fn compile_security_context(
+    pub(crate) fn compile_security_context(
         security: Option<&crate::crd::SecurityContext>,
     ) -> K8sSecurityContext {
         let default = crate::crd::SecurityContext::default();
@@ -452,7 +452,7 @@ impl PodTemplateCompiler {
     }
 
     /// Compile pod-level security context with secure defaults.
-    pub fn compile_pod_security_context(runtime: &RuntimeSpec) -> PodSecurityContext {
+    pub(crate) fn compile_pod_security_context(runtime: &RuntimeSpec) -> PodSecurityContext {
         let sysctls = if runtime.sysctls.is_empty() {
             None
         } else {
@@ -564,7 +564,7 @@ impl PodTemplateCompiler {
     }
 
     /// Resolve `imagePullSecrets` resource names to K8s Secret names
-    pub fn compile_image_pull_secrets(
+    pub(crate) fn compile_image_pull_secrets(
         runtime: &RuntimeSpec,
         workload: &WorkloadSpec,
         secret_refs: &BTreeMap<String, SecretRef>,
@@ -608,5 +608,549 @@ impl PodTemplateCompiler {
                 })
             })
             .collect()
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::{
+        ExecProbe, HttpGetProbe, HttpHeader, Probe, ResourceSpec, ResourceType, SecurityContext,
+        SidecarSpec,
+    };
+    use lattice_common::template::SecretVariableRef;
+
+    // =========================================================================
+    // Story: Compile Probe
+    // =========================================================================
+
+    #[test]
+    fn compile_http_probe() {
+        let probe = Probe {
+            http_get: Some(HttpGetProbe {
+                path: "/healthz".to_string(),
+                port: 8080,
+                scheme: Some("HTTPS".to_string()),
+                host: Some("localhost".to_string()),
+                http_headers: Some(vec![HttpHeader {
+                    name: "X-Custom".to_string(),
+                    value: "test".to_string(),
+                }]),
+            }),
+            exec: None,
+        };
+
+        let result = PodTemplateCompiler::compile_probe(&probe);
+
+        let http = result.http_get.expect("should have http_get");
+        assert_eq!(http.path, "/healthz");
+        assert_eq!(http.port, 8080);
+        assert_eq!(http.scheme, Some("HTTPS".to_string()));
+        assert_eq!(http.host, Some("localhost".to_string()));
+        let headers = http.http_headers.expect("should have headers");
+        assert_eq!(headers[0].name, "X-Custom");
+        assert_eq!(headers[0].value, "test");
+        assert!(result.exec.is_none());
+    }
+
+    #[test]
+    fn compile_exec_probe() {
+        let probe = Probe {
+            http_get: None,
+            exec: Some(ExecProbe {
+                command: vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()],
+            }),
+        };
+
+        let result = PodTemplateCompiler::compile_probe(&probe);
+
+        assert!(result.http_get.is_none());
+        let exec = result.exec.expect("should have exec");
+        assert_eq!(exec.command, vec!["/bin/sh", "-c", "true"]);
+    }
+
+    // =========================================================================
+    // Story: Compile Secret Env Vars
+    // =========================================================================
+
+    #[test]
+    fn secret_env_var_resolves_to_secret_key_ref() {
+        let mut secret_variables = BTreeMap::new();
+        secret_variables.insert(
+            "DB_PASSWORD".to_string(),
+            SecretVariableRef {
+                resource_name: "db-creds".to_string(),
+                key: "password".to_string(),
+            },
+        );
+
+        let mut secret_refs = BTreeMap::new();
+        secret_refs.insert(
+            "db-creds".to_string(),
+            SecretRef {
+                secret_name: "myapp-db-creds".to_string(),
+                remote_key: "vault/db".to_string(),
+                keys: Some(vec!["username".to_string(), "password".to_string()]),
+                store_name: "vault".to_string(),
+            },
+        );
+
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "db-creds".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Secret,
+                ..Default::default()
+            },
+        );
+
+        let result = PodTemplateCompiler::compile_secret_env_vars(
+            "main",
+            &secret_variables,
+            &secret_refs,
+            &resources,
+        )
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "DB_PASSWORD");
+        let vf = result[0].value_from.as_ref().expect("should have value_from");
+        let skr = vf.secret_key_ref.as_ref().expect("should have secret_key_ref");
+        assert_eq!(skr.name, "myapp-db-creds");
+        assert_eq!(skr.key, "password");
+    }
+
+    #[test]
+    fn secret_env_var_errors_on_missing_resource() {
+        let mut secret_variables = BTreeMap::new();
+        secret_variables.insert(
+            "VAR".to_string(),
+            SecretVariableRef {
+                resource_name: "nonexistent".to_string(),
+                key: "key".to_string(),
+            },
+        );
+
+        let result = PodTemplateCompiler::compile_secret_env_vars(
+            "main",
+            &secret_variables,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn secret_env_var_errors_on_non_secret_resource() {
+        let mut secret_variables = BTreeMap::new();
+        secret_variables.insert(
+            "VAR".to_string(),
+            SecretVariableRef {
+                resource_name: "redis".to_string(),
+                key: "host".to_string(),
+            },
+        );
+
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "redis".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                ..Default::default()
+            },
+        );
+
+        let result = PodTemplateCompiler::compile_secret_env_vars(
+            "main",
+            &secret_variables,
+            &BTreeMap::new(),
+            &resources,
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not 'secret'"));
+    }
+
+    #[test]
+    fn secret_env_var_errors_on_invalid_key() {
+        let mut secret_variables = BTreeMap::new();
+        secret_variables.insert(
+            "VAR".to_string(),
+            SecretVariableRef {
+                resource_name: "db-creds".to_string(),
+                key: "nonexistent-key".to_string(),
+            },
+        );
+
+        let mut secret_refs = BTreeMap::new();
+        secret_refs.insert(
+            "db-creds".to_string(),
+            SecretRef {
+                secret_name: "myapp-db-creds".to_string(),
+                remote_key: "vault/db".to_string(),
+                keys: Some(vec!["username".to_string(), "password".to_string()]),
+                store_name: "vault".to_string(),
+            },
+        );
+
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "db-creds".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Secret,
+                ..Default::default()
+            },
+        );
+
+        let result = PodTemplateCompiler::compile_secret_env_vars(
+            "main",
+            &secret_variables,
+            &secret_refs,
+            &resources,
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("available keys"));
+    }
+
+    #[test]
+    fn secret_env_var_allows_any_key_when_no_explicit_keys() {
+        let mut secret_variables = BTreeMap::new();
+        secret_variables.insert(
+            "VAR".to_string(),
+            SecretVariableRef {
+                resource_name: "db-creds".to_string(),
+                key: "any-key".to_string(),
+            },
+        );
+
+        let mut secret_refs = BTreeMap::new();
+        secret_refs.insert(
+            "db-creds".to_string(),
+            SecretRef {
+                secret_name: "myapp-db-creds".to_string(),
+                remote_key: "vault/db".to_string(),
+                keys: None, // No explicit keys — allow anything
+                store_name: "vault".to_string(),
+            },
+        );
+
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "db-creds".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Secret,
+                ..Default::default()
+            },
+        );
+
+        let result = PodTemplateCompiler::compile_secret_env_vars(
+            "main",
+            &secret_variables,
+            &secret_refs,
+            &resources,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Story: Compile Image Pull Secrets
+    // =========================================================================
+
+    #[test]
+    fn image_pull_secrets_resolve_to_k8s_names() {
+        let runtime = RuntimeSpec {
+            image_pull_secrets: vec!["registry-creds".to_string()],
+            ..Default::default()
+        };
+
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "registry-creds".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Secret,
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers: BTreeMap::new(),
+            resources,
+            ..Default::default()
+        };
+
+        let mut secret_refs = BTreeMap::new();
+        secret_refs.insert(
+            "registry-creds".to_string(),
+            SecretRef {
+                secret_name: "myapp-registry-creds".to_string(),
+                remote_key: "registry/pull".to_string(),
+                keys: None,
+                store_name: "vault".to_string(),
+            },
+        );
+
+        let result =
+            PodTemplateCompiler::compile_image_pull_secrets(&runtime, &workload, &secret_refs)
+                .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "myapp-registry-creds");
+    }
+
+    #[test]
+    fn image_pull_secrets_error_on_missing_resource() {
+        let runtime = RuntimeSpec {
+            image_pull_secrets: vec!["nonexistent".to_string()],
+            ..Default::default()
+        };
+
+        let workload = WorkloadSpec::default();
+
+        let result =
+            PodTemplateCompiler::compile_image_pull_secrets(&runtime, &workload, &BTreeMap::new());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn image_pull_secrets_error_on_non_secret_resource() {
+        let runtime = RuntimeSpec {
+            image_pull_secrets: vec!["redis".to_string()],
+            ..Default::default()
+        };
+
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "redis".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers: BTreeMap::new(),
+            resources,
+            ..Default::default()
+        };
+
+        let result =
+            PodTemplateCompiler::compile_image_pull_secrets(&runtime, &workload, &BTreeMap::new());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not 'secret'"));
+    }
+
+    // =========================================================================
+    // Story: Compile Sidecars
+    // =========================================================================
+
+    #[test]
+    fn sidecars_split_into_init_and_regular() {
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            "logger".to_string(),
+            SidecarSpec {
+                image: "fluentbit:1.9".to_string(),
+                init: Some(false),
+                ..Default::default()
+            },
+        );
+        sidecars.insert(
+            "setup".to_string(),
+            SidecarSpec {
+                image: "busybox:latest".to_string(),
+                init: Some(true),
+                command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), "setup".to_string()]),
+                ..Default::default()
+            },
+        );
+
+        let runtime = RuntimeSpec {
+            sidecars,
+            ..Default::default()
+        };
+        let volumes = GeneratedVolumes::default();
+
+        let (init, regular) = PodTemplateCompiler::compile_sidecars(&runtime, &volumes);
+
+        assert_eq!(init.len(), 1);
+        assert_eq!(init[0].name, "setup");
+        assert_eq!(init[0].image, "busybox:latest");
+        assert!(init[0].liveness_probe.is_none()); // Init containers have no probes
+
+        assert_eq!(regular.len(), 1);
+        assert_eq!(regular[0].name, "logger");
+        assert_eq!(regular[0].image, "fluentbit:1.9");
+    }
+
+    #[test]
+    fn sidecar_security_context_defaults_applied() {
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            "proxy".to_string(),
+            SidecarSpec {
+                image: "envoy:latest".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let runtime = RuntimeSpec {
+            sidecars,
+            ..Default::default()
+        };
+        let volumes = GeneratedVolumes::default();
+
+        let (_, regular) = PodTemplateCompiler::compile_sidecars(&runtime, &volumes);
+
+        let sec = regular[0]
+            .security_context
+            .as_ref()
+            .expect("should have security context");
+        assert_eq!(sec.allow_privilege_escalation, Some(false));
+        assert_eq!(sec.read_only_root_filesystem, Some(true));
+        assert_eq!(sec.run_as_non_root, Some(true));
+    }
+
+    #[test]
+    fn sidecar_with_custom_security() {
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            "vpn".to_string(),
+            SidecarSpec {
+                image: "wireguard:latest".to_string(),
+                security: Some(SecurityContext {
+                    capabilities: vec!["NET_ADMIN".to_string()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        let runtime = RuntimeSpec {
+            sidecars,
+            ..Default::default()
+        };
+        let volumes = GeneratedVolumes::default();
+
+        let (_, regular) = PodTemplateCompiler::compile_sidecars(&runtime, &volumes);
+
+        let sec = regular[0]
+            .security_context
+            .as_ref()
+            .expect("should have security context");
+        let caps = sec.capabilities.as_ref().expect("should have capabilities");
+        assert_eq!(caps.add, Some(vec!["NET_ADMIN".to_string()]));
+    }
+
+    #[test]
+    fn sidecar_with_probes() {
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            "proxy".to_string(),
+            SidecarSpec {
+                image: "envoy:latest".to_string(),
+                readiness_probe: Some(Probe {
+                    http_get: Some(HttpGetProbe {
+                        path: "/ready".to_string(),
+                        port: 15021,
+                        scheme: None,
+                        host: None,
+                        http_headers: None,
+                    }),
+                    exec: None,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let runtime = RuntimeSpec {
+            sidecars,
+            ..Default::default()
+        };
+        let volumes = GeneratedVolumes::default();
+
+        let (_, regular) = PodTemplateCompiler::compile_sidecars(&runtime, &volumes);
+
+        assert!(regular[0].readiness_probe.is_some());
+        let probe = regular[0].readiness_probe.as_ref().unwrap();
+        let http = probe.http_get.as_ref().expect("should have http_get");
+        assert_eq!(http.path, "/ready");
+        assert_eq!(http.port, 15021);
+    }
+
+    #[test]
+    fn init_sidecar_has_no_probes() {
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            "setup".to_string(),
+            SidecarSpec {
+                image: "busybox:latest".to_string(),
+                init: Some(true),
+                liveness_probe: Some(Probe {
+                    exec: Some(ExecProbe {
+                        command: vec!["true".to_string()],
+                    }),
+                    http_get: None,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let runtime = RuntimeSpec {
+            sidecars,
+            ..Default::default()
+        };
+        let volumes = GeneratedVolumes::default();
+
+        let (init, _) = PodTemplateCompiler::compile_sidecars(&runtime, &volumes);
+
+        // Init containers must NOT have probes (K8s rejects them)
+        assert!(init[0].liveness_probe.is_none());
+        assert!(init[0].readiness_probe.is_none());
+        assert!(init[0].startup_probe.is_none());
+    }
+
+    // =========================================================================
+    // Story: Pod Security Context
+    // =========================================================================
+
+    #[test]
+    fn pod_security_context_secure_defaults() {
+        let runtime = RuntimeSpec::default();
+        let ctx = PodTemplateCompiler::compile_pod_security_context(&runtime);
+
+        assert_eq!(ctx.run_as_non_root, Some(true));
+        assert_eq!(ctx.fs_group, Some(65534));
+        assert_eq!(ctx.fs_group_change_policy, Some("OnRootMismatch".to_string()));
+        assert_eq!(
+            ctx.seccomp_profile.as_ref().unwrap().type_,
+            "RuntimeDefault"
+        );
+        assert!(ctx.sysctls.is_none());
+    }
+
+    #[test]
+    fn pod_security_context_with_sysctls() {
+        let mut sysctls = BTreeMap::new();
+        sysctls.insert("net.core.somaxconn".to_string(), "65535".to_string());
+
+        let runtime = RuntimeSpec {
+            sysctls,
+            ..Default::default()
+        };
+        let ctx = PodTemplateCompiler::compile_pod_security_context(&runtime);
+
+        let sc = ctx.sysctls.expect("should have sysctls");
+        assert_eq!(sc.len(), 1);
+        assert_eq!(sc[0].name, "net.core.somaxconn");
+        assert_eq!(sc[0].value, "65535");
     }
 }
