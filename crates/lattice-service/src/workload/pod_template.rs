@@ -718,8 +718,14 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "DB_PASSWORD");
-        let vf = result[0].value_from.as_ref().expect("should have value_from");
-        let skr = vf.secret_key_ref.as_ref().expect("should have secret_key_ref");
+        let vf = result[0]
+            .value_from
+            .as_ref()
+            .expect("should have value_from");
+        let skr = vf
+            .secret_key_ref
+            .as_ref()
+            .expect("should have secret_key_ref");
         assert_eq!(skr.name, "myapp-db-creds");
         assert_eq!(skr.key, "password");
     }
@@ -968,7 +974,11 @@ mod tests {
             SidecarSpec {
                 image: "busybox:latest".to_string(),
                 init: Some(true),
-                command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), "setup".to_string()]),
+                command: Some(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "setup".to_string(),
+                ]),
                 ..Default::default()
             },
         );
@@ -1129,7 +1139,10 @@ mod tests {
 
         assert_eq!(ctx.run_as_non_root, Some(true));
         assert_eq!(ctx.fs_group, Some(65534));
-        assert_eq!(ctx.fs_group_change_policy, Some("OnRootMismatch".to_string()));
+        assert_eq!(
+            ctx.fs_group_change_policy,
+            Some("OnRootMismatch".to_string())
+        );
         assert_eq!(
             ctx.seccomp_profile.as_ref().unwrap().type_,
             "RuntimeDefault"

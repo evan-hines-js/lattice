@@ -15,6 +15,7 @@ use kube::Client;
 use tracing::{debug, error, info, instrument, warn};
 
 use lattice_common::kube_utils::build_api_resource;
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_proto::{MoveObject, SourceOwnerRef};
 
 use crate::error::MoveError;
@@ -569,6 +570,10 @@ impl<S: MoveCommandSender> CellMover<S> {
     }
 
     /// Stream batches to the agent
+    ///
+    /// Retries batches when the agent reports retryable errors (e.g., webhook
+    /// endpoints not yet available). Already-created objects are handled
+    /// gracefully by the agent via 409 conflict -> get existing UID.
     async fn stream_batches(&self) -> Result<(), MoveError> {
         let graph = self
             .graph
@@ -580,6 +585,16 @@ impl<S: MoveCommandSender> CellMover<S> {
             .ok_or_else(|| MoveError::Discovery("sequence not computed".to_string()))?;
 
         let total_batches = sequence.num_groups() as u32;
+
+        // Retry config for transient batch failures (webhook not ready, etc.).
+        // The agent already retries individual objects 5x with short backoff,
+        // so batch retries use longer delays to let infrastructure stabilize.
+        let retry_config = RetryConfig {
+            max_attempts: 6,
+            initial_delay: Duration::from_secs(5),
+            max_delay: Duration::from_secs(30),
+            backoff_multiplier: 2.0,
+        };
 
         for (index, group) in sequence.iter_groups() {
             let nodes = extract_nodes_for_group(graph, group);
@@ -604,28 +619,57 @@ impl<S: MoveCommandSender> CellMover<S> {
                 "Sending batch"
             );
 
-            let ack = self.sender.send_batch(batch).await?;
+            let batch_ref = &batch;
+            let sender_ref = &self.sender;
 
-            if !ack.errors.is_empty() {
-                for (uid, msg, retryable) in &ack.errors {
-                    error!(source_uid = %uid, error = %msg, retryable = %retryable, "Object creation failed");
-                }
-                let first_error = &ack.errors[0];
-                return Err(MoveError::BatchFailed {
-                    index: index as u32,
-                    message: format!(
-                        "{} objects failed, first: {}",
-                        ack.errors.len(),
-                        first_error.1
-                    ),
-                });
+            // Use nested Result: Ok(Ok(())) = success, Ok(Err(e)) = non-retryable
+            // (stops retries), Err(e) = retryable (retry_with_backoff retries).
+            let result = retry_with_backoff(
+                &retry_config,
+                &format!("batch {}/{}", index, total_batches),
+                || async {
+                    let ack = sender_ref.send_batch(batch_ref.clone()).await?;
+
+                    if ack.errors.is_empty() {
+                        debug!(
+                            batch = index,
+                            mappings = ack.mappings.len(),
+                            "Batch acknowledged"
+                        );
+                        return Ok(Ok(()));
+                    }
+
+                    let all_retryable = ack.errors.iter().all(|(_, _, retryable)| *retryable);
+
+                    for (uid, msg, retryable) in &ack.errors {
+                        error!(source_uid = %uid, error = %msg, retryable = %retryable, "Object creation failed");
+                    }
+
+                    let first_msg = &ack.errors[0].1;
+                    let err = MoveError::BatchFailed {
+                        index: index as u32,
+                        message: format!(
+                            "{} objects failed, first: {}",
+                            ack.errors.len(),
+                            first_msg
+                        ),
+                    };
+
+                    if all_retryable {
+                        Err(err)
+                    } else {
+                        Ok(Err(err))
+                    }
+                },
+            )
+            .await;
+
+            // Unwrap nested Result
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(e) => return Err(e),
             }
-
-            debug!(
-                batch = index,
-                mappings = ack.mappings.len(),
-                "Batch acknowledged"
-            );
         }
 
         Ok(())

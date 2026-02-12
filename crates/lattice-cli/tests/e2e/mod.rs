@@ -92,6 +92,7 @@ mod endurance_e2e;
 mod upgrade_e2e;
 
 // Per-integration E2E (isolated: setup, one test, teardown)
+mod autoscaling_e2e;
 mod capi_e2e;
 mod cedar_e2e;
 mod cedar_secrets_e2e;

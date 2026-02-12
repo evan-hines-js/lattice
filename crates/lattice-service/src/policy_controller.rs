@@ -189,10 +189,7 @@ mod tests {
         // Same phase, count, and refs → skip update
         assert_eq!(status_a.phase, status_b.phase);
         assert_eq!(status_a.matched_services, status_b.matched_services);
-        assert_eq!(
-            status_a.matched_service_refs,
-            status_b.matched_service_refs
-        );
+        assert_eq!(status_a.matched_service_refs, status_b.matched_service_refs);
 
         // Different count → update needed
         let status_c = LatticeServicePolicyStatus {
