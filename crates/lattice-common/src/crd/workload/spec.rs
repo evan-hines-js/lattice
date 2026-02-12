@@ -173,24 +173,16 @@ impl WorkloadSpec {
             ));
         }
 
-        // Validate container name lengths (K8s DNS label limit: 63 chars)
+        // Validate container names are valid DNS labels
         for name in self.containers.keys() {
-            if name.len() > 63 {
-                return Err(crate::Error::validation(format!(
-                    "container name '{}' exceeds 63 character K8s limit",
-                    name
-                )));
-            }
+            super::super::validate_dns_label(name, "container name")
+                .map_err(crate::Error::validation)?;
         }
 
-        // Validate resource name lengths (K8s DNS label limit: 63 chars)
+        // Validate resource names are valid DNS labels
         for name in self.resources.keys() {
-            if name.len() > 63 {
-                return Err(crate::Error::validation(format!(
-                    "resource name '{}' exceeds 63 character K8s limit",
-                    name
-                )));
-            }
+            super::super::validate_dns_label(name, "resource name")
+                .map_err(crate::Error::validation)?;
         }
 
         // Validate containers
@@ -486,6 +478,44 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("exceeds 63 character"));
+    }
+
+    #[test]
+    fn container_name_with_underscores_fails() {
+        let mut containers = BTreeMap::new();
+        containers.insert("my_container".to_string(), simple_container());
+        let spec = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(err.contains("container name"));
+        assert!(err.contains("lowercase alphanumeric"));
+    }
+
+    #[test]
+    fn container_name_with_uppercase_fails() {
+        let mut containers = BTreeMap::new();
+        containers.insert("MyContainer".to_string(), simple_container());
+        let spec = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(err.contains("container name"));
+    }
+
+    #[test]
+    fn container_name_starting_with_digit_fails() {
+        let mut containers = BTreeMap::new();
+        containers.insert("1container".to_string(), simple_container());
+        let spec = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(err.contains("container name"));
+        assert!(err.contains("start with lowercase letter"));
     }
 
     #[test]

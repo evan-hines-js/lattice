@@ -128,6 +128,11 @@ impl LatticeServiceSpec {
     pub fn validate(&self) -> Result<(), crate::Error> {
         self.workload.validate()?;
 
+        // Validate sidecar names are valid DNS labels
+        for name in self.runtime.sidecars.keys() {
+            super::validate_dns_label(name, "sidecar name").map_err(crate::Error::validation)?;
+        }
+
         // Validate autoscaling
         if let Some(ref autoscaling) = self.autoscaling {
             if self.replicas > autoscaling.max {
@@ -1501,5 +1506,21 @@ workload:
         assert!(main.variables.contains_key("DATABASE_URL"));
         assert!(main.files.contains_key("/etc/app/config.yaml"));
         assert!(spec.workload.resources.contains_key("db-creds"));
+    }
+
+    #[test]
+    fn sidecar_name_with_underscores_fails() {
+        use crate::crd::workload::container::SidecarSpec;
+
+        let mut spec = sample_service_spec();
+        spec.runtime.sidecars.insert(
+            "my_sidecar".to_string(),
+            SidecarSpec {
+                image: "fluentbit:latest".to_string(),
+                ..Default::default()
+            },
+        );
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(err.contains("sidecar name"));
     }
 }

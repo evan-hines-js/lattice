@@ -98,7 +98,7 @@ pub(crate) fn default_true() -> bool {
 /// - Must not end with a hyphen (if `allow_trailing_hyphen` is false)
 ///
 /// Used for pool IDs, custom resource types, and other identifiers.
-pub(crate) fn validate_dns_identifier(s: &str, allow_trailing_hyphen: bool) -> Result<(), String> {
+pub fn validate_dns_identifier(s: &str, allow_trailing_hyphen: bool) -> Result<(), String> {
     if s.is_empty() {
         return Err("identifier cannot be empty".to_string());
     }
@@ -132,4 +132,19 @@ pub(crate) fn validate_dns_identifier(s: &str, allow_trailing_hyphen: bool) -> R
     }
 
     Ok(())
+}
+
+/// Validate that a string is a valid K8s DNS label.
+///
+/// Combines format validation (via [`validate_dns_identifier`]) with the
+/// 63-character length limit. `field` is used in error messages to identify
+/// what kind of name failed (e.g. "container name", "port name").
+pub fn validate_dns_label(name: &str, field: &str) -> Result<(), String> {
+    if name.len() > 63 {
+        return Err(format!(
+            "{} '{}' exceeds 63 character DNS label limit",
+            field, name
+        ));
+    }
+    validate_dns_identifier(name, false).map_err(|e| format!("{} '{}': {}", field, name, e))
 }
