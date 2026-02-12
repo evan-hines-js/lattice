@@ -35,8 +35,8 @@ use lattice_common::NoopEventPublisher;
 use crate::compiler::{ApplyLayer, CompiledService, CompilerPhase, ServiceCompiler};
 use crate::crd::{
     Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
-    LatticeService, LatticeServicePolicy, LatticeServiceSpec, LatticeServiceStatus, ProviderType,
-    ServiceBackupSpec, ServicePhase,
+    LatticeService, LatticeServicePolicy, LatticeServiceSpec, LatticeServiceStatus,
+    MonitoringConfig, ProviderType, ServiceBackupSpec, ServicePhase,
 };
 use crate::graph::ServiceGraph;
 use crate::ingress::{Certificate, Gateway, GrpcRoute, HttpRoute, TcpRoute};
@@ -442,97 +442,40 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
 
         // ExternalSecrets (ESO syncs secrets from Vault)
-        if let Some(ar) = &self.crds.external_secret {
-            for es in &compiled.workloads.external_secrets {
-                layer1.push("ExternalSecret", &es.metadata.name, es, ar)?;
-            }
-        } else if !compiled.workloads.external_secrets.is_empty() {
-            warn!(
-                count = compiled.workloads.external_secrets.len(),
-                "ExternalSecret CRD not installed, skipping"
-            );
-        }
+        layer1.push_crd("ExternalSecret", self.crds.external_secret.as_ref(),
+            &compiled.workloads.external_secrets, |es| &es.metadata.name)?;
 
         // Network policies
-        if let Some(ar) = &self.crds.cilium_network_policy {
-            for cnp in &compiled.policies.cilium_policies {
-                layer1.push("CiliumNetworkPolicy", &cnp.metadata.name, cnp, ar)?;
-            }
-        } else if !compiled.policies.cilium_policies.is_empty() {
-            warn!(
-                count = compiled.policies.cilium_policies.len(),
-                "CiliumNetworkPolicy CRD not installed, skipping"
-            );
-        }
-        if let Some(ar) = &self.crds.authorization_policy {
-            for authz in &compiled.policies.authorization_policies {
-                layer1.push("AuthorizationPolicy", &authz.metadata.name, authz, ar)?;
-            }
-        } else if !compiled.policies.authorization_policies.is_empty() {
-            warn!(
-                count = compiled.policies.authorization_policies.len(),
-                "AuthorizationPolicy CRD not installed, skipping"
-            );
-        }
-        if let Some(ar) = &self.crds.service_entry {
-            for entry in &compiled.policies.service_entries {
-                layer1.push("ServiceEntry", &entry.metadata.name, entry, ar)?;
-            }
-        } else if !compiled.policies.service_entries.is_empty() {
-            warn!(
-                count = compiled.policies.service_entries.len(),
-                "ServiceEntry CRD not installed, skipping"
-            );
-        }
+        layer1.push_crd("CiliumNetworkPolicy", self.crds.cilium_network_policy.as_ref(),
+            &compiled.policies.cilium_policies, |cnp| &cnp.metadata.name)?;
+        layer1.push_crd("AuthorizationPolicy", self.crds.authorization_policy.as_ref(),
+            &compiled.policies.authorization_policies, |p| &p.metadata.name)?;
+        layer1.push_crd("ServiceEntry", self.crds.service_entry.as_ref(),
+            &compiled.policies.service_entries, |e| &e.metadata.name)?;
 
-        // Ingress
+        // Ingress — Gateway uses per-service field manager for SSA listener merging.
+        // Each service owns its own listeners via a unique field manager, so SSA
+        // merges them automatically (Gateway listeners use `name` as merge key).
         if let Some(gw) = &compiled.ingress.gateway {
             if let Some(ar) = &self.crds.gateway {
-                layer1.push("Gateway", &gw.metadata.name, gw, ar)?;
+                let gw_manager = format!("lattice-service-controller/{}", service_name);
+                let gw_params = PatchParams::apply(&gw_manager).force();
+                let mut gw_batch = ApplyBatch::new(self.client.clone(), namespace, &gw_params);
+                gw_batch.push("Gateway", &gw.metadata.name, gw, ar)?;
+                gw_batch.run("gateway").await?;
             } else {
                 warn!("Gateway CRD not installed, skipping ingress");
             }
         }
-        if let Some(ar) = &self.crds.http_route {
-            for route in &compiled.ingress.http_routes {
-                layer1.push("HTTPRoute", &route.metadata.name, route, ar)?;
-            }
-        } else if !compiled.ingress.http_routes.is_empty() {
-            warn!(
-                count = compiled.ingress.http_routes.len(),
-                "HTTPRoute CRD not installed, skipping"
-            );
-        }
-        if let Some(ar) = &self.crds.grpc_route {
-            for route in &compiled.ingress.grpc_routes {
-                layer1.push("GRPCRoute", &route.metadata.name, route, ar)?;
-            }
-        } else if !compiled.ingress.grpc_routes.is_empty() {
-            warn!(
-                count = compiled.ingress.grpc_routes.len(),
-                "GRPCRoute CRD not installed, skipping"
-            );
-        }
-        if let Some(ar) = &self.crds.tcp_route {
-            for route in &compiled.ingress.tcp_routes {
-                layer1.push("TCPRoute", &route.metadata.name, route, ar)?;
-            }
-        } else if !compiled.ingress.tcp_routes.is_empty() {
-            warn!(
-                count = compiled.ingress.tcp_routes.len(),
-                "TCPRoute CRD not installed, skipping"
-            );
-        }
-        if let Some(ar) = &self.crds.certificate {
-            for cert in &compiled.ingress.certificates {
-                layer1.push("Certificate", &cert.metadata.name, cert, ar)?;
-            }
-        } else if !compiled.ingress.certificates.is_empty() {
-            warn!(
-                count = compiled.ingress.certificates.len(),
-                "Certificate CRD not installed, skipping"
-            );
-        }
+        // Ingress routes and certificates
+        layer1.push_crd("HTTPRoute", self.crds.http_route.as_ref(),
+            &compiled.ingress.http_routes, |r| &r.metadata.name)?;
+        layer1.push_crd("GRPCRoute", self.crds.grpc_route.as_ref(),
+            &compiled.ingress.grpc_routes, |r| &r.metadata.name)?;
+        layer1.push_crd("TCPRoute", self.crds.tcp_route.as_ref(),
+            &compiled.ingress.tcp_routes, |r| &r.metadata.name)?;
+        layer1.push_crd("Certificate", self.crds.certificate.as_ref(),
+            &compiled.ingress.certificates, |c| &c.metadata.name)?;
 
         // Waypoint (east-west L7 policies via Istio ambient mesh)
         if let Some(gw) = &compiled.waypoint.gateway {
@@ -672,6 +615,27 @@ impl<'a> ApplyBatch<'a> {
         Ok(())
     }
 
+    /// Push a list of CRD-backed resources if the CRD is discovered, warn if not.
+    ///
+    /// This is the standard pattern for optional CRDs: apply if installed, warn
+    /// if resources were compiled but the CRD is missing.
+    fn push_crd<T: serde::Serialize>(
+        &mut self,
+        kind: &str,
+        crd: Option<&ApiResource>,
+        resources: &[T],
+        name_fn: impl Fn(&T) -> &str,
+    ) -> Result<(), Error> {
+        if let Some(ar) = crd {
+            for resource in resources {
+                self.push(kind, name_fn(resource), resource, ar)?;
+            }
+        } else if !resources.is_empty() {
+            warn!(count = resources.len(), kind = kind, "CRD not installed, skipping");
+        }
+        Ok(())
+    }
+
     /// Execute all queued patches in parallel, returning the count applied.
     async fn run(self, layer: &str) -> Result<usize, Error> {
         use futures::future::join_all;
@@ -793,8 +757,8 @@ pub struct ServiceContext {
     pub cedar: Arc<PolicyEngine>,
     /// Event publisher for emitting Kubernetes Events
     pub events: Arc<dyn EventPublisher>,
-    /// Whether monitoring (VictoriaMetrics) is enabled on this cluster
-    pub monitoring_enabled: bool,
+    /// Monitoring configuration for this cluster (VictoriaMetrics mode)
+    pub monitoring: MonitoringConfig,
     /// Extension phases that run after core compilation
     pub extension_phases: Vec<Arc<dyn CompilerPhase>>,
 }
@@ -808,7 +772,7 @@ impl ServiceContext {
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
         events: Arc<dyn EventPublisher>,
-        monitoring_enabled: bool,
+        monitoring: MonitoringConfig,
     ) -> Self {
         Self {
             kube,
@@ -817,7 +781,7 @@ impl ServiceContext {
             provider_type,
             cedar,
             events,
-            monitoring_enabled,
+            monitoring,
             extension_phases: Vec::new(),
         }
     }
@@ -832,7 +796,7 @@ impl ServiceContext {
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
         crds: Arc<DiscoveredCrds>,
-        monitoring_enabled: bool,
+        monitoring: MonitoringConfig,
     ) -> Self {
         let events = Arc::new(KubeEventPublisher::new(
             client.clone(),
@@ -845,7 +809,7 @@ impl ServiceContext {
             provider_type,
             cedar,
             events,
-            monitoring_enabled,
+            monitoring,
             extension_phases: Vec::new(),
         }
     }
@@ -863,7 +827,7 @@ impl ServiceContext {
             provider_type: ProviderType::Docker,
             cedar: Arc::new(PolicyEngine::new()),
             events: Arc::new(NoopEventPublisher),
-            monitoring_enabled: true,
+            monitoring: MonitoringConfig::default(),
             extension_phases: Vec::new(),
         }
     }
@@ -897,7 +861,7 @@ pub async fn reconcile(
     // Validate the service spec
     if let Err(e) = service.spec.workload.validate() {
         warn!(error = %e, "service validation failed");
-        update_service_status_failed(&service, &ctx, &e.to_string()).await?;
+        update_service_status(&service, &ctx, ServiceStatusUpdate::failed(&e.to_string())).await?;
         // Don't requeue for validation errors - they require spec changes
         return Ok(Action::await_change());
     }
@@ -916,7 +880,7 @@ pub async fn reconcile(
         Some(ns) => ns,
         None => {
             error!("LatticeService is missing namespace - this is a cluster-scoped resource that needs migration");
-            update_service_status_failed(&service, &ctx, "Resource missing namespace").await?;
+            update_service_status(&service, &ctx, ServiceStatusUpdate::failed("Resource missing namespace")).await?;
             return Ok(Action::await_change());
         }
     };
@@ -928,7 +892,7 @@ pub async fn reconcile(
     // State machine: transition based on current phase
     match current_phase {
         ServicePhase::Pending => {
-            update_service_status_compiling(&service, &ctx).await?;
+            update_service_status(&service, &ctx, ServiceStatusUpdate::compiling()).await?;
             Ok(Action::requeue(Duration::from_secs(5)))
         }
         ServicePhase::Compiling => {
@@ -952,7 +916,7 @@ pub async fn reconcile(
             let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
             if !missing_deps.is_empty() {
                 warn!(?missing_deps, "dependencies no longer available");
-                update_service_status_compiling(&service, &ctx).await?;
+                update_service_status(&service, &ctx, ServiceStatusUpdate::compiling()).await?;
                 return Ok(Action::requeue(Duration::from_secs(10)));
             }
 
@@ -962,14 +926,18 @@ pub async fn reconcile(
     }
 }
 
-/// Shared error→action mapping for reconciliation failures.
+/// Error policy for LatticeService and LatticeExternalService controllers (kube-rs callback).
 ///
 /// Retryable errors (transient): requeue after 30 seconds.
 /// Non-retryable errors (permanent): await spec change.
-fn action_for_error(resource_name: &str, error: &Error) -> Action {
+pub fn error_policy<T: ResourceExt>(
+    resource: Arc<T>,
+    error: &Error,
+    _ctx: Arc<ServiceContext>,
+) -> Action {
     error!(
         ?error,
-        resource = %resource_name,
+        resource = %resource.name_any(),
         retryable = error.is_retryable(),
         "reconciliation failed"
     );
@@ -979,15 +947,6 @@ fn action_for_error(resource_name: &str, error: &Error) -> Action {
     } else {
         Action::await_change()
     }
-}
-
-/// Error policy for the service controller (kube-rs callback)
-pub fn error_policy(
-    service: Arc<LatticeService>,
-    error: &Error,
-    _ctx: Arc<ServiceContext>,
-) -> Action {
-    action_for_error(&service.name_any(), error)
 }
 
 /// Check which dependencies are missing from the graph
@@ -1115,7 +1074,7 @@ async fn try_compile(
 ) -> Result<Action, Error> {
     match compile_and_apply(service, name, namespace, ctx).await {
         Ok(()) => {
-            update_service_status_ready(service, ctx).await?;
+            update_service_status(service, ctx, ServiceStatusUpdate::ready()).await?;
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         Err(_) => {
@@ -1169,7 +1128,7 @@ async fn compile_and_apply(
         &ctx.cluster_name,
         ctx.provider_type,
         &ctx.cedar,
-        ctx.monitoring_enabled,
+        ctx.monitoring.clone(),
     )
     .with_phases(&ctx.extension_phases)
     .with_effective_backup(effective_backup);
@@ -1205,7 +1164,7 @@ async fn compile_and_apply(
                 debug!(error = %msg, "compilation still failing");
             }
 
-            update_service_status_failed(service, ctx, &msg).await?;
+            update_service_status(service, ctx, ServiceStatusUpdate::failed(&msg)).await?;
             return Err(Error::from(e));
         }
     };
@@ -1225,7 +1184,7 @@ async fn compile_and_apply(
         } else {
             debug!(error = %msg, "apply still failing");
         }
-        update_service_status_failed(service, ctx, &msg).await?;
+        update_service_status(service, ctx, ServiceStatusUpdate::failed(&msg)).await?;
         return Err(e);
     }
 
@@ -1251,7 +1210,7 @@ pub async fn reconcile_external(
     // Validate the external service spec
     if let Err(e) = external.spec.validate() {
         warn!(error = %e, "external service validation failed");
-        update_external_status_failed(&external, &ctx, &e.to_string()).await?;
+        update_external_status(&external, &ctx, ExternalStatusUpdate::failed(&e.to_string())).await?;
         return Ok(Action::await_change());
     }
 
@@ -1260,7 +1219,7 @@ pub async fn reconcile_external(
         Some(ns) => ns,
         None => {
             error!("LatticeExternalService is missing namespace - this is a cluster-scoped resource that needs migration");
-            update_external_status_failed(&external, &ctx, "Resource missing namespace").await?;
+            update_external_status(&external, &ctx, ExternalStatusUpdate::failed("Resource missing namespace")).await?;
             return Ok(Action::await_change());
         }
     };
@@ -1270,18 +1229,9 @@ pub async fn reconcile_external(
         .put_external_service(namespace, &name, &external.spec);
 
     // update_external_status skips the patch if already Ready with same message
-    update_external_status_ready(&external, &ctx).await?;
+    update_external_status(&external, &ctx, ExternalStatusUpdate::ready()).await?;
 
     Ok(Action::requeue(Duration::from_secs(60)))
-}
-
-/// Error policy for the external service controller (kube-rs callback)
-pub fn error_policy_external(
-    external: Arc<LatticeExternalService>,
-    error: &Error,
-    _ctx: Arc<ServiceContext>,
-) -> Action {
-    action_for_error(&external.name_any(), error)
 }
 
 // =============================================================================
@@ -1420,30 +1370,6 @@ async fn update_service_status(
         .await
 }
 
-/// Convenience wrapper for compiling status
-async fn update_service_status_compiling(
-    service: &LatticeService,
-    ctx: &ServiceContext,
-) -> Result<(), Error> {
-    update_service_status(service, ctx, ServiceStatusUpdate::compiling()).await
-}
-
-/// Convenience wrapper for ready status
-async fn update_service_status_ready(
-    service: &LatticeService,
-    ctx: &ServiceContext,
-) -> Result<(), Error> {
-    update_service_status(service, ctx, ServiceStatusUpdate::ready()).await
-}
-
-/// Convenience wrapper for failed status
-async fn update_service_status_failed(
-    service: &LatticeService,
-    ctx: &ServiceContext,
-    message: &str,
-) -> Result<(), Error> {
-    update_service_status(service, ctx, ServiceStatusUpdate::failed(message)).await
-}
 
 /// Status update configuration for LatticeExternalService
 struct ExternalStatusUpdate<'a> {
@@ -1512,22 +1438,6 @@ async fn update_external_status(
         .await
 }
 
-/// Convenience wrapper for external ready status
-async fn update_external_status_ready(
-    external: &LatticeExternalService,
-    ctx: &ServiceContext,
-) -> Result<(), Error> {
-    update_external_status(external, ctx, ExternalStatusUpdate::ready()).await
-}
-
-/// Convenience wrapper for external failed status
-async fn update_external_status_failed(
-    external: &LatticeExternalService,
-    ctx: &ServiceContext,
-    message: &str,
-) -> Result<(), Error> {
-    update_external_status(external, ctx, ExternalStatusUpdate::failed(message)).await
-}
 
 // =============================================================================
 // Tests
@@ -1949,7 +1859,7 @@ mod tests {
             ProviderType::Docker,
             Arc::clone(&cedar),
             Arc::new(NoopEventPublisher),
-            true,
+            MonitoringConfig::default(),
         );
         let ctx2 = ServiceContext::new(
             mock_kube2,
@@ -1958,7 +1868,7 @@ mod tests {
             ProviderType::Docker,
             Arc::clone(&cedar),
             Arc::new(NoopEventPublisher),
-            true,
+            MonitoringConfig::default(),
         );
 
         // Add service via ctx1
