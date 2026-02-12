@@ -76,8 +76,10 @@ pub fn save_config(config: &LatticeConfig) -> Result<()> {
     let path = config_path()?;
     let data = serde_json::to_string_pretty(config)
         .map_err(|e| Error::command_failed(format!("failed to serialize config: {}", e)))?;
-    std::fs::write(&path, data)
-        .map_err(|e| Error::command_failed(format!("failed to write {}: {}", path.display(), e)))
+    std::fs::write(&path, &data)
+        .map_err(|e| Error::command_failed(format!("failed to write {}: {}", path.display(), e)))?;
+    set_file_permissions_0600(&path)?;
+    Ok(())
 }
 
 /// Save proxy kubeconfig JSON to `~/.lattice/kubeconfig`.
@@ -85,7 +87,21 @@ pub fn save_kubeconfig(json: &str) -> Result<PathBuf> {
     let path = kubeconfig_path()?;
     std::fs::write(&path, json)
         .map_err(|e| Error::command_failed(format!("failed to write {}: {}", path.display(), e)))?;
+    set_file_permissions_0600(&path)?;
     Ok(path)
+}
+
+/// Set file permissions to owner-only read/write (0600).
+fn set_file_permissions_0600(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o600);
+    std::fs::set_permissions(path, perms).map_err(|e| {
+        Error::command_failed(format!(
+            "failed to set permissions on {}: {}",
+            path.display(),
+            e
+        ))
+    })
 }
 
 /// Resolve a kubeconfig path using the priority chain.

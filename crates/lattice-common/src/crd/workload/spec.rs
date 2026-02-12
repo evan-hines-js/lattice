@@ -183,6 +183,26 @@ impl WorkloadSpec {
             ));
         }
 
+        // Validate container name lengths (K8s DNS label limit: 63 chars)
+        for name in self.containers.keys() {
+            if name.len() > 63 {
+                return Err(crate::Error::validation(format!(
+                    "container name '{}' exceeds 63 character K8s limit",
+                    name
+                )));
+            }
+        }
+
+        // Validate resource name lengths (K8s DNS label limit: 63 chars)
+        for name in self.resources.keys() {
+            if name.len() > 63 {
+                return Err(crate::Error::validation(format!(
+                    "resource name '{}' exceeds 63 character K8s limit",
+                    name
+                )));
+            }
+        }
+
         // Validate containers
         for (name, container) in &self.containers {
             container.validate(name)?;
@@ -439,6 +459,43 @@ mod tests {
         let refs = spec.referenced_volume_ids();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0], ("data", "shared-data"));
+    }
+
+    #[test]
+    fn container_name_too_long_fails() {
+        let long_name = "a".repeat(64);
+        let mut containers = BTreeMap::new();
+        containers.insert(long_name, simple_container());
+        let spec = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let result = spec.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds 63 character"));
+    }
+
+    #[test]
+    fn resource_name_too_long_fails() {
+        let mut spec = sample_workload();
+        let long_name = "a".repeat(64);
+        spec.resources.insert(
+            long_name,
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Outbound,
+                ..Default::default()
+            },
+        );
+        let result = spec.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds 63 character"));
     }
 
     #[test]
