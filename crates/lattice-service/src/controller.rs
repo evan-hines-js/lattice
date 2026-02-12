@@ -442,16 +442,32 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
 
         // ExternalSecrets (ESO syncs secrets from Vault)
-        layer1.push_crd("ExternalSecret", self.crds.external_secret.as_ref(),
-            &compiled.workloads.external_secrets, |es| &es.metadata.name)?;
+        layer1.push_crd(
+            "ExternalSecret",
+            self.crds.external_secret.as_ref(),
+            &compiled.workloads.external_secrets,
+            |es| &es.metadata.name,
+        )?;
 
         // Network policies
-        layer1.push_crd("CiliumNetworkPolicy", self.crds.cilium_network_policy.as_ref(),
-            &compiled.policies.cilium_policies, |cnp| &cnp.metadata.name)?;
-        layer1.push_crd("AuthorizationPolicy", self.crds.authorization_policy.as_ref(),
-            &compiled.policies.authorization_policies, |p| &p.metadata.name)?;
-        layer1.push_crd("ServiceEntry", self.crds.service_entry.as_ref(),
-            &compiled.policies.service_entries, |e| &e.metadata.name)?;
+        layer1.push_crd(
+            "CiliumNetworkPolicy",
+            self.crds.cilium_network_policy.as_ref(),
+            &compiled.policies.cilium_policies,
+            |cnp| &cnp.metadata.name,
+        )?;
+        layer1.push_crd(
+            "AuthorizationPolicy",
+            self.crds.authorization_policy.as_ref(),
+            &compiled.policies.authorization_policies,
+            |p| &p.metadata.name,
+        )?;
+        layer1.push_crd(
+            "ServiceEntry",
+            self.crds.service_entry.as_ref(),
+            &compiled.policies.service_entries,
+            |e| &e.metadata.name,
+        )?;
 
         // Ingress — Gateway uses per-service field manager for SSA listener merging.
         // Each service owns its own listeners via a unique field manager, so SSA
@@ -468,14 +484,30 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }
         }
         // Ingress routes and certificates
-        layer1.push_crd("HTTPRoute", self.crds.http_route.as_ref(),
-            &compiled.ingress.http_routes, |r| &r.metadata.name)?;
-        layer1.push_crd("GRPCRoute", self.crds.grpc_route.as_ref(),
-            &compiled.ingress.grpc_routes, |r| &r.metadata.name)?;
-        layer1.push_crd("TCPRoute", self.crds.tcp_route.as_ref(),
-            &compiled.ingress.tcp_routes, |r| &r.metadata.name)?;
-        layer1.push_crd("Certificate", self.crds.certificate.as_ref(),
-            &compiled.ingress.certificates, |c| &c.metadata.name)?;
+        layer1.push_crd(
+            "HTTPRoute",
+            self.crds.http_route.as_ref(),
+            &compiled.ingress.http_routes,
+            |r| &r.metadata.name,
+        )?;
+        layer1.push_crd(
+            "GRPCRoute",
+            self.crds.grpc_route.as_ref(),
+            &compiled.ingress.grpc_routes,
+            |r| &r.metadata.name,
+        )?;
+        layer1.push_crd(
+            "TCPRoute",
+            self.crds.tcp_route.as_ref(),
+            &compiled.ingress.tcp_routes,
+            |r| &r.metadata.name,
+        )?;
+        layer1.push_crd(
+            "Certificate",
+            self.crds.certificate.as_ref(),
+            &compiled.ingress.certificates,
+            |c| &c.metadata.name,
+        )?;
 
         // Waypoint (east-west L7 policies via Istio ambient mesh)
         if let Some(gw) = &compiled.waypoint.gateway {
@@ -631,7 +663,11 @@ impl<'a> ApplyBatch<'a> {
                 self.push(kind, name_fn(resource), resource, ar)?;
             }
         } else if !resources.is_empty() {
-            warn!(count = resources.len(), kind = kind, "CRD not installed, skipping");
+            warn!(
+                count = resources.len(),
+                kind = kind,
+                "CRD not installed, skipping"
+            );
         }
         Ok(())
     }
@@ -880,7 +916,12 @@ pub async fn reconcile(
         Some(ns) => ns,
         None => {
             error!("LatticeService is missing namespace - this is a cluster-scoped resource that needs migration");
-            update_service_status(&service, &ctx, ServiceStatusUpdate::failed("Resource missing namespace")).await?;
+            update_service_status(
+                &service,
+                &ctx,
+                ServiceStatusUpdate::failed("Resource missing namespace"),
+            )
+            .await?;
             return Ok(Action::await_change());
         }
     };
@@ -1210,7 +1251,12 @@ pub async fn reconcile_external(
     // Validate the external service spec
     if let Err(e) = external.spec.validate() {
         warn!(error = %e, "external service validation failed");
-        update_external_status(&external, &ctx, ExternalStatusUpdate::failed(&e.to_string())).await?;
+        update_external_status(
+            &external,
+            &ctx,
+            ExternalStatusUpdate::failed(&e.to_string()),
+        )
+        .await?;
         return Ok(Action::await_change());
     }
 
@@ -1219,7 +1265,12 @@ pub async fn reconcile_external(
         Some(ns) => ns,
         None => {
             error!("LatticeExternalService is missing namespace - this is a cluster-scoped resource that needs migration");
-            update_external_status(&external, &ctx, ExternalStatusUpdate::failed("Resource missing namespace")).await?;
+            update_external_status(
+                &external,
+                &ctx,
+                ExternalStatusUpdate::failed("Resource missing namespace"),
+            )
+            .await?;
             return Ok(Action::await_change());
         }
     };
@@ -1370,7 +1421,6 @@ async fn update_service_status(
         .await
 }
 
-
 /// Status update configuration for LatticeExternalService
 struct ExternalStatusUpdate<'a> {
     phase: crate::crd::ExternalServicePhase,
@@ -1437,7 +1487,6 @@ async fn update_external_status(
         .patch_external_service_status(&name, &namespace, &status)
         .await
 }
-
 
 // =============================================================================
 // Tests

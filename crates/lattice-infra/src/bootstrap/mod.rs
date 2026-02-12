@@ -21,7 +21,9 @@ use std::sync::LazyLock;
 use kube::ResourceExt;
 use tracing::debug;
 
-use lattice_common::crd::{BootstrapProvider, LatticeCluster, ProviderType};
+use lattice_common::crd::{
+    BackupsConfig, BootstrapProvider, LatticeCluster, MonitoringConfig, ProviderType,
+};
 use lattice_common::DEFAULT_GRPC_PORT;
 
 /// Configuration for infrastructure manifest generation
@@ -43,12 +45,10 @@ pub struct InfrastructureConfig {
     pub parent_grpc_port: u16,
     /// Enable GPU infrastructure (NFD + NVIDIA device plugin + HAMi)
     pub gpu: bool,
-    /// Enable monitoring infrastructure (VictoriaMetrics + KEDA for autoscaling).
-    /// Defaults to true.
-    pub monitoring: bool,
-    /// Enable backup infrastructure (Velero).
-    /// Defaults to true.
-    pub backups: bool,
+    /// Monitoring infrastructure configuration (VictoriaMetrics + KEDA for autoscaling).
+    pub monitoring: MonitoringConfig,
+    /// Backup infrastructure configuration (Velero).
+    pub backups: BackupsConfig,
 }
 
 impl Default for InfrastructureConfig {
@@ -62,8 +62,8 @@ impl Default for InfrastructureConfig {
             parent_host: None,
             parent_grpc_port: DEFAULT_GRPC_PORT,
             gpu: false,
-            monitoring: true,
-            backups: true,
+            monitoring: MonitoringConfig::default(),
+            backups: BackupsConfig::default(),
         }
     }
 }
@@ -85,8 +85,8 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             parent_host: None,
             parent_grpc_port: DEFAULT_GRPC_PORT,
             gpu: cluster.spec.gpu,
-            monitoring: cluster.spec.monitoring,
-            backups: cluster.spec.backups,
+            monitoring: cluster.spec.monitoring.clone(),
+            backups: cluster.spec.backups.clone(),
         }
     }
 }
@@ -114,13 +114,17 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
     manifests.extend(eso::generate_eso().iter().cloned());
 
     // Velero (for backup and restore)
-    if config.backups {
+    if config.backups.enabled {
         manifests.extend(velero::generate_velero().iter().cloned());
     }
 
-    // VictoriaMetrics K8s Stack (HA metrics backend) + KEDA (event-driven autoscaling)
-    if config.monitoring {
-        manifests.extend(prometheus::generate_prometheus().iter().cloned());
+    // VictoriaMetrics K8s Stack + KEDA (event-driven autoscaling)
+    if config.monitoring.enabled {
+        manifests.extend(
+            prometheus::generate_prometheus(config.monitoring.ha)
+                .iter()
+                .cloned(),
+        );
         manifests.extend(keda::generate_keda().iter().cloned());
     }
 

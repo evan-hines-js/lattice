@@ -14,8 +14,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
     CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, IngressTls, LatticeService,
-    LatticeServiceSpec, PortSpec, ProviderType, ResourceSpec, ResourceType, RouteKind, RouteSpec,
-    ServicePortsSpec, WorkloadSpec,
+    LatticeServiceSpec, MonitoringConfig, PortSpec, ProviderType, ResourceSpec, ResourceType,
+    RouteKind, RouteSpec, ServicePortsSpec, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_service::compiler::ServiceCompiler;
@@ -251,8 +251,13 @@ fn bench_baseline(c: &mut Criterion) {
     let spec = baseline_spec();
     graph.put_service("default", "target", &spec);
     let service = make_service("target", "default", spec);
-    let compiler =
-        ServiceCompiler::new(&graph, "bench-cluster", ProviderType::Docker, &cedar, true);
+    let compiler = ServiceCompiler::new(
+        &graph,
+        "bench-cluster",
+        ProviderType::Docker,
+        &cedar,
+        MonitoringConfig::default(),
+    );
 
     group.bench_function("minimal", |b| {
         b.iter(|| {
@@ -275,8 +280,13 @@ fn bench_mesh(c: &mut Criterion) {
         let spec = mesh_spec(deps, callers);
         setup_graph(&graph, "default", &spec);
         let service = make_service("target", "default", spec);
-        let compiler =
-            ServiceCompiler::new(&graph, "bench-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "bench-cluster",
+            ProviderType::Docker,
+            &cedar,
+            MonitoringConfig::default(),
+        );
 
         group.bench_with_input(
             BenchmarkId::new("deps_callers", format!("{}d_{}c", deps, callers)),
@@ -304,8 +314,13 @@ fn bench_secrets(c: &mut Criterion) {
         let spec = secrets_spec(num_secrets, 3);
         graph.put_service("default", "target", &spec);
         let service = make_service("target", "default", spec);
-        let compiler =
-            ServiceCompiler::new(&graph, "bench-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "bench-cluster",
+            ProviderType::Docker,
+            &cedar,
+            MonitoringConfig::default(),
+        );
 
         group.bench_with_input(BenchmarkId::new("count", num_secrets), &(), |b, _| {
             b.iter(|| {
@@ -328,8 +343,13 @@ fn bench_ingress(c: &mut Criterion) {
     let spec = ingress_spec();
     graph.put_service("default", "target", &spec);
     let service = make_service("target", "default", spec);
-    let compiler =
-        ServiceCompiler::new(&graph, "bench-cluster", ProviderType::Docker, &cedar, true);
+    let compiler = ServiceCompiler::new(
+        &graph,
+        "bench-cluster",
+        ProviderType::Docker,
+        &cedar,
+        MonitoringConfig::default(),
+    );
 
     group.bench_function("with_tls", |b| {
         b.iter(|| {
@@ -352,8 +372,13 @@ fn bench_full(c: &mut Criterion) {
         let spec = full_spec(deps, callers, secrets);
         setup_graph(&graph, "default", &spec);
         let service = make_service("target", "default", spec);
-        let compiler =
-            ServiceCompiler::new(&graph, "bench-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = ServiceCompiler::new(
+            &graph,
+            "bench-cluster",
+            ProviderType::Docker,
+            &cedar,
+            MonitoringConfig::default(),
+        );
 
         group.bench_with_input(
             BenchmarkId::new("full", format!("{}d_{}c_{}s", deps, callers, secrets)),

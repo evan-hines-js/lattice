@@ -554,20 +554,10 @@ impl Installer {
     async fn generate_bootstrap_manifests(&self) -> Result<Vec<String>> {
         let generator = DefaultManifestGenerator::new();
 
-        let proxmox_ipv4_pool = self
-            .cluster
-            .spec
-            .provider
-            .config
-            .proxmox
-            .as_ref()
-            .map(|p| &p.ipv4_pool);
-
         let config = BootstrapBundleConfig {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
             networking: self.cluster.spec.networking.as_ref(),
-            proxmox_ipv4_pool,
             cluster_name: self.cluster_name(),
             provider: self.provider(),
             k8s_version: &self.cluster.spec.provider.kubernetes.version,

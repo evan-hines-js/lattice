@@ -177,21 +177,16 @@ async fn run_endurance_test() -> Result<(), String> {
                 let mut cluster = workload_template.clone();
                 cluster.metadata.name = Some(name);
 
-                // Update networking CIDR
+                // Update networking CIDR — use /28 range for each cluster
                 if let Some(ref mut networking) = cluster.spec.networking {
                     if let Some(ref mut default) = networking.default {
-                        default.cidr = format!("{}/32", ip);
+                        default.cidr = format!("{}/28", ip);
                     }
-                }
-
-                // Update parent_config host
-                if let Some(ref mut parent_config) = cluster.spec.parent_config {
-                    parent_config.host = Some(ip.clone());
                 }
 
                 // Update cert SANs
                 cluster.spec.provider.kubernetes.cert_sans =
-                    Some(vec!["127.0.0.1".to_string(), "localhost".to_string(), ip]);
+                    Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]);
 
                 cluster
             })

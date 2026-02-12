@@ -127,11 +127,7 @@ impl LatticeServiceSpec {
     /// Validate the service specification (workload + replicas + autoscaling)
     pub fn validate(&self) -> Result<(), crate::Error> {
         self.workload.validate()?;
-
-        // Validate sidecar names are valid DNS labels
-        for name in self.runtime.sidecars.keys() {
-            super::validate_dns_label(name, "sidecar name").map_err(crate::Error::validation)?;
-        }
+        self.runtime.validate()?;
 
         // Validate autoscaling
         if let Some(ref autoscaling) = self.autoscaling {

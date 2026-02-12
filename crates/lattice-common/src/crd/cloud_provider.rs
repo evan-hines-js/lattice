@@ -375,7 +375,7 @@ spec:
         assert!(provider.spec.credential_data.is_some());
 
         let creds = provider.spec.credentials.as_ref().unwrap();
-        assert!(creds.is_secret());
+        assert!(creds.type_.is_secret());
         assert_eq!(
             creds.id,
             Some("infrastructure/openstack/credentials".to_string())

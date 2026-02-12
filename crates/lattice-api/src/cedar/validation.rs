@@ -1,7 +1,7 @@
 //! CedarPolicy validation controller
 //!
-//! Watches CedarPolicy CRDs and validates their Cedar policy syntax,
-//! updating status fields (phase, permit_count, forbid_count, validation_errors).
+//! Watches CedarPolicy CRDs, validates their Cedar policy syntax,
+//! updates status fields, and reloads the in-memory policy engine.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,21 +9,30 @@ use std::time::Duration;
 use cedar_policy::{Effect, PolicySet};
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::{Client, ResourceExt};
+use lattice_cedar::PolicyEngine;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{CedarPolicy, CedarPolicyPhase, CedarPolicyStatus};
-use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE};
 
 /// Requeue interval for successful reconciliation
 const REQUEUE_SUCCESS_SECS: u64 = 300;
 /// Requeue interval on error
 const REQUEUE_ERROR_SECS: u64 = 60;
 
-/// Reconcile a CedarPolicy — validate syntax and update status
+/// Controller context for CedarPolicy validation + policy engine reload
+pub struct CedarValidationContext {
+    /// Kubernetes client
+    pub client: Client,
+    /// Shared Cedar policy engine (reloaded on every policy change)
+    pub cedar: Arc<PolicyEngine>,
+}
+
+/// Reconcile a CedarPolicy — validate syntax, update status, and reload policy engine
 pub async fn reconcile(
     policy: Arc<CedarPolicy>,
-    ctx: Arc<ControllerContext>,
+    ctx: Arc<CedarValidationContext>,
 ) -> Result<Action, ReconcileError> {
     let name = policy.name_any();
     let client = &ctx.client;
@@ -76,6 +85,12 @@ pub async fn reconcile(
         errors = new_status.validation_errors.len(),
         "CedarPolicy status updated"
     );
+
+    // Reload the in-memory policy engine so all consumers (service compiler,
+    // auth proxy, security auth) see the updated policies immediately.
+    if let Err(e) = ctx.cedar.reload(client).await {
+        warn!(error = %e, "Failed to reload Cedar policies after validation");
+    }
 
     Ok(Action::requeue(Duration::from_secs(requeue)))
 }

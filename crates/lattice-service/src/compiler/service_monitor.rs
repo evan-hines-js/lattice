@@ -42,7 +42,7 @@ impl CompilerPhase for ServiceMonitorPhase {
         output: &mut CompiledService,
     ) -> Result<(), String> {
         // Gate 1: monitoring must be enabled
-        if !ctx.monitoring_enabled {
+        if !ctx.monitoring.enabled {
             return Ok(());
         }
 
@@ -181,7 +181,7 @@ mod tests {
         monitoring_enabled: bool,
     ) -> CompilationContext<'a> {
         // We need a graph but ServiceMonitorPhase doesn't use it
-        use crate::crd::ProviderType;
+        use crate::crd::{MonitoringConfig, ProviderType};
         use crate::graph::ServiceGraph;
 
         // Leak a ServiceGraph so the reference lives long enough for tests.
@@ -195,7 +195,10 @@ mod tests {
             graph,
             cluster_name: "test-cluster",
             provider_type: ProviderType::Docker,
-            monitoring_enabled,
+            monitoring: MonitoringConfig {
+                enabled: monitoring_enabled,
+                ha: true,
+            },
         }
     }
 

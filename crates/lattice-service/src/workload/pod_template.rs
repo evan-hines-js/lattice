@@ -315,7 +315,7 @@ impl PodTemplateCompiler {
                 )
             })?;
 
-            if !resource.is_secret() {
+            if !resource.type_.is_secret() {
                 return Err(CompilationError::container(
                     container_name,
                     format!(
@@ -583,7 +583,7 @@ impl PodTemplateCompiler {
                     )
                 })?;
 
-                if !resource.is_secret() {
+                if !resource.type_.is_secret() {
                     return Err(CompilationError::resource(
                         resource_name,
                         format!(

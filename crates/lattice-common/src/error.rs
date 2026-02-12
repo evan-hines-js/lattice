@@ -53,11 +53,8 @@ impl ControllerContext {
 /// Default error policy for controllers.
 ///
 /// Logs the error and requeues for retry after 30 seconds.
-pub fn default_error_policy<T>(
-    _obj: Arc<T>,
-    error: &ReconcileError,
-    _ctx: Arc<ControllerContext>,
-) -> Action {
+/// Generic over context type so any controller can use it.
+pub fn default_error_policy<T, C>(_obj: Arc<T>, error: &ReconcileError, _ctx: Arc<C>) -> Action {
     warn!(error = %error, "Reconcile error, will retry");
     Action::requeue(Duration::from_secs(30))
 }

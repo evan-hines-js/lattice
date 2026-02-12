@@ -301,8 +301,8 @@ mod tests {
     use kube::api::ObjectMeta;
     use lattice_common::crd::LatticeClusterSpec;
     use lattice_common::crd::{
-        BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec, NodeSpec,
-        ProviderConfig, ProviderSpec, RootVolume, WorkerPoolSpec,
+        BackupsConfig, BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec,
+        MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, RootVolume, WorkerPoolSpec,
     };
 
     fn test_openstack_config() -> OpenStackConfig {
@@ -351,8 +351,8 @@ mod tests {
                 networking: None,
                 services: true,
                 gpu: false,
-                monitoring: true,
-                backups: true,
+                monitoring: MonitoringConfig::default(),
+                backups: BackupsConfig::default(),
             },
             status: None,
         }

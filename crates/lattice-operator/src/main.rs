@@ -36,7 +36,7 @@ use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::{ParentConfig, ParentServers};
 use lattice_common::crd::LatticeCluster;
-use lattice_common::crd::{CedarPolicy, LatticeService, OIDCProvider};
+use lattice_common::crd::{LatticeService, OIDCProvider};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::telemetry::{init_telemetry, PrometheusHandle, TelemetryConfig};
 use lattice_common::{
@@ -258,7 +258,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Cluster slice: LatticeCluster CRDs, cluster infra (CAPI, network policies),
-/// Cedar + watcher, cell infra (gRPC, bootstrap, auth proxy), cluster controller
+/// Cedar, cell infra (gRPC, bootstrap, auth proxy), cluster + provider controllers
 async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     let capi_installer: Arc<dyn CapiInstaller> = Arc::new(NativeInstaller::new());
 
@@ -271,9 +271,8 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     // 3. Wait for API readiness using LatticeCluster
     wait_for_api_ready_for::<LatticeCluster>(client).await?;
 
-    // 4. Cedar policy engine + watcher
+    // 4. Cedar policy engine (reloaded by cedar validation controller)
     let cedar = load_cedar_engine(client).await;
-    start_cedar_policy_watcher(client.clone(), cedar.clone());
 
     // 5. Cell infrastructure (gRPC, bootstrap, auth proxy)
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
@@ -281,12 +280,16 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         setup_cell_infra(client, &self_cluster_name, cedar.clone()).await?;
 
     // 6. Build controller futures
-    let controllers = controller_runner::build_cluster_controllers(
+    let mut controllers = controller_runner::build_cluster_controllers(
         client.clone(),
         self_cluster_name,
         Some(parent_servers.clone()),
         capi_installer,
     );
+    controllers.extend(controller_runner::build_provider_controllers(
+        client.clone(),
+        cedar,
+    ));
 
     Ok(SliceHandle {
         controllers,
@@ -297,7 +300,7 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
 }
 
 /// Service slice: Service CRDs, service infra (Istio, Gateway API, ESO, Cilium),
-/// Cedar + watcher, DiscoveredCrds, service controllers
+/// Cedar, DiscoveredCrds, service + provider controllers
 async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     // 1. Install service CRDs
     ensure_service_crds(client).await?;
@@ -308,25 +311,28 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     // 3. Wait for API readiness using LatticeService
     wait_for_api_ready_for::<LatticeService>(client).await?;
 
-    // 4. Cedar policy engine + watcher
+    // 4. Cedar policy engine (reloaded by cedar validation controller)
     let cedar = load_cedar_engine(client).await;
-    start_cedar_policy_watcher(client.clone(), cedar.clone());
 
     // 5. Resolve config from env vars (no LatticeCluster dependency)
     let cluster_name = std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into());
     let provider_type = controller_runner::resolve_provider_type_from_env();
-    let monitoring_enabled = controller_runner::resolve_monitoring_from_env();
+    let monitoring = controller_runner::resolve_monitoring_from_env();
     let crds = Arc::new(DiscoveredCrds::discover(client).await);
 
     // 6. Build controller futures
-    let controllers = controller_runner::build_service_controllers(
+    let mut controllers = controller_runner::build_service_controllers(
         client.clone(),
         cluster_name,
         provider_type,
-        cedar,
+        cedar.clone(),
         crds,
-        monitoring_enabled,
+        monitoring,
     );
+    controllers.extend(controller_runner::build_provider_controllers(
+        client.clone(),
+        cedar,
+    ));
 
     Ok(SliceHandle {
         controllers,
@@ -351,9 +357,8 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     // 3. Wait for API readiness
     wait_for_api_ready_for::<LatticeCluster>(client).await?;
 
-    // 4. Cedar policy engine + watcher (shared across cluster + service)
+    // 4. Cedar policy engine (reloaded by cedar validation controller)
     let cedar = load_cedar_engine(client).await;
-    start_cedar_policy_watcher(client.clone(), cedar.clone());
 
     // 5. Cell infrastructure (gRPC, bootstrap, auth proxy)
     let self_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").ok();
@@ -370,20 +375,21 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
 
     // Service controllers need provider type + monitoring from LatticeCluster
     let provider_type = controller_runner::resolve_provider_type_from_cluster(client).await;
-    let monitoring_enabled = controller_runner::resolve_monitoring_from_cluster(client).await;
+    let monitoring = controller_runner::resolve_monitoring_from_cluster(client).await;
     let cluster_name = self_cluster_name.unwrap_or_else(|| "default".to_string());
     let crds = Arc::new(DiscoveredCrds::discover(client).await);
     controllers.extend(controller_runner::build_service_controllers(
         client.clone(),
         cluster_name,
         provider_type,
-        cedar,
+        cedar.clone(),
         crds,
-        monitoring_enabled,
+        monitoring,
     ));
 
     controllers.extend(controller_runner::build_provider_controllers(
         client.clone(),
+        cedar,
     ));
 
     // Ensure local webhook infrastructure + start webhook server
@@ -685,47 +691,6 @@ fn start_oidc_provider_watcher(client: kube::Client, auth_chain: Arc<AuthChain>)
                 }
                 None => {
                     tracing::warn!("OIDCProvider watcher stream ended, restarting...");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    });
-}
-
-/// Start a background task to watch for CedarPolicy CRD changes and reload the policy engine.
-///
-/// This ensures the auth proxy's Cedar policies are updated when CedarPolicy CRDs are
-/// created, modified, or deleted.
-fn start_cedar_policy_watcher(client: kube::Client, cedar: Arc<PolicyEngine>) {
-    tokio::spawn(async move {
-        let api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-
-        // Use a shorter timeout than client's read_timeout to prevent "body read timed out"
-        let watcher_config = watcher::Config::default().timeout(25);
-        let watcher = watcher::watcher(api, watcher_config);
-        let mut watcher = std::pin::pin!(watcher);
-
-        tracing::info!("Cedar policy watcher started");
-
-        loop {
-            match watcher.next().await {
-                Some(Ok(Event::Apply(_)))
-                | Some(Ok(Event::InitApply(_)))
-                | Some(Ok(Event::Delete(_))) => {
-                    tracing::info!("CedarPolicy changed, reloading policies...");
-                    if let Err(e) = cedar.reload(&client).await {
-                        tracing::warn!(error = %e, "Failed to reload Cedar policies");
-                    }
-                }
-                Some(Ok(Event::Init)) | Some(Ok(Event::InitDone)) => {
-                    tracing::debug!("Cedar policy watcher initialized");
-                }
-                Some(Err(e)) => {
-                    tracing::warn!(error = %e, "Cedar policy watcher error, retrying...");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-                None => {
-                    tracing::warn!("Cedar policy watcher stream ended, restarting...");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }

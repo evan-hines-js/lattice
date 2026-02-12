@@ -133,23 +133,15 @@ async fn patch_kubeconfig_for_proxy_access(
 
 /// Build the proxy URL from cluster's parent config.
 fn build_proxy_url(cluster: &LatticeCluster) -> String {
-    if let Some(ref endpoints) = cluster.spec.parent_config {
-        if let Some(ref host) = endpoints.host {
-            format!("https://{}:{}", host, endpoints.proxy_port)
-        } else {
-            // No explicit host - use in-cluster service DNS
-            format!(
-                "https://{}:{}",
-                lattice_svc_dns(CELL_SERVICE_NAME),
-                endpoints.proxy_port
-            )
-        }
-    } else {
-        // Fallback to default
-        format!(
-            "https://{}:{}",
-            lattice_svc_dns(CELL_SERVICE_NAME),
-            DEFAULT_PROXY_PORT
-        )
-    }
+    let proxy_port = cluster
+        .spec
+        .parent_config
+        .as_ref()
+        .map(|e| e.proxy_port)
+        .unwrap_or(DEFAULT_PROXY_PORT);
+    format!(
+        "https://{}:{}",
+        lattice_svc_dns(CELL_SERVICE_NAME),
+        proxy_port
+    )
 }

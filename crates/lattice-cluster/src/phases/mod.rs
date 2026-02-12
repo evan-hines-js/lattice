@@ -355,13 +355,6 @@ async fn get_or_create_bootstrap_token(
             kind: Some("LatticeCluster".to_string()),
         })?;
 
-    let proxmox_ipv4_pool = cluster
-        .spec
-        .provider
-        .config
-        .proxmox
-        .as_ref()
-        .map(|p| p.ipv4_pool.clone());
     let autoscaling_enabled = cluster
         .spec
         .nodes
@@ -375,7 +368,6 @@ async fn get_or_create_bootstrap_token(
         ca_certificate: ca_cert.to_string(),
         cluster_manifest,
         networking: cluster.spec.networking.clone(),
-        proxmox_ipv4_pool,
         provider: cluster.spec.provider.provider_type(),
         bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
         k8s_version: cluster.spec.provider.kubernetes.version.clone(),

@@ -11,6 +11,45 @@ use super::types::{
     ClusterPhase, Condition, EndpointsSpec, NetworkingSpec, NodeSpec, ProviderSpec,
 };
 
+/// Monitoring infrastructure configuration.
+///
+/// Controls VictoriaMetrics deployment and HA mode.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct MonitoringConfig {
+    /// Enable monitoring infrastructure (VictoriaMetrics + KEDA).
+    #[serde(default = "super::default_true")]
+    pub enabled: bool,
+    /// Deploy VictoriaMetrics in HA cluster mode (2 replicas each).
+    /// When false, deploys a single-node VMSingle instance.
+    #[serde(default = "super::default_true")]
+    pub ha: bool,
+}
+
+impl Default for MonitoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ha: true,
+        }
+    }
+}
+
+/// Backup infrastructure configuration.
+///
+/// Controls Velero deployment.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct BackupsConfig {
+    /// Enable backup infrastructure (Velero).
+    #[serde(default = "super::default_true")]
+    pub enabled: bool,
+}
+
+impl Default for BackupsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Specification for a LatticeCluster
 ///
 /// A LatticeCluster can be either:
@@ -65,15 +104,13 @@ pub struct LatticeClusterSpec {
     #[serde(default)]
     pub gpu: bool,
 
-    /// Enable monitoring infrastructure (VictoriaMetrics + KEDA for autoscaling).
-    /// Defaults to true.
-    #[serde(default = "super::default_true")]
-    pub monitoring: bool,
+    /// Monitoring infrastructure configuration (VictoriaMetrics + KEDA for autoscaling).
+    #[serde(default)]
+    pub monitoring: MonitoringConfig,
 
-    /// Enable backup infrastructure (Velero).
-    /// Defaults to true.
-    #[serde(default = "super::default_true")]
-    pub backups: bool,
+    /// Backup infrastructure configuration (Velero).
+    #[serde(default)]
+    pub backups: BackupsConfig,
 }
 
 impl LatticeClusterSpec {
@@ -328,7 +365,6 @@ mod tests {
 
     fn endpoints_spec() -> EndpointsSpec {
         EndpointsSpec {
-            host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
             proxy_port: 8081,
@@ -360,8 +396,8 @@ mod tests {
             parent_config: Some(endpoints_spec()),
             services: true,
             gpu: false,
-            monitoring: true,
-            backups: true,
+            monitoring: MonitoringConfig::default(),
+            backups: BackupsConfig::default(),
         };
 
         assert!(spec.is_parent(), "Should be recognized as a parent");
@@ -381,8 +417,8 @@ mod tests {
             parent_config: None,
             services: true,
             gpu: false,
-            monitoring: true,
-            backups: true,
+            monitoring: MonitoringConfig::default(),
+            backups: BackupsConfig::default(),
         };
 
         assert!(!spec.is_parent(), "Leaf cluster cannot have children");
@@ -407,8 +443,8 @@ mod tests {
             parent_config: Some(endpoints_spec()),
             services: true,
             gpu: false,
-            monitoring: true,
-            backups: true,
+            monitoring: MonitoringConfig::default(),
+            backups: BackupsConfig::default(),
         };
 
         assert!(
@@ -430,8 +466,8 @@ mod tests {
             parent_config: None,
             services: true,
             gpu: false,
-            monitoring: true,
-            backups: true,
+            monitoring: MonitoringConfig::default(),
+            backups: BackupsConfig::default(),
         };
 
         assert!(
@@ -466,8 +502,8 @@ mod tests {
             parent_config: None,
             services: true,
             gpu: false,
-            monitoring: true,
-            backups: true,
+            monitoring: MonitoringConfig::default(),
+            backups: BackupsConfig::default(),
         };
 
         assert!(
@@ -489,8 +525,8 @@ mod tests {
             parent_config: None,
             services: true,
             gpu: false,
-            monitoring: true,
-            backups: true,
+            monitoring: MonitoringConfig::default(),
+            backups: BackupsConfig::default(),
         };
 
         assert!(
@@ -604,7 +640,6 @@ networking:
   default:
     cidr: "172.18.255.1/32"
 parentConfig:
-  host: "172.18.255.1"
   service:
     type: LoadBalancer
 "#;
@@ -620,8 +655,9 @@ parentConfig:
             spec.parent_config
                 .as_ref()
                 .expect("parent_config should be present")
-                .host,
-            Some("172.18.255.1".to_string())
+                .service
+                .type_,
+            "LoadBalancer"
         );
     }
 
@@ -669,8 +705,8 @@ nodes:
             parent_config: None,
             services: true,
             gpu: false,
-            monitoring: true,
-            backups: true,
+            monitoring: MonitoringConfig::default(),
+            backups: BackupsConfig::default(),
         };
 
         let json =
@@ -703,8 +739,8 @@ nodes:
                 parent_config: None,
                 services: true,
                 gpu: false,
-                monitoring: true,
-                backups: true,
+                monitoring: MonitoringConfig::default(),
+                backups: BackupsConfig::default(),
             },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
         };

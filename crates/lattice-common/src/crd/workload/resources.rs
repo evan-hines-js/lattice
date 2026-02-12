@@ -113,9 +113,19 @@ impl ResourceType {
         }
     }
 
+    /// Returns true if this is an internal service (LatticeService)
+    pub fn is_service(&self) -> bool {
+        matches!(self, Self::Service)
+    }
+
+    /// Returns true if this is an external service (LatticeExternalService)
+    pub fn is_external_service(&self) -> bool {
+        matches!(self, Self::ExternalService)
+    }
+
     /// Returns true if this is a service-like resource type (handles network traffic)
     pub fn is_service_like(&self) -> bool {
-        matches!(self, Self::Service | Self::ExternalService)
+        self.is_service() || self.is_external_service()
     }
 
     /// Returns true if this is a volume resource
@@ -595,11 +605,6 @@ impl ResourceSpec {
             }
             None => Ok(Some(GpuParams::default())),
         }
-    }
-
-    /// Returns true if this is a secret resource
-    pub fn is_secret(&self) -> bool {
-        self.type_.is_secret()
     }
 
     /// Returns true if this is a wildcard mesh resource (`id: "*"`).

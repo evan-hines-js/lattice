@@ -23,11 +23,10 @@ use super::polling::{
 
 /// Ensure the cell LoadBalancer Service exists.
 ///
-/// - Cloud providers: `load_balancer_ip` is None, cloud assigns address
-/// - On-prem: `load_balancer_ip` is set from parent_config.host, Cilium L2 announces it
+/// Creates a LoadBalancer Service for cell servers. The LB address is
+/// auto-discovered from Service status (cloud assigns it, or Cilium L2 announces it).
 pub async fn ensure_cell_service_exists(
     client: &Client,
-    load_balancer_ip: Option<String>,
     bootstrap_port: u16,
     grpc_port: u16,
     proxy_port: u16,
@@ -72,7 +71,6 @@ pub async fn ensure_cell_service_exists(
             // Kubernetes readiness probes remove unresponsive pods from Endpoints
             // before lease expires (30s lease > 15s readiness removal time)
             selector: Some(selector),
-            load_balancer_ip: load_balancer_ip.clone(),
             ports: Some(vec![
                 ServicePort {
                     name: Some("bootstrap".to_string()),
@@ -110,7 +108,6 @@ pub async fn ensure_cell_service_exists(
 
     api.create(&PostParams::default(), &service).await?;
     tracing::info!(
-        load_balancer_ip = ?load_balancer_ip,
         bootstrap_port,
         grpc_port,
         proxy_port,
@@ -210,7 +207,6 @@ pub async fn get_cell_server_sans(
     tracing::info!(?provider_type, "Creating cell LoadBalancer Service...");
     if let Err(e) = ensure_cell_service_exists(
         client,
-        parent_config.host.clone(),
         parent_config.bootstrap_port,
         parent_config.grpc_port,
         parent_config.proxy_port,

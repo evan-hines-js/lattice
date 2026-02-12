@@ -1020,7 +1020,7 @@ impl GeneratedWorkloads {
 
 use crate::crd::{
     AutoscalingMetric, AutoscalingSpec, DeployStrategy, GpuParams, LatticeService,
-    LatticeServiceSpec, ProviderType, WorkloadSpec,
+    LatticeServiceSpec, MonitoringConfig, ProviderType, WorkloadSpec,
 };
 use lattice_common::mesh;
 use lattice_common::template::RenderedContainer;
@@ -1164,7 +1164,7 @@ impl WorkloadCompiler {
         namespace: &str,
         volumes: &GeneratedVolumes,
         provider_type: ProviderType,
-        monitoring_enabled: bool,
+        monitoring: &MonitoringConfig,
         container_data: &ContainerCompilationData<'_>,
     ) -> Result<GeneratedWorkloads, CompilationError> {
         let spec = &service.spec;
@@ -1204,7 +1204,7 @@ impl WorkloadCompiler {
                 namespace,
                 spec.replicas,
                 autoscaling,
-                monitoring_enabled,
+                monitoring,
             )?);
         }
 
@@ -1351,9 +1351,9 @@ impl WorkloadCompiler {
         namespace: &str,
         replicas: u32,
         autoscaling: &AutoscalingSpec,
-        monitoring_enabled: bool,
+        monitoring: &MonitoringConfig,
     ) -> Result<ScaledObject, CompilationError> {
-        use lattice_infra::bootstrap::prometheus::{vmselect_url, VMSELECT_PATH, VMSELECT_PORT};
+        use lattice_infra::bootstrap::prometheus::{query_path, query_port, query_url};
 
         let metrics = if autoscaling.metrics.is_empty() {
             vec![AutoscalingMetric {
@@ -1369,13 +1369,18 @@ impl WorkloadCompiler {
             .filter(|m| !matches!(m.metric.as_str(), "cpu" | "memory"))
             .map(|m| m.metric.clone())
             .collect();
-        if !custom_metrics.is_empty() && !monitoring_enabled {
+        if !custom_metrics.is_empty() && !monitoring.enabled {
             return Err(CompilationError::MonitoringRequired {
                 metrics: custom_metrics,
             });
         }
 
-        let server_address = format!("{}:{}{}", vmselect_url(), VMSELECT_PORT, VMSELECT_PATH);
+        let server_address = format!(
+            "{}:{}{}",
+            query_url(monitoring.ha),
+            query_port(monitoring.ha),
+            query_path(monitoring.ha)
+        );
 
         let triggers = metrics
             .iter()
@@ -1493,7 +1498,7 @@ mod tests {
     fn test_compile_with_monitoring(
         service: &LatticeService,
         secret_refs: &BTreeMap<String, SecretRef>,
-        monitoring_enabled: bool,
+        monitoring: MonitoringConfig,
     ) -> Result<GeneratedWorkloads, CompilationError> {
         let name = service
             .metadata
@@ -1539,7 +1544,7 @@ mod tests {
             namespace,
             &volumes,
             ProviderType::Docker,
-            monitoring_enabled,
+            &monitoring,
             &container_data,
         )
     }
@@ -1549,7 +1554,7 @@ mod tests {
         service: &LatticeService,
         secret_refs: &BTreeMap<String, SecretRef>,
     ) -> Result<GeneratedWorkloads, CompilationError> {
-        test_compile_with_monitoring(service, secret_refs, true)
+        test_compile_with_monitoring(service, secret_refs, MonitoringConfig::default())
     }
 
     /// Helper to compile a service with no secret refs
@@ -1557,12 +1562,12 @@ mod tests {
         test_compile(service, &BTreeMap::new()).expect("test workload compilation should succeed")
     }
 
-    /// Helper to compile a service with monitoring flag
+    /// Helper to compile a service with monitoring config
     fn compile_service_with_monitoring(
         service: &LatticeService,
-        monitoring_enabled: bool,
+        monitoring: MonitoringConfig,
     ) -> GeneratedWorkloads {
-        test_compile_with_monitoring(service, &BTreeMap::new(), monitoring_enabled)
+        test_compile_with_monitoring(service, &BTreeMap::new(), monitoring)
             .expect("test workload compilation should succeed")
     }
 
@@ -1918,7 +1923,14 @@ mod tests {
         });
 
         // With monitoring disabled, custom metrics should fail
-        let result = test_compile_with_monitoring(&service, &BTreeMap::new(), false);
+        let result = test_compile_with_monitoring(
+            &service,
+            &BTreeMap::new(),
+            MonitoringConfig {
+                enabled: false,
+                ha: false,
+            },
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("monitoring"));
@@ -1944,7 +1956,13 @@ mod tests {
         });
 
         // cpu/memory should work even without monitoring
-        let output = compile_service_with_monitoring(&service, false);
+        let output = compile_service_with_monitoring(
+            &service,
+            MonitoringConfig {
+                enabled: false,
+                ha: false,
+            },
+        );
         let so = output.scaled_object.expect("should have ScaledObject");
         assert_eq!(so.spec.triggers.len(), 2);
         assert_eq!(so.spec.triggers[0].type_, "cpu");

@@ -5,8 +5,10 @@ kind: LatticeCluster
 metadata:
   name: e2e-mgmt
 spec:
-  monitoring: false
-  backups: false
+  monitoring:
+    enabled: false
+  backups:
+    enabled: false
   providerRef: openstack
   provider:
     kubernetes:

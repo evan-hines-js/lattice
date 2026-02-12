@@ -110,13 +110,8 @@ pub trait KubeClient: Send + Sync {
     ///
     /// Creates a LoadBalancer Service in lattice-system namespace to expose
     /// cell servers (bootstrap + gRPC) for workload cluster provisioning.
-    /// If load_balancer_ip is None (cloud providers), the cloud will assign one.
-    async fn ensure_cell_service(
-        &self,
-        load_balancer_ip: Option<String>,
-        bootstrap_port: u16,
-        grpc_port: u16,
-    ) -> Result<(), Error>;
+    /// The LB address is auto-discovered from Service status.
+    async fn ensure_cell_service(&self, bootstrap_port: u16, grpc_port: u16) -> Result<(), Error>;
 
     /// Copy a secret from one namespace to another
     ///
@@ -438,12 +433,7 @@ impl KubeClient for KubeClientImpl {
         Ok(())
     }
 
-    async fn ensure_cell_service(
-        &self,
-        load_balancer_ip: Option<String>,
-        bootstrap_port: u16,
-        grpc_port: u16,
-    ) -> Result<(), Error> {
+    async fn ensure_cell_service(&self, bootstrap_port: u16, grpc_port: u16) -> Result<(), Error> {
         use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
         use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
@@ -461,9 +451,6 @@ impl KubeClient for KubeClientImpl {
             },
             spec: Some(ServiceSpec {
                 type_: Some("LoadBalancer".to_string()),
-                // Only set loadBalancerIP if specified (on-prem).
-                // For cloud providers, leave None and let the cloud assign one.
-                load_balancer_ip,
                 selector: Some(labels),
                 ports: Some(vec![
                     ServicePort {
@@ -1651,9 +1638,9 @@ mod tests {
     use lattice_capi::installer::CapiProviderConfig;
     use lattice_capi::provider::CAPIManifest;
     use lattice_common::crd::{
-        BootstrapProvider, CloudProvider, Condition, ConditionStatus, ControlPlaneSpec,
-        EndpointsSpec, KubernetesSpec, LatticeClusterSpec, NodeSpec, ProviderConfig, ProviderSpec,
-        ServiceSpec, WorkerPoolSpec,
+        BackupsConfig, BootstrapProvider, CloudProvider, Condition, ConditionStatus,
+        ControlPlaneSpec, EndpointsSpec, KubernetesSpec, LatticeClusterSpec, MonitoringConfig,
+        NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
     };
     use mockall::mock;
 
@@ -1722,8 +1709,8 @@ mod tests {
                 parent_config: None,
                 services: true,
                 gpu: false,
-                monitoring: true,
-                backups: true,
+                monitoring: MonitoringConfig::default(),
+                backups: BackupsConfig::default(),
             },
             status: None,
         }
@@ -1733,7 +1720,6 @@ mod tests {
     fn sample_parent(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name);
         cluster.spec.parent_config = Some(EndpointsSpec {
-            host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
             proxy_port: 8081,
@@ -2295,8 +2281,8 @@ mod tests {
                     parent_config: None,
                     services: true,
                     gpu: false,
-                    monitoring: true,
-                    backups: true,
+                    monitoring: MonitoringConfig::default(),
+                    backups: BackupsConfig::default(),
                 },
                 status: None,
             }

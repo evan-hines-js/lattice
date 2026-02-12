@@ -12,7 +12,7 @@ use crate::crd::types::ServiceRef;
 
 use super::container::{ContainerSpec, SidecarSpec};
 use super::ports::ServicePortsSpec;
-use super::resources::{ResourceSpec, ResourceType};
+use super::resources::ResourceSpec;
 
 /// Score-compatible workload specification.
 ///
@@ -69,6 +69,17 @@ pub struct RuntimeSpec {
     pub image_pull_secrets: Vec<String>,
 }
 
+impl RuntimeSpec {
+    /// Validate the runtime specification (sidecar names)
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        for name in self.sidecars.keys() {
+            super::super::validate_dns_label(name, "sidecar name")
+                .map_err(crate::Error::validation)?;
+        }
+        Ok(())
+    }
+}
+
 impl WorkloadSpec {
     /// Collect ServiceRefs from resources matching a filter predicate.
     ///
@@ -106,21 +117,21 @@ impl WorkloadSpec {
     /// it defaults to `own_namespace`.
     pub fn allowed_callers(&self, own_namespace: &str) -> Vec<ServiceRef> {
         self.collect_service_refs(own_namespace, |spec| {
-            spec.direction.is_inbound() && matches!(spec.type_, ResourceType::Service)
+            spec.direction.is_inbound() && spec.type_.is_service()
         })
     }
 
     /// Extract external service dependencies with namespace resolution
     pub fn external_dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
         self.collect_service_refs(own_namespace, |spec| {
-            spec.direction.is_outbound() && matches!(spec.type_, ResourceType::ExternalService)
+            spec.direction.is_outbound() && spec.type_.is_external_service()
         })
     }
 
     /// Extract internal service dependencies with namespace resolution
     pub fn internal_dependencies(&self, own_namespace: &str) -> Vec<ServiceRef> {
         self.collect_service_refs(own_namespace, |spec| {
-            spec.direction.is_outbound() && matches!(spec.type_, ResourceType::Service)
+            spec.direction.is_outbound() && spec.type_.is_service()
         })
     }
 
@@ -197,39 +208,28 @@ impl WorkloadSpec {
 
         // Validate resource fields
         for (name, resource) in &self.resources {
-            // Resource id is used in volume owner labels: "volume-owner-{id}" (≤63 chars)
+            // Volume ids flow into K8s names: "vol-{id}" PVC and "volume-owner-{id}" labels.
+            // Secret ids are Vault paths (e.g., "database/prod/creds") — no DNS validation.
+            // Service ids override the target service name — validated by K8s API.
             if let Some(ref id) = resource.id {
-                if id.len() > 50 {
-                    return Err(crate::Error::validation(format!(
-                        "resource '{}': id '{}' exceeds 50 character limit \
-                         (used in label name with 13-char prefix)",
-                        name, id
-                    )));
+                if id != "*" && resource.type_.is_volume() {
+                    if id.len() > 50 {
+                        return Err(crate::Error::validation(format!(
+                            "resource '{}': id '{}' exceeds 50 character limit \
+                             (used in label name with 13-char prefix)",
+                            name, id
+                        )));
+                    }
+                    super::super::validate_dns_identifier(id, false).map_err(|e| {
+                        crate::Error::validation(format!("resource '{}': id: {}", name, e))
+                    })?;
                 }
-                super::super::validate_dns_identifier(id, false).map_err(|e| {
-                    crate::Error::validation(format!("resource '{}': id: {}", name, e))
-                })?;
             }
 
             if resource.type_.is_gpu() {
-                if let Some(params) = &resource.params {
-                    let value = serde_json::to_value(params).map_err(|e| {
-                        crate::Error::validation(format!(
-                            "resource '{}': failed to serialize gpu params: {}",
-                            name, e
-                        ))
-                    })?;
-                    let gpu_params: super::resources::GpuParams = serde_json::from_value(value)
-                        .map_err(|e| {
-                            crate::Error::validation(format!(
-                                "resource '{}': invalid gpu params: {}",
-                                name, e
-                            ))
-                        })?;
-                    gpu_params.validate().map_err(|e| {
-                        crate::Error::validation(format!("resource '{}': {}", name, e))
-                    })?;
-                }
+                resource
+                    .gpu_params()
+                    .map_err(|e| crate::Error::validation(format!("resource '{}': {}", name, e)))?;
             }
         }
 
@@ -508,13 +508,12 @@ mod tests {
     }
 
     #[test]
-    fn resource_id_too_long_fails() {
+    fn volume_id_too_long_fails() {
         let mut spec = sample_workload();
         spec.resources.insert(
             "vol".to_string(),
             ResourceSpec {
-                type_: ResourceType::Service,
-                direction: DependencyDirection::Outbound,
+                type_: ResourceType::Volume,
                 id: Some("a".repeat(51)),
                 ..Default::default()
             },
@@ -524,19 +523,63 @@ mod tests {
     }
 
     #[test]
-    fn resource_id_with_underscores_fails() {
+    fn volume_id_with_underscores_fails() {
         let mut spec = sample_workload();
         spec.resources.insert(
             "vol".to_string(),
             ResourceSpec {
-                type_: ResourceType::Service,
-                direction: DependencyDirection::Outbound,
+                type_: ResourceType::Volume,
                 id: Some("my_volume".to_string()),
                 ..Default::default()
             },
         );
         let err = spec.validate().unwrap_err().to_string();
         assert!(err.contains("resource 'vol': id"));
+    }
+
+    #[test]
+    fn secret_id_with_vault_path_is_valid() {
+        let mut spec = sample_workload();
+        spec.resources.insert(
+            "db-creds".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Secret,
+                id: Some("database/prod/creds".to_string()),
+                ..Default::default()
+            },
+        );
+        spec.validate()
+            .expect("secret id with vault path should be valid");
+    }
+
+    #[test]
+    fn service_id_not_dns_validated() {
+        let mut spec = sample_workload();
+        spec.resources.insert(
+            "backend".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Outbound,
+                id: Some("my-service".to_string()),
+                ..Default::default()
+            },
+        );
+        spec.validate().expect("service id should be valid");
+    }
+
+    #[test]
+    fn resource_id_wildcard_is_valid() {
+        let mut spec = sample_workload();
+        spec.resources.insert(
+            "any-caller".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Service,
+                direction: DependencyDirection::Inbound,
+                id: Some("*".to_string()),
+                ..Default::default()
+            },
+        );
+        spec.validate().expect("wildcard id '*' should be valid");
     }
 
     #[test]
