@@ -9,6 +9,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::workload::ingress::IngressSpec;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 
 // =============================================================================
@@ -109,6 +110,10 @@ pub struct LatticeModelSpec {
     /// Model serving roles — each maps to a ModelServing role (e.g. prefill, decode)
     #[serde(default)]
     pub roles: BTreeMap<String, ModelRoleSpec>,
+
+    /// Ingress configuration for exposing the model externally
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<IngressSpec>,
 }
 
 impl Default for LatticeModelSpec {
@@ -118,6 +123,7 @@ impl Default for LatticeModelSpec {
             recovery_policy: None,
             restart_grace_period_seconds: None,
             roles: BTreeMap::new(),
+            ingress: None,
         }
     }
 }

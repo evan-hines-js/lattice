@@ -50,7 +50,7 @@ pub use secrets_provider::{
 };
 pub use service::{LatticeService, LatticeServiceSpec, LatticeServiceStatus, ServicePhase};
 pub use service_policy::{
-    LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,
+    IngressPolicySpec, LabelSelectorOperator, LabelSelectorRequirement, LatticeServicePolicy,
     LatticeServicePolicySpec, LatticeServicePolicyStatus, NamespaceSelector, ServicePolicyPhase,
     ServiceSelector,
 };
@@ -71,7 +71,8 @@ pub use workload::container::{
 };
 pub use workload::deploy::{CanarySpec, DeploySpec, DeployStrategy};
 pub use workload::ingress::{
-    CertIssuerRef, IngressPath, IngressSpec, IngressTls, PathMatchType, TlsMode,
+    CertIssuerRef, GrpcMethodMatch, HeaderMatch, HeaderMatchType, IngressSpec, IngressTls,
+    PathMatch, PathMatchType, RouteKind, RouteMatch, RouteRule, RouteSpec,
 };
 pub use workload::ports::{PortSpec, ServicePortsSpec};
 pub use workload::resources::{

@@ -14,8 +14,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
     CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, IngressTls, LatticeService,
-    LatticeServiceSpec, PortSpec, ProviderType, ResourceSpec, ResourceType, ServicePortsSpec,
-    TlsMode, WorkloadSpec,
+    LatticeServiceSpec, PortSpec, ProviderType, ResourceSpec, ResourceType, RouteKind, RouteSpec,
+    ServicePortsSpec, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_service::compiler::ServiceCompiler;
@@ -123,17 +123,24 @@ fn secrets_spec(num_secrets: usize, keys_per_secret: usize) -> LatticeServiceSpe
 fn ingress_spec() -> LatticeServiceSpec {
     let mut spec = baseline_spec();
     spec.ingress = Some(IngressSpec {
-        hosts: vec!["api.example.com".to_string()],
-        paths: None,
-        tls: Some(IngressTls {
-            mode: TlsMode::Auto,
-            secret_name: None,
-            issuer_ref: Some(CertIssuerRef {
-                name: "letsencrypt-prod".to_string(),
-                kind: None,
-            }),
-        }),
         gateway_class: None,
+        routes: BTreeMap::from([(
+            "public".to_string(),
+            RouteSpec {
+                kind: RouteKind::HTTPRoute,
+                hosts: vec!["api.example.com".to_string()],
+                port: None,
+                listen_port: None,
+                rules: None,
+                tls: Some(IngressTls {
+                    secret_name: None,
+                    issuer_ref: Some(CertIssuerRef {
+                        name: "letsencrypt-prod".to_string(),
+                        kind: None,
+                    }),
+                }),
+            },
+        )]),
     });
     spec
 }
@@ -161,17 +168,24 @@ fn full_spec(num_deps: usize, num_callers: usize, num_secrets: usize) -> Lattice
 
     // Add ingress
     spec.ingress = Some(IngressSpec {
-        hosts: vec!["api.example.com".to_string()],
-        paths: None,
-        tls: Some(IngressTls {
-            mode: TlsMode::Auto,
-            secret_name: None,
-            issuer_ref: Some(CertIssuerRef {
-                name: "letsencrypt-prod".to_string(),
-                kind: None,
-            }),
-        }),
         gateway_class: None,
+        routes: BTreeMap::from([(
+            "public".to_string(),
+            RouteSpec {
+                kind: RouteKind::HTTPRoute,
+                hosts: vec!["api.example.com".to_string()],
+                port: None,
+                listen_port: None,
+                rules: None,
+                tls: Some(IngressTls {
+                    secret_name: None,
+                    issuer_ref: Some(CertIssuerRef {
+                        name: "letsencrypt-prod".to_string(),
+                        kind: None,
+                    }),
+                }),
+            },
+        )]),
     });
 
     spec

@@ -869,12 +869,13 @@ workload:
       direction: inbound
 replicas: 1
 ingress:
-  hosts:
-    - jellyfin.home.local
-  tls:
-    mode: auto
-    issuerRef:
-      name: letsencrypt-prod
+  routes:
+    public:
+      hosts:
+        - jellyfin.home.local
+      tls:
+        issuerRef:
+          name: letsencrypt-prod
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec =
@@ -911,7 +912,11 @@ ingress:
         assert!(service.ports.contains_key("http"));
 
         let ingress = spec.ingress.as_ref().expect("ingress should exist");
-        assert_eq!(ingress.hosts, vec!["jellyfin.home.local"]);
+        let public_route = ingress
+            .routes
+            .get("public")
+            .expect("public route should exist");
+        assert_eq!(public_route.hosts, vec!["jellyfin.home.local"]);
 
         spec.workload.validate().expect("spec should be valid");
     }

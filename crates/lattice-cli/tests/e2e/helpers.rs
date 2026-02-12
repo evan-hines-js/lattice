@@ -1,28 +1,22 @@
 //! Test helpers for e2e tests
 //!
 //! Provides utilities for Docker-based cluster testing.
+#![cfg(feature = "provider-e2e")]
 
-#[cfg(feature = "provider-e2e")]
 use std::sync::{LazyLock, OnceLock};
-#[cfg(feature = "provider-e2e")]
 use std::{process::Command, time::Duration};
 
-#[cfg(feature = "provider-e2e")]
 use kube::{
     api::{Api, PostParams},
     config::{KubeConfigOptions, Kubeconfig},
     Client,
 };
-#[cfg(feature = "provider-e2e")]
 use lattice_common::crd::{BootstrapProvider, ClusterPhase, LatticeService};
-#[cfg(feature = "provider-e2e")]
 use lattice_common::{
     retry::{retry_with_backoff, RetryConfig},
     LABEL_NAME, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_WEBHOOK_STORE_NAME,
 };
-#[cfg(feature = "provider-e2e")]
 use tokio::time::sleep;
-#[cfg(feature = "provider-e2e")]
 use tracing::{info, warn};
 
 // =============================================================================
@@ -40,7 +34,6 @@ use tracing::{info, warn};
 /// * `timeout` - Maximum wall-clock time to poll
 /// * `poll_interval` - Sleep duration between polls
 /// * `condition` - Async closure checked each iteration
-#[cfg(feature = "provider-e2e")]
 pub async fn wait_for_condition<F, Fut>(
     description: &str,
     timeout: Duration,
@@ -73,22 +66,18 @@ where
 // =============================================================================
 
 /// Default Lattice container image for E2E tests
-#[cfg(feature = "provider-e2e")]
 pub const DEFAULT_LATTICE_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";
 
 /// When `true`, rewrite all non-lattice test images to the GHCR mirror
 /// (`ghcr.io/evan-hines-js/{name}:{tag}`). Flip this single bool to switch.
-#[cfg(feature = "provider-e2e")]
 const USE_GHCR_MIRROR: bool = false;
 
 /// GHCR org where mirrored images live (only used when `USE_GHCR_MIRROR` is true).
-#[cfg(feature = "provider-e2e")]
 const GHCR_MIRROR_PREFIX: &str = "ghcr.io/evan-hines-js";
 
 /// Resolve a test image: returns the canonical docker.io path unchanged, or
 /// rewrites it to the GHCR mirror by extracting `name:tag` from the last
 /// path segment. e.g. `docker.io/curlimages/curl:latest` → `ghcr.io/evan-hines-js/curl:latest`
-#[cfg(feature = "provider-e2e")]
 pub fn test_image(docker_path: &str) -> String {
     if USE_GHCR_MIRROR {
         let name_tag = docker_path.rsplit('/').next().unwrap_or(docker_path);
@@ -99,17 +88,14 @@ pub fn test_image(docker_path: &str) -> String {
 }
 
 /// Nginx image for mesh server containers
-#[cfg(feature = "provider-e2e")]
 pub static NGINX_IMAGE: LazyLock<String> =
     LazyLock::new(|| test_image("docker.io/nginxinc/nginx-unprivileged:alpine"));
 
 /// Curl image for mesh traffic generator containers
-#[cfg(feature = "provider-e2e")]
 pub static CURL_IMAGE: LazyLock<String> =
     LazyLock::new(|| test_image("docker.io/curlimages/curl:latest"));
 
 /// Busybox image for lightweight test pods
-#[cfg(feature = "provider-e2e")]
 pub static BUSYBOX_IMAGE: LazyLock<String> =
     LazyLock::new(|| test_image("docker.io/library/busybox:latest"));
 
@@ -117,44 +103,34 @@ pub static BUSYBOX_IMAGE: LazyLock<String> =
 ///
 /// Points at the operator's built-in `lattice-local` ClusterSecretStore
 /// (created by `ensure_local_webhook_infrastructure()` at startup).
-#[cfg(feature = "provider-e2e")]
 pub const REGCREDS_PROVIDER: &str = LOCAL_WEBHOOK_STORE_NAME;
 
 /// Remote key for the GHCR registry credentials secret in the local webhook store.
-#[cfg(feature = "provider-e2e")]
 pub const REGCREDS_REMOTE_KEY: &str = "local-regcreds";
 
 /// Standard cluster names for E2E tests
-#[cfg(feature = "provider-e2e")]
 pub const MGMT_CLUSTER_NAME: &str = "e2e-mgmt";
-#[cfg(feature = "provider-e2e")]
 pub const WORKLOAD_CLUSTER_NAME: &str = "e2e-workload";
-#[cfg(feature = "provider-e2e")]
 pub const WORKLOAD2_CLUSTER_NAME: &str = "e2e-workload2";
 
 /// Get a cluster name from an env var, falling back to a default.
-#[cfg(feature = "provider-e2e")]
 fn cluster_name_from_env(env_var: &str, default: &str) -> String {
     std::env::var(env_var).unwrap_or_else(|_| default.to_string())
 }
 
-#[cfg(feature = "provider-e2e")]
 pub fn get_mgmt_cluster_name() -> String {
     cluster_name_from_env("LATTICE_MGMT_CLUSTER_NAME", MGMT_CLUSTER_NAME)
 }
 
-#[cfg(feature = "provider-e2e")]
 pub fn get_workload_cluster_name() -> String {
     cluster_name_from_env("LATTICE_WORKLOAD_CLUSTER_NAME", WORKLOAD_CLUSTER_NAME)
 }
 
-#[cfg(feature = "provider-e2e")]
 pub fn get_workload2_cluster_name() -> String {
     cluster_name_from_env("LATTICE_WORKLOAD2_CLUSTER_NAME", WORKLOAD2_CLUSTER_NAME)
 }
 
 /// Get child cluster name (checks LATTICE_CHILD_CLUSTER_NAME, then falls back to workload name)
-#[cfg(feature = "provider-e2e")]
 pub fn get_child_cluster_name() -> String {
     std::env::var("LATTICE_CHILD_CLUSTER_NAME")
         .or_else(|_| std::env::var("LATTICE_WORKLOAD_CLUSTER_NAME"))
@@ -162,14 +138,12 @@ pub fn get_child_cluster_name() -> String {
 }
 
 /// Label selector for lattice-operator pods (helm-managed, not compiler-generated)
-#[cfg(feature = "provider-e2e")]
 pub const OPERATOR_LABEL: &str = "app=lattice-operator";
 
 /// Build a label selector for pods generated by the LatticeService compiler.
 ///
 /// Uses `LABEL_NAME` (`app.kubernetes.io/name`) — the same label the compiler
 /// puts on Deployments and pod templates.
-#[cfg(feature = "provider-e2e")]
 pub fn service_pod_selector(name: &str) -> String {
     format!("{}={}", LABEL_NAME, name)
 }
@@ -181,14 +155,12 @@ pub fn service_pod_selector(name: &str) -> String {
 /// Unique run ID for this test process.
 /// Uses LATTICE_RUN_ID env var if set (e.g., commit SHA in CI),
 /// otherwise falls back to process ID and timestamp.
-#[cfg(feature = "provider-e2e")]
 static RUN_ID: OnceLock<String> = OnceLock::new();
 
 /// Get the unique run ID for this test process.
 ///
 /// Checks `LATTICE_RUN_ID` environment variable first (useful for CI where
 /// you can set it to the commit SHA), then falls back to `{pid}-{timestamp}`.
-#[cfg(feature = "provider-e2e")]
 pub fn run_id() -> &'static str {
     RUN_ID.get_or_init(|| {
         std::env::var("LATTICE_RUN_ID").unwrap_or_else(|_| {
@@ -209,14 +181,12 @@ pub fn run_id() -> &'static str {
 ///
 /// The path includes the run ID as a suffix to allow parallel test execution.
 /// Example: `/tmp/e2e-mgmt-kubeconfig-8156-965202`
-#[cfg(feature = "provider-e2e")]
 pub fn kubeconfig_path(cluster_name: &str) -> String {
     format!("/tmp/{}-kubeconfig-{}", cluster_name, run_id())
 }
 
 /// Generate a unique localhost-patched kubeconfig path for a cluster.
 /// Example: `/tmp/e2e-mgmt-kubeconfig-local-8156-965202`
-#[cfg(feature = "provider-e2e")]
 fn kubeconfig_local_path(cluster_name: &str) -> String {
     format!("/tmp/{}-kubeconfig-local-{}", cluster_name, run_id())
 }
@@ -228,7 +198,6 @@ fn kubeconfig_local_path(cluster_name: &str) -> String {
 /// Create a kube client from a kubeconfig file with proper timeouts.
 ///
 /// Retries on transient connection failures (up to 10 attempts with exponential backoff).
-#[cfg(feature = "provider-e2e")]
 pub async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
     let path = path.to_string();
     retry_with_backoff(
@@ -248,7 +217,6 @@ pub async fn client_from_kubeconfig(path: &str) -> Result<Client, String> {
 /// the resource to be created server-side but the response was lost, subsequent
 /// retries will get `AlreadyExists` (409). We handle this by fetching the
 /// existing resource instead of retrying forever.
-#[cfg(feature = "provider-e2e")]
 pub async fn create_with_retry<K>(api: &Api<K>, resource: &K, name: &str) -> Result<K, String>
 where
     K: kube::Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
@@ -279,7 +247,6 @@ where
 }
 
 /// Patch a Kubernetes resource with retry logic (survives port-forward restarts).
-#[cfg(feature = "provider-e2e")]
 pub async fn patch_with_retry<K>(
     api: &Api<K>,
     name: &str,
@@ -309,7 +276,6 @@ where
 }
 
 /// Inner function for client creation (called by retry wrapper).
-#[cfg(feature = "provider-e2e")]
 async fn client_from_kubeconfig_inner(path: &str) -> Result<Client, String> {
     let kubeconfig =
         Kubeconfig::read_from(path).map_err(|e| format!("Failed to read kubeconfig: {}", e))?;
@@ -331,9 +297,7 @@ async fn client_from_kubeconfig_inner(path: &str) -> Result<Client, String> {
 
 /// Docker network subnet for kind/CAPD clusters
 /// This must be pinned because Cilium LB-IPAM uses IPs from this range (172.18.255.x)
-#[cfg(feature = "provider-e2e")]
 pub const DOCKER_KIND_SUBNET: &str = "172.18.0.0/16";
-#[cfg(feature = "provider-e2e")]
 pub const DOCKER_KIND_GATEWAY: &str = "172.18.0.1";
 
 // =============================================================================
@@ -347,7 +311,6 @@ pub const DOCKER_KIND_GATEWAY: &str = "172.18.0.1";
 /// different subnet. This breaks Cilium LB-IPAM which expects IPs in 172.18.255.x.
 ///
 /// This function ensures the network exists with the pinned subnet.
-#[cfg(feature = "provider-e2e")]
 pub fn ensure_docker_network() -> Result<(), String> {
     info!(
         "Ensuring Docker 'kind' network has correct subnet ({})...",
@@ -430,7 +393,6 @@ pub fn ensure_docker_network() -> Result<(), String> {
 // =============================================================================
 
 /// Run a shell command with 30s timeout
-#[cfg(feature = "provider-e2e")]
 pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     use std::io::Read;
     use std::process::Stdio;
@@ -478,7 +440,6 @@ pub fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
 ///
 /// ALL kubectl invocations should go through this function so transient
 /// proxy / port-forward hiccups don't kill the test run.
-#[cfg(feature = "provider-e2e")]
 pub async fn run_kubectl(args: &[&str]) -> Result<String, String> {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
 
@@ -497,7 +458,6 @@ pub async fn run_kubectl(args: &[&str]) -> Result<String, String> {
 // =============================================================================
 
 /// Result of an HTTP request to the proxy
-#[cfg(feature = "provider-e2e")]
 pub struct HttpResponse {
     /// HTTP status code (0 if connection failed)
     pub status_code: u16,
@@ -505,7 +465,6 @@ pub struct HttpResponse {
     pub body: String,
 }
 
-#[cfg(feature = "provider-e2e")]
 impl HttpResponse {
     /// Check if the response indicates success (2xx)
     pub fn is_success(&self) -> bool {
@@ -527,7 +486,6 @@ impl HttpResponse {
 ///
 /// Uses curl with the provided bearer token and returns both status code and body.
 /// Returns status_code 0 on connection failure or timeout.
-#[cfg(feature = "provider-e2e")]
 fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpResponse {
     // Use -w to append status code after body with a delimiter
     let output = match run_cmd(
@@ -579,7 +537,6 @@ fn http_get_with_token(url: &str, token: &str, timeout_secs: u32) -> HttpRespons
 /// - 4xx errors (401, 403, 404, etc.) - these are permanent failures
 ///
 /// Retries on any non-success response until max attempts exhausted.
-#[cfg(feature = "provider-e2e")]
 pub async fn http_get_with_retry(
     url: &str,
     token: &str,
@@ -623,7 +580,6 @@ pub async fn http_get_with_retry(
 // =============================================================================
 
 /// Get the kubeconfig path inside the container based on bootstrap provider
-#[cfg(feature = "provider-e2e")]
 fn get_kubeconfig_path_for_bootstrap(bootstrap: &BootstrapProvider) -> &'static str {
     match bootstrap {
         BootstrapProvider::Kubeadm => "/etc/kubernetes/admin.conf",
@@ -632,7 +588,6 @@ fn get_kubeconfig_path_for_bootstrap(bootstrap: &BootstrapProvider) -> &'static 
 }
 
 /// Patch a kubeconfig's server URL to use localhost with the given endpoint
-#[cfg(feature = "provider-e2e")]
 fn patch_kubeconfig_server(kubeconfig: &str, endpoint: &str) -> Result<String, String> {
     let mut config: serde_json::Value = lattice_common::yaml::parse_yaml(kubeconfig)
         .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
@@ -651,7 +606,6 @@ fn patch_kubeconfig_server(kubeconfig: &str, endpoint: &str) -> Result<String, S
 }
 
 /// Parse docker port output (e.g., "0.0.0.0:12345") into a localhost endpoint
-#[cfg(feature = "provider-e2e")]
 fn parse_lb_port(port_output: &str) -> Option<String> {
     let trimmed = port_output.trim();
     if trimmed.is_empty() {
@@ -681,7 +635,6 @@ fn parse_lb_port(port_output: &str) -> Option<String> {
 /// # Returns
 /// * `Ok(())` on success
 /// * `Err(String)` with descriptive error on failure
-#[cfg(feature = "provider-e2e")]
 pub async fn extract_docker_cluster_kubeconfig(
     cluster_name: &str,
     bootstrap: &BootstrapProvider,
@@ -767,7 +720,6 @@ pub async fn extract_docker_cluster_kubeconfig(
 /// * `client` - Kubernetes client
 /// * `cluster_name` - Name of the cluster to watch
 /// * `timeout_secs` - Timeout in seconds (default 1800 = 30 minutes if None)
-#[cfg(feature = "provider-e2e")]
 pub async fn watch_cluster_phases(
     client: &kube::Client,
     cluster_name: &str,
@@ -838,7 +790,6 @@ pub async fn watch_cluster_phases(
 }
 
 /// Count ready nodes from kubectl jsonpath output (lines of "True"/"False")
-#[cfg(feature = "provider-e2e")]
 pub fn count_ready_nodes(output: &str) -> u32 {
     output.lines().filter(|line| *line == "True").count() as u32
 }
@@ -846,7 +797,6 @@ pub fn count_ready_nodes(output: &str) -> u32 {
 /// Watch for worker nodes to scale to expected count
 ///
 /// Worker nodes are those without the control-plane role.
-#[cfg(feature = "provider-e2e")]
 pub async fn watch_worker_scaling(
     kubeconfig_path: &str,
     cluster_name: &str,
@@ -909,14 +859,11 @@ pub async fn watch_worker_scaling(
 // Shared Test Configuration
 // =============================================================================
 
-#[cfg(feature = "provider-e2e")]
 use std::path::PathBuf;
 
-#[cfg(feature = "provider-e2e")]
 use lattice_common::crd::LatticeCluster;
 
 /// Get the workspace root directory
-#[cfg(feature = "provider-e2e")]
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -927,19 +874,16 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Get the fixtures directory for cluster configs
-#[cfg(feature = "provider-e2e")]
 fn cluster_fixtures_dir() -> PathBuf {
     workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/clusters")
 }
 
 /// Get the fixtures directory for service configs
-#[cfg(feature = "provider-e2e")]
 fn service_fixtures_dir() -> PathBuf {
     workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/services")
 }
 
 /// Build and push the lattice Docker image
-#[cfg(feature = "provider-e2e")]
 pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
     info!("Building lattice Docker image...");
 
@@ -991,7 +935,6 @@ pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
 ///
 /// * `image` - Docker image tag (e.g., "ghcr.io/evan-hines-js/lattice:latest")
 /// * `kubeconfigs` - List of (cluster_name, kubeconfig_path) tuples
-#[cfg(feature = "provider-e2e")]
 pub async fn rebuild_and_restart_operators(
     image: &str,
     kubeconfigs: &[(&str, &str)],
@@ -1022,7 +965,6 @@ pub async fn rebuild_and_restart_operators(
 }
 
 /// Delete operator pods to trigger image pull.
-#[cfg(feature = "provider-e2e")]
 async fn delete_operator_pods(cluster_name: &str, kubeconfig: &str) {
     let msg = match run_kubectl(&[
         "--kubeconfig",
@@ -1045,7 +987,6 @@ async fn delete_operator_pods(cluster_name: &str, kubeconfig: &str) {
 }
 
 /// Wait for operator deployment to be ready.
-#[cfg(feature = "provider-e2e")]
 pub async fn wait_for_operator_ready(
     cluster_name: &str,
     kubeconfig: &str,
@@ -1082,7 +1023,6 @@ pub async fn wait_for_operator_ready(
 }
 
 /// Load registry credentials from .env file or environment
-#[cfg(feature = "provider-e2e")]
 pub fn load_registry_credentials() -> Option<String> {
     use base64::Engine;
 
@@ -1119,7 +1059,6 @@ pub fn load_registry_credentials() -> Option<String> {
 }
 
 /// Load a LatticeCluster config from a fixture file or env var
-#[cfg(feature = "provider-e2e")]
 pub fn load_cluster_config(
     env_var: &str,
     default_fixture: &str,
@@ -1146,7 +1085,6 @@ pub fn load_cluster_config(
 }
 
 /// Load a LatticeService config from a fixture file
-#[cfg(feature = "provider-e2e")]
 pub fn load_service_config(filename: &str) -> Result<lattice_common::crd::LatticeService, String> {
     let path = service_fixtures_dir().join(filename);
 
@@ -1166,7 +1104,6 @@ pub fn load_service_config(filename: &str) -> Result<lattice_common::crd::Lattic
 }
 
 /// Get a localhost-accessible kubeconfig for a Docker cluster
-#[cfg(feature = "provider-e2e")]
 pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
     let kc_path = kubeconfig_path(cluster_name);
     let kubeconfig = std::fs::read_to_string(&kc_path)
@@ -1193,7 +1130,6 @@ pub fn get_docker_kubeconfig(cluster_name: &str) -> Result<String, String> {
 // =============================================================================
 
 /// Force delete all Docker containers for a cluster (Docker provider only)
-#[cfg(feature = "provider-e2e")]
 pub fn force_delete_docker_cluster(cluster_name: &str) {
     if let Ok(containers) = run_cmd(
         "docker",
@@ -1214,7 +1150,6 @@ pub fn force_delete_docker_cluster(cluster_name: &str) {
 }
 
 /// Check if all containers for a cluster are deleted
-#[cfg(feature = "provider-e2e")]
 pub fn docker_containers_deleted(cluster_name: &str) -> bool {
     match run_cmd(
         "docker",
@@ -1235,11 +1170,9 @@ pub fn docker_containers_deleted(cluster_name: &str) -> bool {
 // Cluster Verification and Deletion
 // =============================================================================
 
-#[cfg(feature = "provider-e2e")]
 use super::providers::InfraProvider;
 
 /// Verify a cluster has its own CAPI resources after pivot
-#[cfg(feature = "provider-e2e")]
 pub async fn verify_cluster_capi_resources(
     kubeconfig: &str,
     cluster_name: &str,
@@ -1267,13 +1200,10 @@ pub async fn verify_cluster_capi_resources(
 
 /// The auth proxy runs as part of the lattice-cell service on port 8082
 /// (8081 is the CAPI proxy for internal CAPI controller access)
-#[cfg(feature = "provider-e2e")]
 const PROXY_SERVICE_NAME: &str = "lattice-cell";
-#[cfg(feature = "provider-e2e")]
 const PROXY_PORT: u16 = 8082;
 
 /// Check if the lattice-cell proxy service exists
-#[cfg(feature = "provider-e2e")]
 pub async fn proxy_service_exists(kubeconfig: &str) -> bool {
     run_kubectl(&[
         "--kubeconfig",
@@ -1293,7 +1223,6 @@ pub async fn proxy_service_exists(kubeconfig: &str) -> bool {
 /// Get the LoadBalancer URL for the proxy service (for cloud providers).
 ///
 /// Waits up to 2 minutes for the LoadBalancer to get an external IP.
-#[cfg(feature = "provider-e2e")]
 async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> {
     use std::sync::Mutex;
 
@@ -1341,14 +1270,12 @@ async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> 
         .ok_or_else(|| "LoadBalancer IP not available".to_string())
 }
 
-#[cfg(feature = "provider-e2e")]
 use lattice_cli::commands::port_forward::PortForward as ResilientPortForward;
 
 /// Get proxy URL, creating a resilient port-forward if necessary.
 ///
 /// If an existing URL is provided, verifies it's healthy first. If unhealthy,
 /// creates a fresh resilient port-forward with automatic restart capability.
-#[cfg(feature = "provider-e2e")]
 pub async fn get_or_create_proxy(
     kubeconfig: &str,
     existing_url: Option<&str>,
@@ -1378,7 +1305,6 @@ pub async fn get_or_create_proxy(
 ///
 /// Duration is 8 hours for long-running E2E tests. Use `refresh_sa_token()`
 /// if you need to refresh an expired token.
-#[cfg(feature = "provider-e2e")]
 pub async fn get_sa_token(
     kubeconfig: &str,
     namespace: &str,
@@ -1406,7 +1332,6 @@ pub async fn get_sa_token(
 ///
 /// The operator handles deletion via finalizers, so we just initiate deletion
 /// and wait for the finalizer to complete (resource to be gone).
-#[cfg(feature = "provider-e2e")]
 pub async fn delete_cluster_and_wait(
     cluster_kubeconfig: &str,
     parent_kubeconfig: &str,
@@ -1490,7 +1415,6 @@ pub async fn delete_cluster_and_wait(
 /// Apply YAML manifest via kubectl with retry for transient failures.
 ///
 /// Handles API server readiness issues by retrying with exponential backoff.
-#[cfg(feature = "provider-e2e")]
 pub async fn apply_yaml_with_retry(kubeconfig: &str, yaml: &str) -> Result<(), String> {
     let retry_config = RetryConfig {
         max_attempts: 0,
@@ -1510,7 +1434,6 @@ pub async fn apply_yaml_with_retry(kubeconfig: &str, yaml: &str) -> Result<(), S
     .await
 }
 
-#[cfg(feature = "provider-e2e")]
 fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -1559,7 +1482,6 @@ fn apply_yaml_internal(kubeconfig: &str, yaml: &str) -> Result<(), String> {
 ///
 /// Callers provide their own `containers` and `resources`; this helper adds
 /// ghcr-creds to `resources` and wraps everything in the standard shell.
-#[cfg(feature = "provider-e2e")]
 pub fn build_busybox_service(
     name: &str,
     namespace: &str,
@@ -1631,7 +1553,6 @@ pub fn build_busybox_service(
 /// * `name` - Service name
 /// * `namespace` - Target namespace
 /// * `secrets` - Vec of (resource_name, remote_key, provider, optional_keys)
-#[cfg(feature = "provider-e2e")]
 pub fn create_service_with_secrets(
     name: &str,
     namespace: &str,
@@ -1773,7 +1694,6 @@ pub fn create_service_with_security_overrides(
 ///
 /// Polls the service status via kubectl until the phase matches or timeout expires.
 /// Used by Cedar secret tests, ESO pipeline tests, and secrets integration tests.
-#[cfg(feature = "provider-e2e")]
 pub async fn wait_for_service_phase(
     kubeconfig: &str,
     namespace: &str,
@@ -1832,7 +1752,6 @@ pub async fn wait_for_service_phase(
 /// Wait for a LatticeService to reach the given phase AND have a condition
 /// message containing `message_substring`. Phase and message are read atomically
 /// in a single kubectl call to avoid races with phase transitions.
-#[cfg(feature = "provider-e2e")]
 pub async fn wait_for_service_phase_with_message(
     kubeconfig: &str,
     namespace: &str,
@@ -1897,7 +1816,6 @@ pub async fn wait_for_service_phase_with_message(
 /// Encapsulates the common pattern of creating a kube client, creating the service
 /// via the API, and waiting for the status phase to match. When `expected_message`
 /// is provided, also asserts that the status condition message contains the substring.
-#[cfg(feature = "provider-e2e")]
 pub async fn deploy_and_wait_for_phase(
     kubeconfig: &str,
     namespace: &str,
@@ -1945,7 +1863,6 @@ pub async fn deploy_and_wait_for_phase(
 /// - `test_label`: value for `lattice.dev/test` label (used for batch cleanup)
 /// - `priority`: Cedar evaluation priority (higher = evaluated first)
 /// - `cedar_text`: Raw Cedar policy text (will be indented under `policies: |`)
-#[cfg(feature = "provider-e2e")]
 pub async fn apply_cedar_policy_crd(
     kubeconfig: &str,
     name: &str,
@@ -1999,7 +1916,6 @@ spec:
 /// Docker KIND clusters don't have AppArmor enabled, so all e2e fixtures
 /// set `apparmor_profile: Unconfined`. This policy permits that security
 /// override. Uses the "e2e" label so it persists across test phases.
-#[cfg(feature = "provider-e2e")]
 pub async fn apply_apparmor_override_policy(kubeconfig: &str) -> Result<(), String> {
     apply_cedar_policy_crd(
         kubeconfig,
@@ -2037,7 +1953,6 @@ pub async fn apply_run_as_root_override_policy(
 }
 
 /// Delete all CedarPolicy CRDs matching a label selector.
-#[cfg(feature = "provider-e2e")]
 pub async fn delete_cedar_policies_by_label(kubeconfig: &str, label_selector: &str) {
     let _ = run_kubectl(&[
         "--kubeconfig",
@@ -2074,7 +1989,6 @@ pub async fn delete_cedar_policies_by_label(kubeconfig: &str, label_selector: &s
 /// let workload_kc = session.kubeconfig_for("e2e-workload").await?;
 /// // Port-forward auto-restarts if it dies - no manual intervention needed
 /// ```
-#[cfg(feature = "provider-e2e")]
 pub struct ProxySession {
     /// Kubeconfig for the cluster this session connects to
     kubeconfig: String,
@@ -2086,7 +2000,6 @@ pub struct ProxySession {
     port_forward: Option<ResilientPortForward>,
 }
 
-#[cfg(feature = "provider-e2e")]
 impl ProxySession {
     /// Start a proxy session using port-forward (for Docker/kind).
     ///
@@ -2320,7 +2233,6 @@ impl ProxySession {
 ///
 /// This is the standard teardown for E2E tests - it runs the full uninstall flow
 /// which handles CAPI resource cleanup, helm uninstall, and bootstrap cluster deletion.
-#[cfg(feature = "provider-e2e")]
 pub async fn teardown_mgmt_cluster(
     mgmt_kubeconfig: &str,
     mgmt_cluster_name: &str,
@@ -2355,7 +2267,6 @@ pub async fn teardown_mgmt_cluster(
 // =============================================================================
 
 /// Delete a namespace (non-blocking).
-#[cfg(feature = "provider-e2e")]
 pub async fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
     info!("[Namespace] Deleting namespace {}...", namespace);
     let _ = run_kubectl(&[
@@ -2372,7 +2283,6 @@ pub async fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
 /// Ensure a fresh namespace exists by deleting if present and waiting for full cleanup.
 ///
 /// This is important for re-running tests - stale resources cause conflicts.
-#[cfg(feature = "provider-e2e")]
 pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> Result<(), String> {
     // Check if namespace exists
     let ns_exists = run_kubectl(&[
@@ -2461,7 +2371,6 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
 ///
 /// The secret will be labeled with `lattice.dev/secret-source: "true"` so the
 /// webhook handler will serve it.
-#[cfg(feature = "provider-e2e")]
 pub async fn seed_local_secret(
     kubeconfig: &str,
     secret_name: &str,
@@ -2503,7 +2412,6 @@ stringData:
 }
 
 /// Ensure a namespace exists (creates if missing, no-op if present)
-#[cfg(feature = "provider-e2e")]
 pub async fn ensure_namespace(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     let ns_yaml = format!(
         r#"apiVersion: v1
@@ -2522,7 +2430,6 @@ metadata:
 /// The operator creates `lattice-local` at startup via
 /// `ensure_local_webhook_infrastructure()`. This polls until the object
 /// exists, which means the operator has completed its startup sequence.
-#[cfg(feature = "provider-e2e")]
 pub async fn wait_for_cluster_secret_store_ready(
     kubeconfig: &str,
     store_name: &str,
@@ -2573,7 +2480,6 @@ pub async fn wait_for_cluster_secret_store_ready(
 /// Uses `load_registry_credentials()` to get the `.dockerconfigjson` payload
 /// and stores it as a labeled K8s Secret in the `lattice-secrets` namespace
 /// so the webhook can serve it to ESO.
-#[cfg(feature = "provider-e2e")]
 async fn seed_local_regcreds(kubeconfig: &str, secret_name: &str) -> Result<(), String> {
     let docker_config = load_registry_credentials()
         .ok_or("No GHCR credentials (check .env or GHCR_USER/GHCR_TOKEN env vars)")?;
@@ -2589,7 +2495,6 @@ async fn seed_local_regcreds(kubeconfig: &str, secret_name: &str) -> Result<(), 
 /// - `local-api-key` (Route 3 file mount): key
 /// - `local-database-config` (Route 5 dataFrom): host, port, name, ssl
 /// - `local-regcreds` (Route 4 imagePullSecrets): .dockerconfigjson from GHCR creds
-#[cfg(feature = "provider-e2e")]
 pub async fn seed_all_local_test_secrets(kubeconfig: &str) -> Result<(), String> {
     use std::collections::BTreeMap;
 
@@ -2639,7 +2544,6 @@ pub async fn seed_all_local_test_secrets(kubeconfig: &str) -> Result<(), String>
 /// Build a LatticeService with a runtime-configurable provider name exercising
 /// all 5 secret routes. Every service includes `ghcr-creds` for imagePullSecrets
 /// since all images come from GHCR.
-#[cfg(feature = "provider-e2e")]
 pub fn create_service_with_all_secret_routes(
     name: &str,
     namespace: &str,
@@ -2788,7 +2692,6 @@ pub fn create_service_with_all_secret_routes(
 
 /// Wait for a pod matching `label_selector` to be Running, then exec `printenv`
 /// and verify the specified env var has the expected value.
-#[cfg(feature = "provider-e2e")]
 pub async fn verify_pod_env_var(
     kubeconfig: &str,
     namespace: &str,
@@ -2835,7 +2738,6 @@ pub async fn verify_pod_env_var(
 
 /// Wait for a pod matching `label_selector` to be Running, then exec `cat`
 /// and verify the file content contains the expected substring.
-#[cfg(feature = "provider-e2e")]
 pub async fn verify_pod_file_content(
     kubeconfig: &str,
     namespace: &str,
@@ -2877,7 +2779,6 @@ pub async fn verify_pod_file_content(
 
 /// Check pod spec `imagePullSecrets` via jsonpath and verify the expected
 /// secret name is present.
-#[cfg(feature = "provider-e2e")]
 pub async fn verify_pod_image_pull_secrets(
     kubeconfig: &str,
     namespace: &str,
@@ -2922,7 +2823,6 @@ pub async fn verify_pod_image_pull_secrets(
 }
 
 /// Wait for at least one pod matching `label_selector` to reach the Running phase.
-#[cfg(feature = "provider-e2e")]
 async fn wait_for_pod_running(
     kubeconfig: &str,
     namespace: &str,
@@ -2963,7 +2863,6 @@ async fn wait_for_pod_running(
 }
 
 /// Get the name of the first pod matching `label_selector`.
-#[cfg(feature = "provider-e2e")]
 async fn get_pod_name(
     kubeconfig: &str,
     namespace: &str,
@@ -2997,7 +2896,6 @@ async fn get_pod_name(
 ///
 /// Waits for the secret to appear (ESO may take a moment to sync),
 /// then checks all expected keys are present.
-#[cfg(feature = "provider-e2e")]
 pub async fn verify_synced_secret_keys(
     kubeconfig: &str,
     namespace: &str,
@@ -3083,7 +2981,6 @@ pub async fn verify_synced_secret_keys(
 /// Call this before deploying any LatticeService in a test — every service
 /// declares `ghcr-creds` as an imagePullSecret resource pointing at
 /// `local-regcreds`, so the local webhook must be ready to serve it.
-#[cfg(feature = "provider-e2e")]
 pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), String> {
     // Wait for the operator's built-in lattice-local ClusterSecretStore
     wait_for_cluster_secret_store_ready(kubeconfig, REGCREDS_PROVIDER).await?;
@@ -3126,7 +3023,6 @@ pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), Strin
 ///
 /// The `label` is used for `lattice.dev/test={label}` so callers can clean up with
 /// `delete_cedar_policies_by_label`.
-#[cfg(feature = "provider-e2e")]
 pub async fn apply_cedar_secret_policy_for_service(
     kubeconfig: &str,
     policy_name: &str,

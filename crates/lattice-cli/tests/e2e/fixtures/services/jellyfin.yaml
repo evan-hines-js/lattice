@@ -68,12 +68,12 @@ spec:
         direction: inbound
   imagePullSecrets:
     - ghcr-creds
-  replicas:
-    min: 1
+  replicas: 1
   ingress:
-    hosts:
-      - jellyfin.home.local
-    tls:
-      mode: auto
-      issuerRef:
-        name: letsencrypt-prod
+    routes:
+      public:
+        hosts:
+          - jellyfin.home.local
+        tls:
+          issuerRef:
+            name: letsencrypt-prod

@@ -39,7 +39,7 @@ use crate::crd::{
     ServiceBackupSpec, ServicePhase,
 };
 use crate::graph::ServiceGraph;
-use crate::ingress::{Certificate, Gateway, HttpRoute};
+use crate::ingress::{Certificate, Gateway, GrpcRoute, HttpRoute, TcpRoute};
 use crate::workload::backup::merge_backup_specs;
 use crate::Error;
 use lattice_common::mesh;
@@ -63,6 +63,8 @@ pub struct DiscoveredCrds {
     pub service_entry: Option<ApiResource>,
     pub gateway: Option<ApiResource>,
     pub http_route: Option<ApiResource>,
+    pub grpc_route: Option<ApiResource>,
+    pub tcp_route: Option<ApiResource>,
     pub certificate: Option<ApiResource>,
     pub scaled_object: Option<ApiResource>,
     pub service_monitor: Option<ApiResource>,
@@ -103,6 +105,8 @@ impl DiscoveredCrds {
             service_entry: Self::find_resource(&discovery, "networking.istio.io", "ServiceEntry"),
             gateway: Self::find_resource(&discovery, "gateway.networking.k8s.io", "Gateway"),
             http_route: Self::find_resource(&discovery, "gateway.networking.k8s.io", "HTTPRoute"),
+            grpc_route: Self::find_resource(&discovery, "gateway.networking.k8s.io", "GRPCRoute"),
+            tcp_route: Self::find_resource(&discovery, "gateway.networking.k8s.io", "TCPRoute"),
             certificate: Self::find_resource(&discovery, "cert-manager.io", "Certificate"),
             scaled_object: Self::find_resource(&discovery, "keda.sh", "ScaledObject"),
             service_monitor: Self::find_resource(
@@ -153,6 +157,8 @@ impl DiscoveredCrds {
             service_entry: Some(ServiceEntry::api_resource()),
             gateway: Some(Gateway::api_resource()),
             http_route: Some(HttpRoute::api_resource()),
+            grpc_route: Some(GrpcRoute::api_resource()),
+            tcp_route: Some(TcpRoute::api_resource()),
             certificate: Some(Certificate::api_resource()),
             scaled_object: Some(ScaledObject::api_resource()),
             service_monitor: Some(lattice_common::kube_utils::build_api_resource(
@@ -487,19 +493,45 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
                 warn!("Gateway CRD not installed, skipping ingress");
             }
         }
-        if let Some(route) = &compiled.ingress.http_route {
-            if let Some(ar) = &self.crds.http_route {
+        if let Some(ar) = &self.crds.http_route {
+            for route in &compiled.ingress.http_routes {
                 layer1.push("HTTPRoute", &route.metadata.name, route, ar)?;
-            } else {
-                warn!("HTTPRoute CRD not installed, skipping ingress");
             }
+        } else if !compiled.ingress.http_routes.is_empty() {
+            warn!(
+                count = compiled.ingress.http_routes.len(),
+                "HTTPRoute CRD not installed, skipping"
+            );
         }
-        if let Some(cert) = &compiled.ingress.certificate {
-            if let Some(ar) = &self.crds.certificate {
-                layer1.push("Certificate", &cert.metadata.name, cert, ar)?;
-            } else {
-                warn!("Certificate CRD not installed, skipping ingress");
+        if let Some(ar) = &self.crds.grpc_route {
+            for route in &compiled.ingress.grpc_routes {
+                layer1.push("GRPCRoute", &route.metadata.name, route, ar)?;
             }
+        } else if !compiled.ingress.grpc_routes.is_empty() {
+            warn!(
+                count = compiled.ingress.grpc_routes.len(),
+                "GRPCRoute CRD not installed, skipping"
+            );
+        }
+        if let Some(ar) = &self.crds.tcp_route {
+            for route in &compiled.ingress.tcp_routes {
+                layer1.push("TCPRoute", &route.metadata.name, route, ar)?;
+            }
+        } else if !compiled.ingress.tcp_routes.is_empty() {
+            warn!(
+                count = compiled.ingress.tcp_routes.len(),
+                "TCPRoute CRD not installed, skipping"
+            );
+        }
+        if let Some(ar) = &self.crds.certificate {
+            for cert in &compiled.ingress.certificates {
+                layer1.push("Certificate", &cert.metadata.name, cert, ar)?;
+            }
+        } else if !compiled.ingress.certificates.is_empty() {
+            warn!(
+                count = compiled.ingress.certificates.len(),
+                "Certificate CRD not installed, skipping"
+            );
         }
 
         // Waypoint (east-west L7 policies via Istio ambient mesh)
@@ -1069,6 +1101,56 @@ async fn resolve_effective_backup(
     ))
 }
 
+/// Resolve the effective ingress defaults for a service from matching policies.
+///
+/// 1. Lists all LatticeServicePolicies
+/// 2. Filters to those matching this service (labels + namespace)
+/// 3. Sorts by priority DESC, then name ASC
+/// 4. First policy with `ingress` set wins (no deep merge)
+async fn resolve_effective_ingress_defaults(
+    service: &LatticeService,
+    namespace: &str,
+    ctx: &ServiceContext,
+) -> Result<Option<crate::crd::IngressPolicySpec>, Error> {
+    let policies = ctx.kube.list_policies().await?;
+    if policies.is_empty() {
+        return Ok(None);
+    }
+
+    let svc_labels = service.labels();
+    let ns_labels = ctx
+        .kube
+        .get_namespace_labels(namespace)
+        .await
+        .unwrap_or_default();
+
+    // Filter policies to those matching this service
+    let mut matching: Vec<_> = policies
+        .iter()
+        .filter(|p| {
+            let policy_ns = p.namespace().unwrap_or_default();
+            p.spec
+                .selector
+                .matches(svc_labels, &ns_labels, &policy_ns, namespace)
+        })
+        .collect();
+
+    if matching.is_empty() {
+        return Ok(None);
+    }
+
+    // Sort by priority DESC, then name ASC for deterministic ordering
+    matching.sort_by(|a, b| {
+        b.spec
+            .priority
+            .cmp(&a.spec.priority)
+            .then_with(|| a.name_any().cmp(&b.name_any()))
+    });
+
+    // First policy with ingress set wins (no deep merge)
+    Ok(matching.into_iter().find_map(|p| p.spec.ingress.clone()))
+}
+
 /// Compile a service and apply the resulting resources to the cluster.
 ///
 /// On compile failure, publishes a warning event and sets the service to Failed.
@@ -1088,6 +1170,40 @@ async fn compile_and_apply(
         }
     };
 
+    // Resolve ingress defaults from matching policies
+    let ingress_defaults = match resolve_effective_ingress_defaults(service, namespace, ctx).await {
+        Ok(defaults) => defaults,
+        Err(e) => {
+            debug!(error = %e, "failed to resolve ingress policies, using inline only");
+            None
+        }
+    };
+
+    // Apply ingress defaults to service if needed
+    let mut service_with_defaults;
+    let effective_service = if let (Some(ref ingress_spec), Some(ref defaults)) =
+        (&service.spec.ingress, &ingress_defaults)
+    {
+        let mut ingress = ingress_spec.clone();
+        // Apply default gateway class if not set
+        if ingress.gateway_class.is_none() {
+            ingress.gateway_class.clone_from(&defaults.gateway_class);
+        }
+        // Apply default TLS to routes that have no TLS
+        if let Some(ref default_tls) = defaults.tls {
+            for (_route_name, route) in ingress.routes.iter_mut() {
+                if route.tls.is_none() {
+                    route.tls = Some(default_tls.clone());
+                }
+            }
+        }
+        service_with_defaults = service.clone();
+        service_with_defaults.spec.ingress = Some(ingress);
+        &service_with_defaults
+    } else {
+        service
+    };
+
     let compiler = ServiceCompiler::new(
         &ctx.graph,
         &ctx.cluster_name,
@@ -1097,7 +1213,7 @@ async fn compile_and_apply(
     )
     .with_phases(&ctx.extension_phases)
     .with_effective_backup(effective_backup);
-    let compiled = match compiler.compile(service).await {
+    let compiled = match compiler.compile(effective_service).await {
         Ok(compiled) => compiled,
         Err(e) => {
             let msg = e.to_string();
@@ -1929,6 +2045,7 @@ mod tests {
                 description: None,
                 priority,
                 backup,
+                ingress: None,
             },
             status: None,
         }
