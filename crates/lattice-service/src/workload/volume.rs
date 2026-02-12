@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::error::CompilationError;
-use super::ObjectMeta;
+use super::{LabelSelector, ObjectMeta};
 use crate::crd::{VolumeAccessMode, WorkloadSpec};
 
 // =============================================================================
@@ -84,15 +84,6 @@ pub struct PodAffinityTerm {
     /// Namespaces to match pods in
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespaces: Option<Vec<String>>,
-}
-
-/// Label selector for affinity
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct LabelSelector {
-    /// Labels that must match
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub match_labels: BTreeMap<String, String>,
 }
 
 /// Full affinity spec for pod

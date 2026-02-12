@@ -683,17 +683,18 @@ pub(crate) fn is_node_ready(node: &k8s_openapi::api::core::v1::Node) -> bool {
         .unwrap_or(false)
 }
 
-/// Check if a control plane node has the NoSchedule taint.
-pub(crate) fn has_control_plane_taint(node: &k8s_openapi::api::core::v1::Node) -> bool {
+/// Check if a node has a specific taint (by key and effect).
+pub(crate) fn has_taint(node: &k8s_openapi::api::core::v1::Node, key: &str, effect: &str) -> bool {
     node.spec
         .as_ref()
         .and_then(|s| s.taints.as_ref())
-        .map(|taints| {
-            taints.iter().any(|t| {
-                t.key == "node-role.kubernetes.io/control-plane" && t.effect == "NoSchedule"
-            })
-        })
+        .map(|taints| taints.iter().any(|t| t.key == key && t.effect == effect))
         .unwrap_or(false)
+}
+
+/// Check if a control plane node has the NoSchedule taint.
+pub(crate) fn has_control_plane_taint(node: &k8s_openapi::api::core::v1::Node) -> bool {
+    has_taint(node, "node-role.kubernetes.io/control-plane", "NoSchedule")
 }
 
 /// Check if a node is an etcd node by looking for the etcd role label.
@@ -709,15 +710,7 @@ pub(crate) fn is_etcd_node(node: &k8s_openapi::api::core::v1::Node) -> bool {
 /// Check if an etcd node has the NoExecute taint.
 /// RKE2 applies this taint to etcd nodes by default.
 pub(crate) fn has_etcd_taint(node: &k8s_openapi::api::core::v1::Node) -> bool {
-    node.spec
-        .as_ref()
-        .and_then(|s| s.taints.as_ref())
-        .map(|taints| {
-            taints
-                .iter()
-                .any(|t| t.key == "node-role.kubernetes.io/etcd" && t.effect == "NoExecute")
-        })
-        .unwrap_or(false)
+    has_taint(node, "node-role.kubernetes.io/etcd", "NoExecute")
 }
 
 /// Actions that can be taken during the pivot phase.

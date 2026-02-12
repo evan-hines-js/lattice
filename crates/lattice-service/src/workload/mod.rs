@@ -284,6 +284,7 @@ pub struct DeploymentSpec {
 #[serde(rename_all = "camelCase")]
 pub struct LabelSelector {
     /// Match labels
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub match_labels: BTreeMap<String, String>,
 }
 
