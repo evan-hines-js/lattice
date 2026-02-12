@@ -215,6 +215,7 @@ impl IngressSpec {
         }
 
         for (route_name, route) in &self.routes {
+            super::super::validate_dns_label(route_name, "route name")?;
             route.validate(route_name, service_ports)?;
         }
 
@@ -663,5 +664,24 @@ mod tests {
 
         let empty = IngressTls::default();
         assert!(empty.is_empty_inherit());
+    }
+
+    #[test]
+    fn route_name_with_underscores_fails() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([("my_route".to_string(), http_route(vec!["api.example.com"]))]),
+        };
+        let err = spec.validate(Some(&single_port_spec())).unwrap_err();
+        assert!(err.contains("route name"));
+    }
+
+    #[test]
+    fn valid_route_name_accepted() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([("public".to_string(), http_route(vec!["api.example.com"]))]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_ok());
     }
 }

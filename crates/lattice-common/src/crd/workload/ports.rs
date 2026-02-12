@@ -35,6 +35,16 @@ impl ServicePortsSpec {
         let mut seen_ports: std::collections::HashSet<u16> = std::collections::HashSet::new();
 
         for (name, port_spec) in &self.ports {
+            // Validate port name is a valid DNS label (max 15 chars for IANA compliance)
+            super::super::validate_dns_label(name, "port name")
+                .map_err(crate::Error::validation)?;
+            if name.len() > 15 {
+                return Err(crate::Error::validation(format!(
+                    "port name '{}' exceeds 15 character IANA service name limit",
+                    name
+                )));
+            }
+
             // Validate port is not zero
             if port_spec.port == 0 {
                 return Err(crate::Error::validation(format!(
@@ -112,5 +122,52 @@ mod tests {
 
         let svc = ServicePortsSpec { ports };
         assert!(svc.validate().is_err());
+    }
+
+    #[test]
+    fn test_port_name_with_underscores_fails() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "my_port".to_string(),
+            PortSpec {
+                port: 80,
+                target_port: None,
+                protocol: None,
+            },
+        );
+        let svc = ServicePortsSpec { ports };
+        let err = svc.validate().unwrap_err().to_string();
+        assert!(err.contains("port name"));
+    }
+
+    #[test]
+    fn test_port_name_exceeding_15_chars_fails() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "ab".repeat(8), // 16 chars
+            PortSpec {
+                port: 80,
+                target_port: None,
+                protocol: None,
+            },
+        );
+        let svc = ServicePortsSpec { ports };
+        let err = svc.validate().unwrap_err().to_string();
+        assert!(err.contains("15 character"));
+    }
+
+    #[test]
+    fn test_valid_port_name_accepted() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "http".to_string(),
+            PortSpec {
+                port: 80,
+                target_port: None,
+                protocol: None,
+            },
+        );
+        let svc = ServicePortsSpec { ports };
+        assert!(svc.validate().is_ok());
     }
 }
