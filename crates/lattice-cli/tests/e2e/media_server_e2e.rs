@@ -14,8 +14,8 @@ use lattice_common::crd::LatticeService;
 
 use super::helpers::{
     apply_cedar_policy_crd, apply_run_as_root_override_policy, client_from_kubeconfig,
-    create_with_retry, ensure_fresh_namespace, load_service_config, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition,
+    create_with_retry, ensure_fresh_namespace, ensure_test_cluster_issuer, load_service_config,
+    run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
 };
 
 const NAMESPACE: &str = "media";
@@ -32,6 +32,9 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
 
     // Set up regcreds infrastructure — all services need ghcr-creds for image pulls
     setup_regcreds_infrastructure(kubeconfig_path).await?;
+
+    // Ensure cert-manager has a self-signed issuer matching the fixture references
+    ensure_test_cluster_issuer(kubeconfig_path, "letsencrypt-prod").await?;
 
     // Cedar: permit security overrides for media services
     for svc in ["jellyfin", "nzbget", "sonarr"] {
@@ -155,6 +158,161 @@ async fn wait_for_deployments(kubeconfig_path: &str) -> Result<(), String> {
     }
 
     info!("All deployments available");
+    Ok(())
+}
+
+async fn verify_gateway_routes(kubeconfig_path: &str) -> Result<(), String> {
+    info!("Verifying Gateway API routes...");
+
+    // Expected: one HTTPRoute per service, each with a hostname and backend
+    let expected_routes: [(&str, &str, &str); 3] = [
+        ("jellyfin", "jellyfin.home.local", "8096"),
+        ("sonarr", "sonarr.home.local", "8989"),
+        ("nzbget", "nzbget.home.local", "6789"),
+    ];
+
+    // 1. Wait for Gateway with correct listeners
+    wait_for_condition(
+        "Gateway media-ingress to have all listeners",
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+        || async {
+            let output = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig_path,
+                "get",
+                "gateway",
+                "media-ingress",
+                "-n",
+                NAMESPACE,
+                "--ignore-not-found",
+                "-o",
+                "jsonpath={.spec.listeners[*].name}",
+            ])
+            .await
+            .unwrap_or_default();
+
+            let listeners: Vec<&str> = output.split_whitespace().collect();
+            for (svc, _, _) in &expected_routes {
+                for proto in ["http", "https"] {
+                    let expected = format!("{}-public-{}-0", svc, proto);
+                    if !listeners.iter().any(|l| *l == expected) {
+                        info!(
+                            "Gateway media-ingress: waiting for listener {} (have: {:?})",
+                            expected, listeners
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
+            info!(
+                "Gateway media-ingress: {} listeners verified",
+                listeners.len()
+            );
+            Ok(true)
+        },
+    )
+    .await?;
+
+    // 2. Wait for HTTPRoutes with correct hostnames and backends
+    for (svc, host, port) in &expected_routes {
+        let route_name = format!("{}-public-route", svc);
+        let expected_host = host.to_string();
+        let expected_backend = format!("{}:{}", svc, port);
+
+        wait_for_condition(
+            &format!("HTTPRoute {} to be correct", route_name),
+            Duration::from_secs(120),
+            Duration::from_secs(5),
+            || {
+                let route_name = route_name.clone();
+                let expected_host = expected_host.clone();
+                let expected_backend = expected_backend.clone();
+                async move {
+                    let output = run_kubectl(&[
+                        "--kubeconfig",
+                        kubeconfig_path,
+                        "get",
+                        "httproute",
+                        &route_name,
+                        "-n",
+                        NAMESPACE,
+                        "--ignore-not-found",
+                        "-o",
+                        "jsonpath={.spec.hostnames[0]} {.spec.rules[0].backendRefs[0].name}:{.spec.rules[0].backendRefs[0].port}",
+                    ])
+                    .await
+                    .unwrap_or_default();
+
+                    let parts: Vec<&str> = output.split_whitespace().collect();
+                    if parts.len() != 2 {
+                        info!("HTTPRoute {} not ready yet", route_name);
+                        return Ok(false);
+                    }
+                    if parts[0] != expected_host || parts[1] != expected_backend {
+                        info!(
+                            "HTTPRoute {} mismatch: host={} backend={} (expected {} {})",
+                            route_name, parts[0], parts[1], expected_host, expected_backend
+                        );
+                        return Ok(false);
+                    }
+                    info!("HTTPRoute {} -> {} (backend {})", route_name, expected_host, expected_backend);
+                    Ok(true)
+                }
+            },
+        )
+        .await?;
+    }
+
+    // 3. Wait for Certificates with correct DNS names and issuer
+    for (svc, host, _) in &expected_routes {
+        let cert_name = format!("{}-public-cert", svc);
+        let expected_host = host.to_string();
+
+        wait_for_condition(
+            &format!("Certificate {} to be correct", cert_name),
+            Duration::from_secs(120),
+            Duration::from_secs(5),
+            || {
+                let cert_name = cert_name.clone();
+                let expected_host = expected_host.clone();
+                async move {
+                    let output = run_kubectl(&[
+                        "--kubeconfig",
+                        kubeconfig_path,
+                        "get",
+                        "certificate",
+                        &cert_name,
+                        "-n",
+                        NAMESPACE,
+                        "--ignore-not-found",
+                        "-o",
+                        "jsonpath={.spec.dnsNames[0]} {.spec.issuerRef.name}",
+                    ])
+                    .await
+                    .unwrap_or_default();
+
+                    let parts: Vec<&str> = output.split_whitespace().collect();
+                    if parts.len() != 2 {
+                        info!("Certificate {} not ready yet", cert_name);
+                        return Ok(false);
+                    }
+                    if parts[0] != expected_host || parts[1] != "letsencrypt-prod" {
+                        info!(
+                            "Certificate {} mismatch: dns={} issuer={} (expected {} letsencrypt-prod)",
+                            cert_name, parts[0], parts[1], expected_host
+                        );
+                        return Ok(false);
+                    }
+                    info!("Certificate {} -> {} (issuer: letsencrypt-prod)", cert_name, expected_host);
+                    Ok(true)
+                }
+            },
+        )
+        .await?;
+    }
+
+    info!("Gateway API routes verified");
     Ok(())
 }
 
@@ -492,6 +650,7 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
 
     deploy_media_services(kubeconfig_path).await?;
     wait_for_deployments(kubeconfig_path).await?;
+    verify_gateway_routes(kubeconfig_path).await?;
     verify_pvcs(kubeconfig_path).await?;
     verify_node_colocation(kubeconfig_path).await?;
     verify_volume_sharing(kubeconfig_path).await?;
