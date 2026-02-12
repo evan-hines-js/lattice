@@ -3058,6 +3058,30 @@ pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), Strin
 }
 
 // =============================================================================
+// Cert-Manager Test Infrastructure
+// =============================================================================
+
+/// Ensure a self-signed ClusterIssuer exists for cert-manager Certificate testing.
+///
+/// In production this would be a real ACME issuer (e.g. letsencrypt-prod).
+/// For E2E tests a self-signed issuer lets cert-manager issue certificates
+/// without external dependencies.
+pub async fn ensure_test_cluster_issuer(kubeconfig: &str, name: &str) -> Result<(), String> {
+    let yaml = format!(
+        r#"apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {name}
+spec:
+  selfSigned: {{}}"#,
+    );
+
+    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+    info!("[CertManager] ClusterIssuer '{}' ensured (self-signed)", name);
+    Ok(())
+}
+
+// =============================================================================
 // Fine-Grained Cedar Policy Helpers
 // =============================================================================
 
