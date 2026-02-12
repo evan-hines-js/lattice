@@ -562,11 +562,6 @@ pub struct GeneratedIngress {
 }
 
 impl GeneratedIngress {
-    /// Create empty generated ingress
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.gateway.is_none()
@@ -597,11 +592,6 @@ pub struct GeneratedWaypoint {
 }
 
 impl GeneratedWaypoint {
-    /// Create empty generated waypoint
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.gateway.is_none() && self.allow_to_waypoint_policy.is_none()
@@ -708,7 +698,7 @@ impl IngressCompiler {
         ingress: &IngressSpec,
         service_ports: Option<&ServicePortsSpec>,
     ) -> GeneratedIngress {
-        let mut output = GeneratedIngress::new();
+        let mut output = GeneratedIngress::default();
         let mut all_listeners = Vec::new();
 
         let gateway_class = ingress
@@ -1508,7 +1498,7 @@ mod tests {
 
     #[test]
     fn total_count_and_is_empty() {
-        let empty = GeneratedIngress::new();
+        let empty = GeneratedIngress::default();
         assert!(empty.is_empty());
         assert_eq!(empty.total_count(), 0);
 

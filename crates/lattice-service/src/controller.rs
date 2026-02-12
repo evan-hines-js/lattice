@@ -928,14 +928,11 @@ pub async fn reconcile(
     // State machine: transition based on current phase
     match current_phase {
         ServicePhase::Pending => {
-            // Transition to Compiling
             update_service_status_compiling(&service, &ctx).await?;
             Ok(Action::requeue(Duration::from_secs(5)))
         }
         ServicePhase::Compiling => {
-            // Verify dependencies exist in the graph
             let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
-
             if !missing_deps.is_empty() {
                 debug!(?missing_deps, "waiting for dependencies");
                 return Ok(Action::requeue(Duration::from_secs(10)));
@@ -949,10 +946,7 @@ pub async fn reconcile(
                 "edge status"
             );
 
-            compile_and_apply(&service, &name, namespace, &ctx).await?;
-            info!("service ready");
-            update_service_status_ready(&service, &ctx).await?;
-            Ok(Action::requeue(Duration::from_secs(60)))
+            try_compile(&service, &name, namespace, &ctx).await
         }
         ServicePhase::Ready => {
             let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
@@ -962,52 +956,40 @@ pub async fn reconcile(
                 return Ok(Action::requeue(Duration::from_secs(10)));
             }
 
-            compile_and_apply(&service, &name, namespace, &ctx).await?;
-            Ok(Action::requeue(Duration::from_secs(60)))
+            try_compile(&service, &name, namespace, &ctx).await
         }
         ServicePhase::Failed => {
-            // Re-attempt compilation without changing phase.
-            // If it succeeds, transition to Ready. If it still fails, stay Failed.
-            match compile_and_apply(&service, &name, namespace, &ctx).await {
-                Ok(()) => {
-                    info!("previously failed service now compiles");
-                    update_service_status_ready(&service, &ctx).await?;
-                    Ok(Action::requeue(Duration::from_secs(60)))
-                }
-                Err(_) => {
-                    debug!("service still failing, will retry");
-                    Ok(Action::requeue(Duration::from_secs(30)))
-                }
-            }
+            try_compile(&service, &name, namespace, &ctx).await
         }
     }
 }
 
-/// Error policy for the service controller
+/// Shared error→action mapping for reconciliation failures.
 ///
-/// This function is called when reconciliation fails. It determines
-/// the requeue strategy based on error type:
-/// - Retryable errors (transient): exponential backoff starting at 30 seconds
-/// - Non-retryable errors (permanent): await spec change, don't retry
-pub fn error_policy(
-    service: Arc<LatticeService>,
-    error: &Error,
-    _ctx: Arc<ServiceContext>,
-) -> Action {
+/// Retryable errors (transient): requeue after 30 seconds.
+/// Non-retryable errors (permanent): await spec change.
+fn action_for_error(resource_name: &str, error: &Error) -> Action {
     error!(
         ?error,
-        service = %service.name_any(),
+        resource = %resource_name,
         retryable = error.is_retryable(),
         "reconciliation failed"
     );
 
     if error.is_retryable() {
-        // Transient error - retry with backoff
         Action::requeue(Duration::from_secs(30))
     } else {
-        // Permanent error - requires spec change to fix
         Action::await_change()
     }
+}
+
+/// Error policy for the service controller (kube-rs callback)
+pub fn error_policy(
+    service: Arc<LatticeService>,
+    error: &Error,
+    _ctx: Arc<ServiceContext>,
+) -> Action {
+    action_for_error(&service.name_any(), error)
 }
 
 /// Check which dependencies are missing from the graph
@@ -1039,45 +1021,24 @@ fn check_missing_dependencies(
         .collect()
 }
 
-/// Resolve the effective backup spec for a service by merging matching policies.
-///
-/// 1. Lists all LatticeServicePolicies
-/// 2. Filters to those matching this service (labels + namespace)
-/// 3. Sorts by priority DESC, then name ASC
-/// 4. Merges policy backup specs with the service's inline backup spec
-async fn resolve_effective_backup(
+/// Find LatticeServicePolicies matching a service, sorted by priority DESC then name ASC.
+fn matching_policies<'a>(
     service: &LatticeService,
     namespace: &str,
-    ctx: &ServiceContext,
-) -> Result<Option<ServiceBackupSpec>, Error> {
-    let policies = ctx.kube.list_policies().await?;
-    if policies.is_empty() {
-        return Ok(None);
-    }
-
+    policies: &'a [LatticeServicePolicy],
+    ns_labels: &BTreeMap<String, String>,
+) -> Vec<&'a LatticeServicePolicy> {
     let svc_labels = service.labels();
-    let ns_labels = ctx
-        .kube
-        .get_namespace_labels(namespace)
-        .await
-        .unwrap_or_default();
-
-    // Filter policies to those matching this service
     let mut matching: Vec<_> = policies
         .iter()
         .filter(|p| {
             let policy_ns = p.namespace().unwrap_or_default();
             p.spec
                 .selector
-                .matches(svc_labels, &ns_labels, &policy_ns, namespace)
+                .matches(svc_labels, ns_labels, &policy_ns, namespace)
         })
         .collect();
 
-    if matching.is_empty() {
-        return Ok(None);
-    }
-
-    // Sort by priority DESC, then name ASC for deterministic ordering
     matching.sort_by(|a, b| {
         b.spec
             .priority
@@ -1085,70 +1046,82 @@ async fn resolve_effective_backup(
             .then_with(|| a.name_any().cmp(&b.name_any()))
     });
 
-    // Extract backup specs from matching policies
-    let policy_backup_specs: Vec<&ServiceBackupSpec> = matching
+    matching
+}
+
+/// Resolve policy defaults (backup + ingress) for a service in one pass.
+///
+/// Lists policies and namespace labels once, then extracts:
+/// - Backup: merged from matching policies (priority-ordered) + inline spec
+/// - Ingress: first matching policy with ingress set wins (no deep merge)
+///
+/// Falls back gracefully: API errors result in (None, None).
+async fn resolve_policy_defaults(
+    service: &LatticeService,
+    namespace: &str,
+    ctx: &ServiceContext,
+) -> (Option<ServiceBackupSpec>, Option<crate::crd::IngressPolicySpec>) {
+    let policies = match ctx.kube.list_policies().await {
+        Ok(p) => p,
+        Err(e) => {
+            debug!(error = %e, "failed to list policies");
+            return (None, None);
+        }
+    };
+    if policies.is_empty() {
+        return (None, None);
+    }
+
+    let ns_labels = ctx
+        .kube
+        .get_namespace_labels(namespace)
+        .await
+        .unwrap_or_default();
+
+    let matched = matching_policies(service, namespace, &policies, &ns_labels);
+    if matched.is_empty() {
+        return (None, None);
+    }
+
+    // Backup: merge matching policy backup specs with inline spec
+    let policy_backup_specs: Vec<&ServiceBackupSpec> = matched
         .iter()
         .filter_map(|p| p.spec.backup.as_ref())
         .collect();
+    let effective_backup = if policy_backup_specs.is_empty() {
+        None
+    } else {
+        merge_backup_specs(&policy_backup_specs, service.spec.backup.as_ref())
+    };
 
-    if policy_backup_specs.is_empty() {
-        return Ok(None);
-    }
+    // Ingress: first matching policy with ingress wins
+    let ingress_defaults = matched.into_iter().find_map(|p| p.spec.ingress.clone());
 
-    Ok(merge_backup_specs(
-        &policy_backup_specs,
-        service.spec.backup.as_ref(),
-    ))
+    (effective_backup, ingress_defaults)
 }
 
-/// Resolve the effective ingress defaults for a service from matching policies.
+/// Try compiling and applying a service. On success, transition to Ready.
+/// On failure, compile_and_apply already sets status to Failed; requeue to retry.
 ///
-/// 1. Lists all LatticeServicePolicies
-/// 2. Filters to those matching this service (labels + namespace)
-/// 3. Sorts by priority DESC, then name ASC
-/// 4. First policy with `ingress` set wins (no deep merge)
-async fn resolve_effective_ingress_defaults(
+/// This is the shared compilation path for Compiling, Ready, and Failed phases.
+/// Using `match` instead of `?` prevents CompilationError → Error::Validation
+/// → error_policy → Action::await_change() from permanently parking the service.
+async fn try_compile(
     service: &LatticeService,
+    name: &str,
     namespace: &str,
     ctx: &ServiceContext,
-) -> Result<Option<crate::crd::IngressPolicySpec>, Error> {
-    let policies = ctx.kube.list_policies().await?;
-    if policies.is_empty() {
-        return Ok(None);
+) -> Result<Action, Error> {
+    match compile_and_apply(service, name, namespace, ctx).await {
+        Ok(()) => {
+            update_service_status_ready(service, ctx).await?;
+            Ok(Action::requeue(Duration::from_secs(60)))
+        }
+        Err(_) => {
+            // compile_and_apply already set status to Failed
+            Ok(Action::requeue(Duration::from_secs(30)))
+        }
     }
-
-    let svc_labels = service.labels();
-    let ns_labels = ctx
-        .kube
-        .get_namespace_labels(namespace)
-        .await
-        .unwrap_or_default();
-
-    // Filter policies to those matching this service
-    let mut matching: Vec<_> = policies
-        .iter()
-        .filter(|p| {
-            let policy_ns = p.namespace().unwrap_or_default();
-            p.spec
-                .selector
-                .matches(svc_labels, &ns_labels, &policy_ns, namespace)
-        })
-        .collect();
-
-    if matching.is_empty() {
-        return Ok(None);
-    }
-
-    // Sort by priority DESC, then name ASC for deterministic ordering
-    matching.sort_by(|a, b| {
-        b.spec
-            .priority
-            .cmp(&a.spec.priority)
-            .then_with(|| a.name_any().cmp(&b.name_any()))
-    });
-
-    // First policy with ingress set wins (no deep merge)
-    Ok(matching.into_iter().find_map(|p| p.spec.ingress.clone()))
 }
 
 /// Compile a service and apply the resulting resources to the cluster.
@@ -1161,23 +1134,9 @@ async fn compile_and_apply(
     namespace: &str,
     ctx: &ServiceContext,
 ) -> Result<(), Error> {
-    // Query matching LatticeServicePolicies and merge backup specs
-    let effective_backup = match resolve_effective_backup(service, namespace, ctx).await {
-        Ok(backup) => backup,
-        Err(e) => {
-            debug!(error = %e, "failed to resolve policies, using inline backup only");
-            None
-        }
-    };
-
-    // Resolve ingress defaults from matching policies
-    let ingress_defaults = match resolve_effective_ingress_defaults(service, namespace, ctx).await {
-        Ok(defaults) => defaults,
-        Err(e) => {
-            debug!(error = %e, "failed to resolve ingress policies, using inline only");
-            None
-        }
-    };
+    // Resolve policy defaults (backup + ingress) in one pass
+    let (effective_backup, ingress_defaults) =
+        resolve_policy_defaults(service, namespace, ctx).await;
 
     // Apply ingress defaults to service if needed
     let mut service_with_defaults;
@@ -1315,28 +1274,13 @@ pub async fn reconcile_external(
     Ok(Action::requeue(Duration::from_secs(60)))
 }
 
-/// Error policy for the external service controller
-///
-/// Uses the same retry logic as the service controller:
-/// - Retryable errors: 30 second backoff
-/// - Non-retryable errors: await spec change
+/// Error policy for the external service controller (kube-rs callback)
 pub fn error_policy_external(
     external: Arc<LatticeExternalService>,
     error: &Error,
     _ctx: Arc<ServiceContext>,
 ) -> Action {
-    error!(
-        ?error,
-        external_service = %external.name_any(),
-        retryable = error.is_retryable(),
-        "reconciliation failed"
-    );
-
-    if error.is_retryable() {
-        Action::requeue(Duration::from_secs(30))
-    } else {
-        Action::await_change()
-    }
+    action_for_error(&external.name_any(), error)
 }
 
 // =============================================================================
@@ -2084,7 +2028,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// Story: resolve_effective_backup merges policy + inline correctly
+    /// Story: resolve_policy_defaults merges policy + inline correctly
     #[tokio::test]
     async fn resolve_effective_backup_merges_policies() {
         // Low-priority policy: hooks + volumes
@@ -2123,11 +2067,9 @@ mod tests {
         let service = sample_service("my-app");
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
-        let result = resolve_effective_backup(&service, "test", &ctx)
-            .await
-            .expect("should resolve");
+        let (backup, _ingress) = resolve_policy_defaults(&service, "test", &ctx).await;
 
-        let backup = result.expect("should have merged backup");
+        let backup = backup.expect("should have merged backup");
         // Hooks from high-priority policy
         assert_eq!(backup.hooks.as_ref().unwrap().pre[0].name, "high-hook");
         // Volumes from low-priority (high didn't set them)
@@ -2141,11 +2083,10 @@ mod tests {
         let service = sample_service("my-app");
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
-        let result = resolve_effective_backup(&service, "test", &ctx)
-            .await
-            .expect("should succeed");
+        let (backup, ingress) = resolve_policy_defaults(&service, "test", &ctx).await;
 
-        assert!(result.is_none());
+        assert!(backup.is_none());
+        assert!(ingress.is_none());
     }
 
     /// Story: Policy matches only same namespace when no namespace selector
@@ -2169,11 +2110,9 @@ mod tests {
         let service = sample_service("my-app");
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
-        let result = resolve_effective_backup(&service, "test", &ctx)
-            .await
-            .expect("should succeed");
+        let (backup, _ingress) = resolve_policy_defaults(&service, "test", &ctx).await;
 
         // Policy is in "other" namespace, service is in "test" — no match
-        assert!(result.is_none());
+        assert!(backup.is_none());
     }
 }

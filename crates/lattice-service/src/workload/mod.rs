@@ -998,11 +998,6 @@ pub struct GeneratedWorkloads {
 }
 
 impl GeneratedWorkloads {
-    /// Create empty workload collection
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Check if any workloads were generated
     pub fn is_empty(&self) -> bool {
         self.deployment.is_none()
@@ -1150,10 +1145,10 @@ impl WorkloadCompiler {
     ) -> Result<GeneratedWorkloads, CompilationError> {
         let spec = &service.spec;
         let workload = &spec.workload;
-        let mut output = GeneratedWorkloads::new();
-
-        // Always generate ServiceAccount for SPIFFE identity
-        output.service_account = Some(Self::compile_service_account(name, namespace));
+        let mut output = GeneratedWorkloads {
+            service_account: Some(Self::compile_service_account(name, namespace)),
+            ..Default::default()
+        };
 
         // Compile shared pod template via PodTemplateCompiler
         let pod_template = PodTemplateCompiler::compile(
@@ -2084,7 +2079,7 @@ mod tests {
 
     #[test]
     fn is_empty() {
-        let empty = GeneratedWorkloads::new();
+        let empty = GeneratedWorkloads::default();
         assert!(empty.is_empty());
 
         let service = make_service("my-app", "default");

@@ -37,11 +37,6 @@ pub struct GeneratedPolicies {
 }
 
 impl GeneratedPolicies {
-    /// Create empty policy collection
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Check if any policies were generated
     pub fn is_empty(&self) -> bool {
         self.authorization_policies.is_empty()
@@ -90,15 +85,15 @@ impl<'a> PolicyCompiler<'a> {
     /// Returns empty policies if service is not in graph or has no active edges.
     pub fn compile(&self, name: &str, namespace: &str) -> GeneratedPolicies {
         let Some(service_node) = self.graph.get_service(namespace, name) else {
-            return GeneratedPolicies::new();
+            return GeneratedPolicies::default();
         };
 
         // Skip Unknown services
         if service_node.type_ == ServiceType::Unknown {
-            return GeneratedPolicies::new();
+            return GeneratedPolicies::default();
         }
 
-        let mut output = GeneratedPolicies::new();
+        let mut output = GeneratedPolicies::default();
 
         // Get active edges
         let inbound_edges = self.graph.get_active_inbound_edges(namespace, name);
