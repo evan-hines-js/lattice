@@ -83,5 +83,12 @@ spec:
         apparmorProfile: Unconfined
   imagePullSecrets:
     - ghcr-creds
-  replicas:
-    min: 1
+  replicas: 1
+  ingress:
+    routes:
+      public:
+        hosts:
+          - nzbget.home.local
+        tls:
+          issuerRef:
+            name: letsencrypt-prod

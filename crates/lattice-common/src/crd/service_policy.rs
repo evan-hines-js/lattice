@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::types::Condition;
 use super::workload::backup::ServiceBackupSpec;
+use super::workload::ingress::IngressTls;
 
 /// Operator for label selector requirements
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -292,6 +293,26 @@ pub struct LatticeServicePolicySpec {
     /// Backup configuration to apply to matched services
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<ServiceBackupSpec>,
+
+    /// Default ingress configuration for matched services
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<IngressPolicySpec>,
+}
+
+/// Default ingress configuration applied by a LatticeServicePolicy.
+///
+/// When a route has `tls: None` or `tls: {}` (empty), the policy's TLS
+/// configuration is applied as default.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IngressPolicySpec {
+    /// Default TLS configuration for routes without explicit TLS
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<IngressTls>,
+
+    /// Default gateway class
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_class: Option<String>,
 }
 
 #[cfg(test)]

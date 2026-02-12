@@ -409,17 +409,10 @@ impl<'a> ServiceCompiler<'a> {
         // Compile waypoint Gateway for east-west L7 policies (Istio ambient mesh)
         let waypoint = WaypointCompiler::compile(namespace);
 
-        // Get primary service port for ingress routing
-        let service_port = workload
-            .service
-            .as_ref()
-            .and_then(|s| s.ports.values().next())
-            .map(|p| p.port)
-            .unwrap_or(80);
-
         // Compile ingress resources if configured
         let ingress = if let Some(ref ingress_spec) = service.spec.ingress {
-            let ingress = IngressCompiler::compile(name, namespace, ingress_spec, service_port);
+            let ingress =
+                IngressCompiler::compile(name, namespace, ingress_spec, workload.service.as_ref());
 
             // Add gateway allow policies for north-south traffic
             let gateway_name = mesh::ingress_gateway_name(namespace);
@@ -813,7 +806,8 @@ mod tests {
     use super::*;
     use crate::crd::{
         CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, IngressTls, PortSpec,
-        ResourceSpec, SecurityContext, ServicePortsSpec, SidecarSpec, TlsMode, WorkloadSpec,
+        ResourceSpec, RouteKind, RouteSpec, SecurityContext, ServicePortsSpec, SidecarSpec,
+        WorkloadSpec,
     };
     use std::collections::BTreeMap;
 
@@ -858,17 +852,24 @@ mod tests {
     fn make_service_with_ingress(name: &str, namespace: &str) -> LatticeService {
         let mut service = make_service(name, namespace);
         service.spec.ingress = Some(IngressSpec {
-            hosts: vec!["api.example.com".to_string()],
-            paths: None,
-            tls: Some(IngressTls {
-                mode: TlsMode::Auto,
-                secret_name: None,
-                issuer_ref: Some(CertIssuerRef {
-                    name: "letsencrypt-prod".to_string(),
-                    kind: None,
-                }),
-            }),
             gateway_class: None,
+            routes: BTreeMap::from([(
+                "public".to_string(),
+                RouteSpec {
+                    kind: RouteKind::HTTPRoute,
+                    hosts: vec!["api.example.com".to_string()],
+                    port: None,
+                    listen_port: None,
+                    rules: None,
+                    tls: Some(IngressTls {
+                        secret_name: None,
+                        issuer_ref: Some(CertIssuerRef {
+                            name: "letsencrypt-prod".to_string(),
+                            kind: None,
+                        }),
+                    }),
+                },
+            )]),
         });
         service
     }
@@ -1089,8 +1090,8 @@ mod tests {
 
         // Should have ingress resources
         assert!(output.ingress.gateway.is_some());
-        assert!(output.ingress.http_route.is_some());
-        assert!(output.ingress.certificate.is_some());
+        assert!(!output.ingress.http_routes.is_empty());
+        assert!(!output.ingress.certificates.is_empty());
 
         let gateway = output
             .ingress
@@ -1099,11 +1100,8 @@ mod tests {
         assert_eq!(gateway.metadata.name, "prod-ingress");
         assert_eq!(gateway.metadata.namespace, "prod");
 
-        let route = output
-            .ingress
-            .http_route
-            .expect("http route should be generated for ingress");
-        assert_eq!(route.metadata.name, "api-route");
+        let route = &output.ingress.http_routes[0];
+        assert_eq!(route.metadata.name, "api-public-route");
 
         // Should have gateway allow policy
         let gateway_policies: Vec<_> = output
@@ -1131,8 +1129,8 @@ mod tests {
         // Should NOT have ingress resources
         assert!(output.ingress.is_empty());
         assert!(output.ingress.gateway.is_none());
-        assert!(output.ingress.http_route.is_none());
-        assert!(output.ingress.certificate.is_none());
+        assert!(output.ingress.http_routes.is_empty());
+        assert!(output.ingress.certificates.is_empty());
     }
 
     #[tokio::test]

@@ -1,76 +1,105 @@
 //! Ingress and Gateway API types.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Ingress specification for exposing services externally via Gateway API
+use super::ports::ServicePortsSpec;
+
+/// Ingress specification for exposing services externally via Gateway API.
+///
+/// Uses a named-routes map for multi-route support (HTTP, gRPC, TCP).
+/// Happy-path: a single route with just `hosts` inherits everything else from
+/// defaults or policy.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct IngressSpec {
-    /// Hostnames for the ingress (e.g., "api.example.com")
-    pub hosts: Vec<String>,
-
-    /// URL paths to route (defaults to ["/"])
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paths: Option<Vec<IngressPath>>,
-
-    /// TLS configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls: Option<IngressTls>,
-
     /// GatewayClass name (default: "istio")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_class: Option<String>,
+
+    /// Named routes — each key is a logical route name
+    pub routes: BTreeMap<String, RouteSpec>,
 }
 
-/// Path configuration for ingress routing
+/// Route kind — which Gateway API route resource to generate.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum RouteKind {
+    /// Gateway API HTTPRoute (default)
+    #[default]
+    HTTPRoute,
+    /// Gateway API GRPCRoute
+    GRPCRoute,
+    /// Gateway API TCPRoute
+    TCPRoute,
+}
+
+/// A single named route within the ingress specification.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct IngressPath {
-    /// The URL path to match
-    pub path: String,
+pub struct RouteSpec {
+    /// Route kind — defaults to HTTPRoute when omitted
+    #[serde(default)]
+    pub kind: RouteKind,
 
-    /// Path match type (PathPrefix or Exact)
+    /// Hostnames for the route (required for HTTP/gRPC, forbidden for TCP)
+    #[serde(default)]
+    pub hosts: Vec<String>,
+
+    /// Service port name to route to. Optional when service has exactly 1 port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_type: Option<PathMatchType>,
+    pub port: Option<String>,
+
+    /// Listener port on the Gateway LB (required for TCP, optional otherwise)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
+
+    /// Routing rules — defaults to catch-all when omitted
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<RouteRule>>,
+
+    /// TLS configuration — inheritable from LatticeServicePolicy
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<IngressTls>,
 }
 
-/// Path match type for Gateway API HTTPRoute
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-pub enum PathMatchType {
-    /// Exact path match
-    Exact,
-    /// Prefix-based path match (default)
-    #[default]
-    PathPrefix,
-}
-
-/// TLS configuration for ingress
+/// TLS configuration for ingress — mode is inferred from which fields are set.
+///
+/// | Fields present         | Behavior                                       |
+/// |------------------------|------------------------------------------------|
+/// | `issuerRef`            | Auto — cert-manager provisions certificate     |
+/// | `secretName`           | Manual — user-provided TLS secret              |
+/// | `tls: {}` (empty)      | Auto — inherit issuerRef from policy           |
+/// | No `tls` field         | No TLS (unless policy provides it)             |
+/// | Both fields            | Validation error                               |
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct IngressTls {
-    /// TLS mode: auto (cert-manager) or manual (pre-existing secret)
-    #[serde(default)]
-    pub mode: TlsMode,
-
-    /// Secret name containing TLS certificate (for manual mode)
+    /// Secret name containing TLS certificate (manual mode)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_name: Option<String>,
 
-    /// Cert-manager issuer reference (for auto mode)
+    /// Cert-manager issuer reference (auto mode)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer_ref: Option<CertIssuerRef>,
 }
 
-/// TLS provisioning mode
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum TlsMode {
-    /// Automatic certificate provisioning via cert-manager
-    #[default]
-    Auto,
-    /// Manual certificate management (use pre-existing secret)
-    Manual,
+impl IngressTls {
+    /// Returns true if this TLS config specifies auto mode (has issuer_ref)
+    pub fn is_auto(&self) -> bool {
+        self.issuer_ref.is_some()
+    }
+
+    /// Returns true if this TLS config specifies manual mode (has secret_name)
+    pub fn is_manual(&self) -> bool {
+        self.secret_name.is_some()
+    }
+
+    /// Returns true if both fields are empty (inherit from policy)
+    pub fn is_empty_inherit(&self) -> bool {
+        self.secret_name.is_none() && self.issuer_ref.is_none()
+    }
 }
 
 /// Reference to a cert-manager issuer
@@ -83,4 +112,556 @@ pub struct CertIssuerRef {
     /// Kind of issuer (default: ClusterIssuer)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+}
+
+/// A routing rule containing match conditions
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteRule {
+    /// Match conditions — traffic must match at least one
+    pub matches: Vec<RouteMatch>,
+}
+
+/// Match condition for a route rule
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteMatch {
+    /// Path match (HTTPRoute only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathMatch>,
+
+    /// Header matches (HTTPRoute only)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<HeaderMatch>,
+
+    /// HTTP method match (HTTPRoute only — GET, POST, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+
+    /// gRPC method match (GRPCRoute only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grpc_method: Option<GrpcMethodMatch>,
+}
+
+/// Path match for HTTPRoute
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PathMatch {
+    /// Match type (PathPrefix or Exact)
+    #[serde(rename = "type", default)]
+    pub type_: PathMatchType,
+
+    /// Path value
+    pub value: String,
+}
+
+/// Path match type for Gateway API HTTPRoute
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum PathMatchType {
+    /// Exact path match
+    Exact,
+    /// Prefix-based path match (default)
+    #[default]
+    PathPrefix,
+}
+
+/// Header match for HTTPRoute
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderMatch {
+    /// Header name
+    pub name: String,
+    /// Header value
+    pub value: String,
+    /// Match type (default: Exact)
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub type_: Option<HeaderMatchType>,
+}
+
+/// Header match type
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum HeaderMatchType {
+    /// Exact header value match (default)
+    Exact,
+    /// Regular expression match
+    RegularExpression,
+}
+
+/// gRPC method match for GRPCRoute
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GrpcMethodMatch {
+    /// gRPC service name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// gRPC method name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+}
+
+// =============================================================================
+// Validation
+// =============================================================================
+
+impl IngressSpec {
+    /// Validate the ingress spec against the service's ports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if validation fails.
+    pub fn validate(&self, service_ports: Option<&ServicePortsSpec>) -> Result<(), String> {
+        if self.routes.is_empty() {
+            return Err("ingress.routes must not be empty".to_string());
+        }
+
+        for (route_name, route) in &self.routes {
+            route.validate(route_name, service_ports)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl RouteSpec {
+    fn validate(
+        &self,
+        route_name: &str,
+        service_ports: Option<&ServicePortsSpec>,
+    ) -> Result<(), String> {
+        match self.kind {
+            RouteKind::HTTPRoute | RouteKind::GRPCRoute => {
+                if self.hosts.is_empty() {
+                    return Err(format!(
+                        "route '{}': hosts required for {:?}",
+                        route_name, self.kind
+                    ));
+                }
+                if self.listen_port.is_some() {
+                    return Err(format!(
+                        "route '{}': listenPort not allowed for {:?}",
+                        route_name, self.kind
+                    ));
+                }
+            }
+            RouteKind::TCPRoute => {
+                if !self.hosts.is_empty() {
+                    return Err(format!(
+                        "route '{}': hosts not allowed for TCPRoute",
+                        route_name
+                    ));
+                }
+                if self.listen_port.is_none() {
+                    return Err(format!(
+                        "route '{}': listenPort required for TCPRoute",
+                        route_name
+                    ));
+                }
+            }
+        }
+
+        // Port resolution validation
+        if let Some(ref port_name) = self.port {
+            if let Some(sps) = service_ports {
+                if !sps.ports.contains_key(port_name) {
+                    return Err(format!(
+                        "route '{}': port '{}' not found in service.ports (available: {:?})",
+                        route_name,
+                        port_name,
+                        sps.ports.keys().collect::<Vec<_>>()
+                    ));
+                }
+            }
+        } else if let Some(sps) = service_ports {
+            if sps.ports.len() > 1 {
+                return Err(format!(
+                    "route '{}': port must be specified when service has multiple ports (available: {:?})",
+                    route_name,
+                    sps.ports.keys().collect::<Vec<_>>()
+                ));
+            }
+        }
+
+        // TLS validation
+        if let Some(ref tls) = self.tls {
+            if tls.issuer_ref.is_some() && tls.secret_name.is_some() {
+                return Err(format!(
+                    "route '{}': cannot specify both issuerRef and secretName in tls",
+                    route_name
+                ));
+            }
+            // TCPRoute + auto TLS (issuerRef) not supported
+            if self.kind == RouteKind::TCPRoute && tls.is_auto() {
+                return Err(format!(
+                    "route '{}': TCPRoute only supports manual TLS (secretName), not auto (issuerRef)",
+                    route_name
+                ));
+            }
+        }
+
+        // Match field consistency
+        if let Some(ref rules) = self.rules {
+            for rule in rules {
+                for m in &rule.matches {
+                    match self.kind {
+                        RouteKind::HTTPRoute => {
+                            if m.grpc_method.is_some() {
+                                return Err(format!(
+                                    "route '{}': grpcMethod not allowed on HTTPRoute matches",
+                                    route_name
+                                ));
+                            }
+                        }
+                        RouteKind::GRPCRoute => {
+                            if m.path.is_some() || !m.headers.is_empty() || m.method.is_some() {
+                                return Err(format!(
+                                    "route '{}': path/headers/method not allowed on GRPCRoute matches",
+                                    route_name
+                                ));
+                            }
+                        }
+                        RouteKind::TCPRoute => {
+                            if m.path.is_some()
+                                || !m.headers.is_empty()
+                                || m.method.is_some()
+                                || m.grpc_method.is_some()
+                            {
+                                return Err(format!(
+                                    "route '{}': match fields not allowed on TCPRoute",
+                                    route_name
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Port resolution helper
+// =============================================================================
+
+impl RouteSpec {
+    /// Resolve the target port number from service ports.
+    ///
+    /// If `port` is set, looks it up by name. Otherwise infers the single port.
+    /// Returns `None` if no service ports are defined.
+    pub fn resolve_port(&self, service_ports: Option<&ServicePortsSpec>) -> Option<u16> {
+        let sps = service_ports?;
+        if let Some(ref port_name) = self.port {
+            sps.ports.get(port_name).map(|p| p.port)
+        } else {
+            // Infer single port
+            if sps.ports.len() == 1 {
+                sps.ports.values().next().map(|p| p.port)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::PortSpec;
+
+    fn single_port_spec() -> ServicePortsSpec {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "http".to_string(),
+            PortSpec {
+                port: 8080,
+                target_port: None,
+                protocol: None,
+            },
+        );
+        ServicePortsSpec { ports }
+    }
+
+    fn multi_port_spec() -> ServicePortsSpec {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "http".to_string(),
+            PortSpec {
+                port: 8080,
+                target_port: None,
+                protocol: None,
+            },
+        );
+        ports.insert(
+            "grpc".to_string(),
+            PortSpec {
+                port: 9090,
+                target_port: None,
+                protocol: None,
+            },
+        );
+        ServicePortsSpec { ports }
+    }
+
+    fn http_route(hosts: Vec<&str>) -> RouteSpec {
+        RouteSpec {
+            kind: RouteKind::HTTPRoute,
+            hosts: hosts.into_iter().map(|s| s.to_string()).collect(),
+            port: None,
+            listen_port: None,
+            rules: None,
+            tls: None,
+        }
+    }
+
+    #[test]
+    fn valid_minimal_http_route() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([("public".to_string(), http_route(vec!["api.example.com"]))]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_ok());
+    }
+
+    #[test]
+    fn empty_routes_fails() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::new(),
+        };
+        assert!(spec.validate(None).is_err());
+    }
+
+    #[test]
+    fn http_route_missing_hosts_fails() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([("r".to_string(), http_route(vec![]))]),
+        };
+        assert!(spec.validate(None).is_err());
+    }
+
+    #[test]
+    fn tcp_route_missing_listen_port_fails() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([(
+                "tcp".to_string(),
+                RouteSpec {
+                    kind: RouteKind::TCPRoute,
+                    hosts: vec![],
+                    port: None,
+                    listen_port: None,
+                    rules: None,
+                    tls: None,
+                },
+            )]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_err());
+    }
+
+    #[test]
+    fn tcp_route_with_hosts_fails() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([(
+                "tcp".to_string(),
+                RouteSpec {
+                    kind: RouteKind::TCPRoute,
+                    hosts: vec!["bad.example.com".to_string()],
+                    port: None,
+                    listen_port: Some(9090),
+                    rules: None,
+                    tls: None,
+                },
+            )]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_err());
+    }
+
+    #[test]
+    fn valid_tcp_route() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([(
+                "metrics".to_string(),
+                RouteSpec {
+                    kind: RouteKind::TCPRoute,
+                    hosts: vec![],
+                    port: Some("http".to_string()),
+                    listen_port: Some(9090),
+                    rules: None,
+                    tls: None,
+                },
+            )]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_ok());
+    }
+
+    #[test]
+    fn port_required_with_multiple_ports() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([("r".to_string(), http_route(vec!["a.example.com"]))]),
+        };
+        assert!(spec.validate(Some(&multi_port_spec())).is_err());
+    }
+
+    #[test]
+    fn port_inferred_with_single_port() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([("r".to_string(), http_route(vec!["a.example.com"]))]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_ok());
+    }
+
+    #[test]
+    fn invalid_port_name_fails() {
+        let mut route = http_route(vec!["a.example.com"]);
+        route.port = Some("nonexistent".to_string());
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([("r".to_string(), route)]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_err());
+    }
+
+    #[test]
+    fn tls_both_fields_fails() {
+        let mut route = http_route(vec!["a.example.com"]);
+        route.tls = Some(IngressTls {
+            secret_name: Some("my-secret".to_string()),
+            issuer_ref: Some(CertIssuerRef {
+                name: "letsencrypt".to_string(),
+                kind: None,
+            }),
+        });
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([("r".to_string(), route)]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_err());
+    }
+
+    #[test]
+    fn tcp_auto_tls_fails() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([(
+                "tcp".to_string(),
+                RouteSpec {
+                    kind: RouteKind::TCPRoute,
+                    hosts: vec![],
+                    port: None,
+                    listen_port: Some(9090),
+                    rules: None,
+                    tls: Some(IngressTls {
+                        secret_name: None,
+                        issuer_ref: Some(CertIssuerRef {
+                            name: "letsencrypt".to_string(),
+                            kind: None,
+                        }),
+                    }),
+                },
+            )]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_err());
+    }
+
+    #[test]
+    fn grpc_method_on_http_route_fails() {
+        let mut route = http_route(vec!["a.example.com"]);
+        route.rules = Some(vec![RouteRule {
+            matches: vec![RouteMatch {
+                path: None,
+                headers: vec![],
+                method: None,
+                grpc_method: Some(GrpcMethodMatch {
+                    service: Some("Greeter".to_string()),
+                    method: None,
+                }),
+            }],
+        }]);
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([("r".to_string(), route)]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_err());
+    }
+
+    #[test]
+    fn path_on_grpc_route_fails() {
+        let spec = IngressSpec {
+            gateway_class: None,
+            routes: BTreeMap::from([(
+                "grpc".to_string(),
+                RouteSpec {
+                    kind: RouteKind::GRPCRoute,
+                    hosts: vec!["grpc.example.com".to_string()],
+                    port: None,
+                    listen_port: None,
+                    rules: Some(vec![RouteRule {
+                        matches: vec![RouteMatch {
+                            path: Some(PathMatch {
+                                type_: PathMatchType::PathPrefix,
+                                value: "/".to_string(),
+                            }),
+                            headers: vec![],
+                            method: None,
+                            grpc_method: None,
+                        }],
+                    }]),
+                    tls: None,
+                },
+            )]),
+        };
+        assert!(spec.validate(Some(&single_port_spec())).is_err());
+    }
+
+    #[test]
+    fn resolve_port_single() {
+        let route = http_route(vec!["a.example.com"]);
+        assert_eq!(route.resolve_port(Some(&single_port_spec())), Some(8080));
+    }
+
+    #[test]
+    fn resolve_port_by_name() {
+        let mut route = http_route(vec!["a.example.com"]);
+        route.port = Some("grpc".to_string());
+        assert_eq!(route.resolve_port(Some(&multi_port_spec())), Some(9090));
+    }
+
+    #[test]
+    fn resolve_port_ambiguous() {
+        let route = http_route(vec!["a.example.com"]);
+        assert_eq!(route.resolve_port(Some(&multi_port_spec())), None);
+    }
+
+    #[test]
+    fn tls_mode_inference() {
+        let auto = IngressTls {
+            secret_name: None,
+            issuer_ref: Some(CertIssuerRef {
+                name: "letsencrypt".to_string(),
+                kind: None,
+            }),
+        };
+        assert!(auto.is_auto());
+        assert!(!auto.is_manual());
+
+        let manual = IngressTls {
+            secret_name: Some("my-cert".to_string()),
+            issuer_ref: None,
+        };
+        assert!(!manual.is_auto());
+        assert!(manual.is_manual());
+
+        let empty = IngressTls::default();
+        assert!(empty.is_empty_inherit());
+    }
 }

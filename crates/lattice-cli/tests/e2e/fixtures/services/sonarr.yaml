@@ -69,12 +69,12 @@ spec:
         direction: outbound
   imagePullSecrets:
     - ghcr-creds
-  replicas:
-    min: 1
+  replicas: 1
   ingress:
-    hosts:
-      - sonarr.home.local
-    tls:
-      mode: auto
-      issuerRef:
-        name: letsencrypt-prod
+    routes:
+      public:
+        hosts:
+          - sonarr.home.local
+        tls:
+          issuerRef:
+            name: letsencrypt-prod
