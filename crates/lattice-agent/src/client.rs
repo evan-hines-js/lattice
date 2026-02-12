@@ -1357,7 +1357,7 @@ mod tests {
     /// It needs to go through the certificate request and mTLS connection
     /// process before it can communicate with the cell.
     #[tokio::test]
-    async fn story_new_agent_starts_disconnected() {
+    async fn new_agent_starts_disconnected() {
         let config = AgentClientConfig {
             cluster_name: "workload-east-1".to_string(),
             cell_grpc_endpoint: "https://cell.example.com:443".to_string(),
@@ -1385,7 +1385,7 @@ mod tests {
     /// The agent tracks its own state throughout its lifecycle:
     /// Provisioning -> Pivoting -> Ready (or Failed)
     #[tokio::test]
-    async fn story_agent_state_lifecycle_transitions() {
+    async fn agent_state_lifecycle_transitions() {
         let config = AgentClientConfig::default();
         let client = AgentClient::new(config);
 
@@ -1403,7 +1403,7 @@ mod tests {
 
     /// Story: When an agent fails to provision, it enters the failed state
     #[tokio::test]
-    async fn story_agent_enters_failed_state_on_error() {
+    async fn agent_enters_failed_state_on_error() {
         let config = AgentClientConfig::default();
         let client = AgentClient::new(config);
 
@@ -1414,7 +1414,7 @@ mod tests {
 
     /// Story: Agent can be in degraded state when issues occur but still operational
     #[tokio::test]
-    async fn story_agent_degraded_state_for_partial_issues() {
+    async fn agent_degraded_state_for_partial_issues() {
         let config = AgentClientConfig::default();
         let client = AgentClient::new(config);
 
@@ -1429,7 +1429,7 @@ mod tests {
 
     /// Story: Agent sends bootstrap complete after CAPI providers are installed
     #[tokio::test]
-    async fn story_agent_reports_bootstrap_completion() {
+    async fn agent_reports_bootstrap_completion() {
         let config = AgentClientConfig {
             cluster_name: "bootstrap-test".to_string(),
             ..Default::default()
@@ -1457,7 +1457,7 @@ mod tests {
 
     /// Story: Agent reports partial bootstrap (CAPI not yet ready)
     #[tokio::test]
-    async fn story_agent_reports_partial_bootstrap() {
+    async fn agent_reports_partial_bootstrap() {
         let config = AgentClientConfig {
             cluster_name: "partial-bootstrap".to_string(),
             ..Default::default()
@@ -1487,7 +1487,7 @@ mod tests {
 
     /// Story: When agent is not connected, sending messages fails gracefully
     #[tokio::test]
-    async fn story_sending_when_not_connected_returns_error() {
+    async fn sending_when_not_connected_returns_error() {
         let config = AgentClientConfig {
             cluster_name: "disconnected-agent".to_string(),
             ..Default::default()
@@ -1502,7 +1502,7 @@ mod tests {
 
     /// Story: When the message channel closes unexpectedly, sends return ChannelClosed
     #[tokio::test]
-    async fn story_channel_closure_detected_on_send() {
+    async fn channel_closure_detected_on_send() {
         let config = AgentClientConfig {
             cluster_name: "channel-closed-test".to_string(),
             ..Default::default()
@@ -1528,7 +1528,7 @@ mod tests {
     ///
     /// Shutdown should be idempotent and safe to call in any state.
     #[tokio::test]
-    async fn story_shutdown_is_idempotent() {
+    async fn shutdown_is_idempotent() {
         let config = AgentClientConfig::default();
         let mut client = AgentClient::new(config);
 
@@ -1543,7 +1543,7 @@ mod tests {
 
     /// Story: Agent shutdown signals background tasks to stop
     #[tokio::test]
-    async fn story_shutdown_signals_background_tasks() {
+    async fn shutdown_signals_background_tasks() {
         let config = AgentClientConfig::default();
         let mut client = AgentClient::new(config);
 
@@ -1571,7 +1571,7 @@ mod tests {
 
     /// Story: Agent configuration can be customized for different environments
     #[test]
-    fn story_agent_config_customization() {
+    fn agent_config_customization() {
         let config = AgentClientConfig {
             cell_grpc_endpoint: "https://cell.prod.example.com:443".to_string(),
             cell_http_endpoint: "http://cell.prod.example.com:8080".to_string(),
@@ -1595,7 +1595,7 @@ mod tests {
 
     /// Story: Default configuration provides sensible defaults
     #[test]
-    fn story_default_config_sensible_values() {
+    fn default_config_sensible_values() {
         let config = AgentClientConfig::default();
 
         // 30 second heartbeat is reasonable for cell health monitoring
@@ -1618,7 +1618,7 @@ mod tests {
     /// The agent needs to extract the domain name from URLs for TLS verification.
     /// This should work with HTTPS, HTTP, with/without ports, and IP addresses.
     #[test]
-    fn story_domain_extraction_handles_various_formats() {
+    fn domain_extraction_handles_various_formats() {
         // Standard HTTPS with port
         assert_eq!(
             extract_domain("https://cell.example.com:443"),
@@ -1669,7 +1669,7 @@ mod tests {
     /// When certificate operations fail, error messages should help
     /// diagnose the issue.
     #[test]
-    fn story_certificate_errors_are_descriptive() {
+    fn certificate_errors_are_descriptive() {
         // HTTP errors during CSR submission
         let http_err = CertificateError::HttpError("connection refused".to_string());
         let msg = http_err.to_string();
@@ -1691,7 +1691,7 @@ mod tests {
 
     /// Story: Client errors cover all connection failure modes
     #[test]
-    fn story_client_errors_cover_failure_modes() {
+    fn client_errors_cover_failure_modes() {
         // Invalid endpoint URL
         let err = ClientError::InvalidEndpoint("not a valid URL".to_string());
         assert!(err.to_string().contains("invalid endpoint"));
@@ -1719,7 +1719,7 @@ mod tests {
 
     /// Story: Client errors implement std::error::Error for error handling chains
     #[test]
-    fn story_client_errors_implement_error_trait() {
+    fn client_errors_implement_error_trait() {
         fn takes_error(_: &dyn std::error::Error) {}
 
         let err = ClientError::NotConnected;
@@ -1735,7 +1735,7 @@ mod tests {
 
     /// Story: Agent credentials are cloneable for use in multiple contexts
     #[test]
-    fn story_credentials_can_be_cloned() {
+    fn credentials_can_be_cloned() {
         let creds = AgentCredentials {
             cert_pem: "-----BEGIN CERTIFICATE-----\nMIIC...\n-----END CERTIFICATE-----".to_string(),
             key_pem: "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----".to_string(),
@@ -1757,7 +1757,7 @@ mod tests {
     ///
     /// The AgentReady message includes version information and current state.
     #[tokio::test]
-    async fn story_ready_message_includes_agent_info() {
+    async fn ready_message_includes_agent_info() {
         // Test the message format that send_ready would produce
         let config = AgentClientConfig {
             cluster_name: "ready-test-cluster".to_string(),
@@ -1789,7 +1789,7 @@ mod tests {
 
     /// Story: AgentReady state reflects current agent state
     #[tokio::test]
-    async fn story_ready_message_reflects_current_state() {
+    async fn ready_message_reflects_current_state() {
         let states = [
             AgentState::Provisioning,
             AgentState::Pivoting,
@@ -1824,7 +1824,7 @@ mod tests {
 
     /// Story: Heartbeat messages include timestamp and state
     #[tokio::test]
-    async fn story_heartbeat_message_format() {
+    async fn heartbeat_message_format() {
         let timestamp = prost_types::Timestamp::from(std::time::SystemTime::now());
 
         let msg = AgentMessage {
@@ -1853,7 +1853,7 @@ mod tests {
 
     /// Story: AgentClientConfig is cloneable for sharing across components
     #[test]
-    fn story_config_is_cloneable() {
+    fn config_is_cloneable() {
         let config = AgentClientConfig {
             cell_grpc_endpoint: "https://cell:443".to_string(),
             cell_http_endpoint: "http://cell:8080".to_string(),
@@ -1877,7 +1877,7 @@ mod tests {
 
     /// Story: AgentClientConfig is debuggable for logging
     #[test]
-    fn story_config_is_debuggable() {
+    fn config_is_debuggable() {
         let config = AgentClientConfig {
             cluster_name: "debug-test".to_string(),
             ..Default::default()
@@ -1894,7 +1894,7 @@ mod tests {
 
     /// Story: Client state machine covers all states
     #[test]
-    fn story_client_state_values() {
+    fn client_state_values() {
         // Verify all states exist and are distinct
         let states = [
             ClientState::Disconnected,
@@ -1917,7 +1917,7 @@ mod tests {
 
     /// Story: Client state is clone and copy
     #[test]
-    fn story_client_state_is_copy() {
+    fn client_state_is_copy() {
         let state = ClientState::Connected;
         let copied = state; // Copy
         let also_copied = state; // Also copy (Copy trait means clone() isn't needed)
@@ -1933,7 +1933,7 @@ mod tests {
 
     /// Story: AgentState values match proto definitions
     #[test]
-    fn story_agent_state_proto_conversion() {
+    fn agent_state_proto_conversion() {
         // Verify conversion to proto i32 values
         assert_eq!(i32::from(AgentState::Unknown), 0);
         assert_eq!(i32::from(AgentState::Provisioning), 1);
@@ -1949,7 +1949,7 @@ mod tests {
 
     /// Story: ClientError types are comparable for testing
     #[test]
-    fn story_client_errors_are_comparable() {
+    fn client_errors_are_comparable() {
         // Same error type and content should be equal
         assert_eq!(
             ClientError::InvalidEndpoint("test".to_string()),
@@ -1980,7 +1980,7 @@ mod tests {
 
     /// Story: Agent state can be accessed concurrently from multiple tasks
     #[tokio::test]
-    async fn story_concurrent_state_access() {
+    async fn concurrent_state_access() {
         let config = AgentClientConfig::default();
         let client = Arc::new(AgentClient::new(config));
 
@@ -2004,7 +2004,7 @@ mod tests {
 
     /// Story: Agent state can be written while being read
     #[tokio::test]
-    async fn story_concurrent_state_read_write() {
+    async fn concurrent_state_read_write() {
         let config = AgentClientConfig::default();
         let client = Arc::new(AgentClient::new(config));
 
@@ -2048,7 +2048,7 @@ mod tests {
     /// The agent should track its uptime from the moment it's created,
     /// not from when it connects to the cell.
     #[test]
-    fn story_agent_tracks_uptime() {
+    fn agent_tracks_uptime() {
         let config = AgentClientConfig::default();
         let client = AgentClient::new(config);
 
@@ -2060,7 +2060,7 @@ mod tests {
 
     /// Story: Agent uptime increases over time
     #[tokio::test]
-    async fn story_agent_uptime_increases() {
+    async fn agent_uptime_increases() {
         let config = AgentClientConfig::default();
         let client = AgentClient::new(config);
 
@@ -2084,7 +2084,7 @@ mod tests {
 
     /// Story: API server endpoint uses injected config
     #[test]
-    fn story_api_server_endpoint_uses_config() {
+    fn api_server_endpoint_uses_config() {
         use crate::config::MockK8sEnvConfig;
 
         let mut mock = MockK8sEnvConfig::new();
@@ -2103,7 +2103,7 @@ mod tests {
 
     /// Story: API server endpoint is empty when host not configured
     #[test]
-    fn story_api_server_endpoint_empty_without_host() {
+    fn api_server_endpoint_empty_without_host() {
         use crate::config::MockK8sEnvConfig;
 
         let mut mock = MockK8sEnvConfig::new();

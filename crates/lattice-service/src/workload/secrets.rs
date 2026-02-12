@@ -213,7 +213,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_generates_external_secret() {
+    fn generates_external_secret() {
         let spec = make_spec_with_secrets(vec![(
             "db-creds",
             "database/prod/credentials",
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn story_generates_secret_ref_for_templating() {
+    fn generates_secret_ref_for_templating() {
         let spec = make_spec_with_secrets(vec![(
             "db-creds",
             "database/prod/credentials",
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn story_uses_data_from_when_no_explicit_keys() {
+    fn uses_data_from_when_no_explicit_keys() {
         let spec = make_spec_with_secrets(vec![(
             "api-keys",
             "services/api-keys",
@@ -298,7 +298,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_error_when_missing_id() {
+    fn error_when_missing_id() {
         let mut spec = make_spec_with_secrets(vec![(
             "db-creds",
             "database/prod/credentials",
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn story_error_when_missing_provider() {
+    fn error_when_missing_provider() {
         let mut spec = make_spec_with_secrets(vec![(
             "db-creds",
             "database/prod/credentials",
@@ -346,7 +346,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_multiple_secrets() {
+    fn multiple_secrets() {
         let spec = make_spec_with_secrets(vec![
             (
                 "db-creds",
@@ -378,7 +378,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_no_secrets_returns_empty() {
+    fn no_secrets_returns_empty() {
         let spec = WorkloadSpec::default();
 
         let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();

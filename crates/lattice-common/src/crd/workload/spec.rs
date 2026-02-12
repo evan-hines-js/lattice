@@ -231,7 +231,6 @@ mod tests {
     use super::super::resources::{
         DependencyDirection, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
     };
-    use super::super::scaling::{AutoscalingMetric, ReplicaSpec};
     use super::*;
 
     fn simple_container() -> ContainerSpec {
@@ -258,13 +257,13 @@ mod tests {
     }
 
     #[test]
-    fn story_valid_service_passes_validation() {
+    fn valid_service_passes_validation() {
         let spec = sample_workload();
         assert!(spec.validate().is_ok());
     }
 
     #[test]
-    fn story_service_without_containers_fails() {
+    fn service_without_containers_fails() {
         let spec = WorkloadSpec {
             containers: BTreeMap::new(),
             ..Default::default()
@@ -295,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn story_service_declares_outbound_dependencies() {
+    fn service_declares_outbound_dependencies() {
         let mut resources = BTreeMap::new();
         resources.insert(
             "redis".to_string(),
@@ -324,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn story_service_declares_allowed_callers() {
+    fn service_declares_allowed_callers() {
         let mut resources = BTreeMap::new();
         resources.insert(
             "curl-tester".to_string(),
@@ -353,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn story_bidirectional_relationships() {
+    fn bidirectional_relationships() {
         let mut resources = BTreeMap::new();
         resources.insert(
             "cache".to_string(),
@@ -375,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn story_external_vs_internal_dependencies() {
+    fn external_vs_internal_dependencies() {
         let mut resources = BTreeMap::new();
         resources.insert(
             "google".to_string(),

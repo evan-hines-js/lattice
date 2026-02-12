@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn story_bilateral_agreement_generates_policy() {
+    fn bilateral_agreement_generates_policy() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn story_no_policy_without_bilateral_agreement() {
+    fn no_policy_without_bilateral_agreement() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn story_no_policies_when_not_in_graph() {
+    fn no_policies_when_not_in_graph() {
         let graph = ServiceGraph::new();
         let compiler = PolicyCompiler::new(&graph, "test-cluster");
         let output = compiler.compile("nonexistent", "default");
@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn story_spiffe_uses_trust_domain() {
+    fn spiffe_uses_trust_domain() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn story_cilium_policy_always_generated() {
+    fn cilium_policy_always_generated() {
         let graph = ServiceGraph::new();
         let ns = "default";
 
@@ -357,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn story_external_service_generates_service_entry() {
+    fn external_service_generates_service_entry() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn story_total_count() {
+    fn total_count() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn story_cilium_fqdn_field_serializes_correctly() {
+    fn cilium_fqdn_field_serializes_correctly() {
         let rule = CiliumEgressRule {
             to_endpoints: vec![],
             to_services: vec![],
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn story_is_ip_address_detection() {
+    fn is_ip_address_detection() {
         assert!(PolicyCompiler::is_ip_address("1.1.1.1"));
         assert!(PolicyCompiler::is_ip_address("::1"));
         assert!(!PolicyCompiler::is_ip_address("example.com"));
@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn story_gateway_allow_policy_generated() {
+    fn gateway_allow_policy_generated() {
         let graph = ServiceGraph::new();
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
 
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn story_wildcard_inbound_generates_policy() {
+    fn wildcard_inbound_generates_policy() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
@@ -497,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn story_ipv6_cidr_uses_128_prefix() {
+    fn ipv6_cidr_uses_128_prefix() {
         use crate::crd::ParsedEndpoint;
 
         // Create a service node with IPv4 and IPv6 endpoints
@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn story_mixed_endpoints_categorized_correctly() {
+    fn mixed_endpoints_categorized_correctly() {
         use crate::crd::ParsedEndpoint;
 
         // Create a service node with mixed FQDN and IP endpoints

@@ -31,6 +31,7 @@ mod service_monitor;
 pub use phase::{CompilationContext, CompilerPhase};
 pub use service_monitor::ServiceMonitorPhase;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use kube::discovery::ApiResource;
@@ -569,6 +570,32 @@ impl<'a> ServiceCompiler<'a> {
     }
 }
 
+/// Default Linux capabilities granted to containers by Docker/containerd.
+///
+/// These are the capabilities a container receives when no explicit `drop: [ALL]`
+/// is applied. When `drop_capabilities` is set to something other than `["ALL"]`,
+/// any capability in this set that is NOT in the drop list is implicitly retained
+/// and must be authorized via Cedar policy — otherwise a service can bypass Cedar
+/// by simply not dropping capabilities instead of explicitly adding them.
+///
+/// Reference: <https://docs.docker.com/engine/reference/run/#runtime-privilege-and-linux-capabilities>
+const DEFAULT_CONTAINER_CAPABILITIES: &[&str] = &[
+    "AUDIT_WRITE",
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "FSETID",
+    "KILL",
+    "MKNOD",
+    "NET_BIND_SERVICE",
+    "NET_RAW",
+    "SETFCAP",
+    "SETGID",
+    "SETPCAP",
+    "SETUID",
+    "SYS_CHROOT",
+];
+
 /// Collect security overrides from WorkloadSpec + RuntimeSpec.
 ///
 /// Scans pod-level and container-level fields for any deviation from the
@@ -623,6 +650,39 @@ fn collect_container_overrides(
             container: cname.clone(),
         });
     }
+
+    // If drop_capabilities relaxes the default "drop ALL", retained default
+    // capabilities must also be authorized via Cedar. Without this check a
+    // service can silently keep NET_RAW, SETUID, DAC_OVERRIDE, etc. by
+    // setting `dropCapabilities: []` instead of adding them explicitly.
+    if s.privileged != Some(true) {
+        if let Some(ref drops) = s.drop_capabilities {
+            if !drops.iter().any(|d| d.eq_ignore_ascii_case("ALL")) {
+                let explicitly_added: HashSet<String> = s
+                    .capabilities
+                    .iter()
+                    .map(|c| c.to_ascii_uppercase())
+                    .collect();
+                let dropped: HashSet<String> =
+                    drops.iter().map(|d| d.to_ascii_uppercase()).collect();
+
+                for &default_cap in DEFAULT_CONTAINER_CAPABILITIES {
+                    if dropped.contains(default_cap) {
+                        continue;
+                    }
+                    if explicitly_added.contains(default_cap) {
+                        continue; // already covered by the add-list override above
+                    }
+                    overrides.push(SecurityOverrideRequest {
+                        override_id: format!("capability:{default_cap}"),
+                        category: "capability".into(),
+                        container: cname.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     if s.privileged == Some(true) {
         overrides.push(SecurityOverrideRequest {
             override_id: "privileged".into(),
@@ -932,7 +992,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    async fn story_compile_delegates_to_both_compilers() {
+    async fn compile_delegates_to_both_compilers() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
         let env = "prod";
@@ -967,7 +1027,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    async fn story_environment_from_label() {
+    async fn environment_from_label() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
 
@@ -987,7 +1047,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_environment_falls_back_to_namespace() {
+    async fn environment_falls_back_to_namespace() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
 
@@ -1011,7 +1071,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    async fn story_workloads_without_graph_entry() {
+    async fn workloads_without_graph_entry() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
         // Don't add service to graph
@@ -1035,7 +1095,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    async fn story_resource_count() {
+    async fn resource_count() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
         let spec = make_service_spec_for_graph(vec![], vec![]);
@@ -1057,7 +1117,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    async fn story_compiled_service_is_empty() {
+    async fn compiled_service_is_empty() {
         let empty = CompiledService::new();
         assert!(empty.is_empty());
 
@@ -1076,7 +1136,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    async fn story_service_with_ingress_generates_gateway_resources() {
+    async fn service_with_ingress_generates_gateway_resources() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
         let spec = make_service_spec_for_graph(vec![], vec![]);
@@ -1114,7 +1174,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_service_without_ingress_has_no_gateway_resources() {
+    async fn service_without_ingress_has_no_gateway_resources() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
         let spec = make_service_spec_for_graph(vec![], vec![]);
@@ -1134,7 +1194,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_resource_count_includes_ingress() {
+    async fn resource_count_includes_ingress() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
         let spec = make_service_spec_for_graph(vec![], vec![]);
@@ -1157,7 +1217,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    async fn story_backup_annotations_injected() {
+    async fn backup_annotations_injected() {
         use crate::crd::{
             BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,
             VolumeBackupSpec,
@@ -1215,7 +1275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_no_backup_no_annotations() {
+    async fn no_backup_no_annotations() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
         let service = make_service("my-app", "default");
@@ -1236,7 +1296,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_extensions_counted_in_resource_count() {
+    fn extensions_counted_in_resource_count() {
         let mut compiled = CompiledService::new();
         assert_eq!(compiled.resource_count(), 0);
 
@@ -1254,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn story_extensions_included_in_is_empty() {
+    fn extensions_included_in_is_empty() {
         let mut compiled = CompiledService::new();
         assert!(compiled.is_empty());
 
@@ -1308,7 +1368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_compiler_phase_gets_called() {
+    async fn compiler_phase_gets_called() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
         let service = make_service("my-app", "default");
@@ -1325,7 +1385,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_phase_can_add_dynamic_resource() {
+    async fn phase_can_add_dynamic_resource() {
         struct AddResourcePhase;
 
         impl CompilerPhase for AddResourcePhase {
@@ -1370,7 +1430,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_phase_error_stops_compilation() {
+    async fn phase_error_stops_compilation() {
         struct FailingPhase;
 
         impl CompilerPhase for FailingPhase {
@@ -1411,7 +1471,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_no_phases_no_extensions() {
+    async fn no_phases_no_extensions() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new();
         let service = make_service("my-app", "default");
@@ -1429,7 +1489,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_collect_security_overrides_empty() {
+    fn collect_security_overrides_empty() {
         // Default service has no security overrides
         let service = make_service("my-app", "default");
         let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
@@ -1437,7 +1497,7 @@ mod tests {
     }
 
     #[test]
-    fn story_collect_security_overrides_capabilities() {
+    fn collect_security_overrides_capabilities() {
         let mut service = make_service("my-app", "default");
         service
             .spec
@@ -1459,7 +1519,7 @@ mod tests {
     }
 
     #[test]
-    fn story_collect_security_overrides_privileged() {
+    fn collect_security_overrides_privileged() {
         let mut service = make_service("my-app", "default");
         service
             .spec
@@ -1479,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn story_collect_security_overrides_run_as_root() {
+    fn collect_security_overrides_run_as_root() {
         // runAsUser: 0
         let mut service = make_service("my-app", "default");
         service
@@ -1515,7 +1575,7 @@ mod tests {
     }
 
     #[test]
-    fn story_collect_security_overrides_pod_level() {
+    fn collect_security_overrides_pod_level() {
         let mut service = make_service("my-app", "default");
         service.spec.runtime.host_network = Some(true);
         service.spec.runtime.share_process_namespace = Some(true);
@@ -1531,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn story_collect_security_overrides_profiles() {
+    fn collect_security_overrides_profiles() {
         let mut service = make_service("my-app", "default");
         service
             .spec
@@ -1555,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn story_collect_security_overrides_read_write_root_fs() {
+    fn collect_security_overrides_read_write_root_fs() {
         let mut service = make_service("my-app", "default");
         service
             .spec
@@ -1574,7 +1634,7 @@ mod tests {
     }
 
     #[test]
-    fn story_collect_security_overrides_allow_priv_escalation() {
+    fn collect_security_overrides_allow_priv_escalation() {
         let mut service = make_service("my-app", "default");
         service
             .spec
@@ -1593,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn story_collect_security_overrides_sidecars() {
+    fn collect_security_overrides_sidecars() {
         let mut service = make_service("my-app", "default");
         service.spec.runtime.sidecars.insert(
             "vpn".to_string(),
@@ -1614,7 +1674,7 @@ mod tests {
     }
 
     #[test]
-    fn story_collect_security_overrides_defaults_not_flagged() {
+    fn collect_security_overrides_defaults_not_flagged() {
         // Explicitly setting defaults should not trigger overrides
         let mut service = make_service("my-app", "default");
         service
@@ -1637,12 +1697,188 @@ mod tests {
         assert!(overrides.is_empty());
     }
 
+    #[test]
+    fn collect_security_overrides_drop_caps_empty_retains_all_defaults() {
+        // dropCapabilities: [] means the container keeps ALL default caps
+        // — this is a huge security relaxation that must require Cedar auth.
+        let mut service = make_service("my-app", "default");
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            drop_capabilities: Some(vec![]),
+            ..Default::default()
+        });
+
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
+        assert_eq!(overrides.len(), DEFAULT_CONTAINER_CAPABILITIES.len());
+
+        let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
+        for &cap in DEFAULT_CONTAINER_CAPABILITIES {
+            assert!(ids.contains(&format!("capability:{cap}").as_str()));
+        }
+        assert!(overrides.iter().all(|o| o.category == "capability"));
+        assert!(overrides
+            .iter()
+            .all(|o| o.container.as_deref() == Some("main")));
+    }
+
+    #[test]
+    fn collect_security_overrides_drop_caps_partial() {
+        // dropCapabilities: ["NET_RAW", "MKNOD"] means everything else is retained
+        let mut service = make_service("my-app", "default");
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            drop_capabilities: Some(vec!["NET_RAW".to_string(), "MKNOD".to_string()]),
+            ..Default::default()
+        });
+
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
+        let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
+
+        // Dropped caps should NOT appear
+        assert!(!ids.contains(&"capability:NET_RAW"));
+        assert!(!ids.contains(&"capability:MKNOD"));
+
+        // Retained caps should appear
+        assert!(ids.contains(&"capability:CHOWN"));
+        assert!(ids.contains(&"capability:SETUID"));
+        assert!(ids.contains(&"capability:DAC_OVERRIDE"));
+        assert_eq!(
+            overrides.len(),
+            DEFAULT_CONTAINER_CAPABILITIES.len() - 2 // minus NET_RAW and MKNOD
+        );
+    }
+
+    #[test]
+    fn collect_security_overrides_drop_caps_deduplicates_with_add() {
+        // If a cap is in both the add list and would be in the retained defaults,
+        // only one override should be generated (the explicit add).
+        let mut service = make_service("my-app", "default");
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            capabilities: vec!["NET_RAW".to_string()],
+            drop_capabilities: Some(vec![]),
+            ..Default::default()
+        });
+
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
+        let net_raw_count = overrides
+            .iter()
+            .filter(|o| o.override_id == "capability:NET_RAW")
+            .count();
+        assert_eq!(net_raw_count, 1);
+
+        // Total = 1 explicit add (NET_RAW) + 13 retained defaults (all except NET_RAW)
+        assert_eq!(overrides.len(), DEFAULT_CONTAINER_CAPABILITIES.len());
+    }
+
+    #[test]
+    fn collect_security_overrides_drop_all_no_retained() {
+        // dropCapabilities: ["ALL"] (the PSS default) should NOT generate retained overrides
+        let mut service = make_service("my-app", "default");
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            drop_capabilities: Some(vec!["ALL".to_string()]),
+            ..Default::default()
+        });
+
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn collect_security_overrides_drop_caps_case_insensitive() {
+        // Drop list should match case-insensitively
+        let mut service = make_service("my-app", "default");
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            drop_capabilities: Some(vec!["net_raw".to_string(), "Mknod".to_string()]),
+            ..Default::default()
+        });
+
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
+        let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
+        assert!(!ids.contains(&"capability:NET_RAW"));
+        assert!(!ids.contains(&"capability:MKNOD"));
+        assert_eq!(overrides.len(), DEFAULT_CONTAINER_CAPABILITIES.len() - 2);
+    }
+
+    #[test]
+    fn collect_security_overrides_privileged_skips_drop_caps_check() {
+        // Privileged containers already get ALL capabilities — the "privileged"
+        // override covers it, so drop_capabilities relaxation is irrelevant.
+        let mut service = make_service("my-app", "default");
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            privileged: Some(true),
+            drop_capabilities: Some(vec![]),
+            ..Default::default()
+        });
+
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
+        let ids: Vec<&str> = overrides.iter().map(|o| o.override_id.as_str()).collect();
+        assert!(ids.contains(&"privileged"));
+        // Should NOT have individual retained capability overrides
+        assert!(!ids.contains(&"capability:NET_RAW"));
+        assert!(!ids.contains(&"capability:SETUID"));
+        assert_eq!(overrides.len(), 1); // just "privileged"
+    }
+
+    #[test]
+    fn collect_security_overrides_none_drop_caps_is_safe() {
+        // drop_capabilities: None means the compiler applies the default ["ALL"],
+        // so no retained capability overrides should be generated.
+        let mut service = make_service("my-app", "default");
+        service
+            .spec
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .security = Some(SecurityContext {
+            drop_capabilities: None,
+            ..Default::default()
+        });
+
+        let overrides = collect_security_overrides(&service.spec.workload, &service.spec.runtime);
+        assert!(overrides.is_empty());
+    }
+
     // =========================================================================
     // Story: Security Override Authorization in Compilation
     // =========================================================================
 
     #[tokio::test]
-    async fn story_compile_fails_when_security_override_denied() {
+    async fn compile_fails_when_security_override_denied() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new(); // default-deny
 
@@ -1669,7 +1905,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_compile_succeeds_when_security_override_permitted() {
+    async fn compile_succeeds_when_security_override_permitted() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::with_policies(
             r#"
@@ -1702,7 +1938,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_compile_no_overrides_no_policy_needed() {
+    async fn compile_no_overrides_no_policy_needed() {
         let graph = ServiceGraph::new();
         let cedar = PolicyEngine::new(); // default-deny — but no overrides, so should pass
 
@@ -1720,7 +1956,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    async fn story_effective_backup_overrides_inline() {
+    async fn effective_backup_overrides_inline() {
         use crate::crd::{
             BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,
             VolumeBackupSpec,
@@ -1773,7 +2009,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story_effective_backup_none_falls_back_to_inline() {
+    async fn effective_backup_none_falls_back_to_inline() {
         use crate::crd::{BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec};
 
         let graph = ServiceGraph::new();

@@ -1598,7 +1598,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_always_generates_service_account() {
+    fn always_generates_service_account() {
         let service = make_service("my-app", "default");
         let output = compile_service(&service);
 
@@ -1615,7 +1615,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_always_generates_deployment() {
+    fn always_generates_deployment() {
         let service = make_service("my-app", "prod");
         let output = compile_service(&service);
 
@@ -1628,7 +1628,7 @@ mod tests {
     }
 
     #[test]
-    fn story_deployment_has_correct_labels() {
+    fn deployment_has_correct_labels() {
         let service = make_service("my-app", "default");
         let output = compile_service(&service);
 
@@ -1653,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn story_deployment_has_complete_spec() {
+    fn deployment_has_complete_spec() {
         let service = make_service("my-app", "default");
         let output = compile_service(&service);
 
@@ -1699,7 +1699,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_generates_service_with_ports() {
+    fn generates_service_with_ports() {
         let service = make_service("my-app", "default");
         let output = compile_service(&service);
 
@@ -1711,7 +1711,7 @@ mod tests {
     }
 
     #[test]
-    fn story_no_service_without_ports() {
+    fn no_service_without_ports() {
         let mut service = make_service("my-app", "default");
         service.spec.workload.service = None;
 
@@ -1980,7 +1980,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_rolling_strategy() {
+    fn rolling_strategy() {
         let service = make_service("my-app", "default");
         let output = compile_service(&service);
 
@@ -1999,7 +1999,7 @@ mod tests {
     }
 
     #[test]
-    fn story_canary_strategy() {
+    fn canary_strategy() {
         let mut service = make_service("my-app", "default");
         service.spec.deploy.strategy = DeployStrategy::Canary;
 
@@ -2024,7 +2024,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_container_environment_variables_via_env_from() {
+    fn container_environment_variables_via_env_from() {
         let mut service = make_service("my-app", "default");
         let container = service
             .spec
@@ -2060,7 +2060,7 @@ mod tests {
     }
 
     #[test]
-    fn story_container_ports_from_service() {
+    fn container_ports_from_service() {
         let service = make_service("my-app", "default");
 
         let output = compile_service(&service);
@@ -2083,7 +2083,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_is_empty() {
+    fn is_empty() {
         let empty = GeneratedWorkloads::new();
         assert!(empty.is_empty());
 
@@ -2180,7 +2180,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_default_security_context_applied() {
+    fn default_security_context_applied() {
         // No security context specified → full restricted defaults
         let k8s_ctx = PodTemplateCompiler::compile_security_context(None);
 
@@ -2202,7 +2202,7 @@ mod tests {
     }
 
     #[test]
-    fn story_default_security_context_for_sidecars() {
+    fn default_security_context_for_sidecars() {
         use crate::crd::SidecarSpec;
 
         let mut service = make_service("my-app", "default");
@@ -2238,7 +2238,7 @@ mod tests {
     }
 
     #[test]
-    fn story_security_context_with_user_overrides() {
+    fn security_context_with_user_overrides() {
         use crate::crd::SecurityContext;
 
         let security = SecurityContext {
@@ -2270,7 +2270,7 @@ mod tests {
     }
 
     #[test]
-    fn story_privileged_mode_relaxes_defaults() {
+    fn privileged_mode_relaxes_defaults() {
         use crate::crd::SecurityContext;
 
         let security = SecurityContext {
@@ -2290,7 +2290,7 @@ mod tests {
     }
 
     #[test]
-    fn story_privileged_with_caps_keeps_add() {
+    fn privileged_with_caps_keeps_add() {
         use crate::crd::SecurityContext;
 
         let security = SecurityContext {
@@ -2309,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn story_run_as_user_zero_disables_run_as_non_root() {
+    fn run_as_user_zero_disables_run_as_non_root() {
         use crate::crd::SecurityContext;
 
         let security = SecurityContext {
@@ -2324,7 +2324,7 @@ mod tests {
     }
 
     #[test]
-    fn story_user_can_override_readonly_root_fs() {
+    fn user_can_override_readonly_root_fs() {
         use crate::crd::SecurityContext;
 
         let security = SecurityContext {
@@ -2337,7 +2337,7 @@ mod tests {
     }
 
     #[test]
-    fn story_seccomp_profile_defaults() {
+    fn seccomp_profile_defaults() {
         let k8s_ctx = PodTemplateCompiler::compile_security_context(None);
         let seccomp = k8s_ctx
             .seccomp_profile
@@ -2347,7 +2347,7 @@ mod tests {
     }
 
     #[test]
-    fn story_seccomp_profile_user_override() {
+    fn seccomp_profile_user_override() {
         use crate::crd::SecurityContext;
 
         let security = SecurityContext {
@@ -2363,7 +2363,7 @@ mod tests {
     }
 
     #[test]
-    fn story_apparmor_profile_defaults() {
+    fn apparmor_profile_defaults() {
         let k8s_ctx = PodTemplateCompiler::compile_security_context(None);
         let apparmor = k8s_ctx
             .app_armor_profile
@@ -2373,7 +2373,7 @@ mod tests {
     }
 
     #[test]
-    fn story_apparmor_profile_localhost() {
+    fn apparmor_profile_localhost() {
         use crate::crd::SecurityContext;
 
         let security = SecurityContext {
@@ -2398,7 +2398,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_pod_security_context_sysctls() {
+    fn pod_security_context_sysctls() {
         let mut service = make_service("my-app", "default");
         service.spec.runtime.sysctls.insert(
             "net.ipv4.conf.all.src_valid_mark".to_string(),
@@ -2431,7 +2431,7 @@ mod tests {
     }
 
     #[test]
-    fn story_pod_security_context_has_secure_defaults() {
+    fn pod_security_context_has_secure_defaults() {
         let service = make_service("my-app", "default");
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2456,7 +2456,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_emptydir_in_deployment_with_readonly_rootfs() {
+    fn emptydir_in_deployment_with_readonly_rootfs() {
         // Simulate nginx pattern: read-only rootfs + emptyDir for writable paths
         let mut service = make_service("nginx-app", "default");
         let container = service.spec.workload.containers.get_mut("main").unwrap();
@@ -2529,7 +2529,7 @@ mod tests {
     }
 
     #[test]
-    fn story_emptydir_tmpfs_flows_to_deployment() {
+    fn emptydir_tmpfs_flows_to_deployment() {
         let mut service = make_service("my-app", "default");
         let container = service.spec.workload.containers.get_mut("main").unwrap();
         container.volumes.insert(
@@ -2565,7 +2565,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_init_containers_separated() {
+    fn init_containers_separated() {
         use crate::crd::SidecarSpec;
 
         let mut service = make_service("my-app", "default");
@@ -2621,7 +2621,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_sidecars_included_in_deployment() {
+    fn sidecars_included_in_deployment() {
         use crate::crd::{SecurityContext, SidecarSpec};
 
         let mut service = make_service("my-app", "default");
@@ -2669,7 +2669,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_host_network_and_share_process_namespace() {
+    fn host_network_and_share_process_namespace() {
         let mut service = make_service("my-app", "default");
         service.spec.runtime.host_network = Some(true);
         service.spec.runtime.share_process_namespace = Some(true);
@@ -2685,7 +2685,7 @@ mod tests {
     }
 
     #[test]
-    fn story_host_network_none_by_default() {
+    fn host_network_none_by_default() {
         let service = make_service("my-app", "default");
         let output = compile_service(&service);
         let deployment = output.deployment.expect("should have deployment");
@@ -2704,7 +2704,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_main_container_security_context() {
+    fn main_container_security_context() {
         use crate::crd::SecurityContext;
 
         let mut service = make_service("my-app", "default");
@@ -3229,7 +3229,7 @@ mod tests {
     }
 
     #[test]
-    fn story_secret_var_compiles_to_secret_key_ref() {
+    fn secret_var_compiles_to_secret_key_ref() {
         let service = make_service_with_secret_vars(
             vec![("DB_PASSWORD", "${secret.db-creds.password}")],
             "db-creds",
@@ -3265,7 +3265,7 @@ mod tests {
     }
 
     #[test]
-    fn story_secret_var_and_secret_key_ref_coexist() {
+    fn secret_var_and_secret_key_ref_coexist() {
         let service = make_service_with_secret_vars(
             vec![
                 ("DB_HOST", "postgres.svc"),
@@ -3299,7 +3299,7 @@ mod tests {
     }
 
     #[test]
-    fn story_secret_var_error_missing_resource() {
+    fn secret_var_error_missing_resource() {
         let mut service = make_service_with_secret_vars(
             vec![("SECRET", "${secret.nonexistent.key}")],
             "db-creds",
@@ -3324,7 +3324,7 @@ mod tests {
     }
 
     #[test]
-    fn story_secret_var_error_wrong_type() {
+    fn secret_var_error_wrong_type() {
         let mut service = make_service_with_secret_vars(vec![("VAR", "${secret.db.host}")], "db");
         service.spec.workload.resources.get_mut("db").unwrap().type_ =
             crate::crd::ResourceType::Service;
@@ -3347,7 +3347,7 @@ mod tests {
     }
 
     #[test]
-    fn story_secret_var_error_invalid_key() {
+    fn secret_var_error_invalid_key() {
         let service = make_service_with_secret_vars(
             vec![("VAR", "${secret.db-creds.nonexistent}")],
             "db-creds",
@@ -3375,7 +3375,7 @@ mod tests {
     }
 
     #[test]
-    fn story_secret_var_no_explicit_keys_allows_any_key() {
+    fn secret_var_no_explicit_keys_allows_any_key() {
         let service =
             make_service_with_secret_vars(vec![("VAR", "${secret.db-creds.anything}")], "db-creds");
         let mut secret_refs = BTreeMap::new();
@@ -3398,7 +3398,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_image_pull_secrets_resolved_from_secret_refs() {
+    fn image_pull_secrets_resolved_from_secret_refs() {
         let mut service = make_service("myapp", "prod");
         service.spec.runtime.image_pull_secrets = vec!["ghcr-creds".to_string()];
         service.spec.workload.resources.insert(
@@ -3436,7 +3436,7 @@ mod tests {
     }
 
     #[test]
-    fn story_image_pull_secrets_error_missing_resource() {
+    fn image_pull_secrets_error_missing_resource() {
         let mut service = make_service("myapp", "prod");
         service.spec.runtime.image_pull_secrets = vec!["nonexistent".to_string()];
 
@@ -3448,7 +3448,7 @@ mod tests {
     }
 
     #[test]
-    fn story_image_pull_secrets_error_wrong_type() {
+    fn image_pull_secrets_error_wrong_type() {
         let mut service = make_service("myapp", "prod");
         service.spec.runtime.image_pull_secrets = vec!["db".to_string()];
         service.spec.workload.resources.insert(
@@ -3477,7 +3477,7 @@ mod tests {
     }
 
     #[test]
-    fn story_no_image_pull_secrets_by_default() {
+    fn no_image_pull_secrets_by_default() {
         let service = make_service("myapp", "prod");
         let output = compile_service(&service);
         let deployment = output.deployment.unwrap();

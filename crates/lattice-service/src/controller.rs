@@ -1748,7 +1748,7 @@ mod tests {
 
     /// Story: New service transitions from Pending to Compiling
     #[tokio::test]
-    async fn story_new_service_transitions_to_compiling() {
+    async fn new_service_transitions_to_compiling() {
         let service = Arc::new(sample_service("my-service"));
         let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
@@ -1767,7 +1767,7 @@ mod tests {
 
     /// Story: Service with dependencies waits for them
     #[tokio::test]
-    async fn story_service_waits_for_dependencies() {
+    async fn service_waits_for_dependencies() {
         let mut service = service_with_deps("frontend", vec!["backend"]);
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
         let service = Arc::new(service);
@@ -1788,7 +1788,7 @@ mod tests {
 
     /// Story: Service becomes ready when dependencies exist
     #[tokio::test]
-    async fn story_service_becomes_ready_with_deps() {
+    async fn service_becomes_ready_with_deps() {
         let mut service = service_with_deps("frontend", vec!["backend"]);
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
         let service = Arc::new(service);
@@ -1811,7 +1811,7 @@ mod tests {
 
     /// Story: Service in Ready state stays ready
     #[tokio::test]
-    async fn story_ready_service_stays_ready() {
+    async fn ready_service_stays_ready() {
         let mut service = sample_service("my-service");
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Ready));
         let service = Arc::new(service);
@@ -1831,7 +1831,7 @@ mod tests {
 
     /// Story: Invalid service transitions to Failed
     #[tokio::test]
-    async fn story_invalid_service_fails() {
+    async fn invalid_service_fails() {
         let mut service = sample_service("bad-service");
         // Make it invalid by removing containers
         service.spec.workload.containers.clear();
@@ -1850,7 +1850,7 @@ mod tests {
 
     /// Story: External service reconciles immediately to Ready
     #[tokio::test]
-    async fn story_external_service_becomes_ready() {
+    async fn external_service_becomes_ready() {
         let external = Arc::new(sample_external_service("stripe"));
         let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
@@ -1873,7 +1873,7 @@ mod tests {
 
     /// Story: Graph tracks active edges with bilateral agreements
     #[tokio::test]
-    async fn story_graph_tracks_bilateral_agreements() {
+    async fn graph_tracks_bilateral_agreements() {
         let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
@@ -1893,7 +1893,7 @@ mod tests {
 
     /// Story: Graph handles service deletion
     #[tokio::test]
-    async fn story_graph_handles_deletion() {
+    async fn graph_handles_deletion() {
         let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
@@ -1916,7 +1916,7 @@ mod tests {
 
     /// Story: Error policy distinguishes retryable vs non-retryable errors
     #[test]
-    fn story_error_policy_requeues() {
+    fn error_policy_requeues() {
         let service = Arc::new(sample_service("my-service"));
         let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
@@ -1938,7 +1938,7 @@ mod tests {
 
     /// Story: Detect missing internal dependencies
     #[test]
-    fn story_detect_missing_dependencies() {
+    fn detect_missing_dependencies() {
         let graph = ServiceGraph::new();
         let spec = service_with_deps("frontend", vec!["backend", "cache"]).spec;
 
@@ -1966,7 +1966,7 @@ mod tests {
 
     /// Story: Services are isolated by environment
     #[tokio::test]
-    async fn story_services_isolated_by_environment() {
+    async fn services_isolated_by_environment() {
         let mock_kube = mock_kube_with_policies(vec![]);
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
 
@@ -1991,7 +1991,7 @@ mod tests {
 
     /// Story: Context can share graph across instances
     #[test]
-    fn story_shared_graph_across_contexts() {
+    fn shared_graph_across_contexts() {
         let mock_kube1 = Arc::new(mock_kube_with_policies(vec![]));
         let mock_kube2 = Arc::new(mock_kube_with_policies(vec![]));
         let shared_graph = Arc::new(ServiceGraph::new());
@@ -2054,7 +2054,7 @@ mod tests {
     /// Story: When policies with backup specs match a service, compile_and_apply
     /// produces backup annotations on the deployment
     #[tokio::test]
-    async fn story_policy_backup_applied_to_service() {
+    async fn policy_backup_applied_to_service() {
         let policy_backup = ServiceBackupSpec {
             hooks: Some(BackupHooksSpec {
                 pre: vec![BackupHook {
@@ -2086,7 +2086,7 @@ mod tests {
 
     /// Story: resolve_effective_backup merges policy + inline correctly
     #[tokio::test]
-    async fn story_resolve_effective_backup_merges_policies() {
+    async fn resolve_effective_backup_merges_policies() {
         // Low-priority policy: hooks + volumes
         let low_policy = make_policy(
             "low",
@@ -2136,7 +2136,7 @@ mod tests {
 
     /// Story: No matching policies returns None
     #[tokio::test]
-    async fn story_resolve_effective_backup_no_policies() {
+    async fn resolve_effective_backup_no_policies() {
         let mock_kube = mock_kube_with_policies(vec![]);
         let service = sample_service("my-app");
         let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
@@ -2150,7 +2150,7 @@ mod tests {
 
     /// Story: Policy matches only same namespace when no namespace selector
     #[tokio::test]
-    async fn story_resolve_effective_backup_namespace_scoping() {
+    async fn resolve_effective_backup_namespace_scoping() {
         // Policy in "other" namespace — should NOT match service in "test"
         let policy = make_policy(
             "other-ns-policy",
