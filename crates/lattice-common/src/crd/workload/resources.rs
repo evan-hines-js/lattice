@@ -476,10 +476,7 @@ fn validate_duration_string(s: &str) -> Result<(), String> {
 
         // Parse unit
         if remaining.is_empty() {
-            return Err(format!(
-                "missing unit suffix (h/m/s) in duration '{}'",
-                s
-            ));
+            return Err(format!("missing unit suffix (h/m/s) in duration '{}'", s));
         }
         let unit = remaining.chars().next().unwrap();
         if !matches!(unit, 'h' | 'm' | 's') {
@@ -1156,10 +1153,7 @@ mod tests {
             id: Some("vault/path".to_string()),
             params: Some(BTreeMap::from([
                 ("provider".to_string(), serde_json::json!("vault")),
-                (
-                    "secretType".to_string(),
-                    serde_json::json!("invalid-type"),
-                ),
+                ("secretType".to_string(), serde_json::json!("invalid-type")),
             ])),
             ..Default::default()
         };

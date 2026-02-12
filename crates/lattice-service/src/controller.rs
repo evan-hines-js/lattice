@@ -958,9 +958,7 @@ pub async fn reconcile(
 
             try_compile(&service, &name, namespace, &ctx).await
         }
-        ServicePhase::Failed => {
-            try_compile(&service, &name, namespace, &ctx).await
-        }
+        ServicePhase::Failed => try_compile(&service, &name, namespace, &ctx).await,
     }
 }
 
@@ -1060,7 +1058,10 @@ async fn resolve_policy_defaults(
     service: &LatticeService,
     namespace: &str,
     ctx: &ServiceContext,
-) -> (Option<ServiceBackupSpec>, Option<crate::crd::IngressPolicySpec>) {
+) -> (
+    Option<ServiceBackupSpec>,
+    Option<crate::crd::IngressPolicySpec>,
+) {
     let policies = match ctx.kube.list_policies().await {
         Ok(p) => p,
         Err(e) => {

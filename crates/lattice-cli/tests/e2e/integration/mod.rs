@@ -20,6 +20,7 @@
 //! cargo test --features provider-e2e --test e2e test_mesh_standalone -- --ignored --nocapture
 //! ```
 
+pub mod autoscaling;
 pub mod capi;
 pub mod cedar;
 pub mod cedar_secrets;

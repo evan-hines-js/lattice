@@ -3524,7 +3524,10 @@ mod tests {
 
     #[test]
     fn sanitize_dns_label_dots() {
-        assert_eq!(sanitize_dns_label("api-main-file-etc-app-config.yaml"), "api-main-file-etc-app-config-yaml");
+        assert_eq!(
+            sanitize_dns_label("api-main-file-etc-app-config.yaml"),
+            "api-main-file-etc-app-config-yaml"
+        );
     }
 
     #[test]

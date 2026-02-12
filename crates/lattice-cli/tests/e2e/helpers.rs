@@ -3077,7 +3077,10 @@ spec:
     );
 
     apply_yaml_with_retry(kubeconfig, &yaml).await?;
-    info!("[CertManager] ClusterIssuer '{}' ensured (self-signed)", name);
+    info!(
+        "[CertManager] ClusterIssuer '{}' ensured (self-signed)",
+        name
+    );
     Ok(())
 }
 

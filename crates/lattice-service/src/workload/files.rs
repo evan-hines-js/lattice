@@ -463,7 +463,10 @@ mod tests {
         assert_eq!(result.volume_mounts.len(), 1);
         // Volume name must be DNS-label safe (dots replaced with dashes)
         assert_eq!(result.volumes[0].name, "api-main-file-etc-app-config-yaml");
-        assert_eq!(result.volume_mounts[0].name, "api-main-file-etc-app-config-yaml");
+        assert_eq!(
+            result.volume_mounts[0].name,
+            "api-main-file-etc-app-config-yaml"
+        );
     }
 
     #[test]

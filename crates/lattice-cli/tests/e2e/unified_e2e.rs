@@ -12,7 +12,7 @@
 //! 2. Kubeconfig + proxy verification
 //! 3. Cedar cluster-access policy enforcement
 //! 4. Multi-hop proxy (if workload2)
-//! 5. Mesh + secrets + Cedar secret tests (parallel) + workload2 deletion
+//! 5. Mesh + secrets + Cedar secret + autoscaling tests (parallel) + workload2 deletion
 //! 6. Workload deletion (unpivot to mgmt)
 //! 7. Management cluster uninstall
 //!
@@ -130,12 +130,12 @@ async fn run_full_e2e() -> Result<(), String> {
     }
 
     // =========================================================================
-    // Phase 7: Run mesh + secrets + Cedar secret tests + delete workload2 (pool)
+    // Phase 7: Run mesh + secrets + Cedar secret + autoscaling tests + delete workload2 (pool)
     // =========================================================================
     if ctx.has_workload2() {
-        info!("[Phase 7] Running mesh/secrets/cedar tests + deleting workload2 (pool=3)...");
+        info!("[Phase 7] Running mesh/secrets/cedar/autoscaling tests + deleting workload2 (pool=3)...");
     } else {
-        info!("[Phase 7] Running mesh/secrets/cedar tests (pool=3, workload2 disabled)...");
+        info!("[Phase 7] Running mesh/secrets/cedar/autoscaling tests (pool=3, workload2 disabled)...");
     }
 
     // Limit concurrent proxy load — at most 3 tasks run simultaneously
@@ -204,6 +204,19 @@ async fn run_full_e2e() -> Result<(), String> {
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::cedar_secrets::run_cedar_secret_tests(&ctx2).await
+            }),
+        ));
+    }
+
+    // Autoscaling: KEDA pod scale-up
+    {
+        let ctx2 = ctx.clone();
+        let sem = pool.clone();
+        handles.push((
+            "Autoscaling",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::autoscaling::run_autoscaling_tests(&ctx2).await
             }),
         ));
     }
