@@ -1096,6 +1096,30 @@ pub(crate) fn gpu_shm_volume(gpu: Option<&GpuParams>) -> Option<(Volume, VolumeM
     })
 }
 
+/// Sanitize a string into a valid K8s DNS label.
+///
+/// DNS labels: `[a-z0-9]([-a-z0-9]*[a-z0-9])?`, max 63 chars.
+/// Non-alphanumeric characters become `-`, uppercase becomes lowercase,
+/// leading/trailing hyphens are stripped, and the result is truncated to 63 chars.
+pub(crate) fn sanitize_dns_label(s: &str) -> String {
+    let sanitized: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.len() > 63 {
+        trimmed[..63].trim_end_matches('-').to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Compute image pull policy from the image reference.
 ///
 /// Returns `Always` when the tag is `:latest` or absent (bare image name),
@@ -3492,5 +3516,59 @@ mod tests {
         assert!(json.get("nvidia.com/gpu").is_none());
         assert!(json.get("nvidia.com/gpumem").is_none());
         assert!(json.get("nvidia.com/gpucores").is_none());
+    }
+
+    // =========================================================================
+    // Story: DNS Label Sanitization
+    // =========================================================================
+
+    #[test]
+    fn sanitize_dns_label_dots() {
+        assert_eq!(sanitize_dns_label("api-main-file-etc-app-config.yaml"), "api-main-file-etc-app-config-yaml");
+    }
+
+    #[test]
+    fn sanitize_dns_label_underscores() {
+        assert_eq!(sanitize_dns_label("my_volume_name"), "my-volume-name");
+    }
+
+    #[test]
+    fn sanitize_dns_label_uppercase() {
+        assert_eq!(sanitize_dns_label("MyService"), "myservice");
+    }
+
+    #[test]
+    fn sanitize_dns_label_leading_trailing_special() {
+        assert_eq!(sanitize_dns_label("--hello--"), "hello");
+        assert_eq!(sanitize_dns_label("/data/logs/"), "data-logs");
+    }
+
+    #[test]
+    fn sanitize_dns_label_truncates_to_63() {
+        let long = "a".repeat(100);
+        let result = sanitize_dns_label(&long);
+        assert!(result.len() <= 63);
+        assert_eq!(result, "a".repeat(63));
+    }
+
+    #[test]
+    fn sanitize_dns_label_truncation_strips_trailing_hyphens() {
+        // 62 a's + dot + a → sanitized to 62 a's + hyphen + a (64 chars)
+        // truncated to 63 → "aaa...a-" → trailing hyphen stripped
+        let input = format!("{}.a", "a".repeat(62));
+        let result = sanitize_dns_label(&input);
+        assert!(result.len() <= 63);
+        assert!(!result.ends_with('-'));
+    }
+
+    #[test]
+    fn sanitize_dns_label_empty_input() {
+        assert_eq!(sanitize_dns_label(""), "");
+        assert_eq!(sanitize_dns_label("---"), "");
+    }
+
+    #[test]
+    fn sanitize_dns_label_already_valid() {
+        assert_eq!(sanitize_dns_label("my-valid-name"), "my-valid-name");
     }
 }

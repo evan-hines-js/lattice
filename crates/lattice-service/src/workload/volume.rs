@@ -159,21 +159,9 @@ impl GeneratedVolumes {
 /// Convert a mount path to a valid K8s volume name.
 ///
 /// E.g., `/var/cache/nginx` → `emptydir-var-cache-nginx`
-///
-/// K8s volume names must be lowercase alphanumeric + `-`, max 63 chars.
 fn sanitize_volume_name(mount_path: &str) -> String {
-    let sanitized: String = mount_path
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = sanitized.trim_matches('-');
-    let name = format!("emptydir-{}", trimmed);
+    let label = super::sanitize_dns_label(mount_path);
+    let name = format!("emptydir-{}", label);
     if name.len() > 63 {
         name[..63].trim_end_matches('-').to_string()
     } else {

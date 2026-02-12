@@ -183,7 +183,8 @@ fn compile_secret_files(
         let store = resolve_store_for_refs(file_refs, secret_refs, &format!("file '{}'", key))?;
 
         let es_name = format!("{}-file-{}", base_name, key);
-        let vol_name = es_name.clone();
+        // Volume names must be DNS labels (no dots/underscores/etc).
+        let vol_name = super::sanitize_dns_label(&es_name);
 
         let mut eso_data: Vec<ExternalSecretData> = Vec::new();
         let mut seen_eso_keys = std::collections::HashSet::new();
@@ -460,6 +461,9 @@ mod tests {
         // Should have volume and mount pointing at the ESO-created secret
         assert_eq!(result.volumes.len(), 1);
         assert_eq!(result.volume_mounts.len(), 1);
+        // Volume name must be DNS-label safe (dots replaced with dashes)
+        assert_eq!(result.volumes[0].name, "api-main-file-etc-app-config-yaml");
+        assert_eq!(result.volume_mounts[0].name, "api-main-file-etc-app-config-yaml");
     }
 
     #[test]
