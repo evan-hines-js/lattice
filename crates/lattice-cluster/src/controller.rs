@@ -1874,7 +1874,7 @@ mod tests {
                     .lock()
                     .expect("mutex should not be poisoned")
                     .last()
-                    .map(|s| s.phase.clone())
+                    .map(|s| s.phase)
             }
 
             fn was_updated(&self) -> bool {
@@ -2001,7 +2001,7 @@ mod tests {
         /// generate CAPI manifests and transition the cluster to Provisioning phase.
         /// This kicks off the infrastructure provisioning process.
         #[tokio::test]
-        async fn story_new_cluster_starts_provisioning() {
+        async fn new_cluster_starts_provisioning() {
             let cluster = Arc::new(sample_cluster("new-cluster"));
             let (ctx, capture) = mock_context_with_status_capture();
 
@@ -2020,7 +2020,7 @@ mod tests {
         /// Story: A cluster explicitly in Pending phase should behave identically
         /// to a new cluster - both enter the provisioning pipeline.
         #[tokio::test]
-        async fn story_pending_cluster_starts_provisioning() {
+        async fn pending_cluster_starts_provisioning() {
             let cluster = Arc::new(cluster_with_phase("pending-cluster", ClusterPhase::Pending));
             let (ctx, capture) = mock_context_with_status_capture();
 
@@ -2036,7 +2036,7 @@ mod tests {
         /// Story: While infrastructure is being provisioned (VMs starting, etc.),
         /// the controller should keep checking until CAPI reports ready.
         #[tokio::test]
-        async fn story_provisioning_cluster_waits_for_infrastructure() {
+        async fn provisioning_cluster_waits_for_infrastructure() {
             let cluster = Arc::new(cluster_with_phase(
                 "provisioning-cluster",
                 ClusterPhase::Provisioning,
@@ -2054,7 +2054,7 @@ mod tests {
         /// Story: Once infrastructure is ready, the cluster transitions to Pivoting
         /// phase where CAPI resources are moved into the cluster for self-management.
         #[tokio::test]
-        async fn story_ready_infrastructure_triggers_pivot() {
+        async fn ready_infrastructure_triggers_pivot() {
             let cluster = Arc::new(cluster_with_phase(
                 "ready-infra-cluster",
                 ClusterPhase::Provisioning,
@@ -2075,7 +2075,7 @@ mod tests {
         /// Story: Once a cluster is fully self-managing, the controller only needs
         /// periodic drift detection to ensure the cluster matches its spec.
         #[tokio::test]
-        async fn story_ready_cluster_performs_drift_detection() {
+        async fn ready_cluster_performs_drift_detection() {
             let cluster = Arc::new(cluster_with_phase("ready-cluster", ClusterPhase::Ready));
             let ctx = mock_context_readonly();
 
@@ -2090,7 +2090,7 @@ mod tests {
         /// Story: A failed cluster requires human intervention to fix the spec.
         /// The controller waits for spec changes rather than retrying on a timer.
         #[tokio::test]
-        async fn story_failed_cluster_awaits_human_intervention() {
+        async fn failed_cluster_awaits_human_intervention() {
             let cluster = Arc::new(cluster_with_phase("failed-cluster", ClusterPhase::Failed));
             let ctx = mock_context_readonly();
 
@@ -2105,7 +2105,7 @@ mod tests {
         /// Story: Invalid cluster specs (like zero control plane nodes) should
         /// immediately fail rather than attempting to provision bad infrastructure.
         #[tokio::test]
-        async fn story_invalid_spec_immediately_fails() {
+        async fn invalid_spec_immediately_fails() {
             let cluster = Arc::new(invalid_cluster("invalid-cluster"));
             let (ctx, capture) = mock_context_with_status_capture();
 
@@ -2125,7 +2125,7 @@ mod tests {
         /// Story: When the Kubernetes API is unavailable, errors should propagate
         /// so the controller can apply exponential backoff.
         #[tokio::test]
-        async fn story_kube_api_errors_trigger_retry() {
+        async fn kube_api_errors_trigger_retry() {
             let cluster = Arc::new(sample_cluster("error-cluster"));
 
             let mut mock = MockKubeClient::new();
@@ -2157,7 +2157,7 @@ mod tests {
         /// Story: CAPI manifest application failures should propagate so the
         /// error policy can handle retries.
         #[tokio::test]
-        async fn story_capi_failures_trigger_retry() {
+        async fn capi_failures_trigger_retry() {
             let cluster = Arc::new(sample_cluster("capi-error-cluster"));
 
             let mut mock = MockKubeClient::new();
@@ -2337,7 +2337,7 @@ mod tests {
         /// Story: When CAPI reports infrastructure NOT ready, the controller
         /// should continue polling with the Provisioning phase requeue interval.
         #[tokio::test]
-        async fn story_not_ready_infrastructure_triggers_requeue() {
+        async fn not_ready_infrastructure_triggers_requeue() {
             let cluster = Arc::new(cluster_with_phase(
                 "provisioning-cluster",
                 ClusterPhase::Provisioning,
@@ -2371,7 +2371,7 @@ mod tests {
         /// Story: When CAPI reports infrastructure IS ready, the controller
         /// should transition to Pivoting phase.
         #[tokio::test]
-        async fn story_ready_infrastructure_triggers_phase_transition() {
+        async fn ready_infrastructure_triggers_phase_transition() {
             use std::sync::{Arc as StdArc, Mutex};
 
             let cluster = Arc::new(cluster_with_phase(
@@ -2424,7 +2424,7 @@ mod tests {
         /// Story: When CAPI infrastructure check fails, error should propagate
         /// for retry with backoff.
         #[tokio::test]
-        async fn story_infrastructure_check_failure_propagates_error() {
+        async fn infrastructure_check_failure_propagates_error() {
             let cluster = Arc::new(cluster_with_phase(
                 "error-cluster",
                 ClusterPhase::Provisioning,
@@ -2469,7 +2469,7 @@ mod tests {
         /// Story: Controller always calls CAPI ensure before provisioning
         /// (ensure is idempotent - handles upgrades and no-ops).
         #[tokio::test]
-        async fn story_capi_init_called_before_provisioning() {
+        async fn capi_init_called_before_provisioning() {
             let cluster = Arc::new(sample_cluster("ready-to-provision"));
 
             let updates: StdArc<Mutex<Vec<LatticeClusterStatus>>> =
@@ -2512,7 +2512,7 @@ mod tests {
         /// Story: When CAPI installation fails, the error should propagate
         /// for retry with exponential backoff.
         #[tokio::test]
-        async fn story_capi_installation_failure_propagates_error() {
+        async fn capi_installation_failure_propagates_error() {
             let cluster = Arc::new(sample_cluster("install-fails"));
 
             let mut mock = MockKubeClient::new();
@@ -2556,7 +2556,7 @@ mod tests {
         /// Story: When transitioning to Provisioning, the status should include
         /// a clear message and Provisioning condition for observability.
         #[tokio::test]
-        async fn story_provisioning_status_has_correct_content() {
+        async fn provisioning_status_has_correct_content() {
             let cluster = sample_cluster("new-cluster");
 
             let captured_status: StdArc<Mutex<Option<LatticeClusterStatus>>> =
@@ -2602,7 +2602,7 @@ mod tests {
         /// Story: When transitioning to Pivoting, the status should indicate
         /// that the cluster is being transitioned to self-management.
         #[tokio::test]
-        async fn story_pivoting_status_has_correct_content() {
+        async fn pivoting_status_has_correct_content() {
             let cluster = sample_cluster("pivoting-cluster");
 
             let captured_status: StdArc<Mutex<Option<LatticeClusterStatus>>> =
@@ -2647,7 +2647,7 @@ mod tests {
         /// Story: When a cluster fails validation, the status should clearly
         /// indicate the failure reason so users can fix the configuration.
         #[tokio::test]
-        async fn story_failed_status_includes_error_message() {
+        async fn failed_status_includes_error_message() {
             let cluster = sample_cluster("invalid-cluster");
 
             let captured_status: StdArc<Mutex<Option<LatticeClusterStatus>>> =
@@ -2711,7 +2711,7 @@ mod tests {
         /// Story: Retryable errors requeue with exponential backoff,
         /// non-retryable errors await change.
         #[test]
-        fn story_retryable_errors_requeue_nonretryable_await() {
+        fn retryable_errors_requeue_nonretryable_await() {
             let cluster = Arc::new(sample_cluster("error-cluster"));
 
             // Retryable errors should requeue
@@ -2750,7 +2750,7 @@ mod tests {
 
         /// Story: Error policy should work correctly with clusters in any phase.
         #[test]
-        fn story_error_policy_works_for_all_phases() {
+        fn error_policy_works_for_all_phases() {
             let phases = vec![
                 ClusterPhase::Pending,
                 ClusterPhase::Provisioning,
@@ -2764,7 +2764,7 @@ mod tests {
 
             for phase in phases {
                 let ctx = mock_context_minimal(); // Fresh context per phase
-                let cluster = Arc::new(cluster_with_phase("test", phase.clone()));
+                let cluster = Arc::new(cluster_with_phase("test", phase));
                 let error = Error::provider("test error".to_string());
                 let action = error_policy(cluster, &error, ctx);
 
@@ -2794,7 +2794,7 @@ mod tests {
 
         /// Story: Creating a new PivotOperationsImpl should work
         #[tokio::test]
-        async fn story_create_pivot_operations() {
+        async fn create_pivot_operations() {
             let Some(client) = test_client().await else {
                 eprintln!("Skipping test: no K8s cluster available");
                 return;
@@ -2807,7 +2807,7 @@ mod tests {
 
         /// Story: Agent ready check should return false for unconnected cluster
         #[tokio::test]
-        async fn story_agent_not_ready_when_not_connected() {
+        async fn agent_not_ready_when_not_connected() {
             let Some(client) = test_client().await else {
                 eprintln!("Skipping test: no K8s cluster available");
                 return;
@@ -2820,7 +2820,7 @@ mod tests {
 
         /// Story: Pivot complete check should return false for unconnected cluster
         #[tokio::test]
-        async fn story_pivot_not_complete_when_not_connected() {
+        async fn pivot_not_complete_when_not_connected() {
             let Some(client) = test_client().await else {
                 eprintln!("Skipping test: no K8s cluster available");
                 return;
@@ -2833,7 +2833,7 @@ mod tests {
 
         /// Story: Trigger pivot should fail when agent is not connected
         #[tokio::test]
-        async fn story_trigger_pivot_fails_when_no_agent() {
+        async fn trigger_pivot_fails_when_no_agent() {
             let Some(client) = test_client().await else {
                 eprintln!("Skipping test: no K8s cluster available");
                 return;

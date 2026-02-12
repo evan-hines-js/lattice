@@ -275,7 +275,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_controller_builds_status_fluently() {
+    fn controller_builds_status_fluently() {
         let condition = Condition::new(
             "Ready",
             ConditionStatus::True,
@@ -300,7 +300,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_yaml_simple_service() {
+    fn yaml_simple_service() {
         let yaml = r#"
 workload:
   containers:
@@ -329,7 +329,7 @@ autoscaling:
     }
 
     #[test]
-    fn story_yaml_service_with_dependencies() {
+    fn yaml_service_with_dependencies() {
         let yaml = r#"
 workload:
   containers:
@@ -374,7 +374,7 @@ workload:
     }
 
     #[test]
-    fn story_yaml_canary_deployment() {
+    fn yaml_canary_deployment() {
         let yaml = r#"
 workload:
   containers:
@@ -401,7 +401,7 @@ deploy:
     }
 
     #[test]
-    fn story_spec_survives_yaml_roundtrip() {
+    fn spec_survives_yaml_roundtrip() {
         let spec = sample_service_spec();
         let yaml =
             serde_json::to_string(&spec).expect("LatticeServiceSpec serialization should succeed");
@@ -926,7 +926,7 @@ ingress:
     // =========================================================================
 
     #[test]
-    fn story_security_context_parses() {
+    fn security_context_parses() {
         let yaml = r#"
 workload:
   containers:
@@ -961,7 +961,7 @@ workload:
     }
 
     #[test]
-    fn story_security_context_minimal() {
+    fn security_context_minimal() {
         let yaml = r#"
 workload:
   containers:
@@ -988,7 +988,7 @@ workload:
     // =========================================================================
 
     #[test]
-    fn story_sidecars_parse_with_init_flag() {
+    fn sidecars_parse_with_init_flag() {
         let yaml = r#"
 workload:
   containers:
@@ -1036,7 +1036,7 @@ sidecars:
     }
 
     #[test]
-    fn story_sidecar_full_spec() {
+    fn sidecar_full_spec() {
         let yaml = r#"
 workload:
   containers:
@@ -1080,7 +1080,7 @@ sidecars:
     // =========================================================================
 
     #[test]
-    fn story_runtime_settings_parse() {
+    fn runtime_settings_parse() {
         let yaml = r#"
 workload:
   containers:
@@ -1110,7 +1110,7 @@ shareProcessNamespace: true
     }
 
     #[test]
-    fn story_vpn_killswitch_example() {
+    fn vpn_killswitch_example() {
         let yaml = r#"
 workload:
   containers:
@@ -1155,7 +1155,7 @@ sidecars:
     }
 
     #[test]
-    fn story_empty_sidecars_and_sysctls() {
+    fn empty_sidecars_and_sysctls() {
         let yaml = r#"
 workload:
   containers:

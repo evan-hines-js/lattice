@@ -388,7 +388,7 @@ mod tests {
     /// When a user creates a LatticeCluster with invalid configuration,
     /// the validation layer catches it immediately with a clear error message.
     #[test]
-    fn story_validation_prevents_invalid_cluster_creation() {
+    fn validation_prevents_invalid_cluster_creation() {
         // Scenario: User tries to create a cluster with invalid name
         let err = Error::validation("cluster name 'My Cluster!' contains invalid characters");
         assert!(err.to_string().contains("validation error"));
@@ -411,7 +411,7 @@ mod tests {
 
     /// Story: Structured errors include cluster context for debugging
     #[test]
-    fn story_structured_errors_include_cluster_context() {
+    fn structured_errors_include_cluster_context() {
         // Validation error with cluster context
         let err = Error::validation_for("prod-cluster", "invalid node count");
         assert!(err.to_string().contains("prod-cluster"));
@@ -439,7 +439,7 @@ mod tests {
     /// When infrastructure provisioning fails (Docker, AWS, GCP, Azure),
     /// the error clearly indicates which provider failed and why.
     #[test]
-    fn story_provider_errors_during_cluster_provisioning() {
+    fn provider_errors_during_cluster_provisioning() {
         // Scenario: Docker daemon not running for local development
         let err = Error::provider_for("dev-cluster", "docker", "connection refused");
         assert!(err.to_string().contains("provider error"));
@@ -464,7 +464,7 @@ mod tests {
     /// Failures here require careful handling as the cluster may be in an
     /// intermediate state.
     #[test]
-    fn story_pivot_errors_during_self_management_transition() {
+    fn pivot_errors_during_self_management_transition() {
         // Scenario: move operation fails
         let err = Error::pivot_for("target-cluster", "CAPI resource move failed");
         assert!(err.to_string().contains("pivot error"));
@@ -486,7 +486,7 @@ mod tests {
     /// When YAML/JSON processing fails, the error indicates what
     /// was being processed and what went wrong.
     #[test]
-    fn story_serialization_errors_in_manifest_processing() {
+    fn serialization_errors_in_manifest_processing() {
         // Scenario: Invalid YAML in cluster spec
         let err = Error::serialization("invalid YAML: unexpected key");
         assert!(err.to_string().contains("serialization error"));
@@ -509,7 +509,7 @@ mod tests {
     /// For ergonomic API usage, error constructors accept anything
     /// that implements Into<String>.
     #[test]
-    fn story_error_construction_ergonomics() {
+    fn error_construction_ergonomics() {
         // From String
         let dynamic_msg = format!("cluster {} not found", "test-cluster");
         let err = Error::validation(dynamic_msg);
@@ -527,7 +527,7 @@ mod tests {
 
     /// Story: Errors have is_retryable() for controller retry logic
     #[test]
-    fn story_error_retryability() {
+    fn error_retryability() {
         // Validation errors should NOT retry (user must fix config)
         assert!(!Error::validation("bad config").is_retryable());
 
@@ -549,7 +549,7 @@ mod tests {
 
     /// Story: Error cluster() accessor returns cluster name when available
     #[test]
-    fn story_error_cluster_accessor() {
+    fn error_cluster_accessor() {
         // Validation has cluster
         assert_eq!(
             Error::validation_for("my-cluster", "msg").cluster(),

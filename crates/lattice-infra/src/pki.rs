@@ -858,7 +858,7 @@ mod tests {
     /// This demonstrates the full PKI flow from CA creation to agent
     /// certificate verification.
     #[test]
-    fn story_complete_certificate_lifecycle() {
+    fn complete_certificate_lifecycle() {
         // Chapter 1: Cell creates its CA during initialization
         // -----------------------------------------------------
         let ca =
@@ -903,7 +903,7 @@ mod tests {
     /// An attacker who creates their own CA cannot get their agents
     /// accepted by our cell.
     #[test]
-    fn story_cross_ca_attack_prevention() {
+    fn cross_ca_attack_prevention() {
         // Legitimate cell CA
         let legitimate_ca = CertificateAuthority::new("Legitimate CA")
             .expect("legitimate CA creation should succeed");
@@ -939,7 +939,7 @@ mod tests {
     /// spoofed. An agent with a valid certificate can only claim the
     /// identity it was issued for.
     #[test]
-    fn story_cluster_identity_binding() {
+    fn cluster_identity_binding() {
         let ca = CertificateAuthority::new("Identity CA").expect("CA creation should succeed");
 
         // Sign certificates for different clusters
@@ -966,7 +966,7 @@ mod tests {
     /// The CA can be saved and restored, allowing the cell to restart
     /// without invalidating existing agent certificates.
     #[test]
-    fn story_ca_persistence_and_recovery() {
+    fn ca_persistence_and_recovery() {
         // Initial setup: Create CA and issue a certificate
         let original_ca =
             CertificateAuthority::new("Persistent CA").expect("CA creation should succeed");
@@ -1002,7 +1002,7 @@ mod tests {
     /// When an agent submits malformed data as a CSR, the error
     /// is handled gracefully with a descriptive message.
     #[test]
-    fn story_malformed_csr_rejection() {
+    fn malformed_csr_rejection() {
         let ca = CertificateAuthority::new("Strict CA").expect("CA creation should succeed");
 
         // Various forms of invalid CSR data
@@ -1030,7 +1030,7 @@ mod tests {
     /// When loading a CA from corrupted or mismatched PEM files,
     /// errors are caught before any certificates can be issued.
     #[test]
-    fn story_corrupted_ca_detection() {
+    fn corrupted_ca_detection() {
         let good_ca = CertificateAuthority::new("Good CA").expect("CA creation should succeed");
 
         // Corrupted key
@@ -1049,7 +1049,7 @@ mod tests {
     ///
     /// Invalid PEM data is rejected with clear error messages.
     #[test]
-    fn story_pem_parsing_errors() {
+    fn pem_parsing_errors() {
         let invalid_pem = "this is not valid PEM data at all";
         let result = parse_pem(invalid_pem);
 
@@ -1066,7 +1066,7 @@ mod tests {
     ///
     /// I/O errors (from file operations) are properly wrapped in PkiError.
     #[test]
-    fn story_io_error_conversion() {
+    fn io_error_conversion() {
         let io_err = std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "cannot read CA key file",

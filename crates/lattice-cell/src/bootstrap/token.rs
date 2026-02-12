@@ -214,7 +214,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_tokens_are_cryptographically_unique() {
+    fn tokens_are_cryptographically_unique() {
         let token1 = BootstrapToken::generate();
         let token2 = BootstrapToken::generate();
 
@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn story_tokens_are_url_safe_for_http_transport() {
+    fn tokens_are_url_safe_for_http_transport() {
         let token = BootstrapToken::generate();
 
         assert!(
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn story_token_hashes_enable_secure_validation() {
+    fn token_hashes_enable_secure_validation() {
         let token = BootstrapToken::generate();
 
         let hash1 = token.hash();
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn story_debug_output_protects_token_secrecy() {
+    fn debug_output_protects_token_secrecy() {
         let token = BootstrapToken::generate();
         let debug = format!("{:?}", token);
 
@@ -273,7 +273,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_cell_creates_token_for_new_cluster() {
+    fn cell_creates_token_for_new_cluster() {
         let store = TokenStore::new();
         let token = store.create_token("workload-cluster-prod-1");
 
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn story_agent_authenticates_with_valid_token() {
+    fn agent_authenticates_with_valid_token() {
         let store = TokenStore::new();
         let token = store.create_token("new-workload");
 
@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn story_token_cannot_be_reused_after_consumption() {
+    fn token_cannot_be_reused_after_consumption() {
         let store = TokenStore::new();
         let token = store.create_token("secure-cluster");
 
@@ -320,7 +320,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_forged_tokens_are_rejected() {
+    fn forged_tokens_are_rejected() {
         let store = TokenStore::new();
         store.create_token("legitimate-cluster");
 
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn story_invalid_base64_fails_explicitly() {
+    fn invalid_base64_fails_explicitly() {
         let valid = BootstrapToken::from_string("dGVzdA");
         assert!(valid.is_ok(), "Valid base64 should parse");
 
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn story_tokens_are_bound_to_specific_cluster() {
+    fn tokens_are_bound_to_specific_cluster() {
         let store = TokenStore::new();
         let token = store.create_token("cluster-alpha");
 
@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn story_expired_tokens_are_rejected() {
+    fn expired_tokens_are_rejected() {
         let store = TokenStore::with_ttl(Duration::from_millis(1));
         let token = store.create_token("slow-cluster");
 
@@ -375,7 +375,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_cleanup_removes_expired_tokens() {
+    fn cleanup_removes_expired_tokens() {
         let store = TokenStore::with_ttl(Duration::from_millis(1));
 
         store.create_token("abandoned-cluster-1");
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn story_cleanup_preserves_active_tokens() {
+    fn cleanup_preserves_active_tokens() {
         let store = TokenStore::with_ttl(Duration::from_secs(3600));
         store.create_token("active-cluster");
         store.cleanup_expired();
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn story_token_store_has_sensible_defaults() {
+    fn token_store_has_sensible_defaults() {
         let store = TokenStore::default();
 
         assert!(store.is_empty());

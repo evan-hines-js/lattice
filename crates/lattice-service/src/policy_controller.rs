@@ -145,6 +145,7 @@ mod tests {
                 }),
                 volumes: None,
             }),
+            ingress: None,
         };
 
         assert_eq!(spec.priority, 100);

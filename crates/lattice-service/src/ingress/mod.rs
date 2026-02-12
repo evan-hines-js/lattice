@@ -1346,8 +1346,7 @@ mod tests {
 
     #[test]
     fn multi_host_generates_per_host_listeners() {
-        let mut ingress =
-            make_ingress_spec(vec!["api.example.com", "api.internal.example.com"], true);
+        let ingress = make_ingress_spec(vec!["api.example.com", "api.internal.example.com"], true);
         // Verify the route name is "public"
         assert!(ingress.routes.contains_key("public"));
 

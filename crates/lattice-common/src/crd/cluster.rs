@@ -351,7 +351,7 @@ mod tests {
     /// Parent clusters can provision and manage child clusters. They have the
     /// parent config (host, service) for child clusters to connect back to.
     #[test]
-    fn story_cluster_with_parent_config_can_have_children() {
+    fn cluster_with_parent_config_can_have_children() {
         let spec = LatticeClusterSpec {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
@@ -372,7 +372,7 @@ mod tests {
     /// Leaf clusters run user workloads and connect outbound to their
     /// parent for management and monitoring.
     #[test]
-    fn story_cluster_without_parent_is_leaf() {
+    fn cluster_without_parent_is_leaf() {
         let spec = LatticeClusterSpec {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
@@ -398,7 +398,7 @@ mod tests {
     ///
     /// A parent cluster needs parent config and valid node topology.
     #[test]
-    fn story_valid_parent_passes_validation() {
+    fn valid_parent_passes_validation() {
         let spec = LatticeClusterSpec {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
@@ -421,7 +421,7 @@ mod tests {
     ///
     /// A workload cluster needs valid node topology.
     #[test]
-    fn story_valid_workload_cluster_passes_validation() {
+    fn valid_workload_cluster_passes_validation() {
         let spec = LatticeClusterSpec {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
@@ -444,7 +444,7 @@ mod tests {
     ///
     /// Every Kubernetes cluster needs at least one control plane node.
     #[test]
-    fn story_zero_control_plane_nodes_fails_validation() {
+    fn zero_control_plane_nodes_fails_validation() {
         let spec = LatticeClusterSpec {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
@@ -480,7 +480,7 @@ mod tests {
     ///
     /// Every cluster must reference a CloudProvider for credentials.
     #[test]
-    fn story_empty_provider_ref_fails_validation() {
+    fn empty_provider_ref_fails_validation() {
         let spec = LatticeClusterSpec {
             provider_ref: "".to_string(),
             provider: sample_provider_spec(),
@@ -510,7 +510,7 @@ mod tests {
     /// The controller uses the builder pattern to construct status updates
     /// with phase, message, and conditions in a single fluent chain.
     #[test]
-    fn story_controller_builds_complete_status_fluently() {
+    fn controller_builds_complete_status_fluently() {
         use crate::crd::types::ConditionStatus;
 
         let condition = Condition::new(
@@ -535,7 +535,7 @@ mod tests {
     /// When cluster state changes (e.g., Ready: False -> Ready: True),
     /// the new condition replaces the old one rather than accumulating.
     #[test]
-    fn story_new_condition_replaces_old_condition_of_same_type() {
+    fn new_condition_replaces_old_condition_of_same_type() {
         use crate::crd::types::ConditionStatus;
 
         let provisioning = Condition::new(
@@ -583,7 +583,7 @@ mod tests {
     /// Platform operators define management clusters in YAML files that
     /// are applied to set up the Lattice control plane.
     #[test]
-    fn story_yaml_manifest_defines_management_cluster() {
+    fn yaml_manifest_defines_management_cluster() {
         let yaml = r#"
 providerRef: aws-prod
 provider:
@@ -630,7 +630,7 @@ parentConfig:
     /// Application teams define leaf clusters for running workloads.
     /// Environment/region metadata belongs in metadata.labels, not in the spec.
     #[test]
-    fn story_yaml_manifest_defines_leaf_cluster() {
+    fn yaml_manifest_defines_leaf_cluster() {
         let yaml = r#"
 providerRef: aws-prod
 provider:
@@ -660,7 +660,7 @@ nodes:
     /// When specs are serialized and deserialized (e.g., stored in etcd),
     /// all data must be preserved.
     #[test]
-    fn story_spec_survives_json_roundtrip() {
+    fn spec_survives_json_roundtrip() {
         let spec = LatticeClusterSpec {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),

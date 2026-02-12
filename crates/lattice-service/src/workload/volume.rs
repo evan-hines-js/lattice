@@ -519,7 +519,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_generates_pvc_for_owned_volume() {
+    fn generates_pvc_for_owned_volume() {
         let spec = make_spec_with_volumes(
             vec![("config", None, "5Gi", None)],
             vec![],
@@ -537,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn story_pvc_uses_volume_id_for_name() {
+    fn pvc_uses_volume_id_for_name() {
         let spec = make_spec_with_volumes(
             vec![("downloads", Some("media-downloads"), "500Gi", None)],
             vec![],
@@ -552,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn story_pvc_respects_storage_class() {
+    fn pvc_respects_storage_class() {
         let mut spec = make_spec_with_volumes(
             vec![("config", None, "5Gi", None)],
             vec![],
@@ -573,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn story_pvc_respects_access_mode() {
+    fn pvc_respects_access_mode() {
         let spec = make_spec_with_volumes(
             vec![(
                 "media",
@@ -596,7 +596,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_no_pvc_for_volume_reference() {
+    fn no_pvc_for_volume_reference() {
         let spec = make_spec_with_volumes(
             vec![],
             vec![("downloads", "media-downloads")],
@@ -626,7 +626,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_owner_gets_volume_label_for_rwo() {
+    fn owner_gets_volume_label_for_rwo() {
         let spec = make_spec_with_volumes(
             vec![(
                 "downloads",
@@ -650,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn story_owner_no_label_for_rwx() {
+    fn owner_no_label_for_rwx() {
         let spec = make_spec_with_volumes(
             vec![(
                 "media",
@@ -673,7 +673,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_reference_gets_affinity_to_owner() {
+    fn reference_gets_affinity_to_owner() {
         let spec = make_spec_with_volumes(
             vec![],
             vec![("downloads", "media-downloads")],
@@ -699,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn story_multiple_references_get_multiple_affinities() {
+    fn multiple_references_get_multiple_affinities() {
         let spec = make_spec_with_volumes(
             vec![],
             vec![("downloads", "media-downloads"), ("media", "media-library")],
@@ -720,7 +720,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_generates_volume_mounts() {
+    fn generates_volume_mounts() {
         let spec = make_spec_with_volumes(
             vec![("config", None, "5Gi", None)],
             vec![],
@@ -739,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn story_generates_pod_volumes() {
+    fn generates_pod_volumes() {
         let spec = make_spec_with_volumes(
             vec![("config", None, "5Gi", None)],
             vec![],
@@ -762,7 +762,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_parse_volume_source() {
+    fn parse_volume_source() {
         assert_eq!(
             VolumeCompiler::parse_volume_source("${resources.config}"),
             Some("config".to_string())
@@ -780,7 +780,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn story_no_volumes_returns_empty() {
+    fn no_volumes_returns_empty() {
         let spec = WorkloadSpec::default();
 
         let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
@@ -789,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn story_no_scheduling_gate_without_model() {
+    fn no_scheduling_gate_without_model() {
         let spec = make_spec_with_volumes(
             vec![("config", None, "5Gi", None)],
             vec![],
@@ -838,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn story_emptydir_volume_from_sourceless_mount() {
+    fn emptydir_volume_from_sourceless_mount() {
         let spec = make_emptydir_spec(vec![("/tmp", None, None)]);
         let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
@@ -859,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn story_emptydir_tmpfs_medium() {
+    fn emptydir_tmpfs_medium() {
         let spec = make_emptydir_spec(vec![("/dev/shm", Some("Memory"), None)]);
         let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
@@ -870,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn story_emptydir_size_limit() {
+    fn emptydir_size_limit() {
         let spec = make_emptydir_spec(vec![("/scratch", None, Some("5Gi"))]);
         let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
 
@@ -881,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn story_mixed_resource_and_emptydir_volumes() {
+    fn mixed_resource_and_emptydir_volumes() {
         let mut spec = make_spec_with_volumes(
             vec![("data", None, "10Gi", None)],
             vec![],
@@ -935,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn story_emptydir_volume_name_sanitization() {
+    fn emptydir_volume_name_sanitization() {
         let spec = make_emptydir_spec(vec![
             ("/var/cache/nginx", None, None),
             ("/tmp", None, None),
@@ -950,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn story_sidecar_emptydir_volumes() {
+    fn sidecar_emptydir_volumes() {
         use crate::crd::SidecarSpec;
 
         let spec = WorkloadSpec {
@@ -1004,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn story_shared_emptydir_between_main_and_sidecar_deduplicates() {
+    fn shared_emptydir_between_main_and_sidecar_deduplicates() {
         use crate::crd::SidecarSpec;
 
         // Main container declares /tmp and /run
@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn story_emptydir_only_no_resources_needed() {
+    fn emptydir_only_no_resources_needed() {
         // EmptyDir volumes should work even with zero resource declarations
         let spec = make_emptydir_spec(vec![("/tmp", None, None), ("/var/run", None, None)]);
         assert!(spec.resources.is_empty());

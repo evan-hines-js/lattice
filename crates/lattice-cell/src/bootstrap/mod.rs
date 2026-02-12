@@ -1628,7 +1628,7 @@ mod tests {
     /// This test demonstrates the entire bootstrap sequence as experienced
     /// by a newly provisioned workload cluster connecting to its parent cell.
     #[tokio::test]
-    async fn story_complete_bootstrap_flow() {
+    async fn complete_bootstrap_flow() {
         let state = test_state();
 
         // Chapter 1: Cell registers a new cluster for provisioning
@@ -1698,7 +1698,7 @@ mod tests {
     /// Bootstrap tokens are one-time use. An attacker who captures
     /// a token cannot use it to bootstrap a malicious agent.
     #[tokio::test]
-    async fn story_token_replay_attack_prevention() {
+    async fn token_replay_attack_prevention() {
         let state = test_state();
 
         // Legitimate cluster gets registered
@@ -1733,7 +1733,7 @@ mod tests {
     /// Tokens are cryptographically random and cluster-specific.
     /// Guessing or using the wrong token fails.
     #[tokio::test]
-    async fn story_invalid_token_rejection() {
+    async fn invalid_token_rejection() {
         let state = test_state();
 
         register_test_cluster(
@@ -1772,7 +1772,7 @@ mod tests {
     /// An agent can only get its CSR signed after completing the bootstrap
     /// flow. This prevents rogue agents from getting valid certificates.
     #[tokio::test]
-    async fn story_csr_requires_bootstrap_completion() {
+    async fn csr_requires_bootstrap_completion() {
         let state = test_state();
 
         // Register cluster but DON'T complete bootstrap
@@ -1803,7 +1803,7 @@ mod tests {
     /// Only pre-registered clusters can use the bootstrap endpoint.
     /// Random cluster IDs are rejected.
     #[tokio::test]
-    async fn story_unknown_cluster_rejection() {
+    async fn unknown_cluster_rejection() {
         let state = test_state();
 
         // No clusters registered - attacker tries to bootstrap
@@ -1829,7 +1829,7 @@ mod tests {
     /// Tokens have a TTL. If a cluster takes too long to bootstrap,
     /// the token expires and a new one must be generated.
     #[tokio::test]
-    async fn story_expired_token_rejection() {
+    async fn expired_token_rejection() {
         // Very short TTL for testing
         let state = test_state_with_ttl(Duration::from_millis(1));
 
@@ -1857,7 +1857,7 @@ mod tests {
     /// the Lattice operator on new clusters. Every cluster runs the same
     /// deployment - the controller reads LatticeCluster CRD to determine behavior.
     #[tokio::test]
-    async fn story_manifest_generation() {
+    async fn manifest_generation() {
         let generator = DefaultManifestGenerator::new();
         let manifests = generator.generate("test:latest", None, None, None).await;
 
@@ -1891,7 +1891,7 @@ mod tests {
     ///
     /// The bootstrap endpoint uses standard Bearer token authentication.
     #[test]
-    fn story_bearer_token_authentication() {
+    fn bearer_token_authentication() {
         // Valid Bearer token
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1925,7 +1925,7 @@ mod tests {
     /// Different error types return appropriate HTTP status codes
     /// for proper client error handling.
     #[tokio::test]
-    async fn story_error_http_responses() {
+    async fn error_http_responses() {
         use axum::http::StatusCode;
 
         // Authentication errors -> 401 Unauthorized
@@ -1961,7 +1961,7 @@ mod tests {
     /// When CSR signing fails due to PKI errors (invalid CSR format, etc.),
     /// the error should be properly converted to a BootstrapError.
     #[test]
-    fn story_pki_error_converts_to_bootstrap_error() {
+    fn pki_error_converts_to_bootstrap_error() {
         use lattice_infra::pki::PkiError;
 
         // Test the From<PkiError> implementation
@@ -1981,7 +1981,7 @@ mod tests {
     /// When an agent submits an invalid CSR (not proper PEM format),
     /// the signing should fail with a descriptive error.
     #[tokio::test]
-    async fn story_malformed_csr_returns_error() {
+    async fn malformed_csr_returns_error() {
         let state = test_state();
 
         // Register and bootstrap
@@ -2008,7 +2008,7 @@ mod tests {
 
     /// Story: CA certificate availability for distribution
     #[tokio::test]
-    async fn story_ca_certificate_distribution() {
+    async fn ca_certificate_distribution() {
         let state = test_state();
 
         // Cell provides CA cert for agents to verify mTLS
@@ -2373,7 +2373,7 @@ mod tests {
     /// include GODEBUG=fips140=on to allow the operator to communicate with
     /// the kubeadm API server which uses non-FIPS cipher suites (like X25519).
     #[tokio::test]
-    async fn story_kubeadm_clusters_get_fips_relaxation() {
+    async fn kubeadm_clusters_get_fips_relaxation() {
         // Use real DefaultManifestGenerator to get actual Deployment
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
@@ -2429,7 +2429,7 @@ mod tests {
     /// include FIPS relaxation because RKE2 is FIPS-compliant out of the box.
     /// The container default (fips140=only) is appropriate for RKE2 clusters.
     #[tokio::test]
-    async fn story_rke2_clusters_no_fips_relaxation() {
+    async fn rke2_clusters_no_fips_relaxation() {
         // Use real DefaultManifestGenerator to get actual Deployment
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
@@ -2481,7 +2481,7 @@ mod tests {
 
     /// Story: BootstrapProvider correctly reports FIPS requirements
     #[test]
-    fn story_bootstrap_provider_fips_properties() {
+    fn bootstrap_provider_fips_properties() {
         use lattice_common::crd::BootstrapProvider;
 
         // Kubeadm needs FIPS relaxation
@@ -2498,7 +2498,7 @@ mod tests {
     /// Both CRS path (CLI) and webhook path use generate_bootstrap_bundle(),
     /// which includes AWS addons when provider is "aws".
     #[tokio::test]
-    async fn story_aws_clusters_include_ccm_and_csi() {
+    async fn aws_clusters_include_ccm_and_csi() {
         // Use real DefaultManifestGenerator
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),
@@ -2561,7 +2561,7 @@ mod tests {
 
     /// Story: Non-AWS clusters don't get AWS addons
     #[tokio::test]
-    async fn story_non_aws_clusters_no_ccm() {
+    async fn non_aws_clusters_no_ccm() {
         // Use real DefaultManifestGenerator
         let state = BootstrapState::new(
             DefaultManifestGenerator::new(),

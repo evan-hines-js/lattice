@@ -5,7 +5,7 @@
 <h3 align="center">Self-managing Kubernetes clusters with zero-trust networking</h3>
 
 <p align="center">
-  <a href="https://lattice-docs.vercel.app">
+  <a href="https://lattice-docs.vercel.app/docs">
     <img src="https://img.shields.io/badge/docs-lattice-blue?style=for-the-badge&logo=gitbook&logoColor=white" alt="Documentation"/>
   </a>
 </p>

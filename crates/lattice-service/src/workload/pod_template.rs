@@ -11,9 +11,9 @@ use crate::crd::{GpuParams, ProviderType, RuntimeSpec, WorkloadSpec};
 use super::error::CompilationError;
 use super::volume::GeneratedVolumes;
 use super::{
-    gpu_node_selector, gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources,
-    AppArmorProfile, Capabilities, Container, ContainerCompilationData, ContainerPort, EnvVar,
-    K8sSecurityContext, LabelSelector, LocalObjectReference, PodSecurityContext, ResourceQuantity,
+    gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources, AppArmorProfile,
+    Capabilities, Container, ContainerCompilationData, ContainerPort, EnvVar, K8sSecurityContext,
+    LabelSelector, LocalObjectReference, PodSecurityContext, ResourceQuantity,
     ResourceRequirements, SeccompProfile, SecretRef, Sysctl, TopologySpreadConstraint, Volume,
 };
 
