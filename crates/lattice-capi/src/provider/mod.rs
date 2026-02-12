@@ -682,6 +682,21 @@ fn get_node_name_template(provider_type: ProviderType) -> Option<&'static str> {
     }
 }
 
+/// Build kubeadm nodeRegistration JSON with optional name template for cloud providers.
+fn build_node_registration(
+    kubelet_extra_args: &[serde_json::Value],
+    provider_type: ProviderType,
+) -> serde_json::Value {
+    let mut reg = serde_json::json!({
+        "criSocket": "/var/run/containerd/containerd.sock",
+        "kubeletExtraArgs": kubelet_extra_args
+    });
+    if let Some(name_template) = get_node_name_template(provider_type) {
+        reg["name"] = serde_json::json!(name_template);
+    }
+    reg
+}
+
 /// Generate KubeadmConfigTemplate manifest for a worker pool
 fn generate_kubeadm_config_template_for_pool(
     config: &ClusterConfig,
@@ -891,18 +906,7 @@ fn generate_kubeadm_control_plane(
     let controller_manager_extra_args = build_controller_manager_extra_args(config.provider_type);
 
     // Build nodeRegistration with optional name field for cloud providers
-    let mut init_node_registration = serde_json::json!({
-        "criSocket": "/var/run/containerd/containerd.sock",
-        "kubeletExtraArgs": kubelet_extra_args.clone()
-    });
-    let mut join_node_registration = serde_json::json!({
-        "criSocket": "/var/run/containerd/containerd.sock",
-        "kubeletExtraArgs": kubelet_extra_args
-    });
-    if let Some(name_template) = get_node_name_template(config.provider_type) {
-        init_node_registration["name"] = serde_json::json!(name_template);
-        join_node_registration["name"] = serde_json::json!(name_template);
-    }
+    let node_registration = build_node_registration(&kubelet_extra_args, config.provider_type);
 
     let mut kubeadm_config_spec = serde_json::json!({
         "clusterConfiguration": {
@@ -920,10 +924,10 @@ fn generate_kubeadm_control_plane(
             }
         },
         "initConfiguration": {
-            "nodeRegistration": init_node_registration
+            "nodeRegistration": node_registration.clone()
         },
         "joinConfiguration": {
-            "nodeRegistration": join_node_registration
+            "nodeRegistration": node_registration
         }
     });
 
