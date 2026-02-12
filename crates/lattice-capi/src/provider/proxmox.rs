@@ -5,7 +5,7 @@
 //!
 //! Requirements:
 //! - VM template must be on Ceph storage for linked clones
-//! - Cilium LB-IPAM pool is auto-derived from ipv4_pool gateway as .200/27
+//! - Explicit `networking` section required for Cilium LB-IPAM
 
 use async_trait::async_trait;
 
@@ -356,8 +356,8 @@ mod tests {
     use super::*;
     use kube::api::ObjectMeta;
     use lattice_common::crd::{
-        BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec, NodeResourceSpec,
-        NodeSpec, ProviderConfig, ProviderSpec, WorkerPoolSpec,
+        BackupsConfig, BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec,
+        MonitoringConfig, NodeResourceSpec, NodeSpec, ProviderConfig, ProviderSpec, WorkerPoolSpec,
     };
     use lattice_common::crd::{Ipv4PoolConfig, LatticeClusterSpec};
 
@@ -440,8 +440,8 @@ mod tests {
                 networking: None,
                 services: true,
                 gpu: false,
-                monitoring: true,
-                backups: true,
+                monitoring: MonitoringConfig::default(),
+                backups: BackupsConfig::default(),
             },
             status: None,
         }

@@ -29,7 +29,8 @@ pub use cloud_provider::{
     CloudProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
 };
 pub use cluster::{
-    ChildClusterHealth, LatticeCluster, LatticeClusterSpec, LatticeClusterStatus, WorkerPoolStatus,
+    BackupsConfig, ChildClusterHealth, LatticeCluster, LatticeClusterSpec, LatticeClusterStatus,
+    MonitoringConfig, WorkerPoolStatus,
 };
 pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,

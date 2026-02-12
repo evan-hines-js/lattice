@@ -3,9 +3,6 @@
 //! Provides shared logic for discovering the Lattice auth proxy, creating
 //! ServiceAccount tokens, and fetching proxy kubeconfigs. Used by `lattice login`.
 
-use kube::api::ListParams;
-use kube::Api;
-use lattice_common::crd::LatticeCluster;
 use tracing::{debug, info};
 
 use crate::{Error, Result};
@@ -89,38 +86,38 @@ pub(crate) async fn resolve_proxy_connection(
     Ok((server, token, port_forward))
 }
 
-/// Discover the auth proxy endpoint from a parent cluster's LatticeCluster CRD.
+/// Discover the auth proxy endpoint from the cell LoadBalancer Service.
 pub(crate) async fn discover_proxy_endpoint(kubeconfig_path: &str) -> Result<String> {
+    use k8s_openapi::api::core::v1::Service;
+    use kube::Api;
+    use lattice_common::{CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE};
+
     let client = super::kube_client_from_path(kubeconfig_path).await?;
 
-    let api: Api<LatticeCluster> = Api::all(client);
-    let clusters = api
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| Error::command_failed(format!("failed to list LatticeCluster CRDs: {}", e)))?
-        .items;
+    // Get the cell LoadBalancer Service
+    let services: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let svc = services.get(CELL_SERVICE_NAME).await.map_err(|e| {
+        Error::command_failed(format!(
+            "failed to get {} Service: {}. Use --server to specify the proxy URL manually.",
+            CELL_SERVICE_NAME, e
+        ))
+    })?;
 
-    let parent = clusters
-        .iter()
-        .find(|c| c.spec.is_parent())
+    // Extract LB address from Service status
+    let host = svc
+        .status
+        .and_then(|s| s.load_balancer)
+        .and_then(|lb| lb.ingress)
+        .and_then(|ingress| ingress.into_iter().next())
+        .and_then(|entry| entry.hostname.or(entry.ip))
         .ok_or_else(|| {
             Error::command_failed(
-                "no parent cluster found (no LatticeCluster with parent_config). \
+                "cell Service has no LoadBalancer address assigned yet. \
                  Use --server to specify the proxy URL manually.",
             )
         })?;
 
-    parent
-        .spec
-        .parent_config
-        .as_ref()
-        .and_then(|e| e.auth_proxy_endpoint())
-        .ok_or_else(|| {
-            Error::command_failed(
-                "parent cluster has no proxy endpoint (host not set). \
-                 Use --server to specify the proxy URL manually.",
-            )
-        })
+    Ok(format!("https://{}:{}", host, DEFAULT_AUTH_PROXY_PORT))
 }
 
 /// Check if a URL contains a Docker-internal IP (172.18.x.x subnet).

@@ -400,7 +400,7 @@ fn main() {
     );
     std::fs::write(out_dir.join("hami.yaml"), yaml).expect("write hami.yaml");
 
-    // 10. VictoriaMetrics K8s Stack
+    // 10a. VictoriaMetrics K8s Stack — HA mode (VMCluster with 2 replicas each)
     let yaml = run_helm_template(
         "vm",
         &chart(&format!(
@@ -433,8 +433,36 @@ fn main() {
             "vmalert.enabled=false",
         ],
     );
-    std::fs::write(out_dir.join("victoria-metrics.yaml"), yaml)
-        .expect("write victoria-metrics.yaml");
+    std::fs::write(out_dir.join("victoria-metrics-ha.yaml"), yaml)
+        .expect("write victoria-metrics-ha.yaml");
+
+    // 10b. VictoriaMetrics K8s Stack — Single-node mode (VMSingle)
+    let yaml = run_helm_template(
+        "vm",
+        &chart(&format!(
+            "victoria-metrics-k8s-stack-{}.tgz",
+            versions.charts["victoria-metrics-k8s-stack"].version
+        )),
+        "monitoring",
+        &[
+            "--set",
+            "fullnameOverride=lattice-metrics",
+            "--set",
+            "vmcluster.enabled=false",
+            "--set",
+            "vmsingle.enabled=true",
+            "--set",
+            "vmsingle.spec.retentionPeriod=24h",
+            "--set",
+            "grafana.enabled=false",
+            "--set",
+            "alertmanager.enabled=false",
+            "--set",
+            "vmalert.enabled=false",
+        ],
+    );
+    std::fs::write(out_dir.join("victoria-metrics-single.yaml"), yaml)
+        .expect("write victoria-metrics-single.yaml");
 
     // 11. KEDA (event-driven autoscaler)
     let yaml = run_helm_template(

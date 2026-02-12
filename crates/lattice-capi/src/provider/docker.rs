@@ -395,8 +395,9 @@ mod tests {
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        BootstrapProvider, ControlPlaneSpec, EndpointsSpec, KubernetesSpec, LatticeClusterSpec,
-        NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
+        BackupsConfig, BootstrapProvider, ControlPlaneSpec, EndpointsSpec, KubernetesSpec,
+        LatticeClusterSpec, MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
+        WorkerPoolSpec,
     };
 
     /// Helper to create a sample LatticeCluster for testing
@@ -442,8 +443,8 @@ mod tests {
                 parent_config: None,
                 services: true,
                 gpu: false,
-                monitoring: true,
-                backups: true,
+                monitoring: MonitoringConfig::default(),
+                backups: BackupsConfig::default(),
             },
             status: None,
         }
@@ -453,7 +454,6 @@ mod tests {
     fn sample_parent_cluster(name: &str) -> LatticeCluster {
         let mut cluster = sample_cluster(name, 2);
         cluster.spec.parent_config = Some(EndpointsSpec {
-            host: Some("172.18.255.1".to_string()),
             grpc_port: 50051,
             bootstrap_port: 8443,
             proxy_port: 8081,

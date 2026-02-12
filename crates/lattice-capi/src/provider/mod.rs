@@ -212,26 +212,16 @@ pub fn validate_k8s_version(version: &str) -> Result<()> {
 
 /// Build certSANs list from cluster spec
 ///
-/// Starts with user-provided SANs and adds parent endpoint host if configured.
+/// Returns user-provided SANs. Cell LB IP is added at runtime by
+/// `get_cell_server_sans()` auto-discovery.
 pub fn build_cert_sans(cluster: &LatticeCluster) -> Vec<String> {
-    let mut cert_sans = cluster
+    cluster
         .spec
         .provider
         .kubernetes
         .cert_sans
         .clone()
-        .unwrap_or_default();
-
-    // Add parent endpoint host if configured (for workload clusters connecting back to parent)
-    if let Some(ref endpoints) = cluster.spec.parent_config {
-        if let Some(ref host) = endpoints.host {
-            if !cert_sans.contains(host) {
-                cert_sans.push(host.clone());
-            }
-        }
-    }
-
-    cert_sans
+        .unwrap_or_default()
 }
 
 /// Extract cluster name from metadata or return validation error

@@ -25,15 +25,15 @@ use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
-    LatticeRestore, LatticeService, LatticeServicePolicy, OIDCProvider, ProviderType,
-    SecretProvider,
+    LatticeRestore, LatticeService, LatticeServicePolicy, MonitoringConfig, OIDCProvider,
+    ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, LATTICE_SYSTEM_NAMESPACE};
 use lattice_secret_provider as secrets_provider_ctrl;
 use lattice_service::compiler::ServiceMonitorPhase;
 use lattice_service::controller::{
-    error_policy as service_error_policy, error_policy_external, reconcile as service_reconcile,
-    reconcile_external, DiscoveredCrds, ServiceContext,
+    error_policy as service_error_policy, reconcile as service_reconcile, reconcile_external,
+    DiscoveredCrds, ServiceContext,
 };
 use lattice_service::policy_controller as service_policy_ctrl;
 
@@ -80,7 +80,7 @@ pub fn build_service_controllers(
     provider_type: ProviderType,
     cedar: Arc<PolicyEngine>,
     crds: Arc<DiscoveredCrds>,
-    monitoring_enabled: bool,
+    monitoring: MonitoringConfig,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
     let service_monitor_ar = crds.service_monitor.clone();
@@ -90,7 +90,7 @@ pub fn build_service_controllers(
         provider_type,
         cedar,
         crds,
-        monitoring_enabled,
+        monitoring,
     );
     service_ctx.extension_phases = vec![Arc::new(ServiceMonitorPhase::new(service_monitor_ar))];
     let service_ctx = Arc::new(service_ctx);
@@ -151,7 +151,7 @@ pub fn build_service_controllers(
         watcher_config(),
     )
     .shutdown_on_signal()
-    .run(reconcile_external, error_policy_external, service_ctx)
+    .run(reconcile_external, service_error_policy, service_ctx)
     .for_each(log_reconcile_result("ExternalService"));
 
     let policy_ctx = Arc::new(ControllerContext::new(client.clone()));
@@ -179,8 +179,15 @@ pub fn build_service_controllers(
 }
 
 /// Build provider controller futures (CloudProvider, SecretProvider, CedarPolicy, OIDCProvider)
-pub fn build_provider_controllers(client: Client) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+pub fn build_provider_controllers(
+    client: Client,
+    cedar: Arc<PolicyEngine>,
+) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let ctx = Arc::new(ControllerContext::new(client.clone()));
+    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
+        client: client.clone(),
+        cedar,
+    });
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
     let cloud_ctrl = Controller::new(Api::<CloudProvider>::all(client.clone()), watcher_config())
@@ -207,7 +214,7 @@ pub fn build_provider_controllers(client: Client) -> Vec<Pin<Box<dyn Future<Outp
         .run(
             cedar_validation_ctrl::reconcile,
             lattice_common::default_error_policy,
-            ctx.clone(),
+            cedar_ctx,
         )
         .for_each(log_reconcile_result("CedarPolicy"));
 
@@ -274,20 +281,25 @@ pub async fn resolve_provider_type_from_cluster(client: &Client) -> ProviderType
     }
 }
 
-/// Resolve monitoring status from env var (for Service mode, which has no LatticeCluster).
-/// Defaults to true (monitoring is enabled by default).
-pub fn resolve_monitoring_from_env() -> bool {
-    std::env::var("LATTICE_MONITORING")
+/// Resolve monitoring config from env var (for Service mode, which has no LatticeCluster).
+/// Defaults to enabled + HA.
+pub fn resolve_monitoring_from_env() -> MonitoringConfig {
+    let enabled = std::env::var("LATTICE_MONITORING")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(true)
+        .unwrap_or(true);
+    let ha = std::env::var("LATTICE_MONITORING_HA")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(true);
+    MonitoringConfig { enabled, ha }
 }
 
-/// Resolve monitoring status from the first LatticeCluster CRD
-pub async fn resolve_monitoring_from_cluster(client: &Client) -> bool {
+/// Resolve monitoring config from the first LatticeCluster CRD
+pub async fn resolve_monitoring_from_cluster(client: &Client) -> MonitoringConfig {
     match read_first_cluster(client).await {
         Some(cluster) => cluster.spec.monitoring,
-        None => true,
+        None => MonitoringConfig::default(),
     }
 }
 

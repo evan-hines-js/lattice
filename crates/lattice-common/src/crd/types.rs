@@ -649,12 +649,6 @@ fn default_lattice_namespace() -> String {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointsSpec {
-    /// Host address for child agent connections.
-    /// Optional for cloud providers with LBs - will be auto-discovered from LB status.
-    /// Required for on-premises providers (Proxmox, Docker).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-
     /// gRPC port for agent connections (default: 50051)
     #[serde(default = "default_grpc_port")]
     pub grpc_port: u16,
@@ -681,48 +675,6 @@ fn default_bootstrap_port() -> u16 {
 
 fn default_proxy_port() -> u16 {
     crate::DEFAULT_PROXY_PORT
-}
-
-impl EndpointsSpec {
-    /// Get the combined parent endpoint in format "host:http_port:grpc_port"
-    /// Returns None if host is not set (pending auto-discovery from cloud LB)
-    pub fn endpoint(&self) -> Option<String> {
-        self.host
-            .as_ref()
-            .map(|h| format!("{}:{}:{}", h, self.bootstrap_port, self.grpc_port))
-    }
-
-    /// Get the gRPC endpoint URL for agent connections
-    /// Returns None if host is not set
-    pub fn grpc_endpoint(&self) -> Option<String> {
-        self.host
-            .as_ref()
-            .map(|h| format!("https://{}:{}", h, self.grpc_port))
-    }
-
-    /// Get the bootstrap endpoint URL for kubeadm webhook
-    /// Returns None if host is not set
-    pub fn bootstrap_endpoint(&self) -> Option<String> {
-        self.host
-            .as_ref()
-            .map(|h| format!("https://{}:{}", h, self.bootstrap_port))
-    }
-
-    /// Get the K8s API proxy endpoint URL for CAPI controller access
-    /// Returns None if host is not set
-    pub fn proxy_endpoint(&self) -> Option<String> {
-        self.host
-            .as_ref()
-            .map(|h| format!("https://{}:{}", h, self.proxy_port))
-    }
-
-    /// Get the authenticated proxy endpoint URL for user/service access (Cedar-authorized)
-    /// Returns None if host is not set
-    pub fn auth_proxy_endpoint(&self) -> Option<String> {
-        self.host
-            .as_ref()
-            .map(|h| format!("https://{}:{}", h, crate::DEFAULT_AUTH_PROXY_PORT))
-    }
 }
 
 /// Service exposure specification
@@ -1728,54 +1680,11 @@ mod tests {
 
         #[test]
         fn test_endpoints_spec_default_ports() {
-            let json = r#"{"host":"example.com","service":{"type":"LoadBalancer"}}"#;
+            let json = r#"{"service":{"type":"LoadBalancer"}}"#;
             let spec: EndpointsSpec =
                 serde_json::from_str(json).expect("EndpointsSpec deserialization should succeed");
             assert_eq!(spec.grpc_port, 50051);
             assert_eq!(spec.bootstrap_port, 8443);
-        }
-
-        #[test]
-        fn test_endpoints_spec_urls() {
-            let spec = EndpointsSpec {
-                host: Some("172.18.255.1".to_string()),
-                grpc_port: 50051,
-                bootstrap_port: 8443,
-                proxy_port: 8081,
-                service: ServiceSpec {
-                    type_: "LoadBalancer".to_string(),
-                },
-            };
-            assert_eq!(
-                spec.grpc_endpoint(),
-                Some("https://172.18.255.1:50051".to_string())
-            );
-            assert_eq!(
-                spec.bootstrap_endpoint(),
-                Some("https://172.18.255.1:8443".to_string())
-            );
-            assert_eq!(
-                spec.proxy_endpoint(),
-                Some("https://172.18.255.1:8081".to_string())
-            );
-            assert_eq!(spec.endpoint(), Some("172.18.255.1:8443:50051".to_string()));
-        }
-
-        #[test]
-        fn test_endpoints_spec_no_host() {
-            let spec = EndpointsSpec {
-                host: None,
-                grpc_port: 50051,
-                bootstrap_port: 8443,
-                proxy_port: 8081,
-                service: ServiceSpec {
-                    type_: "LoadBalancer".to_string(),
-                },
-            };
-            assert_eq!(spec.grpc_endpoint(), None);
-            assert_eq!(spec.bootstrap_endpoint(), None);
-            assert_eq!(spec.proxy_endpoint(), None);
-            assert_eq!(spec.endpoint(), None);
         }
     }
 }

@@ -7,14 +7,16 @@ metadata:
     lattice.dev/environment: e2e-test
     lattice.dev/region: proxmox
 spec:
-  monitoring: false
-  backups: false
+  monitoring:
+    enabled: true
+    ha: false
+  backups:
+    enabled: false
   providerRef: proxmox
   provider:
     kubernetes:
       version: "1.32.0"
       bootstrap: rke2
-      # certSANs auto-populated from controlPlaneEndpoint
     config:
       proxmox:
         sshAuthorizedKeys:
@@ -45,3 +47,6 @@ spec:
           cores: 16
           memoryGib: 32
           diskGib: 100
+  networking:
+    default:
+      cidr: "10.0.0.216/28"

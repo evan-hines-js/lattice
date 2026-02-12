@@ -17,7 +17,9 @@ use lattice_common::{
 use lattice_capi::installer::{
     copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
 };
-use lattice_common::crd::{CloudProvider, LatticeCluster, ProviderType};
+use lattice_common::crd::{
+    BackupsConfig, CloudProvider, LatticeCluster, MonitoringConfig, ProviderType,
+};
 use lattice_infra::bootstrap::{self, InfrastructureConfig};
 
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT};
@@ -43,8 +45,11 @@ pub async fn ensure_infrastructure(
             cluster_name: "bootstrap".to_string(),
             skip_cilium_policies: true,
             skip_service_mesh: true,
-            monitoring: false,
-            backups: false,
+            monitoring: MonitoringConfig {
+                enabled: false,
+                ha: false,
+            },
+            backups: BackupsConfig { enabled: false },
             ..Default::default()
         };
 
@@ -71,8 +76,8 @@ pub async fn ensure_infrastructure(
                     bootstrap = ?cfg.bootstrap,
                     cluster = %cfg.cluster_name,
                     parent_host = ?cfg.parent_host,
-                    monitoring = cfg.monitoring,
-                    backups = cfg.backups,
+                    monitoring = ?cfg.monitoring,
+                    backups = ?cfg.backups,
                     "config from LatticeCluster CRD"
                 );
                 cfg
@@ -84,8 +89,11 @@ pub async fn ensure_infrastructure(
                 tracing::info!(cluster = %cluster_name, "no LatticeCluster CRD, using env config");
                 InfrastructureConfig {
                     cluster_name,
-                    monitoring: false,
-                    backups: false,
+                    monitoring: MonitoringConfig {
+                        enabled: false,
+                        ha: false,
+                    },
+                    backups: BackupsConfig { enabled: false },
                     ..Default::default()
                 }
             }

@@ -5,7 +5,7 @@
 //! then append `DynamicResource` entries to `compiled.extensions` for things
 //! like Flagger Canaries, ServiceMonitors, or rate-limiting EnvoyFilters.
 
-use crate::crd::{LatticeService, ProviderType};
+use crate::crd::{LatticeService, MonitoringConfig, ProviderType};
 use crate::graph::ServiceGraph;
 
 use super::CompiledService;
@@ -24,8 +24,8 @@ pub struct CompilationContext<'a> {
     pub cluster_name: &'a str,
     /// Infrastructure provider type
     pub provider_type: ProviderType,
-    /// Whether monitoring is enabled on this cluster
-    pub monitoring_enabled: bool,
+    /// Monitoring configuration for this cluster
+    pub monitoring: MonitoringConfig,
 }
 
 /// A pluggable phase in the service compilation pipeline.
@@ -46,7 +46,7 @@ pub struct CompilationContext<'a> {
 ///         ctx: &CompilationContext<'_>,
 ///         output: &mut CompiledService,
 ///     ) -> Result<(), String> {
-///         if !ctx.monitoring_enabled { return Ok(()); }
+///         if !ctx.monitoring.enabled { return Ok(()); }
 ///         let monitor = build_service_monitor(ctx.name, ctx.namespace);
 ///         output.extensions.push(DynamicResource { ... });
 ///         Ok(())

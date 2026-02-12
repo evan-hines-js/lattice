@@ -176,8 +176,6 @@ pub struct ClusterRegistration {
     pub cluster_manifest: String,
     /// Optional networking config for Cilium LB-IPAM
     pub networking: Option<lattice_common::crd::NetworkingSpec>,
-    /// Proxmox ipv4_pool for auto-deriving LB-IPAM (when networking is None)
-    pub proxmox_ipv4_pool: Option<lattice_common::crd::Ipv4PoolConfig>,
     /// Infrastructure provider (docker, aws, gcp, azure)
     pub provider: ProviderType,
     /// Bootstrap mechanism (kubeadm or rke2)
@@ -227,8 +225,6 @@ pub struct BootstrapBundleConfig<'a> {
     pub registry_credentials: Option<&'a str>,
     /// Optional networking configuration (for LB-IPAM)
     pub networking: Option<&'a lattice_common::crd::NetworkingSpec>,
-    /// Optional Proxmox ipv4_pool config (for auto-deriving LB-IPAM when networking is None)
-    pub proxmox_ipv4_pool: Option<&'a lattice_common::crd::Ipv4PoolConfig>,
     /// Cluster name
     pub cluster_name: &'a str,
     /// Provider type
@@ -279,17 +275,10 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
     }
 
     // Add Cilium LB-IPAM resources
-    // Priority: explicit networking config > auto-derived from Proxmox ipv4_pool
     if let Some(networking) = config.networking {
         let lb_resources = crate::cilium::generate_lb_resources(networking).map_err(|e| {
             BootstrapError::Internal(format!("failed to generate Cilium LB resources: {}", e))
         })?;
-        manifests.extend(lb_resources);
-    } else if let Some(ipv4_pool) = config.proxmox_ipv4_pool {
-        let lb_resources =
-            crate::cilium::generate_lb_resources_from_proxmox(ipv4_pool).map_err(|e| {
-                BootstrapError::Internal(format!("failed to generate Cilium LB resources: {}", e))
-            })?;
         manifests.extend(lb_resources);
     }
 
@@ -674,8 +663,6 @@ pub struct ClusterBootstrapInfo {
     pub token_used: bool,
     /// Networking configuration for Cilium LB-IPAM
     pub networking: Option<lattice_common::crd::NetworkingSpec>,
-    /// Proxmox ipv4_pool for auto-deriving LB-IPAM (when networking is None)
-    pub proxmox_ipv4_pool: Option<lattice_common::crd::Ipv4PoolConfig>,
     /// Infrastructure provider (docker, aws, gcp, azure)
     pub provider: ProviderType,
     /// Bootstrap mechanism (kubeadm or rke2) - determines FIPS relaxation needs
@@ -804,7 +791,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             token_created: Instant::now(),
             token_used: false,
             networking: registration.networking,
-            proxmox_ipv4_pool: registration.proxmox_ipv4_pool,
             provider: registration.provider,
             bootstrap: registration.bootstrap,
             k8s_version: registration.k8s_version,
@@ -910,7 +896,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
             networking: info.networking.as_ref(),
-            proxmox_ipv4_pool: info.proxmox_ipv4_pool.as_ref(),
             cluster_name: &info.cluster_id,
             provider: info.provider,
             k8s_version: &info.k8s_version,
@@ -1263,7 +1248,7 @@ mod tests {
                 ca_certificate: ca_certificate.into(),
                 cluster_manifest,
                 networking: None,
-                proxmox_ipv4_pool: None,
+
                 provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::default(),
                 k8s_version: "1.32.0".to_string(),
@@ -2397,7 +2382,7 @@ mod tests {
                 token_created: std::time::Instant::now(),
                 token_used: true, // Already bootstrapped
                 networking: None,
-                proxmox_ipv4_pool: None,
+
                 provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
@@ -2453,7 +2438,7 @@ mod tests {
                 token_created: std::time::Instant::now(),
                 token_used: true, // Already bootstrapped
                 networking: None,
-                proxmox_ipv4_pool: None,
+
                 provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::Rke2,
                 k8s_version: "1.32.0".to_string(),
@@ -2522,7 +2507,7 @@ mod tests {
                 token_created: std::time::Instant::now(),
                 token_used: true,
                 networking: None,
-                proxmox_ipv4_pool: None,
+
                 provider: ProviderType::Aws,
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
@@ -2585,7 +2570,7 @@ mod tests {
                 token_created: std::time::Instant::now(),
                 token_used: true,
                 networking: None,
-                proxmox_ipv4_pool: None,
+
                 provider: ProviderType::Docker,
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),

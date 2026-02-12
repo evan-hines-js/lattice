@@ -212,13 +212,6 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
             ca_certificate: ca_cert,
             cluster_manifest,
             networking: cluster.spec.networking.clone(),
-            proxmox_ipv4_pool: cluster
-                .spec
-                .provider
-                .config
-                .proxmox
-                .as_ref()
-                .map(|p| p.ipv4_pool.clone()),
             provider: cluster.spec.provider.provider_type(),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             k8s_version: cluster.spec.provider.kubernetes.version.clone(),

@@ -72,7 +72,7 @@ impl SecretsCompiler {
         let secret_resources: Vec<_> = workload
             .resources
             .iter()
-            .filter(|(_, r)| r.is_secret())
+            .filter(|(_, r)| r.type_.is_secret())
             .collect();
 
         if secret_resources.is_empty() {

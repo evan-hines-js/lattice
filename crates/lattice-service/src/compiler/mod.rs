@@ -15,7 +15,7 @@
 //! ```text
 //! let graph = ServiceGraph::new();
 //! let cedar = PolicyEngine::new();
-//! let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, true);
+//! let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, MonitoringConfig::default());
 //! let output = compiler.compile(&lattice_service).await;
 //! // output.workloads, output.policies
 //! ```
@@ -46,7 +46,7 @@ use lattice_secret_provider::{
     ExternalSecretTemplate, RemoteRef, SecretStoreRef,
 };
 
-use crate::crd::{LatticeService, ProviderType, ServiceBackupSpec};
+use crate::crd::{LatticeService, MonitoringConfig, ProviderType, ServiceBackupSpec};
 use crate::graph::ServiceGraph;
 use crate::ingress::{GeneratedIngress, GeneratedWaypoint, IngressCompiler, WaypointCompiler};
 use crate::policy::{GeneratedPolicies, PolicyCompiler};
@@ -157,7 +157,7 @@ pub struct ServiceCompiler<'a> {
     cluster_name: String,
     provider_type: ProviderType,
     cedar: &'a PolicyEngine,
-    monitoring_enabled: bool,
+    monitoring: MonitoringConfig,
     renderer: TemplateRenderer,
     extension_phases: &'a [Arc<dyn CompilerPhase>],
     effective_backup: Option<ServiceBackupSpec>,
@@ -171,20 +171,20 @@ impl<'a> ServiceCompiler<'a> {
     /// * `cluster_name` - Cluster name used in trust domain (lattice.{cluster}.local)
     /// * `provider_type` - Infrastructure provider for topology-aware scheduling
     /// * `cedar` - Cedar policy engine for secret access authorization
-    /// * `monitoring_enabled` - Whether the cluster has monitoring (VictoriaMetrics) enabled
+    /// * `monitoring` - Monitoring configuration for this cluster
     pub fn new(
         graph: &'a ServiceGraph,
         cluster_name: impl Into<String>,
         provider_type: ProviderType,
         cedar: &'a PolicyEngine,
-        monitoring_enabled: bool,
+        monitoring: MonitoringConfig,
     ) -> Self {
         Self {
             graph,
             cluster_name: cluster_name.into(),
             provider_type,
             cedar,
-            monitoring_enabled,
+            monitoring,
             renderer: TemplateRenderer::new(),
             extension_phases: &[],
             effective_backup: None,
@@ -349,7 +349,7 @@ impl<'a> ServiceCompiler<'a> {
             namespace,
             &compiled_volumes,
             self.provider_type,
-            self.monitoring_enabled,
+            &self.monitoring,
             &container_data,
         )?;
 
@@ -457,7 +457,7 @@ impl<'a> ServiceCompiler<'a> {
                 graph: self.graph,
                 cluster_name: &self.cluster_name,
                 provider_type: self.provider_type,
-                monitoring_enabled: self.monitoring_enabled,
+                monitoring: self.monitoring.clone(),
             };
             for phase in self.extension_phases {
                 phase
@@ -483,7 +483,7 @@ impl<'a> ServiceCompiler<'a> {
         let secret_paths: Vec<_> = workload
             .resources
             .iter()
-            .filter(|(_, r)| r.is_secret())
+            .filter(|(_, r)| r.type_.is_secret())
             .filter_map(|(resource_name, r)| {
                 let remote_key = r.secret_remote_key()?.to_string();
                 let provider = r.secret_params().ok()??.provider;
@@ -982,6 +982,17 @@ mod tests {
         }
     }
 
+    /// Create a test compiler with default settings (Docker provider, monitoring enabled).
+    fn test_compiler<'a>(graph: &'a ServiceGraph, cedar: &'a PolicyEngine) -> ServiceCompiler<'a> {
+        ServiceCompiler::new(
+            graph,
+            "test-cluster",
+            ProviderType::Docker,
+            cedar,
+            MonitoringConfig::default(),
+        )
+    }
+
     // =========================================================================
     // Story: Unified Compilation Delegates to Specialized Compilers
     // =========================================================================
@@ -1003,8 +1014,7 @@ mod tests {
         // Create LatticeService for api
         let service = make_service("api", "prod");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should have workloads (from WorkloadCompiler)
@@ -1033,8 +1043,7 @@ mod tests {
         // Create LatticeService with staging label
         let service = make_service("my-app", "staging");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should find service in graph and generate cilium policy
@@ -1053,8 +1062,7 @@ mod tests {
         // Create LatticeService without env label
         let service = make_service("my-app", "prod-ns");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should find service using namespace as env
@@ -1073,8 +1081,7 @@ mod tests {
 
         let service = make_service("my-app", "default");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should still have workloads
@@ -1098,8 +1105,7 @@ mod tests {
 
         let service = make_service("my-app", "default");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         // Deployment + Service + ServiceAccount + CiliumPolicy
@@ -1120,8 +1126,7 @@ mod tests {
         let cedar = PolicyEngine::new();
         let service = make_service("my-app", "default");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
         assert!(!output.is_empty());
     }
@@ -1139,8 +1144,7 @@ mod tests {
 
         let service = make_service_with_ingress("api", "prod");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should have ingress resources
@@ -1177,8 +1181,7 @@ mod tests {
 
         let service = make_service("api", "prod");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should NOT have ingress resources
@@ -1197,8 +1200,7 @@ mod tests {
 
         let service = make_service_with_ingress("api", "prod");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         // Should include: Deployment + Service + ServiceAccount + CiliumPolicy +
@@ -1244,8 +1246,7 @@ mod tests {
             }),
         });
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         let deployment = output.workloads.deployment.expect("should have deployment");
@@ -1275,8 +1276,7 @@ mod tests {
         let cedar = PolicyEngine::new();
         let service = make_service("my-app", "default");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         let deployment = output.workloads.deployment.expect("should have deployment");
@@ -1371,9 +1371,7 @@ mod tests {
         let phase = Arc::new(TrackingPhase::new());
         let phases: Vec<Arc<dyn CompilerPhase>> = vec![phase.clone()];
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true)
-                .with_phases(&phases);
+        let compiler = test_compiler(&graph, &cedar).with_phases(&phases);
         compiler.compile(&service).await.unwrap();
 
         assert!(phase.was_called());
@@ -1413,9 +1411,7 @@ mod tests {
         let service = make_service("my-app", "default");
 
         let phases: Vec<Arc<dyn CompilerPhase>> = vec![Arc::new(AddResourcePhase)];
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true)
-                .with_phases(&phases);
+        let compiler = test_compiler(&graph, &cedar).with_phases(&phases);
         let output = compiler.compile(&service).await.unwrap();
 
         assert_eq!(output.extensions.len(), 1);
@@ -1447,9 +1443,7 @@ mod tests {
         let service = make_service("my-app", "default");
 
         let phases: Vec<Arc<dyn CompilerPhase>> = vec![Arc::new(FailingPhase)];
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true)
-                .with_phases(&phases);
+        let compiler = test_compiler(&graph, &cedar).with_phases(&phases);
         let err = compiler.compile(&service).await.unwrap_err();
 
         let msg = err.to_string();
@@ -1472,8 +1466,7 @@ mod tests {
         let service = make_service("my-app", "default");
 
         // No with_phases call — default empty
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         assert!(output.extensions.is_empty());
@@ -1889,8 +1882,7 @@ mod tests {
             ..Default::default()
         });
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let err = compiler.compile(&service).await.unwrap_err();
 
         assert!(err.is_policy_denied());
@@ -1925,8 +1917,7 @@ mod tests {
             ..Default::default()
         });
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         assert!(output.workloads.deployment.is_some());
@@ -1939,8 +1930,7 @@ mod tests {
 
         let service = make_service("my-app", "default");
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true);
+        let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
         assert!(output.workloads.deployment.is_some());
@@ -1986,9 +1976,7 @@ mod tests {
             }),
         };
 
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true)
-                .with_effective_backup(Some(effective));
+        let compiler = test_compiler(&graph, &cedar).with_effective_backup(Some(effective));
         let output = compiler.compile(&service).await.unwrap();
 
         let deployment = output.workloads.deployment.expect("should have deployment");
@@ -2026,9 +2014,7 @@ mod tests {
         });
 
         // No effective backup — should fall back to inline
-        let compiler =
-            ServiceCompiler::new(&graph, "test-cluster", ProviderType::Docker, &cedar, true)
-                .with_effective_backup(None);
+        let compiler = test_compiler(&graph, &cedar).with_effective_backup(None);
         let output = compiler.compile(&service).await.unwrap();
 
         let deployment = output.workloads.deployment.expect("should have deployment");
