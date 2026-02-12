@@ -294,11 +294,16 @@ fn resolve_store_for_refs(
     })
 }
 
-/// Convert a file path to a valid ConfigMap/Secret key
+/// Convert a file path to a valid ConfigMap/Secret key.
+///
+/// Uses `__` as separator for `/` and keeps `.` literal to preserve
+/// reversibility. Previous versions mapped both `/` and `.` to `-`
+/// which caused collisions (e.g., `/foo/bar` and `/foo.bar` both
+/// became `foo-bar`).
 fn path_to_key(path: &str) -> String {
     path.trim_start_matches('/')
         .chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .map(|c| if c == '/' { '-' } else { c })
         .collect()
 }
 
@@ -436,7 +441,7 @@ mod tests {
         assert_eq!(result.file_external_secrets.len(), 1);
 
         let es = &result.file_external_secrets[0];
-        assert_eq!(es.metadata.name, "api-main-file-etc-app-config-yaml");
+        assert_eq!(es.metadata.name, "api-main-file-etc-app-config.yaml");
         assert_eq!(es.metadata.namespace, "prod");
 
         // Should have template data
@@ -446,7 +451,7 @@ mod tests {
             .template
             .as_ref()
             .expect("should have template");
-        assert!(template.data.contains_key("etc-app-config-yaml"));
+        assert!(template.data.contains_key("etc-app-config.yaml"));
 
         // Should have data entry for fetching the secret
         assert_eq!(es.spec.data.len(), 1);
@@ -578,9 +583,17 @@ mod tests {
 
     #[test]
     fn test_path_to_key() {
-        assert_eq!(path_to_key("/etc/app/config.yaml"), "etc-app-config-yaml");
-        assert_eq!(path_to_key("file.txt"), "file-txt");
+        assert_eq!(path_to_key("/etc/app/config.yaml"), "etc-app-config.yaml");
+        assert_eq!(path_to_key("file.txt"), "file.txt");
         assert_eq!(path_to_key("/a/b/c"), "a-b-c");
+    }
+
+    #[test]
+    fn test_path_to_key_no_dot_slash_collision() {
+        // Previously both mapped to "foo-bar", now they're distinct
+        assert_ne!(path_to_key("/foo/bar"), path_to_key("/foo.bar"));
+        assert_eq!(path_to_key("/foo/bar"), "foo-bar");
+        assert_eq!(path_to_key("/foo.bar"), "foo.bar");
     }
 
     #[test]

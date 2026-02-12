@@ -444,6 +444,61 @@ impl GpuParams {
     }
 }
 
+/// Validate a duration string (e.g., "1h", "30m", "15s", "1h30m").
+///
+/// Accepts Go-style durations used by ESO: combinations of hours (h),
+/// minutes (m), and seconds (s) with positive integer values.
+fn validate_duration_string(s: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err("duration cannot be empty".to_string());
+    }
+
+    let mut remaining = s;
+    let mut found_unit = false;
+
+    while !remaining.is_empty() {
+        // Parse numeric part
+        let num_end = remaining
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(remaining.len());
+        if num_end == 0 {
+            return Err(format!(
+                "expected a number at position {} in '{}'",
+                s.len() - remaining.len(),
+                s
+            ));
+        }
+        let _num: u64 = remaining[..num_end]
+            .parse()
+            .map_err(|_| format!("invalid number in duration '{}'", s))?;
+
+        remaining = &remaining[num_end..];
+
+        // Parse unit
+        if remaining.is_empty() {
+            return Err(format!(
+                "missing unit suffix (h/m/s) in duration '{}'",
+                s
+            ));
+        }
+        let unit = remaining.chars().next().unwrap();
+        if !matches!(unit, 'h' | 'm' | 's') {
+            return Err(format!(
+                "invalid duration unit '{}' in '{}' (expected h, m, or s)",
+                unit, s
+            ));
+        }
+        remaining = &remaining[1..];
+        found_unit = true;
+    }
+
+    if !found_unit {
+        return Err(format!("no duration units found in '{}'", s));
+    }
+
+    Ok(())
+}
+
 /// Parse a GPU memory string into MiB.
 ///
 /// Accepts "20Gi" -> 20480, "512Mi" -> 512, bare number -> MiB.
@@ -578,6 +633,35 @@ impl ResourceSpec {
                 // Validate provider is specified
                 if secret_params.provider.is_empty() {
                     return Err("secret resource requires 'provider' in params".to_string());
+                }
+
+                // Validate refresh_interval format if specified
+                if let Some(ref interval) = secret_params.refresh_interval {
+                    validate_duration_string(interval).map_err(|e| {
+                        format!("secret resource refresh_interval '{}': {}", interval, e)
+                    })?;
+                }
+
+                // Validate secret_type if specified
+                if let Some(ref secret_type) = secret_params.secret_type {
+                    const VALID_SECRET_TYPES: &[&str] = &[
+                        "Opaque",
+                        "kubernetes.io/tls",
+                        "kubernetes.io/dockerconfigjson",
+                        "kubernetes.io/dockercfg",
+                        "kubernetes.io/basic-auth",
+                        "kubernetes.io/ssh-auth",
+                        "kubernetes.io/service-account-token",
+                        "bootstrap.kubernetes.io/token",
+                    ];
+                    if !VALID_SECRET_TYPES.contains(&secret_type.as_str()) {
+                        return Err(format!(
+                            "secret resource secret_type '{}' is not a recognized K8s secret type \
+                             (valid: {})",
+                            secret_type,
+                            VALID_SECRET_TYPES.join(", ")
+                        ));
+                    }
                 }
 
                 Ok(Some(secret_params))
@@ -987,5 +1071,100 @@ mod tests {
         assert!(parse_gpu_memory_mib("abc").is_err());
         assert!(parse_gpu_memory_mib("").is_err());
         assert!(parse_gpu_memory_mib("10Xi").is_err());
+    }
+
+    // =========================================================================
+    // Duration validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_valid_duration_strings() {
+        assert!(validate_duration_string("1h").is_ok());
+        assert!(validate_duration_string("30m").is_ok());
+        assert!(validate_duration_string("15s").is_ok());
+        assert!(validate_duration_string("1h30m").is_ok());
+        assert!(validate_duration_string("2h0m30s").is_ok());
+    }
+
+    #[test]
+    fn test_invalid_duration_strings() {
+        assert!(validate_duration_string("").is_err());
+        assert!(validate_duration_string("abc").is_err());
+        assert!(validate_duration_string("1x").is_err());
+        assert!(validate_duration_string("1").is_err()); // missing unit
+        assert!(validate_duration_string("h").is_err()); // missing number
+    }
+
+    // =========================================================================
+    // Secret params validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_secret_params_valid_refresh_interval() {
+        let resource = ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some("vault/path".to_string()),
+            params: Some(BTreeMap::from([
+                ("provider".to_string(), serde_json::json!("vault")),
+                ("refreshInterval".to_string(), serde_json::json!("1h")),
+            ])),
+            ..Default::default()
+        };
+        assert!(resource.secret_params().is_ok());
+    }
+
+    #[test]
+    fn test_secret_params_invalid_refresh_interval() {
+        let resource = ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some("vault/path".to_string()),
+            params: Some(BTreeMap::from([
+                ("provider".to_string(), serde_json::json!("vault")),
+                (
+                    "refreshInterval".to_string(),
+                    serde_json::json!("not-a-duration"),
+                ),
+            ])),
+            ..Default::default()
+        };
+        let result = resource.secret_params();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("refresh_interval"));
+    }
+
+    #[test]
+    fn test_secret_params_valid_secret_type() {
+        let resource = ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some("vault/path".to_string()),
+            params: Some(BTreeMap::from([
+                ("provider".to_string(), serde_json::json!("vault")),
+                (
+                    "secretType".to_string(),
+                    serde_json::json!("kubernetes.io/tls"),
+                ),
+            ])),
+            ..Default::default()
+        };
+        assert!(resource.secret_params().is_ok());
+    }
+
+    #[test]
+    fn test_secret_params_invalid_secret_type() {
+        let resource = ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some("vault/path".to_string()),
+            params: Some(BTreeMap::from([
+                ("provider".to_string(), serde_json::json!("vault")),
+                (
+                    "secretType".to_string(),
+                    serde_json::json!("invalid-type"),
+                ),
+            ])),
+            ..Default::default()
+        };
+        let result = resource.secret_params();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a recognized"));
     }
 }

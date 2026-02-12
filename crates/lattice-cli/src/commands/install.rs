@@ -499,6 +499,12 @@ impl Installer {
         let kubeconfig_path = self.kubeconfig_path();
         info!("Writing kubeconfig to {:?}", kubeconfig_path);
         tokio::fs::write(&kubeconfig_path, &kubeconfig).await?;
+        // Restrict kubeconfig to owner-only read/write
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&kubeconfig_path, perms)?;
+        }
 
         info!("Waiting for management cluster API server...");
         self.wait_for_api_server().await?;

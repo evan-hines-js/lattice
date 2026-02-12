@@ -400,6 +400,15 @@ pub(crate) fn validate_image(image: &str, container_name: &str) -> Result<(), cr
         )));
     }
 
+    // Reject shell metacharacters that could enable injection
+    const SHELL_METACHARS: &[char] = &['`', '|', ';', '&', '$', '>', '<', '(', ')', '{', '}'];
+    if image.chars().any(|c| SHELL_METACHARS.contains(&c)) {
+        return Err(crate::Error::validation(format!(
+            "container '{}': image '{}' contains shell metacharacters",
+            container_name, image
+        )));
+    }
+
     Ok(())
 }
 
@@ -422,6 +431,26 @@ pub(crate) fn validate_file_mode(
     if !mode_str.chars().all(|c| ('0'..='7').contains(&c)) {
         return Err(crate::Error::validation(format!(
             "container '{}' file '{}': mode '{}' contains non-octal digits",
+            container_name, path, mode
+        )));
+    }
+
+    // Parse the mode value to check for insecure permissions
+    let mode_val =
+        u32::from_str_radix(mode_str, 8).expect("already validated as octal digits above");
+
+    // Reject setuid (04000), setgid (02000), and sticky (01000) bits
+    if mode_val & 0o7000 != 0 {
+        return Err(crate::Error::validation(format!(
+            "container '{}' file '{}': mode '{}' sets special bits (setuid/setgid/sticky) which are not allowed",
+            container_name, path, mode
+        )));
+    }
+
+    // Reject world-writable files (other-write bit)
+    if mode_val & 0o002 != 0 {
+        return Err(crate::Error::validation(format!(
+            "container '{}' file '{}': mode '{}' is world-writable which is not allowed",
             container_name, path, mode
         )));
     }
@@ -478,7 +507,8 @@ mod tests {
         assert!(validate_file_mode("0644", "main", "/etc/config").is_ok());
         assert!(validate_file_mode("0755", "main", "/usr/bin/script").is_ok());
         assert!(validate_file_mode("644", "main", "/etc/config").is_ok());
-        assert!(validate_file_mode("0777", "main", "/tmp/file").is_ok());
+        assert!(validate_file_mode("0400", "main", "/etc/secret").is_ok());
+        assert!(validate_file_mode("0750", "main", "/usr/bin/script").is_ok());
     }
 
     #[test]
@@ -487,6 +517,23 @@ mod tests {
         assert!(validate_file_mode("abc", "main", "/etc/config").is_err());
         assert!(validate_file_mode("12", "main", "/etc/config").is_err());
         assert!(validate_file_mode("12345", "main", "/etc/config").is_err());
+    }
+
+    #[test]
+    fn test_file_mode_rejects_world_writable() {
+        assert!(validate_file_mode("0777", "main", "/tmp/file").is_err());
+        assert!(validate_file_mode("0666", "main", "/tmp/file").is_err());
+        assert!(validate_file_mode("0772", "main", "/tmp/file").is_err());
+    }
+
+    #[test]
+    fn test_file_mode_rejects_special_bits() {
+        // setuid
+        assert!(validate_file_mode("4755", "main", "/usr/bin/evil").is_err());
+        // setgid
+        assert!(validate_file_mode("2755", "main", "/usr/bin/evil").is_err());
+        // sticky
+        assert!(validate_file_mode("1755", "main", "/tmp/dir").is_err());
     }
 
     #[test]
@@ -510,6 +557,17 @@ mod tests {
     #[test]
     fn test_dot_image_placeholder_valid() {
         assert!(validate_image(".", "main").is_ok());
+    }
+
+    #[test]
+    fn test_image_with_shell_metacharacters_fails() {
+        assert!(validate_image("nginx; rm -rf /", "main").is_err()); // also caught by whitespace
+        assert!(validate_image("$(evil)", "main").is_err());
+        assert!(validate_image("`whoami`", "main").is_err());
+        assert!(validate_image("img|cat", "main").is_err());
+        assert!(validate_image("img&bg", "main").is_err());
+        assert!(validate_image("img>file", "main").is_err());
+        assert!(validate_image("img<file", "main").is_err());
     }
 
     #[test]
