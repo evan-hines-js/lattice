@@ -34,10 +34,8 @@ regex.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
-opentelemetry-prometheus.workspace = true
 opentelemetry-semantic-conventions.workspace = true
 tracing-opentelemetry.workspace = true
-prometheus.workspace = true
 once_cell.workspace = true
 
 [dev-dependencies]

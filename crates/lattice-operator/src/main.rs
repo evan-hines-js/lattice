@@ -20,15 +20,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, CustomResourceExt};
-use once_cell::sync::OnceCell;
 
 use lattice_api::{AuthChain, OidcValidator, SaValidator, ServerConfig as AuthProxyConfig};
 use lattice_capi::installer::{CapiInstaller, NativeInstaller};
@@ -38,7 +35,7 @@ use lattice_cell::parent::{ParentConfig, ParentServers};
 use lattice_common::crd::LatticeCluster;
 use lattice_common::crd::{LatticeService, OIDCProvider};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::telemetry::{init_telemetry, PrometheusHandle, TelemetryConfig};
+use lattice_common::telemetry::{init_telemetry, TelemetryConfig};
 use lattice_common::{
     lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
     DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
@@ -51,9 +48,6 @@ use lattice_operator::startup::{
     re_register_existing_clusters, start_ca_rotation, wait_for_api_ready_for,
 };
 use lattice_service::controller::DiscoveredCrds;
-
-/// Global Prometheus handle for metrics endpoint
-static PROMETHEUS_HANDLE: OnceCell<PrometheusHandle> = OnceCell::new();
 
 mod controller_runner;
 
@@ -135,12 +129,8 @@ fn init_telemetry_global() {
     };
 
     match init_telemetry(config) {
-        Ok(Some(handle)) => {
-            let _ = PROMETHEUS_HANDLE.set(handle);
-            tracing::info!("Telemetry initialized with Prometheus metrics");
-        }
-        Ok(None) => {
-            tracing::info!("Telemetry initialized without Prometheus metrics");
+        Ok(()) => {
+            tracing::info!("Telemetry initialized");
         }
         Err(e) => {
             eprintln!("WARNING: Failed to initialize telemetry: {}", e);
@@ -493,13 +483,11 @@ async fn setup_cell_infra(
 /// Runs on all pods:
 /// - `/healthz` - liveness probe (process alive)
 /// - `/readyz` - readiness probe (ready to become leader or already leading)
-/// - `/metrics` - Prometheus metrics endpoint
 fn start_health_server() -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let app = Router::new()
             .route("/healthz", get(|| async { "ok" }))
-            .route("/readyz", get(|| async { "ok" }))
-            .route("/metrics", get(metrics_handler));
+            .route("/readyz", get(|| async { "ok" }));
 
         let addr: SocketAddr = ([0, 0, 0, 0], DEFAULT_HEALTH_PORT).into();
 
@@ -518,23 +506,6 @@ fn start_health_server() -> tokio::task::JoinHandle<()> {
             tracing::error!(error = %e, "Health server error");
         }
     })
-}
-
-/// Handler for /metrics endpoint returning Prometheus text format
-async fn metrics_handler() -> impl IntoResponse {
-    match PROMETHEUS_HANDLE.get() {
-        Some(handle) => (
-            StatusCode::OK,
-            [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
-            handle.encode(),
-        )
-            .into_response(),
-        None => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Prometheus metrics not initialized",
-        )
-            .into_response(),
-    }
 }
 
 /// Start the auth proxy server for authenticated cluster access

@@ -54,12 +54,14 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Install build dependencies for aws-lc-rs FIPS
 # - clang-devel: libclang for bindgen (aws-lc-rs)
 # - cmake, golang, perl: aws-lc-rs FIPS module build
-# - protobuf-compiler: prost/tonic code generation
+# - protobuf-compiler + protobuf-devel: prost/tonic code generation
+#   (protobuf-devel provides google/protobuf/timestamp.proto etc.)
 RUN dnf install -y 'dnf-command(config-manager)' && \
     dnf config-manager --set-enabled crb && \
     dnf install -y epel-release && \
     dnf install -y \
         protobuf-compiler \
+        protobuf-devel \
         clang-devel \
         cmake \
         golang \

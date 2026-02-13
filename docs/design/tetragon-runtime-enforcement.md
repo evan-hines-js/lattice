@@ -39,14 +39,24 @@ LatticeServiceSpec
 TracingPolicies compile into three tiers, each progressively more restrictive:
 
 **Tier 1: Baseline (all services, no opt-in)**
-- Block `execve` of shells (`/bin/sh`, `/bin/bash`, `/bin/dash`) in non-debug containers, **unless the container's liveness, readiness, or startup probes use `exec` commands** (the compiler inspects probe specs and excludes shell paths that appear in probe commands)
-- Block writes to `/etc/shadow`, `/etc/passwd`, `/etc/sudoers`
+
+Tier 1 is split between cluster-wide and per-service policies to avoid conflicts:
+
+*Cluster-wide TracingPolicy (bootstrap-time, unconditional):*
 - Block `ptrace` (anti-debugging/container-escape)
 - Block loading kernel modules (`init_module`, `finit_module`)
 - Block `mount`/`umount` syscalls
 - Kill processes that call `unshare` or `setns` (namespace escape)
+- Block writes to `/etc/shadow`, `/etc/passwd`, `/etc/sudoers`
 
-Services that legitimately need to escape Tier 1 restrictions (e.g., build containers that must exec shells) can be exempted via Cedar policy: `Lattice::Action::"ExemptBaselineEnforcement"` on `Lattice::Service::"namespace/name"`. The compiler checks for this permit before emitting baseline kprobes for the service.
+These are unconditionally wrong in application containers — no legitimate service needs them, so no per-service override is needed. Scoped to non-system namespaces via the same exclusion pattern as the Cilium default-deny.
+
+*Per-service TracingPolicyNamespaced (compiler-time, probe-aware):*
+- Block `execve` of shells (`/bin/sh`, `/bin/bash`, `/bin/dash`, `/usr/bin/sh`), **unless the container's liveness, readiness, or startup probes use `exec` commands** (the compiler inspects probe specs and excludes shell paths that appear in probe commands)
+
+Shell blocking must be per-service because it requires inspecting each service's probe specs. If this were cluster-wide, a probe using `/bin/sh` would be killed before the per-service policy could allow it — TracingPolicies are additive enforcement (any matching policy can kill), not overridable.
+
+Services that legitimately need shells beyond probes (e.g., build containers) can be exempted via Cedar policy: `Lattice::Action::"ExemptBaselineEnforcement"` on `Lattice::Service::"namespace/name"`. The compiler checks for this permit before emitting the per-service shell-blocking policy.
 
 **Tier 2: Spec-derived (automatic from LatticeServiceSpec) — enforced via Sigkill**
 - If `read_only_root_filesystem: true` → block `open(..., O_WRONLY|O_RDWR)` on `/` tree (excluding tmpfs mounts)
@@ -132,7 +142,7 @@ impl PolicyCompiler<'_> {
 
         // Check Cedar exemption before emitting baseline
         if !self.has_cedar_permit(namespace, service_name, "ExemptBaselineEnforcement") {
-            policies.push(self.compile_baseline_policy(service_name, namespace, spec));
+            policies.push(self.compile_baseline_shell_policy(service_name, namespace, spec));
         }
 
         // Tier 2: spec-derived
@@ -141,13 +151,15 @@ impl PolicyCompiler<'_> {
         policies
     }
 
-    fn compile_baseline_policy(
+    fn compile_baseline_shell_policy(
         &self,
         service_name: &str,
         namespace: &str,
         spec: &LatticeServiceSpec,
     ) -> DynamicObject {
-        // Collect shell paths used by exec probes so we don't block them
+        // Shell blocking is per-service (not cluster-wide) because it must
+        // exclude shells used by exec probes. The cluster-wide baseline
+        // handles unconditional syscalls (ptrace, modules, mount, etc.).
         let probe_shell_paths = Self::extract_probe_shell_paths(spec);
         let blocked_shells: Vec<&str> = ["/bin/sh", "/bin/bash", "/bin/dash", "/usr/bin/sh"]
             .into_iter()
@@ -199,7 +211,7 @@ Add a cluster-wide TracingPolicy during bootstrap (alongside the existing Cilium
 crates/lattice-infra/src/bootstrap/tetragon.rs
 ```
 
-This installs the Tier 1 baseline for all non-system namespaces, using the same namespace exclusion pattern as the Cilium default-deny:
+This installs the cluster-wide portion of Tier 1 (unconditional syscall blocking) for all non-system namespaces, using the same namespace exclusion pattern as the Cilium default-deny:
 
 ```yaml
 apiVersion: cilium.io/v1alpha1
@@ -209,23 +221,23 @@ metadata:
 spec:
   tracepoints:
     - subsystem: "syscalls"
-      event: "sys_enter_execve"
-      args:
-        - index: 0
-          type: string
+      event: "sys_enter_ptrace"
       selectors:
-        - matchArgs:
-            - index: 0
-              operator: In
-              values: ["/bin/sh", "/bin/bash", "/bin/dash", "/usr/bin/sh"]
-          matchNamespaces:
+        - matchNamespaces:
             - namespace: !kube-system
               operator: NotIn
       action: Sigkill
-    # ... ptrace, module loading, etc.
+    - subsystem: "syscalls"
+      event: "sys_enter_init_module"
+      selectors:
+        - matchNamespaces:
+            - namespace: !kube-system
+              operator: NotIn
+      action: Sigkill
+    # ... mount, umount, unshare, setns, sensitive file writes
 ```
 
-Per-service TracingPolicies from Tier 2 layer on top of this baseline. Per-service policies use `TracingPolicyNamespaced` so they are namespace-scoped and owned by the LatticeService.
+Shell blocking is NOT included here — it is emitted per-service by the compiler so it can inspect probe specs and exclude shells used by health checks. Per-service policies (Tier 1 shell blocking + Tier 2 spec-derived) use `TracingPolicyNamespaced` so they are namespace-scoped and owned by the LatticeService.
 
 ## Compilation Examples
 
@@ -345,7 +357,8 @@ Recommendation: option 1. Tetragon events go to stdout, collected by the cluster
 
 ### Unit Tests
 
-- `compile_baseline_policy()` produces expected tracepoint specs
+- `compile_baseline_shell_policy()` produces expected tracepoint specs with probe exclusions
+- Cluster-wide baseline covers ptrace, modules, mount, unshare, setns, sensitive files
 - `compile_spec_derived_policies()` with various `ContainerSecuritySpec` combinations
 - Empty capabilities → blocks `capset`
 - `readOnlyRootFilesystem: true` → blocks write syscalls

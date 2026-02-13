@@ -83,10 +83,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 opentelemetry = { version = "0.27", default-features = false, features = ["trace", "metrics"] }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", features = ["tonic", "metrics"] }
-opentelemetry-prometheus = "0.27"
 opentelemetry-semantic-conventions = "0.27"
 tracing-opentelemetry = "0.28"
-prometheus = "0.13"
 
 # gRPC
 tonic = { version = "0.12", features = ["tls", "transport"] }

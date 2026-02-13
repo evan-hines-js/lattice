@@ -277,7 +277,7 @@ pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, St
 /// it passes or 5 minutes elapse. This avoids waiting for full cycle counts
 /// on each attempt and lets policy propagation settle naturally.
 pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
-    let handle = start_mesh_test(kubeconfig_path).await?;
+    let _handle = start_mesh_test(kubeconfig_path).await?;
 
     // Wait for at least 1 cycle so there's log data to check
     wait_for_mesh_test_cycles(kubeconfig_path, 1).await?;
@@ -285,7 +285,7 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let timeout = Duration::from_secs(300);
     let start = Instant::now();
     let mut attempt = 0;
-    let mut last_err = String::new();
+    let mut last_err;
 
     loop {
         attempt += 1;
