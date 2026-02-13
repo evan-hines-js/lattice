@@ -17,7 +17,7 @@ const NAMESPACE: &str = "Lattice";
 // =============================================================================
 
 /// Build an entity UID for a given type and ID
-pub fn build_entity_uid(type_name: &str, id: &str) -> Result<EntityUid> {
+pub(crate) fn build_entity_uid(type_name: &str, id: &str) -> Result<EntityUid> {
     let full_type_name = format!("{}::{}", NAMESPACE, type_name);
     let entity_type: EntityTypeName =
         full_type_name
@@ -43,7 +43,7 @@ pub fn build_entity_uid(type_name: &str, id: &str) -> Result<EntityUid> {
 /// - `Lattice::User::<username>` entity with group parents
 ///
 /// Returns all entities (user + groups).
-pub fn build_user_entity(username: &str, groups: &[String]) -> Result<Vec<Entity>> {
+pub(crate) fn build_user_entity(username: &str, groups: &[String]) -> Result<Vec<Entity>> {
     let mut entities = Vec::new();
 
     // Create group entities and collect UIDs for user membership
@@ -79,7 +79,10 @@ pub fn build_user_entity(username: &str, groups: &[String]) -> Result<Vec<Entity
 /// - `environment`: only added if present (fail-closed via policy pattern)
 /// - `region`: always present (defaults to "unknown")
 /// - `tier`: always present (defaults to "standard")
-pub fn build_cluster_entity(cluster_name: &str, attrs: &ClusterAttributes) -> Result<Entity> {
+pub(crate) fn build_cluster_entity(
+    cluster_name: &str,
+    attrs: &ClusterAttributes,
+) -> Result<Entity> {
     let cluster_uid = build_entity_uid("Cluster", cluster_name)?;
     let mut attr_map = HashMap::new();
 
@@ -116,7 +119,7 @@ pub fn build_cluster_entity(cluster_name: &str, attrs: &ClusterAttributes) -> Re
 /// Attributes:
 /// - `namespace`: service namespace
 /// - `name`: service name
-pub fn build_service_entity(namespace: &str, name: &str) -> Result<Entity> {
+pub(crate) fn build_service_entity(namespace: &str, name: &str) -> Result<Entity> {
     let uid_str = format!("{}/{}", namespace, name);
     let uid = build_entity_uid("Service", &uid_str)?;
 
@@ -146,7 +149,7 @@ pub fn build_service_entity(namespace: &str, name: &str) -> Result<Entity> {
 /// Attributes:
 /// - `path`: full vault path
 /// - `provider`: SecretProvider name
-pub fn build_secret_path_entity(provider: &str, remote_key: &str) -> Result<Entity> {
+pub(crate) fn build_secret_path_entity(provider: &str, remote_key: &str) -> Result<Entity> {
     let uid_str = format!("{}:{}", provider, remote_key);
     let uid = build_entity_uid("SecretPath", &uid_str)?;
 
@@ -175,7 +178,7 @@ pub fn build_secret_path_entity(provider: &str, remote_key: &str) -> Result<Enti
 /// Attributes:
 /// - `category`: override category (e.g. "capability", "pod", "container", "profile")
 /// - `override_id`: the full override identifier
-pub fn build_security_override_entity(override_id: &str, category: &str) -> Result<Entity> {
+pub(crate) fn build_security_override_entity(override_id: &str, category: &str) -> Result<Entity> {
     let uid = build_entity_uid("SecurityOverride", override_id)?;
 
     let mut attrs = HashMap::new();

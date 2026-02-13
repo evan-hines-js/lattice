@@ -237,12 +237,12 @@ impl From<MoveObjectOutput> for MoveObject {
     }
 }
 
-impl From<&MoveObjectOutput> for MoveObject {
-    fn from(obj: &MoveObjectOutput) -> Self {
+impl From<MoveObject> for MoveObjectOutput {
+    fn from(obj: MoveObject) -> Self {
         Self {
-            source_uid: obj.source_uid.clone(),
-            manifest: obj.manifest.clone(),
-            owners: obj.owners.iter().map(Into::into).collect(),
+            source_uid: obj.source_uid,
+            manifest: obj.manifest,
+            owners: obj.owners.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -277,13 +277,13 @@ impl From<SourceOwnerRefOutput> for SourceOwnerRef {
     }
 }
 
-impl From<&SourceOwnerRefOutput> for SourceOwnerRef {
-    fn from(o: &SourceOwnerRefOutput) -> Self {
+impl From<SourceOwnerRef> for SourceOwnerRefOutput {
+    fn from(o: SourceOwnerRef) -> Self {
         Self {
-            source_uid: o.source_uid.clone(),
-            api_version: o.api_version.clone(),
-            kind: o.kind.clone(),
-            name: o.name.clone(),
+            source_uid: o.source_uid,
+            api_version: o.api_version,
+            kind: o.kind,
+            name: o.name,
             controller: o.controller,
             block_owner_deletion: o.block_owner_deletion,
         }

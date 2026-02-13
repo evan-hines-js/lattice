@@ -151,40 +151,29 @@ pub fn has_trace_context(request: &KubernetesRequest) -> bool {
     !request.traceparent.is_empty()
 }
 
-/// Get the trace ID from a request if present
+/// Extract a component from the traceparent header by index.
 ///
-/// Extracts the trace ID from the traceparent field if valid.
-/// Returns None if no trace context or invalid format.
-pub fn get_trace_id(request: &KubernetesRequest) -> Option<String> {
+/// traceparent format: `version-traceid-spanid-flags`
+/// Example: `00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01`
+fn traceparent_component(request: &KubernetesRequest, index: usize) -> Option<String> {
     if request.traceparent.is_empty() {
         return None;
     }
-
-    // traceparent format: version-traceid-spanid-flags
-    // Example: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
-    let parts: Vec<&str> = request.traceparent.split('-').collect();
-    if parts.len() >= 2 {
-        Some(parts[1].to_string())
-    } else {
-        None
-    }
+    request
+        .traceparent
+        .split('-')
+        .nth(index)
+        .map(|s| s.to_string())
 }
 
-/// Get the span ID from a request if present
-///
-/// Extracts the parent span ID from the traceparent field if valid.
-/// Returns None if no trace context or invalid format.
-pub fn get_span_id(request: &KubernetesRequest) -> Option<String> {
-    if request.traceparent.is_empty() {
-        return None;
-    }
+/// Get the trace ID from a request if present.
+pub fn get_trace_id(request: &KubernetesRequest) -> Option<String> {
+    traceparent_component(request, 1)
+}
 
-    let parts: Vec<&str> = request.traceparent.split('-').collect();
-    if parts.len() >= 3 {
-        Some(parts[2].to_string())
-    } else {
-        None
-    }
+/// Get the parent span ID from a request if present.
+pub fn get_span_id(request: &KubernetesRequest) -> Option<String> {
+    traceparent_component(request, 2)
 }
 
 #[cfg(test)]

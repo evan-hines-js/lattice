@@ -12,6 +12,7 @@ use lattice_common::kube_utils::build_api_resource;
 use serde_json::Value;
 use tracing::{debug, info, instrument, warn};
 
+use crate::cell::{MoveObjectOutput, SourceOwnerRefOutput};
 use crate::error::MoveError;
 
 /// Annotation key used to store the source UID on created resources
@@ -219,7 +220,7 @@ impl AgentMover {
     )]
     pub async fn apply_batch(
         &mut self,
-        objects: &[MoveObjectInput],
+        objects: &[MoveObjectOutput],
     ) -> (Vec<(String, String)>, Vec<MoveObjectError>) {
         let mut mappings = Vec::new();
         let mut errors = Vec::new();
@@ -255,7 +256,7 @@ impl AgentMover {
     }
 
     /// Create a single object with owner reference rebuilding
-    async fn create_object(&self, input: &MoveObjectInput) -> Result<String, MoveError> {
+    async fn create_object(&self, input: &MoveObjectOutput) -> Result<String, MoveError> {
         // Parse the manifest
         let mut obj: Value = serde_json::from_slice(&input.manifest)
             .map_err(|e| MoveError::Serialization(format!("failed to parse manifest: {}", e)))?;
@@ -358,7 +359,7 @@ impl AgentMover {
     fn rebuild_owner_refs(
         &self,
         obj: &mut Value,
-        source_owners: &[SourceOwnerRefInput],
+        source_owners: &[SourceOwnerRefOutput],
     ) -> Result<(), MoveError> {
         if source_owners.is_empty() {
             // Remove any existing owner references
@@ -432,34 +433,6 @@ impl AgentMover {
         }
         Ok(())
     }
-}
-
-/// Input for creating a single object
-#[derive(Debug, Clone)]
-pub struct MoveObjectInput {
-    /// Source UID
-    pub source_uid: String,
-    /// Object manifest (JSON bytes)
-    pub manifest: Vec<u8>,
-    /// Owner references from source
-    pub owners: Vec<SourceOwnerRefInput>,
-}
-
-/// Owner reference from source cluster
-#[derive(Debug, Clone)]
-pub struct SourceOwnerRefInput {
-    /// Source UID
-    pub source_uid: String,
-    /// API version
-    pub api_version: String,
-    /// Kind
-    pub kind: String,
-    /// Name
-    pub name: String,
-    /// Is controller
-    pub controller: bool,
-    /// Block owner deletion
-    pub block_owner_deletion: bool,
 }
 
 /// Error for a specific object

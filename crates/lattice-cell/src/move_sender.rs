@@ -144,7 +144,7 @@ fn to_proto_batch(batch: &MoveBatch) -> MoveObjectBatch {
         total_batches: batch.total_batches,
         target_namespace: batch.target_namespace.clone(),
         cluster_name: batch.cluster_name.clone(),
-        objects: batch.objects.iter().map(Into::into).collect(),
+        objects: batch.objects.iter().cloned().map(Into::into).collect(),
     }
 }
 
