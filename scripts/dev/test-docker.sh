@@ -1,6 +1,10 @@
 #!/bin/bash
 # E2E test with Docker provider (CAPD)
 # No external dependencies - runs entirely in kind clusters
+#
+# FIPS is disabled for macOS test builds (--no-default-features) because
+# aws-lc-fips-sys fails to build on macOS ARM64. Production container builds
+# on Linux use FIPS (default features).
 
 set -e
 
@@ -32,4 +36,4 @@ echo "Workload cluster config: $LATTICE_WORKLOAD_CLUSTER_CONFIG"
 echo "Workload2 cluster config: $LATTICE_WORKLOAD2_CLUSTER_CONFIG"
 echo
 
-RUST_LOG=info cargo test -p lattice-cli --features provider-e2e --test e2e unified_e2e -- --nocapture
+RUST_LOG=info cargo test -p lattice-cli --no-default-features --features provider-e2e --test e2e unified_e2e -- --nocapture

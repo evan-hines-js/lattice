@@ -72,31 +72,6 @@ fn extract_delta_changes(state: &SubtreeState) -> (Vec<ClusterInfo>, Vec<String>
     (added, removed)
 }
 
-/// Convert proto MoveObject to lattice_move MoveObjectInput
-fn convert_proto_objects(
-    objects: &[lattice_proto::MoveObject],
-) -> Vec<lattice_move::MoveObjectInput> {
-    objects
-        .iter()
-        .map(|obj| lattice_move::MoveObjectInput {
-            source_uid: obj.source_uid.clone(),
-            manifest: obj.manifest.clone(),
-            owners: obj
-                .owners
-                .iter()
-                .map(|o| lattice_move::SourceOwnerRefInput {
-                    source_uid: o.source_uid.clone(),
-                    api_version: o.api_version.clone(),
-                    kind: o.kind.clone(),
-                    name: o.name.clone(),
-                    controller: o.controller,
-                    block_owner_deletion: o.block_owner_deletion,
-                })
-                .collect(),
-        })
-        .collect()
-}
-
 /// Handle cluster deletion (unpivot flow)
 ///
 /// This is the core logic for handling a ClusterDeleting message from an agent.
@@ -112,7 +87,7 @@ fn convert_proto_objects(
 async fn handle_cluster_deletion(
     cluster: String,
     namespace: String,
-    objects: Vec<lattice_move::MoveObjectInput>,
+    objects: Vec<lattice_move::MoveObjectOutput>,
     client: Client,
     registry: SharedAgentRegistry,
 ) {
@@ -202,7 +177,7 @@ async fn handle_cluster_deletion(
 async fn import_capi_objects(
     cluster: &str,
     namespace: &str,
-    objects: &[lattice_move::MoveObjectInput],
+    objects: &[lattice_move::MoveObjectOutput],
     client: &Client,
     registry: &SharedAgentRegistry,
 ) -> Result<(), String> {
@@ -409,7 +384,8 @@ async fn process_agent_message(
                 "Cluster deletion requested"
             );
 
-            let objects = convert_proto_objects(&cd.objects);
+            let objects: Vec<lattice_move::MoveObjectOutput> =
+                cd.objects.iter().cloned().map(Into::into).collect();
             let namespace = cd.namespace.clone();
             let cluster = cluster_name.to_string();
             let client = kube_client.clone();

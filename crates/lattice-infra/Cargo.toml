@@ -50,5 +50,4 @@ tokio-test = { workspace = true }
 tempfile = { workspace = true }
 
 [features]
-default = ["fips"]
 fips = ["aws-lc-rs/fips"]
