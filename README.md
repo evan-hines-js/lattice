@@ -33,41 +33,45 @@ metadata:
   name: api-gateway
   namespace: platform
 spec:
-  containers:
-    main:
-      image: myorg/api:v2.1.0
-      variables:
-        AUTH_URL: ${resources.auth-service.url}
-        DB_PASS: ${resources.db-creds.password}
-        CACHE_HOST: ${resources.redis.host}
-      volumes:
-        /data:
-          source: "${resources.data}"
+  workload:
+    containers:
+      main:
+        image: myorg/api:v2.1.0
+        variables:
+          AUTH_URL: ${resources.auth-service.url}
+          DB_PASS: ${resources.db-creds.password}
+          CACHE_HOST: ${resources.redis.host}
+        volumes:
+          /data:
+            source: "${resources.data}"
 
-  service:
-    ports:
-      http:
-        port: 8080
+    service:
+      ports:
+        http:
+          port: 8080
 
-  resources:
-    auth-service:
-      type: service
-      direction: outbound            # "I call auth-service"
-    web-frontend:
-      type: service
-      direction: inbound             # "web-frontend can call me"
-    db-creds:
-      type: secret
-      id: database/prod/creds
-      params:
-        provider: vault-prod
-        keys: [username, password]
-        refreshInterval: 1h
-    data:
-      type: volume
-      params:
-        size: 50Gi
-        storageClass: fast-nvme
+    resources:
+      auth-service:
+        type: service
+        direction: outbound            # "I call auth-service"
+      web-frontend:
+        type: service
+        direction: inbound             # "web-frontend can call me"
+      redis:
+        type: service
+        direction: outbound            # "I call redis"
+      db-creds:
+        type: secret
+        id: database/prod/creds
+        params:
+          provider: vault-prod
+          keys: [username, password]
+          refreshInterval: 1h
+      data:
+        type: volume
+        params:
+          size: 50Gi
+          storageClass: fast-nvme
 
   replicas: 2
   autoscaling:
@@ -77,12 +81,13 @@ spec:
         target: 80
 
   ingress:
-    hosts:
-      - api.example.com
-    tls:
-      mode: auto
-      issuerRef:
-        name: letsencrypt-prod
+    routes:
+      public:
+        hosts:
+          - api.example.com
+        tls:
+          issuerRef:
+            name: letsencrypt-prod
 
   deploy:
     strategy: canary
@@ -205,21 +210,22 @@ Enforced at two layers simultaneously: **Cilium L4 eBPF** + **Istio L7 mTLS**. R
 LatticeService supports the full range of container configuration you'd expect — plus Lattice extensions:
 
 ```yaml
-containers:
-  main:
-    image: app:latest
-    livenessProbe:
-      httpGet:
-        path: /healthz
-        port: 8080
-    readinessProbe:
-      exec:
-        command: ["/bin/sh", "-c", "test -f /tmp/ready"]
-    security:
-      readOnlyRootFilesystem: true
-      runAsNonRoot: true
-      runAsUser: 1000
-      allowPrivilegeEscalation: false
+workload:
+  containers:
+    main:
+      image: app:latest
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+      readinessProbe:
+        exec:
+          command: ["/bin/sh", "-c", "test -f /tmp/ready"]
+      security:
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 1000
+        allowPrivilegeEscalation: false
 
 sidecars:
   vpn:
@@ -253,21 +259,25 @@ spec:
     config:
       aws:
         region: us-west-2
-        cpInstanceType: m5.xlarge
-        workerInstanceType: m5.large
   nodes:
-    controlPlane: 3
+    controlPlane:
+      replicas: 3
+      instanceType:
+        name: m5.xlarge
     workerPools:
       general:
         replicas: 10
+        instanceType:
+          name: m5.large
       gpu:
         replicas: 2
         min: 1
         max: 8
   services: true                    # Istio ambient mesh
-  monitoring: true                  # VictoriaMetrics + KEDA
-  backups: true                     # Velero
-  externalSecrets: true             # ESO for Vault integration
+  monitoring:
+    enabled: true                   # VictoriaMetrics + KEDA
+  backups:
+    enabled: true                   # Velero
 ```
 
 Supports **AWS**, **Proxmox**, **OpenStack**, and **Docker** — same CRDs, same workflow everywhere.
