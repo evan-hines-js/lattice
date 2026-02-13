@@ -47,9 +47,7 @@ pub mod local;
 mod sequence;
 mod utils;
 
-pub use agent::{
-    AgentMover, MoveObjectError, MoveObjectInput, SourceOwnerRefInput, SOURCE_UID_ANNOTATION,
-};
+pub use agent::{AgentMover, MoveObjectError, SOURCE_UID_ANNOTATION};
 pub use cell::{
     // Standalone functions (used by both pivot and unpivot)
     prepare_move_objects,

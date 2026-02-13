@@ -19,26 +19,8 @@ pub async fn handle(command_id: &str, batch: &MoveObjectBatch, ctx: &CommandCont
     let total_batches = batch.total_batches;
 
     // Convert proto objects to domain objects
-    let objects: Vec<lattice_move::MoveObjectInput> = batch
-        .objects
-        .iter()
-        .map(|obj| lattice_move::MoveObjectInput {
-            source_uid: obj.source_uid.clone(),
-            manifest: obj.manifest.clone(),
-            owners: obj
-                .owners
-                .iter()
-                .map(|o| lattice_move::SourceOwnerRefInput {
-                    source_uid: o.source_uid.clone(),
-                    api_version: o.api_version.clone(),
-                    kind: o.kind.clone(),
-                    name: o.name.clone(),
-                    controller: o.controller,
-                    block_owner_deletion: o.block_owner_deletion,
-                })
-                .collect(),
-        })
-        .collect();
+    let objects: Vec<lattice_move::MoveObjectOutput> =
+        batch.objects.iter().cloned().map(Into::into).collect();
 
     info!(
         batch = %format!("{}/{}", batch_index + 1, total_batches),

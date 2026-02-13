@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::agent::{AgentMover, MoveObjectInput, SourceOwnerRefInput};
+use crate::agent::AgentMover;
 use crate::cell::{
     BatchAck, CellMover, CellMoverConfig, CompleteAck, MoveBatch, MoveCommandSender,
     MoveCompleteInput, MoveResult,
@@ -38,30 +38,9 @@ impl LocalMoveSender {
 #[async_trait]
 impl MoveCommandSender for LocalMoveSender {
     async fn send_batch(&self, batch: MoveBatch) -> Result<BatchAck, MoveError> {
-        let objects: Vec<MoveObjectInput> = batch
-            .objects
-            .into_iter()
-            .map(|obj| MoveObjectInput {
-                source_uid: obj.source_uid,
-                manifest: obj.manifest,
-                owners: obj
-                    .owners
-                    .into_iter()
-                    .map(|o| SourceOwnerRefInput {
-                        source_uid: o.source_uid,
-                        api_version: o.api_version,
-                        kind: o.kind,
-                        name: o.name,
-                        controller: o.controller,
-                        block_owner_deletion: o.block_owner_deletion,
-                    })
-                    .collect(),
-            })
-            .collect();
-
         let mut agent = self.agent.lock().await;
         agent.ensure_namespace().await?;
-        let (mappings, errors) = agent.apply_batch(&objects).await;
+        let (mappings, errors) = agent.apply_batch(&batch.objects).await;
 
         Ok(BatchAck {
             mappings,
