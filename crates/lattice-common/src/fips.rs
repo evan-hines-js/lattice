@@ -38,10 +38,11 @@ pub fn install_crypto_provider() {
 
     #[cfg(feature = "fips")]
     if let Err(e) = aws_lc_rs::try_fips_mode() {
-        panic!(
+        eprintln!(
             "CRITICAL: FIPS mode failed to activate: {e}. \
              Ensure aws-lc-rs is compiled with the fips feature."
         );
+        std::process::abort();
     }
 
     #[cfg(not(feature = "fips"))]

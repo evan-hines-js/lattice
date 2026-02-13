@@ -3,6 +3,8 @@
 # =============================================================================
 # All cryptographic operations use FIPS 140-3 validated modules:
 # - Lattice (Rust): aws-lc-rs FIPS module
+# Runtime: Red Hat UBI 9 Minimal (FIPS-validated OS)
+# Builder: AlmaLinux 9 (RHEL 9-compatible glibc for binary compatibility)
 # =============================================================================
 
 ARG FIPS=true
@@ -36,19 +38,35 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     cp bin/helm /usr/local/bin/helm
 
 # -----------------------------------------------------------------------------
-# Stage 2: Build Rust application with BuildKit cache
+# Stage 2: Build Rust application on RHEL 9-compatible base
 # -----------------------------------------------------------------------------
-FROM rust:latest AS rust-builder
+# AlmaLinux 9 provides glibc 2.34 (same as UBI 9 runtime), ensuring binary
+# compatibility. Using rust:latest (Debian) would produce binaries linked
+# against a newer glibc that won't run on the UBI 9 runtime.
+FROM almalinux:9 AS rust-builder
 
 ARG FIPS
 
+# Install Rust toolchain via rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 # Install build dependencies for aws-lc-rs FIPS
-RUN apt-get update && apt-get install -y \
-    protobuf-compiler \
-    libclang-dev \
-    cmake \
-    golang \
-    && rm -rf /var/lib/apt/lists/*
+# - clang-devel: libclang for bindgen (aws-lc-rs)
+# - cmake, golang, perl: aws-lc-rs FIPS module build
+# - protobuf-compiler: prost/tonic code generation
+RUN dnf install -y 'dnf-command(config-manager)' && \
+    dnf config-manager --set-enabled crb && \
+    dnf install -y epel-release && \
+    dnf install -y \
+        protobuf-compiler \
+        clang-devel \
+        cmake \
+        golang \
+        gcc \
+        make \
+        perl \
+    && dnf clean all
 
 # Copy helm from go-builder (needed by build.rs to pre-render charts)
 COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
@@ -61,21 +79,22 @@ COPY scripts/runtime ./scripts
 # Build with BuildKit cache mounts for incremental compilation
 # - registry/git: caches downloaded crates
 # - target: caches compiled artifacts (the expensive part)
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/app/target \
     cargo build -p lattice-operator && \
     cp /app/target/debug/lattice-operator /usr/local/bin/lattice-operator
 
 # -----------------------------------------------------------------------------
-# Stage 3: Runtime image (minimal)
+# Stage 3: Runtime image (FIPS-validated Red Hat UBI 9 Minimal)
 # -----------------------------------------------------------------------------
-FROM debian:trixie-slim
+FROM registry.access.redhat.com/ubi9/ubi-minimal
 
-# Install only CA certificates for TLS
-RUN apt-get update && apt-get install -y \
+# Install CA certificates for TLS and shadow-utils for useradd
+RUN microdnf install -y \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    shadow-utils \
+    && microdnf clean all
 
 # Copy Lattice operator binary (manifests are embedded at build time)
 COPY --from=rust-builder /usr/local/bin/lattice-operator /usr/local/bin/lattice-operator
