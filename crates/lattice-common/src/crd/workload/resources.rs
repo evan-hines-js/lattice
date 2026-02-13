@@ -488,7 +488,7 @@ fn validate_duration_string(s: &str) -> Result<(), String> {
         if remaining.is_empty() {
             return Err(format!("missing unit suffix (h/m/s) in duration '{}'", s));
         }
-        let unit = remaining.chars().next().unwrap();
+        let unit = remaining.chars().next().expect("checked non-empty above");
         if !matches!(unit, 'h' | 'm' | 's') {
             return Err(format!(
                 "invalid duration unit '{}' in '{}' (expected h, m, or s)",
