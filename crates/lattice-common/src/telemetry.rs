@@ -2,8 +2,7 @@
 //!
 //! Provides unified telemetry setup with:
 //! - W3C TraceContext propagation for distributed tracing
-//! - OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set
-//! - Prometheus metrics export via handle
+//! - OTLP export for traces and metrics when `OTEL_EXPORTER_OTLP_ENDPOINT` is set
 //! - Kubernetes resource detection (pod, namespace, node)
 //! - JSON structured logging with trace context
 
@@ -13,7 +12,6 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::TracerProvider;
 use opentelemetry_sdk::{runtime, Resource};
-use prometheus::Registry;
 use thiserror::Error;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -26,9 +24,9 @@ pub enum TelemetryError {
     #[error("failed to initialize tracer: {0}")]
     TracerInit(String),
 
-    /// Failed to initialize Prometheus exporter
-    #[error("failed to initialize Prometheus exporter: {0}")]
-    PrometheusInit(String),
+    /// Failed to initialize OTLP metrics exporter
+    #[error("failed to initialize metrics exporter: {0}")]
+    MetricsInit(String),
 
     /// Failed to initialize tracing subscriber
     #[error("failed to initialize tracing subscriber: {0}")]
@@ -41,12 +39,9 @@ pub struct TelemetryConfig {
     /// Service name for traces and metrics (e.g., "lattice-operator")
     pub service_name: String,
 
-    /// OTLP endpoint for trace export (e.g., "http://otel-collector:4317")
-    /// If None, traces are only logged locally
+    /// OTLP endpoint for trace and metric export (e.g., "http://otel-collector:4317")
+    /// If None, traces and metrics are only logged locally
     pub otlp_endpoint: Option<String>,
-
-    /// Whether to enable Prometheus metrics export
-    pub prometheus_enabled: bool,
 }
 
 impl Default for TelemetryConfig {
@@ -54,34 +49,7 @@ impl Default for TelemetryConfig {
         Self {
             service_name: "lattice".to_string(),
             otlp_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
-            prometheus_enabled: std::env::var("LATTICE_PROMETHEUS_ENABLED")
-                .map(|v| v != "false" && v != "0")
-                .unwrap_or(true),
         }
-    }
-}
-
-/// Handle for accessing Prometheus metrics
-///
-/// Use `registry()` to get the Prometheus registry for encoding metrics.
-pub struct PrometheusHandle {
-    registry: Registry,
-}
-
-impl PrometheusHandle {
-    /// Get the Prometheus registry for encoding metrics
-    pub fn registry(&self) -> &Registry {
-        &self.registry
-    }
-
-    /// Encode metrics as Prometheus text format
-    pub fn encode(&self) -> String {
-        use prometheus::Encoder;
-        let encoder = prometheus::TextEncoder::new();
-        let metric_families = self.registry.gather();
-        let mut buffer = Vec::new();
-        encoder.encode(&metric_families, &mut buffer).ok();
-        String::from_utf8(buffer).unwrap_or_default()
     }
 }
 
@@ -89,13 +57,9 @@ impl PrometheusHandle {
 ///
 /// Sets up:
 /// - W3C TraceContext propagator for distributed tracing
-/// - OTLP exporter if `otlp_endpoint` is configured
-/// - Prometheus metrics if `prometheus_enabled` is true
+/// - OTLP exporter for traces and metrics if `otlp_endpoint` is configured
 /// - JSON structured logging with trace context
 /// - Kubernetes resource detection
-///
-/// Returns a `PrometheusHandle` if Prometheus is enabled, which can be used
-/// to expose metrics at a `/metrics` endpoint.
 ///
 /// # Example
 ///
@@ -106,30 +70,27 @@ impl PrometheusHandle {
 ///     service_name: "lattice-operator".to_string(),
 ///     ..Default::default()
 /// };
-/// let prom_handle = init_telemetry(config)?;
+/// init_telemetry(config)?;
 /// ```
-pub fn init_telemetry(config: TelemetryConfig) -> Result<Option<PrometheusHandle>, TelemetryError> {
+pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
     // Set W3C TraceContext as global propagator
     global::set_text_map_propagator(TraceContextPropagator::new());
 
     // Build resource with service name and K8s detection
     let resource = build_resource(&config.service_name);
 
-    // Initialize OTLP tracer if endpoint is configured
-    let tracer_provider = if let Some(endpoint) = &config.otlp_endpoint {
-        Some(init_otlp_tracer(endpoint, resource.clone())?)
+    // Initialize OTLP tracer and metrics if endpoint is configured
+    // Option<Layer> implements Layer, so we can compose it directly
+    let otel_layer = if let Some(endpoint) = &config.otlp_endpoint {
+        init_otlp_metrics(endpoint, resource.clone())?;
+        let provider = init_otlp_tracer(endpoint, resource)?;
+        let tracer = provider.tracer(config.service_name.clone());
+        Some(tracing_opentelemetry::layer().with_tracer(tracer))
     } else {
         None
     };
 
-    // Initialize Prometheus if enabled
-    let prometheus_handle = if config.prometheus_enabled {
-        Some(init_prometheus(resource)?)
-    } else {
-        None
-    };
-
-    // Build tracing subscriber layers
+    // Build tracing subscriber
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,lattice=debug,kube=info,tower=warn,hyper=warn"));
 
@@ -141,30 +102,16 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<Option<PrometheusHandle
         .with_file(false)
         .with_line_number(false);
 
-    // Build the subscriber with optional OpenTelemetry layer
-    if let Some(provider) = tracer_provider {
-        let tracer = provider.tracer(config.service_name.clone());
-        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .with(otel_layer)
+        .try_init()
+        .map_err(|e: tracing_subscriber::util::TryInitError| {
+            TelemetryError::SubscriberInit(e.to_string())
+        })?;
 
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(fmt_layer)
-            .with(otel_layer)
-            .try_init()
-            .map_err(|e: tracing_subscriber::util::TryInitError| {
-                TelemetryError::SubscriberInit(e.to_string())
-            })?;
-    } else {
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(fmt_layer)
-            .try_init()
-            .map_err(|e: tracing_subscriber::util::TryInitError| {
-                TelemetryError::SubscriberInit(e.to_string())
-            })?;
-    }
-
-    Ok(prometheus_handle)
+    Ok(())
 }
 
 /// Build OpenTelemetry resource with service info and K8s detection
@@ -218,34 +165,25 @@ fn init_otlp_tracer(endpoint: &str, resource: Resource) -> Result<TracerProvider
     Ok(provider)
 }
 
-/// Initialize Prometheus metrics exporter
-fn init_prometheus(resource: Resource) -> Result<PrometheusHandle, TelemetryError> {
-    let registry = Registry::new();
-
-    let exporter = opentelemetry_prometheus::exporter()
-        .with_registry(registry.clone())
-        .without_scope_info()
-        .without_target_info()
+/// Initialize OTLP metrics exporter with periodic push
+fn init_otlp_metrics(endpoint: &str, resource: Resource) -> Result<(), TelemetryError> {
+    let exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
         .build()
-        .map_err(|e| TelemetryError::PrometheusInit(e.to_string()))?;
+        .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
 
-    // Create a meter provider with the resource
+    let reader =
+        opentelemetry_sdk::metrics::PeriodicReader::builder(exporter, runtime::Tokio).build();
+
     let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-        .with_reader(exporter)
+        .with_reader(reader)
         .with_resource(resource)
         .build();
 
     global::set_meter_provider(meter_provider);
 
-    Ok(PrometheusHandle { registry })
-}
-
-/// Shutdown telemetry providers gracefully
-///
-/// Call this during application shutdown to ensure all pending traces
-/// and metrics are flushed.
-pub fn shutdown_telemetry() {
-    global::shutdown_tracer_provider();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -254,30 +192,24 @@ mod tests {
 
     #[test]
     fn test_telemetry_config_default() {
-        // Test with explicit values to avoid env var pollution
         let config = TelemetryConfig {
             service_name: "test-service".to_string(),
             otlp_endpoint: None,
-            prometheus_enabled: true,
         };
         assert_eq!(config.service_name, "test-service");
         assert!(config.otlp_endpoint.is_none());
-        assert!(config.prometheus_enabled);
     }
 
     #[test]
-    fn test_telemetry_config_from_env() {
-        // Test explicit config instead of relying on env vars
+    fn test_telemetry_config_with_endpoint() {
         let config = TelemetryConfig {
             service_name: "lattice".to_string(),
             otlp_endpoint: Some("http://localhost:4317".to_string()),
-            prometheus_enabled: false,
         };
         assert_eq!(
             config.otlp_endpoint,
             Some("http://localhost:4317".to_string())
         );
-        assert!(!config.prometheus_enabled);
     }
 
     #[test]
@@ -285,14 +217,5 @@ mod tests {
         let resource = build_resource("test-service");
         // Resource should have at least the service name
         assert!(!resource.is_empty());
-    }
-
-    #[test]
-    fn test_prometheus_handle_encode() {
-        let registry = Registry::new();
-        let handle = PrometheusHandle { registry };
-        let encoded = handle.encode();
-        // Should return valid (possibly empty) Prometheus text
-        assert!(encoded.is_empty() || encoded.contains("# HELP") || encoded.contains("# TYPE"));
     }
 }

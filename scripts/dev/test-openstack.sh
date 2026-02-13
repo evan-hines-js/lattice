@@ -45,10 +45,17 @@ export LATTICE_ENABLE_INDEPENDENCE_TEST=true
 export LATTICE_ENABLE_HIERARCHY_TEST=true
 export LATTICE_ENABLE_MESH_TEST=true
 
+# Build the lattice CLI without FIPS so kubectl can use it as an exec credential plugin.
+# The FIPS build produces a dynamic library (libaws_lc_fips_*_crypto.dylib) that macOS
+# can't locate at runtime due to missing @rpath, causing credential exec failures.
+echo "Building lattice CLI (non-FIPS)..."
+cargo build -p lattice-cli --no-default-features
+export PATH="$REPO_ROOT/target/debug:$PATH"
+
 echo "OpenStack Cloud: ${OS_CLOUD:-"(using env vars)"}"
 echo "Management cluster config: $LATTICE_MGMT_CLUSTER_CONFIG"
 echo "Workload cluster config: $LATTICE_WORKLOAD_CLUSTER_CONFIG"
 echo "Workload2 cluster config: $LATTICE_WORKLOAD2_CLUSTER_CONFIG"
 echo
 
-RUST_LOG=info cargo test -p lattice-cli --features provider-e2e --test e2e unified_e2e -- --nocapture
+RUST_LOG=info cargo test -p lattice-cli --no-default-features --features provider-e2e --test e2e unified_e2e -- --nocapture
