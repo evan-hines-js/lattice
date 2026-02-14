@@ -14,8 +14,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
 use futures::StreamExt;
+use moka::future::Cache;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::interval;
 use tokio_stream::wrappers::ReceiverStream;
@@ -144,7 +144,7 @@ pub struct AgentClient {
     /// Registry for tracking active exec sessions
     exec_registry: Arc<crate::exec::ExecRegistry>,
     /// Registry for tracking forwarded exec sessions (to child clusters)
-    forwarded_exec_sessions: Arc<DashMap<String, StoredExecSession>>,
+    forwarded_exec_sessions: Arc<Cache<String, StoredExecSession>>,
     /// Optional forwarder for routing K8s requests to child clusters.
     /// When None, requests targeting other clusters return 404.
     forwarder: Option<SharedK8sForwarder>,
@@ -214,7 +214,11 @@ impl AgentClientBuilder {
             subtree_watcher_handle: None,
             watch_registry: Arc::new(WatchRegistry::new()),
             exec_registry: Arc::new(crate::exec::ExecRegistry::new()),
-            forwarded_exec_sessions: Arc::new(DashMap::new()),
+            forwarded_exec_sessions: Arc::new(
+                Cache::builder()
+                    .time_to_live(std::time::Duration::from_secs(1800))
+                    .build(),
+            ),
             forwarder: self.forwarder,
             exec_forwarder: self.exec_forwarder,
         }

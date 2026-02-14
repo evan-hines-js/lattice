@@ -90,7 +90,7 @@ async fn handle_forwarded_exec(req: &ExecRequest, ctx: &CommandContext) {
                                 resize_tx: session.resize_tx,
                                 cancel_token,
                             },
-                        );
+                        ).await;
 
                         // Relay data from child back to parent
                         while let Some(mut data) = data_rx.recv().await {
@@ -109,7 +109,7 @@ async fn handle_forwarded_exec(req: &ExecRequest, ctx: &CommandContext) {
                         }
 
                         // Clean up session
-                        sessions.remove(&request_id);
+                        sessions.remove(&request_id).await;
                     }
                     Err(e) => {
                         error!(
@@ -163,7 +163,7 @@ pub async fn handle_exec_stdin(data: &ExecData, ctx: &CommandContext) {
             return;
         }
         // Otherwise, try forwarded sessions
-        if let Some(session) = forwarded.get(&request_id) {
+        if let Some(session) = forwarded.get(&request_id).await {
             let _ = session.stdin_tx.send(data_bytes).await;
         }
     });
@@ -184,14 +184,14 @@ pub async fn handle_exec_resize(resize: &ExecResize, ctx: &CommandContext) {
             return;
         }
         // Otherwise, try forwarded sessions
-        if let Some(session) = forwarded.get(&request_id) {
+        if let Some(session) = forwarded.get(&request_id).await {
             let _ = session.resize_tx.send((width, height)).await;
         }
     });
 }
 
 /// Handle cancellation of an exec session.
-pub fn handle_exec_cancel(cancel: &ExecCancel, ctx: &CommandContext) {
+pub async fn handle_exec_cancel(cancel: &ExecCancel, ctx: &CommandContext) {
     let request_id = &cancel.request_id;
     debug!(request_id = %request_id, "Received exec cancel");
 
@@ -201,7 +201,7 @@ pub fn handle_exec_cancel(cancel: &ExecCancel, ctx: &CommandContext) {
     }
 
     // Otherwise, try forwarded sessions
-    if let Some((_, session)) = ctx.forwarded_exec_sessions.remove(request_id) {
+    if let Some(session) = ctx.forwarded_exec_sessions.remove(request_id).await {
         session.cancel_token.cancel();
     }
 }

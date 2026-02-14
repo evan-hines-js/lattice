@@ -13,7 +13,7 @@ mod sync_resources;
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use moka::future::Cache;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -28,6 +28,7 @@ use lattice_proto::{cell_command::Command, AgentMessage, AgentState, CellCommand
 ///
 /// Unlike ForwardedExecSession, this doesn't include data_rx since the
 /// receiver is consumed immediately when the session starts.
+#[derive(Clone)]
 pub struct StoredExecSession {
     pub stdin_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     pub resize_tx: tokio::sync::mpsc::Sender<(u16, u16)>,
@@ -53,8 +54,9 @@ pub struct CommandContext {
     pub forwarder: Option<SharedK8sForwarder>,
     /// Optional forwarder for routing exec requests to child clusters
     pub exec_forwarder: Option<SharedExecForwarder>,
-    /// Registry for tracking forwarded exec sessions (to child clusters)
-    pub forwarded_exec_sessions: Arc<DashMap<String, StoredExecSession>>,
+    /// Registry for tracking forwarded exec sessions (to child clusters).
+    /// TTL evicts leaked entries when a child disconnects without cleanup.
+    pub forwarded_exec_sessions: Arc<Cache<String, StoredExecSession>>,
     /// Provider for creating Kubernetes clients
     pub kube_provider: Arc<dyn KubeClientProvider>,
 }
@@ -70,7 +72,7 @@ impl CommandContext {
         exec_registry: Arc<ExecRegistry>,
         forwarder: Option<SharedK8sForwarder>,
         exec_forwarder: Option<SharedExecForwarder>,
-        forwarded_exec_sessions: Arc<DashMap<String, StoredExecSession>>,
+        forwarded_exec_sessions: Arc<Cache<String, StoredExecSession>>,
         kube_provider: Arc<dyn KubeClientProvider>,
     ) -> Self {
         Self {
@@ -122,7 +124,7 @@ pub async fn handle_command(command: &CellCommand, ctx: &CommandContext) {
             exec::handle_exec_resize(resize, ctx).await;
         }
         Some(Command::ExecCancel(cancel)) => {
-            exec::handle_exec_cancel(cancel, ctx);
+            exec::handle_exec_cancel(cancel, ctx).await;
         }
         None => {
             warn!(command_id = %command.command_id, "Received command with no payload");

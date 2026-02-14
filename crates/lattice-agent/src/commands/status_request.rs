@@ -45,7 +45,11 @@ mod tests {
             exec_registry: Arc::new(crate::exec::ExecRegistry::new()),
             forwarder: None,
             exec_forwarder: None,
-            forwarded_exec_sessions: Arc::new(dashmap::DashMap::new()),
+            forwarded_exec_sessions: Arc::new(
+                moka::future::Cache::builder()
+                    .time_to_live(std::time::Duration::from_secs(1800))
+                    .build(),
+            ),
             kube_provider: Arc::new(crate::kube_client::InClusterClientProvider),
         };
 

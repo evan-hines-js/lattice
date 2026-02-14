@@ -29,6 +29,7 @@ async-trait = { workspace = true }
 
 # Concurrency
 dashmap = { workspace = true }
+moka = { workspace = true }
 
 # gRPC
 tonic = { workspace = true }

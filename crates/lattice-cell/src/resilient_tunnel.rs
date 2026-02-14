@@ -175,7 +175,7 @@ async fn tunnel_watch_resilient(
             // receiver is dropped but the registry still holds the sender under
             // the old request_id. Without this, entries accumulate on every
             // reconnect cycle.
-            registry.take_pending_k8s_response(&request_id);
+            registry.take_pending_k8s_response(&request_id).await;
 
             if !disconnected || !resilient_enabled {
                 break;
