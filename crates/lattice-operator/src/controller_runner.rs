@@ -29,7 +29,7 @@ use lattice_common::crd::{
     ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, LATTICE_SYSTEM_NAMESPACE};
-use lattice_secret_provider as secrets_provider_ctrl;
+use lattice_secret_provider::controller as secrets_provider_ctrl;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{
     error_policy as service_error_policy, reconcile as service_reconcile, reconcile_external,

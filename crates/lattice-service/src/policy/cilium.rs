@@ -2,8 +2,17 @@
 //!
 //! Generates eBPF-based network enforcement at the kernel level using Cilium.
 //!
-//! Port handling: Egress uses `toServices` which auto-resolves ports. Ingress
-//! allows HBONE port 15008 since ztunnel wraps all pod-to-pod traffic in HBONE.
+//! ## Ambient mesh interaction
+//!
+//! In Istio ambient mesh, ztunnel wraps all pod-to-pod traffic in HBONE
+//! (port 15008). Cilium sees the raw pod-to-pod connection on port 15008,
+//! so it cannot distinguish individual service ports at L4.
+//!
+//! Enforcement is split across two layers:
+//! - **Cilium (L4)**: Broad HBONE allow for mesh traffic, plus DNS and
+//!   external FQDN/CIDR rules for non-mesh egress.
+//! - **Istio AuthorizationPolicy (L7)**: Identity-based enforcement using
+//!   SPIFFE identities inside the HBONE tunnel.
 
 use std::collections::BTreeMap;
 
@@ -11,8 +20,7 @@ use crate::graph::{ActiveEdge, ServiceNode, ServiceType};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::policy::{
     CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort,
-    CiliumPortRule, DnsMatch, DnsRules, EndpointSelector, FqdnSelector, K8sServiceRef,
-    K8sServiceSelector,
+    CiliumPortRule, DnsMatch, DnsRules, EndpointSelector, FqdnSelector,
 };
 use lattice_common::{mesh, CILIUM_LABEL_NAME, CILIUM_LABEL_NAMESPACE};
 
@@ -30,59 +38,14 @@ impl<'a> PolicyCompiler<'a> {
         let mut endpoint_labels = BTreeMap::new();
         endpoint_labels.insert(CILIUM_LABEL_NAME.to_string(), service.name.clone());
 
-        // Build ingress rules
-        let mut ingress_rules = Vec::new();
-
-        // Allow from callers if there are inbound edges
-        if !inbound_edges.is_empty() {
-            let from_endpoints: Vec<EndpointSelector> = inbound_edges
-                .iter()
-                .map(|edge| {
-                    let mut labels = BTreeMap::new();
-                    labels.insert(
-                        CILIUM_LABEL_NAMESPACE.to_string(),
-                        edge.caller_namespace.clone(),
-                    );
-                    labels.insert(CILIUM_LABEL_NAME.to_string(), edge.caller_name.clone());
-                    EndpointSelector::from_labels(labels)
-                })
-                .collect();
-
-            // Ztunnel wraps all pod-to-pod traffic in HBONE (port 15008),
-            // so Cilium ingress must allow HBONE from callers.
-            ingress_rules.push(CiliumIngressRule {
-                from_endpoints,
-                to_ports: vec![CiliumPortRule {
-                    ports: vec![CiliumPort {
-                        port: mesh::HBONE_PORT.to_string(),
-                        protocol: "TCP".to_string(),
-                    }],
-                    rules: None,
-                }],
-            });
-        }
-
-        // Allow traffic from waypoint proxy on HBONE port (only when waypoint is in the path)
-        if has_external_deps {
-            let mut waypoint_ingress_labels = BTreeMap::new();
-            waypoint_ingress_labels
-                .insert(CILIUM_LABEL_NAMESPACE.to_string(), namespace.to_string());
-            waypoint_ingress_labels.insert(
-                mesh::CILIUM_WAYPOINT_FOR_LABEL.to_string(),
-                mesh::WAYPOINT_FOR_SERVICE.to_string(),
-            );
-
-            ingress_rules.push(CiliumIngressRule {
-                from_endpoints: vec![EndpointSelector::from_labels(waypoint_ingress_labels)],
-                to_ports: vec![CiliumPortRule {
-                    ports: vec![CiliumPort {
-                        port: mesh::HBONE_PORT.to_string(),
-                        protocol: "TCP".to_string(),
-                    }],
-                    rules: None,
-                }],
-            });
-        }
+        // Build ingress: allow HBONE from any mesh pod if this service has callers.
+        // Cilium sees pod-to-pod on port 15008; Istio AuthorizationPolicy enforces
+        // which specific callers are permitted via SPIFFE identities.
+        let ingress_rules = if !inbound_edges.is_empty() || has_external_deps {
+            vec![Self::hbone_ingress_rule()]
+        } else {
+            vec![]
+        };
 
         // Build egress rules
         let mut egress_rules = Vec::new();
@@ -135,28 +98,21 @@ impl<'a> PolicyCompiler<'a> {
             ..Default::default()
         });
 
-        // Allow HBONE to waypoint (only when waypoint is in the path for external outbound)
-        if has_external_deps {
-            let mut waypoint_egress_labels = BTreeMap::new();
-            waypoint_egress_labels.insert(
-                mesh::CILIUM_WAYPOINT_FOR_LABEL.to_string(),
-                mesh::WAYPOINT_FOR_SERVICE.to_string(),
-            );
-            egress_rules.push(CiliumEgressRule {
-                to_endpoints: vec![EndpointSelector::from_labels(waypoint_egress_labels)],
-                to_ports: vec![CiliumPortRule {
-                    ports: vec![CiliumPort {
-                        port: mesh::HBONE_PORT.to_string(),
-                        protocol: "TCP".to_string(),
-                    }],
-                    rules: None,
-                }],
-                ..Default::default()
-            });
+        // Allow HBONE egress to any mesh pod if this service has outbound deps.
+        // Ztunnel wraps all connections in HBONE, so Cilium sees pod-to-pod on
+        // port 15008 regardless of the actual service port.
+        let has_local_deps = outbound_edges.iter().any(|edge| {
+            self.graph
+                .get_service(&edge.callee_namespace, &edge.callee_name)
+                .map(|callee| callee.type_ == ServiceType::Local)
+                .unwrap_or(false)
+        });
+        if has_local_deps || has_external_deps {
+            egress_rules.push(Self::hbone_egress_rule());
         }
 
-        // Add egress rules for dependencies
-        self.build_egress_rules_for_dependencies(outbound_edges, &mut egress_rules);
+        // Add egress rules for external dependencies (FQDN/CIDR-based, not HBONE)
+        self.build_egress_rules_for_external_deps(outbound_edges, &mut egress_rules);
 
         CiliumNetworkPolicy::new(
             ObjectMeta::new(format!("policy-{}", service.name), namespace),
@@ -168,11 +124,9 @@ impl<'a> PolicyCompiler<'a> {
         )
     }
 
-    /// Build egress rules for all outbound dependencies
-    ///
-    /// This handles both local (in-cluster) and external service dependencies,
-    /// generating appropriate Cilium egress rules for each.
-    fn build_egress_rules_for_dependencies(
+    /// Build egress rules for external (non-mesh) dependencies only.
+    /// Local service dependencies are covered by the broad HBONE egress rule.
+    fn build_egress_rules_for_external_deps(
         &self,
         outbound_edges: &[ActiveEdge],
         egress_rules: &mut Vec<CiliumEgressRule>,
@@ -182,33 +136,11 @@ impl<'a> PolicyCompiler<'a> {
                 .graph
                 .get_service(&edge.callee_namespace, &edge.callee_name)
             {
-                match callee.type_ {
-                    ServiceType::Local => {
-                        Self::build_local_dependency_rule(edge, egress_rules);
-                    }
-                    ServiceType::External => {
-                        self.build_external_dependency_rules(&callee, egress_rules);
-                    }
-                    ServiceType::Unknown => {}
+                if callee.type_ == ServiceType::External {
+                    self.build_external_dependency_rules(&callee, egress_rules);
                 }
             }
         }
-    }
-
-    /// Build egress rule for a local (in-cluster) service dependency.
-    ///
-    /// Uses `toServices` with `k8sService` so Cilium resolves the service's
-    /// endpoints and translates service ports to targetPorts automatically.
-    fn build_local_dependency_rule(edge: &ActiveEdge, egress_rules: &mut Vec<CiliumEgressRule>) {
-        egress_rules.push(CiliumEgressRule {
-            to_services: vec![K8sServiceSelector {
-                k8s_service: K8sServiceRef {
-                    service_name: edge.callee_name.clone(),
-                    namespace: edge.callee_namespace.clone(),
-                },
-            }],
-            ..Default::default()
-        });
     }
 
     /// Build egress rules for an external service dependency
@@ -262,6 +194,39 @@ impl<'a> PolicyCompiler<'a> {
         }
 
         (fqdns, cidrs)
+    }
+
+    /// Broad HBONE ingress: allow any pod to deliver traffic on port 15008.
+    /// Identity enforcement is handled by Istio AuthorizationPolicy at L7.
+    fn hbone_ingress_rule() -> CiliumIngressRule {
+        CiliumIngressRule {
+            from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
+            to_ports: vec![CiliumPortRule {
+                ports: vec![CiliumPort {
+                    port: mesh::HBONE_PORT.to_string(),
+                    protocol: "TCP".to_string(),
+                }],
+                rules: None,
+            }],
+        }
+    }
+
+    /// Broad HBONE egress: allow this pod to reach any pod on port 15008.
+    /// In ambient mesh, ztunnel redirects all outbound connections to HBONE,
+    /// so Cilium sees pod-to-pod connections on port 15008 regardless of the
+    /// original service port.
+    fn hbone_egress_rule() -> CiliumEgressRule {
+        CiliumEgressRule {
+            to_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
+            to_ports: vec![CiliumPortRule {
+                ports: vec![CiliumPort {
+                    port: mesh::HBONE_PORT.to_string(),
+                    protocol: "TCP".to_string(),
+                }],
+                rules: None,
+            }],
+            ..Default::default()
+        }
     }
 
     /// Generate a CiliumIngressRule allowing the Istio gateway proxy to reach

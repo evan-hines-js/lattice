@@ -8,13 +8,10 @@
 use std::collections::{BTreeMap, HashSet};
 
 use lattice_common::template::{FileSecretRef, RenderedFile};
-use lattice_secret_provider::{
-    ExternalSecret, ExternalSecretData, ExternalSecretSpec, ExternalSecretTarget,
-    ExternalSecretTemplate, RemoteRef, SecretStoreRef,
-};
+use lattice_secret_provider::eso::ExternalSecret;
 
 use super::error::CompilationError;
-use super::secrets::SecretRef;
+use super::secrets::{resolve_eso_data, SecretRef};
 use super::{ConfigMap, Secret, Volume, VolumeMount};
 
 /// Result of compiling file mounts
@@ -180,54 +177,14 @@ fn compile_secret_files(
         // Volume names must be DNS labels (no dots/underscores/etc).
         let vol_name = super::sanitize_dns_label(&es_name);
 
-        let mut eso_data: Vec<ExternalSecretData> = Vec::new();
-        let mut seen_eso_keys = std::collections::HashSet::new();
-
-        for fref in file_refs {
-            if !seen_eso_keys.insert(fref.eso_data_key.clone()) {
-                continue;
-            }
-
-            let sr = secret_refs.get(&fref.resource_name).ok_or_else(|| {
-                CompilationError::file_compilation(format!(
-                    "file '{}' references secret resource '{}' but no SecretRef was compiled \
-                     (is it declared as a type: secret resource?)",
-                    key, fref.resource_name
-                ))
-            })?;
-
-            if let Some(ref keys) = sr.keys {
-                if !keys.contains(&fref.key) {
-                    return Err(CompilationError::file_compilation(format!(
-                        "file '{}' references key '{}' in secret '{}' but available keys are: {:?}",
-                        key, fref.key, fref.resource_name, keys
-                    )));
-                }
-            }
-
-            eso_data.push(ExternalSecretData::new(
-                &fref.eso_data_key,
-                RemoteRef::with_property(&sr.remote_key, &fref.key),
-            ));
-        }
+        let eso_data =
+            resolve_eso_data(file_refs, secret_refs, &format!("file '{}'", key))?;
 
         let mut template_data = BTreeMap::new();
         template_data.insert(key.clone(), content.clone());
 
-        let external_secret = ExternalSecret::new(
-            &es_name,
-            namespace,
-            ExternalSecretSpec {
-                secret_store_ref: SecretStoreRef::cluster_secret_store(&store),
-                target: ExternalSecretTarget::with_template(
-                    &es_name,
-                    ExternalSecretTemplate::new(template_data),
-                ),
-                data: eso_data,
-                data_from: None,
-                refresh_interval: Some("1h".to_string()),
-            },
-        );
+        let external_secret =
+            ExternalSecret::templated(&es_name, namespace, &store, template_data, eso_data);
 
         result.file_external_secrets.push(external_secret);
 

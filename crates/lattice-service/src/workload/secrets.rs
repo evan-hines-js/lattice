@@ -6,7 +6,9 @@
 
 use std::collections::BTreeMap;
 
-use lattice_secret_provider::{build_external_secret, ExternalSecret};
+use lattice_secret_provider::eso::{
+    self, ExternalSecret, ExternalSecretData, RemoteRef,
+};
 
 use super::error::CompilationError;
 use crate::crd::WorkloadSpec;
@@ -87,6 +89,52 @@ pub(crate) fn resolve_single_store(
     })
 }
 
+/// Resolve `FileSecretRef`s into ESO `ExternalSecretData` entries.
+///
+/// For each ref: looks up the `SecretRef` to get the remote key, validates the
+/// referenced key exists (when the secret has explicit keys), deduplicates by
+/// `eso_data_key`, and builds the `RemoteRef`.
+///
+/// `context` is used in error messages (e.g., "env var 'DB_URL'", "file 'config.yaml'").
+pub(crate) fn resolve_eso_data(
+    refs: &[lattice_common::template::FileSecretRef],
+    secret_refs: &BTreeMap<String, SecretRef>,
+    context: &str,
+) -> Result<Vec<ExternalSecretData>, CompilationError> {
+    let mut data = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for fref in refs {
+        if !seen.insert(fref.eso_data_key.clone()) {
+            continue;
+        }
+
+        let sr = secret_refs.get(&fref.resource_name).ok_or_else(|| {
+            CompilationError::file_compilation(format!(
+                "{} references secret resource '{}' but no SecretRef was compiled \
+                 (is it declared as a type: secret resource?)",
+                context, fref.resource_name
+            ))
+        })?;
+
+        if let Some(ref keys) = sr.keys {
+            if !keys.contains(&fref.key) {
+                return Err(CompilationError::file_compilation(format!(
+                    "{} references key '{}' in secret '{}' but available keys are: {:?}",
+                    context, fref.key, fref.resource_name, keys
+                )));
+            }
+        }
+
+        data.push(ExternalSecretData::new(
+            &fref.eso_data_key,
+            RemoteRef::with_property(&sr.remote_key, &fref.key),
+        ));
+    }
+
+    Ok(data)
+}
+
 // =============================================================================
 // Secrets Compiler
 // =============================================================================
@@ -155,7 +203,7 @@ impl SecretsCompiler {
                     .then_some("kubernetes.io/dockerconfigjson")
             });
 
-            let mut external_secret = build_external_secret(
+            let mut external_secret = eso::build_external_secret(
                 &k8s_secret_name,
                 namespace,
                 &params.provider,
