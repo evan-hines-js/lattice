@@ -170,6 +170,35 @@ impl ExternalSecret {
         }
     }
 
+    /// Create a templated ExternalSecret (the most common pattern).
+    ///
+    /// Constructs an ExternalSecret backed by a ClusterSecretStore with a Go template
+    /// target, 1h refresh interval, and no `dataFrom`. Used whenever file mounts or
+    /// env vars contain `${secret.*}` placeholders that ESO renders at sync time.
+    pub fn templated(
+        name: impl Into<String>,
+        namespace: impl Into<String>,
+        store: &str,
+        template_data: BTreeMap<String, String>,
+        data: Vec<ExternalSecretData>,
+    ) -> Self {
+        let name = name.into();
+        Self::new(
+            &name,
+            namespace,
+            ExternalSecretSpec {
+                secret_store_ref: SecretStoreRef::cluster_secret_store(store),
+                target: ExternalSecretTarget::with_template(
+                    &name,
+                    ExternalSecretTemplate::new(template_data),
+                ),
+                data,
+                data_from: None,
+                refresh_interval: Some("1h".to_string()),
+            },
+        )
+    }
+
     /// Set the K8s Secret type on the target (e.g., `kubernetes.io/dockerconfigjson`)
     pub fn with_secret_type(mut self, secret_type: impl Into<String>) -> Self {
         match &mut self.spec.target.template {
@@ -462,19 +491,8 @@ pub fn build_templated_external_secret(
         ));
     }
 
-    Ok(ExternalSecret::new(
-        name,
-        namespace,
-        ExternalSecretSpec {
-            secret_store_ref: SecretStoreRef::cluster_secret_store(store_name),
-            target: ExternalSecretTarget::with_template(
-                name,
-                ExternalSecretTemplate::new(template_data),
-            ),
-            data: eso_data,
-            data_from: None,
-            refresh_interval: Some("1h".to_string()),
-        },
+    Ok(ExternalSecret::templated(
+        name, namespace, store_name, template_data, eso_data,
     ))
 }
 

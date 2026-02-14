@@ -161,6 +161,16 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     // Start health server (runs on all pods for K8s probes)
     let health_handle = start_health_server();
 
+    // Start the local secrets webhook on ALL pods (before leader election).
+    // The webhook is a stateless HTTP reader — any replica can serve ESO requests.
+    // Infrastructure setup (namespace, Service, ClusterSecretStore) happens on the
+    // leader later, but the HTTP endpoint must be available on every pod so the
+    // Service (which selects all operator pods) never routes to a non-listening replica.
+    let webhook_client = client.clone();
+    tokio::spawn(async move {
+        lattice_secret_provider::webhook::start_webhook_server(webhook_client).await;
+    });
+
     // Acquire leadership using Kubernetes Lease BEFORE any initialization
     // Only the leader should install CRDs and infrastructure
     let elector = Arc::new(LeaderElector::new(
@@ -332,6 +342,8 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         cedar,
     ));
 
+    spawn_webhook_infrastructure(client.clone());
+
     Ok(SliceHandle {
         controllers,
         parent_servers: None,
@@ -339,6 +351,30 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         auth_proxy_handle: None,
         infra_handle: Some(infra_handle),
     })
+}
+
+/// Spawn ESO webhook K8s infrastructure (namespace, Service, ClusterSecretStore) in background.
+///
+/// ESO pods won't schedule until workers are available (no CP toleration),
+/// so blocking would deadlock during bootstrap. The webhook HTTP server itself
+/// is started on ALL pods before leader election (see `run_controller`).
+fn spawn_webhook_infrastructure(client: kube::Client) {
+    tokio::spawn(async move {
+        if let Err(e) = retry_with_backoff(
+            &RetryConfig {
+                initial_delay: Duration::from_secs(2),
+                ..RetryConfig::infinite()
+            },
+            "ensure local webhook infrastructure (waiting for ESO)",
+            || async {
+                lattice_secret_provider::controller::ensure_local_webhook_infrastructure(&client).await
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %e, "failed to ensure local webhook infrastructure");
+        }
+    });
 }
 
 /// All slices: union of Cluster + Service + Provider. Same behavior as the
@@ -393,29 +429,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
         cedar,
     ));
 
-    // Start ESO webhook infrastructure in the background.
-    // ESO pods won't schedule until workers are available (no CP toleration),
-    // so blocking here would deadlock during bootstrap. The webhook comes up
-    // lazily; SecretProvider controller already handles ESO-not-ready with 30s requeues.
-    let webhook_client = client.clone();
-    tokio::spawn(async move {
-        if let Err(e) = retry_with_backoff(
-            &RetryConfig {
-                initial_delay: Duration::from_secs(2),
-                ..RetryConfig::infinite()
-            },
-            "ensure local webhook infrastructure (waiting for ESO)",
-            || async {
-                lattice_secret_provider::ensure_local_webhook_infrastructure(&webhook_client).await
-            },
-        )
-        .await
-        {
-            tracing::error!(error = %e, "failed to ensure local webhook infrastructure");
-            return;
-        }
-        lattice_secret_provider::start_webhook_server(webhook_client).await;
-    });
+    spawn_webhook_infrastructure(client.clone());
 
     Ok(SliceHandle {
         controllers,

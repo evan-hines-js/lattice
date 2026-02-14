@@ -356,16 +356,11 @@ mod tests {
             .iter()
             .any(|pr| pr.ports.iter().any(|p| p.port == "53"))));
 
-        // No waypoint HBONE ingress/egress for services without external deps
-        assert!(!cnp
-            .spec
-            .ingress
-            .iter()
-            .any(|i| i.from_endpoints.iter().any(|ep| ep
-                .match_labels
-                .get(mesh::CILIUM_WAYPOINT_FOR_LABEL)
-                .map(|v| v == mesh::WAYPOINT_FOR_SERVICE)
-                .unwrap_or(false))));
+        // No ztunnel HBONE ingress for services without callers or external deps
+        assert!(
+            cnp.spec.ingress.is_empty(),
+            "service with no callers or external deps should have no ingress rules"
+        );
     }
 
     #[test]
@@ -548,10 +543,11 @@ mod tests {
     }
 
     #[test]
-    fn cilium_ingress_allows_hbone_from_callers() {
+    fn cilium_hbone_ingress_and_egress_for_mesh_service() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
+        // gateway → api (bilateral)
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
         graph.put_service(ns, "api", &api_spec);
 
@@ -559,33 +555,39 @@ mod tests {
         graph.put_service(ns, "gateway", &gateway_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
-        let output = compiler.compile("api", ns);
 
-        let cnp = &output.cilium_policies[0];
-
-        // Callers must be allowed on HBONE port (ztunnel wraps all traffic in HBONE)
-        let caller_rule = cnp
-            .spec
-            .ingress
-            .iter()
-            .find(|r| {
-                r.from_endpoints.iter().any(|ep| {
-                    ep.match_labels
-                        .get("k8s:app.kubernetes.io/name")
-                        .map(|v| v == "gateway")
-                        .unwrap_or(false)
-                })
-            })
-            .expect("should have ingress rule for caller");
-
-        let hbone_port = mesh::HBONE_PORT.to_string();
+        // Check api (has inbound callers, no outbound)
+        let api_cnp = &compiler.compile("api", ns).cilium_policies[0];
+        assert_eq!(api_cnp.spec.ingress.len(), 1, "api should have HBONE ingress");
+        let ingress = &api_cnp.spec.ingress[0];
         assert!(
-            caller_rule
+            ingress.from_endpoints[0].match_labels.is_empty(),
+            "HBONE ingress should use empty selector (broad allow)"
+        );
+        assert!(ingress.to_ports[0].ports[0].port == mesh::HBONE_PORT.to_string());
+        // api has no outbound deps, so no HBONE egress (only DNS)
+        assert!(
+            !api_cnp.spec.egress.iter().any(|e| e
                 .to_ports
                 .iter()
-                .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port)),
-            "caller ingress must allow HBONE port {hbone_port}, got: {:?}",
-            caller_rule.to_ports
+                .any(|pr| pr.ports.iter().any(|p| p.port == mesh::HBONE_PORT.to_string()))),
+            "api should not have HBONE egress (no outbound deps)"
+        );
+
+        // Check gateway (has outbound deps, no inbound callers)
+        let gw_cnp = &compiler.compile("gateway", ns).cilium_policies[0];
+        assert!(gw_cnp.spec.ingress.is_empty(), "gateway has no callers");
+        // gateway has outbound local dep, so should have HBONE egress
+        let hbone_egress = gw_cnp.spec.egress.iter().find(|e| {
+            e.to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == mesh::HBONE_PORT.to_string()))
+        });
+        assert!(hbone_egress.is_some(), "gateway should have HBONE egress for local deps");
+        let egress = hbone_egress.unwrap();
+        assert!(
+            egress.to_endpoints[0].match_labels.is_empty(),
+            "HBONE egress should use empty selector (broad allow)"
         );
     }
 
@@ -611,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn cilium_waypoint_hbone_only_with_external_deps() {
+    fn cilium_hbone_with_external_deps() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
@@ -629,29 +631,25 @@ mod tests {
 
         let cnp = &output.cilium_policies[0];
 
-        // Should have both caller HBONE and waypoint HBONE ingress rules
-        let has_waypoint_rule = cnp.spec.ingress.iter().any(|r| {
-            r.from_endpoints.iter().any(|ep| {
-                ep.match_labels
-                    .get(mesh::CILIUM_WAYPOINT_FOR_LABEL)
-                    .map(|v| v == mesh::WAYPOINT_FOR_SERVICE)
-                    .unwrap_or(false)
-            })
-        });
+        // Should have broad HBONE ingress (callers + waypoint traffic from externals)
+        assert_eq!(cnp.spec.ingress.len(), 1);
+        assert!(cnp.spec.ingress[0].from_endpoints[0].match_labels.is_empty());
+
+        // Should have HBONE egress (external deps route through waypoint via HBONE)
+        let hbone_port = mesh::HBONE_PORT.to_string();
         assert!(
-            has_waypoint_rule,
-            "should have waypoint HBONE ingress when external deps exist"
+            cnp.spec.egress.iter().any(|e| e
+                .to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port))),
+            "should have HBONE egress for external deps"
         );
 
-        let has_caller_rule = cnp.spec.ingress.iter().any(|r| {
-            r.from_endpoints.iter().any(|ep| {
-                ep.match_labels
-                    .get("k8s:app.kubernetes.io/name")
-                    .map(|v| v == "gateway")
-                    .unwrap_or(false)
-            })
-        });
-        assert!(has_caller_rule, "should have caller HBONE ingress");
+        // Should also have FQDN egress for the external service
+        assert!(
+            cnp.spec.egress.iter().any(|e| !e.to_fqdns.is_empty()),
+            "should have FQDN egress for stripe"
+        );
     }
 
     #[test]
