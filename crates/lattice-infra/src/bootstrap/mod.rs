@@ -2,7 +2,7 @@
 //!
 //! Single source of truth for ALL infrastructure manifests.
 //! Used by operator startup (`ensure_infrastructure`)
-//! to install Istio, Gateway API CRDs, ESO, Velero, VictoriaMetrics, KEDA, and GPU stack.
+//! to install Istio, Gateway API CRDs, ESO, Velero, VictoriaMetrics, KEDA, metrics-server, and GPU stack.
 //!
 //! Server-side apply handles idempotency - no need to check if installed.
 //!
@@ -13,6 +13,7 @@ pub mod eso;
 pub mod gpu;
 pub mod istio;
 pub mod keda;
+pub mod metrics_server;
 pub mod prometheus;
 pub mod velero;
 
@@ -126,6 +127,7 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
                 .cloned(),
         );
         manifests.extend(keda::generate_keda().iter().cloned());
+        manifests.extend(metrics_server::generate_metrics_server().iter().cloned());
     }
 
     // GPU stack (NFD + NVIDIA device plugin + HAMi)
@@ -161,6 +163,19 @@ pub fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, Stri
         serde_json::to_string_pretty(&istio::IstioReconciler::generate_operator_allow_policy())
             .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
     );
+
+    // Monitoring AuthorizationPolicies (VMAgent→storage, KEDA→query)
+    if config.monitoring.enabled {
+        for policy in istio::IstioReconciler::generate_monitoring_allow_policies(
+            &config.cluster_name,
+            config.monitoring.ha,
+        ) {
+            manifests.push(
+                serde_json::to_string_pretty(&policy)
+                    .map_err(|e| format!("Failed to serialize monitoring AuthorizationPolicy: {}", e))?,
+            );
+        }
+    }
 
     // Cilium policies (skip on kind/bootstrap clusters) - serialize typed structs to JSON
     if !config.skip_cilium_policies {
@@ -210,6 +225,17 @@ pub fn generate_gateway_api_crds() -> &'static [String] {
 pub(crate) fn namespace_yaml(name: &str) -> String {
     format!(
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}",
+        name
+    )
+}
+
+/// Create a namespace YAML with Istio ambient mesh enrollment.
+///
+/// Used for infrastructure namespaces (e.g. monitoring) whose pods need
+/// mTLS communication with workload pods enrolled in the ambient mesh.
+pub(crate) fn namespace_yaml_ambient(name: &str) -> String {
+    format!(
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}\n  labels:\n    istio.io/dataplane-mode: ambient",
         name
     )
 }

@@ -496,6 +496,7 @@ fn is_transient_kubectl_error(error: &str) -> bool {
         || error.contains("ServiceUnavailable")
         || error.contains("client rate limiter")
         || error.contains("net/http")
+        || error.contains("timed out")
 }
 
 // =============================================================================
@@ -2753,33 +2754,44 @@ pub async fn verify_pod_env_var(
     // Wait for pod to be Running
     wait_for_pod_running(kubeconfig, namespace, label_selector).await?;
 
-    // Get the pod name
-    let pod_name = get_pod_name(kubeconfig, namespace, label_selector).await?;
+    // Exec printenv inside the pod (retry to handle proxy/exec transient failures)
+    let kc = kubeconfig.to_string();
+    let ns = namespace.to_string();
+    let ls = label_selector.to_string();
+    let vn = var_name.to_string();
+    let ev = expected_value.to_string();
 
-    // Exec printenv inside the pod
-    let actual = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "exec",
-        &pod_name,
-        "-n",
-        namespace,
-        "--",
-        "printenv",
-        var_name,
-    ])
-    .await?;
-
-    let actual = actual.trim();
-    if actual != expected_value {
-        return Err(format!(
-            "Env var {} mismatch: expected '{}', got '{}'",
-            var_name, expected_value, actual
-        ));
-    }
-
-    info!("[PodVerify] Env var {} = '{}' (correct)", var_name, actual);
-    Ok(())
+    wait_for_condition(
+        &format!("env var {} = '{}'", var_name, expected_value),
+        Duration::from_secs(60),
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let ns = ns.clone();
+            let ls = ls.clone();
+            let vn = vn.clone();
+            let ev = ev.clone();
+            async move {
+                let pod_name = get_pod_name(&kc, &ns, &ls).await?;
+                let actual = match run_kubectl(&[
+                    "--kubeconfig", &kc,
+                    "exec", &pod_name, "-n", &ns,
+                    "--", "printenv", &vn,
+                ]).await {
+                    Ok(v) => v,
+                    Err(_) => return Ok(false), // transient exec failure
+                };
+                let actual = actual.trim();
+                if actual == ev {
+                    info!("[PodVerify] Env var {} = '{}' (correct)", vn, actual);
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+        },
+    )
+    .await
 }
 
 /// Wait for a pod matching `label_selector` to be Running, then exec `cat`
@@ -2797,30 +2809,44 @@ pub async fn verify_pod_file_content(
     );
 
     wait_for_pod_running(kubeconfig, namespace, label_selector).await?;
-    let pod_name = get_pod_name(kubeconfig, namespace, label_selector).await?;
 
-    let content = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "exec",
-        &pod_name,
-        "-n",
-        namespace,
-        "--",
-        "cat",
-        file_path,
-    ])
-    .await?;
+    // Retry to handle proxy/exec transient failures
+    let kc = kubeconfig.to_string();
+    let ns = namespace.to_string();
+    let ls = label_selector.to_string();
+    let fp = file_path.to_string();
+    let es = expected_substr.to_string();
 
-    if !content.contains(expected_substr) {
-        return Err(format!(
-            "File {} does not contain '{}'. Actual content:\n{}",
-            file_path, expected_substr, content
-        ));
-    }
-
-    info!("[PodVerify] File {} contains expected content", file_path);
-    Ok(())
+    wait_for_condition(
+        &format!("file {} contains '{}'", file_path, expected_substr),
+        Duration::from_secs(60),
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let ns = ns.clone();
+            let ls = ls.clone();
+            let fp = fp.clone();
+            let es = es.clone();
+            async move {
+                let pod_name = get_pod_name(&kc, &ns, &ls).await?;
+                let content = match run_kubectl(&[
+                    "--kubeconfig", &kc,
+                    "exec", &pod_name, "-n", &ns,
+                    "--", "cat", &fp,
+                ]).await {
+                    Ok(v) => v,
+                    Err(_) => return Ok(false), // transient exec failure
+                };
+                if content.contains(&*es) {
+                    info!("[PodVerify] File {} contains expected content", fp);
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+        },
+    )
+    .await
 }
 
 /// Check pod spec `imagePullSecrets` via jsonpath and verify the expected

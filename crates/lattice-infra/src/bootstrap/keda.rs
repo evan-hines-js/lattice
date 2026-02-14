@@ -5,14 +5,17 @@
 
 use std::sync::LazyLock;
 
-use super::{namespace_yaml, split_yaml_documents};
+use super::{namespace_yaml_ambient, split_yaml_documents};
 
 /// Namespace for KEDA components.
 pub const KEDA_NAMESPACE: &str = "keda";
 
-/// Pre-rendered KEDA manifests with namespace prepended.
+/// KEDA operator service account name (derived from chart defaults).
+/// Used to construct SPIFFE identity for AuthorizationPolicy.
+pub const KEDA_SERVICE_ACCOUNT: &str = "keda-operator";
+
 static KEDA_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let mut manifests = vec![namespace_yaml(KEDA_NAMESPACE)];
+    let mut manifests = vec![namespace_yaml_ambient(KEDA_NAMESPACE)];
     manifests.extend(split_yaml_documents(include_str!(concat!(
         env!("OUT_DIR"),
         "/keda.yaml"
@@ -20,14 +23,10 @@ static KEDA_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     manifests
 });
 
-/// KEDA version (pinned at build time)
 pub fn keda_version() -> &'static str {
     env!("KEDA_VERSION")
 }
 
-/// Generate KEDA manifests
-///
-/// Returns pre-rendered manifests embedded at build time.
 pub fn generate_keda() -> &'static [String] {
     &KEDA_MANIFESTS
 }
@@ -38,8 +37,7 @@ mod tests {
 
     #[test]
     fn version_is_set() {
-        let version = keda_version();
-        assert!(!version.is_empty());
+        assert!(!keda_version().is_empty());
     }
 
     #[test]
@@ -47,5 +45,9 @@ mod tests {
         let manifests = generate_keda();
         assert!(!manifests.is_empty());
         assert!(manifests[0].contains("kind: Namespace"));
+        assert!(
+            manifests[0].contains("istio.io/dataplane-mode: ambient"),
+            "KEDA namespace must be enrolled in ambient mesh for mTLS identity"
+        );
     }
 }

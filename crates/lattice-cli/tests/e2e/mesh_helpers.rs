@@ -51,8 +51,8 @@ impl TestTarget {
         }
     }
 
-    /// Create a test target for an external service (random mesh log format)
-    pub fn external(source: &str, target: &str, url: &str, expected: bool) -> Self {
+    /// Create a test target with a custom URL (random mesh log format)
+    pub fn with_url(source: &str, target: &str, url: &str, expected: bool) -> Self {
         let (success_msg, fail_msg) = if expected {
             (
                 format!("{}->{}:ALLOWED", source, target),
@@ -66,27 +66,6 @@ impl TestTarget {
         };
         Self {
             url: url.to_string(),
-            expected_allowed: expected,
-            success_msg,
-            fail_msg,
-        }
-    }
-
-    /// Create a test target for an internal service (random mesh log format)
-    pub fn internal_random(source: &str, target: &str, namespace: &str, expected: bool) -> Self {
-        let (success_msg, fail_msg) = if expected {
-            (
-                format!("{}->{}:ALLOWED", source, target),
-                format!("{}->{}:BLOCKED(UNEXPECTED)", source, target),
-            )
-        } else {
-            (
-                format!("{}->{}:ALLOWED(UNEXPECTED)", source, target),
-                format!("{}->{}:BLOCKED", source, target),
-            )
-        };
-        Self {
-            url: format!("http://{}.{}.svc.cluster.local/", target, namespace),
             expected_allowed: expected,
             success_msg,
             fail_msg,
@@ -136,7 +115,7 @@ pub fn generate_test_script(source_name: &str, targets: Vec<TestTarget>) -> Stri
         .map(|(i, t)| {
             format!(
                 r#"
-    R{i}=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5 {url} 2>/dev/null || echo "000")"#,
+    R{i}=$(curl -sk -o /dev/null -w "%{{http_code}}" --connect-timeout 3 --max-time 5 {url} 2>/dev/null || echo "000")"#,
                 i = i,
                 url = t.url,
             )
@@ -206,7 +185,7 @@ MAX_ATTEMPTS=3
 ATTEMPT=0
 RESULT="UNKNOWN"
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" --connect-timeout 2 --max-time 3 {url} 2>/dev/null || echo "000")
+    HTTP_CODE=$(curl -sk -o /dev/null -w "%{{http_code}}" --connect-timeout 2 --max-time 3 {url} 2>/dev/null || echo "000")
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
         RESULT="ALLOWED"
         break

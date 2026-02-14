@@ -60,28 +60,12 @@ impl<'a> PolicyCompiler<'a> {
             return None;
         }
 
-        Some(AuthorizationPolicy::new(
-            ObjectMeta::new(format!("allow-to-{}", service.name), namespace),
-            AuthorizationPolicySpec {
-                target_refs: vec![TargetRef {
-                    group: String::new(),
-                    kind: "Service".to_string(),
-                    name: service.name.clone(),
-                }],
-                selector: None,
-                action: "ALLOW".to_string(),
-                rules: vec![AuthorizationRule {
-                    from: vec![AuthorizationSource {
-                        source: SourceSpec { principals },
-                    }],
-                    to: vec![AuthorizationOperation {
-                        operation: OperationSpec {
-                            ports,
-                            hosts: vec![],
-                        },
-                    }],
-                }],
-            },
+        Some(AuthorizationPolicy::allow_to_service(
+            format!("allow-to-{}", service.name),
+            namespace,
+            service.name.clone(),
+            principals,
+            ports,
         ))
     }
 

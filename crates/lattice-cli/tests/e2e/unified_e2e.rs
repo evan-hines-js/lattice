@@ -164,7 +164,7 @@ async fn run_full_e2e() -> Result<(), String> {
             "Random mesh",
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                super::mesh_tests::run_random_mesh_test(&kc).await
+                super::mesh_random::run_random_mesh_test(&kc).await
             }),
         ));
     }

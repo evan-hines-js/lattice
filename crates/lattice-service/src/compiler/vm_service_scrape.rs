@@ -1,39 +1,44 @@
-//! ServiceMonitor compiler phase
+//! VMServiceScrape compiler phase
 //!
-//! Generates a Prometheus-compatible `ServiceMonitor` for LatticeServices that
-//! declare a port named `metrics`. This opt-in approach avoids scrape errors
-//! on ports that don't serve Prometheus metrics (HTTP APIs returning HTML,
+//! Generates a VictoriaMetrics `VMServiceScrape` for LatticeServices that
+//! declare a port named `metrics`, plus an AuthorizationPolicy allowing VMAgent
+//! to scrape through the Istio waypoint. This opt-in approach avoids scrape
+//! errors on ports that don't serve Prometheus metrics (HTTP APIs returning HTML,
 //! gRPC ports, etc.).
 
 use kube::discovery::ApiResource;
+use lattice_common::mesh;
+use lattice_common::policy::AuthorizationPolicy;
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
+use lattice_infra::bootstrap::prometheus::{MONITORING_NAMESPACE, VMAGENT_SERVICE_ACCOUNT};
 
 use super::{ApplyLayer, CompiledService, DynamicResource};
 use crate::compiler::phase::{CompilationContext, CompilerPhase};
 
-/// Compiler phase that emits a `monitoring.coreos.com/v1` `ServiceMonitor`.
+/// Compiler phase that emits a `operator.victoriametrics.com/v1beta1` `VMServiceScrape`
+/// and an Istio `AuthorizationPolicy` allowing VMAgent to scrape through the waypoint.
 ///
 /// The phase no-ops when:
 /// - Monitoring is disabled on the cluster
-/// - The ServiceMonitor CRD is not installed (`api_resource` is `None`)
+/// - The VMServiceScrape CRD is not installed (`api_resource` is `None`)
 /// - The service has no port named `metrics`
-pub struct ServiceMonitorPhase {
+pub struct VMServiceScrapePhase {
     api_resource: Option<ApiResource>,
 }
 
-impl ServiceMonitorPhase {
-    /// Create a new `ServiceMonitorPhase`.
+impl VMServiceScrapePhase {
+    /// Create a new `VMServiceScrapePhase`.
     ///
-    /// Pass `None` if the ServiceMonitor CRD is not installed — the phase
+    /// Pass `None` if the VMServiceScrape CRD is not installed — the phase
     /// will gracefully no-op.
     pub fn new(api_resource: Option<ApiResource>) -> Self {
         Self { api_resource }
     }
 }
 
-impl CompilerPhase for ServiceMonitorPhase {
+impl CompilerPhase for VMServiceScrapePhase {
     fn name(&self) -> &str {
-        "service-monitor"
+        "vm-service-scrape"
     }
 
     fn compile(
@@ -41,47 +46,39 @@ impl CompilerPhase for ServiceMonitorPhase {
         ctx: &CompilationContext<'_>,
         output: &mut CompiledService,
     ) -> Result<(), String> {
-        // Gate 1: monitoring must be enabled
         if !ctx.monitoring.enabled {
             return Ok(());
         }
 
-        // Gate 2: CRD must be installed
         let ar = match &self.api_resource {
             Some(ar) => ar.clone(),
             None => return Ok(()),
         };
 
-        // Gate 3: service must have a port named "metrics".
-        // Scraping arbitrary ports (http, grpc) produces noisy errors because
+        // Only generate a scrape config for services that explicitly declare
+        // a port named "metrics". Many services expose HTTP/gRPC ports where
         // they don't serve Prometheus metrics. Requiring an explicit "metrics"
         // port is opt-in: zero config for those who add it, zero noise for
         // those who don't.
-        let has_metrics_port = ctx
+        let metrics_port = ctx
             .service
             .spec
             .workload
             .service
             .as_ref()
-            .map(|svc| svc.ports.contains_key("metrics"))
-            .unwrap_or(false);
-        if !has_metrics_port {
-            return Ok(());
-        }
+            .and_then(|svc| svc.ports.get("metrics"));
+        let metrics_port = match metrics_port {
+            Some(p) => p,
+            None => return Ok(()),
+        };
 
-        let endpoints = vec![serde_json::json!({
-            "port": "metrics",
-            "path": "/metrics",
-            "interval": "30s"
-        })];
-
-        let monitor_name = format!("{}-monitor", ctx.name);
-
+        // Emit VMServiceScrape
+        let scrape_name = format!("{}-scrape", ctx.name);
         let json = serde_json::json!({
-            "apiVersion": "monitoring.coreos.com/v1",
-            "kind": "ServiceMonitor",
+            "apiVersion": "operator.victoriametrics.com/v1beta1",
+            "kind": "VMServiceScrape",
             "metadata": {
-                "name": monitor_name,
+                "name": scrape_name,
                 "namespace": ctx.namespace,
                 "labels": {
                     LABEL_NAME: ctx.name,
@@ -94,25 +91,44 @@ impl CompilerPhase for ServiceMonitorPhase {
                         LABEL_NAME: ctx.name
                     }
                 },
-                "endpoints": endpoints
+                "endpoints": [{
+                    "port": "metrics",
+                    "path": "/metrics",
+                    "interval": "30s"
+                }]
             }
         });
 
         output.extensions.push(DynamicResource {
-            kind: "ServiceMonitor".to_string(),
-            name: monitor_name,
+            kind: "VMServiceScrape".to_string(),
+            name: scrape_name,
             json,
             api_resource: ar,
             layer: ApplyLayer::Infrastructure,
         });
 
+        // Emit AuthorizationPolicy allowing VMAgent to scrape through the waypoint.
+        // Without this, the waypoint's default-deny blocks VMAgent's scrape requests.
+        let vmagent_principal = mesh::trust_domain::principal(
+            ctx.cluster_name,
+            MONITORING_NAMESPACE,
+            VMAGENT_SERVICE_ACCOUNT,
+        );
+
+        output
+            .policies
+            .authorization_policies
+            .push(AuthorizationPolicy::allow_to_service(
+                format!("allow-vm-scrape-{}", ctx.name),
+                ctx.namespace,
+                ctx.name,
+                vec![vmagent_principal],
+                vec![metrics_port.port.to_string()],
+            ));
+
         Ok(())
     }
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -122,9 +138,12 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    /// Build a fake ApiResource for ServiceMonitor
+    /// Build a fake ApiResource for VMServiceScrape
     fn fake_ar() -> ApiResource {
-        lattice_common::kube_utils::build_api_resource("monitoring.coreos.com/v1", "ServiceMonitor")
+        lattice_common::kube_utils::build_api_resource(
+            "operator.victoriametrics.com/v1beta1",
+            "VMServiceScrape",
+        )
     }
 
     /// Build a minimal LatticeService with given ports
@@ -180,12 +199,9 @@ mod tests {
         service: &'a LatticeService,
         monitoring_enabled: bool,
     ) -> CompilationContext<'a> {
-        // We need a graph but ServiceMonitorPhase doesn't use it
         use crate::crd::{MonitoringConfig, ProviderType};
         use crate::graph::ServiceGraph;
 
-        // Leak a ServiceGraph so the reference lives long enough for tests.
-        // In tests this is fine — each test is short-lived.
         let graph: &'static ServiceGraph = Box::leak(Box::new(ServiceGraph::new()));
 
         CompilationContext {
@@ -203,70 +219,74 @@ mod tests {
     }
 
     // =========================================================================
-    // Gate tests
+    // No-op cases
     // =========================================================================
 
     #[test]
     fn monitoring_disabled_produces_no_extensions() {
         let svc = make_service_with_ports("my-app", "default", &[("http", 80)]);
         let ctx = make_ctx(&svc, false);
-        let phase = ServiceMonitorPhase::new(Some(fake_ar()));
+        let phase = VMServiceScrapePhase::new(Some(fake_ar()));
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
+        assert!(compiled.policies.authorization_policies.is_empty());
     }
 
     #[test]
     fn crd_not_installed_produces_no_extensions() {
         let svc = make_service_with_ports("my-app", "default", &[("http", 80)]);
         let ctx = make_ctx(&svc, true);
-        let phase = ServiceMonitorPhase::new(None);
+        let phase = VMServiceScrapePhase::new(None);
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
+        assert!(compiled.policies.authorization_policies.is_empty());
     }
 
     #[test]
     fn no_ports_produces_no_extensions() {
         let svc = make_service_with_ports("my-app", "default", &[]);
         let ctx = make_ctx(&svc, true);
-        let phase = ServiceMonitorPhase::new(Some(fake_ar()));
+        let phase = VMServiceScrapePhase::new(Some(fake_ar()));
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
+        assert!(compiled.policies.authorization_policies.is_empty());
     }
 
     #[test]
     fn no_metrics_port_produces_no_extensions() {
         let svc = make_service_with_ports("my-app", "default", &[("http", 80), ("grpc", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = ServiceMonitorPhase::new(Some(fake_ar()));
+        let phase = VMServiceScrapePhase::new(Some(fake_ar()));
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
+        assert!(compiled.policies.authorization_policies.is_empty());
     }
 
     // =========================================================================
-    // Happy path tests
+    // Happy-path cases
     // =========================================================================
 
     #[test]
-    fn metrics_port_produces_service_monitor() {
+    fn metrics_port_produces_vm_service_scrape() {
         let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = ServiceMonitorPhase::new(Some(fake_ar()));
+        let phase = VMServiceScrapePhase::new(Some(fake_ar()));
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
 
         assert_eq!(compiled.extensions.len(), 1);
         let ext = &compiled.extensions[0];
-        assert_eq!(ext.kind, "ServiceMonitor");
-        assert_eq!(ext.name, "my-app-monitor");
+        assert_eq!(ext.kind, "VMServiceScrape");
+        assert_eq!(ext.name, "my-app-scrape");
         assert_eq!(ext.layer, ApplyLayer::Infrastructure);
 
         let endpoints = ext.json["spec"]["endpoints"].as_array().unwrap();
@@ -277,43 +297,75 @@ mod tests {
     }
 
     #[test]
-    fn metrics_port_among_others_only_scrapes_metrics() {
-        let svc = make_service_with_ports(
-            "my-app",
-            "prod",
-            &[("http", 80), ("metrics", 9090), ("grpc", 9000)],
-        );
+    fn metrics_port_produces_scrape_auth_policy() {
+        let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = ServiceMonitorPhase::new(Some(fake_ar()));
+        let phase = VMServiceScrapePhase::new(Some(fake_ar()));
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
 
-        assert_eq!(compiled.extensions.len(), 1);
+        assert_eq!(compiled.policies.authorization_policies.len(), 1);
+        let policy = &compiled.policies.authorization_policies[0];
+        assert_eq!(policy.metadata.name, "allow-vm-scrape-my-app");
+        assert_eq!(policy.metadata.namespace, "prod");
+        assert_eq!(policy.spec.action, "ALLOW");
+
+        // Targets the Service (waypoint evaluates this)
+        assert_eq!(policy.spec.target_refs.len(), 1);
+        assert_eq!(policy.spec.target_refs[0].kind, "Service");
+        assert_eq!(policy.spec.target_refs[0].name, "my-app");
+
+        // Allows VMAgent's SPIFFE identity
+        let principal = &policy.spec.rules[0].from[0].source.principals[0];
+        assert!(principal.contains("monitoring"));
+        assert!(principal.contains("vmagent-lattice-metrics"));
+
+        // On the metrics port
+        let ports = &policy.spec.rules[0].to[0].operation.ports;
+        assert_eq!(ports, &["9090"]);
+    }
+
+    #[test]
+    fn metrics_port_among_others_only_scrapes_metrics() {
+        let svc = make_service_with_ports(
+            "my-app",
+            "default",
+            &[("http", 80), ("metrics", 9090), ("grpc", 9000)],
+        );
+        let ctx = make_ctx(&svc, true);
+        let phase = VMServiceScrapePhase::new(Some(fake_ar()));
+        let mut compiled = CompiledService::default();
+
+        phase.compile(&ctx, &mut compiled).unwrap();
+
         let endpoints = compiled.extensions[0].json["spec"]["endpoints"]
             .as_array()
             .unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0]["port"], "metrics");
+
+        // Auth policy only allows the metrics port
+        let ports = &compiled.policies.authorization_policies[0].spec.rules[0].to[0]
+            .operation
+            .ports;
+        assert_eq!(ports, &["9090"]);
     }
 
     #[test]
     fn labels_and_selector_match_workload_compiler() {
         let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = ServiceMonitorPhase::new(Some(fake_ar()));
+        let phase = VMServiceScrapePhase::new(Some(fake_ar()));
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
 
         let json = &compiled.extensions[0].json;
-
-        // Metadata labels
         let labels = &json["metadata"]["labels"];
         assert_eq!(labels[LABEL_NAME], "my-app");
         assert_eq!(labels[LABEL_MANAGED_BY], LABEL_MANAGED_BY_LATTICE);
 
-        // Selector must match what WorkloadCompiler puts on the K8s Service
         let selector = &json["spec"]["selector"]["matchLabels"];
         assert_eq!(selector[LABEL_NAME], "my-app");
     }
@@ -322,14 +374,14 @@ mod tests {
     fn correct_namespace_and_api_version() {
         let svc = make_service_with_ports("my-app", "staging", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = ServiceMonitorPhase::new(Some(fake_ar()));
+        let phase = VMServiceScrapePhase::new(Some(fake_ar()));
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();
 
         let json = &compiled.extensions[0].json;
-        assert_eq!(json["apiVersion"], "monitoring.coreos.com/v1");
-        assert_eq!(json["kind"], "ServiceMonitor");
+        assert_eq!(json["apiVersion"], "operator.victoriametrics.com/v1beta1");
+        assert_eq!(json["kind"], "VMServiceScrape");
         assert_eq!(json["metadata"]["namespace"], "staging");
     }
 
@@ -337,7 +389,7 @@ mod tests {
     fn layer_is_infrastructure() {
         let svc = make_service_with_ports("my-app", "default", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = ServiceMonitorPhase::new(Some(fake_ar()));
+        let phase = VMServiceScrapePhase::new(Some(fake_ar()));
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).unwrap();

@@ -51,6 +51,42 @@ impl AuthorizationPolicy {
             spec,
         }
     }
+
+    /// Create an ALLOW policy targeting a K8s Service from specific principals on specific ports.
+    ///
+    /// This is the most common pattern: waypoint-enforced L7 access control where
+    /// identified callers are allowed to reach a Service on specific ports.
+    pub fn allow_to_service(
+        name: impl Into<String>,
+        namespace: impl Into<String>,
+        service_name: impl Into<String>,
+        principals: Vec<String>,
+        ports: Vec<String>,
+    ) -> Self {
+        Self::new(
+            ObjectMeta::new(name, namespace),
+            AuthorizationPolicySpec {
+                target_refs: vec![TargetRef {
+                    group: String::new(),
+                    kind: "Service".to_string(),
+                    name: service_name.into(),
+                }],
+                selector: None,
+                action: "ALLOW".to_string(),
+                rules: vec![AuthorizationRule {
+                    from: vec![AuthorizationSource {
+                        source: SourceSpec { principals },
+                    }],
+                    to: vec![AuthorizationOperation {
+                        operation: OperationSpec {
+                            ports,
+                            hosts: vec![],
+                        },
+                    }],
+                }],
+            },
+        )
+    }
 }
 
 /// AuthorizationPolicy spec

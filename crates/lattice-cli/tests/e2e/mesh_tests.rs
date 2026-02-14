@@ -20,7 +20,6 @@ use super::helpers::{
 };
 use super::mesh_fixtures::*;
 use super::mesh_helpers::*;
-pub use super::mesh_random::run_random_mesh_test;
 
 // =============================================================================
 // Expected Results (Fixed Mesh)
@@ -278,9 +277,6 @@ pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, St
 /// on each attempt and lets policy propagation settle naturally.
 pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let _handle = start_mesh_test(kubeconfig_path).await?;
-
-    // Wait for at least 1 cycle so there's log data to check
-    wait_for_mesh_test_cycles(kubeconfig_path, 1).await?;
 
     let timeout = Duration::from_secs(300);
     let start = Instant::now();

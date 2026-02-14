@@ -341,34 +341,47 @@ pub fn generate_operator_network_policy(
                 "app".to_string(),
                 "lattice-operator".to_string(),
             )])),
-            ingress: vec![CiliumIngressRule {
-                from_endpoints: vec![],
-                to_ports: vec![CiliumPortRule {
-                    ports: vec![
-                        CiliumPort {
-                            port: DEFAULT_BOOTSTRAP_PORT.to_string(),
-                            protocol: "TCP".to_string(),
-                        },
-                        CiliumPort {
-                            port: DEFAULT_GRPC_PORT.to_string(),
-                            protocol: "TCP".to_string(),
-                        },
-                        CiliumPort {
-                            port: DEFAULT_PROXY_PORT.to_string(),
-                            protocol: "TCP".to_string(),
-                        },
-                        CiliumPort {
-                            port: DEFAULT_AUTH_PROXY_PORT.to_string(),
-                            protocol: "TCP".to_string(),
-                        },
-                        CiliumPort {
+            ingress: vec![
+                // Operator ports: open to all (bootstrap webhook, gRPC, proxy, auth proxy)
+                CiliumIngressRule {
+                    from_endpoints: vec![],
+                    to_ports: vec![CiliumPortRule {
+                        ports: vec![
+                            CiliumPort {
+                                port: DEFAULT_BOOTSTRAP_PORT.to_string(),
+                                protocol: "TCP".to_string(),
+                            },
+                            CiliumPort {
+                                port: DEFAULT_GRPC_PORT.to_string(),
+                                protocol: "TCP".to_string(),
+                            },
+                            CiliumPort {
+                                port: DEFAULT_PROXY_PORT.to_string(),
+                                protocol: "TCP".to_string(),
+                            },
+                            CiliumPort {
+                                port: DEFAULT_AUTH_PROXY_PORT.to_string(),
+                                protocol: "TCP".to_string(),
+                            },
+                        ],
+                        rules: None,
+                    }],
+                },
+                // Local secrets webhook: only ESO needs access
+                CiliumIngressRule {
+                    from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::from([(
+                        "k8s:io.kubernetes.pod.namespace".to_string(),
+                        "external-secrets".to_string(),
+                    )]))],
+                    to_ports: vec![CiliumPortRule {
+                        ports: vec![CiliumPort {
                             port: LOCAL_SECRETS_PORT.to_string(),
                             protocol: "TCP".to_string(),
-                        },
-                    ],
-                    rules: None,
-                }],
-            }],
+                        }],
+                        rules: None,
+                    }],
+                },
+            ],
             egress: egress_rules,
         },
     )

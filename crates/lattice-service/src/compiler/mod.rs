@@ -27,9 +27,9 @@
 //! 2. Falls back to namespace
 
 mod phase;
-mod service_monitor;
+mod vm_service_scrape;
 pub use phase::{CompilationContext, CompilerPhase};
-pub use service_monitor::ServiceMonitorPhase;
+pub use vm_service_scrape::VMServiceScrapePhase;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -77,7 +77,7 @@ pub enum ApplyLayer {
 /// A dynamically-typed Kubernetes resource produced by a compiler extension.
 ///
 /// This lets `CompilerPhase` implementations emit arbitrary resource types
-/// (Flagger Canary, Argo Rollout, ServiceMonitor, etc.) without adding
+/// (Flagger Canary, Argo Rollout, VMServiceScrape, etc.) without adding
 /// a named field to `CompiledService` for each one.
 #[derive(Clone, Debug)]
 pub struct DynamicResource {
@@ -448,7 +448,7 @@ impl<'a> ServiceCompiler<'a> {
             extensions: Vec::new(),
         };
 
-        // Run extension phases (Flagger, ServiceMonitor, rate limiting, etc.)
+        // Run extension phases (Flagger, VMServiceScrape, rate limiting, etc.)
         if !self.extension_phases.is_empty() {
             let phase_ctx = CompilationContext {
                 service,
@@ -1268,9 +1268,9 @@ mod tests {
         assert_eq!(compiled.resource_count(), 0);
 
         compiled.extensions.push(DynamicResource {
-            kind: "ServiceMonitor".to_string(),
-            name: "my-monitor".to_string(),
-            json: serde_json::json!({"metadata": {"name": "my-monitor"}}),
+            kind: "VMServiceScrape".to_string(),
+            name: "my-scrape".to_string(),
+            json: serde_json::json!({"metadata": {"name": "my-scrape"}}),
             api_resource: kube::discovery::ApiResource::erase::<
                 k8s_openapi::api::core::v1::ConfigMap,
             >(&()),
@@ -1363,12 +1363,12 @@ mod tests {
                 output: &mut CompiledService,
             ) -> Result<(), String> {
                 output.extensions.push(DynamicResource {
-                    kind: "ServiceMonitor".to_string(),
-                    name: format!("{}-monitor", ctx.name),
+                    kind: "VMServiceScrape".to_string(),
+                    name: format!("{}-scrape", ctx.name),
                     json: serde_json::json!({
-                        "apiVersion": "monitoring.coreos.com/v1",
-                        "kind": "ServiceMonitor",
-                        "metadata": {"name": format!("{}-monitor", ctx.name), "namespace": ctx.namespace}
+                        "apiVersion": "operator.victoriametrics.com/v1beta1",
+                        "kind": "VMServiceScrape",
+                        "metadata": {"name": format!("{}-scrape", ctx.name), "namespace": ctx.namespace}
                     }),
                     api_resource: kube::discovery::ApiResource::erase::<k8s_openapi::api::core::v1::ConfigMap>(&()),
                     layer: ApplyLayer::Infrastructure,
@@ -1385,8 +1385,8 @@ mod tests {
         let output = compiler.compile(&service).await.unwrap();
 
         assert_eq!(output.extensions.len(), 1);
-        assert_eq!(output.extensions[0].kind, "ServiceMonitor");
-        assert_eq!(output.extensions[0].name, "my-app-monitor");
+        assert_eq!(output.extensions[0].kind, "VMServiceScrape");
+        assert_eq!(output.extensions[0].name, "my-app-scrape");
         assert_eq!(output.extensions[0].layer, ApplyLayer::Infrastructure);
     }
 

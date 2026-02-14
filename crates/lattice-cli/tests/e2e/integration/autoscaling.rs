@@ -72,6 +72,7 @@ fn build_cpu_burner_service() -> lattice_common::crd::LatticeService {
             }),
         }),
         security: Some(SecurityContext {
+            run_as_user: Some(65534),
             apparmor_profile: Some("Unconfined".to_string()),
             ..Default::default()
         }),
@@ -104,8 +105,8 @@ fn build_cpu_burner_service() -> lattice_common::crd::LatticeService {
 ///
 /// Uses busybox httpd to serve a `/metrics` endpoint returning a high-value
 /// gauge. The service exposes a port named `metrics` (port 9090) which triggers
-/// automatic ServiceMonitor generation by the compiler. VictoriaMetrics scrapes
-/// this via the ServiceMonitor, and KEDA queries VictoriaMetrics to trigger scale-up.
+/// automatic VMServiceScrape generation by the compiler. VictoriaMetrics scrapes
+/// this via the VMServiceScrape, and KEDA queries VictoriaMetrics to trigger scale-up.
 fn build_metrics_server_service() -> lattice_common::crd::LatticeService {
     // busybox httpd serves static files — write metrics content then start httpd
     let script = format!(
@@ -147,6 +148,7 @@ fn build_metrics_server_service() -> lattice_common::crd::LatticeService {
         }),
         volumes,
         security: Some(SecurityContext {
+            run_as_user: Some(65534),
             apparmor_profile: Some("Unconfined".to_string()),
             ..Default::default()
         }),
@@ -155,7 +157,7 @@ fn build_metrics_server_service() -> lattice_common::crd::LatticeService {
 
     let resources = BTreeMap::new();
 
-    // Build with a metrics port so the compiler generates a ServiceMonitor
+    // Build with a metrics port so the compiler generates a VMServiceScrape
     let mut containers = BTreeMap::new();
     containers.insert("main".to_string(), container);
 
@@ -296,8 +298,8 @@ async fn run_prometheus_autoscaling_test(ctx: &InfraContext) -> Result<(), Strin
     )
     .await?;
 
-    info!("[Integration/Autoscaling/Prom] Verifying ServiceMonitor exists...");
-    verify_service_monitor(kubeconfig).await?;
+    info!("[Integration/Autoscaling/Prom] Verifying VMServiceScrape exists...");
+    verify_vm_service_scrape(kubeconfig).await?;
 
     info!("[Integration/Autoscaling/Prom] Waiting for Prometheus-driven scale-up...");
     wait_for_scale_up(
@@ -398,25 +400,25 @@ async fn verify_scaled_object(
     ).await
 }
 
-/// Verify the ServiceMonitor was created for the metrics-server service.
-async fn verify_service_monitor(kubeconfig: &str) -> Result<(), String> {
+/// Verify the VMServiceScrape was created for the metrics-server service.
+async fn verify_vm_service_scrape(kubeconfig: &str) -> Result<(), String> {
     let kc = kubeconfig.to_string();
-    let monitor_name = format!("{}-monitor", METRICS_SERVER_NAME);
+    let scrape_name = format!("{}-scrape", METRICS_SERVER_NAME);
 
     wait_for_condition(
-        &format!("ServiceMonitor {} to exist", monitor_name),
+        &format!("VMServiceScrape {} to exist", scrape_name),
         SCALEDOBJECT_TIMEOUT,
         POLL_INTERVAL,
         || {
             let kc = kc.clone();
-            let monitor_name = monitor_name.clone();
+            let scrape_name = scrape_name.clone();
             async move {
                 let output = run_kubectl(&[
                     "--kubeconfig",
                     &kc,
                     "get",
-                    "servicemonitor",
-                    &monitor_name,
+                    "vmservicescrape",
+                    &scrape_name,
                     "-n",
                     PROM_NAMESPACE,
                     "-o",
@@ -428,13 +430,13 @@ async fn verify_service_monitor(kubeconfig: &str) -> Result<(), String> {
                     Ok(port) => {
                         if port == "metrics" {
                             info!(
-                                "[Integration/Autoscaling/Prom] ServiceMonitor {} found, scraping port: {}",
-                                monitor_name, port
+                                "[Integration/Autoscaling/Prom] VMServiceScrape {} found, scraping port: {}",
+                                scrape_name, port
                             );
                             Ok(true)
                         } else {
                             info!(
-                                "[Integration/Autoscaling/Prom] ServiceMonitor port mismatch: {}",
+                                "[Integration/Autoscaling/Prom] VMServiceScrape port mismatch: {}",
                                 port
                             );
                             Ok(false)

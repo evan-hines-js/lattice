@@ -4,7 +4,7 @@
 
 use std::sync::LazyLock;
 
-use super::{namespace_yaml, split_yaml_documents};
+use super::{namespace_yaml_ambient, split_yaml_documents};
 
 /// Well-known service name for the VMCluster components.
 /// Used as `fullnameOverride` so all downstream consumers (KEDA,
@@ -14,32 +14,39 @@ pub const VMCLUSTER_NAME: &str = "lattice-metrics";
 /// Namespace for monitoring components.
 pub const MONITORING_NAMESPACE: &str = "monitoring";
 
+/// VMAgent service account name (derived from chart fullnameOverride).
+/// Used to construct SPIFFE identity for AuthorizationPolicy.
+pub const VMAGENT_SERVICE_ACCOUNT: &str = "vmagent-lattice-metrics";
+
 /// VMSelect query port (Prometheus-compatible read path, HA mode).
 pub const VMSELECT_PORT: u16 = 8481;
 
 /// VMSelect URL path prefix for Prometheus-compatible queries (HA mode).
 pub const VMSELECT_PATH: &str = "/select/0/prometheus";
 
+/// VMInsert write port (HA mode).
+pub const VMINSERT_PORT: u16 = 8480;
+
 /// VMSingle query port (Prometheus-compatible read path, single-node mode).
-pub const VMSINGLE_PORT: u16 = 8429;
+pub const VMSINGLE_PORT: u16 = 8428;
 
 /// VMSingle URL path prefix for Prometheus-compatible queries (single-node mode).
 pub const VMSINGLE_PATH: &str = "/prometheus";
 
 /// Build the VMSelect service URL from well-known constants (HA mode).
-/// Returns e.g. `http://lattice-metrics-vmselect.monitoring.svc`
+/// Returns e.g. `http://vmselect-lattice-metrics.monitoring.svc`
 pub fn vmselect_url() -> String {
     format!(
-        "http://{}-vmselect.{}.svc",
+        "http://vmselect-{}.{}.svc",
         VMCLUSTER_NAME, MONITORING_NAMESPACE
     )
 }
 
 /// Build the VMSingle service URL from well-known constants (single-node mode).
-/// Returns e.g. `http://lattice-metrics-vmsingle.monitoring.svc`
+/// Returns e.g. `http://vmsingle-lattice-metrics.monitoring.svc`
 pub fn vmsingle_url() -> String {
     format!(
-        "http://{}-vmsingle.{}.svc",
+        "http://vmsingle-{}.{}.svc",
         VMCLUSTER_NAME, MONITORING_NAMESPACE
     )
 }
@@ -73,7 +80,7 @@ pub fn query_url(ha: bool) -> String {
 
 /// Pre-rendered VictoriaMetrics HA manifests with namespace prepended.
 static PROMETHEUS_HA_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let mut manifests = vec![namespace_yaml(MONITORING_NAMESPACE)];
+    let mut manifests = vec![namespace_yaml_ambient(MONITORING_NAMESPACE)];
     manifests.extend(split_yaml_documents(include_str!(concat!(
         env!("OUT_DIR"),
         "/victoria-metrics-ha.yaml"
@@ -83,7 +90,7 @@ static PROMETHEUS_HA_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
 
 /// Pre-rendered VictoriaMetrics single-node manifests with namespace prepended.
 static PROMETHEUS_SINGLE_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let mut manifests = vec![namespace_yaml(MONITORING_NAMESPACE)];
+    let mut manifests = vec![namespace_yaml_ambient(MONITORING_NAMESPACE)];
     manifests.extend(split_yaml_documents(include_str!(concat!(
         env!("OUT_DIR"),
         "/victoria-metrics-single.yaml"
@@ -120,9 +127,10 @@ mod tests {
 
     #[test]
     fn test_namespace_is_correct() {
-        let ns = namespace_yaml("monitoring");
+        let ns = namespace_yaml_ambient("monitoring");
         assert!(ns.contains("kind: Namespace"));
         assert!(ns.contains("name: monitoring"));
+        assert!(ns.contains("istio.io/dataplane-mode: ambient"));
     }
 
     #[test]
@@ -130,6 +138,7 @@ mod tests {
         let manifests = generate_prometheus(true);
         assert!(!manifests.is_empty());
         assert!(manifests[0].contains("kind: Namespace"));
+        assert!(manifests[0].contains("istio.io/dataplane-mode: ambient"));
     }
 
     #[test]
@@ -137,6 +146,7 @@ mod tests {
         let manifests = generate_prometheus(false);
         assert!(!manifests.is_empty());
         assert!(manifests[0].contains("kind: Namespace"));
+        assert!(manifests[0].contains("istio.io/dataplane-mode: ambient"));
     }
 
     #[test]
