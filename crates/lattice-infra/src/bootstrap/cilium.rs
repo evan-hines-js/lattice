@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh::{CILIUM_GATEWAY_NAME_LABEL, HBONE_PORT, ISTIOD_XDS_PORT};
-use lattice_common::policy::{
+use lattice_common::policy::cilium::{
     CiliumClusterwideNetworkPolicy, CiliumClusterwideSpec, CiliumEgressRule, CiliumIngressRule,
     CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule,
     ClusterwideEgressRule, ClusterwideIngressRule, ClusterwideMetadata, DnsMatch, DnsRules,
@@ -262,7 +262,6 @@ pub fn generate_operator_network_policy(
                 ),
                 ("k8s:k8s-app".to_string(), "kube-dns".to_string()),
             ]))],
-            to_services: vec![],
             to_entities: vec![],
             to_fqdns: vec![],
             to_cidr: vec![],
@@ -283,7 +282,6 @@ pub fn generate_operator_network_policy(
         // K8s API server
         CiliumEgressRule {
             to_endpoints: vec![],
-            to_services: vec![],
             to_entities: vec!["kube-apiserver".to_string()],
             to_fqdns: vec![],
             to_cidr: vec![],
@@ -312,8 +310,7 @@ pub fn generate_operator_network_policy(
             // For IP addresses (Docker), use CIDR rule
             egress_rules.push(CiliumEgressRule {
                 to_endpoints: vec![],
-                to_services: vec![],
-                to_entities: vec![],
+                    to_entities: vec![],
                 to_fqdns: vec![],
                 to_cidr: vec![format!("{}/32", host)],
                 to_ports: parent_ports,
@@ -322,8 +319,7 @@ pub fn generate_operator_network_policy(
             // For hostnames (AWS NLB, etc.), use FQDN rule
             egress_rules.push(CiliumEgressRule {
                 to_endpoints: vec![],
-                to_services: vec![],
-                to_entities: vec![],
+                    to_entities: vec![],
                 to_fqdns: vec![FqdnSelector {
                     match_name: Some(host.to_string()),
                     match_pattern: None,

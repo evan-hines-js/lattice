@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use kube::discovery::ApiResource;
 use lattice_common::mesh;
-use lattice_common::policy::AuthorizationPolicy;
+use lattice_common::policy::istio::AuthorizationPolicy;
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 use lattice_infra::bootstrap::prometheus::{MONITORING_NAMESPACE, VMAGENT_SERVICE_ACCOUNT};
 
