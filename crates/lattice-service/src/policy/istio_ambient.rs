@@ -21,11 +21,11 @@ use std::collections::BTreeMap;
 use crate::graph::{ActiveEdge, ServiceNode};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
-use lattice_common::policy::{
+use lattice_common::policy::istio::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
-    AuthorizationSource, OperationSpec, ServiceEntry, ServiceEntryPort, ServiceEntrySpec,
-    SourceSpec, TargetRef, WorkloadSelector,
+    AuthorizationSource, OperationSpec, SourceSpec, TargetRef, WorkloadSelector,
 };
+use lattice_common::policy::service_entry::{ServiceEntry, ServiceEntryPort, ServiceEntrySpec};
 use lattice_common::LABEL_NAME;
 
 use super::PolicyCompiler;

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use crate::graph::{ActiveEdge, ServiceNode, ServiceType};
 use lattice_common::kube_utils::ObjectMeta;
-use lattice_common::policy::{
+use lattice_common::policy::cilium::{
     CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort,
     CiliumPortRule, DnsMatch, DnsRules, EndpointSelector, FqdnSelector,
 };

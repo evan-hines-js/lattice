@@ -17,7 +17,9 @@
 mod cilium;
 mod istio_ambient;
 
-use lattice_common::policy::{AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry};
+use lattice_common::policy::cilium::CiliumNetworkPolicy;
+use lattice_common::policy::istio::AuthorizationPolicy;
+use lattice_common::policy::service_entry::ServiceEntry;
 
 use crate::graph::{ServiceGraph, ServiceType};
 
@@ -188,7 +190,7 @@ mod tests {
     };
     use crate::graph::ServiceGraph;
     use lattice_common::mesh;
-    use lattice_common::policy::{CiliumEgressRule, FqdnSelector};
+    use lattice_common::policy::cilium::{CiliumEgressRule, FqdnSelector};
     use std::collections::BTreeMap;
 
     fn make_external_spec(allowed: Vec<&str>) -> LatticeExternalServiceSpec {
@@ -427,7 +429,6 @@ mod tests {
     fn cilium_fqdn_field_serializes_correctly() {
         let rule = CiliumEgressRule {
             to_endpoints: vec![],
-            to_services: vec![],
             to_entities: vec![],
             to_fqdns: vec![FqdnSelector {
                 match_name: Some("api.example.com".to_string()),

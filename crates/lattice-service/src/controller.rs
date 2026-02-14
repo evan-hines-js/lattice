@@ -24,7 +24,9 @@ use mockall::automock;
 
 use kube::discovery::ApiResource;
 use lattice_common::kube_utils::HasApiResource;
-use lattice_common::policy::{AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry};
+use lattice_common::policy::cilium::CiliumNetworkPolicy;
+use lattice_common::policy::istio::AuthorizationPolicy;
+use lattice_common::policy::service_entry::ServiceEntry;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::events::{actions, reasons, EventPublisher};

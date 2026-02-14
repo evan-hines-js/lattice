@@ -8,7 +8,7 @@ use std::sync::{LazyLock, OnceLock};
 
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
-use lattice_common::policy::{
+use lattice_common::policy::istio::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
     MtlsConfig, OperationSpec, PeerAuthentication, PeerAuthenticationSpec, TargetRef,
     WorkloadSelector,
