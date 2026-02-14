@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, DynamicObject, Patch, PatchParams};
+use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
@@ -21,7 +21,8 @@ use lattice_common::{
 };
 
 use crate::eso::{
-    ClusterSecretStore, ClusterSecretStoreSpec, ProviderSpec, WebhookProvider, WebhookResult,
+    ClusterSecretStore, ClusterSecretStoreSpec, ExternalSecret, ProviderSpec, WebhookProvider,
+    WebhookResult,
 };
 
 /// Service name for the local secrets webhook
@@ -108,13 +109,33 @@ pub async fn reconcile(
             // Check if ESO has validated the ClusterSecretStore
             match check_cluster_secret_store_ready(client, &name).await {
                 Ok(Some((true, _))) => {
+                    // Detect transition from not-ready to ready and force-refresh
+                    // any failed ExternalSecrets so they don't wait for refreshInterval
+                    let was_pending = sp
+                        .status
+                        .as_ref()
+                        .map(|s| s.phase != SecretProviderPhase::Ready)
+                        .unwrap_or(true);
+                    if was_pending {
+                        info!(secrets_provider = %name, "ClusterSecretStore transitioned to Ready, force-refreshing failed ExternalSecrets");
+                        if let Err(e) = force_refresh_failed_external_secrets(client, &name).await {
+                            warn!(secrets_provider = %name, error = %e, "Failed to force-refresh ExternalSecrets (non-fatal)");
+                        }
+                    }
+
                     info!(secrets_provider = %name, "ClusterSecretStore is Ready");
                     update_status(client, &sp, SecretProviderPhase::Ready, None, provider_type)
                         .await?;
                     Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
                 }
                 Ok(Some((false, msg))) => {
-                    info!(secrets_provider = %name, reason = %msg, "ClusterSecretStore not ready yet");
+                    info!(secrets_provider = %name, reason = %msg, "ClusterSecretStore not ready yet, re-applying to trigger ESO revalidation");
+                    // Re-apply the CSS spec to force ESO to re-run provider validation.
+                    // Without this, ESO keeps the store in InvalidProviderConfig even after
+                    // the underlying issue (e.g., webhook pod not running) resolves.
+                    if let Err(e) = ensure_cluster_secret_store(client, &sp).await {
+                        warn!(secrets_provider = %name, error = %e, "Failed to re-apply ClusterSecretStore for revalidation");
+                    }
                     update_status(
                         client,
                         &sp,
@@ -270,6 +291,115 @@ async fn check_cluster_secret_store_ready(
     }
 
     Ok(None)
+}
+
+/// Force-refresh failed ExternalSecrets that reference a given ClusterSecretStore.
+///
+/// When a ClusterSecretStore transitions from unhealthy to healthy, ExternalSecrets
+/// that failed due to the store being unavailable won't retry until their
+/// `refreshInterval` (typically 1h). This function annotates them with
+/// `force-sync=<timestamp>` to trigger immediate resync.
+async fn force_refresh_failed_external_secrets(
+    client: &Client,
+    store_name: &str,
+) -> Result<(), ReconcileError> {
+    let api_resource = ExternalSecret::api_resource();
+    let es_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
+
+    let es_list = es_api
+        .list(&ListParams::default())
+        .await
+        .map_err(|e| ReconcileError::Kube(format!("failed to list ExternalSecrets: {e}")))?;
+
+    let timestamp = chrono::Utc::now().timestamp().to_string();
+    let mut refreshed = 0u32;
+
+    for es in &es_list {
+        // Check if this ExternalSecret references the given store
+        let refs_store = es
+            .data
+            .get("spec")
+            .and_then(|s| s.get("secretStoreRef"))
+            .and_then(|r| {
+                let name_match = r.get("name").and_then(|n| n.as_str()) == Some(store_name);
+                let kind_match = r
+                    .get("kind")
+                    .and_then(|k| k.as_str())
+                    .map(|k| k == "ClusterSecretStore")
+                    .unwrap_or(true); // default kind is ClusterSecretStore
+                Some(name_match && kind_match)
+            })
+            .unwrap_or(false);
+
+        if !refs_store {
+            continue;
+        }
+
+        // Check if this ExternalSecret is in a failed state (Ready=False)
+        let is_failed = es
+            .data
+            .get("status")
+            .and_then(|s| s.get("conditions"))
+            .and_then(|c| c.as_array())
+            .map(|conditions| {
+                conditions.iter().any(|c| {
+                    c.get("type").and_then(|t| t.as_str()) == Some("Ready")
+                        && c.get("status").and_then(|s| s.as_str()) == Some("False")
+                })
+            })
+            .unwrap_or(false);
+
+        if !is_failed {
+            continue;
+        }
+
+        let es_name = es.metadata.name.as_deref().unwrap_or("unknown");
+        let es_namespace = es.metadata.namespace.as_deref().unwrap_or("default");
+
+        // Annotate with force-sync to trigger immediate resync
+        let patch = serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    "force-sync": &timestamp
+                }
+            }
+        });
+
+        let ns_api: Api<DynamicObject> =
+            Api::namespaced_with(client.clone(), es_namespace, &api_resource);
+        if let Err(e) = ns_api
+            .patch(
+                es_name,
+                &PatchParams::apply("lattice-secrets-provider").force(),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            warn!(
+                external_secret = %es_name,
+                namespace = %es_namespace,
+                error = %e,
+                "Failed to force-refresh ExternalSecret"
+            );
+        } else {
+            info!(
+                external_secret = %es_name,
+                namespace = %es_namespace,
+                "Force-refreshed failed ExternalSecret after store recovery"
+            );
+            refreshed += 1;
+        }
+    }
+
+    if refreshed > 0 {
+        info!(
+            store = %store_name,
+            count = refreshed,
+            "Force-refreshed failed ExternalSecrets after ClusterSecretStore recovery"
+        );
+    }
+
+    Ok(())
 }
 
 /// Build webhook provider configuration for local backend
