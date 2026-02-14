@@ -8,20 +8,6 @@
 //! All policy types implement the `HasApiResource` trait for consistent
 //! API version and kind handling.
 
-mod cilium;
-mod istio;
-mod service_entry;
-
-pub use cilium::{
-    CiliumClusterwideNetworkPolicy, CiliumClusterwideSpec, CiliumEgressRule, CiliumIngressRule,
-    CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort, CiliumPortRule,
-    ClusterwideEgressRule, ClusterwideIngressRule, ClusterwideMetadata, DnsMatch, DnsRules,
-    EnableDefaultDeny, EndpointSelector, FqdnSelector, K8sServiceRef, K8sServiceSelector,
-    MatchExpression,
-};
-pub use istio::{
-    AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
-    AuthorizationSource, MtlsConfig, OperationSpec, PeerAuthentication, PeerAuthenticationSpec,
-    SourceSpec, TargetRef, WorkloadSelector,
-};
-pub use service_entry::{ServiceEntry, ServiceEntryPort, ServiceEntrySpec};
+pub mod cilium;
+pub mod istio;
+pub mod service_entry;

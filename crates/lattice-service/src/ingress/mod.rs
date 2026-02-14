@@ -20,7 +20,7 @@ use lattice_common::crd::{IngressSpec, IngressTls, PathMatchType, RouteKind, Ser
 use lattice_common::kube_utils::HasApiResource;
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
-use lattice_common::policy::{
+use lattice_common::policy::istio::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
     OperationSpec, WorkloadSelector,
 };
