@@ -1035,7 +1035,7 @@ pub struct GeneratedWorkloads {
     /// PersistentVolumeClaims for owned volumes
     pub pvcs: Vec<PersistentVolumeClaim>,
     /// ExternalSecrets for syncing secrets from SecretProvider (Vault)
-    pub external_secrets: Vec<lattice_secret_provider::ExternalSecret>,
+    pub external_secrets: Vec<lattice_secret_provider::eso::ExternalSecret>,
     /// Secret references for template resolution (resource_name -> SecretRef)
     pub secret_refs: BTreeMap<String, SecretRef>,
 }

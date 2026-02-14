@@ -42,10 +42,7 @@ use lattice_cedar::{
 
 use lattice_common::mesh;
 use lattice_common::template::{EsoTemplatedEnvVar, RenderConfig, TemplateRenderer};
-use lattice_secret_provider::{
-    ExternalSecret, ExternalSecretData, ExternalSecretSpec, ExternalSecretTarget,
-    ExternalSecretTemplate, RemoteRef, SecretStoreRef,
-};
+use lattice_secret_provider::eso::ExternalSecret;
 
 use crate::crd::{LatticeService, MonitoringConfig, ProviderType, ServiceBackupSpec};
 use crate::graph::ServiceGraph;
@@ -877,54 +874,27 @@ fn compile_eso_templated_env_vars(
         };
         let es_name = format!("{}-{}-env-eso{}", service_name, container_name, suffix);
 
-        let mut eso_data: Vec<ExternalSecretData> = Vec::new();
         let mut template_data = std::collections::BTreeMap::new();
-        let mut seen_eso_keys = std::collections::HashSet::new();
+        let mut all_refs = Vec::new();
 
         for (var_name, templated) in vars {
             template_data.insert((*var_name).clone(), templated.rendered_template.clone());
-
-            for fref in &templated.secret_refs {
-                if !seen_eso_keys.insert(fref.eso_data_key.clone()) {
-                    continue;
-                }
-
-                let sr = secret_refs.get(&fref.resource_name).ok_or_else(|| {
-                    CompilationError::file_compilation(format!(
-                        "env var '{}' references secret resource '{}' but no SecretRef was compiled",
-                        var_name, fref.resource_name
-                    ))
-                })?;
-
-                if let Some(ref keys) = sr.keys {
-                    if !keys.contains(&fref.key) {
-                        return Err(CompilationError::file_compilation(format!(
-                            "env var '{}' references key '{}' in secret '{}' but available keys are: {:?}",
-                            var_name, fref.key, fref.resource_name, keys
-                        )));
-                    }
-                }
-
-                eso_data.push(ExternalSecretData::new(
-                    &fref.eso_data_key,
-                    RemoteRef::with_property(&sr.remote_key, &fref.key),
-                ));
-            }
+            all_refs.extend(
+                templated
+                    .secret_refs
+                    .iter()
+                    .map(|r| (var_name.as_str(), r)),
+            );
         }
 
-        external_secrets.push(ExternalSecret::new(
-            &es_name,
-            namespace,
-            ExternalSecretSpec {
-                secret_store_ref: SecretStoreRef::cluster_secret_store(store_name),
-                target: ExternalSecretTarget::with_template(
-                    &es_name,
-                    ExternalSecretTemplate::new(template_data),
-                ),
-                data: eso_data,
-                data_from: None,
-                refresh_interval: Some("1h".to_string()),
-            },
+        // Collect refs for resolve_eso_data (context uses first var name for errors)
+        let flat_refs: Vec<_> = all_refs.iter().map(|(_, r)| (*r).clone()).collect();
+        let context = format!("env var(s) in {}", es_name);
+        let eso_data =
+            crate::workload::secrets::resolve_eso_data(&flat_refs, secret_refs, &context)?;
+
+        external_secrets.push(ExternalSecret::templated(
+            &es_name, namespace, store_name, template_data, eso_data,
         ));
 
         env_from_refs.push(EnvFromSource {
