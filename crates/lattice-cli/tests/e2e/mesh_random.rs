@@ -562,9 +562,10 @@ impl RandomMesh {
             .map(|(_, target, expected_allowed, is_external)| {
                 if *is_external {
                     let url = &self.external_services[target].url;
-                    TestTarget::external(source_name, target, url, *expected_allowed)
+                    TestTarget::with_url(source_name, target, url, *expected_allowed)
                 } else {
-                    TestTarget::internal_random(source_name, target, namespace, *expected_allowed)
+                    let url = format!("http://{}.{}.svc.cluster.local/", target, namespace);
+                    TestTarget::with_url(source_name, target, &url, *expected_allowed)
                 }
             })
             .collect()

@@ -83,6 +83,12 @@ repo = "https://kedacore.github.io/charts"
 chart = "kedacore/keda"
 filename = "keda-{version}.tgz"
 
+[charts.metrics-server]
+version = "3.12.2"
+repo = "https://kubernetes-sigs.github.io/metrics-server/"
+chart = "metrics-server/metrics-server"
+filename = "metrics-server-{version}.tgz"
+
 [charts.victoria-metrics-k8s-stack]
 version = "0.69.0"
 repo = "https://victoriametrics.github.io/helm-charts"

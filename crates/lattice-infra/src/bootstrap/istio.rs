@@ -7,12 +7,19 @@ use std::collections::BTreeMap;
 use std::sync::{LazyLock, OnceLock};
 
 use lattice_common::kube_utils::ObjectMeta;
+use lattice_common::mesh;
 use lattice_common::policy::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
     MtlsConfig, OperationSpec, PeerAuthentication, PeerAuthenticationSpec, TargetRef,
     WorkloadSelector,
 };
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+
+use super::keda::{KEDA_NAMESPACE, KEDA_SERVICE_ACCOUNT};
+use super::prometheus::{
+    MONITORING_NAMESPACE, VMCLUSTER_NAME, VMINSERT_PORT, VMAGENT_SERVICE_ACCOUNT, VMSELECT_PORT,
+    VMSINGLE_PORT,
+};
 
 use super::split_yaml_documents;
 
@@ -143,6 +150,58 @@ impl IstioReconciler {
                 rules: vec![],
             },
         )
+    }
+
+    /// Generate AuthorizationPolicies allowing monitoring traffic through the mesh.
+    ///
+    /// Produces policies for:
+    /// - VMAgent → VMSingle/VMInsert (push scraped metrics to storage)
+    /// - KEDA → VMSingle/VMSelect (query metrics for autoscaling)
+    ///
+    /// Note: VMAgent → scrape targets is handled per-service by `VMServiceScrapePhase`.
+    pub fn generate_monitoring_allow_policies(
+        cluster_name: &str,
+        ha: bool,
+    ) -> Vec<AuthorizationPolicy> {
+        // VMAgent → storage (write path)
+        let (write_service, write_port) = if ha {
+            (format!("vminsert-{}", VMCLUSTER_NAME), VMINSERT_PORT)
+        } else {
+            (format!("vmsingle-{}", VMCLUSTER_NAME), VMSINGLE_PORT)
+        };
+
+        let vmagent_principal = mesh::trust_domain::principal(
+            cluster_name,
+            MONITORING_NAMESPACE,
+            VMAGENT_SERVICE_ACCOUNT,
+        );
+
+        // KEDA → query (read path)
+        let (read_service, read_port) = if ha {
+            (format!("vmselect-{}", VMCLUSTER_NAME), VMSELECT_PORT)
+        } else {
+            (format!("vmsingle-{}", VMCLUSTER_NAME), VMSINGLE_PORT)
+        };
+
+        let keda_principal =
+            mesh::trust_domain::principal(cluster_name, KEDA_NAMESPACE, KEDA_SERVICE_ACCOUNT);
+
+        vec![
+            AuthorizationPolicy::allow_to_service(
+                "allow-vmagent-write",
+                MONITORING_NAMESPACE,
+                write_service,
+                vec![vmagent_principal],
+                vec![write_port.to_string()],
+            ),
+            AuthorizationPolicy::allow_to_service(
+                "allow-keda-query",
+                MONITORING_NAMESPACE,
+                read_service,
+                vec![keda_principal],
+                vec![read_port.to_string()],
+            ),
+        ]
     }
 
     /// Generate AuthorizationPolicy allowing traffic to lattice-operator
@@ -282,5 +341,63 @@ mod tests {
             .collect();
         assert!(ports.contains(&"8443"));
         assert!(ports.contains(&"50051"));
+    }
+
+    #[test]
+    fn test_monitoring_allow_policies_single_node() {
+        let policies =
+            IstioReconciler::generate_monitoring_allow_policies("test-cluster", false);
+        assert_eq!(policies.len(), 2);
+
+        // VMAgent → VMSingle
+        let vmagent = &policies[0];
+        assert_eq!(vmagent.metadata.name, "allow-vmagent-write");
+        assert_eq!(vmagent.metadata.namespace, MONITORING_NAMESPACE);
+        assert_eq!(vmagent.spec.action, "ALLOW");
+        assert_eq!(vmagent.spec.target_refs[0].name, "vmsingle-lattice-metrics");
+        let principal = &vmagent.spec.rules[0].from[0].source.principals[0];
+        assert!(principal.contains(VMAGENT_SERVICE_ACCOUNT));
+        assert_eq!(
+            vmagent.spec.rules[0].to[0].operation.ports,
+            vec![VMSINGLE_PORT.to_string()]
+        );
+
+        // KEDA → VMSingle
+        let keda = &policies[1];
+        assert_eq!(keda.metadata.name, "allow-keda-query");
+        assert_eq!(keda.spec.target_refs[0].name, "vmsingle-lattice-metrics");
+        let principal = &keda.spec.rules[0].from[0].source.principals[0];
+        assert!(principal.contains(KEDA_SERVICE_ACCOUNT));
+        assert_eq!(
+            keda.spec.rules[0].to[0].operation.ports,
+            vec![VMSINGLE_PORT.to_string()]
+        );
+    }
+
+    #[test]
+    fn test_monitoring_allow_policies_ha() {
+        let policies =
+            IstioReconciler::generate_monitoring_allow_policies("test-cluster", true);
+        assert_eq!(policies.len(), 2);
+
+        // VMAgent → VMInsert (HA write path)
+        assert_eq!(
+            policies[0].spec.target_refs[0].name,
+            "vminsert-lattice-metrics"
+        );
+        assert_eq!(
+            policies[0].spec.rules[0].to[0].operation.ports,
+            vec![VMINSERT_PORT.to_string()]
+        );
+
+        // KEDA → VMSelect (HA read path)
+        assert_eq!(
+            policies[1].spec.target_refs[0].name,
+            "vmselect-lattice-metrics"
+        );
+        assert_eq!(
+            policies[1].spec.rules[0].to[0].operation.ports,
+            vec![VMSELECT_PORT.to_string()]
+        );
     }
 }

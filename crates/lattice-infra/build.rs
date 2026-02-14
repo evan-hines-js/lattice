@@ -224,6 +224,10 @@ fn main() {
         "cargo:rustc-env=VICTORIA_METRICS_VERSION={}",
         versions.charts["victoria-metrics-k8s-stack"].version
     );
+    println!(
+        "cargo:rustc-env=METRICS_SERVER_VERSION={}",
+        versions.charts["metrics-server"].version
+    );
 
     // --- Auto-download missing charts ---
 
@@ -473,7 +477,19 @@ fn main() {
     );
     std::fs::write(out_dir.join("keda.yaml"), yaml).expect("write keda.yaml");
 
-    // 12. Gateway API CRDs (just copy, not helm)
+    // 12. metrics-server (required for HPA / KEDA CPU triggers)
+    let yaml = run_helm_template(
+        "metrics-server",
+        &chart(&format!(
+            "metrics-server-{}.tgz",
+            versions.charts["metrics-server"].version
+        )),
+        "kube-system",
+        &["--set", "args={--kubelet-insecure-tls}"],
+    );
+    std::fs::write(out_dir.join("metrics-server.yaml"), yaml).expect("write metrics-server.yaml");
+
+    // 13. Gateway API CRDs (just copy, not helm)
     let gw_ver = &versions.resources["gateway-api"].version;
     let gw_src = charts_dir.join(format!("gateway-api-crds-v{}.yaml", gw_ver));
     let gw_content = std::fs::read_to_string(&gw_src)

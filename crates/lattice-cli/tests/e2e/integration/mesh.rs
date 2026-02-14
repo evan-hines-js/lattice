@@ -16,7 +16,8 @@
 use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
-use super::super::mesh_tests::{run_mesh_test, run_random_mesh_test, start_mesh_test};
+use super::super::mesh_random::run_random_mesh_test;
+use super::super::mesh_tests::{run_mesh_test, start_mesh_test};
 use super::cedar::apply_e2e_default_policy;
 
 /// Run all mesh bilateral agreement tests

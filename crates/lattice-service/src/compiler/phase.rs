@@ -3,7 +3,7 @@
 //! A `CompilerPhase` plugs into `ServiceCompiler::compile()` and runs after
 //! core compilation. Phases can inspect the service spec and compiled output,
 //! then append `DynamicResource` entries to `compiled.extensions` for things
-//! like Flagger Canaries, ServiceMonitors, or rate-limiting EnvoyFilters.
+//! like Flagger Canaries, VMServiceScrapes, or rate-limiting EnvoyFilters.
 
 use crate::crd::{LatticeService, MonitoringConfig, ProviderType};
 use crate::graph::ServiceGraph;
@@ -36,10 +36,10 @@ pub struct CompilationContext<'a> {
 /// # Example
 ///
 /// ```ignore
-/// struct ServiceMonitorPhase;
+/// struct VMServiceScrapePhase;
 ///
-/// impl CompilerPhase for ServiceMonitorPhase {
-///     fn name(&self) -> &str { "service-monitor" }
+/// impl CompilerPhase for VMServiceScrapePhase {
+///     fn name(&self) -> &str { "vm-service-scrape" }
 ///
 ///     fn compile(
 ///         &self,
@@ -47,7 +47,7 @@ pub struct CompilationContext<'a> {
 ///         output: &mut CompiledService,
 ///     ) -> Result<(), String> {
 ///         if !ctx.monitoring.enabled { return Ok(()); }
-///         let monitor = build_service_monitor(ctx.name, ctx.namespace);
+///         let monitor = build_vm_service_scrape(ctx.name, ctx.namespace);
 ///         output.extensions.push(DynamicResource { ... });
 ///         Ok(())
 ///     }
