@@ -113,31 +113,83 @@ impl IstioReconciler {
         )
     }
 
-    /// Generate PERMISSIVE PeerAuthentication for KEDA's metrics-apiserver.
+    /// Generate policies for mesh-enrolled pods that serve webhooks or
+    /// APIServices called by the kube-apiserver.
     ///
-    /// KEDA's metrics-apiserver registers a Kubernetes APIService which the
-    /// kube-apiserver health-checks directly. The kube-apiserver isn't in the
-    /// mesh, so it doesn't speak Istio mTLS. With STRICT mode (mesh-wide default),
-    /// ztunnel rejects the apiserver's connection → EOF → the APIService is
-    /// marked FailedDiscoveryCheck → all API discovery fails.
-    ///
-    /// Targets only the metrics-apiserver pod (via selector) so the KEDA
-    /// operator itself stays STRICT for its mTLS communication with VictoriaMetrics.
-    pub fn generate_keda_peer_authentication() -> PeerAuthentication {
-        PeerAuthentication::new(
-            ObjectMeta::new("keda-metrics-apiserver", KEDA_NAMESPACE),
-            PeerAuthenticationSpec {
-                selector: Some(WorkloadSelector {
-                    match_labels: BTreeMap::from([(
-                        "app".to_string(),
-                        "keda-operator-metrics-apiserver".to_string(),
-                    )]),
-                }),
-                mtls: MtlsConfig {
-                    mode: "PERMISSIVE".to_string(),
-                },
+    /// The kube-apiserver isn't in the mesh and doesn't speak mTLS. Two policies
+    /// are needed per webhook pod:
+    /// 1. **PeerAuthentication PERMISSIVE**: so ztunnel accepts non-mTLS connections
+    /// 2. **AuthorizationPolicy ALLOW**: so mesh-default-deny doesn't block the call
+    pub fn generate_webhook_policies() -> (Vec<PeerAuthentication>, Vec<AuthorizationPolicy>) {
+        struct WebhookTarget {
+            name: &'static str,
+            namespace: &'static str,
+            label_key: &'static str,
+            label_value: &'static str,
+            port: &'static str,
+        }
+
+        let targets = [
+            WebhookTarget {
+                name: "keda-metrics-apiserver",
+                namespace: KEDA_NAMESPACE,
+                label_key: "app",
+                label_value: "keda-operator-metrics-apiserver",
+                port: "8443",
             },
-        )
+            WebhookTarget {
+                name: "victoria-metrics-operator",
+                namespace: MONITORING_NAMESPACE,
+                label_key: "app.kubernetes.io/name",
+                label_value: "victoria-metrics-operator",
+                port: "9443",
+            },
+        ];
+
+        let mut peer_auths = Vec::new();
+        let mut auth_policies = Vec::new();
+
+        for target in &targets {
+            let match_labels = BTreeMap::from([(
+                target.label_key.to_string(),
+                target.label_value.to_string(),
+            )]);
+
+            peer_auths.push(PeerAuthentication::new(
+                ObjectMeta::new(target.name, target.namespace),
+                PeerAuthenticationSpec {
+                    selector: Some(WorkloadSelector {
+                        match_labels: match_labels.clone(),
+                    }),
+                    mtls: MtlsConfig {
+                        mode: "PERMISSIVE".to_string(),
+                    },
+                },
+            ));
+
+            auth_policies.push(AuthorizationPolicy::new(
+                ObjectMeta::new(
+                    format!("allow-webhook-{}", target.name),
+                    target.namespace,
+                ),
+                AuthorizationPolicySpec {
+                    target_refs: vec![],
+                    selector: Some(WorkloadSelector { match_labels }),
+                    action: "ALLOW".to_string(),
+                    rules: vec![AuthorizationRule {
+                        from: vec![],
+                        to: vec![AuthorizationOperation {
+                            operation: OperationSpec {
+                                ports: vec![target.port.to_string()],
+                                hosts: vec![],
+                            },
+                        }],
+                    }],
+                },
+            ));
+        }
+
+        (peer_auths, auth_policies)
     }
 
     /// Generate mesh-wide default-deny AuthorizationPolicy
@@ -290,21 +342,31 @@ mod tests {
     }
 
     #[test]
-    fn test_keda_peer_authentication_permissive() {
-        let policy = IstioReconciler::generate_keda_peer_authentication();
-        assert_eq!(policy.metadata.name, "keda-metrics-apiserver");
-        assert_eq!(policy.metadata.namespace, KEDA_NAMESPACE);
-        assert_eq!(
-            policy.spec.mtls.mode, "PERMISSIVE",
-            "KEDA metrics-apiserver must be PERMISSIVE so kube-apiserver can reach its aggregated APIService"
-        );
+    fn test_webhook_policies() {
+        let (peer_auths, auth_policies) = IstioReconciler::generate_webhook_policies();
+        assert_eq!(peer_auths.len(), 2);
+        assert_eq!(auth_policies.len(), 2);
 
-        // Must target only the metrics-apiserver, not the whole namespace
-        let selector = policy.spec.selector.as_ref().expect("must have a selector");
-        assert_eq!(
-            selector.match_labels.get("app"),
-            Some(&"keda-operator-metrics-apiserver".to_string())
-        );
+        // All PeerAuthentications must be PERMISSIVE with a selector
+        for pa in &peer_auths {
+            assert_eq!(pa.spec.mtls.mode, "PERMISSIVE");
+            assert!(pa.spec.selector.is_some(), "{} must have a selector", pa.metadata.name);
+        }
+
+        // All AuthorizationPolicies must be ALLOW with a selector and port
+        for authz in &auth_policies {
+            assert_eq!(authz.spec.action, "ALLOW");
+            assert!(authz.spec.selector.is_some(), "{} must have a selector", authz.metadata.name);
+            assert!(!authz.spec.rules[0].to[0].operation.ports.is_empty());
+        }
+
+        // KEDA metrics-apiserver
+        assert_eq!(peer_auths[0].metadata.namespace, KEDA_NAMESPACE);
+        assert_eq!(auth_policies[0].metadata.namespace, KEDA_NAMESPACE);
+
+        // VictoriaMetrics operator
+        assert_eq!(peer_auths[1].metadata.namespace, MONITORING_NAMESPACE);
+        assert_eq!(auth_policies[1].metadata.namespace, MONITORING_NAMESPACE);
     }
 
     #[test]

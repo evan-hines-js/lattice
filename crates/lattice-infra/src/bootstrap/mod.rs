@@ -176,14 +176,22 @@ pub fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, Stri
             })?);
         }
 
-        // KEDA namespace needs PERMISSIVE mTLS so the kube-apiserver can
-        // health-check the KEDA metrics-apiserver's aggregated APIService.
-        manifests.push(
-            serde_json::to_string_pretty(
-                &istio::IstioReconciler::generate_keda_peer_authentication(),
-            )
-            .map_err(|e| format!("Failed to serialize KEDA PeerAuthentication: {}", e))?,
-        );
+        // Webhook/APIService pods in the mesh need PERMISSIVE mTLS + ALLOW policies
+        // so the kube-apiserver (not in the mesh) can reach them.
+        let (webhook_pas, webhook_authzs) =
+            istio::IstioReconciler::generate_webhook_policies();
+        for pa in webhook_pas {
+            manifests.push(
+                serde_json::to_string_pretty(&pa)
+                    .map_err(|e| format!("Failed to serialize PeerAuthentication: {}", e))?,
+            );
+        }
+        for authz in webhook_authzs {
+            manifests.push(
+                serde_json::to_string_pretty(&authz)
+                    .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
+            );
+        }
     }
 
     // Cilium policies (skip on kind/bootstrap clusters) - serialize typed structs to JSON
