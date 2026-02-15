@@ -68,26 +68,18 @@ impl<'a> PolicyCompiler<'a> {
             ));
         }
 
-        if principals.is_empty() {
-            return None;
-        }
-
         let ports: Vec<String> = service
             .ports
             .values()
             .map(|pm| pm.target_port.to_string())
             .collect();
 
-        if ports.is_empty() {
+        // Need both principals and ports to generate a meaningful policy
+        if principals.is_empty() || ports.is_empty() {
             return None;
         }
 
-        // Use custom selector labels if available, otherwise fall back to LABEL_NAME
-        let match_labels = service.selector.clone().unwrap_or_else(|| {
-            let mut m = BTreeMap::new();
-            m.insert(LABEL_NAME.to_string(), service.name.clone());
-            m
-        });
+        let match_labels = service.istio_match_labels();
 
         Some(AuthorizationPolicy::allow_to_workload(
             derived_name("allow-to-", &[namespace, &service.name]),
@@ -122,7 +114,10 @@ impl<'a> PolicyCompiler<'a> {
         match_labels.insert(LABEL_NAME.to_string(), service.name.clone());
 
         Some(AuthorizationPolicy::new(
-            ObjectMeta::new(format!("allow-waypoint-to-{}", service.name), namespace),
+            ObjectMeta::new(
+                derived_name("allow-wp-to-", &[namespace, &service.name]),
+                namespace,
+            ),
             AuthorizationPolicySpec {
                 target_refs: vec![],
                 selector: Some(WorkloadSelector { match_labels }),
@@ -207,7 +202,7 @@ impl<'a> PolicyCompiler<'a> {
 
         AuthorizationPolicy::new(
             ObjectMeta::new(
-                format!("allow-{}-to-{}", caller, external_service.name),
+                derived_name("allow-ext-", &[namespace, caller, &external_service.name]),
                 namespace,
             ),
             AuthorizationPolicySpec {
@@ -243,40 +238,36 @@ impl<'a> PolicyCompiler<'a> {
         )
     }
 
-    /// Compile permissive policies for specific ports on a mesh member.
+    /// Compile permissive mTLS policies for non-strict ports.
     ///
-    /// - PeerAuthentication: STRICT default with PERMISSIVE overrides on specified ports
-    /// - AuthorizationPolicy: ALLOW with no `from` restriction on permissive ports
-    ///   (allows plaintext callers like kube-apiserver)
-    pub(super) fn compile_permissive_policies_for_ports(
+    /// - PeerAuthentication: STRICT default with PERMISSIVE overrides per port
+    /// - AuthorizationPolicy: ALLOW with empty `from` (any plaintext caller)
+    ///
+    /// Both `Permissive` and `Webhook` ports need these Istio-level policies;
+    /// the kube-apiserver restriction for `Webhook` is enforced at L4 by Cilium.
+    pub(super) fn compile_permissive_policies(
         &self,
         service: &ServiceNode,
         namespace: &str,
-        permissive_ports: &[u16],
     ) -> (Vec<PeerAuthentication>, Vec<AuthorizationPolicy>) {
-        if permissive_ports.is_empty() {
+        let non_strict_ports = service.all_non_strict_port_numbers();
+        if non_strict_ports.is_empty() {
             return (vec![], vec![]);
         }
 
-        let match_labels = service.selector.clone().unwrap_or_else(|| {
-            let mut m = BTreeMap::new();
-            m.insert(LABEL_NAME.to_string(), service.name.clone());
-            m
-        });
+        let match_labels = service.istio_match_labels();
 
-        // PeerAuthentication with port-level PERMISSIVE
         let peer_auth = PeerAuthentication::with_permissive_ports(
             derived_name("permissive-", &[namespace, &service.name]),
             namespace,
             match_labels.clone(),
-            permissive_ports,
+            &non_strict_ports,
         );
 
-        // AuthorizationPolicy: ALLOW with empty from (any caller) on permissive ports only
-        let port_strings: Vec<String> = permissive_ports.iter().map(|p| p.to_string()).collect();
+        let port_strings: Vec<String> = non_strict_ports.iter().map(|p| p.to_string()).collect();
         let auth_policy = AuthorizationPolicy::new(
             ObjectMeta::new(
-                derived_name("allow-webhook-", &[namespace, &service.name]),
+                derived_name("allow-plaintext-", &[namespace, &service.name]),
                 namespace,
             ),
             AuthorizationPolicySpec {
@@ -284,7 +275,7 @@ impl<'a> PolicyCompiler<'a> {
                 selector: Some(WorkloadSelector { match_labels }),
                 action: "ALLOW".to_string(),
                 rules: vec![AuthorizationRule {
-                    from: vec![], // Empty from = allow any caller
+                    from: vec![],
                     to: vec![AuthorizationOperation {
                         operation: OperationSpec {
                             ports: port_strings,

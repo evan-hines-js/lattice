@@ -87,12 +87,7 @@ impl<'a> PolicyCompiler<'a> {
     /// This is the single entry point for all mesh policy generation.
     /// Uses the node's custom selector labels and supports permissive ports,
     /// peer traffic, non-mesh egress rules, and external dependencies.
-    pub fn compile(
-        &self,
-        name: &str,
-        namespace: &str,
-        permissive_ports: &[u16],
-    ) -> GeneratedPolicies {
+    pub fn compile(&self, name: &str, namespace: &str) -> GeneratedPolicies {
         let Some(service_node) = self.graph.get_service(namespace, name) else {
             return GeneratedPolicies::default();
         };
@@ -134,12 +129,11 @@ impl<'a> PolicyCompiler<'a> {
             namespace,
             &inbound_edges,
             &outbound_edges,
-            permissive_ports,
         ));
 
-        // Permissive policies (PeerAuthentication + AuthorizationPolicy for plaintext ports)
+        // Permissive mTLS policies (PeerAuthentication + AuthorizationPolicy)
         let (peer_auths, auth_policies) =
-            self.compile_permissive_policies_for_ports(&service_node, namespace, permissive_ports);
+            self.compile_permissive_policies(&service_node, namespace);
         output.peer_authentications.extend(peer_auths);
         output.authorization_policies.extend(auth_policies);
 
@@ -269,7 +263,7 @@ mod tests {
         graph.put_service(ns, "gateway", &gateway_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
-        let output = compiler.compile("api", "prod-ns", &[]);
+        let output = compiler.compile("api", "prod-ns");
 
         assert!(!output.authorization_policies.is_empty());
         let auth = &output.authorization_policies[0];
@@ -295,7 +289,7 @@ mod tests {
         graph.put_service(ns, "gateway", &gateway_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
-        let output = compiler.compile("api", "prod-ns", &[]);
+        let output = compiler.compile("api", "prod-ns");
 
         assert!(output.authorization_policies.is_empty());
     }
@@ -304,7 +298,7 @@ mod tests {
     fn no_policies_when_not_in_graph() {
         let graph = ServiceGraph::new();
         let compiler = PolicyCompiler::new(&graph, "test-cluster");
-        let output = compiler.compile("nonexistent", "default", &[]);
+        let output = compiler.compile("nonexistent", "default");
         assert!(output.is_empty());
     }
 
@@ -320,7 +314,7 @@ mod tests {
         graph.put_service(ns, "gateway", &gateway_spec);
 
         let compiler = PolicyCompiler::new(&graph, "my-cluster");
-        let output = compiler.compile("api", "prod-ns", &[]);
+        let output = compiler.compile("api", "prod-ns");
 
         let principals = &output.authorization_policies[0].spec.rules[0].from[0]
             .source
@@ -341,7 +335,7 @@ mod tests {
         graph.put_service(ns, "my-app", &spec);
 
         let compiler = PolicyCompiler::new(&graph, "test-cluster");
-        let output = compiler.compile("my-app", ns, &[]);
+        let output = compiler.compile("my-app", ns);
 
         assert_eq!(output.cilium_policies.len(), 1);
 
@@ -369,7 +363,7 @@ mod tests {
         graph.put_external_service(ns, "stripe-api", &make_external_spec(vec!["api"]));
 
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
-        let output = compiler.compile("api", "prod-ns", &[]);
+        let output = compiler.compile("api", "prod-ns");
 
         assert_eq!(output.service_entries.len(), 1);
         let entry = &output.service_entries[0];
@@ -392,14 +386,14 @@ mod tests {
         graph.put_external_service(ns, "stripe", &make_external_spec(vec!["api"]));
 
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
-        let output = compiler.compile("api", "prod-ns", &[]);
+        let output = compiler.compile("api", "prod-ns");
 
         assert_eq!(output.cilium_policies.len(), 1);
 
         // AuthorizationPolicies:
         //    - allow inbound from gateway
-        //    - allow-waypoint-to-api for L7 policy
-        //    - allow-api-to-stripe for external access
+        //    - waypoint->pod ztunnel allow policy
+        //    - external access policy for stripe
         assert_eq!(output.authorization_policies.len(), 3);
 
         assert_eq!(output.service_entries.len(), 1);
@@ -447,7 +441,7 @@ mod tests {
         graph.put_service(ns, "gateway", &gateway_spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
-        let output = compiler.compile("api", ns, &[]);
+        let output = compiler.compile("api", ns);
 
         assert!(!output.authorization_policies.is_empty());
         assert!(output.authorization_policies[0].spec.rules[0].from[0]
@@ -503,7 +497,7 @@ mod tests {
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
 
         // Check api (has inbound callers, no outbound)
-        let api_cnp = &compiler.compile("api", ns, &[]).cilium_policies[0];
+        let api_cnp = &compiler.compile("api", ns).cilium_policies[0];
         assert_eq!(
             api_cnp.spec.ingress.len(),
             1,
@@ -525,7 +519,7 @@ mod tests {
         );
 
         // Check gateway (has outbound deps, no inbound callers)
-        let gw_cnp = &compiler.compile("gateway", ns, &[]).cilium_policies[0];
+        let gw_cnp = &compiler.compile("gateway", ns).cilium_policies[0];
         assert!(gw_cnp.spec.ingress.is_empty(), "gateway has no callers");
         let hbone_egress = gw_cnp.spec.egress.iter().find(|e| {
             e.to_ports.iter().any(|pr| {
@@ -554,7 +548,7 @@ mod tests {
         graph.put_external_service(ns, "stripe", &make_external_spec(vec!["api"]));
 
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
-        let output = compiler.compile("api", ns, &[]);
+        let output = compiler.compile("api", ns);
 
         let cnp = &output.cilium_policies[0];
 

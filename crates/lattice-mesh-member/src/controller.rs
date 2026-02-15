@@ -21,7 +21,7 @@ use lattice_common::crd::{
     Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberStatus, MeshMemberPhase,
     MeshMemberScope, MeshMemberTarget,
 };
-use lattice_common::graph::ServiceGraph;
+use lattice_common::graph::{ActiveEdge, ServiceGraph};
 use lattice_common::kube_utils::{find_discovered_resource, HasApiResource};
 use lattice_common::mesh;
 use lattice_common::ReconcileError;
@@ -159,14 +159,6 @@ pub async fn reconcile(
             ReconcileError::Validation("LatticeMeshMember missing namespace".into())
         })?;
 
-    // Skip reconciliation if spec hasn't changed since last successful reconcile
-    if is_status_current(&member) {
-        debug!("generation unchanged, skipping reconcile");
-        return Ok(Action::requeue(Duration::from_secs(60)));
-    }
-
-    info!("reconciling mesh member");
-
     // Validate spec
     if let Err(e) = member.spec.validate() {
         warn!(error = %e, "mesh member validation failed");
@@ -183,22 +175,24 @@ pub async fn reconcile(
     // Update graph (idempotent — crash recovery)
     ctx.graph.put_mesh_member(namespace, &name, &member.spec);
 
+    // Compute edge hash AFTER graph update to capture current bilateral agreements
+    let inbound_edges = ctx.graph.get_active_inbound_edges(namespace, &name);
+    let outbound_edges = ctx.graph.get_active_outbound_edges(namespace, &name);
+    let graph_hash = compute_edge_hash(&inbound_edges, &outbound_edges);
+
+    // Skip reconciliation if spec AND graph state haven't changed
+    if is_status_current(&member, graph_hash.clone()) {
+        debug!("generation and graph state unchanged, skipping reconcile");
+        return Ok(Action::requeue(Duration::from_secs(60)));
+    }
+
+    info!("reconciling mesh member");
+
     // Ensure namespace has ambient mode label
     ensure_namespace_ambient(&ctx.client, namespace).await?;
 
     // Compile policies
-    let permissive_port_numbers: Vec<u16> = member
-        .spec
-        .permissive_ports()
-        .iter()
-        .map(|p| p.port)
-        .collect();
-
-    let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name).compile(
-        &name,
-        namespace,
-        &permissive_port_numbers,
-    );
+    let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name).compile(&name, namespace);
 
     // Compile ingress (if configured)
     let ingress = member
@@ -208,7 +202,6 @@ pub async fn reconcile(
         .map(|ingress_spec| IngressCompiler::compile(&name, namespace, ingress_spec, None));
 
     // Compile waypoint (if service has external dependencies)
-    let outbound_edges = ctx.graph.get_active_outbound_edges(namespace, &name);
     let has_external_deps = outbound_edges.iter().any(|edge| {
         ctx.graph
             .get_service(&edge.callee_namespace, &edge.callee_name)
@@ -263,7 +256,7 @@ pub async fn reconcile(
         &ctx.client,
         &name,
         namespace,
-        status_ready(scope, member.metadata.generation),
+        status_ready(scope, member.metadata.generation, graph_hash),
     )
     .await?;
 
@@ -564,21 +557,39 @@ async fn apply_waypoint(
 // Status helpers
 // =============================================================================
 
-/// Check if the member's status already reflects the current generation.
+/// Compute a stable hash of the active edges for change detection.
 ///
-/// Same pattern as LatticeService and CloudProvider: skip redundant patches
-/// because `Condition::new()` stamps a fresh `lastTransitionTime` on every call,
-/// making every merge patch "different" and generating a watch event that triggers
-/// another reconcile.
-fn is_status_current(member: &LatticeMeshMember) -> bool {
+/// When bilateral agreements change (e.g., a new caller declares a dependency),
+/// the edge hash changes even though this member's spec/generation doesn't.
+fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::fmt::Write;
+    use std::hash::{Hash, Hasher};
+
+    let mut input = String::new();
+    for e in inbound {
+        let _ = write!(input, "in:{}/{}->", e.caller_namespace, e.caller_name);
+    }
+    for e in outbound {
+        let _ = write!(input, "out:{}/{}->", e.callee_namespace, e.callee_name);
+    }
+    let mut hasher = DefaultHasher::new();
+    input.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn is_status_current(member: &LatticeMeshMember, current_graph_hash: String) -> bool {
     member
         .status
         .as_ref()
         .and_then(|s| {
-            // Only skip if phase is Ready and observed_generation matches
+            // Only skip if phase is Ready, generation matches, AND graph state matches
             if s.phase == MeshMemberPhase::Ready {
                 match (s.observed_generation, member.metadata.generation) {
-                    (Some(observed), Some(current)) => Some(observed == current),
+                    (Some(observed), Some(current)) if observed == current => {
+                        // Also check if graph edges have changed
+                        Some(s.graph_hash.as_deref() == Some(&current_graph_hash))
+                    }
                     _ => None,
                 }
             } else {
@@ -588,12 +599,17 @@ fn is_status_current(member: &LatticeMeshMember) -> bool {
         .unwrap_or(false)
 }
 
-fn status_ready(scope: MeshMemberScope, generation: Option<i64>) -> LatticeMeshMemberStatus {
+fn status_ready(
+    scope: MeshMemberScope,
+    generation: Option<i64>,
+    graph_hash: String,
+) -> LatticeMeshMemberStatus {
     LatticeMeshMemberStatus {
         phase: MeshMemberPhase::Ready,
         scope: Some(scope),
         message: Some("Policies applied successfully".to_string()),
         observed_generation: generation,
+        graph_hash: Some(graph_hash),
         conditions: vec![Condition::new(
             "Ready",
             ConditionStatus::True,
@@ -609,6 +625,7 @@ fn status_failed(message: &str, generation: Option<i64>) -> LatticeMeshMemberSta
         scope: None,
         message: Some(message.to_string()),
         observed_generation: generation,
+        graph_hash: None,
         conditions: vec![Condition::new(
             "Ready",
             ConditionStatus::False,

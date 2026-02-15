@@ -89,12 +89,15 @@ impl EndpointSelector {
 }
 
 /// Cilium ingress rule
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CiliumIngressRule {
     /// From endpoints
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub from_endpoints: Vec<EndpointSelector>,
+    /// From entities (special Cilium entities like kube-apiserver, host, world)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_entities: Vec<String>,
     /// To ports
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to_ports: Vec<CiliumPortRule>,

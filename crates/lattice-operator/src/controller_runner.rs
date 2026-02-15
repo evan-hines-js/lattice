@@ -239,8 +239,50 @@ pub async fn build_service_controllers(
     });
 
     let mesh_members: Api<LatticeMeshMember> = Api::all(client.clone());
+    let mesh_members_for_mm_watch: Api<LatticeMeshMember> = Api::all(client.clone());
+    let graph_for_mm_dep_watch = service_ctx.graph.clone();
 
     let mm_ctrl = Controller::new(mesh_members, watcher_config())
+        .watches(mesh_members_for_mm_watch, watcher_config(), move |member| {
+            let graph = graph_for_mm_dep_watch.clone();
+            let namespace = match member.metadata.namespace.as_deref() {
+                Some(ns) => ns,
+                None => return vec![],
+            };
+            let name = member.metadata.name.as_deref().unwrap_or_default();
+
+            // When a MeshMember changes, re-reconcile its dependencies and dependents
+            // so they can update their inbound/outbound policies
+            let mut affected: Vec<String> = graph.get_dependencies(namespace, name);
+            affected.extend(graph.get_dependents(namespace, name));
+            affected.sort();
+            affected.dedup();
+            // Don't re-reconcile self (the controller already handles that)
+            affected.retain(|n| n != name);
+
+            if !affected.is_empty() {
+                tracing::debug!(
+                    mesh_member = %name,
+                    namespace = %namespace,
+                    affected_count = affected.len(),
+                    "MeshMember changed, re-reconciling affected mesh members"
+                );
+            }
+
+            let ns = namespace.to_string();
+            affected
+                .into_iter()
+                .filter_map(|dep| {
+                    // Only re-reconcile if the affected service is a MeshMember
+                    let node = graph.get_service(&ns, &dep)?;
+                    if node.type_ == lattice_common::graph::ServiceType::MeshMember {
+                        Some(ObjectRef::<LatticeMeshMember>::new(&dep).within(&ns))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
         .shutdown_on_signal()
         .run(
             mesh_member_ctrl::reconcile,

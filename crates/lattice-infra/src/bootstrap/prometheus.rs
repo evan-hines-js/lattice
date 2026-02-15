@@ -313,8 +313,14 @@ mod tests {
 
         // vmsingle (merged read+write target)
         let single = &members[0];
-        assert_eq!(single.metadata.name.as_deref(), Some(VM_READ_TARGET_LMM_NAME));
-        assert_eq!(single.metadata.namespace.as_deref(), Some(MONITORING_NAMESPACE));
+        assert_eq!(
+            single.metadata.name.as_deref(),
+            Some(VM_READ_TARGET_LMM_NAME)
+        );
+        assert_eq!(
+            single.metadata.namespace.as_deref(),
+            Some(MONITORING_NAMESPACE)
+        );
         assert_eq!(single.spec.ports[0].port, VMSINGLE_PORT);
         assert_eq!(single.spec.ports[0].peer_auth, PeerAuth::Strict);
         assert_eq!(single.spec.allowed_callers.len(), 2); // vmagent + keda
@@ -328,7 +334,10 @@ mod tests {
 
         // vm-operator webhook
         let op = &members[2];
-        assert_eq!(op.metadata.name.as_deref(), Some("victoria-metrics-operator"));
+        assert_eq!(
+            op.metadata.name.as_deref(),
+            Some("victoria-metrics-operator")
+        );
         assert_eq!(op.spec.ports[0].port, 9443);
         assert_eq!(op.spec.ports[0].peer_auth, PeerAuth::Permissive);
         assert!(op.spec.allowed_callers.is_empty());
@@ -355,7 +364,10 @@ mod tests {
         assert_eq!(agent.spec.dependencies[0].name, "vm-write-target");
 
         let op = &members[3];
-        assert_eq!(op.metadata.name.as_deref(), Some("victoria-metrics-operator"));
+        assert_eq!(
+            op.metadata.name.as_deref(),
+            Some("victoria-metrics-operator")
+        );
 
         for m in &members {
             assert!(m.spec.validate().is_ok());
