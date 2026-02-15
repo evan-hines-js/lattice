@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{IngressSpec, IngressTls, PathMatchType, RouteKind, ServicePortsSpec};
+use lattice_common::crd::{IngressSpec, IngressTls, MeshMemberPort, PathMatchType, RouteKind};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
 use lattice_common::network::gateway_api::*;
@@ -144,13 +144,15 @@ pub struct IngressCompiler;
 impl IngressCompiler {
     const DEFAULT_GATEWAY_CLASS: &'static str = mesh::INGRESS_GATEWAY_CLASS;
 
-    /// Compile ingress resources for a service.
+    /// Compile ingress resources for a mesh member.
+    ///
+    /// Returns an error if any route's port cannot be resolved against the member ports.
     pub fn compile(
         service_name: &str,
         namespace: &str,
         ingress: &IngressSpec,
-        service_ports: Option<&ServicePortsSpec>,
-    ) -> GeneratedIngress {
+        ports: &[MeshMemberPort],
+    ) -> Result<GeneratedIngress, String> {
         let mut output = GeneratedIngress::default();
         let mut all_listeners = Vec::new();
 
@@ -161,7 +163,12 @@ impl IngressCompiler {
         let gateway_name = mesh::ingress_gateway_name(namespace);
 
         for (route_name, route_spec) in &ingress.routes {
-            let backend_port = route_spec.resolve_port(service_ports).unwrap_or(80);
+            let backend_port = route_spec.resolve_port(ports).map_err(|e| {
+                format!(
+                    "route '{}' for service '{}': {}",
+                    route_name, service_name, e
+                )
+            })?;
 
             match route_spec.kind {
                 RouteKind::HTTPRoute => {
@@ -222,7 +229,7 @@ impl IngressCompiler {
             ));
         }
 
-        output
+        Ok(output)
     }
 
     fn build_host_listeners(
@@ -538,21 +545,16 @@ mod tests {
     use super::*;
     use lattice_common::crd::{
         CertIssuerRef, HeaderMatch as CrdHeaderMatch, HeaderMatchType as CrdHeaderMatchType,
-        PathMatch as CrdPathMatch, PortSpec, RouteKind, RouteMatch as CrdRouteMatch,
+        PathMatch as CrdPathMatch, PeerAuth, RouteKind, RouteMatch as CrdRouteMatch,
         RouteRule as CrdRouteRule, RouteSpec as CrdRouteSpec,
     };
 
-    fn single_port_spec() -> ServicePortsSpec {
-        let mut ports = BTreeMap::new();
-        ports.insert(
-            "http".to_string(),
-            PortSpec {
-                port: 8080,
-                target_port: None,
-                protocol: None,
-            },
-        );
-        ServicePortsSpec { ports }
+    fn single_port() -> Vec<MeshMemberPort> {
+        vec![MeshMemberPort {
+            port: 8080,
+            name: "http".to_string(),
+            peer_auth: PeerAuth::Strict,
+        }]
     }
 
     fn make_ingress_spec(hosts: Vec<&str>, with_tls: bool) -> IngressSpec {
@@ -587,7 +589,7 @@ mod tests {
     #[test]
     fn generates_gateway_with_http_listener() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
-        let output = IngressCompiler::compile("api", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
         assert_eq!(gateway.metadata.name, "prod-ingress");
@@ -606,7 +608,7 @@ mod tests {
     #[test]
     fn generates_gateway_with_https_listener() {
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
-        let output = IngressCompiler::compile("api", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
         assert_eq!(gateway.spec.listeners.len(), 2);
@@ -624,7 +626,7 @@ mod tests {
     #[test]
     fn generates_http_route() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
-        let output = IngressCompiler::compile("api", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
 
         assert_eq!(output.http_routes.len(), 1);
         let route = &output.http_routes[0];
@@ -647,7 +649,7 @@ mod tests {
     #[test]
     fn generates_certificate_for_auto_tls() {
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
-        let output = IngressCompiler::compile("api", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
 
         assert_eq!(output.certificates.len(), 1);
         let cert = &output.certificates[0];
@@ -695,7 +697,7 @@ mod tests {
             )]),
         };
 
-        let output = IngressCompiler::compile("api", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
         let route = &output.http_routes[0];
         let matches = &route.spec.rules[0].matches;
 
@@ -741,7 +743,7 @@ mod tests {
             )]),
         };
 
-        let output = IngressCompiler::compile("api", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
         let route = &output.http_routes[0];
         let m = &route.spec.rules[0].matches[0];
 
@@ -756,7 +758,7 @@ mod tests {
     #[test]
     fn multi_host_generates_per_host_listeners() {
         let ingress = make_ingress_spec(vec!["api.example.com", "api.internal.example.com"], true);
-        let output = IngressCompiler::compile("api", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
         assert_eq!(gateway.spec.listeners.len(), 4);
@@ -788,7 +790,7 @@ mod tests {
                 },
             )]),
         };
-        let output = IngressCompiler::compile("api", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
         let https_listener = &gateway.spec.listeners[1];
@@ -814,7 +816,7 @@ mod tests {
                 },
             )]),
         };
-        let output = IngressCompiler::compile("model", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("model", "prod", &ingress, &single_port()).unwrap();
 
         assert!(output.http_routes.is_empty());
         assert_eq!(output.grpc_routes.len(), 1);
@@ -842,7 +844,7 @@ mod tests {
                 },
             )]),
         };
-        let output = IngressCompiler::compile("db", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("db", "prod", &ingress, &single_port()).unwrap();
 
         assert!(output.http_routes.is_empty());
         assert!(output.grpc_routes.is_empty());
@@ -898,7 +900,7 @@ mod tests {
             ]),
         };
 
-        let output = IngressCompiler::compile("svc", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("svc", "prod", &ingress, &single_port()).unwrap();
 
         assert_eq!(output.http_routes.len(), 1);
         assert_eq!(output.grpc_routes.len(), 1);
@@ -916,7 +918,7 @@ mod tests {
         assert_eq!(empty.total_count(), 0);
 
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
-        let output = IngressCompiler::compile("api", "prod", &ingress, Some(&single_port_spec()));
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
 
         assert!(!output.is_empty());
         assert_eq!(output.total_count(), 3);
