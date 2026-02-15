@@ -2,10 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::crd::MeshMemberPort;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::ports::ServicePortsSpec;
 
 /// Ingress specification for exposing services externally via Gateway API.
 ///
@@ -209,14 +209,14 @@ impl IngressSpec {
     /// # Errors
     ///
     /// Returns an error string if validation fails.
-    pub fn validate(&self, service_ports: Option<&ServicePortsSpec>) -> Result<(), String> {
+    pub fn validate(&self, ports: &[MeshMemberPort]) -> Result<(), String> {
         if self.routes.is_empty() {
             return Err("ingress.routes must not be empty".to_string());
         }
 
         for (route_name, route) in &self.routes {
             super::super::validate_dns_label(route_name, "route name")?;
-            route.validate(route_name, service_ports)?;
+            route.validate(route_name, ports)?;
         }
 
         Ok(())
@@ -224,11 +224,7 @@ impl IngressSpec {
 }
 
 impl RouteSpec {
-    fn validate(
-        &self,
-        route_name: &str,
-        service_ports: Option<&ServicePortsSpec>,
-    ) -> Result<(), String> {
+    fn validate(&self, route_name: &str, ports: &[MeshMemberPort]) -> Result<(), String> {
         match self.kind {
             RouteKind::HTTPRoute | RouteKind::GRPCRoute => {
                 if self.hosts.is_empty() {
@@ -261,25 +257,19 @@ impl RouteSpec {
         }
 
         // Port resolution validation
+        let port_names: Vec<&str> = ports.iter().map(|p| p.name.as_str()).collect();
         if let Some(ref port_name) = self.port {
-            if let Some(sps) = service_ports {
-                if !sps.ports.contains_key(port_name) {
-                    return Err(format!(
-                        "route '{}': port '{}' not found in service.ports (available: {:?})",
-                        route_name,
-                        port_name,
-                        sps.ports.keys().collect::<Vec<_>>()
-                    ));
-                }
-            }
-        } else if let Some(sps) = service_ports {
-            if sps.ports.len() > 1 {
+            if !ports.iter().any(|p| p.name == *port_name) {
                 return Err(format!(
-                    "route '{}': port must be specified when service has multiple ports (available: {:?})",
-                    route_name,
-                    sps.ports.keys().collect::<Vec<_>>()
+                    "route '{}': port '{}' not found in member ports (available: {:?})",
+                    route_name, port_name, port_names
                 ));
             }
+        } else if ports.len() > 1 {
+            return Err(format!(
+                "route '{}': port must be specified when member has multiple ports (available: {:?})",
+                route_name, port_names
+            ));
         }
 
         // TLS validation
@@ -346,21 +336,24 @@ impl RouteSpec {
 // =============================================================================
 
 impl RouteSpec {
-    /// Resolve the target port number from service ports.
+    /// Resolve the target port number from mesh member ports.
     ///
-    /// If `port` is set, looks it up by name. Otherwise infers the single port.
-    /// Returns `None` if no service ports are defined.
-    pub fn resolve_port(&self, service_ports: Option<&ServicePortsSpec>) -> Option<u16> {
-        let sps = service_ports?;
+    /// If `port` is set, looks it up by name. Otherwise infers when there's exactly one port.
+    /// Returns an error if the port can't be resolved.
+    pub fn resolve_port(&self, ports: &[MeshMemberPort]) -> Result<u16, String> {
         if let Some(ref port_name) = self.port {
-            sps.ports.get(port_name).map(|p| p.port)
+            ports
+                .iter()
+                .find(|p| p.name == *port_name)
+                .map(|p| p.port)
+                .ok_or_else(|| format!("port '{}' not found in member ports", port_name))
+        } else if ports.len() == 1 {
+            Ok(ports[0].port)
         } else {
-            // Infer single port
-            if sps.ports.len() == 1 {
-                sps.ports.values().next().map(|p| p.port)
-            } else {
-                None
-            }
+            Err(format!(
+                "cannot infer port: member has {} ports, specify route.port explicitly",
+                ports.len()
+            ))
         }
     }
 }
@@ -372,40 +365,29 @@ impl RouteSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::PortSpec;
+    use crate::crd::PeerAuth;
 
-    fn single_port_spec() -> ServicePortsSpec {
-        let mut ports = BTreeMap::new();
-        ports.insert(
-            "http".to_string(),
-            PortSpec {
-                port: 8080,
-                target_port: None,
-                protocol: None,
-            },
-        );
-        ServicePortsSpec { ports }
+    fn single_port() -> Vec<MeshMemberPort> {
+        vec![MeshMemberPort {
+            port: 8080,
+            name: "http".to_string(),
+            peer_auth: PeerAuth::Strict,
+        }]
     }
 
-    fn multi_port_spec() -> ServicePortsSpec {
-        let mut ports = BTreeMap::new();
-        ports.insert(
-            "http".to_string(),
-            PortSpec {
+    fn multi_port() -> Vec<MeshMemberPort> {
+        vec![
+            MeshMemberPort {
                 port: 8080,
-                target_port: None,
-                protocol: None,
+                name: "http".to_string(),
+                peer_auth: PeerAuth::Strict,
             },
-        );
-        ports.insert(
-            "grpc".to_string(),
-            PortSpec {
+            MeshMemberPort {
                 port: 9090,
-                target_port: None,
-                protocol: None,
+                name: "grpc".to_string(),
+                peer_auth: PeerAuth::Strict,
             },
-        );
-        ServicePortsSpec { ports }
+        ]
     }
 
     fn http_route(hosts: Vec<&str>) -> RouteSpec {
@@ -425,7 +407,7 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::from([("public".to_string(), http_route(vec!["api.example.com"]))]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_ok());
+        assert!(spec.validate(&single_port()).is_ok());
     }
 
     #[test]
@@ -434,7 +416,7 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::new(),
         };
-        assert!(spec.validate(None).is_err());
+        assert!(spec.validate(&[]).is_err());
     }
 
     #[test]
@@ -443,7 +425,7 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::from([("r".to_string(), http_route(vec![]))]),
         };
-        assert!(spec.validate(None).is_err());
+        assert!(spec.validate(&[]).is_err());
     }
 
     #[test]
@@ -462,7 +444,7 @@ mod tests {
                 },
             )]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_err());
+        assert!(spec.validate(&single_port()).is_err());
     }
 
     #[test]
@@ -481,7 +463,7 @@ mod tests {
                 },
             )]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_err());
+        assert!(spec.validate(&single_port()).is_err());
     }
 
     #[test]
@@ -500,7 +482,7 @@ mod tests {
                 },
             )]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_ok());
+        assert!(spec.validate(&single_port()).is_ok());
     }
 
     #[test]
@@ -509,7 +491,7 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::from([("r".to_string(), http_route(vec!["a.example.com"]))]),
         };
-        assert!(spec.validate(Some(&multi_port_spec())).is_err());
+        assert!(spec.validate(&multi_port()).is_err());
     }
 
     #[test]
@@ -518,7 +500,7 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::from([("r".to_string(), http_route(vec!["a.example.com"]))]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_ok());
+        assert!(spec.validate(&single_port()).is_ok());
     }
 
     #[test]
@@ -529,7 +511,7 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::from([("r".to_string(), route)]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_err());
+        assert!(spec.validate(&single_port()).is_err());
     }
 
     #[test]
@@ -546,7 +528,7 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::from([("r".to_string(), route)]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_err());
+        assert!(spec.validate(&single_port()).is_err());
     }
 
     #[test]
@@ -571,7 +553,7 @@ mod tests {
                 },
             )]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_err());
+        assert!(spec.validate(&single_port()).is_err());
     }
 
     #[test]
@@ -592,7 +574,7 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::from([("r".to_string(), route)]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_err());
+        assert!(spec.validate(&single_port()).is_err());
     }
 
     #[test]
@@ -621,26 +603,33 @@ mod tests {
                 },
             )]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_err());
+        assert!(spec.validate(&single_port()).is_err());
     }
 
     #[test]
     fn resolve_port_single() {
         let route = http_route(vec!["a.example.com"]);
-        assert_eq!(route.resolve_port(Some(&single_port_spec())), Some(8080));
+        assert_eq!(route.resolve_port(&single_port()).unwrap(), 8080);
     }
 
     #[test]
     fn resolve_port_by_name() {
         let mut route = http_route(vec!["a.example.com"]);
         route.port = Some("grpc".to_string());
-        assert_eq!(route.resolve_port(Some(&multi_port_spec())), Some(9090));
+        assert_eq!(route.resolve_port(&multi_port()).unwrap(), 9090);
     }
 
     #[test]
     fn resolve_port_ambiguous() {
         let route = http_route(vec!["a.example.com"]);
-        assert_eq!(route.resolve_port(Some(&multi_port_spec())), None);
+        assert!(route.resolve_port(&multi_port()).is_err());
+    }
+
+    #[test]
+    fn resolve_port_missing_name() {
+        let mut route = http_route(vec!["a.example.com"]);
+        route.port = Some("nonexistent".to_string());
+        assert!(route.resolve_port(&single_port()).is_err());
     }
 
     #[test]
@@ -672,7 +661,7 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::from([("my_route".to_string(), http_route(vec!["api.example.com"]))]),
         };
-        let err = spec.validate(Some(&single_port_spec())).unwrap_err();
+        let err = spec.validate(&single_port()).unwrap_err();
         assert!(err.contains("route name"));
     }
 
@@ -682,6 +671,6 @@ mod tests {
             gateway_class: None,
             routes: BTreeMap::from([("public".to_string(), http_route(vec!["api.example.com"]))]),
         };
-        assert!(spec.validate(Some(&single_port_spec())).is_ok());
+        assert!(spec.validate(&single_port()).is_ok());
     }
 }

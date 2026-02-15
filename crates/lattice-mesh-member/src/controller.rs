@@ -201,7 +201,9 @@ pub async fn reconcile(
         .spec
         .ingress
         .as_ref()
-        .map(|ingress_spec| IngressCompiler::compile(&name, namespace, ingress_spec, None));
+        .map(|ingress_spec| IngressCompiler::compile(&name, namespace, ingress_spec, &member.spec.ports))
+        .transpose()
+        .map_err(|e| ReconcileError::Validation(format!("ingress compilation: {e}")))?;
 
     // Compile waypoint (if service has external dependencies)
     let has_external_deps = outbound_edges.iter().any(|edge| {
