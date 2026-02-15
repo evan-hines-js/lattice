@@ -13,6 +13,7 @@ pub mod kube_utils;
 pub mod leader_election;
 pub mod mesh;
 pub mod metrics;
+pub mod network;
 pub mod policy;
 pub mod protocol;
 pub mod retry;

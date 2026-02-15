@@ -6,11 +6,8 @@
 //! errors on ports that don't serve Prometheus metrics (HTTP APIs returning HTML,
 //! gRPC ports, etc.).
 
-use std::collections::BTreeMap;
-
 use kube::discovery::ApiResource;
-use lattice_common::mesh;
-use lattice_common::policy::istio::AuthorizationPolicy;
+use lattice_common::crd::CallerRef;
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 use lattice_infra::bootstrap::prometheus::{MONITORING_NAMESPACE, VMAGENT_SERVICE_ACCOUNT};
 
@@ -62,17 +59,17 @@ impl CompilerPhase for VMServiceScrapePhase {
         // they don't serve Prometheus metrics. Requiring an explicit "metrics"
         // port is opt-in: zero config for those who add it, zero noise for
         // those who don't.
-        let metrics_port = ctx
+        let has_metrics_port = ctx
             .service
             .spec
             .workload
             .service
             .as_ref()
-            .and_then(|svc| svc.ports.get("metrics"));
-        let metrics_port = match metrics_port {
-            Some(p) => p,
-            None => return Ok(()),
-        };
+            .and_then(|svc| svc.ports.get("metrics"))
+            .is_some();
+        if !has_metrics_port {
+            return Ok(());
+        }
 
         // Emit VMServiceScrape
         let scrape_name = format!("{}-scrape", ctx.name);
@@ -109,27 +106,14 @@ impl CompilerPhase for VMServiceScrapePhase {
             layer: ApplyLayer::Infrastructure,
         });
 
-        // Emit AuthorizationPolicy allowing VMAgent to scrape through the waypoint.
-        // Without this, the waypoint's default-deny blocks VMAgent's scrape requests.
-        let vmagent_principal = mesh::trust_domain::principal(
-            ctx.cluster_name,
-            MONITORING_NAMESPACE,
-            VMAGENT_SERVICE_ACCOUNT,
-        );
-
-        // VMAgent scrape traffic goes directly through ztunnel (no waypoint),
-        // so use selector-based enforcement.
-        let match_labels = BTreeMap::from([(LABEL_NAME.to_string(), ctx.name.to_string())]);
-        output
-            .policies
-            .authorization_policies
-            .push(AuthorizationPolicy::allow_to_workload(
-                format!("allow-vm-scrape-{}", ctx.name),
-                ctx.namespace,
-                match_labels,
-                vec![vmagent_principal],
-                vec![metrics_port.port.to_string()],
-            ));
+        // Add VMAgent as an allowed caller on the MeshMember so the
+        // MeshMember controller generates the appropriate AuthorizationPolicy.
+        if let Some(ref mut mesh_member) = output.mesh_member {
+            mesh_member.spec.allowed_callers.push(CallerRef {
+                name: VMAGENT_SERVICE_ACCOUNT.to_string(),
+                namespace: Some(MONITORING_NAMESPACE.to_string()),
+            });
+        }
 
         Ok(())
     }
@@ -236,7 +220,7 @@ mod tests {
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
-        assert!(compiled.policies.authorization_policies.is_empty());
+        assert!(compiled.mesh_member.is_none());
     }
 
     #[test]
@@ -248,7 +232,7 @@ mod tests {
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
-        assert!(compiled.policies.authorization_policies.is_empty());
+        assert!(compiled.mesh_member.is_none());
     }
 
     #[test]
@@ -260,7 +244,7 @@ mod tests {
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
-        assert!(compiled.policies.authorization_policies.is_empty());
+        assert!(compiled.mesh_member.is_none());
     }
 
     #[test]
@@ -272,7 +256,7 @@ mod tests {
 
         phase.compile(&ctx, &mut compiled).unwrap();
         assert!(compiled.extensions.is_empty());
-        assert!(compiled.policies.authorization_policies.is_empty());
+        assert!(compiled.mesh_member.is_none());
     }
 
     // =========================================================================
@@ -302,36 +286,46 @@ mod tests {
     }
 
     #[test]
-    fn metrics_port_produces_scrape_auth_policy() {
+    fn metrics_port_adds_vmagent_caller_to_mesh_member() {
+        use lattice_common::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
+
         let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
         let phase = VMServiceScrapePhase::new(Some(fake_ar()));
         let mut compiled = CompiledService::default();
 
+        // Pre-populate mesh_member (as ServiceCompiler would)
+        compiled.mesh_member = Some(LatticeMeshMember {
+            metadata: kube::api::ObjectMeta {
+                name: Some("my-app".to_string()),
+                namespace: Some("prod".to_string()),
+                ..Default::default()
+            },
+            spec: LatticeMeshMemberSpec {
+                target: MeshMemberTarget::Selector(BTreeMap::from([(
+                    "app.kubernetes.io/name".to_string(),
+                    "my-app".to_string(),
+                )])),
+                ports: vec![],
+                allowed_callers: vec![],
+                dependencies: vec![],
+                egress: vec![],
+                allow_peer_traffic: false,
+                ingress: None,
+            },
+            status: None,
+        });
+
         phase.compile(&ctx, &mut compiled).unwrap();
 
-        assert_eq!(compiled.policies.authorization_policies.len(), 1);
-        let policy = &compiled.policies.authorization_policies[0];
-        assert_eq!(policy.metadata.name, "allow-vm-scrape-my-app");
-        assert_eq!(policy.metadata.namespace, "prod");
-        assert_eq!(policy.spec.action, "ALLOW");
-
-        // Ztunnel-enforced via selector (no waypoint in scrape path)
-        assert!(policy.spec.target_refs.is_empty());
-        let selector = policy.spec.selector.as_ref().unwrap();
+        // VMAgent should be added as an allowed caller
+        let mm = compiled.mesh_member.unwrap();
+        assert_eq!(mm.spec.allowed_callers.len(), 1);
+        assert_eq!(mm.spec.allowed_callers[0].name, VMAGENT_SERVICE_ACCOUNT);
         assert_eq!(
-            selector.match_labels.get("app.kubernetes.io/name"),
-            Some(&"my-app".to_string())
+            mm.spec.allowed_callers[0].namespace.as_deref(),
+            Some(MONITORING_NAMESPACE)
         );
-
-        // Allows VMAgent's SPIFFE identity
-        let principal = &policy.spec.rules[0].from[0].source.principals[0];
-        assert!(principal.contains("monitoring"));
-        assert!(principal.contains("vmagent-lattice-metrics"));
-
-        // On the metrics port
-        let ports = &policy.spec.rules[0].to[0].operation.ports;
-        assert_eq!(ports, &["9090"]);
     }
 
     #[test]
@@ -352,12 +346,6 @@ mod tests {
             .unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0]["port"], "metrics");
-
-        // Auth policy only allows the metrics port
-        let ports = &compiled.policies.authorization_policies[0].spec.rules[0].to[0]
-            .operation
-            .ports;
-        assert_eq!(ports, &["9090"]);
     }
 
     #[test]

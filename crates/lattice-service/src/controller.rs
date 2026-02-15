@@ -24,9 +24,6 @@ use mockall::automock;
 
 use kube::discovery::ApiResource;
 use lattice_common::kube_utils::HasApiResource;
-use lattice_common::policy::cilium::CiliumNetworkPolicy;
-use lattice_common::policy::istio::AuthorizationPolicy;
-use lattice_common::policy::service_entry::ServiceEntry;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::events::{actions, reasons, EventPublisher};
@@ -41,9 +38,7 @@ use crate::crd::{
     MonitoringConfig, ProviderType, ServiceBackupSpec, ServicePhase,
 };
 use crate::graph::ServiceGraph;
-use crate::ingress::{Certificate, Gateway, GrpcRoute, HttpRoute, TcpRoute};
 use crate::Error;
-use lattice_common::mesh;
 use lattice_workload::backup::merge_backup_specs;
 
 // =============================================================================
@@ -60,16 +55,9 @@ use lattice_workload::backup::merge_backup_specs;
 /// skipped with a warning during apply.
 pub struct DiscoveredCrds {
     pub external_secret: Option<ApiResource>,
-    pub cilium_network_policy: Option<ApiResource>,
-    pub authorization_policy: Option<ApiResource>,
-    pub service_entry: Option<ApiResource>,
-    pub gateway: Option<ApiResource>,
-    pub http_route: Option<ApiResource>,
-    pub grpc_route: Option<ApiResource>,
-    pub tcp_route: Option<ApiResource>,
-    pub certificate: Option<ApiResource>,
     pub scaled_object: Option<ApiResource>,
     pub vm_service_scrape: Option<ApiResource>,
+    pub mesh_member: Option<ApiResource>,
 }
 
 impl DiscoveredCrds {
@@ -94,28 +82,13 @@ impl DiscoveredCrds {
                 "external-secrets.io",
                 "ExternalSecret",
             ),
-            cilium_network_policy: Self::find_resource(
-                &discovery,
-                "cilium.io",
-                "CiliumNetworkPolicy",
-            ),
-            authorization_policy: Self::find_resource(
-                &discovery,
-                "security.istio.io",
-                "AuthorizationPolicy",
-            ),
-            service_entry: Self::find_resource(&discovery, "networking.istio.io", "ServiceEntry"),
-            gateway: Self::find_resource(&discovery, "gateway.networking.k8s.io", "Gateway"),
-            http_route: Self::find_resource(&discovery, "gateway.networking.k8s.io", "HTTPRoute"),
-            grpc_route: Self::find_resource(&discovery, "gateway.networking.k8s.io", "GRPCRoute"),
-            tcp_route: Self::find_resource(&discovery, "gateway.networking.k8s.io", "TCPRoute"),
-            certificate: Self::find_resource(&discovery, "cert-manager.io", "Certificate"),
             scaled_object: Self::find_resource(&discovery, "keda.sh", "ScaledObject"),
             vm_service_scrape: Self::find_resource(
                 &discovery,
                 "operator.victoriametrics.com",
                 "VMServiceScrape",
             ),
+            mesh_member: Self::find_resource(&discovery, "lattice.dev", "LatticeMeshMember"),
         }
     }
 
@@ -154,18 +127,14 @@ impl DiscoveredCrds {
 
         Self {
             external_secret: Some(ExternalSecret::api_resource()),
-            cilium_network_policy: Some(CiliumNetworkPolicy::api_resource()),
-            authorization_policy: Some(AuthorizationPolicy::api_resource()),
-            service_entry: Some(ServiceEntry::api_resource()),
-            gateway: Some(Gateway::api_resource()),
-            http_route: Some(HttpRoute::api_resource()),
-            grpc_route: Some(GrpcRoute::api_resource()),
-            tcp_route: Some(TcpRoute::api_resource()),
-            certificate: Some(Certificate::api_resource()),
             scaled_object: Some(ScaledObject::api_resource()),
             vm_service_scrape: Some(lattice_common::kube_utils::build_api_resource(
                 "operator.victoriametrics.com/v1beta1",
                 "VMServiceScrape",
+            )),
+            mesh_member: Some(lattice_common::kube_utils::build_api_resource(
+                "lattice.dev/v1alpha1",
+                "LatticeMeshMember",
             )),
         }
     }
@@ -266,7 +235,7 @@ impl ServiceKubeClientImpl {
     ///
     /// Waypoint routing is per-Service (applied by the service compiler when L7 is needed),
     /// not per-namespace.
-    async fn ensure_namespace_with_ambient(&self, name: &str) -> Result<(), Error> {
+    async fn ensure_namespace(&self, name: &str) -> Result<(), Error> {
         use k8s_openapi::api::core::v1::Namespace;
 
         let api: Api<Namespace> = Api::all(self.client.clone());
@@ -275,10 +244,7 @@ impl ServiceKubeClientImpl {
             "apiVersion": "v1",
             "kind": "Namespace",
             "metadata": {
-                "name": name,
-                "labels": {
-                    (mesh::DATAPLANE_MODE_LABEL): mesh::DATAPLANE_MODE_AMBIENT
-                }
+                "name": name
             }
         });
 
@@ -289,7 +255,7 @@ impl ServiceKubeClientImpl {
         )
         .await?;
 
-        debug!(namespace = %name, "ensured namespace with ambient mode labels");
+        debug!(namespace = %name, "ensured namespace exists");
         Ok(())
     }
 }
@@ -394,7 +360,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             Service as K8sService, ServiceAccount as K8sSA,
         };
 
-        self.ensure_namespace_with_ambient(namespace).await?;
+        self.ensure_namespace(namespace).await?;
 
         let params = PatchParams::apply("lattice-service-controller").force();
 
@@ -448,81 +414,20 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             |es| &es.metadata.name,
         )?;
 
-        // Network policies
-        layer1.push_crd(
-            "CiliumNetworkPolicy",
-            self.crds.cilium_network_policy.as_ref(),
-            &compiled.policies.cilium_policies,
-            |cnp| &cnp.metadata.name,
-        )?;
-        layer1.push_crd(
-            "AuthorizationPolicy",
-            self.crds.authorization_policy.as_ref(),
-            &compiled.policies.authorization_policies,
-            |p| &p.metadata.name,
-        )?;
-        layer1.push_crd(
-            "ServiceEntry",
-            self.crds.service_entry.as_ref(),
-            &compiled.policies.service_entries,
-            |e| &e.metadata.name,
-        )?;
-
-        // Ingress — Gateway uses per-service field manager for SSA listener merging.
-        // Each service owns its own listeners via a unique field manager, so SSA
-        // merges them automatically (Gateway listeners use `name` as merge key).
-        if let Some(gw) = &compiled.ingress.gateway {
-            if let Some(ar) = &self.crds.gateway {
-                let gw_manager = format!("lattice-service-controller/{}", service_name);
-                let gw_params = PatchParams::apply(&gw_manager).force();
-                let mut gw_batch = ApplyBatch::new(self.client.clone(), namespace, &gw_params);
-                gw_batch.push("Gateway", &gw.metadata.name, gw, ar)?;
-                gw_batch.run("gateway").await?;
-            } else {
-                warn!("Gateway CRD not installed, skipping ingress");
+        // LatticeMeshMember CR — the MeshMember controller generates all mesh policies
+        if let Some(ref mesh_member) = compiled.mesh_member {
+            if let Some(ar) = &self.crds.mesh_member {
+                layer1.push(
+                    "LatticeMeshMember",
+                    mesh_member.metadata.name.as_deref().unwrap_or("unknown"),
+                    mesh_member,
+                    ar,
+                )?;
             }
         }
 
-        // Ingress routes and certificates
-        layer1.push_crd(
-            "HTTPRoute",
-            self.crds.http_route.as_ref(),
-            &compiled.ingress.http_routes,
-            |r| &r.metadata.name,
-        )?;
-        layer1.push_crd(
-            "GRPCRoute",
-            self.crds.grpc_route.as_ref(),
-            &compiled.ingress.grpc_routes,
-            |r| &r.metadata.name,
-        )?;
-        layer1.push_crd(
-            "TCPRoute",
-            self.crds.tcp_route.as_ref(),
-            &compiled.ingress.tcp_routes,
-            |r| &r.metadata.name,
-        )?;
-        layer1.push_crd(
-            "Certificate",
-            self.crds.certificate.as_ref(),
-            &compiled.ingress.certificates,
-            |c| &c.metadata.name,
-        )?;
-
-        // Waypoint (east-west L7 policies via Istio ambient mesh)
-        layer1.push_optional_crd(
-            "Gateway",
-            self.crds.gateway.as_ref(),
-            compiled.waypoint.gateway.as_ref(),
-            |gw| &gw.metadata.name,
-        )?;
-        layer1.push_optional_crd(
-            "AuthorizationPolicy",
-            self.crds.authorization_policy.as_ref(),
-            compiled.waypoint.allow_to_waypoint_policy.as_ref(),
-            |p| &p.metadata.name,
-        )?;
-
+        // Ingress — Gateway uses per-service field manager for SSA listener merging.
+        // Each service owns its own listeners via a unique field manager, so SSA
         // Extension resources — infrastructure layer
         for ext in &compiled.extensions {
             if ext.layer == ApplyLayer::Infrastructure {
@@ -1076,7 +981,7 @@ async fn resolve_policy_defaults(
     }
 
     let svc_labels = service.labels();
-    let matched = ctx.graph.matching_policies(&svc_labels, namespace);
+    let matched = ctx.graph.matching_policies(svc_labels, namespace);
     if matched.is_empty() {
         return (None, None);
     }

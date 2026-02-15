@@ -1,0 +1,26 @@
+[package]
+name = "lattice-mesh-member"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MeshMember controller and policy compilation for Lattice"
+
+[features]
+fips = ["lattice-common/fips"]
+
+[dependencies]
+# Internal
+lattice-common = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

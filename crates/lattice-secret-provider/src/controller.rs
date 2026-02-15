@@ -320,14 +320,14 @@ async fn force_refresh_failed_external_secrets(
             .data
             .get("spec")
             .and_then(|s| s.get("secretStoreRef"))
-            .and_then(|r| {
+            .map(|r| {
                 let name_match = r.get("name").and_then(|n| n.as_str()) == Some(store_name);
                 let kind_match = r
                     .get("kind")
                     .and_then(|k| k.as_str())
                     .map(|k| k == "ClusterSecretStore")
                     .unwrap_or(true); // default kind is ClusterSecretStore
-                Some(name_match && kind_match)
+                name_match && kind_match
             })
             .unwrap_or(false);
 

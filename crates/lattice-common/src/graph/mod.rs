@@ -14,8 +14,9 @@ use dashmap::DashMap;
 use tracing::warn;
 
 use crate::crd::{
-    IngressPolicySpec, LatticeExternalServiceSpec, LatticeServicePolicy, LatticeServiceSpec,
-    ParsedEndpoint, Resolution, ServiceBackupSpec, ServiceSelector, VolumeParams,
+    EgressRule, IngressPolicySpec, LatticeExternalServiceSpec, LatticeMeshMemberSpec,
+    LatticeServicePolicy, LatticeServiceSpec, MeshMemberTarget, ParsedEndpoint, Resolution,
+    ServiceBackupSpec, ServiceSelector, VolumeParams,
 };
 
 /// Fully qualified service reference: (namespace, name)
@@ -28,6 +29,8 @@ pub enum ServiceType {
     Local,
     /// External service defined via LatticeExternalService
     External,
+    /// Pre-existing workload enrolled via LatticeMeshMember
+    MeshMember,
     /// Placeholder for a service referenced but not yet defined
     Unknown,
 }
@@ -64,6 +67,14 @@ pub struct ServiceNode {
     pub endpoints: BTreeMap<String, ParsedEndpoint>,
     /// Resolution strategy (for external services)
     pub resolution: Option<Resolution>,
+    /// Custom pod selector labels (for mesh members with non-LABEL_NAME selectors)
+    pub selector: Option<BTreeMap<String, String>>,
+    /// Target namespace (for namespace-scoped mesh members)
+    pub target_namespace: Option<String>,
+    /// Allow traffic between pods matching this member's own selector
+    pub allow_peer_traffic: bool,
+    /// Non-mesh egress rules (entity, CIDR, FQDN targets)
+    pub egress_rules: Vec<EgressRule>,
 }
 
 impl ServiceNode {
@@ -118,6 +129,10 @@ impl ServiceNode {
                 .unwrap_or_default(),
             endpoints: BTreeMap::new(),
             resolution: None,
+            selector: None,
+            target_namespace: None,
+            allow_peer_traffic: false,
+            egress_rules: vec![],
         }
     }
 
@@ -151,6 +166,75 @@ impl ServiceNode {
             ports: BTreeMap::new(),
             endpoints: spec.valid_endpoints(),
             resolution: Some(spec.resolution.clone()),
+            selector: None,
+            target_namespace: None,
+            allow_peer_traffic: false,
+            egress_rules: vec![],
+        }
+    }
+
+    /// Create a new mesh member node from a LatticeMeshMember spec
+    pub fn from_mesh_member_spec(
+        namespace: &str,
+        name: &str,
+        spec: &LatticeMeshMemberSpec,
+    ) -> Self {
+        let allows_all = spec.allowed_callers.iter().any(|c| c.name == "*");
+
+        let allowed_callers: HashSet<QualifiedName> = if allows_all {
+            HashSet::new()
+        } else {
+            spec.allowed_callers
+                .iter()
+                .map(|c| (c.resolve_namespace(namespace).to_string(), c.name.clone()))
+                .collect()
+        };
+
+        let dependencies: Vec<QualifiedName> = spec
+            .dependencies
+            .iter()
+            .map(|d| (d.resolve_namespace(namespace).to_string(), d.name.clone()))
+            .collect();
+
+        let ports: BTreeMap<String, PortMapping> = spec
+            .ports
+            .iter()
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    PortMapping {
+                        service_port: p.port,
+                        target_port: p.port, // No K8s Service indirection
+                    },
+                )
+            })
+            .collect();
+
+        let selector = match &spec.target {
+            MeshMemberTarget::Selector(labels) => Some(labels.clone()),
+            MeshMemberTarget::Namespace(_) => None,
+        };
+
+        let target_namespace = match &spec.target {
+            MeshMemberTarget::Namespace(ns) => Some(ns.clone()),
+            MeshMemberTarget::Selector(_) => None,
+        };
+
+        Self {
+            namespace: namespace.to_string(),
+            name: name.to_string(),
+            type_: ServiceType::MeshMember,
+            dependencies,
+            allowed_callers,
+            allows_all,
+            image: None,
+            ports,
+            endpoints: BTreeMap::new(),
+            resolution: None,
+            selector,
+            target_namespace,
+            allow_peer_traffic: spec.allow_peer_traffic,
+            egress_rules: spec.egress.clone(),
         }
     }
 
@@ -167,6 +251,10 @@ impl ServiceNode {
             ports: BTreeMap::new(),
             endpoints: BTreeMap::new(),
             resolution: None,
+            selector: None,
+            target_namespace: None,
+            allow_peer_traffic: false,
+            egress_rules: vec![],
         }
     }
 
@@ -289,6 +377,12 @@ impl ServiceGraph {
         let node = ServiceNode::from_service_spec(namespace, name, spec);
         self.put_node(node);
         self.update_volume_owners(namespace, name, spec);
+    }
+
+    /// Insert or update a mesh member in the graph
+    pub fn put_mesh_member(&self, namespace: &str, name: &str, spec: &LatticeMeshMemberSpec) {
+        let node = ServiceNode::from_mesh_member_spec(namespace, name, spec);
+        self.put_node(node);
     }
 
     /// Insert or update an external service in the graph
@@ -483,7 +577,9 @@ impl ServiceGraph {
 
                 // Check bilateral agreement
                 let allowed = match callee.type_ {
-                    ServiceType::Local | ServiceType::External => callee.allows(namespace, name),
+                    ServiceType::Local | ServiceType::External | ServiceType::MeshMember => {
+                        callee.allows(namespace, name)
+                    }
                     ServiceType::Unknown => {
                         warn!(
                             caller = %format!("{}/{}", namespace, name),
@@ -538,6 +634,26 @@ impl ServiceGraph {
                     .filter_map(|name| {
                         let node = self.get_service(namespace, name)?;
                         if node.type_ == ServiceType::External {
+                            Some(node)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// List all mesh members in a namespace
+    pub fn list_mesh_members(&self, namespace: &str) -> Vec<ServiceNode> {
+        self.ns_index
+            .get(namespace)
+            .map(|index| {
+                index
+                    .iter()
+                    .filter_map(|name| {
+                        let node = self.get_service(namespace, name)?;
+                        if node.type_ == ServiceType::MeshMember {
                             Some(node)
                         } else {
                             None
@@ -1207,5 +1323,214 @@ mod tests {
         assert_eq!(graph.service_count("ns1"), 2);
         assert_eq!(graph.service_count("ns2"), 1);
         assert_eq!(graph.service_count("nonexistent"), 0);
+    }
+
+    // =========================================================================
+    // MeshMember Tests
+    // =========================================================================
+
+    fn make_mesh_member_spec(
+        labels: BTreeMap<String, String>,
+        ports: Vec<(&str, u16)>,
+        callers: Vec<&str>,
+        deps: Vec<&str>,
+    ) -> LatticeMeshMemberSpec {
+        use crate::crd::{CallerRef, MeshMemberPort, PeerAuth, ServiceRef};
+
+        LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(labels),
+            ports: ports
+                .into_iter()
+                .map(|(name, port)| MeshMemberPort {
+                    port,
+                    name: name.to_string(),
+                    peer_auth: PeerAuth::Strict,
+                })
+                .collect(),
+            allowed_callers: callers
+                .into_iter()
+                .map(|c| CallerRef {
+                    name: c.to_string(),
+                    namespace: None,
+                })
+                .collect(),
+            dependencies: deps
+                .into_iter()
+                .map(|d| ServiceRef {
+                    name: d.to_string(),
+                    namespace: None,
+                })
+                .collect(),
+            egress: vec![],
+            allow_peer_traffic: false,
+            ingress: None,
+        }
+    }
+
+    #[test]
+    fn test_put_mesh_member() {
+        let graph = ServiceGraph::new();
+        let labels = BTreeMap::from([("app".to_string(), "prometheus".to_string())]);
+        let spec = make_mesh_member_spec(labels.clone(), vec![("metrics", 9090)], vec![], vec![]);
+
+        graph.put_mesh_member("monitoring", "prometheus", &spec);
+
+        let node = graph.get_service("monitoring", "prometheus").unwrap();
+        assert_eq!(node.type_, ServiceType::MeshMember);
+        assert_eq!(node.selector, Some(labels));
+        assert_eq!(node.ports.len(), 1);
+        let port = node.ports.get("metrics").unwrap();
+        assert_eq!(port.service_port, 9090);
+        assert_eq!(port.target_port, 9090);
+    }
+
+    #[test]
+    fn test_mesh_member_bilateral_with_service() {
+        let graph = ServiceGraph::new();
+
+        // MeshMember allows "api" caller
+        let labels = BTreeMap::from([("app".to_string(), "prometheus".to_string())]);
+        let mm_spec = make_mesh_member_spec(labels, vec![("metrics", 9090)], vec!["api"], vec![]);
+        graph.put_mesh_member("monitoring", "prometheus", &mm_spec);
+
+        // api depends on prometheus — need cross-namespace dep, build manually
+        {
+            use crate::crd::{
+                ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
+                ServicePortsSpec, WorkloadSpec,
+            };
+
+            let mut resources = BTreeMap::new();
+            resources.insert(
+                "prometheus".to_string(),
+                ResourceSpec {
+                    type_: ResourceType::Service,
+                    direction: DependencyDirection::Outbound,
+                    id: None,
+                    class: None,
+                    metadata: None,
+                    params: None,
+                    namespace: Some("monitoring".to_string()),
+                },
+            );
+
+            let mut containers = BTreeMap::new();
+            containers.insert(
+                "main".to_string(),
+                ContainerSpec {
+                    image: "api:latest".to_string(),
+                    ..Default::default()
+                },
+            );
+
+            let spec = LatticeServiceSpec {
+                workload: WorkloadSpec {
+                    containers,
+                    resources,
+                    service: Some(ServicePortsSpec {
+                        ports: BTreeMap::from([(
+                            "http".to_string(),
+                            PortSpec {
+                                port: 8080,
+                                target_port: None,
+                                protocol: None,
+                            },
+                        )]),
+                    }),
+                },
+                ..Default::default()
+            };
+            graph.put_service("monitoring", "api", &spec);
+        }
+
+        // Bilateral agreement: api -> prometheus
+        let outbound = graph.get_active_outbound_edges("monitoring", "api");
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].callee_name, "prometheus");
+
+        let inbound = graph.get_active_inbound_edges("monitoring", "prometheus");
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].caller_name, "api");
+    }
+
+    #[test]
+    fn test_list_mesh_members() {
+        let graph = ServiceGraph::new();
+
+        // Add mesh member
+        let labels = BTreeMap::from([("app".to_string(), "prometheus".to_string())]);
+        let mm_spec = make_mesh_member_spec(labels, vec![("metrics", 9090)], vec![], vec![]);
+        graph.put_mesh_member("monitoring", "prometheus", &mm_spec);
+
+        // Add local service
+        let svc_spec = make_service_spec(vec![], vec![]);
+        graph.put_service("monitoring", "grafana", &svc_spec);
+
+        let members = graph.list_mesh_members("monitoring");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "prometheus");
+
+        // list_services should NOT include mesh members
+        let services = graph.list_services("monitoring");
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name, "grafana");
+    }
+
+    #[test]
+    fn test_mesh_member_namespace_target() {
+        let graph = ServiceGraph::new();
+
+        let spec = LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Namespace("kube-system".to_string()),
+            ports: vec![crate::crd::MeshMemberPort {
+                port: 443,
+                name: "https".to_string(),
+                peer_auth: crate::crd::PeerAuth::Permissive,
+            }],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![],
+            allow_peer_traffic: false,
+            ingress: None,
+        };
+
+        graph.put_mesh_member("default", "kube-api-access", &spec);
+
+        let node = graph.get_service("default", "kube-api-access").unwrap();
+        assert_eq!(node.type_, ServiceType::MeshMember);
+        assert_eq!(node.selector, None);
+        assert_eq!(node.target_namespace, Some("kube-system".to_string()));
+    }
+
+    #[test]
+    fn test_mesh_member_with_dependencies() {
+        let graph = ServiceGraph::new();
+
+        // MeshMember depends on a service
+        let labels = BTreeMap::from([("app".to_string(), "webhook".to_string())]);
+        let mm_spec = make_mesh_member_spec(labels, vec![("webhook", 9443)], vec![], vec!["api"]);
+        graph.put_mesh_member("prod", "webhook-handler", &mm_spec);
+
+        // api allows webhook-handler
+        let api_spec = make_service_spec(vec![], vec!["webhook-handler"]);
+        graph.put_service("prod", "api", &api_spec);
+
+        // Bilateral agreement: webhook-handler -> api
+        let outbound = graph.get_active_outbound_edges("prod", "webhook-handler");
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].callee_name, "api");
+    }
+
+    #[test]
+    fn test_delete_mesh_member() {
+        let graph = ServiceGraph::new();
+
+        let labels = BTreeMap::from([("app".to_string(), "prometheus".to_string())]);
+        let spec = make_mesh_member_spec(labels, vec![("metrics", 9090)], vec![], vec![]);
+        graph.put_mesh_member("monitoring", "prometheus", &spec);
+
+        assert!(graph.get_service("monitoring", "prometheus").is_some());
+        graph.delete_service("monitoring", "prometheus");
+        assert!(graph.get_service("monitoring", "prometheus").is_none());
     }
 }

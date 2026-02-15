@@ -18,12 +18,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::graph::{ActiveEdge, ServiceNode};
+use lattice_common::crd::derived_name;
+use lattice_common::graph::{ActiveEdge, ServiceNode};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
 use lattice_common::policy::istio::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
-    AuthorizationSource, OperationSpec, SourceSpec, TargetRef, WorkloadSelector,
+    AuthorizationSource, OperationSpec, PeerAuthentication, SourceSpec, TargetRef,
+    WorkloadSelector,
 };
 use lattice_common::policy::service_entry::{ServiceEntry, ServiceEntryPort, ServiceEntrySpec};
 use lattice_common::LABEL_NAME;
@@ -31,25 +33,22 @@ use lattice_common::LABEL_NAME;
 use super::PolicyCompiler;
 
 impl<'a> PolicyCompiler<'a> {
-    /// Compile an AuthorizationPolicy for inbound traffic to a service.
+    /// Compile an AuthorizationPolicy for inbound traffic.
     ///
-    /// The enforcement point depends on whether the service has a waypoint:
-    /// - **Waypoint path** (`has_waypoint=true`): `targetRefs` → waypoint evaluates,
-    ///   port matching uses **service port**.
-    /// - **Ztunnel path** (`has_waypoint=false`): `selector` → ztunnel evaluates
-    ///   directly on the destination node, port matching uses **container target port**.
+    /// Always ztunnel-enforced (selector-based). Uses the node's custom selector
+    /// labels if available, otherwise falls back to `LABEL_NAME`.
+    /// If `allow_peer_traffic` is set on the node, adds own SPIFFE principal.
     pub(super) fn compile_inbound_policy(
         &self,
         service: &ServiceNode,
         namespace: &str,
         inbound_edges: &[ActiveEdge],
-        has_waypoint: bool,
     ) -> Option<AuthorizationPolicy> {
-        if inbound_edges.is_empty() {
+        if inbound_edges.is_empty() && !service.allow_peer_traffic {
             return None;
         }
 
-        let principals: Vec<String> = inbound_edges
+        let mut principals: Vec<String> = inbound_edges
             .iter()
             .map(|edge| {
                 mesh::trust_domain::principal(
@@ -60,43 +59,43 @@ impl<'a> PolicyCompiler<'a> {
             })
             .collect();
 
-        let ports: Vec<String> = if has_waypoint {
-            service
-                .ports
-                .values()
-                .map(|pm| pm.service_port.to_string())
-                .collect()
-        } else {
-            service
-                .ports
-                .values()
-                .map(|pm| pm.target_port.to_string())
-                .collect()
-        };
+        // If allow_peer_traffic, add own principal so pods can talk to each other
+        if service.allow_peer_traffic {
+            principals.push(mesh::trust_domain::principal(
+                &self.cluster_name,
+                namespace,
+                &service.name,
+            ));
+        }
+
+        if principals.is_empty() {
+            return None;
+        }
+
+        let ports: Vec<String> = service
+            .ports
+            .values()
+            .map(|pm| pm.target_port.to_string())
+            .collect();
 
         if ports.is_empty() {
             return None;
         }
 
-        if has_waypoint {
-            Some(AuthorizationPolicy::allow_to_service(
-                format!("allow-to-{}", service.name),
-                namespace,
-                service.name.clone(),
-                principals,
-                ports,
-            ))
-        } else {
-            let mut match_labels = BTreeMap::new();
-            match_labels.insert(LABEL_NAME.to_string(), service.name.clone());
-            Some(AuthorizationPolicy::allow_to_workload(
-                format!("allow-to-{}", service.name),
-                namespace,
-                match_labels,
-                principals,
-                ports,
-            ))
-        }
+        // Use custom selector labels if available, otherwise fall back to LABEL_NAME
+        let match_labels = service.selector.clone().unwrap_or_else(|| {
+            let mut m = BTreeMap::new();
+            m.insert(LABEL_NAME.to_string(), service.name.clone());
+            m
+        });
+
+        Some(AuthorizationPolicy::allow_to_workload(
+            derived_name("allow-to-", &[namespace, &service.name]),
+            namespace,
+            match_labels,
+            principals,
+            ports,
+        ))
     }
 
     /// Compile a ztunnel-enforced AuthorizationPolicy (waypoint → pod).
@@ -244,29 +243,58 @@ impl<'a> PolicyCompiler<'a> {
         )
     }
 
-    /// Compile an AuthorizationPolicy to allow the Istio gateway proxy to reach a service.
+    /// Compile permissive policies for specific ports on a mesh member.
     ///
-    /// Gateway traffic goes directly from the ingress gateway to the pod via ztunnel
-    /// (not through a waypoint), so we use selector-based enforcement.
-    pub(crate) fn compile_gateway_allow_policy(
+    /// - PeerAuthentication: STRICT default with PERMISSIVE overrides on specified ports
+    /// - AuthorizationPolicy: ALLOW with no `from` restriction on permissive ports
+    ///   (allows plaintext callers like kube-apiserver)
+    pub(super) fn compile_permissive_policies_for_ports(
         &self,
-        service_name: &str,
+        service: &ServiceNode,
         namespace: &str,
-        ports: &[u16],
-    ) -> AuthorizationPolicy {
-        let gateway_principal =
-            mesh::trust_domain::gateway_principal(&self.cluster_name, namespace);
-        let port_strings: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+        permissive_ports: &[u16],
+    ) -> (Vec<PeerAuthentication>, Vec<AuthorizationPolicy>) {
+        if permissive_ports.is_empty() {
+            return (vec![], vec![]);
+        }
 
-        let mut match_labels = BTreeMap::new();
-        match_labels.insert(LABEL_NAME.to_string(), service_name.to_string());
+        let match_labels = service.selector.clone().unwrap_or_else(|| {
+            let mut m = BTreeMap::new();
+            m.insert(LABEL_NAME.to_string(), service.name.clone());
+            m
+        });
 
-        AuthorizationPolicy::allow_to_workload(
-            format!("allow-gateway-to-{}", service_name),
+        // PeerAuthentication with port-level PERMISSIVE
+        let peer_auth = PeerAuthentication::with_permissive_ports(
+            derived_name("permissive-", &[namespace, &service.name]),
             namespace,
-            match_labels,
-            vec![gateway_principal],
-            port_strings,
-        )
+            match_labels.clone(),
+            permissive_ports,
+        );
+
+        // AuthorizationPolicy: ALLOW with empty from (any caller) on permissive ports only
+        let port_strings: Vec<String> = permissive_ports.iter().map(|p| p.to_string()).collect();
+        let auth_policy = AuthorizationPolicy::new(
+            ObjectMeta::new(
+                derived_name("allow-webhook-", &[namespace, &service.name]),
+                namespace,
+            ),
+            AuthorizationPolicySpec {
+                target_refs: vec![],
+                selector: Some(WorkloadSelector { match_labels }),
+                action: "ALLOW".to_string(),
+                rules: vec![AuthorizationRule {
+                    from: vec![], // Empty from = allow any caller
+                    to: vec![AuthorizationOperation {
+                        operation: OperationSpec {
+                            ports: port_strings,
+                            hosts: vec![],
+                        },
+                    }],
+                }],
+            },
+        );
+
+        (vec![peer_auth], vec![auth_policy])
     }
 }

@@ -2496,6 +2496,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-mesh-member"
+version = "0.1.0"
+dependencies = [
+ "kube",
+ "lattice-common",
+ "serde",
+ "serde_json",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-move"
 version = "0.1.0"
 dependencies = [
