@@ -201,7 +201,9 @@ pub async fn reconcile(
         .spec
         .ingress
         .as_ref()
-        .map(|ingress_spec| IngressCompiler::compile(&name, namespace, ingress_spec, &member.spec.ports))
+        .map(|ingress_spec| {
+            IngressCompiler::compile(&name, namespace, ingress_spec, &member.spec.ports)
+        })
         .transpose()
         .map_err(|e| ReconcileError::Validation(format!("ingress compilation: {e}")))?;
 
@@ -224,11 +226,18 @@ pub async fn reconcile(
     apply_policies(&ctx.client, &ctx.crds, namespace, &params, &policies).await?;
 
     if let Some(ref ingress_resources) = ingress {
+        // Use a per-member field manager for the Gateway so each member owns
+        // only its own listeners. The Gateway CRD uses `name` as the list map
+        // key on `spec.listeners`, so SSA merges listeners from different
+        // field managers correctly.
+        let gateway_field_manager = format!("{}/{}", FIELD_MANAGER, name);
+        let gateway_params = PatchParams::apply(&gateway_field_manager).force();
         apply_ingress(
             &ctx.client,
             &ctx.crds,
             namespace,
             &params,
+            &gateway_params,
             ingress_resources,
         )
         .await?;
@@ -446,18 +455,22 @@ async fn apply_policies(
 }
 
 /// Apply compiled ingress resources
+///
+/// Uses `gateway_params` (per-member field manager) for the shared Gateway
+/// and `params` (shared field manager) for routes and certificates.
 async fn apply_ingress(
     client: &Client,
     crds: &MeshMemberDiscoveredCrds,
     namespace: &str,
     params: &PatchParams,
+    gateway_params: &PatchParams,
     ingress: &crate::ingress::GeneratedIngress,
 ) -> Result<(), ReconcileError> {
     if let Some(ref gw) = ingress.gateway {
         apply_if_discovered(
             client,
             namespace,
-            params,
+            gateway_params,
             gw,
             crds.gateway.as_ref(),
             &gw.metadata.name,
@@ -655,9 +668,13 @@ async fn patch_status_with_hash(
         "status": status,
     });
 
-    api.patch(name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
-        .await
-        .map_err(|e| ReconcileError::Kube(format!("patch status: {e}")))?;
+    api.patch(
+        name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .map_err(|e| ReconcileError::Kube(format!("patch status: {e}")))?;
 
     Ok(())
 }

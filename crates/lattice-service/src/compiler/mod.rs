@@ -36,10 +36,7 @@ use std::sync::Arc;
 
 use kube::discovery::ApiResource;
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{
-    CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
-};
-use lattice_common::LABEL_NAME;
+use lattice_common::crd::LatticeMeshMember;
 use lattice_workload::CompilationError;
 
 use crate::crd::{LatticeService, MonitoringConfig, ProviderType, ServiceBackupSpec};
@@ -229,8 +226,11 @@ impl<'a> ServiceCompiler<'a> {
         })
         .with_annotations(&service.metadata.annotations.clone().unwrap_or_default())
         .with_image_pull_secrets(&service.spec.runtime.image_pull_secrets)
+        .with_ingress(service.spec.ingress.clone())
         .compile()
         .await?;
+
+        let mesh_member = compiled.mesh_member;
 
         // Build service-specific resources from compiled pod template
         let mut workloads = WorkloadCompiler::compile(
@@ -279,90 +279,6 @@ impl<'a> ServiceCompiler<'a> {
                     .extend(backup_annotations);
             }
         }
-
-        // Build LatticeMeshMember CR for mesh policy delegation.
-        // The MeshMember controller will generate all Cilium + Istio policies.
-        let service_node = self.graph.get_service(namespace, name);
-        let mut allowed_callers: Vec<CallerRef> = service_node
-            .as_ref()
-            .map(|n| {
-                n.allowed_callers
-                    .iter()
-                    .map(|(ns, name)| CallerRef {
-                        name: name.clone(),
-                        namespace: if ns == namespace {
-                            None
-                        } else {
-                            Some(ns.clone())
-                        },
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // If service allows all callers, use wildcard
-        if service_node.as_ref().is_some_and(|n| n.allows_all) {
-            allowed_callers = vec![CallerRef {
-                name: "*".to_string(),
-                namespace: None,
-            }];
-        }
-
-        let dependencies: Vec<lattice_common::crd::ServiceRef> = service_node
-            .as_ref()
-            .map(|n| {
-                n.dependencies
-                    .iter()
-                    .map(|(ns, name)| lattice_common::crd::ServiceRef {
-                        name: name.clone(),
-                        namespace: if ns == namespace {
-                            None
-                        } else {
-                            Some(ns.clone())
-                        },
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let ports: Vec<MeshMemberPort> = service
-            .spec
-            .workload
-            .service
-            .as_ref()
-            .map(|s| {
-                s.ports
-                    .iter()
-                    .map(|(port_name, ps): (&String, _)| MeshMemberPort {
-                        port: ps.target_port.unwrap_or(ps.port),
-                        name: port_name.clone(),
-                        peer_auth: PeerAuth::Strict,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let has_mesh_participation = !ports.is_empty() || !dependencies.is_empty();
-        let mesh_member = if service_node.is_some() && has_mesh_participation {
-            Some(LatticeMeshMember::new(
-                name,
-                LatticeMeshMemberSpec {
-                    target: MeshMemberTarget::Selector(
-                        [(LABEL_NAME.to_string(), name.to_string())]
-                            .into_iter()
-                            .collect(),
-                    ),
-                    ports,
-                    allowed_callers,
-                    dependencies,
-                    egress: vec![],
-                    allow_peer_traffic: false,
-                    ingress: service.spec.ingress.clone(),
-                },
-            ))
-        } else {
-            None
-        };
 
         let mut compiled = CompiledService {
             workloads,

@@ -24,8 +24,8 @@ use kube::ResourceExt;
 use tracing::debug;
 
 use lattice_common::crd::{
-    BackupsConfig, BootstrapProvider, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec,
-    MonitoringConfig, ProviderType,
+    BackupsConfig, BootstrapProvider, EgressRule, EgressTarget, LatticeCluster, LatticeMeshMember,
+    LatticeMeshMemberSpec, MonitoringConfig, ProviderType,
 };
 use lattice_common::DEFAULT_GRPC_PORT;
 
@@ -224,6 +224,18 @@ pub(crate) fn namespace_yaml(name: &str) -> String {
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}",
         name
     )
+}
+
+/// Egress rule allowing traffic to the kube-apiserver.
+///
+/// Required for system components (KEDA, VM operator, etc.) that need to
+/// reach the Kubernetes API from within the ambient mesh.
+/// Port 6443 is the actual endpoint port after DNAT from the ClusterIP (443).
+pub(crate) fn kube_apiserver_egress() -> EgressRule {
+    EgressRule {
+        target: EgressTarget::Entity("kube-apiserver".to_string()),
+        ports: vec![6443],
+    }
 }
 
 /// Create a namespaced LatticeMeshMember.

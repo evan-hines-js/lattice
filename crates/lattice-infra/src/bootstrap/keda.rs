@@ -12,7 +12,7 @@ use lattice_common::crd::{
 };
 
 use super::prometheus::MONITORING_NAMESPACE;
-use super::{lmm, namespace_yaml_ambient, split_yaml_documents};
+use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
 
 /// Namespace for KEDA components.
 pub const KEDA_NAMESPACE: &str = "keda";
@@ -40,12 +40,12 @@ pub fn generate_keda() -> &'static [String] {
 /// Generate LatticeMeshMember CRDs for KEDA components.
 ///
 /// Produces 3 LMMs:
-/// 1. **keda-metrics-apiserver** — webhook called by kube-apiserver (Permissive mTLS)
-/// 2. **keda-admission-webhooks** — webhook called by kube-apiserver (Permissive mTLS)
+/// 1. **keda-metrics-apiserver** — webhook called by kube-apiserver (Webhook mTLS)
+/// 2. **keda-admission-webhooks** — webhook called by kube-apiserver (Webhook mTLS)
 /// 3. **keda-operator** — receives gRPC from metrics-apiserver, queries VictoriaMetrics
 pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
     vec![
-        // keda-metrics-apiserver — webhook called by kube-apiserver
+        // keda-metrics-apiserver — webhook called by kube-apiserver, aggregates metrics
         lmm(
             "keda-metrics-apiserver",
             KEDA_NAMESPACE,
@@ -57,11 +57,11 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 ports: vec![MeshMemberPort {
                     port: 6443,
                     name: "metrics-api".to_string(),
-                    peer_auth: PeerAuth::Permissive,
+                    peer_auth: PeerAuth::Webhook,
                 }],
                 allowed_callers: vec![],
                 dependencies: vec![ServiceRef::new(KEDA_NAMESPACE, "keda-operator")],
-                egress: vec![],
+                egress: vec![kube_apiserver_egress()],
                 allow_peer_traffic: false,
                 ingress: None,
             },
@@ -78,16 +78,16 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 ports: vec![MeshMemberPort {
                     port: 9443,
                     name: "webhook".to_string(),
-                    peer_auth: PeerAuth::Permissive,
+                    peer_auth: PeerAuth::Webhook,
                 }],
                 allowed_callers: vec![],
                 dependencies: vec![],
-                egress: vec![],
+                egress: vec![kube_apiserver_egress()],
                 allow_peer_traffic: false,
                 ingress: None,
             },
         ),
-        // keda-operator — receives gRPC from metrics-apiserver, queries VictoriaMetrics
+        // keda-operator — receives gRPC from metrics-apiserver, scales workloads
         lmm(
             "keda-operator",
             KEDA_NAMESPACE,
@@ -109,7 +109,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                     MONITORING_NAMESPACE,
                     VM_READ_TARGET_LMM_NAME,
                 )],
-                egress: vec![],
+                egress: vec![kube_apiserver_egress()],
                 allow_peer_traffic: false,
                 ingress: None,
             },
@@ -152,7 +152,7 @@ mod tests {
         let m = &members[0];
         assert_eq!(m.metadata.name.as_deref(), Some("keda-metrics-apiserver"));
         assert_eq!(m.spec.ports[0].port, 6443);
-        assert_eq!(m.spec.ports[0].peer_auth, PeerAuth::Permissive);
+        assert_eq!(m.spec.ports[0].peer_auth, PeerAuth::Webhook);
         assert!(m.spec.allowed_callers.is_empty());
         assert_eq!(m.spec.dependencies[0].name, "keda-operator");
 
@@ -160,7 +160,7 @@ mod tests {
         let m = &members[1];
         assert_eq!(m.metadata.name.as_deref(), Some("keda-admission-webhooks"));
         assert_eq!(m.spec.ports[0].port, 9443);
-        assert_eq!(m.spec.ports[0].peer_auth, PeerAuth::Permissive);
+        assert_eq!(m.spec.ports[0].peer_auth, PeerAuth::Webhook);
 
         // operator
         let m = &members[2];

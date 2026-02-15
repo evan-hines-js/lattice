@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use lattice_common::crd::LatticeMeshMember;
 use lattice_secret_provider::eso::ExternalSecret;
 
 use crate::k8s::{ConfigMap, Secret};
@@ -21,6 +22,8 @@ pub struct CompiledWorkload {
     pub config: CompiledConfig,
     /// SHA-256 hash of config data for triggering rollouts
     pub config_hash: String,
+    /// LatticeMeshMember CR for mesh policy delegation (if workload participates in mesh)
+    pub mesh_member: Option<LatticeMeshMember>,
 }
 
 /// Configuration resources generated during compilation.

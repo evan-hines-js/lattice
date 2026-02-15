@@ -118,7 +118,17 @@ pub struct GeneratedVolumes {
     pub scheduling_gates: Vec<crate::k8s::SchedulingGate>,
 }
 
-impl GeneratedVolumes {}
+#[cfg(test)]
+impl GeneratedVolumes {
+    pub fn is_empty(&self) -> bool {
+        self.pvcs.is_empty()
+            && self.pod_labels.is_empty()
+            && self.affinity.is_none()
+            && self.volumes.is_empty()
+            && self.volume_mounts.is_empty()
+            && self.scheduling_gates.is_empty()
+    }
+}
 
 // =============================================================================
 // Helpers

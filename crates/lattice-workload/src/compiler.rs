@@ -7,9 +7,13 @@
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{ProviderType, RuntimeSpec, WorkloadSpec};
+use lattice_common::crd::{
+    CallerRef, IngressSpec, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort,
+    MeshMemberTarget, PeerAuth, ProviderType, RuntimeSpec, WorkloadSpec,
+};
 use lattice_common::graph::ServiceGraph;
 use lattice_common::template::{RenderConfig, TemplateRenderer};
+use lattice_common::LABEL_NAME;
 
 use crate::authorization::VolumeAuthorizationMode;
 use crate::compiled::{CompiledConfig, CompiledWorkload};
@@ -45,6 +49,7 @@ pub struct WorkloadCompiler<'a> {
     image_pull_secrets: &'a [String],
     renderer: TemplateRenderer,
     graph: Option<&'a ServiceGraph>,
+    ingress: Option<IngressSpec>,
 }
 
 impl<'a> WorkloadCompiler<'a> {
@@ -69,6 +74,7 @@ impl<'a> WorkloadCompiler<'a> {
             image_pull_secrets: &[],
             renderer: TemplateRenderer::new(),
             graph: None,
+            ingress: None,
         }
     }
 
@@ -105,6 +111,12 @@ impl<'a> WorkloadCompiler<'a> {
     /// Set service graph for template resolution.
     pub fn with_graph(mut self, graph: &'a ServiceGraph) -> Self {
         self.graph = Some(graph);
+        self
+    }
+
+    /// Set ingress configuration for the mesh member.
+    pub fn with_ingress(mut self, ingress: Option<IngressSpec>) -> Self {
+        self.ingress = ingress;
         self
     }
 
@@ -287,10 +299,92 @@ impl<'a> WorkloadCompiler<'a> {
             &config.files_secrets,
         );
 
+        // Build LatticeMeshMember CR for mesh policy delegation.
+        let service_node = graph.get_service(self.namespace, self.name);
+        let mut allowed_callers: Vec<CallerRef> = service_node
+            .as_ref()
+            .map(|n| {
+                n.allowed_callers
+                    .iter()
+                    .map(|(ns, name)| CallerRef {
+                        name: name.clone(),
+                        namespace: if ns == self.namespace {
+                            None
+                        } else {
+                            Some(ns.clone())
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if service_node.as_ref().is_some_and(|n| n.allows_all) {
+            allowed_callers = vec![CallerRef {
+                name: "*".to_string(),
+                namespace: None,
+            }];
+        }
+
+        let dependencies: Vec<lattice_common::crd::ServiceRef> = service_node
+            .as_ref()
+            .map(|n| {
+                n.dependencies
+                    .iter()
+                    .map(|(ns, name)| lattice_common::crd::ServiceRef {
+                        name: name.clone(),
+                        namespace: if ns == self.namespace {
+                            None
+                        } else {
+                            Some(ns.clone())
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let ports: Vec<MeshMemberPort> = self
+            .workload
+            .service
+            .as_ref()
+            .map(|s| {
+                s.ports
+                    .iter()
+                    .map(|(port_name, ps)| MeshMemberPort {
+                        port: ps.target_port.unwrap_or(ps.port),
+                        name: port_name.clone(),
+                        peer_auth: PeerAuth::Strict,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let has_mesh_participation = !ports.is_empty() || !dependencies.is_empty();
+        let mesh_member = if service_node.is_some() && has_mesh_participation {
+            Some(LatticeMeshMember::new(
+                self.name,
+                LatticeMeshMemberSpec {
+                    target: MeshMemberTarget::Selector(
+                        [(LABEL_NAME.to_string(), self.name.to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ports,
+                    allowed_callers,
+                    dependencies,
+                    egress: vec![],
+                    allow_peer_traffic: false,
+                    ingress: self.ingress,
+                },
+            ))
+        } else {
+            None
+        };
+
         Ok(CompiledWorkload {
             pod_template,
             config,
             config_hash,
+            mesh_member,
         })
     }
 }

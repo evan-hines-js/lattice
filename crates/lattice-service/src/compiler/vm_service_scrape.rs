@@ -292,29 +292,29 @@ mod tests {
         let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
         let phase = VMServiceScrapePhase::new(Some(fake_ar()));
-        let mut compiled = CompiledService::default();
-
-        // Pre-populate mesh_member (as ServiceCompiler would)
-        compiled.mesh_member = Some(LatticeMeshMember {
-            metadata: kube::api::ObjectMeta {
-                name: Some("my-app".to_string()),
-                namespace: Some("prod".to_string()),
-                ..Default::default()
-            },
-            spec: LatticeMeshMemberSpec {
-                target: MeshMemberTarget::Selector(BTreeMap::from([(
-                    "app.kubernetes.io/name".to_string(),
-                    "my-app".to_string(),
-                )])),
-                ports: vec![],
-                allowed_callers: vec![],
-                dependencies: vec![],
-                egress: vec![],
-                allow_peer_traffic: false,
-                ingress: None,
-            },
-            status: None,
-        });
+        let mut compiled = CompiledService {
+            mesh_member: Some(LatticeMeshMember {
+                metadata: kube::api::ObjectMeta {
+                    name: Some("my-app".to_string()),
+                    namespace: Some("prod".to_string()),
+                    ..Default::default()
+                },
+                spec: LatticeMeshMemberSpec {
+                    target: MeshMemberTarget::Selector(BTreeMap::from([(
+                        "app.kubernetes.io/name".to_string(),
+                        "my-app".to_string(),
+                    )])),
+                    ports: vec![],
+                    allowed_callers: vec![],
+                    dependencies: vec![],
+                    egress: vec![],
+                    allow_peer_traffic: false,
+                    ingress: None,
+                },
+                status: None,
+            }),
+            ..Default::default()
+        };
 
         phase.compile(&ctx, &mut compiled).unwrap();
 
