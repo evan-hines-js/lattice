@@ -1016,7 +1016,8 @@ pub async fn apply_manifests_with_discovery(
         .iter()
         .any(|m| extract_kind(m) == "CustomResourceDefinition");
 
-    // Phase 1: Apply foundational resources (Namespaces, CRDs)
+    // Phase 1: Apply foundational resources (Namespaces, CRDs) — fail-fast.
+    // These are prerequisites; if they fail, nothing else will work.
     if !foundational.is_empty() {
         let discovery = run_discovery(client).await?;
 
@@ -1024,9 +1025,8 @@ pub async fn apply_manifests_with_discovery(
             apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
         }
 
-        // Phase 2: Apply remaining resources.
+        // Phase 2: Apply remaining resources best-effort, continuing past failures.
         // Re-run discovery only if CRDs were applied (they register new API types).
-        // Namespaces don't change the API surface, so reuse the existing discovery.
         if !rest.is_empty() {
             let discovery = if has_crds {
                 run_discovery(client).await?
@@ -1034,20 +1034,54 @@ pub async fn apply_manifests_with_discovery(
                 discovery
             };
 
-            for manifest in &rest {
-                apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
-            }
+            apply_all_best_effort(client, &discovery, &rest, options).await?;
         }
     } else if !rest.is_empty() {
-        // No foundational resources — single discovery call for everything
         let discovery = run_discovery(client).await?;
-
-        for manifest in &rest {
-            apply_manifest_with_discovery(client, &discovery, manifest, options).await?;
-        }
+        apply_all_best_effort(client, &discovery, &rest, options).await?;
     }
 
     Ok(())
+}
+
+/// Apply manifests best-effort: try every manifest even if some fail.
+/// Returns the first error after attempting all manifests.
+/// This prevents a single webhook or transient failure from blocking
+/// all subsequent manifests (e.g., LMMs that would unblock the webhook).
+async fn apply_all_best_effort(
+    client: &Client,
+    discovery: &kube::discovery::Discovery,
+    manifests: &[&str],
+    options: &ApplyOptions,
+) -> Result<(), Error> {
+    let mut first_error: Option<Error> = None;
+    let mut failed_count = 0usize;
+
+    for manifest in manifests {
+        if let Err(e) = apply_manifest_with_discovery(client, discovery, manifest, options).await {
+            failed_count += 1;
+            tracing::warn!(
+                error = %e,
+                kind = %extract_kind(manifest),
+                "manifest apply failed, continuing with remaining manifests"
+            );
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
+        }
+    }
+
+    match first_error {
+        Some(e) => {
+            tracing::warn!(
+                failed = failed_count,
+                total = manifests.len(),
+                "some manifests failed to apply"
+            );
+            Err(e)
+        }
+        None => Ok(()),
+    }
 }
 
 /// Retry interval for apply operations

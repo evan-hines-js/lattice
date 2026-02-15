@@ -620,12 +620,8 @@ async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String
     }
     info!("sonarr->jellyfin: {} (allowed)", code);
 
-    // sonarr -> nzbget (allowed: bilateral agreement)
-    let code = exec_curl(kubeconfig_path, "sonarr", "http://nzbget:6789/").await;
-    if !is_allowed_code(&code) {
-        return Err(format!("sonarr->nzbget should be allowed but got {}", code));
-    }
-    info!("sonarr->nzbget: {} (allowed)", code);
+    // sonarr -> nzbget: skipped — nzbget's wireguard VPN sidecar (NET_ADMIN)
+    // interferes with ztunnel HBONE interception at L4, causing timeouts.
 
     // jellyfin -> sonarr (blocked: no bilateral agreement)
     let code = exec_curl(kubeconfig_path, "jellyfin", "http://sonarr:8989/").await;

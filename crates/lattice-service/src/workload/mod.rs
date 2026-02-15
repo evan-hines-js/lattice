@@ -653,7 +653,6 @@ mod tests {
         AutoscalingMetric, AutoscalingSpec, ContainerSpec, PortSpec, ResourceSpec, ResourceType,
         ServicePortsSpec,
     };
-    use lattice_workload::SecretRef;
 
     /// Helper to compile a service through the lattice_workload pipeline then
     /// through the service-specific WorkloadCompiler.

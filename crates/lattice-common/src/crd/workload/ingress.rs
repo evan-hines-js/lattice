@@ -6,7 +6,6 @@ use crate::crd::MeshMemberPort;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 /// Ingress specification for exposing services externally via Gateway API.
 ///
 /// Uses a named-routes map for multi-route support (HTTP, gRPC, TCP).

@@ -25,6 +25,13 @@ pub struct GeneratedSecrets {
     pub secret_refs: BTreeMap<String, SecretRef>,
 }
 
+#[cfg(test)]
+impl GeneratedSecrets {
+    pub fn is_empty(&self) -> bool {
+        self.external_secrets.is_empty() && self.secret_refs.is_empty()
+    }
+}
+
 /// Reference to a synced Kubernetes Secret for template resolution
 #[derive(Clone, Debug)]
 pub struct SecretRef {

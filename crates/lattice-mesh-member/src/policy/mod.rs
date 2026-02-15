@@ -245,7 +245,6 @@ mod tests {
                 containers,
                 resources,
                 service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
             },
             ..Default::default()
         }
@@ -615,9 +614,7 @@ mod tests {
         callers: Vec<&str>,
         deps: Vec<&str>,
     ) -> lattice_common::crd::LatticeMeshMemberSpec {
-        use lattice_common::crd::{
-            CallerRef, MeshMemberPort, MeshMemberTarget, ServiceRef,
-        };
+        use lattice_common::crd::{CallerRef, MeshMemberPort, MeshMemberTarget, ServiceRef};
 
         lattice_common::crd::LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(labels),
@@ -636,10 +633,7 @@ mod tests {
                     namespace: None,
                 })
                 .collect(),
-            dependencies: deps
-                .into_iter()
-                .map(|d| ServiceRef::local(d))
-                .collect(),
+            dependencies: deps.into_iter().map(ServiceRef::local).collect(),
             egress: vec![],
             allow_peer_traffic: false,
             ingress: None,
@@ -674,9 +668,22 @@ mod tests {
         // Should have PeerAuthentication with permissive override on port 9443
         assert_eq!(output.peer_authentications.len(), 1);
         let pa = &output.peer_authentications[0];
-        assert!(pa.spec.port_level_mtls.as_ref().unwrap().contains_key("9443"));
-        assert_eq!(pa.spec.port_level_mtls.as_ref().unwrap()["9443"].mode, "PERMISSIVE");
-        assert!(!pa.spec.port_level_mtls.as_ref().unwrap().contains_key("8443"));
+        assert!(pa
+            .spec
+            .port_level_mtls
+            .as_ref()
+            .unwrap()
+            .contains_key("9443"));
+        assert_eq!(
+            pa.spec.port_level_mtls.as_ref().unwrap()["9443"].mode,
+            "PERMISSIVE"
+        );
+        assert!(!pa
+            .spec
+            .port_level_mtls
+            .as_ref()
+            .unwrap()
+            .contains_key("8443"));
 
         // Should have an AuthorizationPolicy allowing plaintext on port 9443
         let plaintext_authz = output
@@ -757,8 +764,7 @@ mod tests {
             .iter()
             .find(|r| r.from_entities.contains(&"kube-apiserver".to_string()))
             .expect("should have kube-apiserver ingress rule");
-        assert!(webhook_rule
-            .to_ports[0]
+        assert!(webhook_rule.to_ports[0]
             .ports
             .iter()
             .any(|p| p.port == "9443"));
@@ -826,9 +832,24 @@ mod tests {
 
         // PeerAuthentication should have PERMISSIVE on both 9090 and 9443
         let pa = &output.peer_authentications[0];
-        assert!(pa.spec.port_level_mtls.as_ref().unwrap().contains_key("9090"));
-        assert!(pa.spec.port_level_mtls.as_ref().unwrap().contains_key("9443"));
-        assert!(!pa.spec.port_level_mtls.as_ref().unwrap().contains_key("8080"));
+        assert!(pa
+            .spec
+            .port_level_mtls
+            .as_ref()
+            .unwrap()
+            .contains_key("9090"));
+        assert!(pa
+            .spec
+            .port_level_mtls
+            .as_ref()
+            .unwrap()
+            .contains_key("9443"));
+        assert!(!pa
+            .spec
+            .port_level_mtls
+            .as_ref()
+            .unwrap()
+            .contains_key("8080"));
 
         // Cilium: separate ingress rules for permissive (any) and webhook (kube-apiserver)
         let cnp = &output.cilium_policies[0];

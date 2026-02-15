@@ -11,7 +11,7 @@ use lattice_common::crd::{
 };
 
 use super::keda::{KEDA_NAMESPACE, VM_READ_TARGET_LMM_NAME};
-use super::{lmm, namespace_yaml_ambient, split_yaml_documents};
+use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
 
 /// Well-known service name for the VMCluster components.
 /// Used as `fullnameOverride` so all downstream consumers
@@ -230,13 +230,13 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             }],
             allowed_callers: vec![],
             dependencies: vec![write_dep],
-            egress: vec![],
+            egress: vec![kube_apiserver_egress()],
             allow_peer_traffic: false,
             ingress: None,
         },
     ));
 
-    // victoria-metrics-operator — webhook called by kube-apiserver
+    // victoria-metrics-operator — webhook called by kube-apiserver, manages CRDs
     members.push(lmm(
         "victoria-metrics-operator",
         MONITORING_NAMESPACE,
@@ -248,11 +248,11 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             ports: vec![MeshMemberPort {
                 port: 9443,
                 name: "webhook".to_string(),
-                peer_auth: PeerAuth::Permissive,
+                peer_auth: PeerAuth::Webhook,
             }],
             allowed_callers: vec![],
             dependencies: vec![],
-            egress: vec![],
+            egress: vec![kube_apiserver_egress()],
             allow_peer_traffic: false,
             ingress: None,
         },
@@ -339,7 +339,7 @@ mod tests {
             Some("victoria-metrics-operator")
         );
         assert_eq!(op.spec.ports[0].port, 9443);
-        assert_eq!(op.spec.ports[0].peer_auth, PeerAuth::Permissive);
+        assert_eq!(op.spec.ports[0].peer_auth, PeerAuth::Webhook);
         assert!(op.spec.allowed_callers.is_empty());
         assert!(op.spec.validate().is_ok());
     }

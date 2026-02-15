@@ -322,6 +322,12 @@ fn main() {
             "pilot.resources.requests.cpu=100m",
             "--set",
             "pilot.resources.requests.memory=128Mi",
+            "--set",
+            "pilot.tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "pilot.tolerations[0].operator=Exists",
+            "--set",
+            "pilot.tolerations[0].effect=NoSchedule",
         ],
     );
     std::fs::write(out_dir.join("istiod.yaml"), yaml).expect("write istiod.yaml");
@@ -530,7 +536,16 @@ fn main() {
             versions.charts["metrics-server"].version
         )),
         "kube-system",
-        &["--set", "args={--kubelet-insecure-tls}"],
+        &[
+            "--set",
+            "args={--kubelet-insecure-tls}",
+            "--set",
+            "tolerations[0].key=node-role.kubernetes.io/control-plane",
+            "--set",
+            "tolerations[0].operator=Exists",
+            "--set",
+            "tolerations[0].effect=NoSchedule",
+        ],
     );
     std::fs::write(out_dir.join("metrics-server.yaml"), yaml).expect("write metrics-server.yaml");
 
