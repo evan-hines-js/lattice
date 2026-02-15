@@ -165,31 +165,21 @@ pub fn generate_istio(config: &InfrastructureConfig) -> Result<Vec<String>, Stri
             .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
     );
 
-    // Monitoring AuthorizationPolicies (VMAgent→storage, KEDA→query)
+    // LatticeMeshMember CRDs for monitoring and KEDA addon policies
     if config.monitoring.enabled {
-        for policy in istio::IstioReconciler::generate_monitoring_allow_policies(
-            &config.cluster_name,
-            config.monitoring.ha,
-        ) {
-            manifests.push(serde_json::to_string_pretty(&policy).map_err(|e| {
-                format!("Failed to serialize monitoring AuthorizationPolicy: {}", e)
+        for lmm in keda::generate_keda_mesh_members() {
+            manifests.push(
+                serde_json::to_string_pretty(&lmm)
+                    .map_err(|e| format!("Failed to serialize KEDA LatticeMeshMember: {}", e))?,
+            );
+        }
+        for lmm in prometheus::generate_monitoring_mesh_members(config.monitoring.ha) {
+            manifests.push(serde_json::to_string_pretty(&lmm).map_err(|e| {
+                format!(
+                    "Failed to serialize monitoring LatticeMeshMember: {}",
+                    e
+                )
             })?);
-        }
-
-        // Webhook/APIService pods in the mesh need PERMISSIVE mTLS + ALLOW policies
-        // so the kube-apiserver (not in the mesh) can reach them.
-        let (webhook_pas, webhook_authzs) = istio::IstioReconciler::generate_webhook_policies();
-        for pa in webhook_pas {
-            manifests.push(
-                serde_json::to_string_pretty(&pa)
-                    .map_err(|e| format!("Failed to serialize PeerAuthentication: {}", e))?,
-            );
-        }
-        for authz in webhook_authzs {
-            manifests.push(
-                serde_json::to_string_pretty(&authz)
-                    .map_err(|e| format!("Failed to serialize AuthorizationPolicy: {}", e))?,
-            );
         }
     }
 

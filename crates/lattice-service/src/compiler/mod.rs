@@ -310,7 +310,7 @@ impl<'a> ServiceCompiler<'a> {
             }];
         }
 
-        let dependencies = service_node
+        let dependencies: Vec<lattice_common::crd::ServiceRef> = service_node
             .as_ref()
             .map(|n| {
                 n.dependencies
@@ -342,7 +342,8 @@ impl<'a> ServiceCompiler<'a> {
             })
             .unwrap_or_default();
 
-        let mesh_member = if service_node.is_some() && !ports.is_empty() {
+        let has_mesh_participation = !ports.is_empty() || !dependencies.is_empty();
+        let mesh_member = if service_node.is_some() && has_mesh_participation {
             Some(LatticeMeshMember::new(
                 name,
                 LatticeMeshMemberSpec {
