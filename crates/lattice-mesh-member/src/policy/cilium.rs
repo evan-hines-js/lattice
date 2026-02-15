@@ -23,7 +23,7 @@ use lattice_common::policy::cilium::{
     CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort,
     CiliumPortRule, DnsMatch, DnsRules, EndpointSelector, FqdnSelector,
 };
-use lattice_common::{mesh, CILIUM_LABEL_NAME, CILIUM_LABEL_NAMESPACE};
+use lattice_common::{mesh, CILIUM_LABEL_NAMESPACE};
 
 use super::PolicyCompiler;
 
@@ -39,23 +39,8 @@ impl<'a> PolicyCompiler<'a> {
         namespace: &str,
         inbound_edges: &[ActiveEdge],
         outbound_edges: &[ActiveEdge],
-        permissive_ports: &[u16],
     ) -> CiliumNetworkPolicy {
-        // Endpoint selector: custom labels or Cilium name label
-        let endpoint_labels = service
-            .selector
-            .as_ref()
-            .map(|labels| {
-                labels
-                    .iter()
-                    .map(|(k, v)| (format!("k8s:{}", k), v.clone()))
-                    .collect()
-            })
-            .unwrap_or_else(|| {
-                let mut m = BTreeMap::new();
-                m.insert(CILIUM_LABEL_NAME.to_string(), service.name.clone());
-                m
-            });
+        let endpoint_labels = service.cilium_match_labels();
 
         let mut ingress_rules = Vec::new();
 
@@ -64,20 +49,23 @@ impl<'a> PolicyCompiler<'a> {
             ingress_rules.push(Self::hbone_ingress_rule());
         }
 
-        // Direct TCP ingress for permissive ports (plaintext callers like kube-apiserver)
-        if !permissive_ports.is_empty() {
+        // Direct TCP ingress for broadly permissive ports (any source)
+        let broad_ports = service.permissive_port_numbers();
+        if !broad_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
                 from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
-                to_ports: vec![CiliumPortRule {
-                    ports: permissive_ports
-                        .iter()
-                        .map(|p| CiliumPort {
-                            port: p.to_string(),
-                            protocol: "TCP".to_string(),
-                        })
-                        .collect(),
-                    rules: None,
-                }],
+                to_ports: Self::build_tcp_port_rules(&broad_ports),
+                ..Default::default()
+            });
+        }
+
+        // Direct TCP ingress for webhook ports (kube-apiserver only)
+        let webhook_ports = service.webhook_port_numbers();
+        if !webhook_ports.is_empty() {
+            ingress_rules.push(CiliumIngressRule {
+                from_entities: vec!["kube-apiserver".to_string()],
+                to_ports: Self::build_tcp_port_rules(&webhook_ports),
+                ..Default::default()
             });
         }
 
@@ -145,21 +133,7 @@ impl<'a> PolicyCompiler<'a> {
 
         // Non-mesh egress rules from spec (entity, CIDR, FQDN)
         for rule in &service.egress_rules {
-            let to_ports = if rule.ports.is_empty() {
-                vec![]
-            } else {
-                vec![CiliumPortRule {
-                    ports: rule
-                        .ports
-                        .iter()
-                        .map(|p| CiliumPort {
-                            port: p.to_string(),
-                            protocol: "TCP".to_string(),
-                        })
-                        .collect(),
-                    rules: None,
-                }]
-            };
+            let to_ports = Self::build_tcp_port_rules(&rule.ports);
 
             match &rule.target {
                 EgressTarget::Entity(entity) => {
@@ -281,6 +255,7 @@ impl<'a> PolicyCompiler<'a> {
                 }],
                 rules: None,
             }],
+            ..Default::default()
         }
     }
 
@@ -299,21 +274,29 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
-    /// Build port rules for external service endpoints (TCP only)
-    fn build_external_port_rules(callee: &ServiceNode) -> Vec<CiliumPortRule> {
-        let ports: Vec<CiliumPort> = callee
-            .endpoints
-            .values()
-            .map(|ep| CiliumPort {
-                port: ep.port.to_string(),
-                protocol: "TCP".to_string(),
-            })
-            .collect();
-
+    /// Build a CiliumPortRule list from a slice of port numbers (TCP only).
+    ///
+    /// Returns an empty vec if no ports are given, otherwise a single rule with all ports.
+    fn build_tcp_port_rules(ports: &[u16]) -> Vec<CiliumPortRule> {
         if ports.is_empty() {
             vec![]
         } else {
-            vec![CiliumPortRule { ports, rules: None }]
+            vec![CiliumPortRule {
+                ports: ports
+                    .iter()
+                    .map(|p| CiliumPort {
+                        port: p.to_string(),
+                        protocol: "TCP".to_string(),
+                    })
+                    .collect(),
+                rules: None,
+            }]
         }
+    }
+
+    /// Build port rules for external service endpoints (TCP only)
+    fn build_external_port_rules(callee: &ServiceNode) -> Vec<CiliumPortRule> {
+        let ports: Vec<u16> = callee.endpoints.values().map(|ep| ep.port).collect();
+        Self::build_tcp_port_rules(&ports)
     }
 }

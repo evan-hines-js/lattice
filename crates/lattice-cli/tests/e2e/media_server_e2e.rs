@@ -607,7 +607,6 @@ fn is_blocked_code(code: &str) -> bool {
     code == "403"
 }
 
-
 async fn verify_bilateral_agreements(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying bilateral agreements...");
 

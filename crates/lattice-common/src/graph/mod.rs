@@ -15,8 +15,8 @@ use tracing::warn;
 
 use crate::crd::{
     EgressRule, IngressPolicySpec, LatticeExternalServiceSpec, LatticeMeshMemberSpec,
-    LatticeServicePolicy, LatticeServiceSpec, MeshMemberTarget, ParsedEndpoint, Resolution,
-    ServiceBackupSpec, ServiceSelector, VolumeParams,
+    LatticeServicePolicy, LatticeServiceSpec, MeshMemberTarget, ParsedEndpoint, PeerAuth,
+    Resolution, ServiceBackupSpec, ServiceSelector, VolumeParams,
 };
 
 /// Fully qualified service reference: (namespace, name)
@@ -42,6 +42,8 @@ pub struct PortMapping {
     pub service_port: u16,
     /// Container target port — what the pod listens on (K8s Service `.spec.ports[].targetPort`)
     pub target_port: u16,
+    /// mTLS enforcement mode for this port
+    pub peer_auth: PeerAuth,
 }
 
 /// A node in the service graph representing a service
@@ -121,6 +123,7 @@ impl ServiceNode {
                                 PortMapping {
                                     service_port: ps.port,
                                     target_port: ps.target_port.unwrap_or(ps.port),
+                                    peer_auth: PeerAuth::Strict,
                                 },
                             )
                         })
@@ -205,6 +208,7 @@ impl ServiceNode {
                     PortMapping {
                         service_port: p.port,
                         target_port: p.port, // No K8s Service indirection
+                        peer_auth: p.peer_auth,
                     },
                 )
             })
@@ -256,6 +260,56 @@ impl ServiceNode {
             allow_peer_traffic: false,
             egress_rules: vec![],
         }
+    }
+
+    /// Return port numbers by peer auth mode.
+    fn ports_with_auth(&self, mode: PeerAuth) -> Vec<u16> {
+        self.ports
+            .values()
+            .filter(|pm| pm.peer_auth == mode)
+            .map(|pm| pm.target_port)
+            .collect()
+    }
+
+    /// Port numbers that accept plaintext from any source.
+    pub fn permissive_port_numbers(&self) -> Vec<u16> {
+        self.ports_with_auth(PeerAuth::Permissive)
+    }
+
+    /// Port numbers that accept plaintext from kube-apiserver only.
+    pub fn webhook_port_numbers(&self) -> Vec<u16> {
+        self.ports_with_auth(PeerAuth::Webhook)
+    }
+
+    /// All port numbers that need permissive mTLS (PeerAuthentication PERMISSIVE).
+    pub fn all_non_strict_port_numbers(&self) -> Vec<u16> {
+        self.ports
+            .values()
+            .filter(|pm| pm.peer_auth != PeerAuth::Strict)
+            .map(|pm| pm.target_port)
+            .collect()
+    }
+
+    /// Effective match labels for Istio policies (custom selector or fallback to LABEL_NAME).
+    pub fn istio_match_labels(&self) -> BTreeMap<String, String> {
+        self.selector
+            .clone()
+            .unwrap_or_else(|| BTreeMap::from([(crate::LABEL_NAME.to_string(), self.name.clone())]))
+    }
+
+    /// Effective match labels for Cilium policies (custom selector with k8s: prefix or CILIUM_LABEL_NAME).
+    pub fn cilium_match_labels(&self) -> BTreeMap<String, String> {
+        self.selector
+            .as_ref()
+            .map(|labels| {
+                labels
+                    .iter()
+                    .map(|(k, v)| (format!("k8s:{}", k), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                BTreeMap::from([(crate::CILIUM_LABEL_NAME.to_string(), self.name.clone())])
+            })
     }
 
     /// Check if this service allows a specific caller (O(1) lookup)

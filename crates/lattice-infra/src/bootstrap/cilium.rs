@@ -340,7 +340,6 @@ pub fn generate_operator_network_policy(
             ingress: vec![
                 // Operator ports: open to all (bootstrap webhook, gRPC, proxy, auth proxy)
                 CiliumIngressRule {
-                    from_endpoints: vec![],
                     to_ports: vec![CiliumPortRule {
                         ports: vec![
                             CiliumPort {
@@ -362,6 +361,7 @@ pub fn generate_operator_network_policy(
                         ],
                         rules: None,
                     }],
+                    ..Default::default()
                 },
                 // Local secrets webhook: only ESO needs access
                 CiliumIngressRule {
@@ -376,6 +376,7 @@ pub fn generate_operator_network_policy(
                         }],
                         rules: None,
                     }],
+                    ..Default::default()
                 },
             ],
             egress: egress_rules,

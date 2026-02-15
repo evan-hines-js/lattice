@@ -84,13 +84,15 @@ pub struct MeshMemberPort {
 }
 
 /// mTLS enforcement mode per-port
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum PeerAuth {
     /// Require mTLS (default)
     #[default]
     Strict,
-    /// Allow plaintext callers (e.g., kube-apiserver webhooks)
+    /// Allow plaintext from any source
     Permissive,
+    /// Allow plaintext from kube-apiserver only (admission webhooks)
+    Webhook,
 }
 
 /// A service allowed to call this mesh member
@@ -153,6 +155,10 @@ pub struct LatticeMeshMemberStatus {
     /// Last observed generation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+    /// Hash of the graph edges used during last policy compilation.
+    /// Detects when bilateral agreements change without a spec change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_hash: Option<String>,
     /// Status conditions
     #[serde(default)]
     pub conditions: Vec<super::types::Condition>,
@@ -195,6 +201,12 @@ impl LatticeMeshMemberSpec {
             super::validate_dns_label(&port.name, "port name")?;
         }
 
+        if let MeshMemberTarget::Namespace(ref ns) = self.target {
+            if ns.is_empty() {
+                return Err("namespace target cannot be empty".to_string());
+            }
+        }
+
         if let MeshMemberTarget::Selector(ref labels) = self.target {
             if labels.is_empty() {
                 return Err("selector must have at least one label".to_string());
@@ -207,14 +219,6 @@ impl LatticeMeshMemberSpec {
         }
 
         Ok(())
-    }
-
-    /// Return ports that use permissive mTLS
-    pub fn permissive_ports(&self) -> Vec<&MeshMemberPort> {
-        self.ports
-            .iter()
-            .filter(|p| p.peer_auth == PeerAuth::Permissive)
-            .collect()
     }
 
     /// Return target labels (empty map for namespace-scoped)
@@ -311,6 +315,13 @@ mod tests {
     }
 
     #[test]
+    fn validate_empty_namespace_target_fails() {
+        let mut spec = valid_spec();
+        spec.target = MeshMemberTarget::Namespace(String::new());
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
     fn validate_namespace_target_valid() {
         let mut spec = valid_spec();
         spec.target = MeshMemberTarget::Namespace("monitoring".to_string());
@@ -336,37 +347,6 @@ mod tests {
         let name = derived_name("cnp-mesh-", &["monitoring", "prometheus"]);
         assert!(name.starts_with("cnp-mesh-"));
         assert_eq!(name.len(), "cnp-mesh-".len() + 8);
-    }
-
-    #[test]
-    fn permissive_ports_filters_correctly() {
-        let spec = LatticeMeshMemberSpec {
-            target: MeshMemberTarget::Selector(BTreeMap::from([(
-                "app".to_string(),
-                "webhook".to_string(),
-            )])),
-            ports: vec![
-                MeshMemberPort {
-                    port: 8080,
-                    name: "http".to_string(),
-                    peer_auth: PeerAuth::Strict,
-                },
-                MeshMemberPort {
-                    port: 9443,
-                    name: "webhook".to_string(),
-                    peer_auth: PeerAuth::Permissive,
-                },
-            ],
-            allowed_callers: vec![],
-            dependencies: vec![],
-            egress: vec![],
-            allow_peer_traffic: false,
-            ingress: None,
-        };
-
-        let permissive = spec.permissive_ports();
-        assert_eq!(permissive.len(), 1);
-        assert_eq!(permissive[0].port, 9443);
     }
 
     #[test]
