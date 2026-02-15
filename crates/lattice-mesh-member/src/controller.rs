@@ -159,6 +159,12 @@ pub async fn reconcile(
             ReconcileError::Validation("LatticeMeshMember missing namespace".into())
         })?;
 
+    // Skip reconciliation if spec hasn't changed since last successful reconcile
+    if is_status_current(&member) {
+        debug!("generation unchanged, skipping reconcile");
+        return Ok(Action::requeue(Duration::from_secs(60)));
+    }
+
     info!("reconciling mesh member");
 
     // Validate spec
@@ -557,6 +563,30 @@ async fn apply_waypoint(
 // =============================================================================
 // Status helpers
 // =============================================================================
+
+/// Check if the member's status already reflects the current generation.
+///
+/// Same pattern as LatticeService and CloudProvider: skip redundant patches
+/// because `Condition::new()` stamps a fresh `lastTransitionTime` on every call,
+/// making every merge patch "different" and generating a watch event that triggers
+/// another reconcile.
+fn is_status_current(member: &LatticeMeshMember) -> bool {
+    member
+        .status
+        .as_ref()
+        .and_then(|s| {
+            // Only skip if phase is Ready and observed_generation matches
+            if s.phase == MeshMemberPhase::Ready {
+                match (s.observed_generation, member.metadata.generation) {
+                    (Some(observed), Some(current)) => Some(observed == current),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false)
+}
 
 fn status_ready(scope: MeshMemberScope, generation: Option<i64>) -> LatticeMeshMemberStatus {
     LatticeMeshMemberStatus {
