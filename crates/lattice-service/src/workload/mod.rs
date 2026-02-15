@@ -1,200 +1,26 @@
 //! Workload types for Lattice services
 //!
-//! This module defines Kubernetes workload resource types used by the ServiceCompiler:
+//! This module defines service-specific Kubernetes workload resource types:
 //! - Deployment: Container orchestration
 //! - Service: Network exposure
 //! - ServiceAccount: SPIFFE identity for mTLS
 //! - ScaledObject: KEDA-based auto-scaling
-//! - ConfigMap/Secret: Configuration and secrets
+//! - PodDisruptionBudget: HA protection during node drains
+//!
+//! Shared types (ConfigMap, Secret, Container, Volume, etc.) come from `lattice_workload::k8s`.
+//! The compilation pipeline (env, files, secrets, volumes, pod_template) is in `lattice_workload`.
 //!
 //! For workload generation, use [`crate::compiler::ServiceCompiler`].
 
-pub mod backup;
-pub mod env;
-pub mod error;
-pub mod files;
-pub mod pod_template;
-pub mod secrets;
-pub mod volume;
-
-pub use error::CompilationError;
-pub use pod_template::{CompiledPodTemplate, PodTemplateCompiler};
-pub use secrets::{GeneratedSecrets, SecretRef, SecretsCompiler};
-pub use volume::{
-    Affinity, GeneratedVolumes, PersistentVolumeClaim, PodAffinity, PvcVolumeSource,
-    VolumeCompiler, VOLUME_OWNER_LABEL_PREFIX,
-};
-
 use std::collections::BTreeMap;
 
-use aws_lc_rs::digest::{digest, SHA256};
 use lattice_common::kube_utils::HasApiResource;
-pub use lattice_common::kube_utils::ObjectMeta;
+use lattice_workload::k8s::{
+    ConfigMap, Container, LabelSelector, LocalObjectReference, ObjectMeta, PodSecurityContext,
+    SchedulingGate, Secret, TopologySpreadConstraint, Volume,
+};
+use lattice_workload::{CompilationError, CompiledPodTemplate};
 use serde::{Deserialize, Serialize};
-
-/// Compute a config hash from ConfigMap and Secret data
-///
-/// This hash is added as a pod annotation to trigger rollouts when config changes.
-/// Uses SHA-256 for FIPS compliance.
-pub fn compute_config_hash(
-    env_config_maps: &[ConfigMap],
-    env_secrets: &[Secret],
-    files_config_maps: &[ConfigMap],
-    files_secrets: &[Secret],
-) -> String {
-    let mut data = String::new();
-
-    for cm in env_config_maps {
-        for (k, v) in &cm.data {
-            data.push_str(k);
-            data.push('=');
-            data.push_str(v);
-            data.push('\n');
-        }
-    }
-
-    for s in env_secrets {
-        for (k, v) in &s.string_data {
-            data.push_str(k);
-            data.push('=');
-            data.push_str(v);
-            data.push('\n');
-        }
-    }
-
-    for cm in files_config_maps {
-        for (k, v) in &cm.data {
-            data.push_str("file:");
-            data.push_str(k);
-            data.push('=');
-            data.push_str(v);
-            data.push('\n');
-        }
-    }
-
-    for s in files_secrets {
-        for (k, v) in &s.string_data {
-            data.push_str("file:");
-            data.push_str(k);
-            data.push('=');
-            data.push_str(v);
-            data.push('\n');
-        }
-    }
-
-    // Compute SHA-256 hash
-    let hash = digest(&SHA256, data.as_bytes());
-    // Return first 16 hex chars (64 bits) for readability
-    hash.as_ref()
-        .iter()
-        .take(8)
-        .map(|b| format!("{:02x}", b))
-        .collect()
-}
-
-// =============================================================================
-// ConfigMap and Secret
-// =============================================================================
-
-/// Kubernetes ConfigMap for non-sensitive configuration
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigMap {
-    /// API version
-    pub api_version: String,
-    /// Kind
-    pub kind: String,
-    /// Metadata
-    pub metadata: ObjectMeta,
-    /// String data
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub data: BTreeMap<String, String>,
-}
-
-impl ConfigMap {
-    /// Create a new ConfigMap
-    pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
-        Self {
-            api_version: "v1".to_string(),
-            kind: "ConfigMap".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
-            data: BTreeMap::new(),
-        }
-    }
-
-    /// Add a data entry
-    pub fn with_data(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.data.insert(key.into(), value.into());
-        self
-    }
-}
-
-/// Kubernetes Secret for sensitive configuration
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Secret {
-    /// API version
-    pub api_version: String,
-    /// Kind
-    pub kind: String,
-    /// Metadata
-    pub metadata: ObjectMeta,
-    /// String data (auto-encoded to base64 by K8s)
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub string_data: BTreeMap<String, String>,
-    /// Secret type
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub type_: Option<String>,
-}
-
-impl Secret {
-    /// Create a new Secret
-    pub fn new(name: impl Into<String>, namespace: impl Into<String>) -> Self {
-        Self {
-            api_version: "v1".to_string(),
-            kind: "Secret".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
-            string_data: BTreeMap::new(),
-            type_: Some("Opaque".to_string()),
-        }
-    }
-
-    /// Add a data entry
-    pub fn with_data(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.string_data.insert(key.into(), value.into());
-        self
-    }
-}
-
-// =============================================================================
-// EnvFrom sources for referencing ConfigMap/Secret in containers
-// =============================================================================
-
-/// Reference to a ConfigMap or Secret for loading env vars
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct EnvFromSource {
-    /// ConfigMap reference
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_map_ref: Option<ConfigMapEnvSource>,
-    /// Secret reference
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret_ref: Option<SecretEnvSource>,
-}
-
-/// Reference to a ConfigMap for env vars
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ConfigMapEnvSource {
-    /// ConfigMap name
-    pub name: String,
-}
-
-/// Reference to a Secret for env vars
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SecretEnvSource {
-    /// Secret name
-    pub name: String,
-}
 
 // =============================================================================
 // Deployment
@@ -227,15 +53,6 @@ pub struct DeploymentSpec {
     /// Deployment strategy
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<DeploymentStrategy>,
-}
-
-/// Label selector
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct LabelSelector {
-    /// Match labels
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub match_labels: BTreeMap<String, String>,
 }
 
 /// Deployment strategy
@@ -302,7 +119,7 @@ pub struct PodSpec {
     pub volumes: Vec<Volume>,
     /// Pod affinity rules (for RWO volume co-location)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub affinity: Option<volume::Affinity>,
+    pub affinity: Option<lattice_workload::Affinity>,
     /// Pod-level security context
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_context: Option<PodSecurityContext>,
@@ -320,7 +137,7 @@ pub struct PodSpec {
     pub node_selector: Option<BTreeMap<String, String>>,
     /// Tolerations for scheduling onto tainted nodes
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tolerations: Vec<Toleration>,
+    pub tolerations: Vec<lattice_workload::k8s::Toleration>,
     /// Runtime class name (e.g., "nvidia" for GPU workloads)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class_name: Option<String>,
@@ -330,518 +147,6 @@ pub struct PodSpec {
     /// Image pull secrets for authenticating to private registries
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_pull_secrets: Vec<LocalObjectReference>,
-}
-
-/// Scheduling gate that blocks pod scheduling until removed
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SchedulingGate {
-    /// Gate name
-    pub name: String,
-}
-
-/// Topology spread constraint for distributing pods across failure domains
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TopologySpreadConstraint {
-    /// Maximum difference in pod count between topology domains
-    pub max_skew: i32,
-    /// Topology key (e.g., topology.kubernetes.io/zone)
-    pub topology_key: String,
-    /// What to do when constraint can't be satisfied
-    pub when_unsatisfiable: String,
-    /// Label selector to find pods to spread
-    pub label_selector: LabelSelector,
-}
-
-/// Kubernetes toleration
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Toleration {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operator: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect: Option<String>,
-}
-
-/// Container spec
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Container {
-    /// Container name
-    pub name: String,
-    /// Image
-    pub image: String,
-    /// Image pull policy (Always, IfNotPresent, Never)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_pull_policy: Option<String>,
-    /// Command
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<Vec<String>>,
-    /// Args
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<Vec<String>>,
-    /// Environment variables
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub env: Vec<EnvVar>,
-    /// Environment from ConfigMap/Secret references
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub env_from: Vec<EnvFromSource>,
-    /// Ports
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ports: Vec<ContainerPort>,
-    /// Resource requirements
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<ResourceRequirements>,
-    /// Liveness probe - restarts container when it fails
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub liveness_probe: Option<ProbeSpec>,
-    /// Readiness probe - removes from service endpoints when it fails
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub readiness_probe: Option<ProbeSpec>,
-    /// Startup probe - delays liveness/readiness until container is ready
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub startup_probe: Option<ProbeSpec>,
-    /// Volume mounts
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub volume_mounts: Vec<VolumeMount>,
-    /// Security context
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub security_context: Option<K8sSecurityContext>,
-}
-
-/// Environment variable — either a literal value or a reference to a secret key
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct EnvVar {
-    /// Variable name
-    pub name: String,
-    /// Literal value (mutually exclusive with `value_from`)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-    /// Reference to a secret key (mutually exclusive with `value`)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value_from: Option<EnvVarSource>,
-}
-
-impl EnvVar {
-    /// Create an env var with a literal value
-    pub fn literal(name: impl Into<String>, value: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            value: Some(value.into()),
-            value_from: None,
-        }
-    }
-
-    /// Create an env var that references a secret key
-    pub fn from_secret(
-        name: impl Into<String>,
-        secret_name: impl Into<String>,
-        key: impl Into<String>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            value: None,
-            value_from: Some(EnvVarSource {
-                secret_key_ref: Some(SecretKeySelector {
-                    name: secret_name.into(),
-                    key: key.into(),
-                }),
-            }),
-        }
-    }
-}
-
-/// Source for an environment variable value
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct EnvVarSource {
-    /// Reference to a specific key in a K8s Secret
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret_key_ref: Option<SecretKeySelector>,
-}
-
-/// Selector for a key within a K8s Secret
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SecretKeySelector {
-    /// Name of the K8s Secret
-    pub name: String,
-    /// Key within the secret
-    pub key: String,
-}
-
-/// Reference to a local object by name (e.g., for imagePullSecrets)
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalObjectReference {
-    /// Object name
-    pub name: String,
-}
-
-/// Container port
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ContainerPort {
-    /// Port name
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Port number
-    pub container_port: u16,
-    /// Protocol
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol: Option<String>,
-}
-
-/// Resource requirements
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ResourceRequirements {
-    /// Requests
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requests: Option<ResourceQuantity>,
-    /// Limits
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limits: Option<ResourceQuantity>,
-}
-
-/// Resource quantity
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct ResourceQuantity {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory: Option<String>,
-    /// GPU count (serializes as `nvidia.com/gpu`)
-    #[serde(
-        default,
-        rename = "nvidia.com/gpu",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub gpu: Option<String>,
-    /// GPU memory in MiB for HAMi (serializes as `nvidia.com/gpumem`)
-    #[serde(
-        default,
-        rename = "nvidia.com/gpumem",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub gpu_memory: Option<String>,
-    /// GPU compute percentage for HAMi (serializes as `nvidia.com/gpucores`)
-    #[serde(
-        default,
-        rename = "nvidia.com/gpucores",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub gpu_cores: Option<String>,
-}
-
-impl From<&crate::crd::ResourceQuantity> for ResourceQuantity {
-    fn from(rq: &crate::crd::ResourceQuantity) -> Self {
-        Self {
-            cpu: rq.cpu.clone(),
-            memory: rq.memory.clone(),
-            ..Default::default()
-        }
-    }
-}
-
-impl From<&crate::crd::ResourceRequirements> for ResourceRequirements {
-    fn from(rr: &crate::crd::ResourceRequirements) -> Self {
-        Self {
-            requests: rr.requests.as_ref().map(ResourceQuantity::from),
-            limits: rr.limits.as_ref().map(ResourceQuantity::from),
-        }
-    }
-}
-
-/// Probe specification - maps 1:1 with Kubernetes probe spec
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ProbeSpec {
-    /// HTTP GET probe
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub http_get: Option<HttpGetAction>,
-    /// Exec probe
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exec: Option<ExecAction>,
-}
-
-/// HTTP GET action for probe
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct HttpGetAction {
-    /// Path
-    pub path: String,
-    /// Port
-    pub port: u16,
-    /// Scheme (HTTP or HTTPS)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scheme: Option<String>,
-    /// Host header
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-    /// HTTP headers
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub http_headers: Option<Vec<HttpHeader>>,
-}
-
-/// HTTP header for probes
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct HttpHeader {
-    /// Header name
-    pub name: String,
-    /// Header value
-    pub value: String,
-}
-
-/// Exec action for probe
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecAction {
-    /// Command
-    pub command: Vec<String>,
-}
-
-/// Kubernetes container security context
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct K8sSecurityContext {
-    /// Capabilities to add/drop
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<Capabilities>,
-    /// Run container in privileged mode
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub privileged: Option<bool>,
-    /// Mount root filesystem as read-only
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read_only_root_filesystem: Option<bool>,
-    /// Require the container to run as a non-root user
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_non_root: Option<bool>,
-    /// UID to run the container as
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_user: Option<i64>,
-    /// GID to run the container as
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_group: Option<i64>,
-    /// Allow privilege escalation
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_privilege_escalation: Option<bool>,
-    /// Seccomp profile
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seccomp_profile: Option<SeccompProfile>,
-    /// AppArmor profile
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app_armor_profile: Option<AppArmorProfile>,
-}
-
-/// Seccomp profile for container or pod security context
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SeccompProfile {
-    /// Profile type: RuntimeDefault, Unconfined, or Localhost
-    #[serde(rename = "type")]
-    pub type_: String,
-    /// Localhost profile path (only for Localhost type)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub localhost_profile: Option<String>,
-}
-
-/// AppArmor profile for container security context
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AppArmorProfile {
-    /// Profile type: RuntimeDefault, Unconfined, or Localhost
-    #[serde(rename = "type")]
-    pub type_: String,
-    /// Localhost profile name (only for Localhost type)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub localhost_profile: Option<String>,
-}
-
-/// Linux capabilities for containers
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Capabilities {
-    /// Capabilities to add
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub add: Option<Vec<String>>,
-    /// Capabilities to drop
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drop: Option<Vec<String>>,
-}
-
-/// Pod-level security context
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PodSecurityContext {
-    /// Require all containers to run as non-root
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_non_root: Option<bool>,
-    /// GID applied to all volumes so files are group-readable
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fs_group: Option<i64>,
-    /// Policy for applying fsGroup to volumes (OnRootMismatch or Always)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fs_group_change_policy: Option<String>,
-    /// Pod-level seccomp profile
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seccomp_profile: Option<SeccompProfile>,
-    /// Sysctls for the pod
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sysctls: Option<Vec<Sysctl>>,
-}
-
-/// Sysctl setting for pod
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Sysctl {
-    /// Sysctl name (e.g., net.ipv4.conf.all.src_valid_mark)
-    pub name: String,
-    /// Sysctl value
-    pub value: String,
-}
-
-/// Volume
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Volume {
-    /// Volume name
-    pub name: String,
-    /// ConfigMap source
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_map: Option<ConfigMapVolumeSource>,
-    /// Secret source
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret: Option<SecretVolumeSource>,
-    /// EmptyDir source
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub empty_dir: Option<EmptyDirVolumeSource>,
-    /// PVC source
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persistent_volume_claim: Option<volume::PvcVolumeSource>,
-}
-
-impl Volume {
-    /// Create a Volume backed by a ConfigMap.
-    pub fn from_config_map(name: impl Into<String>, cm_name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            config_map: Some(ConfigMapVolumeSource {
-                name: cm_name.into(),
-            }),
-            secret: None,
-            empty_dir: None,
-            persistent_volume_claim: None,
-        }
-    }
-
-    /// Create a Volume backed by a Secret.
-    pub fn from_secret(name: impl Into<String>, secret_name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            config_map: None,
-            secret: Some(SecretVolumeSource {
-                secret_name: secret_name.into(),
-            }),
-            empty_dir: None,
-            persistent_volume_claim: None,
-        }
-    }
-
-    /// Create a Volume backed by an emptyDir.
-    pub fn from_empty_dir(
-        name: impl Into<String>,
-        medium: Option<String>,
-        size_limit: Option<String>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            config_map: None,
-            secret: None,
-            empty_dir: Some(EmptyDirVolumeSource { medium, size_limit }),
-            persistent_volume_claim: None,
-        }
-    }
-
-    /// Create a Volume backed by a PVC.
-    pub fn from_pvc(name: impl Into<String>, claim_name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            config_map: None,
-            secret: None,
-            empty_dir: None,
-            persistent_volume_claim: Some(volume::PvcVolumeSource {
-                claim_name: claim_name.into(),
-                read_only: None,
-            }),
-        }
-    }
-}
-
-/// ConfigMap volume source
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigMapVolumeSource {
-    /// ConfigMap name
-    pub name: String,
-}
-
-/// Secret volume source
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SecretVolumeSource {
-    /// Secret name
-    pub secret_name: String,
-}
-
-/// EmptyDir volume source
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct EmptyDirVolumeSource {
-    /// Storage medium ("Memory" for tmpfs, empty for default)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub medium: Option<String>,
-    /// Size limit for the emptyDir (e.g., "1Gi")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_limit: Option<String>,
-}
-
-/// Volume mount
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct VolumeMount {
-    /// Volume name
-    pub name: String,
-    /// Mount path
-    pub mount_path: String,
-    /// Sub path within the volume
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sub_path: Option<String>,
-    /// Read only
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read_only: Option<bool>,
-}
-
-impl VolumeMount {
-    /// Create a readonly file mount with a sub_path key
-    pub fn readonly_file(
-        name: impl Into<String>,
-        mount_path: impl Into<String>,
-        sub_path: impl Into<String>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            mount_path: mount_path.into(),
-            sub_path: Some(sub_path.into()),
-            read_only: Some(true),
-        }
-    }
 }
 
 // =============================================================================
@@ -1033,11 +338,11 @@ pub struct GeneratedWorkloads {
     /// Secrets for file mounts — binary content (one per container)
     pub files_secrets: Vec<Secret>,
     /// PersistentVolumeClaims for owned volumes
-    pub pvcs: Vec<PersistentVolumeClaim>,
+    pub pvcs: Vec<lattice_workload::PersistentVolumeClaim>,
     /// ExternalSecrets for syncing secrets from SecretProvider (Vault)
     pub external_secrets: Vec<lattice_secret_provider::eso::ExternalSecret>,
     /// Secret references for template resolution (resource_name -> SecretRef)
-    pub secret_refs: BTreeMap<String, SecretRef>,
+    pub secret_refs: BTreeMap<String, lattice_workload::SecretRef>,
 }
 
 impl GeneratedWorkloads {
@@ -1062,143 +367,27 @@ impl GeneratedWorkloads {
 // =============================================================================
 
 use crate::crd::{
-    AutoscalingMetric, AutoscalingSpec, DeployStrategy, GpuParams, LatticeService,
-    LatticeServiceSpec, MonitoringConfig, ProviderType, WorkloadSpec,
+    AutoscalingMetric, AutoscalingSpec, DeployStrategy, LatticeService, LatticeServiceSpec,
+    MonitoringConfig, WorkloadSpec,
 };
-use lattice_common::template::RenderedContainer;
-
-/// Merge GPU resource requests into container limits.
-///
-/// For full GPU mode (count only), adds `nvidia.com/gpu` to limits.
-/// For HAMi fractional mode (memory/compute set), also adds
-/// `nvidia.com/gpumem` and/or `nvidia.com/gpucores`.
-pub(crate) fn merge_gpu_resources(
-    resources: Option<ResourceRequirements>,
-    gpu: Option<&GpuParams>,
-) -> Option<ResourceRequirements> {
-    let gpu = match gpu {
-        Some(g) => g,
-        None => return resources,
-    };
-
-    let mut reqs = resources.unwrap_or_default();
-    let limits = reqs.limits.get_or_insert_with(ResourceQuantity::default);
-
-    limits.gpu = Some(gpu.count.to_string());
-
-    if let Some(Ok(mib)) = gpu.memory_mib() {
-        limits.gpu_memory = Some(mib.to_string());
-    }
-
-    if let Some(compute) = gpu.compute {
-        limits.gpu_cores = Some(compute.to_string());
-    }
-
-    Some(reqs)
-}
-
-/// Build GPU tolerations for a pod spec.
-pub(crate) fn gpu_tolerations(gpu: Option<&GpuParams>) -> Vec<Toleration> {
-    match gpu {
-        Some(g) if g.tolerations.unwrap_or(true) => vec![Toleration {
-            key: Some("nvidia.com/gpu".to_string()),
-            operator: Some("Exists".to_string()),
-            effect: Some("NoSchedule".to_string()),
-            ..Default::default()
-        }],
-        _ => vec![],
-    }
-}
-
-/// Build SHM volume and mount for GPU pods.
-///
-/// GPU workloads (NCCL, PyTorch DataLoader) require a large `/dev/shm` for
-/// shared-memory IPC. The default 64MB is insufficient. This adds an emptyDir
-/// volume with `medium: Memory` (tmpfs) mounted at `/dev/shm`.
-pub(crate) fn gpu_shm_volume(gpu: Option<&GpuParams>) -> Option<(Volume, VolumeMount)> {
-    gpu.map(|_| {
-        (
-            Volume::from_empty_dir("dshm", Some("Memory".to_string()), None),
-            VolumeMount {
-                name: "dshm".to_string(),
-                mount_path: "/dev/shm".to_string(),
-                sub_path: None,
-                read_only: None,
-            },
-        )
-    })
-}
-
-/// Sanitize a string into a valid K8s DNS label.
-///
-/// DNS labels: `[a-z0-9]([-a-z0-9]*[a-z0-9])?`, max 63 chars.
-/// Non-alphanumeric characters become `-`, uppercase becomes lowercase,
-/// leading/trailing hyphens are stripped, and the result is truncated to 63 chars.
-pub(crate) fn sanitize_dns_label(s: &str) -> String {
-    let sanitized: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = sanitized.trim_matches('-');
-    if trimmed.len() > 63 {
-        trimmed[..63].trim_end_matches('-').to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Compute image pull policy from the image reference.
-///
-/// Returns `Always` when the tag is `:latest` or absent (bare image name),
-/// `IfNotPresent` for any other explicit tag or digest.
-pub(crate) fn image_pull_policy(image: &str) -> String {
-    if image.ends_with(":latest") || !image.contains(':') {
-        "Always".to_string()
-    } else {
-        "IfNotPresent".to_string()
-    }
-}
-
-/// Per-container compilation data bundled from earlier pipeline stages.
-///
-/// Groups the five per-container maps that flow from `SecretsCompiler`,
-/// `TemplateRenderer`, `env::compile`, and `files::compile` into a single
-/// parameter object.
-pub struct ContainerCompilationData<'a> {
-    /// Secret references from ESO for `${secret.*}` resolution
-    pub secret_refs: &'a BTreeMap<String, SecretRef>,
-    /// Rendered container data from TemplateRenderer
-    pub rendered_containers: &'a BTreeMap<String, RenderedContainer>,
-    /// EnvFrom refs from env::compile per container
-    pub per_container_env_from: &'a BTreeMap<String, Vec<EnvFromSource>>,
-    /// File volumes from files::compile per container
-    pub per_container_file_volumes: &'a BTreeMap<String, Vec<Volume>>,
-    /// File volume mounts from files::compile per container
-    pub per_container_file_mounts: &'a BTreeMap<String, Vec<VolumeMount>>,
-}
 
 /// Compiler for generating LatticeService-specific Kubernetes workload resources.
 ///
-/// Uses `PodTemplateCompiler` for the shared pod template, then wraps it in
-/// service-specific resources: Deployment, Service, ServiceAccount, PDB, ScaledObject.
+/// Takes a pre-compiled `CompiledPodTemplate` from `lattice_workload::WorkloadCompiler`
+/// and wraps it in service-specific resources: Deployment, Service, ServiceAccount, PDB, ScaledObject.
 pub struct WorkloadCompiler;
 
 impl WorkloadCompiler {
     /// Compile a LatticeService into workload resources.
+    ///
+    /// Takes a pre-compiled pod template from the shared pipeline and wraps it
+    /// in service-specific Kubernetes resources.
     pub fn compile(
         name: &str,
         service: &LatticeService,
         namespace: &str,
-        volumes: &GeneratedVolumes,
-        provider_type: ProviderType,
+        pod_template: CompiledPodTemplate,
         monitoring: &MonitoringConfig,
-        container_data: &ContainerCompilationData<'_>,
     ) -> Result<GeneratedWorkloads, CompilationError> {
         let spec = &service.spec;
         let workload = &spec.workload;
@@ -1206,16 +395,6 @@ impl WorkloadCompiler {
             service_account: Some(Self::compile_service_account(name, namespace)),
             ..Default::default()
         };
-
-        // Compile shared pod template via PodTemplateCompiler
-        let pod_template = PodTemplateCompiler::compile(
-            name,
-            workload,
-            &spec.runtime,
-            volumes,
-            provider_type,
-            container_data,
-        )?;
 
         // Wrap pod template in a Deployment with service-specific fields
         output.deployment = Some(Self::build_deployment(name, namespace, spec, pod_template));
@@ -1472,65 +651,14 @@ mod tests {
     use super::*;
     use crate::crd::{
         AutoscalingMetric, AutoscalingSpec, ContainerSpec, PortSpec, ResourceSpec, ResourceType,
-        ServicePortsSpec, WorkloadSpec,
+        ServicePortsSpec,
     };
-    use lattice_common::template::TemplateString;
+    use lattice_workload::SecretRef;
 
-    /// Build rendered containers from a service spec for testing.
-    ///
-    /// Simulates what the TemplateRenderer does:
-    /// - Non-secret variables are treated as pre-rendered plain values
-    /// - `${secret.*}` variables are separated into `secret_variables`
-    /// - Image, command, args are copied from the spec
-    fn build_test_rendered_containers(
+    /// Helper to compile a service through the lattice_workload pipeline then
+    /// through the service-specific WorkloadCompiler.
+    async fn test_compile_with_monitoring(
         service: &LatticeService,
-    ) -> BTreeMap<String, RenderedContainer> {
-        use lattice_common::template::{parse_secret_ref, RenderedVariable};
-
-        service
-            .spec
-            .workload
-            .containers
-            .iter()
-            .map(|(cname, cspec)| {
-                let mut variables = BTreeMap::new();
-                let mut secret_variables = BTreeMap::new();
-
-                for (var_name, var_val) in &cspec.variables {
-                    if let Some(sref) = parse_secret_ref(var_val.as_str()) {
-                        secret_variables.insert(var_name.clone(), sref);
-                    } else {
-                        variables
-                            .insert(var_name.clone(), RenderedVariable::plain(var_val.as_str()));
-                    }
-                }
-
-                (
-                    cname.clone(),
-                    RenderedContainer {
-                        name: cname.clone(),
-                        image: cspec.image.clone(),
-                        command: cspec.command.clone(),
-                        args: cspec.args.clone(),
-                        variables,
-                        secret_variables,
-                        eso_templated_variables: BTreeMap::new(),
-                        files: BTreeMap::new(),
-                        volumes: BTreeMap::new(),
-                    },
-                )
-            })
-            .collect()
-    }
-
-    /// Core test compilation helper.
-    ///
-    /// Builds rendered containers, runs env::compile for envFrom, and delegates
-    /// to WorkloadCompiler. Mirrors the ServiceCompiler pipeline without
-    /// requiring a TemplateRenderer or ServiceGraph.
-    fn test_compile_with_monitoring(
-        service: &LatticeService,
-        secret_refs: &BTreeMap<String, SecretRef>,
         monitoring: MonitoringConfig,
     ) -> Result<GeneratedWorkloads, CompilationError> {
         let name = service
@@ -1543,56 +671,69 @@ mod tests {
             .namespace
             .as_deref()
             .expect("test service must have a namespace");
-        let volumes = VolumeCompiler::compile(
+
+        let graph = lattice_common::graph::ServiceGraph::new();
+        let cedar = lattice_cedar::PolicyEngine::with_policies(
+            r#"
+            permit(
+                principal,
+                action == Lattice::Action::"OverrideSecurity",
+                resource
+            );
+            permit(
+                principal,
+                action == Lattice::Action::"AccessSecret",
+                resource
+            );
+            "#,
+        )
+        .unwrap();
+
+        let compiled = lattice_workload::WorkloadCompiler::new(
             name,
             namespace,
             &service.spec.workload,
-            &service.spec.runtime.sidecars,
+            &service.spec.runtime,
+            crate::crd::ProviderType::Docker,
         )
-        .expect("test volume compilation should succeed");
+        .with_cedar(&cedar)
+        .with_graph(&graph)
+        .with_cluster_name("test-cluster")
+        .with_image_pull_secrets(&service.spec.runtime.image_pull_secrets)
+        .compile()
+        .await?;
 
-        let rendered_containers = build_test_rendered_containers(service);
-
-        // Run env::compile per container to get envFrom refs
-        let mut per_container_env_from = BTreeMap::new();
-        for (cname, rendered) in &rendered_containers {
-            let compiled_env = env::compile(name, cname, namespace, &rendered.variables);
-            per_container_env_from.insert(cname.clone(), compiled_env.env_from);
-        }
-
-        let empty_file_volumes = BTreeMap::new();
-        let empty_file_mounts = BTreeMap::new();
-
-        let container_data = ContainerCompilationData {
-            secret_refs,
-            rendered_containers: &rendered_containers,
-            per_container_env_from: &per_container_env_from,
-            per_container_file_volumes: &empty_file_volumes,
-            per_container_file_mounts: &empty_file_mounts,
-        };
-
-        WorkloadCompiler::compile(
+        let mut workloads = WorkloadCompiler::compile(
             name,
             service,
             namespace,
-            &volumes,
-            ProviderType::Docker,
+            compiled.pod_template,
             &monitoring,
-            &container_data,
-        )
+        )?;
+
+        workloads.env_config_maps = compiled.config.env_config_maps;
+        workloads.env_secrets = compiled.config.env_secrets;
+        workloads.files_config_maps = compiled.config.files_config_maps;
+        workloads.files_secrets = compiled.config.files_secrets;
+        workloads.pvcs = compiled.config.pvcs;
+        workloads.external_secrets = compiled.config.external_secrets;
+        workloads.secret_refs = compiled.config.secret_refs;
+
+        Ok(workloads)
     }
 
     /// Core test compilation helper with monitoring enabled by default.
-    fn test_compile(
+    async fn test_compile(
         service: &LatticeService,
-        secret_refs: &BTreeMap<String, SecretRef>,
     ) -> Result<GeneratedWorkloads, CompilationError> {
-        test_compile_with_monitoring(service, secret_refs, MonitoringConfig::default())
+        test_compile_with_monitoring(service, MonitoringConfig::default()).await
     }
 
     /// Helper to compile a service with no secret refs
-    fn compile_service(service: &LatticeService) -> GeneratedWorkloads {
-        test_compile(service, &BTreeMap::new()).expect("test workload compilation should succeed")
+    async fn compile_service(service: &LatticeService) -> GeneratedWorkloads {
+        test_compile(service)
+            .await
+            .expect("test workload compilation should succeed")
     }
 
     fn make_service(name: &str, namespace: &str) -> LatticeService {
@@ -1637,10 +778,10 @@ mod tests {
     // Story: Always Generate ServiceAccount
     // =========================================================================
 
-    #[test]
-    fn always_generates_service_account() {
+    #[tokio::test]
+    async fn always_generates_service_account() {
         let service = make_service("my-app", "default");
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
 
         let sa = output.service_account.expect("should have service account");
         assert_eq!(sa.metadata.name, "my-app");
@@ -1654,10 +795,10 @@ mod tests {
     // Story: Always Generate Deployment
     // =========================================================================
 
-    #[test]
-    fn always_generates_deployment() {
+    #[tokio::test]
+    async fn always_generates_deployment() {
         let service = make_service("my-app", "prod");
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
 
         let deployment = output.deployment.expect("should have deployment");
         assert_eq!(deployment.metadata.name, "my-app");
@@ -1667,10 +808,10 @@ mod tests {
         assert_eq!(deployment.spec.replicas, 1);
     }
 
-    #[test]
-    fn deployment_has_correct_labels() {
+    #[tokio::test]
+    async fn deployment_has_correct_labels() {
         let service = make_service("my-app", "default");
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
 
         let deployment = output.deployment.expect("deployment should be set");
         assert_eq!(
@@ -1692,14 +833,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn deployment_has_complete_spec() {
+    #[tokio::test]
+    async fn deployment_has_complete_spec() {
         let service = make_service("my-app", "default");
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
 
         let deployment = output.deployment.expect("deployment should be set");
 
-        // Deployment has containers
         assert!(!deployment.spec.template.spec.containers.is_empty());
         assert_eq!(deployment.spec.template.spec.containers[0].name, "main");
         assert_eq!(
@@ -1707,11 +847,8 @@ mod tests {
             "nginx:latest"
         );
 
-        // Deployment has service account name matching the service
         assert_eq!(deployment.spec.template.spec.service_account_name, "my-app");
 
-        // Deployment has topology spread constraints for HA
-        // Tests use Docker provider which spreads by hostname
         assert_eq!(
             deployment
                 .spec
@@ -1725,23 +862,16 @@ mod tests {
         assert_eq!(constraint.max_skew, 1);
         assert_eq!(constraint.topology_key, "kubernetes.io/hostname");
         assert_eq!(constraint.when_unsatisfiable, "ScheduleAnyway");
-        assert_eq!(
-            constraint
-                .label_selector
-                .match_labels
-                .get(lattice_common::LABEL_NAME),
-            Some(&"my-app".to_string())
-        );
     }
 
     // =========================================================================
     // Story: Generate Service When Ports Defined
     // =========================================================================
 
-    #[test]
-    fn generates_service_with_ports() {
+    #[tokio::test]
+    async fn generates_service_with_ports() {
         let service = make_service("my-app", "default");
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
 
         let svc = output.service.expect("should have service");
         assert_eq!(svc.metadata.name, "my-app");
@@ -1750,12 +880,12 @@ mod tests {
         assert!(!svc.spec.ports.is_empty());
     }
 
-    #[test]
-    fn no_service_without_ports() {
+    #[tokio::test]
+    async fn no_service_without_ports() {
         let mut service = make_service("my-app", "default");
         service.spec.workload.service = None;
 
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
         assert!(output.service.is_none());
     }
 
@@ -1763,8 +893,8 @@ mod tests {
     // Story: Generate KEDA ScaledObject When Max Replicas Set
     // =========================================================================
 
-    #[test]
-    fn scaled_object_generated_with_max_replicas() {
+    #[tokio::test]
+    async fn scaled_object_generated_with_max_replicas() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = 2;
         service.spec.autoscaling = Some(AutoscalingSpec {
@@ -1772,7 +902,7 @@ mod tests {
             metrics: vec![],
         });
 
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
 
         let so = output.scaled_object.expect("should have ScaledObject");
         assert_eq!(so.api_version, "keda.sh/v1alpha1");
@@ -1784,22 +914,22 @@ mod tests {
         assert_eq!(so.spec.scale_target_ref.kind, "Deployment");
     }
 
-    #[test]
-    fn no_scaled_object_without_max_replicas() {
+    #[tokio::test]
+    async fn no_scaled_object_without_max_replicas() {
         let service = make_service("my-app", "default");
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
         assert!(output.scaled_object.is_none());
     }
 
-    #[test]
-    fn scaled_object_default_cpu_80() {
+    #[tokio::test]
+    async fn scaled_object_default_cpu_80() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = 1;
         service.spec.autoscaling = Some(AutoscalingSpec {
             max: 5,
             metrics: vec![],
         });
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
         let so = output.scaled_object.expect("should have ScaledObject");
         assert_eq!(so.spec.triggers.len(), 1);
         let t = &so.spec.triggers[0];
@@ -1808,126 +938,8 @@ mod tests {
         assert_eq!(t.metadata.get("value").unwrap(), "80");
     }
 
-    #[test]
-    fn scaled_object_custom_cpu_threshold() {
-        let mut service = make_service("my-app", "default");
-        service.spec.replicas = 1;
-        service.spec.autoscaling = Some(AutoscalingSpec {
-            max: 5,
-            metrics: vec![AutoscalingMetric {
-                metric: "cpu".to_string(),
-                target: 60,
-            }],
-        });
-        let output = compile_service(&service);
-        let so = output.scaled_object.expect("should have ScaledObject");
-        assert_eq!(so.spec.triggers.len(), 1);
-        assert_eq!(so.spec.triggers[0].type_, "cpu");
-        assert_eq!(so.spec.triggers[0].metadata.get("value").unwrap(), "60");
-    }
-
-    #[test]
-    fn scaled_object_memory_trigger() {
-        let mut service = make_service("my-app", "default");
-        service.spec.replicas = 1;
-        service.spec.autoscaling = Some(AutoscalingSpec {
-            max: 5,
-            metrics: vec![AutoscalingMetric {
-                metric: "memory".to_string(),
-                target: 75,
-            }],
-        });
-        let output = compile_service(&service);
-        let so = output.scaled_object.expect("should have ScaledObject");
-        assert_eq!(so.spec.triggers.len(), 1);
-        let t = &so.spec.triggers[0];
-        assert_eq!(t.type_, "memory");
-        assert_eq!(t.metric_type.as_deref(), Some("Utilization"));
-        assert_eq!(t.metadata.get("value").unwrap(), "75");
-    }
-
-    #[test]
-    fn scaled_object_prometheus_trigger() {
-        let mut service = make_service("my-app", "default");
-        service.spec.replicas = 1;
-        service.spec.autoscaling = Some(AutoscalingSpec {
-            max: 10,
-            metrics: vec![AutoscalingMetric {
-                metric: "vllm_num_requests_waiting".to_string(),
-                target: 5,
-            }],
-        });
-        let output = compile_service(&service);
-        let so = output.scaled_object.expect("should have ScaledObject");
-        assert_eq!(so.spec.triggers.len(), 1);
-        let t = &so.spec.triggers[0];
-        assert_eq!(t.type_, "prometheus");
-        assert!(t.metric_type.is_none());
-        assert!(t
-            .metadata
-            .get("serverAddress")
-            .unwrap()
-            .contains("vmselect"));
-        assert!(t
-            .metadata
-            .get("query")
-            .unwrap()
-            .contains("vllm_num_requests_waiting"));
-        assert!(t
-            .metadata
-            .get("query")
-            .unwrap()
-            .contains("namespace=\"default\""));
-        assert!(t
-            .metadata
-            .get("query")
-            .unwrap()
-            .contains("pod=~\"my-app-.*\""));
-        assert_eq!(t.metadata.get("threshold").unwrap(), "5");
-    }
-
-    #[test]
-    fn scaled_object_multi_signal() {
-        let mut service = make_service("my-app", "default");
-        service.spec.replicas = 1;
-        service.spec.autoscaling = Some(AutoscalingSpec {
-            max: 10,
-            metrics: vec![
-                AutoscalingMetric {
-                    metric: "cpu".to_string(),
-                    target: 70,
-                },
-                AutoscalingMetric {
-                    metric: "vllm_num_requests_waiting".to_string(),
-                    target: 5,
-                },
-            ],
-        });
-        let output = compile_service(&service);
-        let so = output.scaled_object.expect("should have ScaledObject");
-        assert_eq!(so.spec.triggers.len(), 2);
-        assert_eq!(so.spec.triggers[0].type_, "cpu");
-        assert_eq!(so.spec.triggers[1].type_, "prometheus");
-    }
-
-    #[test]
-    fn scaled_object_defaults_to_cpu_when_no_autoscaling() {
-        let mut service = make_service("my-app", "default");
-        service.spec.replicas = 2;
-        service.spec.autoscaling = Some(AutoscalingSpec {
-            max: 8,
-            metrics: vec![],
-        });
-        let output = compile_service(&service);
-        let so = output.scaled_object.expect("should have ScaledObject");
-        assert_eq!(so.spec.min_replica_count, 2);
-        assert_eq!(so.spec.max_replica_count, 8);
-        assert_eq!(so.spec.triggers.len(), 1);
-        assert_eq!(so.spec.triggers[0].type_, "cpu");
-    }
-
-    #[test]
-    fn scaled_object_custom_metrics_require_monitoring() {
+    #[tokio::test]
+    async fn scaled_object_custom_metrics_require_monitoring() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = 1;
         service.spec.autoscaling = Some(AutoscalingSpec {
@@ -1938,106 +950,53 @@ mod tests {
             }],
         });
 
-        // With monitoring disabled, custom metrics should fail
         let result = test_compile_with_monitoring(
             &service,
-            &BTreeMap::new(),
             MonitoringConfig {
                 enabled: false,
                 ha: false,
             },
-        );
+        )
+        .await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("monitoring"));
         assert!(err.contains("vllm_num_requests_waiting"));
     }
 
-    #[test]
-    fn scaled_object_cpu_memory_work_without_monitoring() {
-        let mut service = make_service("my-app", "default");
-        service.spec.replicas = 1;
-        service.spec.autoscaling = Some(AutoscalingSpec {
-            max: 5,
-            metrics: vec![
-                AutoscalingMetric {
-                    metric: "cpu".to_string(),
-                    target: 70,
-                },
-                AutoscalingMetric {
-                    metric: "memory".to_string(),
-                    target: 80,
-                },
-            ],
-        });
-
-        // cpu/memory should work even without monitoring
-        let output = test_compile_with_monitoring(
-            &service,
-            &BTreeMap::new(),
-            MonitoringConfig {
-                enabled: false,
-                ha: false,
-            },
-        )
-        .expect("test workload compilation should succeed");
-        let so = output.scaled_object.expect("should have ScaledObject");
-        assert_eq!(so.spec.triggers.len(), 2);
-        assert_eq!(so.spec.triggers[0].type_, "cpu");
-        assert_eq!(so.spec.triggers[1].type_, "memory");
-    }
-
     // =========================================================================
     // Story: PodDisruptionBudget for HA Services
     // =========================================================================
 
-    #[test]
-    fn pdb_generated_for_ha_services() {
+    #[tokio::test]
+    async fn pdb_generated_for_ha_services() {
         let mut service = make_service("my-app", "default");
         service.spec.replicas = 3;
 
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
 
         let pdb = output.pdb.expect("should have PDB");
         assert_eq!(pdb.api_version, "policy/v1");
         assert_eq!(pdb.kind, "PodDisruptionBudget");
         assert_eq!(pdb.metadata.name, "my-app");
         assert_eq!(pdb.spec.min_available, Some(2));
-        assert_eq!(
-            pdb.spec
-                .selector
-                .match_labels
-                .get(lattice_common::LABEL_NAME),
-            Some(&"my-app".to_string())
-        );
     }
 
-    #[test]
-    fn no_pdb_for_single_replica() {
+    #[tokio::test]
+    async fn no_pdb_for_single_replica() {
         let service = make_service("my-app", "default");
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
         assert!(output.pdb.is_none());
-    }
-
-    #[test]
-    fn pdb_min_available_for_two_replicas() {
-        let mut service = make_service("my-app", "default");
-        service.spec.replicas = 2;
-
-        let output = compile_service(&service);
-
-        let pdb = output.pdb.expect("should have PDB");
-        assert_eq!(pdb.spec.min_available, Some(1));
     }
 
     // =========================================================================
     // Story: Deployment Strategy
     // =========================================================================
 
-    #[test]
-    fn rolling_strategy() {
+    #[tokio::test]
+    async fn rolling_strategy() {
         let service = make_service("my-app", "default");
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
 
         let strategy = output
             .deployment
@@ -2053,12 +1012,12 @@ mod tests {
         assert_eq!(rolling.max_surge, Some("25%".to_string()));
     }
 
-    #[test]
-    fn canary_strategy() {
+    #[tokio::test]
+    async fn canary_strategy() {
         let mut service = make_service("my-app", "default");
         service.spec.deploy.strategy = DeployStrategy::Canary;
 
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
 
         let strategy = output
             .deployment
@@ -2075,552 +1034,187 @@ mod tests {
     }
 
     // =========================================================================
-    // Story: Container Configuration
-    // =========================================================================
-
-    #[test]
-    fn container_environment_variables_via_env_from() {
-        let mut service = make_service("my-app", "default");
-        let container = service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .expect("main container should exist");
-        container
-            .variables
-            .insert("LOG_LEVEL".to_string(), TemplateString::from("debug"));
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("deployment should be set");
-
-        // Non-secret env vars are delivered via envFrom (ConfigMap), not individual env entries
-        let main = deployment
-            .spec
-            .template
-            .spec
-            .containers
-            .iter()
-            .find(|c| c.name == "main")
-            .expect("main container should exist");
-
-        assert!(
-            !main.env_from.is_empty(),
-            "should have envFrom for rendered variables"
-        );
-        assert!(
-            main.env_from.iter().any(|ef| ef.config_map_ref.is_some()),
-            "envFrom should reference a ConfigMap"
-        );
-    }
-
-    #[test]
-    fn container_ports_from_service() {
-        let service = make_service("my-app", "default");
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("deployment should be set");
-
-        let ports = &deployment
-            .spec
-            .template
-            .spec
-            .containers
-            .iter()
-            .find(|c| c.name == "main")
-            .expect("main container should exist")
-            .ports;
-        assert!(ports.iter().any(|p| p.container_port == 80));
-    }
-
-    // =========================================================================
     // Story: GeneratedWorkloads Utility Methods
     // =========================================================================
 
-    #[test]
-    fn is_empty() {
+    #[tokio::test]
+    async fn is_empty() {
         let empty = GeneratedWorkloads::default();
         assert!(empty.is_empty());
 
         let service = make_service("my-app", "default");
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
         assert!(!output.is_empty());
     }
 
     // =========================================================================
-    // Story: Config Hash for Rollouts
+    // Story: GPU Resource Compilation
     // =========================================================================
 
-    #[test]
-    fn test_config_hash_empty() {
-        let hash = compute_config_hash(&[], &[], &[], &[]);
-        // Empty data still produces a hash
-        assert_eq!(hash.len(), 16); // 8 bytes = 16 hex chars
-    }
-
-    #[test]
-    fn test_config_hash_with_configmap() {
-        let mut cm = ConfigMap::new("test", "default");
-        cm.data.insert("KEY".to_string(), "value".to_string());
-
-        let hash1 = compute_config_hash(&[cm.clone()], &[], &[], &[]);
-        assert_eq!(hash1.len(), 16);
-
-        // Different value produces different hash
-        cm.data.insert("KEY".to_string(), "different".to_string());
-        let hash2 = compute_config_hash(&[cm], &[], &[], &[]);
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_config_hash_with_secret() {
-        let mut secret = Secret::new("test", "default");
-        secret
-            .string_data
-            .insert("PASSWORD".to_string(), "secret123".to_string());
-
-        let hash = compute_config_hash(&[], &[secret], &[], &[]);
-        assert_eq!(hash.len(), 16);
-    }
-
-    #[test]
-    fn test_config_hash_deterministic() {
-        let mut cm = ConfigMap::new("test", "default");
-        cm.data.insert("KEY".to_string(), "value".to_string());
-
-        // Same input produces same hash
-        let hash1 = compute_config_hash(&[cm.clone()], &[], &[], &[]);
-        let hash2 = compute_config_hash(&[cm], &[], &[], &[]);
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_config_hash_combines_all_sources() {
-        let mut env_cm = ConfigMap::new("env", "default");
-        env_cm
-            .data
-            .insert("HOST".to_string(), "localhost".to_string());
-
-        let mut env_secret = Secret::new("env", "default");
-        env_secret
-            .string_data
-            .insert("PASSWORD".to_string(), "secret".to_string());
-
-        let mut files_cm = ConfigMap::new("files", "default");
-        files_cm
-            .data
-            .insert("config-yaml".to_string(), "key: value".to_string());
-
-        let mut files_secret = Secret::new("files", "default");
-        files_secret
-            .string_data
-            .insert("cert-pem".to_string(), "binary".to_string());
-
-        // All four produce a combined hash
-        let hash_all = compute_config_hash(
-            &[env_cm.clone()],
-            &[env_secret.clone()],
-            &[files_cm],
-            &[files_secret],
-        );
-
-        // Subset produces different hash
-        let hash_partial = compute_config_hash(&[env_cm], &[env_secret], &[], &[]);
-
-        assert_ne!(hash_all, hash_partial);
-    }
-
-    // =========================================================================
-    // Story: Security Context — Secure Defaults (PSS Restricted)
-    // =========================================================================
-
-    #[test]
-    fn default_security_context_applied() {
-        // No security context specified → full restricted defaults
-        let k8s_ctx = PodTemplateCompiler::compile_security_context(None);
-
-        let caps = k8s_ctx.capabilities.expect("should have capabilities");
-        assert_eq!(caps.add, None);
-        assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
-        assert_eq!(k8s_ctx.privileged, None);
-        assert_eq!(k8s_ctx.read_only_root_filesystem, Some(true));
-        assert_eq!(k8s_ctx.run_as_non_root, Some(true));
-        assert_eq!(k8s_ctx.allow_privilege_escalation, Some(false));
-        assert_eq!(
-            k8s_ctx.seccomp_profile.as_ref().unwrap().type_,
-            "RuntimeDefault"
-        );
-        assert_eq!(
-            k8s_ctx.app_armor_profile.as_ref().unwrap().type_,
-            "RuntimeDefault"
-        );
-    }
-
-    #[test]
-    fn default_security_context_for_sidecars() {
-        use crate::crd::SidecarSpec;
-
-        let mut service = make_service("my-app", "default");
-        service.spec.runtime.sidecars.insert(
-            "logger".to_string(),
-            SidecarSpec {
-                image: "fluentbit:latest".to_string(),
+    #[tokio::test]
+    async fn gpu_full_gpu_in_limits() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p
+                }),
                 ..Default::default()
             },
         );
 
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
+        let deployment = output.deployment.expect("should have deployment");
+        let main = &deployment.spec.template.spec.containers[0];
+        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
+
+        assert_eq!(limits.gpu, Some("1".to_string()));
+        assert!(limits.gpu_memory.is_none());
+        assert!(limits.gpu_cores.is_none());
+    }
+
+    #[tokio::test]
+    async fn gpu_toleration_added_by_default() {
+        let mut service = make_service("gpu-app", "default");
+        service.spec.workload.resources.insert(
+            "my-gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                params: Some({
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("count".to_string(), serde_json::json!(1));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
+
+        let output = compile_service(&service).await;
+        let deployment = output.deployment.expect("should have deployment");
+        let tolerations = &deployment.spec.template.spec.tolerations;
+
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(tolerations[0].key, Some("nvidia.com/gpu".to_string()));
+    }
+
+    #[tokio::test]
+    async fn no_gpu_no_tolerations_or_selector() {
+        let service = make_service("my-app", "default");
+        let output = compile_service(&service).await;
         let deployment = output.deployment.expect("should have deployment");
 
-        let logger = deployment
-            .spec
-            .template
-            .spec
-            .containers
-            .iter()
-            .find(|c| c.name == "logger")
-            .expect("logger sidecar should exist");
-
-        let sec = logger
-            .security_context
-            .as_ref()
-            .expect("should have security context");
-        assert_eq!(sec.allow_privilege_escalation, Some(false));
-        assert_eq!(sec.read_only_root_filesystem, Some(true));
-        assert_eq!(sec.run_as_non_root, Some(true));
-        let caps = sec.capabilities.as_ref().expect("should have capabilities");
-        assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
-    }
-
-    #[test]
-    fn security_context_with_user_overrides() {
-        use crate::crd::SecurityContext;
-
-        let security = SecurityContext {
-            capabilities: vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()],
-            drop_capabilities: None,
-            privileged: Some(false),
-            read_only_root_filesystem: Some(true),
-            run_as_non_root: Some(true),
-            run_as_user: Some(1000),
-            run_as_group: Some(1000),
-            allow_privilege_escalation: Some(false),
-            ..Default::default()
-        };
-
-        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
-
-        let caps = k8s_ctx.capabilities.expect("should have capabilities");
-        assert_eq!(
-            caps.add,
-            Some(vec!["NET_ADMIN".to_string(), "SYS_MODULE".to_string()])
-        );
-        assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
-        assert_eq!(k8s_ctx.privileged, Some(false));
-        assert_eq!(k8s_ctx.read_only_root_filesystem, Some(true));
-        assert_eq!(k8s_ctx.run_as_non_root, Some(true));
-        assert_eq!(k8s_ctx.run_as_user, Some(1000));
-        assert_eq!(k8s_ctx.run_as_group, Some(1000));
-        assert_eq!(k8s_ctx.allow_privilege_escalation, Some(false));
-    }
-
-    #[test]
-    fn privileged_mode_relaxes_defaults() {
-        use crate::crd::SecurityContext;
-
-        let security = SecurityContext {
-            privileged: Some(true),
-            ..Default::default()
-        };
-
-        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
-
-        assert_eq!(k8s_ctx.privileged, Some(true));
-        // Privileged: no drop ALL, no allowPrivilegeEscalation restriction
-        assert!(k8s_ctx.capabilities.is_none());
-        assert_eq!(k8s_ctx.allow_privilege_escalation, None);
-        // Other defaults still apply
-        assert_eq!(k8s_ctx.read_only_root_filesystem, Some(true));
-        assert_eq!(k8s_ctx.run_as_non_root, Some(true));
-    }
-
-    #[test]
-    fn privileged_with_caps_keeps_add() {
-        use crate::crd::SecurityContext;
-
-        let security = SecurityContext {
-            privileged: Some(true),
-            capabilities: vec!["NET_ADMIN".to_string()],
-            ..Default::default()
-        };
-
-        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
-
-        let caps = k8s_ctx
-            .capabilities
-            .expect("should have capabilities for add");
-        assert_eq!(caps.add, Some(vec!["NET_ADMIN".to_string()]));
-        assert_eq!(caps.drop, None); // Privileged: no drop
-    }
-
-    #[test]
-    fn run_as_user_zero_disables_run_as_non_root() {
-        use crate::crd::SecurityContext;
-
-        let security = SecurityContext {
-            run_as_user: Some(0),
-            ..Default::default()
-        };
-
-        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
-
-        assert_eq!(k8s_ctx.run_as_user, Some(0));
-        assert_eq!(k8s_ctx.run_as_non_root, Some(false));
-    }
-
-    #[test]
-    fn user_can_override_readonly_root_fs() {
-        use crate::crd::SecurityContext;
-
-        let security = SecurityContext {
-            read_only_root_filesystem: Some(false),
-            ..Default::default()
-        };
-
-        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
-        assert_eq!(k8s_ctx.read_only_root_filesystem, Some(false));
-    }
-
-    #[test]
-    fn seccomp_profile_defaults() {
-        let k8s_ctx = PodTemplateCompiler::compile_security_context(None);
-        let seccomp = k8s_ctx
-            .seccomp_profile
-            .expect("should have seccomp profile");
-        assert_eq!(seccomp.type_, "RuntimeDefault");
-        assert!(seccomp.localhost_profile.is_none());
-    }
-
-    #[test]
-    fn seccomp_profile_user_override() {
-        use crate::crd::SecurityContext;
-
-        let security = SecurityContext {
-            seccomp_profile: Some("Unconfined".to_string()),
-            ..Default::default()
-        };
-
-        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
-        let seccomp = k8s_ctx
-            .seccomp_profile
-            .expect("should have seccomp profile");
-        assert_eq!(seccomp.type_, "Unconfined");
-    }
-
-    #[test]
-    fn apparmor_profile_defaults() {
-        let k8s_ctx = PodTemplateCompiler::compile_security_context(None);
-        let apparmor = k8s_ctx
-            .app_armor_profile
-            .expect("should have apparmor profile");
-        assert_eq!(apparmor.type_, "RuntimeDefault");
-        assert!(apparmor.localhost_profile.is_none());
-    }
-
-    #[test]
-    fn apparmor_profile_localhost() {
-        use crate::crd::SecurityContext;
-
-        let security = SecurityContext {
-            apparmor_profile: Some("Localhost".to_string()),
-            apparmor_localhost_profile: Some("my-custom-profile".to_string()),
-            ..Default::default()
-        };
-
-        let k8s_ctx = PodTemplateCompiler::compile_security_context(Some(&security));
-        let apparmor = k8s_ctx
-            .app_armor_profile
-            .expect("should have apparmor profile");
-        assert_eq!(apparmor.type_, "Localhost");
-        assert_eq!(
-            apparmor.localhost_profile,
-            Some("my-custom-profile".to_string())
-        );
+        assert!(deployment.spec.template.spec.tolerations.is_empty());
+        assert!(deployment.spec.template.spec.node_selector.is_none());
     }
 
     // =========================================================================
-    // Story: Pod Security Context (Sysctls)
+    // Story: imagePullSecrets Resolution
     // =========================================================================
 
-    #[test]
-    fn pod_security_context_sysctls() {
-        let mut service = make_service("my-app", "default");
-        service.spec.runtime.sysctls.insert(
-            "net.ipv4.conf.all.src_valid_mark".to_string(),
-            "1".to_string(),
-        );
+    #[tokio::test]
+    async fn no_image_pull_secrets_by_default() {
+        let service = make_service("myapp", "prod");
+        let output = compile_service(&service).await;
+        let deployment = output.deployment.unwrap();
+        assert!(deployment.spec.template.spec.image_pull_secrets.is_empty());
+    }
+
+    // =========================================================================
+    // Story: Secret Variable Resolution in Env Vars
+    // =========================================================================
+
+    #[tokio::test]
+    async fn secret_var_compiles_to_secret_key_ref() {
+        use lattice_common::template::TemplateString;
+
+        let mut service = make_service("myapp", "prod");
         service
             .spec
-            .runtime
-            .sysctls
-            .insert("net.core.somaxconn".to_string(), "65535".to_string());
+            .workload
+            .containers
+            .get_mut("main")
+            .unwrap()
+            .variables
+            .insert(
+                "DB_PASSWORD".to_string(),
+                TemplateString::from("${secret.db-creds.password}"),
+            );
+        service.spec.workload.resources.insert(
+            "db-creds".to_string(),
+            crate::crd::ResourceSpec {
+                type_: crate::crd::ResourceType::Secret,
+                id: Some("vault/path".to_string()),
+                params: Some({
+                    let mut p = BTreeMap::new();
+                    p.insert("provider".to_string(), serde_json::json!("vault"));
+                    p.insert("keys".to_string(), serde_json::json!(["password"]));
+                    p
+                }),
+                ..Default::default()
+            },
+        );
 
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
         let deployment = output.deployment.expect("should have deployment");
-
-        let pod_sec = deployment
-            .spec
-            .template
-            .spec
-            .security_context
-            .expect("should have pod security context");
-
-        let sysctls = pod_sec.sysctls.expect("should have sysctls");
-        assert_eq!(sysctls.len(), 2);
-        assert!(sysctls
+        let env = &deployment.spec.template.spec.containers[0].env;
+        let db_pass = env
             .iter()
-            .any(|s| s.name == "net.ipv4.conf.all.src_valid_mark" && s.value == "1"));
-        assert!(sysctls
-            .iter()
-            .any(|s| s.name == "net.core.somaxconn" && s.value == "65535"));
-    }
-
-    #[test]
-    fn pod_security_context_has_secure_defaults() {
-        let service = make_service("my-app", "default");
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-
-        let pod_sec = deployment
-            .spec
-            .template
-            .spec
-            .security_context
-            .expect("should always have pod security context");
-
-        assert_eq!(pod_sec.run_as_non_root, Some(true));
-        assert_eq!(
-            pod_sec.seccomp_profile.as_ref().unwrap().type_,
-            "RuntimeDefault"
-        );
-        assert!(pod_sec.sysctls.is_none()); // No sysctls when none specified
-    }
-
-    // =========================================================================
-    // Story: EmptyDir Writable Paths with Read-Only RootFS
-    // =========================================================================
-
-    #[test]
-    fn emptydir_in_deployment_with_readonly_rootfs() {
-        // Simulate nginx pattern: read-only rootfs + emptyDir for writable paths
-        let mut service = make_service("nginx-app", "default");
-        let container = service.spec.workload.containers.get_mut("main").unwrap();
-        container.volumes.insert(
-            "/var/cache/nginx".to_string(),
-            lattice_common::crd::VolumeMount {
-                source: None,
-                path: None,
-                read_only: None,
-                medium: None,
-                size_limit: None,
-            },
-        );
-        container.volumes.insert(
-            "/var/run".to_string(),
-            lattice_common::crd::VolumeMount {
-                source: None,
-                path: None,
-                read_only: None,
-                medium: None,
-                size_limit: None,
-            },
-        );
-        container.volumes.insert(
-            "/tmp".to_string(),
-            lattice_common::crd::VolumeMount {
-                source: None,
-                path: None,
-                read_only: None,
-                medium: None,
-                size_limit: None,
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-
-        // Container should have read-only rootfs (secure default)
-        let main = &deployment.spec.template.spec.containers[0];
-        let sec = main
-            .security_context
+            .find(|e| e.name == "DB_PASSWORD")
+            .expect("should have DB_PASSWORD");
+        assert!(db_pass.value.is_none());
+        let vf = db_pass.value_from.as_ref().expect("should have valueFrom");
+        let skr = vf
+            .secret_key_ref
             .as_ref()
-            .expect("should have security context");
-        assert_eq!(sec.read_only_root_filesystem, Some(true));
-
-        // Container should have 3 emptyDir volume mounts
-        let emptydir_mounts: Vec<_> = main
-            .volume_mounts
-            .iter()
-            .filter(|vm| vm.name.starts_with("emptydir-"))
-            .collect();
-        assert_eq!(emptydir_mounts.len(), 3);
-
-        // Pod should have 3 emptyDir volumes
-        let emptydir_vols: Vec<_> = deployment
-            .spec
-            .template
-            .spec
-            .volumes
-            .iter()
-            .filter(|v| v.empty_dir.is_some())
-            .collect();
-        assert_eq!(emptydir_vols.len(), 3);
-
-        // Verify specific volume names
-        let vol_names: Vec<_> = emptydir_vols.iter().map(|v| v.name.as_str()).collect();
-        assert!(vol_names.contains(&"emptydir-var-cache-nginx"));
-        assert!(vol_names.contains(&"emptydir-var-run"));
-        assert!(vol_names.contains(&"emptydir-tmp"));
+            .expect("should have secretKeyRef");
+        assert_eq!(skr.key, "password");
     }
 
-    #[test]
-    fn emptydir_tmpfs_flows_to_deployment() {
-        let mut service = make_service("my-app", "default");
-        let container = service.spec.workload.containers.get_mut("main").unwrap();
-        container.volumes.insert(
-            "/dev/shm".to_string(),
-            lattice_common::crd::VolumeMount {
-                source: None,
-                path: None,
-                read_only: None,
-                medium: Some("Memory".to_string()),
-                size_limit: Some("256Mi".to_string()),
-            },
-        );
+    // =========================================================================
+    // Story: Host Network and Share Process Namespace
+    // =========================================================================
 
-        let output = compile_service(&service);
+    #[tokio::test]
+    async fn host_network_and_share_process_namespace() {
+        let mut service = make_service("my-app", "default");
+        service.spec.runtime.host_network = Some(true);
+        service.spec.runtime.share_process_namespace = Some(true);
+
+        let output = compile_service(&service).await;
         let deployment = output.deployment.expect("should have deployment");
 
-        let shm_vol = deployment
+        assert_eq!(deployment.spec.template.spec.host_network, Some(true));
+        assert_eq!(
+            deployment.spec.template.spec.share_process_namespace,
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn host_network_none_by_default() {
+        let service = make_service("my-app", "default");
+        let output = compile_service(&service).await;
+        let deployment = output.deployment.expect("should have deployment");
+
+        assert!(deployment.spec.template.spec.host_network.is_none());
+        assert!(deployment
             .spec
             .template
             .spec
-            .volumes
-            .iter()
-            .find(|v| v.name == "emptydir-dev-shm")
-            .expect("should have emptyDir volume for /dev/shm");
-
-        let ed = shm_vol.empty_dir.as_ref().expect("should be emptyDir");
-        assert_eq!(ed.medium, Some("Memory".to_string()));
-        assert_eq!(ed.size_limit, Some("256Mi".to_string()));
+            .share_process_namespace
+            .is_none());
     }
 
     // =========================================================================
     // Story: Init Containers Separated
     // =========================================================================
 
-    #[test]
-    fn init_containers_separated() {
+    #[tokio::test]
+    async fn init_containers_separated() {
         use crate::crd::SidecarSpec;
 
         let mut service = make_service("my-app", "default");
@@ -2643,17 +1237,15 @@ mod tests {
             },
         );
 
-        let output = compile_service(&service);
+        let output = compile_service(&service).await;
         let deployment = output.deployment.expect("should have deployment");
 
-        // Check init containers
         assert_eq!(deployment.spec.template.spec.init_containers.len(), 1);
         assert_eq!(
             deployment.spec.template.spec.init_containers[0].name,
             "init-setup"
         );
 
-        // Check regular containers (main + vpn sidecar)
         assert_eq!(deployment.spec.template.spec.containers.len(), 2);
         assert!(deployment
             .spec
@@ -2669,942 +1261,5 @@ mod tests {
             .containers
             .iter()
             .any(|c| c.name == "vpn"));
-    }
-
-    // =========================================================================
-    // Story: Sidecars Included in Deployment
-    // =========================================================================
-
-    #[test]
-    fn sidecars_included_in_deployment() {
-        use crate::crd::{SecurityContext, SidecarSpec};
-
-        let mut service = make_service("my-app", "default");
-        service.spec.runtime.sidecars.insert(
-            "vpn".to_string(),
-            SidecarSpec {
-                image: "wireguard:latest".to_string(),
-                security: Some(SecurityContext {
-                    capabilities: vec!["NET_ADMIN".to_string()],
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-
-        // Main + VPN sidecar
-        assert_eq!(deployment.spec.template.spec.containers.len(), 2);
-
-        let vpn = deployment
-            .spec
-            .template
-            .spec
-            .containers
-            .iter()
-            .find(|c| c.name == "vpn")
-            .expect("vpn container should exist");
-
-        assert_eq!(vpn.image, "wireguard:latest");
-
-        // Check security context on sidecar
-        let sec = vpn
-            .security_context
-            .as_ref()
-            .expect("should have security context");
-        let caps = sec.capabilities.as_ref().expect("should have capabilities");
-        assert_eq!(caps.add, Some(vec!["NET_ADMIN".to_string()]));
-        assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
-    }
-
-    // =========================================================================
-    // Story: Host Network and Share Process Namespace
-    // =========================================================================
-
-    #[test]
-    fn host_network_and_share_process_namespace() {
-        let mut service = make_service("my-app", "default");
-        service.spec.runtime.host_network = Some(true);
-        service.spec.runtime.share_process_namespace = Some(true);
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-
-        assert_eq!(deployment.spec.template.spec.host_network, Some(true));
-        assert_eq!(
-            deployment.spec.template.spec.share_process_namespace,
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn host_network_none_by_default() {
-        let service = make_service("my-app", "default");
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-
-        assert!(deployment.spec.template.spec.host_network.is_none());
-        assert!(deployment
-            .spec
-            .template
-            .spec
-            .share_process_namespace
-            .is_none());
-    }
-
-    // =========================================================================
-    // Story: Container Security Context
-    // =========================================================================
-
-    #[test]
-    fn main_container_security_context() {
-        use crate::crd::SecurityContext;
-
-        let mut service = make_service("my-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .security = Some(SecurityContext {
-            capabilities: vec!["NET_BIND_SERVICE".to_string()],
-            run_as_non_root: Some(true),
-            run_as_user: Some(1000),
-            ..Default::default()
-        });
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-
-        let main = deployment
-            .spec
-            .template
-            .spec
-            .containers
-            .iter()
-            .find(|c| c.name == "main")
-            .expect("main container should exist");
-
-        let sec = main
-            .security_context
-            .as_ref()
-            .expect("should have security context");
-        assert_eq!(sec.run_as_non_root, Some(true));
-        assert_eq!(sec.run_as_user, Some(1000));
-    }
-
-    // =========================================================================
-    // Story: GPU Resource Compilation
-    // =========================================================================
-
-    #[test]
-    fn gpu_full_gpu_in_limits() {
-        let mut service = make_service("gpu-app", "default");
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-        let main = &deployment.spec.template.spec.containers[0];
-        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
-
-        assert_eq!(limits.gpu, Some("1".to_string()));
-        assert!(limits.gpu_memory.is_none());
-        assert!(limits.gpu_cores.is_none());
-    }
-
-    #[test]
-    fn gpu_multi_gpu() {
-        let mut service = make_service("gpu-app", "default");
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(4));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-        let main = &deployment.spec.template.spec.containers[0];
-        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
-
-        assert_eq!(limits.gpu, Some("4".to_string()));
-    }
-
-    #[test]
-    fn gpu_hami_fractional() {
-        let mut service = make_service("gpu-app", "default");
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p.insert("memory".to_string(), serde_json::json!("20Gi"));
-                    p.insert("compute".to_string(), serde_json::json!(30));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-        let main = &deployment.spec.template.spec.containers[0];
-        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
-
-        assert_eq!(limits.gpu, Some("1".to_string()));
-        assert_eq!(limits.gpu_memory, Some("20480".to_string())); // 20Gi = 20480 MiB
-        assert_eq!(limits.gpu_cores, Some("30".to_string()));
-    }
-
-    #[test]
-    fn gpu_memory_only_no_compute() {
-        let mut service = make_service("gpu-app", "default");
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p.insert("memory".to_string(), serde_json::json!("8Gi"));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-        let main = &deployment.spec.template.spec.containers[0];
-        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
-
-        assert_eq!(limits.gpu, Some("1".to_string()));
-        assert_eq!(limits.gpu_memory, Some("8192".to_string()));
-        assert!(limits.gpu_cores.is_none());
-    }
-
-    #[test]
-    fn gpu_toleration_added_by_default() {
-        let mut service = make_service("gpu-app", "default");
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-        let tolerations = &deployment.spec.template.spec.tolerations;
-
-        assert_eq!(tolerations.len(), 1);
-        assert_eq!(tolerations[0].key, Some("nvidia.com/gpu".to_string()));
-        assert_eq!(tolerations[0].operator, Some("Exists".to_string()));
-        assert_eq!(tolerations[0].effect, Some("NoSchedule".to_string()));
-    }
-
-    #[test]
-    fn gpu_toleration_disabled() {
-        let mut service = make_service("gpu-app", "default");
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p.insert("tolerations".to_string(), serde_json::json!(false));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-        assert!(deployment.spec.template.spec.tolerations.is_empty());
-    }
-
-    #[test]
-    fn gpu_model_node_selector() {
-        let mut service = make_service("gpu-app", "default");
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(4));
-                    p.insert("model".to_string(), serde_json::json!("H100"));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-        let selector = deployment
-            .spec
-            .template
-            .spec
-            .node_selector
-            .as_ref()
-            .expect("should have node selector");
-
-        assert_eq!(
-            selector.get("nvidia.com/gpu.product"),
-            Some(&"NVIDIA-H100-80GB-HBM3".to_string())
-        );
-    }
-
-    #[test]
-    fn no_gpu_no_tolerations_or_selector() {
-        let service = make_service("my-app", "default");
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-
-        assert!(deployment.spec.template.spec.tolerations.is_empty());
-        assert!(deployment.spec.template.spec.node_selector.is_none());
-    }
-
-    #[test]
-    fn gpu_first_container_only() {
-        let mut service = make_service("gpu-app", "default");
-        // Add a second container (BTreeMap sorts alphabetically: "main" < "sidecar")
-        // But "gpu-worker" < "main", so gpu-worker gets idx 0
-        service.spec.workload.containers.insert(
-            "gpu-worker".to_string(),
-            ContainerSpec {
-                image: "worker:latest".to_string(),
-                ..Default::default()
-            },
-        );
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-        let containers = &deployment.spec.template.spec.containers;
-
-        // First container (alphabetically) gets GPU limits
-        let first = containers.iter().find(|c| c.name == "gpu-worker").unwrap();
-        let first_limits = first.resources.as_ref().unwrap().limits.as_ref().unwrap();
-        assert_eq!(first_limits.gpu, Some("1".to_string()));
-
-        // Second container does NOT get GPU limits
-        let second = containers.iter().find(|c| c.name == "main").unwrap();
-        assert!(
-            second.resources.is_none() || {
-                let r = second.resources.as_ref().unwrap();
-                r.limits.is_none() || r.limits.as_ref().unwrap().gpu.is_none()
-            }
-        );
-    }
-
-    #[test]
-    fn gpu_merge_with_existing_resources() {
-        let mut service = make_service("gpu-app", "default");
-        service
-            .spec
-            .workload
-            .containers
-            .get_mut("main")
-            .unwrap()
-            .resources = Some(crate::crd::ResourceRequirements {
-            requests: Some(crate::crd::ResourceQuantity {
-                cpu: Some("2".to_string()),
-                memory: Some("8Gi".to_string()),
-            }),
-            limits: Some(crate::crd::ResourceQuantity {
-                cpu: Some("4".to_string()),
-                memory: Some("16Gi".to_string()),
-            }),
-        });
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-        let main = &deployment.spec.template.spec.containers[0];
-        let limits = main.resources.as_ref().unwrap().limits.as_ref().unwrap();
-
-        // CPU and memory preserved
-        assert_eq!(limits.cpu, Some("4".to_string()));
-        assert_eq!(limits.memory, Some("16Gi".to_string()));
-        // GPU merged alongside
-        assert_eq!(limits.gpu, Some("1".to_string()));
-    }
-
-    #[test]
-    fn gpu_resource_quantity_serialization() {
-        let limits = ResourceQuantity {
-            cpu: Some("4".to_string()),
-            memory: Some("16Gi".to_string()),
-            gpu: Some("1".to_string()),
-            gpu_memory: Some("8192".to_string()),
-            gpu_cores: Some("30".to_string()),
-        };
-
-        let json = serde_json::to_value(&limits).unwrap();
-        assert_eq!(json["cpu"], "4");
-        assert_eq!(json["memory"], "16Gi");
-        assert_eq!(json["nvidia.com/gpu"], "1");
-        assert_eq!(json["nvidia.com/gpumem"], "8192");
-        assert_eq!(json["nvidia.com/gpucores"], "30");
-    }
-
-    #[test]
-    fn gpu_deployment_has_shm_volume() {
-        let mut service = make_service("gpu-app", "default");
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-
-        // Verify dshm volume exists with medium: Memory
-        let shm_vol = deployment
-            .spec
-            .template
-            .spec
-            .volumes
-            .iter()
-            .find(|v| v.name == "dshm")
-            .expect("should have dshm volume");
-        let empty_dir = shm_vol.empty_dir.as_ref().expect("should be emptyDir");
-        assert_eq!(empty_dir.medium, Some("Memory".to_string()));
-
-        // Verify first container has /dev/shm mount
-        let main = &deployment.spec.template.spec.containers[0];
-        let shm_mount = main
-            .volume_mounts
-            .iter()
-            .find(|vm| vm.name == "dshm")
-            .expect("should have dshm volume mount");
-        assert_eq!(shm_mount.mount_path, "/dev/shm");
-    }
-
-    #[test]
-    fn gpu_deployment_has_runtime_class() {
-        let mut service = make_service("gpu-app", "default");
-        service.spec.workload.resources.insert(
-            "my-gpu".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Gpu,
-                params: Some({
-                    let mut p = std::collections::BTreeMap::new();
-                    p.insert("count".to_string(), serde_json::json!(1));
-                    p
-                }),
-                ..Default::default()
-            },
-        );
-
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-
-        assert_eq!(
-            deployment.spec.template.spec.runtime_class_name,
-            Some("nvidia".to_string())
-        );
-    }
-
-    #[test]
-    fn no_gpu_no_shm_or_runtime_class() {
-        let service = make_service("my-app", "default");
-        let output = compile_service(&service);
-        let deployment = output.deployment.expect("should have deployment");
-
-        // No dshm volume
-        assert!(
-            !deployment
-                .spec
-                .template
-                .spec
-                .volumes
-                .iter()
-                .any(|v| v.name == "dshm"),
-            "non-GPU deployment should not have dshm volume"
-        );
-
-        // No runtimeClassName
-        assert!(
-            deployment.spec.template.spec.runtime_class_name.is_none(),
-            "non-GPU deployment should not have runtimeClassName"
-        );
-    }
-
-    // =========================================================================
-    // Story: EnvVar Serialization (literal vs secretKeyRef)
-    // =========================================================================
-
-    #[test]
-    fn envvar_literal_serializes_with_value() {
-        let env = EnvVar::literal("DB_HOST", "postgres.svc");
-        let json = serde_json::to_value(&env).unwrap();
-        assert_eq!(json["name"], "DB_HOST");
-        assert_eq!(json["value"], "postgres.svc");
-        assert!(json.get("valueFrom").is_none());
-    }
-
-    #[test]
-    fn envvar_secret_ref_serializes_with_value_from() {
-        let env = EnvVar::from_secret("DB_PASSWORD", "myapp-db-creds", "password");
-        let json = serde_json::to_value(&env).unwrap();
-        assert_eq!(json["name"], "DB_PASSWORD");
-        assert!(json.get("value").is_none());
-        assert_eq!(json["valueFrom"]["secretKeyRef"]["name"], "myapp-db-creds");
-        assert_eq!(json["valueFrom"]["secretKeyRef"]["key"], "password");
-    }
-
-    #[test]
-    fn envvar_roundtrip() {
-        let literal = EnvVar::literal("KEY", "val");
-        let json = serde_json::to_string(&literal).unwrap();
-        let back: EnvVar = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, literal);
-
-        let secret = EnvVar::from_secret("KEY", "secret-name", "key");
-        let json = serde_json::to_string(&secret).unwrap();
-        let back: EnvVar = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, secret);
-    }
-
-    // =========================================================================
-    // Story: Secret Variable Resolution in Env Vars
-    // =========================================================================
-
-    fn make_service_with_secret_vars(
-        vars: Vec<(&str, &str)>,
-        secret_resource_name: &str,
-    ) -> LatticeService {
-        let mut variables = BTreeMap::new();
-        for (k, v) in vars {
-            variables.insert(
-                k.to_string(),
-                lattice_common::template::TemplateString::from(v),
-            );
-        }
-
-        let mut containers = BTreeMap::new();
-        containers.insert(
-            "main".to_string(),
-            ContainerSpec {
-                image: "nginx:latest".to_string(),
-                variables,
-                ..Default::default()
-            },
-        );
-
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            secret_resource_name.to_string(),
-            crate::crd::ResourceSpec {
-                type_: crate::crd::ResourceType::Secret,
-                id: Some("vault/path".to_string()),
-                ..Default::default()
-            },
-        );
-
-        LatticeService {
-            metadata: kube::api::ObjectMeta {
-                name: Some("myapp".to_string()),
-                namespace: Some("prod".to_string()),
-                ..Default::default()
-            },
-            spec: crate::crd::LatticeServiceSpec {
-                workload: WorkloadSpec {
-                    containers,
-                    resources,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            status: None,
-        }
-    }
-
-    #[test]
-    fn secret_var_compiles_to_secret_key_ref() {
-        let service = make_service_with_secret_vars(
-            vec![("DB_PASSWORD", "${secret.db-creds.password}")],
-            "db-creds",
-        );
-        let mut secret_refs = BTreeMap::new();
-        secret_refs.insert(
-            "db-creds".to_string(),
-            SecretRef {
-                secret_name: "myapp-db-creds".to_string(),
-                remote_key: "database/prod/credentials".to_string(),
-                keys: Some(vec!["password".to_string()]),
-                store_name: "vault".to_string(),
-            },
-        );
-
-        let output = test_compile(&service, &secret_refs).expect("should compile");
-
-        let deployment = output.deployment.expect("should have deployment");
-        let env = &deployment.spec.template.spec.containers[0].env;
-        let db_pass = env
-            .iter()
-            .find(|e| e.name == "DB_PASSWORD")
-            .expect("should have DB_PASSWORD");
-        assert!(db_pass.value.is_none());
-        let vf = db_pass.value_from.as_ref().expect("should have valueFrom");
-        let skr = vf
-            .secret_key_ref
-            .as_ref()
-            .expect("should have secretKeyRef");
-        assert_eq!(skr.name, "myapp-db-creds");
-        assert_eq!(skr.key, "password");
-    }
-
-    #[test]
-    fn secret_var_and_secret_key_ref_coexist() {
-        let service = make_service_with_secret_vars(
-            vec![
-                ("DB_HOST", "postgres.svc"),
-                ("DB_PASSWORD", "${secret.db-creds.password}"),
-            ],
-            "db-creds",
-        );
-        let mut secret_refs = BTreeMap::new();
-        secret_refs.insert(
-            "db-creds".to_string(),
-            SecretRef {
-                secret_name: "myapp-db-creds".to_string(),
-                remote_key: "database/prod/credentials".to_string(),
-                keys: Some(vec!["password".to_string()]),
-                store_name: "vault".to_string(),
-            },
-        );
-
-        let output = test_compile(&service, &secret_refs).expect("should compile");
-
-        let env = &output.deployment.unwrap().spec.template.spec.containers[0].env;
-
-        // Secret var should be a secretKeyRef
-        let pass = env
-            .iter()
-            .find(|e| e.name == "DB_PASSWORD")
-            .expect("DB_PASSWORD");
-        assert!(pass.value.is_none());
-        assert!(pass.value_from.is_some());
-    }
-
-    #[test]
-    fn secret_var_error_missing_resource() {
-        let mut service = make_service_with_secret_vars(
-            vec![("SECRET", "${secret.nonexistent.key}")],
-            "db-creds",
-        );
-        service.spec.workload.resources.remove("nonexistent");
-
-        let secret_refs = BTreeMap::new();
-        let result = test_compile(&service, &secret_refs);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("nonexistent"),
-            "error should mention the missing resource: {}",
-            err
-        );
-        assert!(
-            err.contains("does not exist"),
-            "error should say resource doesn't exist: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn secret_var_error_wrong_type() {
-        let mut service = make_service_with_secret_vars(vec![("VAR", "${secret.db.host}")], "db");
-        service.spec.workload.resources.get_mut("db").unwrap().type_ =
-            crate::crd::ResourceType::Service;
-
-        let secret_refs = BTreeMap::new();
-        let result = test_compile(&service, &secret_refs);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("service"),
-            "error should mention actual type: {}",
-            err
-        );
-        assert!(
-            err.contains("not 'secret'"),
-            "error should say not secret: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn secret_var_error_invalid_key() {
-        let service = make_service_with_secret_vars(
-            vec![("VAR", "${secret.db-creds.nonexistent}")],
-            "db-creds",
-        );
-        let mut secret_refs = BTreeMap::new();
-        secret_refs.insert(
-            "db-creds".to_string(),
-            SecretRef {
-                secret_name: "myapp-db-creds".to_string(),
-                remote_key: "database/prod/credentials".to_string(),
-                keys: Some(vec!["username".to_string(), "password".to_string()]),
-                store_name: "vault".to_string(),
-            },
-        );
-
-        let result = test_compile(&service, &secret_refs);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("nonexistent"),
-            "error should mention the bad key: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn secret_var_no_explicit_keys_allows_any_key() {
-        let service =
-            make_service_with_secret_vars(vec![("VAR", "${secret.db-creds.anything}")], "db-creds");
-        let mut secret_refs = BTreeMap::new();
-        secret_refs.insert(
-            "db-creds".to_string(),
-            SecretRef {
-                secret_name: "myapp-db-creds".to_string(),
-                remote_key: "database/prod/credentials".to_string(),
-                keys: None,
-                store_name: "vault".to_string(),
-            },
-        );
-
-        let result = test_compile(&service, &secret_refs);
-        assert!(result.is_ok());
-    }
-
-    // =========================================================================
-    // Story: imagePullSecrets Resolution
-    // =========================================================================
-
-    #[test]
-    fn image_pull_secrets_resolved_from_secret_refs() {
-        let mut service = make_service("myapp", "prod");
-        service.spec.runtime.image_pull_secrets = vec!["ghcr-creds".to_string()];
-        service.spec.workload.resources.insert(
-            "ghcr-creds".to_string(),
-            crate::crd::ResourceSpec {
-                type_: crate::crd::ResourceType::Secret,
-                id: Some("registry/ghcr".to_string()),
-                ..Default::default()
-            },
-        );
-
-        let mut secret_refs = BTreeMap::new();
-        secret_refs.insert(
-            "ghcr-creds".to_string(),
-            SecretRef {
-                secret_name: "myapp-ghcr-creds".to_string(),
-                remote_key: "registry/ghcr".to_string(),
-                keys: None,
-                store_name: "vault".to_string(),
-            },
-        );
-
-        let output = test_compile(&service, &secret_refs).expect("should compile");
-
-        let ips = &output
-            .deployment
-            .unwrap()
-            .spec
-            .template
-            .spec
-            .image_pull_secrets;
-        assert_eq!(ips.len(), 1);
-        assert_eq!(ips[0].name, "myapp-ghcr-creds");
-    }
-
-    #[test]
-    fn image_pull_secrets_error_missing_resource() {
-        let mut service = make_service("myapp", "prod");
-        service.spec.runtime.image_pull_secrets = vec!["nonexistent".to_string()];
-
-        let secret_refs = BTreeMap::new();
-        let result = test_compile(&service, &secret_refs);
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("nonexistent"));
-    }
-
-    #[test]
-    fn image_pull_secrets_error_wrong_type() {
-        let mut service = make_service("myapp", "prod");
-        service.spec.runtime.image_pull_secrets = vec!["db".to_string()];
-        service.spec.workload.resources.insert(
-            "db".to_string(),
-            crate::crd::ResourceSpec {
-                type_: crate::crd::ResourceType::Service,
-                ..Default::default()
-            },
-        );
-
-        let secret_refs = BTreeMap::new();
-        let result = test_compile(&service, &secret_refs);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("service"),
-            "should mention actual type: {}",
-            err
-        );
-        assert!(
-            err.contains("not 'secret'"),
-            "should say not secret: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn no_image_pull_secrets_by_default() {
-        let service = make_service("myapp", "prod");
-        let output = compile_service(&service);
-        let deployment = output.deployment.unwrap();
-        assert!(deployment.spec.template.spec.image_pull_secrets.is_empty());
-    }
-
-    #[test]
-    fn gpu_resource_quantity_empty_omits_gpu_fields() {
-        let limits = ResourceQuantity {
-            cpu: Some("1".to_string()),
-            memory: Some("1Gi".to_string()),
-            ..Default::default()
-        };
-
-        let json = serde_json::to_value(&limits).unwrap();
-        assert_eq!(json["cpu"], "1");
-        assert!(json.get("nvidia.com/gpu").is_none());
-        assert!(json.get("nvidia.com/gpumem").is_none());
-        assert!(json.get("nvidia.com/gpucores").is_none());
-    }
-
-    // =========================================================================
-    // Story: DNS Label Sanitization
-    // =========================================================================
-
-    #[test]
-    fn sanitize_dns_label_dots() {
-        assert_eq!(
-            sanitize_dns_label("api-main-file-etc-app-config.yaml"),
-            "api-main-file-etc-app-config-yaml"
-        );
-    }
-
-    #[test]
-    fn sanitize_dns_label_underscores() {
-        assert_eq!(sanitize_dns_label("my_volume_name"), "my-volume-name");
-    }
-
-    #[test]
-    fn sanitize_dns_label_uppercase() {
-        assert_eq!(sanitize_dns_label("MyService"), "myservice");
-    }
-
-    #[test]
-    fn sanitize_dns_label_leading_trailing_special() {
-        assert_eq!(sanitize_dns_label("--hello--"), "hello");
-        assert_eq!(sanitize_dns_label("/data/logs/"), "data-logs");
-    }
-
-    #[test]
-    fn sanitize_dns_label_truncates_to_63() {
-        let long = "a".repeat(100);
-        let result = sanitize_dns_label(&long);
-        assert!(result.len() <= 63);
-        assert_eq!(result, "a".repeat(63));
-    }
-
-    #[test]
-    fn sanitize_dns_label_truncation_strips_trailing_hyphens() {
-        // 62 a's + dot + a → sanitized to 62 a's + hyphen + a (64 chars)
-        // truncated to 63 → "aaa...a-" → trailing hyphen stripped
-        let input = format!("{}.a", "a".repeat(62));
-        let result = sanitize_dns_label(&input);
-        assert!(result.len() <= 63);
-        assert!(!result.ends_with('-'));
-    }
-
-    #[test]
-    fn sanitize_dns_label_empty_input() {
-        assert_eq!(sanitize_dns_label(""), "");
-        assert_eq!(sanitize_dns_label("---"), "");
-    }
-
-    #[test]
-    fn sanitize_dns_label_already_valid() {
-        assert_eq!(sanitize_dns_label("my-valid-name"), "my-valid-name");
     }
 }

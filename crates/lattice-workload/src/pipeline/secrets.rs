@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use lattice_secret_provider::eso::{self, ExternalSecret, ExternalSecretData, RemoteRef};
 
-use super::error::CompilationError;
-use crate::crd::WorkloadSpec;
+use crate::error::CompilationError;
+use lattice_common::crd::WorkloadSpec;
 
 // =============================================================================
 // Generated Secrets Container
@@ -37,13 +37,6 @@ pub struct SecretRef {
     pub keys: Option<Vec<String>>,
     /// ClusterSecretStore name (e.g., "vault")
     pub store_name: String,
-}
-
-impl GeneratedSecrets {
-    /// Check if no secrets were generated
-    pub fn is_empty(&self) -> bool {
-        self.external_secrets.is_empty() && self.secret_refs.is_empty()
-    }
 }
 
 /// Validate that all secret refs in a set come from the same ClusterSecretStore.
@@ -238,7 +231,7 @@ impl SecretsCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ContainerSpec, ResourceSpec, ResourceType, WorkloadSpec};
+    use lattice_common::crd::{ContainerSpec, ResourceSpec, ResourceType, WorkloadSpec};
     use std::collections::BTreeMap;
 
     /// (name, remote_key, provider, keys, refresh_interval)

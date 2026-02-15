@@ -553,7 +553,10 @@ mod tests {
 
         // KEDA metrics-apiserver → keda-operator (gRPC port 9666)
         let keda_internal = &policies[2];
-        assert_eq!(keda_internal.metadata.name, "allow-keda-metrics-to-operator");
+        assert_eq!(
+            keda_internal.metadata.name,
+            "allow-keda-metrics-to-operator"
+        );
         assert_eq!(keda_internal.metadata.namespace, KEDA_NAMESPACE);
         let selector = keda_internal.spec.selector.as_ref().unwrap();
         assert_eq!(

@@ -424,6 +424,12 @@ Parent can access child's K8s API through the gRPC stream:
 - **Remove unused code immediately**: Don't comment out, delete
 - **No backwards compatibility shims**: If something is unused, delete it completely
 - **Clean as you go**: Every change should leave the codebase cleaner
+- **Delete code as you move it**: When extracting code to a new crate/module, delete the original immediately. Use compiler errors to drive the integration — don't leave duplicates "for now"
+
+### Comment Style
+
+- **No numbered lists in comments**: They're brittle and break when items are added/removed/reordered. Use prose or unordered bullets instead.
+- **No re-exports**: Import types directly from the crate that owns them. Don't re-export through intermediate modules.
 
 ### Consistent Patterns
 

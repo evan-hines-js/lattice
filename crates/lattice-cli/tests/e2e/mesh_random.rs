@@ -758,8 +758,7 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     .await?;
 
     let kc = kubeconfig_path.to_string();
-    let result =
-        retry_verification("Random Mesh", || verify_random_mesh_traffic(&mesh, &kc)).await;
+    let result = retry_verification("Random Mesh", || verify_random_mesh_traffic(&mesh, &kc)).await;
 
     if result.is_ok() {
         delete_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE).await;

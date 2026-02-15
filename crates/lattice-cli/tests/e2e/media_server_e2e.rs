@@ -538,8 +538,6 @@ async fn verify_volume_sharing(kubeconfig_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-
-
 async fn verify_unauthorized_volume_access_denied(kubeconfig_path: &str) -> Result<(), String> {
     info!("Verifying unauthorized volume access is denied...");
 
@@ -581,9 +579,16 @@ async fn exec_curl(kubeconfig_path: &str, from_deploy: &str, url: &str) -> Strin
         url
     );
     run_kubectl(&[
-        "--kubeconfig", kubeconfig_path,
-        "exec", "-n", NAMESPACE, &target,
-        "--", "sh", "-c", &cmd,
+        "--kubeconfig",
+        kubeconfig_path,
+        "exec",
+        "-n",
+        NAMESPACE,
+        &target,
+        "--",
+        "sh",
+        "-c",
+        &cmd,
     ])
     .await
     .unwrap_or_else(|_| "000".to_string())

@@ -6,36 +6,39 @@
 
 use std::collections::BTreeMap;
 
-use crate::crd::{GpuParams, ProviderType, RuntimeSpec, WorkloadSpec};
+use lattice_common::crd::{GpuParams, ProviderType, RuntimeSpec, WorkloadSpec};
 
-use super::error::CompilationError;
-use super::volume::GeneratedVolumes;
-use super::{
-    gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources, AppArmorProfile,
-    Capabilities, Container, ContainerCompilationData, ContainerPort, EnvVar, K8sSecurityContext,
+use crate::error::CompilationError;
+use crate::helpers::ContainerCompilationData;
+use crate::helpers::{gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources};
+use crate::k8s::{
+    AppArmorProfile, Capabilities, Container, ContainerPort, EnvVar, K8sSecurityContext,
     LabelSelector, LocalObjectReference, PodSecurityContext, ResourceRequirements, SeccompProfile,
-    SecretRef, Sysctl, TopologySpreadConstraint, Volume,
+    Sysctl, TopologySpreadConstraint, Volume,
 };
+use crate::pipeline::secrets::SecretRef;
+use crate::pipeline::volumes::GeneratedVolumes;
 
 /// Compiled pod template — all the fields needed to build a K8s PodTemplateSpec.
 ///
 /// This is the reusable output from `PodTemplateCompiler::compile()`.
 /// Each CRD compiler wraps this in its own outer resource type.
+#[derive(Debug)]
 pub struct CompiledPodTemplate {
     pub containers: Vec<Container>,
     pub init_containers: Vec<Container>,
     pub volumes: Vec<Volume>,
     pub labels: BTreeMap<String, String>,
     pub service_account_name: String,
-    pub affinity: Option<super::volume::Affinity>,
+    pub affinity: Option<crate::pipeline::volumes::Affinity>,
     pub security_context: Option<PodSecurityContext>,
     pub host_network: Option<bool>,
     pub share_process_namespace: Option<bool>,
     pub topology_spread_constraints: Vec<TopologySpreadConstraint>,
     pub node_selector: Option<BTreeMap<String, String>>,
-    pub tolerations: Vec<super::Toleration>,
+    pub tolerations: Vec<crate::k8s::Toleration>,
     pub runtime_class_name: Option<String>,
-    pub scheduling_gates: Vec<super::SchedulingGate>,
+    pub scheduling_gates: Vec<crate::k8s::SchedulingGate>,
     pub image_pull_secrets: Vec<LocalObjectReference>,
 }
 
@@ -99,7 +102,7 @@ impl PodTemplateCompiler {
 
         // Add file volumes from files::compile (deduplicate by name)
         for file_vols in container_data.per_container_file_volumes.values() {
-            super::volume::VolumeCompiler::extend_volumes_dedup(
+            crate::pipeline::volumes::VolumeCompiler::extend_volumes_dedup(
                 &mut pod_volumes,
                 file_vols.clone(),
             );
@@ -289,7 +292,7 @@ impl PodTemplateCompiler {
         container_name: &str,
         secret_variables: &BTreeMap<String, lattice_common::template::SecretVariableRef>,
         secret_refs: &BTreeMap<String, SecretRef>,
-        resources: &BTreeMap<String, crate::crd::ResourceSpec>,
+        resources: &BTreeMap<String, lattice_common::crd::ResourceSpec>,
     ) -> Result<Vec<EnvVar>, CompilationError> {
         let mut env = Vec::with_capacity(secret_variables.len());
         for (var_name, secret_var) in secret_variables {
@@ -345,9 +348,9 @@ impl PodTemplateCompiler {
     }
 
     /// Compile a Score-compliant Probe to a K8s ProbeSpec
-    pub(crate) fn compile_probe(p: &crate::crd::Probe) -> super::ProbeSpec {
-        super::ProbeSpec {
-            http_get: p.http_get.as_ref().map(|h| super::HttpGetAction {
+    pub(crate) fn compile_probe(p: &lattice_common::crd::Probe) -> crate::k8s::ProbeSpec {
+        crate::k8s::ProbeSpec {
+            http_get: p.http_get.as_ref().map(|h| crate::k8s::HttpGetAction {
                 path: h.path.clone(),
                 port: h.port,
                 scheme: h.scheme.clone(),
@@ -355,14 +358,14 @@ impl PodTemplateCompiler {
                 http_headers: h.http_headers.as_ref().map(|headers| {
                     headers
                         .iter()
-                        .map(|hdr| super::HttpHeader {
+                        .map(|hdr| crate::k8s::HttpHeader {
                             name: hdr.name.clone(),
                             value: hdr.value.clone(),
                         })
                         .collect()
                 }),
             }),
-            exec: p.exec.as_ref().map(|e| super::ExecAction {
+            exec: p.exec.as_ref().map(|e| crate::k8s::ExecAction {
                 command: e.command.clone(),
             }),
         }
@@ -370,9 +373,9 @@ impl PodTemplateCompiler {
 
     /// Compile a CRD SecurityContext to a K8s SecurityContext with PSS restricted defaults.
     pub(crate) fn compile_security_context(
-        security: Option<&crate::crd::SecurityContext>,
+        security: Option<&lattice_common::crd::SecurityContext>,
     ) -> K8sSecurityContext {
-        let default = crate::crd::SecurityContext::default();
+        let default = lattice_common::crd::SecurityContext::default();
         let s = security.unwrap_or(&default);
 
         let is_privileged = s.privileged == Some(true);
@@ -595,7 +598,7 @@ impl PodTemplateCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{
+    use lattice_common::crd::{
         ExecProbe, HttpGetProbe, HttpHeader, Probe, ResourceSpec, ResourceType, SecurityContext,
         SidecarSpec,
     };
