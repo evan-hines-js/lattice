@@ -253,16 +253,55 @@ impl PeerAuthentication {
             spec,
         }
     }
+
+    /// Create a PeerAuthentication with STRICT default and PERMISSIVE overrides on specific ports.
+    pub fn with_permissive_ports(
+        name: impl Into<String>,
+        namespace: &str,
+        match_labels: BTreeMap<String, String>,
+        permissive_ports: &[u16],
+    ) -> Self {
+        let port_level_mtls: BTreeMap<String, MtlsConfig> = permissive_ports
+            .iter()
+            .map(|p| {
+                (
+                    p.to_string(),
+                    MtlsConfig {
+                        mode: "PERMISSIVE".to_string(),
+                    },
+                )
+            })
+            .collect();
+
+        Self::new(
+            ObjectMeta::new(name, namespace),
+            PeerAuthenticationSpec {
+                selector: Some(WorkloadSelector { match_labels }),
+                mtls: MtlsConfig {
+                    mode: "STRICT".to_string(),
+                },
+                port_level_mtls: if port_level_mtls.is_empty() {
+                    None
+                } else {
+                    Some(port_level_mtls)
+                },
+            },
+        )
+    }
 }
 
 /// PeerAuthentication spec
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct PeerAuthenticationSpec {
     /// Workload selector (None = all pods in namespace)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selector: Option<WorkloadSelector>,
     /// mTLS configuration
     pub mtls: MtlsConfig,
+    /// Per-port mTLS overrides (port number as string key)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_level_mtls: Option<BTreeMap<String, MtlsConfig>>,
 }
 
 /// mTLS configuration

@@ -9,7 +9,7 @@
 //! The ServiceCompiler delegates to specialized compilers:
 //! - [`lattice_workload::WorkloadCompiler`]: Runs the shared compilation pipeline
 //! - [`WorkloadCompiler`](crate::workload::WorkloadCompiler): Wraps in service-specific resources
-//! - [`PolicyCompiler`](crate::policy::PolicyCompiler): Generates AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry
+//! - MeshMember CR: Emitted for the `lattice-mesh-member` controller to generate mesh policies
 //!
 //! # Usage
 //!
@@ -38,12 +38,14 @@ use kube::discovery::ApiResource;
 use lattice_cedar::PolicyEngine;
 use lattice_workload::CompilationError;
 
-use lattice_common::mesh;
+use lattice_common::crd::{
+    CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
+};
+use lattice_common::LABEL_NAME;
+use lattice_workload::CompilationError;
 
 use crate::crd::{LatticeService, MonitoringConfig, ProviderType, ServiceBackupSpec};
 use crate::graph::ServiceGraph;
-use crate::ingress::{GeneratedIngress, GeneratedWaypoint, IngressCompiler, WaypointCompiler};
-use crate::policy::{GeneratedPolicies, PolicyCompiler};
 use crate::workload::{GeneratedWorkloads, WorkloadCompiler};
 
 /// Which layer a dynamic resource should be applied in.
@@ -82,12 +84,8 @@ pub struct DynamicResource {
 pub struct CompiledService {
     /// Generated workload resources (Deployment, Service, ServiceAccount, ScaledObject)
     pub workloads: GeneratedWorkloads,
-    /// Generated network policies (AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry)
-    pub policies: GeneratedPolicies,
-    /// Generated ingress resources (Gateway, HTTPRoute, Certificate)
-    pub ingress: GeneratedIngress,
-    /// Generated waypoint Gateway for east-west L7 policy enforcement
-    pub waypoint: GeneratedWaypoint,
+    /// LatticeMeshMember CR — the mesh-member controller handles all network concerns
+    pub mesh_member: Option<LatticeMeshMember>,
     /// Dynamic resources from compiler extension phases
     pub extensions: Vec<DynamicResource>,
 }
@@ -95,11 +93,7 @@ pub struct CompiledService {
 impl CompiledService {
     /// Check if any resources were generated
     pub fn is_empty(&self) -> bool {
-        self.workloads.is_empty()
-            && self.policies.is_empty()
-            && self.ingress.is_empty()
-            && self.waypoint.is_empty()
-            && self.extensions.is_empty()
+        self.workloads.is_empty() && self.mesh_member.is_none() && self.extensions.is_empty()
     }
 
     /// Total count of all generated resources
@@ -122,9 +116,7 @@ impl CompiledService {
             + self.workloads.files_secrets.len()
             + self.workloads.pvcs.len()
             + self.workloads.external_secrets.len()
-            + self.policies.total_count()
-            + self.ingress.total_count()
-            + self.waypoint.total_count()
+            + self.mesh_member.as_ref().map_or(0, |_| 1)
             + self.extensions.len()
     }
 }
@@ -135,7 +127,7 @@ impl CompiledService {
 /// LatticeService by delegating to specialized compilers:
 /// - lattice_workload::WorkloadCompiler for the shared pipeline (volumes, secrets, authorization, templates, pod template)
 /// - WorkloadCompiler for service-specific wrapping (Deployment, Service, ServiceAccount, ScaledObject)
-/// - PolicyCompiler for AuthorizationPolicy, CiliumNetworkPolicy, ServiceEntry
+/// - MeshMember CR emission for mesh policy generation
 /// - Cedar PolicyEngine for secret access authorization (via lattice_workload)
 pub struct ServiceCompiler<'a> {
     graph: &'a ServiceGraph,
@@ -290,79 +282,90 @@ impl<'a> ServiceCompiler<'a> {
             }
         }
 
-        let policy_compiler = PolicyCompiler::new(self.graph, &self.cluster_name);
-        let mut policies = policy_compiler.compile(name, namespace);
+        // Build LatticeMeshMember CR for mesh policy delegation.
+        // The MeshMember controller will generate all Cilium + Istio policies.
+        let service_node = self.graph.get_service(namespace, name);
+        let mut allowed_callers: Vec<CallerRef> = service_node
+            .as_ref()
+            .map(|n| {
+                n.allowed_callers
+                    .iter()
+                    .map(|(ns, name)| CallerRef {
+                        name: name.clone(),
+                        namespace: if ns == namespace {
+                            None
+                        } else {
+                            Some(ns.clone())
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // Only deploy waypoint when L7 enforcement is needed (external dependencies).
-        // When no waypoint is needed, ztunnel enforces policies directly.
-        let needs_waypoint = !policies.service_entries.is_empty();
-        let waypoint = if needs_waypoint {
-            // Add use-waypoint label to the K8s Service so traffic routes through waypoint
-            if let Some(ref mut svc) = workloads.service {
-                svc.metadata = svc
-                    .metadata
-                    .clone()
-                    .with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
-            }
-            WaypointCompiler::compile(namespace)
-        } else {
-            GeneratedWaypoint::default()
-        };
+        // If service allows all callers, use wildcard
+        if service_node.as_ref().is_some_and(|n| n.allows_all) {
+            allowed_callers = vec![CallerRef {
+                name: "*".to_string(),
+                namespace: None,
+            }];
+        }
 
-        // Compile ingress resources if configured
-        let ingress = if let Some(ref ingress_spec) = service.spec.ingress {
-            let ingress = IngressCompiler::compile(
+        let dependencies = service_node
+            .as_ref()
+            .map(|n| {
+                n.dependencies
+                    .iter()
+                    .map(|(ns, name)| lattice_common::crd::ServiceRef {
+                        name: name.clone(),
+                        namespace: if ns == namespace {
+                            None
+                        } else {
+                            Some(ns.clone())
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let ports: Vec<MeshMemberPort> = workload
+            .service
+            .as_ref()
+            .map(|s| {
+                s.ports
+                    .iter()
+                    .map(|(port_name, ps)| MeshMemberPort {
+                        port: ps.target_port.unwrap_or(ps.port),
+                        name: port_name.clone(),
+                        peer_auth: PeerAuth::Strict,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mesh_member = if service_node.is_some() && !ports.is_empty() {
+            Some(LatticeMeshMember::new(
                 name,
-                namespace,
-                ingress_spec,
-                service.spec.workload.service.as_ref(),
-            );
-
-            // Add gateway allow policies for north-south traffic
-            let gateway_name = mesh::ingress_gateway_name(namespace);
-
-            // Service ports used by both L7 (Istio) and L4 (Cilium) gateway rules.
-            // Cilium translates service ports to targetPorts internally.
-            // Gateway traffic goes through ztunnel directly to the pod,
-            // so both Istio AuthorizationPolicy (ztunnel-enforced) and Cilium
-            // ingress must use the container target port.
-            let target_ports: Vec<u16> = service
-                .spec
-                .workload
-                .service
-                .as_ref()
-                .map(|s| {
-                    s.ports
-                        .values()
-                        .map(|p| p.target_port.unwrap_or(p.port))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let gateway_policy =
-                policy_compiler.compile_gateway_allow_policy(name, namespace, &target_ports);
-            policies.authorization_policies.push(gateway_policy);
-
-            if let Some(cilium_policy) = policies.cilium_policies.first_mut() {
-                cilium_policy
-                    .spec
-                    .ingress
-                    .push(PolicyCompiler::compile_gateway_ingress_rule(
-                        &gateway_name,
-                        &target_ports,
-                    ));
-            }
-
-            ingress
+                LatticeMeshMemberSpec {
+                    target: MeshMemberTarget::Selector(
+                        [(LABEL_NAME.to_string(), name.to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ports,
+                    allowed_callers,
+                    dependencies,
+                    egress: vec![],
+                    allow_peer_traffic: false,
+                    ingress: service.spec.ingress.clone(),
+                },
+            ))
         } else {
-            GeneratedIngress::default()
+            None
         };
 
         let mut compiled = CompiledService {
             workloads,
-            policies,
-            ingress,
-            waypoint,
+            mesh_member,
             extensions: Vec::new(),
         };
 
@@ -572,9 +575,8 @@ mod tests {
         assert!(output.workloads.service.is_some());
         assert!(output.workloads.service_account.is_some());
 
-        // Should have policies (from PolicyCompiler)
-        assert!(!output.policies.authorization_policies.is_empty());
-        assert!(!output.policies.cilium_policies.is_empty());
+        // Should have a MeshMember CR (network concerns delegated to mesh-member controller)
+        assert!(output.mesh_member.is_some());
     }
 
     // =========================================================================
@@ -595,8 +597,8 @@ mod tests {
         let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
-        // Should find service in graph and generate cilium policy
-        assert!(!output.policies.cilium_policies.is_empty());
+        // Should find service in graph and generate a MeshMember CR
+        assert!(output.mesh_member.is_some());
     }
 
     #[tokio::test]
@@ -614,7 +616,7 @@ mod tests {
         let output = compiler.compile(&service).await.unwrap();
 
         // Should find service using namespace as env
-        assert!(!output.policies.cilium_policies.is_empty());
+        assert!(output.mesh_member.is_some());
     }
 
     // =========================================================================
@@ -635,8 +637,8 @@ mod tests {
         assert!(output.workloads.deployment.is_some());
         assert!(output.workloads.service_account.is_some());
 
-        // No policies when service is not in graph
-        assert!(output.policies.is_empty());
+        // No MeshMember when service is not in the graph
+        assert!(output.mesh_member.is_none());
     }
 
     // =========================================================================
@@ -654,7 +656,7 @@ mod tests {
         let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
-        // Deployment + Service + ServiceAccount + CiliumPolicy
+        // Deployment + Service + ServiceAccount + MeshMember
         assert_eq!(output.resource_count(), 4);
     }
 
@@ -680,7 +682,7 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    async fn service_with_ingress_generates_gateway_resources() {
+    async fn service_with_ingress_populates_mesh_member_ingress() {
         let (graph, cedar) = test_setup();
         let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
@@ -690,33 +692,16 @@ mod tests {
         let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
-        // Should have ingress resources
-        assert!(output.ingress.gateway.is_some());
-        assert!(!output.ingress.http_routes.is_empty());
-        assert!(!output.ingress.certificates.is_empty());
-
-        let gateway = output
-            .ingress
-            .gateway
-            .expect("gateway should be generated for ingress");
-        assert_eq!(gateway.metadata.name, "prod-ingress");
-        assert_eq!(gateway.metadata.namespace, "prod");
-
-        let route = &output.ingress.http_routes[0];
-        assert_eq!(route.metadata.name, "api-public-route");
-
-        // Should have gateway allow policy
-        let gateway_policies: Vec<_> = output
-            .policies
-            .authorization_policies
-            .iter()
-            .filter(|p| p.metadata.name.starts_with("allow-gateway-to-"))
-            .collect();
-        assert_eq!(gateway_policies.len(), 1);
+        // Ingress spec should be passed through to the MeshMember CR
+        let mm = output.mesh_member.expect("should have mesh member");
+        assert!(
+            mm.spec.ingress.is_some(),
+            "MeshMember should carry ingress spec"
+        );
     }
 
     #[tokio::test]
-    async fn service_without_ingress_has_no_gateway_resources() {
+    async fn service_without_ingress_has_no_mesh_member_ingress() {
         let (graph, cedar) = test_setup();
         let spec = make_service_spec_for_graph(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
@@ -726,28 +711,11 @@ mod tests {
         let compiler = test_compiler(&graph, &cedar);
         let output = compiler.compile(&service).await.unwrap();
 
-        // Should NOT have ingress resources
-        assert!(output.ingress.is_empty());
-        assert!(output.ingress.gateway.is_none());
-        assert!(output.ingress.http_routes.is_empty());
-        assert!(output.ingress.certificates.is_empty());
-    }
-
-    #[tokio::test]
-    async fn resource_count_includes_ingress() {
-        let (graph, cedar) = test_setup();
-        let spec = make_service_spec_for_graph(vec![], vec![]);
-        graph.put_service("prod", "api", &spec);
-
-        let service = make_service_with_ingress("api", "prod");
-
-        let compiler = test_compiler(&graph, &cedar);
-        let output = compiler.compile(&service).await.unwrap();
-
-        // Should include: Deployment + Service + ServiceAccount + CiliumPolicy +
-        //                 Gateway + HTTPRoute + Certificate + GatewayAllowPolicy
-        // = 3 workloads + 2 policies + 3 ingress = at least 8
-        assert!(output.resource_count() >= 6);
+        let mm = output.mesh_member.expect("should have mesh member");
+        assert!(
+            mm.spec.ingress.is_none(),
+            "MeshMember should not carry ingress spec"
+        );
     }
 
     // =========================================================================

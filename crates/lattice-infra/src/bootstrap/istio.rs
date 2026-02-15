@@ -109,6 +109,7 @@ impl IstioReconciler {
                 mtls: MtlsConfig {
                     mode: "STRICT".to_string(),
                 },
+                port_level_mtls: None,
             },
         )
     }
@@ -169,6 +170,7 @@ impl IstioReconciler {
                     mtls: MtlsConfig {
                         mode: "PERMISSIVE".to_string(),
                     },
+                    port_level_mtls: None,
                 },
             ));
 

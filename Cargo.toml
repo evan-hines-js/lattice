@@ -18,6 +18,7 @@ members = [
     "crates/lattice-api",
     "crates/lattice-backup",
     "crates/lattice-workload",
+    "crates/lattice-mesh-member",
 ]
 
 [workspace.package]
@@ -42,6 +43,7 @@ lattice-cedar = { path = "crates/lattice-cedar" }
 lattice-api = { path = "crates/lattice-api" }
 lattice-backup = { path = "crates/lattice-backup" }
 lattice-workload = { path = "crates/lattice-workload" }
+lattice-mesh-member = { path = "crates/lattice-mesh-member" }
 
 
 # Kubernetes

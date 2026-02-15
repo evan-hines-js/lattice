@@ -8,6 +8,7 @@ mod cloud_provider;
 mod cluster;
 mod external_service;
 mod job;
+mod mesh_member;
 mod model_serving;
 mod oidc_provider;
 mod providers;
@@ -37,6 +38,11 @@ pub use external_service::{
     LatticeExternalServiceStatus, ParsedEndpoint, Resolution,
 };
 pub use job::{JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus, RestartPolicy};
+pub use mesh_member::{
+    derived_name, CallerRef, EgressRule, EgressTarget, LatticeMeshMember, LatticeMeshMemberSpec,
+    LatticeMeshMemberStatus, MeshMemberPhase, MeshMemberPort, MeshMemberScope, MeshMemberTarget,
+    PeerAuth,
+};
 pub use model_serving::{
     LatticeModel, LatticeModelSpec, LatticeModelStatus, ModelRoleSpec, ModelServingPhase,
 };
