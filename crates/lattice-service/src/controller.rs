@@ -42,9 +42,9 @@ use crate::crd::{
 };
 use crate::graph::ServiceGraph;
 use crate::ingress::{Certificate, Gateway, GrpcRoute, HttpRoute, TcpRoute};
-use crate::workload::backup::merge_backup_specs;
 use crate::Error;
 use lattice_common::mesh;
+use lattice_workload::backup::merge_backup_specs;
 
 // =============================================================================
 // Discovered CRD versions
@@ -1178,10 +1178,10 @@ async fn compile_and_apply(
             if !is_status_unchanged(service, ServicePhase::Failed, &msg) {
                 let event_reason = if e.is_policy_denied() {
                     match &e {
-                        crate::workload::CompilationError::SecurityOverrideDenied { .. } => {
+                        lattice_workload::CompilationError::SecurityOverrideDenied { .. } => {
                             reasons::SECURITY_OVERRIDE_DENIED
                         }
-                        crate::workload::CompilationError::VolumeAccessDenied { .. } => {
+                        lattice_workload::CompilationError::VolumeAccessDenied { .. } => {
                             reasons::VOLUME_ACCESS_DENIED
                         }
                         _ => reasons::SECRET_ACCESS_DENIED,
@@ -1204,7 +1204,7 @@ async fn compile_and_apply(
             }
 
             update_service_status(service, ctx, ServiceStatusUpdate::failed(&msg)).await?;
-            return Err(Error::from(e));
+            return Err(Error::validation(e.to_string()));
         }
     };
 

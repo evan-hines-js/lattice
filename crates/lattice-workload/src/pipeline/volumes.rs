@@ -9,9 +9,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::error::CompilationError;
-use super::{LabelSelector, ObjectMeta};
-use crate::crd::{VolumeAccessMode, WorkloadSpec};
+use crate::error::CompilationError;
+use crate::k8s::LabelSelector;
+use lattice_common::crd::{VolumeAccessMode, WorkloadSpec};
+use lattice_common::kube_utils::ObjectMeta;
 
 // =============================================================================
 // Kubernetes PVC Types
@@ -96,20 +97,6 @@ pub struct Affinity {
 }
 
 // =============================================================================
-// PVC Volume Source
-// =============================================================================
-
-/// PVC volume source for pod volumes
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PvcVolumeSource {
-    /// PVC claim name
-    pub claim_name: String,
-    /// Mount as read-only
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read_only: Option<bool>,
-}
-
 // =============================================================================
 // Generated Volumes Container
 // =============================================================================
@@ -124,24 +111,14 @@ pub struct GeneratedVolumes {
     /// Pod affinity rules (for RWO volume co-location)
     pub affinity: Option<Affinity>,
     /// Volumes to add to pod spec
-    pub volumes: Vec<super::Volume>,
+    pub volumes: Vec<crate::k8s::Volume>,
     /// Volume mounts per container (container_name -> mounts)
-    pub volume_mounts: BTreeMap<String, Vec<super::VolumeMount>>,
+    pub volume_mounts: BTreeMap<String, Vec<crate::k8s::VolumeMount>>,
     /// Scheduling gates to add to pod spec
-    pub scheduling_gates: Vec<super::SchedulingGate>,
+    pub scheduling_gates: Vec<crate::k8s::SchedulingGate>,
 }
 
-impl GeneratedVolumes {
-    /// Check if no volumes were generated
-    pub fn is_empty(&self) -> bool {
-        self.pvcs.is_empty()
-            && self.pod_labels.is_empty()
-            && self.affinity.is_none()
-            && self.volumes.is_empty()
-            && self.volume_mounts.is_empty()
-            && self.scheduling_gates.is_empty()
-    }
-}
+impl GeneratedVolumes {}
 
 // =============================================================================
 // Helpers
@@ -151,7 +128,7 @@ impl GeneratedVolumes {
 ///
 /// E.g., `/var/cache/nginx` → `emptydir-var-cache-nginx`
 fn sanitize_volume_name(mount_path: &str) -> String {
-    let label = super::sanitize_dns_label(mount_path);
+    let label = crate::helpers::sanitize_dns_label(mount_path);
     let name = format!("emptydir-{}", label);
     if name.len() > 63 {
         name[..63].trim_end_matches('-').to_string()
@@ -185,7 +162,7 @@ impl VolumeCompiler {
         service_name: &str,
         namespace: &str,
         workload: &WorkloadSpec,
-        sidecars: &BTreeMap<String, crate::crd::SidecarSpec>,
+        sidecars: &BTreeMap<String, lattice_common::crd::SidecarSpec>,
     ) -> Result<GeneratedVolumes, CompilationError> {
         let mut output = GeneratedVolumes::default();
 
@@ -252,9 +229,10 @@ impl VolumeCompiler {
             }
 
             // Generate pod volume
-            output
-                .volumes
-                .push(super::Volume::from_pvc(resource_name.as_str(), pvc_name));
+            output.volumes.push(crate::k8s::Volume::from_pvc(
+                resource_name.as_str(),
+                pvc_name,
+            ));
         }
 
         // -----------------------------------------------------------------
@@ -288,7 +266,7 @@ impl VolumeCompiler {
     fn compile_pvc(
         name: &str,
         namespace: &str,
-        params: &crate::crd::VolumeParams,
+        params: &lattice_common::crd::VolumeParams,
     ) -> PersistentVolumeClaim {
         let access_mode = match params.access_mode {
             Some(VolumeAccessMode::ReadWriteMany) => "ReadWriteMany",
@@ -321,9 +299,9 @@ impl VolumeCompiler {
     /// Returns (volume_mounts, extra_pod_volumes) where extra_pod_volumes are
     /// emptyDir volumes that need to be added to the pod spec.
     fn resolve_mounts(
-        volumes: &BTreeMap<String, crate::crd::VolumeMount>,
-        mountable_resources: &[(&String, &crate::crd::ResourceSpec)],
-    ) -> (Vec<super::VolumeMount>, Vec<super::Volume>) {
+        volumes: &BTreeMap<String, lattice_common::crd::VolumeMount>,
+        mountable_resources: &[(&String, &lattice_common::crd::ResourceSpec)],
+    ) -> (Vec<crate::k8s::VolumeMount>, Vec<crate::k8s::Volume>) {
         let mut mounts = Vec::new();
         let mut extra_volumes = Vec::new();
 
@@ -335,7 +313,7 @@ impl VolumeCompiler {
                             .iter()
                             .any(|(name, _)| name.as_str() == resource_name)
                         {
-                            mounts.push(super::VolumeMount {
+                            mounts.push(crate::k8s::VolumeMount {
                                 name: resource_name.to_string(),
                                 mount_path: mount_path.clone(),
                                 sub_path: volume_mount.path.clone(),
@@ -346,12 +324,12 @@ impl VolumeCompiler {
                 }
                 None => {
                     let vol_name = sanitize_volume_name(mount_path);
-                    extra_volumes.push(super::Volume::from_empty_dir(
+                    extra_volumes.push(crate::k8s::Volume::from_empty_dir(
                         &vol_name,
                         volume_mount.medium.clone(),
                         volume_mount.size_limit.clone(),
                     ));
-                    mounts.push(super::VolumeMount {
+                    mounts.push(crate::k8s::VolumeMount {
                         name: vol_name,
                         mount_path: mount_path.clone(),
                         sub_path: volume_mount.path.clone(),
@@ -369,7 +347,10 @@ impl VolumeCompiler {
     /// When multiple containers (main + sidecars) declare the same emptyDir
     /// mount (e.g., `/tmp: {}`), they produce identically-named volumes.
     /// K8s rejects duplicate volume names, so we deduplicate here.
-    pub(crate) fn extend_volumes_dedup(existing: &mut Vec<super::Volume>, new: Vec<super::Volume>) {
+    pub(crate) fn extend_volumes_dedup(
+        existing: &mut Vec<crate::k8s::Volume>,
+        new: Vec<crate::k8s::Volume>,
+    ) {
         for vol in new {
             if !existing.iter().any(|v| v.name == vol.name) {
                 existing.push(vol);
@@ -396,7 +377,7 @@ impl VolumeCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ContainerSpec, ResourceSpec, ResourceType, WorkloadSpec};
+    use lattice_common::crd::{ContainerSpec, ResourceSpec, ResourceType, WorkloadSpec};
     use lattice_common::template::TemplateString;
 
     fn make_spec_with_volumes(
@@ -446,7 +427,7 @@ mod tests {
         for (mount_path, resource_name) in container_mounts {
             volumes.insert(
                 mount_path.to_string(),
-                crate::crd::VolumeMount {
+                lattice_common::crd::VolumeMount {
                     source: Some(TemplateString::from(format!(
                         "${{resources.{}}}",
                         resource_name
@@ -773,7 +754,7 @@ mod tests {
         for (path, medium, size_limit) in mounts {
             volumes.insert(
                 path.to_string(),
-                crate::crd::VolumeMount {
+                lattice_common::crd::VolumeMount {
                     source: None,
                     path: None,
                     read_only: None,
@@ -854,7 +835,7 @@ mod tests {
         let container = spec.containers.get_mut("main").unwrap();
         container.volumes.insert(
             "/tmp".to_string(),
-            crate::crd::VolumeMount {
+            lattice_common::crd::VolumeMount {
                 source: None,
                 path: None,
                 read_only: None,
@@ -864,7 +845,7 @@ mod tests {
         );
         container.volumes.insert(
             "/var/cache/nginx".to_string(),
-            crate::crd::VolumeMount {
+            lattice_common::crd::VolumeMount {
                 source: None,
                 path: None,
                 read_only: None,
@@ -913,7 +894,7 @@ mod tests {
 
     #[test]
     fn sidecar_emptydir_volumes() {
-        use crate::crd::SidecarSpec;
+        use lattice_common::crd::SidecarSpec;
 
         let spec = WorkloadSpec {
             containers: {
@@ -933,7 +914,7 @@ mod tests {
         let mut sidecar_volumes = BTreeMap::new();
         sidecar_volumes.insert(
             "/tmp".to_string(),
-            crate::crd::VolumeMount {
+            lattice_common::crd::VolumeMount {
                 source: None,
                 path: None,
                 read_only: None,
@@ -967,14 +948,14 @@ mod tests {
 
     #[test]
     fn shared_emptydir_between_main_and_sidecar_deduplicates() {
-        use crate::crd::SidecarSpec;
+        use lattice_common::crd::SidecarSpec;
 
         // Main container declares /tmp and /run
         let mut main_volumes = BTreeMap::new();
         for path in ["/tmp", "/run"] {
             main_volumes.insert(
                 path.to_string(),
-                crate::crd::VolumeMount {
+                lattice_common::crd::VolumeMount {
                     source: None,
                     path: None,
                     read_only: None,
@@ -1005,7 +986,7 @@ mod tests {
         for path in ["/tmp", "/run"] {
             sidecar_volumes.insert(
                 path.to_string(),
-                crate::crd::VolumeMount {
+                lattice_common::crd::VolumeMount {
                     source: None,
                     path: None,
                     read_only: None,

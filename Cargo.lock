@@ -2632,11 +2632,28 @@ dependencies = [
  "lattice-common",
  "lattice-infra",
  "lattice-secret-provider",
+ "lattice-workload",
  "mockall",
  "parking_lot",
  "rstest",
  "rustls",
  "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-workload"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "lattice-cedar",
+ "lattice-common",
+ "lattice-secret-provider",
  "serde",
  "serde_json",
  "thiserror 2.0.17",

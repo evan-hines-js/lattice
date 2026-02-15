@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::crd::{HookErrorAction, ServiceBackupSpec, VolumeBackupDefault};
+use lattice_common::crd::{HookErrorAction, ServiceBackupSpec, VolumeBackupDefault};
 
 /// Compile Velero pod annotations from a resolved backup spec.
 ///
@@ -45,7 +45,7 @@ pub fn compile_backup_annotations(spec: &ServiceBackupSpec) -> BTreeMap<String, 
 fn compile_hook_annotations(
     annotations: &mut BTreeMap<String, String>,
     phase: &str,
-    hooks: &[crate::crd::BackupHook],
+    hooks: &[lattice_common::crd::BackupHook],
 ) {
     if hooks.is_empty() {
         return;
@@ -94,7 +94,7 @@ fn compile_hook_annotations(
 /// Compile volume backup annotations.
 fn compile_volume_annotations(
     annotations: &mut BTreeMap<String, String>,
-    volumes: &crate::crd::VolumeBackupSpec,
+    volumes: &lattice_common::crd::VolumeBackupSpec,
 ) {
     match volumes.default_policy {
         VolumeBackupDefault::OptIn => {
@@ -162,7 +162,7 @@ fn overlay_backup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{BackupHook, BackupHooksSpec, HookErrorAction, VolumeBackupSpec};
+    use lattice_common::crd::{BackupHook, BackupHooksSpec, HookErrorAction, VolumeBackupSpec};
 
     fn make_hook(name: &str, container: &str, cmd: &str) -> BackupHook {
         BackupHook {

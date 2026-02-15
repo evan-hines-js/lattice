@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use lattice_common::template::RenderedVariable;
 
-use super::{ConfigMap, ConfigMapEnvSource, EnvFromSource, Secret, SecretEnvSource};
+use crate::k8s::{ConfigMap, ConfigMapEnvSource, EnvFromSource, Secret, SecretEnvSource};
 
 /// Result of compiling environment variables
 #[derive(Debug, Default)]

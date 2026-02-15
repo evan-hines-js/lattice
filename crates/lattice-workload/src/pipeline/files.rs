@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, HashSet};
 use lattice_common::template::{FileSecretRef, RenderedFile};
 use lattice_secret_provider::eso::ExternalSecret;
 
-use super::error::CompilationError;
-use super::secrets::{resolve_eso_data, SecretRef};
-use super::{ConfigMap, Secret, Volume, VolumeMount};
+use crate::error::CompilationError;
+use crate::k8s::{ConfigMap, Secret, Volume, VolumeMount};
+use crate::pipeline::secrets::{resolve_eso_data, SecretRef};
 
 /// Result of compiling file mounts
 #[derive(Debug, Default)]
@@ -167,7 +167,7 @@ fn compile_secret_files(
     result: &mut CompiledFiles,
 ) -> Result<(), CompilationError> {
     for (key, (content, mount_path, file_refs)) in secret_files {
-        let store = super::secrets::resolve_single_store(
+        let store = crate::pipeline::secrets::resolve_single_store(
             file_refs,
             secret_refs,
             &format!("file '{}'", key),
@@ -175,7 +175,7 @@ fn compile_secret_files(
 
         let es_name = format!("{}-file-{}", base_name, key);
         // Volume names must be DNS labels (no dots/underscores/etc).
-        let vol_name = super::sanitize_dns_label(&es_name);
+        let vol_name = crate::helpers::sanitize_dns_label(&es_name);
 
         let eso_data = resolve_eso_data(file_refs, secret_refs, &format!("file '{}'", key))?;
 
