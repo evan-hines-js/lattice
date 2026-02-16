@@ -196,7 +196,113 @@ fn collect_container_overrides(
         overrides.push(SecurityOverrideRequest {
             override_id: "unconfined:apparmor".into(),
             category: "profile".into(),
-            container: cname,
+            container: cname.clone(),
         });
+    }
+
+    for binary in &s.allowed_binaries {
+        overrides.push(SecurityOverrideRequest {
+            override_id: format!("allowedBinary:{binary}"),
+            category: "binary".into(),
+            container: cname.clone(),
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use lattice_common::crd::{ContainerSpec, RuntimeSpec, SecurityContext, WorkloadSpec};
+
+    use super::*;
+
+    #[test]
+    fn allowed_binaries_generate_overrides() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                security: Some(SecurityContext {
+                    allowed_binaries: vec![
+                        "/usr/bin/curl".to_string(),
+                        "/usr/bin/convert".to_string(),
+                    ],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec::default();
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        let binary_overrides: Vec<_> = overrides
+            .iter()
+            .filter(|o| o.category == "binary")
+            .collect();
+        assert_eq!(binary_overrides.len(), 2);
+        assert!(binary_overrides
+            .iter()
+            .any(|o| o.override_id == "allowedBinary:/usr/bin/curl"));
+        assert!(binary_overrides
+            .iter()
+            .any(|o| o.override_id == "allowedBinary:/usr/bin/convert"));
+        assert!(binary_overrides
+            .iter()
+            .all(|o| o.container.as_deref() == Some("main")));
+    }
+
+    #[test]
+    fn wildcard_allowed_binary_generates_override() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                security: Some(SecurityContext {
+                    allowed_binaries: vec!["*".to_string()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec::default();
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        let binary_overrides: Vec<_> = overrides
+            .iter()
+            .filter(|o| o.category == "binary")
+            .collect();
+        assert_eq!(binary_overrides.len(), 1);
+        assert_eq!(binary_overrides[0].override_id, "allowedBinary:*");
+    }
+
+    #[test]
+    fn no_allowed_binaries_no_binary_overrides() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec::default();
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        assert!(overrides.iter().all(|o| o.category != "binary"));
     }
 }

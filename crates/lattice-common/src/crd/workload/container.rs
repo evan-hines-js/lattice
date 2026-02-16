@@ -192,6 +192,14 @@ pub struct SecurityContext {
     /// Localhost AppArmor profile name (only when apparmor_profile is "Localhost")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apparmor_localhost_profile: Option<String>,
+
+    /// Full binary execution whitelist.
+    ///
+    /// When set, only these binaries (plus auto-detected probe/command shells)
+    /// may execute. All other binaries are SIGKILL'd by Tetragon.
+    /// When empty/unset, the default shell-only blocking applies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_binaries: Vec<String>,
 }
 
 // =============================================================================
