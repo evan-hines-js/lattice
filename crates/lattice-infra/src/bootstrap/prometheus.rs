@@ -285,7 +285,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             }],
             allowed_callers: vec![],
             dependencies: vec![],
-            egress: vec![],
+            egress: vec![kube_apiserver_egress()],
             allow_peer_traffic: false,
             ingress: None,
             service_account: Some("vm-kube-state-metrics".to_string()),

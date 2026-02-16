@@ -248,7 +248,20 @@ pub async fn kube_client_from_kubeconfig(
     Client::try_from(config).cmd_err()
 }
 
+/// Ensure cert-manager is installed and ready.
+///
+/// cert-manager must be installed before CAPI providers because CAPI manifests
+/// reference cert-manager CRDs (Certificate, Issuer).
+pub async fn ensure_cert_manager(client: &kube::Client) -> Result<()> {
+    lattice_infra::bootstrap::cert_manager::ensure_cert_manager(client)
+        .await
+        .cmd_err()
+}
+
 /// Ensure CAPI providers are installed for the given provider type.
+///
+/// cert-manager must be installed and ready before calling this function,
+/// as CAPI manifests reference cert-manager CRDs (Certificate, Issuer).
 pub async fn ensure_capi_providers(provider: lattice_common::crd::ProviderType) -> Result<()> {
     use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
 
