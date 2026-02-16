@@ -117,7 +117,7 @@ pub fn generate_test_script(source_name: &str, targets: Vec<TestTarget>) -> Stri
         .map(|(i, t)| {
             format!(
                 r#"
-    R{i}=$(curl -sk -o /dev/null -w "%{{http_code}}" --connect-timeout 1 --max-time 2 {url} 2>/dev/null || echo "000")"#,
+    R{i}=$(curl -sk -o /dev/null -w "%{{http_code}}" --connect-timeout 1 --max-time 2 {url} 2>/dev/null; true)"#,
                 i = i,
                 url = t.url,
             )
@@ -187,7 +187,7 @@ MAX_ATTEMPTS=3
 ATTEMPT=0
 RESULT="UNKNOWN"
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    HTTP_CODE=$(curl -sk -o /dev/null -w "%{{http_code}}" --connect-timeout 1 --max-time 2 {url} 2>/dev/null || echo "000")
+    HTTP_CODE=$(curl -sk -o /dev/null -w "%{{http_code}}" --connect-timeout 1 --max-time 2 {url} 2>/dev/null; true)
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
         RESULT="ALLOWED"
         break

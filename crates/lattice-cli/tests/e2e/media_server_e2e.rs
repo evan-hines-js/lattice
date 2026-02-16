@@ -576,7 +576,7 @@ async fn verify_unauthorized_volume_access_denied(kubeconfig_path: &str) -> Resu
 async fn exec_curl(kubeconfig_path: &str, from_deploy: &str, url: &str) -> String {
     let target = format!("deploy/{}", from_deploy);
     let cmd = format!(
-        "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 5 --max-time 10 {} || echo '000'",
+        "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 5 --max-time 10 {}; true",
         url
     );
     run_kubectl(&[
