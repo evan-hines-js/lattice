@@ -1394,15 +1394,52 @@ pub async fn delete_cluster_and_wait(
     // 2. The unpivot flow sends CAPI manifests to parent
     // 3. Parent imports and deletes via CAPI, which kills the infrastructure
     // 4. The cluster's API server dies before the finalizer is removed
-    // So we just initiate deletion and wait for parent confirmation
-    run_kubectl(&[
-        "--kubeconfig",
-        cluster_kubeconfig,
-        "delete",
-        "latticecluster",
-        cluster_name,
-        "--wait=false",
-    ])
+    // So we just initiate deletion and wait for parent confirmation.
+    //
+    // We retry until the phase changes from Ready because transient proxy/network
+    // issues can cause the delete to silently fail (kubectl returns success but the
+    // request never reaches the API server).
+    wait_for_condition(
+        &format!("{} deletion initiated", cluster_name),
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+        || {
+            let cluster_kubeconfig = cluster_kubeconfig.to_string();
+            let cluster_name = cluster_name.to_string();
+            async move {
+                // Issue the delete (idempotent — safe to retry)
+                let _ = run_kubectl(&[
+                    "--kubeconfig",
+                    &cluster_kubeconfig,
+                    "delete",
+                    "latticecluster",
+                    &cluster_name,
+                    "--wait=false",
+                ])
+                .await;
+
+                // Check that the phase is no longer Ready
+                match run_kubectl(&[
+                    "--kubeconfig",
+                    &cluster_kubeconfig,
+                    "get",
+                    "latticecluster",
+                    &cluster_name,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ])
+                .await
+                {
+                    Ok(phase) if phase.trim() == "Ready" => {
+                        info!("LatticeCluster still Ready, retrying delete...");
+                        Ok(false)
+                    }
+                    // Not Ready, not found, or error — deletion is underway
+                    _ => Ok(true),
+                }
+            }
+        },
+    )
     .await?;
     info!("LatticeCluster deletion initiated (async)");
 

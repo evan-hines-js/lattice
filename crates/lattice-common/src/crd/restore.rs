@@ -81,9 +81,9 @@ pub struct LatticeRestoreSpec {
     /// Name of the Velero backup to restore from
     pub backup_name: String,
 
-    /// Reference to the LatticeBackupPolicy that created the backup
+    /// Reference to the LatticeClusterBackup that created the backup
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup_policy_ref: Option<String>,
+    pub cluster_backup_ref: Option<String>,
 
     /// Whether to restore persistent volumes
     #[serde(default = "default_true")]
@@ -104,13 +104,13 @@ mod tests {
         let spec = parse_spec(
             r#"
 backupName: lattice-default-20260205020012
-backupPolicyRef: default
+clusterBackupRef: default
 restoreVolumes: true
 "#,
         );
 
         assert_eq!(spec.backup_name, "lattice-default-20260205020012");
-        assert_eq!(spec.backup_policy_ref, Some("default".to_string()));
+        assert_eq!(spec.cluster_backup_ref, Some("default".to_string()));
         assert!(spec.restore_volumes);
     }
 
@@ -123,7 +123,7 @@ backupName: my-backup
         );
 
         assert!(spec.restore_volumes);
-        assert!(spec.backup_policy_ref.is_none());
+        assert!(spec.cluster_backup_ref.is_none());
     }
 
     #[test]

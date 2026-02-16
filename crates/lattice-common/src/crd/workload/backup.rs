@@ -80,8 +80,25 @@ pub struct VolumeBackupSpec {
 /// Defines Velero backup hooks and volume backup policies for a service.
 /// This spec is shared between `LatticeService.spec.backup` (inline) and
 /// `LatticeServicePolicy.spec.backup` (policy overlay).
+///
+/// When `schedule` is set, the service controller generates a dedicated Velero
+/// Schedule scoped to this service's namespace and labels. When `schedule` is
+/// None, the service relies on cluster-wide backup schedules.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ServiceBackupSpec {
+    /// Cron schedule for service-level backups (e.g., "0 */1 * * *" for hourly)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+
+    /// Reference to a BackupStore by name (omit to use default)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_ref: Option<String>,
+
+    /// Retention configuration for service-level backups
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<super::super::cluster_backup::BackupRetentionSpec>,
+
     /// Pre/post backup hooks for application-aware backups
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<BackupHooksSpec>,

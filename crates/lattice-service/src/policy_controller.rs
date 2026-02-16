@@ -146,6 +146,7 @@ mod tests {
                     post: vec![],
                 }),
                 volumes: None,
+                ..Default::default()
             }),
             ingress: None,
         };

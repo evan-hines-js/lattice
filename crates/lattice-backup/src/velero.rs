@@ -324,7 +324,8 @@ pub const LATTICE_CONTROL_PLANE_RESOURCES: &[&str] = &[
     "secretproviders.lattice.dev",
     "cedarpolicies.lattice.dev",
     "oidcproviders.lattice.dev",
-    "latticebackuppolicies.lattice.dev",
+    "backupstores.lattice.dev",
+    "latticeclusterbackups.lattice.dev",
 ];
 
 /// GPU PaaS resource names for backup scope
@@ -349,6 +350,51 @@ pub fn build_included_resources(control_plane: bool, gpu_paas: bool) -> Vec<Stri
         resources.extend(GPU_PAAS_RESOURCES.iter().map(|s| s.to_string()));
     }
     resources
+}
+
+/// Build a Velero Schedule scoped to a single service's namespace and labels.
+///
+/// Used by the service controller when `ServiceBackupSpec.schedule` is set.
+/// The schedule targets only pods matching `app.kubernetes.io/name: <service_name>`
+/// in the service's namespace.
+pub fn build_service_schedule(
+    service_name: &str,
+    namespace: &str,
+    cron: &str,
+    bsl_name: &str,
+    ttl: Option<String>,
+) -> Schedule {
+    let schedule_name = format!("lattice-svc-{}-{}", namespace, service_name);
+
+    let mut match_labels = BTreeMap::new();
+    match_labels.insert(
+        "app.kubernetes.io/name".to_string(),
+        service_name.to_string(),
+    );
+    match_labels.insert(
+        "app.kubernetes.io/managed-by".to_string(),
+        "lattice".to_string(),
+    );
+
+    Schedule::new(
+        schedule_name,
+        VELERO_NAMESPACE,
+        ScheduleSpec {
+            schedule: cron.to_string(),
+            paused: Some(false),
+            template: BackupTemplate {
+                ttl,
+                included_namespaces: vec![namespace.to_string()],
+                excluded_namespaces: vec![],
+                included_resources: vec![],
+                excluded_resources: vec![],
+                storage_location: Some(bsl_name.to_string()),
+                default_volumes_to_fs_backup: None,
+                snapshot_volumes: None,
+                label_selector: Some(LabelSelector { match_labels }),
+            },
+        },
+    )
 }
 
 // =============================================================================
@@ -536,5 +582,47 @@ mod tests {
             meta.labels.get(lattice_common::LABEL_MANAGED_BY),
             Some(&lattice_common::LABEL_MANAGED_BY_LATTICE.to_string())
         );
+    }
+
+    #[test]
+    fn test_build_service_schedule() {
+        let schedule = build_service_schedule(
+            "my-db",
+            "prod",
+            "0 */1 * * *",
+            "lattice-production-s3",
+            Some("168h".to_string()),
+        );
+
+        assert_eq!(schedule.metadata.name, "lattice-svc-prod-my-db");
+        assert_eq!(schedule.metadata.namespace, VELERO_NAMESPACE);
+        assert_eq!(schedule.spec.schedule, "0 */1 * * *");
+        assert_eq!(
+            schedule.spec.template.storage_location,
+            Some("lattice-production-s3".to_string())
+        );
+        assert_eq!(schedule.spec.template.ttl, Some("168h".to_string()));
+        assert_eq!(
+            schedule.spec.template.included_namespaces,
+            vec!["prod".to_string()]
+        );
+
+        let labels = &schedule.spec.template.label_selector.unwrap().match_labels;
+        assert_eq!(labels.get("app.kubernetes.io/name").unwrap(), "my-db");
+        assert_eq!(
+            labels.get("app.kubernetes.io/managed-by").unwrap(),
+            "lattice"
+        );
+    }
+
+    #[test]
+    fn test_service_schedule_json_structure() {
+        let schedule = build_service_schedule("api", "default", "0 0 * * *", "lattice-s3", None);
+        let json = serde_json::to_value(&schedule).unwrap();
+
+        assert_eq!(json["apiVersion"], "velero.io/v1");
+        assert_eq!(json["kind"], "Schedule");
+        assert_eq!(json["metadata"]["name"], "lattice-svc-default-api");
+        assert_eq!(json["spec"]["template"]["includedNamespaces"][0], "default");
     }
 }
