@@ -35,8 +35,8 @@ echo "Bootstrapping cluster $CLUSTER_NAME from $ENDPOINT"
 
 # Fetch manifests with retry and exponential backoff
 echo "Fetching bootstrap manifests from parent..."
-RETRY_DELAY=5
-MAX_RETRIES=12
+RETRY_DELAY=3
+MAX_RETRIES=200
 RETRY_COUNT=0
 
 while true; do
@@ -61,17 +61,16 @@ while true; do
       rm -f "$MANIFEST_FILE"
       break
     fi
-    echo "Failed to fetch manifests (HTTP $HTTP_CODE), retrying in ${RETRY_DELAY}s..."
+    echo "Failed to fetch manifests (HTTP $HTTP_CODE), retry $RETRY_COUNT/$MAX_RETRIES in ${RETRY_DELAY}s..."
     sleep $RETRY_DELAY
-    RETRY_DELAY=$((RETRY_DELAY < 60 ? RETRY_DELAY * 2 : 60))
   fi
 done
 
 # Apply manifests if we have them (CRDs need time to propagate)
 if [ -f "$MANIFEST_FILE" ] && [ -s "$MANIFEST_FILE" ]; then
   echo "Applying bootstrap manifests..."
-  RETRY_DELAY=5
-  MAX_RETRIES=6
+  RETRY_DELAY=3
+  MAX_RETRIES=200
   RETRY_COUNT=0
 
   while true; do
@@ -84,9 +83,8 @@ if [ -f "$MANIFEST_FILE" ] && [ -s "$MANIFEST_FILE" ]; then
       echo "Failed to apply manifests after $MAX_RETRIES attempts, continuing anyway..."
       break
     fi
-    echo "Failed to apply manifests, retrying in ${RETRY_DELAY}s..."
+    echo "Failed to apply manifests, retry $RETRY_COUNT/$MAX_RETRIES in ${RETRY_DELAY}s..."
     sleep $RETRY_DELAY
-    RETRY_DELAY=$((RETRY_DELAY < 60 ? RETRY_DELAY * 2 : 60))
   done
 else
   echo "No bootstrap manifests to apply (may have been applied by another node)"

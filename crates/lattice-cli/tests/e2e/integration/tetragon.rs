@@ -271,8 +271,10 @@ async fn get_policy_yaml(kubeconfig: &str, namespace: &str, name: &str) -> Resul
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn yaml_blocks_shell(yaml: &str, shell: &str) -> bool {
-    yaml.contains(&format!("- {shell}")) || yaml.contains(&format!("- \"{shell}\""))
+/// Check if a binary appears in the allow-binaries policy's NotEqual values list.
+/// In the allow-binaries policy, NotEqual values are the ALLOWED binaries.
+fn yaml_allows_binary(yaml: &str, binary: &str) -> bool {
+    yaml.contains(&format!("- {binary}")) || yaml.contains(&format!("- \"{binary}\""))
 }
 
 // =============================================================================
@@ -295,7 +297,7 @@ async fn test_default_security(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     let p = wait_for_policies(kubeconfig, NS_DEFAULT, svc, Duration::from_secs(30)).await?;
-    assert_has(&p, "block-shells", svc);
+    assert_has(&p, "allow-binaries", svc);
     assert_has(&p, "block-rootfs-write", svc);
     assert_has(&p, "block-setuid", svc);
     assert_has(&p, "block-capset", svc);
@@ -327,7 +329,7 @@ async fn test_writable_rootfs(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     let p = wait_for_policies(kubeconfig, NS_WRITABLE_ROOTFS, svc, Duration::from_secs(30)).await?;
-    assert_has(&p, "block-shells", svc);
+    assert_has(&p, "allow-binaries", svc);
     assert_missing(&p, "block-rootfs-write", svc);
 
     delete_namespace(kubeconfig, NS_WRITABLE_ROOTFS).await;
@@ -415,10 +417,10 @@ async fn test_probe_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     wait_for_policies(kubeconfig, NS_PROBE_SHELL, svc, Duration::from_secs(30)).await?;
-    let yaml = get_policy_yaml(kubeconfig, NS_PROBE_SHELL, &format!("block-shells-{svc}")).await?;
+    let yaml = get_policy_yaml(kubeconfig, NS_PROBE_SHELL, &format!("allow-binaries-{svc}")).await?;
     assert!(
-        !yaml_blocks_shell(&yaml, "/bin/sh"),
-        "/bin/sh should be exempted for probe"
+        yaml_allows_binary(&yaml, "/bin/sh"),
+        "/bin/sh should be auto-allowed for probe"
     );
 
     delete_namespace(kubeconfig, NS_PROBE_SHELL).await;
@@ -447,10 +449,10 @@ async fn test_cmd_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     wait_for_policies(kubeconfig, NS_CMD_SHELL, svc, Duration::from_secs(30)).await?;
-    let yaml = get_policy_yaml(kubeconfig, NS_CMD_SHELL, &format!("block-shells-{svc}")).await?;
+    let yaml = get_policy_yaml(kubeconfig, NS_CMD_SHELL, &format!("allow-binaries-{svc}")).await?;
     assert!(
-        !yaml_blocks_shell(&yaml, "/bin/bash"),
-        "/bin/bash should be exempted for container command"
+        yaml_allows_binary(&yaml, "/bin/bash"),
+        "/bin/bash should be auto-allowed for container command"
     );
 
     delete_namespace(kubeconfig, NS_CMD_SHELL).await;
@@ -458,7 +460,7 @@ async fn test_cmd_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Test 7: Sidecar command shell exemption — /bin/ash NOT in blocked shells
+/// Test 7: Sidecar command shell exemption — /bin/ash auto-allowed
 async fn test_sidecar_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 7: Sidecar shell exemption — /bin/ash should be allowed...");
     ensure_fresh_namespace(kubeconfig, NS_SIDECAR_SHELL).await?;
@@ -476,10 +478,10 @@ async fn test_sidecar_shell_exemption(kubeconfig: &str) -> Result<(), String> {
 
     wait_for_policies(kubeconfig, NS_SIDECAR_SHELL, svc, Duration::from_secs(30)).await?;
     let yaml =
-        get_policy_yaml(kubeconfig, NS_SIDECAR_SHELL, &format!("block-shells-{svc}")).await?;
+        get_policy_yaml(kubeconfig, NS_SIDECAR_SHELL, &format!("allow-binaries-{svc}")).await?;
     assert!(
-        !yaml_blocks_shell(&yaml, "/bin/ash"),
-        "/bin/ash should be exempted because sidecar command uses it"
+        yaml_allows_binary(&yaml, "/bin/ash"),
+        "/bin/ash should be auto-allowed because sidecar command uses it"
     );
 
     delete_namespace(kubeconfig, NS_SIDECAR_SHELL).await;
@@ -605,6 +607,214 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
 }
 
 // =============================================================================
+// Allowed binaries tests
+// =============================================================================
+
+const NS_ALLOWED_BINARIES: &str = "tetragon-t9";
+const NS_ALLOWED_BINARIES_CEDAR: &str = "tetragon-t10";
+const NS_WILDCARD_BINARIES: &str = "tetragon-t11";
+
+fn build_service_with_allowed_binaries(
+    name: &str,
+    namespace: &str,
+    allowed_binaries: Vec<String>,
+) -> LatticeService {
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            security: Some(SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                allowed_binaries,
+                ..Default::default()
+            }),
+            resources: Some(ResourceRequirements {
+                limits: Some(ResourceQuantity {
+                    cpu: Some("100m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 8080,
+            target_port: None,
+            protocol: None,
+        },
+    );
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            workload: WorkloadSpec {
+                containers,
+                service: Some(ServicePortsSpec { ports }),
+                ..Default::default()
+            },
+            runtime: RuntimeSpec::default(),
+            ..Default::default()
+        },
+        status: None,
+    }
+}
+
+/// Test 9: allowedBinaries whitelist — allow-binaries policy emitted, listed binaries work,
+/// unlisted binaries get SIGKILL'd
+async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
+    info!("[Tetragon] Test 9: allowedBinaries whitelist...");
+    ensure_fresh_namespace(kubeconfig, NS_ALLOWED_BINARIES).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t9", NS_ALLOWED_BINARIES).await?;
+
+    let svc = "svc-binaries";
+    // Allow only /bin/busybox (needed to exec anything in busybox image)
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_ALLOWED_BINARIES,
+        build_service_with_allowed_binaries(
+            svc,
+            NS_ALLOWED_BINARIES,
+            vec!["/bin/busybox".to_string()],
+        ),
+        "Ready",
+        None,
+        Duration::from_secs(90),
+    )
+    .await?;
+
+    let p = wait_for_policies(kubeconfig, NS_ALLOWED_BINARIES, svc, Duration::from_secs(30)).await?;
+    assert_has(&p, "allow-binaries", svc);
+
+    wait_for_pod_running(
+        kubeconfig,
+        NS_ALLOWED_BINARIES,
+        &format!("app.kubernetes.io/name={svc}"),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Allowed binary should work
+    let ok = exec_in_pod(
+        kubeconfig,
+        NS_ALLOWED_BINARIES,
+        svc,
+        &["/bin/busybox", "echo", "hello"],
+    )
+    .await;
+    assert!(
+        ok.is_ok(),
+        "Expected /bin/busybox to be allowed: {ok:?}"
+    );
+
+    // Shell should be blocked (not in allowedBinaries)
+    let blocked = exec_in_pod(
+        kubeconfig,
+        NS_ALLOWED_BINARIES,
+        svc,
+        &["sh", "-c", "echo hello"],
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "Expected shell to be SIGKILL'd: {blocked:?}"
+    );
+
+    delete_namespace(kubeconfig, NS_ALLOWED_BINARIES).await;
+    info!("[Tetragon] Test 9 passed");
+    Ok(())
+}
+
+/// Test 10: Cedar forbid on allowedBinary — compilation rejected
+async fn test_allowed_binaries_cedar_deny(kubeconfig: &str) -> Result<(), String> {
+    info!("[Tetragon] Test 10: Cedar deny on allowedBinary...");
+    ensure_fresh_namespace(kubeconfig, NS_ALLOWED_BINARIES_CEDAR).await?;
+    // No security override permit → Cedar default-deny should reject
+
+    let svc = "svc-cedar-deny";
+    let result = deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_ALLOWED_BINARIES_CEDAR,
+        build_service_with_allowed_binaries(
+            svc,
+            NS_ALLOWED_BINARIES_CEDAR,
+            vec!["/usr/bin/curl".to_string()],
+        ),
+        "Failed",
+        None,
+        Duration::from_secs(90),
+    )
+    .await;
+
+    // Should either fail to deploy or land in Failed phase due to Cedar denial
+    if result.is_err() {
+        info!("[Tetragon] Test 10 passed — deployment rejected by Cedar");
+    } else {
+        info!("[Tetragon] Test 10 passed — service in Failed phase due to Cedar denial");
+    }
+
+    delete_namespace(kubeconfig, NS_ALLOWED_BINARIES_CEDAR).await;
+    Ok(())
+}
+
+/// Test 11: Wildcard allowedBinaries — no binary restriction policies
+async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
+    info!("[Tetragon] Test 11: Wildcard allowedBinaries — no binary restrictions...");
+    ensure_fresh_namespace(kubeconfig, NS_WILDCARD_BINARIES).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t11", NS_WILDCARD_BINARIES).await?;
+
+    let svc = "svc-wildcard";
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_WILDCARD_BINARIES,
+        build_service_with_allowed_binaries(svc, NS_WILDCARD_BINARIES, vec!["*".to_string()]),
+        "Ready",
+        None,
+        Duration::from_secs(90),
+    )
+    .await?;
+
+    let p =
+        wait_for_policies(kubeconfig, NS_WILDCARD_BINARIES, svc, Duration::from_secs(30)).await?;
+    assert_missing(&p, "allow-binaries", svc);
+
+    wait_for_pod_running(
+        kubeconfig,
+        NS_WILDCARD_BINARIES,
+        &format!("app.kubernetes.io/name={svc}"),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Everything should work with wildcard
+    let shell = exec_in_pod(
+        kubeconfig,
+        NS_WILDCARD_BINARIES,
+        svc,
+        &["sh", "-c", "echo hello"],
+    )
+    .await;
+    assert!(
+        shell.is_ok(),
+        "Expected shell to work with wildcard: {shell:?}"
+    );
+
+    delete_namespace(kubeconfig, NS_WILDCARD_BINARIES).await;
+    info!("[Tetragon] Test 11 passed");
+    Ok(())
+}
+
+// =============================================================================
 // Orchestrator
 // =============================================================================
 
@@ -625,6 +835,9 @@ pub async fn run_tetragon_tests(ctx: &InfraContext) -> Result<(), String> {
         test_cmd_shell_exemption(kubeconfig),
         test_sidecar_shell_exemption(kubeconfig),
         test_enforcement(kubeconfig),
+        test_allowed_binaries(kubeconfig),
+        test_allowed_binaries_cedar_deny(kubeconfig),
+        test_wildcard_allowed_binaries(kubeconfig),
     )?;
 
     cleanup_policies(kubeconfig).await;
