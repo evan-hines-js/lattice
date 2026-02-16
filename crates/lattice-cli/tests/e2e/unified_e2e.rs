@@ -32,7 +32,8 @@ use tracing::info;
 
 use super::context::init_e2e_test;
 use super::helpers::{
-    run_id, teardown_mgmt_cluster, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+    run_id, teardown_mgmt_cluster, TestHarness, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME,
+    WORKLOAD_CLUSTER_NAME,
 };
 use super::integration::{self, setup};
 use super::providers::InfraProvider;
@@ -256,13 +257,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
-    // Wait for all tasks
+    // Wait for all tasks and collect results
+    let harness = TestHarness::new("E2E Phase 7");
     for (name, handle) in handles {
-        handle
-            .await
-            .map_err(|e| format!("{} task panicked: {}", name, e))??;
-        info!("SUCCESS: {} complete!", name);
+        let start = std::time::Instant::now();
+        let result = handle.await;
+        let duration = start.elapsed();
+        match result {
+            Ok(Ok(())) => harness.record(&name, true, duration, None),
+            Ok(Err(e)) => harness.record(&name, false, duration, Some(e)),
+            Err(e) => harness.record(&name, false, duration, Some(format!("PANIC: {e}"))),
+        }
     }
+    harness.finish()?;
 
     // =========================================================================
     // Phase 8: Delete workload (unpivot to mgmt)
