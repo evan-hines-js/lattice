@@ -4,6 +4,9 @@
 //! provider. Only secrets with the `lattice.dev/secret-source: "true"` label
 //! are served; all others return 404.
 //!
+//! All requests must include a valid `Authorization: Basic <base64>` header
+//! matching the credentials stored in the `lattice-webhook-auth` K8s Secret.
+//!
 //! ESO protocol:
 //! - URL template: `.../secret/{{ .remoteRef.key }}/{{ .remoteRef.property }}`
 //! - `spec.data` entries: ESO renders property (e.g. `/secret/foo/password`)
@@ -11,12 +14,14 @@
 //! - `result.jsonPath: "$"` tells ESO to use the response as-is
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use base64::Engine;
 use kube::api::Api;
 use kube::Client;
 use tracing::info;
@@ -26,23 +31,45 @@ use lattice_common::{LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT};
 /// Label that must be present (and set to "true") on source secrets
 const SECRET_SOURCE_LABEL: &str = "lattice.dev/secret-source";
 
-/// Build the webhook router with a shared `Client` state
-fn webhook_routes(client: Client) -> Router {
-    Router::new()
-        // Catch-all handles both `/secret/foo/bar` and `/secret/foo/` (empty property)
-        .route("/secret/{name}/{*rest}", get(handle_with_property))
-        .route("/secret/{name}", get(handle_all_keys))
-        .route("/healthz", get(|| async { "ok" }))
-        .with_state(client)
+/// Credentials for webhook Basic auth
+#[derive(Clone, Debug)]
+pub struct WebhookCredentials {
+    /// HTTP Basic auth username
+    pub username: String,
+    /// HTTP Basic auth password
+    pub password: String,
+}
+
+impl WebhookCredentials {
+    /// Compute the expected `Authorization` header value
+    pub fn basic_auth_header(&self) -> String {
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(format!("{}:{}", self.username, self.password));
+        format!("Basic {encoded}")
+    }
+}
+
+/// Shared state for webhook handlers
+struct WebhookState {
+    client: Client,
+    expected_auth: String,
 }
 
 /// Start the webhook HTTP server on `LOCAL_SECRETS_PORT`
-pub async fn start_webhook_server(client: Client) {
-    let app = webhook_routes(client);
+pub async fn start_webhook_server(client: Client, credentials: WebhookCredentials) {
+    let state = Arc::new(WebhookState {
+        expected_auth: credentials.basic_auth_header(),
+        client,
+    });
+    let app = Router::new()
+        .route("/secret/{name}/{*rest}", get(handle_with_property))
+        .route("/secret/{name}", get(handle_all_keys))
+        .route("/healthz", get(|| async { "ok" }))
+        .with_state(state);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], LOCAL_SECRETS_PORT));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => {
-            info!(addr = %addr, "Local secrets webhook started");
+            info!(addr = %addr, "Local secrets webhook started (Basic auth enabled)");
             l
         }
         Err(e) => {
@@ -55,13 +82,36 @@ pub async fn start_webhook_server(client: Client) {
     }
 }
 
+/// Validate the Authorization header against expected credentials.
+fn check_auth(
+    headers: &HeaderMap,
+    expected: &str,
+) -> Result<(), (StatusCode, String)> {
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "missing Authorization header".to_string(),
+        ))?;
+
+    if auth != expected {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid credentials".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Fetch and decode a labeled K8s Secret from the `lattice-secrets` namespace.
 async fn fetch_secret_data(
-    client: Client,
+    client: &Client,
     name: &str,
 ) -> Result<BTreeMap<String, String>, (StatusCode, String)> {
     let api: Api<k8s_openapi::api::core::v1::Secret> =
-        Api::namespaced(client, LOCAL_SECRETS_NAMESPACE);
+        Api::namespaced(client.clone(), LOCAL_SECRETS_NAMESPACE);
 
     let secret = api.get(name).await.map_err(|e| {
         (
@@ -112,10 +162,8 @@ fn resolve_secret(
         None => Err((
             StatusCode::NOT_FOUND,
             format!(
-                "property '{}' not found in secret '{}' (available: {:?})",
-                property,
-                name,
-                data.keys().collect::<Vec<_>>()
+                "property '{}' not found in secret '{}'",
+                property, name
             ),
         )),
     }
@@ -130,20 +178,24 @@ fn resolve_secret(
 /// The trailing-slash case occurs when ESO renders `{{ .remoteRef.property }}`
 /// as empty for `dataFrom.extract`.
 async fn handle_with_property(
-    State(client): State<Client>,
+    State(state): State<Arc<WebhookState>>,
+    headers: HeaderMap,
     Path((name, rest)): Path<(String, String)>,
 ) -> Result<Response, (StatusCode, String)> {
-    let data = fetch_secret_data(client, &name).await?;
+    check_auth(&headers, &state.expected_auth)?;
+    let data = fetch_secret_data(&state.client, &name).await?;
     let property = rest.trim_matches('/');
     resolve_secret(data, &name, property)
 }
 
 /// Handle `GET /secret/{name}` — return all keys as a flat JSON map.
 async fn handle_all_keys(
-    State(client): State<Client>,
+    State(state): State<Arc<WebhookState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Response, (StatusCode, String)> {
-    let data = fetch_secret_data(client, &name).await?;
+    check_auth(&headers, &state.expected_auth)?;
+    let data = fetch_secret_data(&state.client, &name).await?;
     resolve_secret(data, &name, "")
 }
 
@@ -165,6 +217,7 @@ fn hex_encode(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
 
     #[test]
     fn secret_source_label_constant() {
@@ -173,15 +226,12 @@ mod tests {
 
     #[test]
     fn hex_encode_fallback_produces_hex() {
-        let data = vec![0xde, 0xad, 0xbe, 0xef];
-        let encoded = hex_encode(&data);
-        assert_eq!(encoded, "deadbeef");
+        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
     }
 
     #[test]
     fn unlabeled_secret_is_not_source() {
-        let secret = k8s_openapi::api::core::v1::Secret::default();
-        assert!(!is_labeled_source(&secret));
+        assert!(!is_labeled_source(&k8s_openapi::api::core::v1::Secret::default()));
     }
 
     #[test]
@@ -210,8 +260,7 @@ mod tests {
             ("username".to_string(), "admin".to_string()),
             ("password".to_string(), "s3cret".to_string()),
         ]);
-        let response = resolve_secret(data, "test", "");
-        assert!(response.is_ok());
+        assert!(resolve_secret(data, "test", "").is_ok());
     }
 
     #[test]
@@ -220,17 +269,51 @@ mod tests {
             ("username".to_string(), "admin".to_string()),
             ("password".to_string(), "s3cret".to_string()),
         ]);
-        let response = resolve_secret(data, "test", "password");
-        assert!(response.is_ok());
+        assert!(resolve_secret(data, "test", "password").is_ok());
     }
 
     #[test]
     fn resolve_secret_missing_property_returns_not_found() {
         let data = BTreeMap::from([("username".to_string(), "admin".to_string())]);
-        let response = resolve_secret(data, "test", "missing");
-        assert!(response.is_err());
-        let (status, msg) = response.unwrap_err();
+        let (status, msg) = resolve_secret(data, "test", "missing").unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(msg.contains("missing"));
+    }
+
+    #[test]
+    fn basic_auth_header_encodes_correctly() {
+        let creds = WebhookCredentials {
+            username: "user".to_string(),
+            password: "pass".to_string(),
+        };
+        let expected_b64 =
+            base64::engine::general_purpose::STANDARD.encode("user:pass");
+        assert_eq!(creds.basic_auth_header(), format!("Basic {expected_b64}"));
+    }
+
+    #[test]
+    fn check_auth_accepts_valid_credentials() {
+        let expected = WebhookCredentials {
+            username: "user".to_string(),
+            password: "pass".to_string(),
+        }
+        .basic_auth_header();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_str(&expected).unwrap());
+        assert!(check_auth(&headers, &expected).is_ok());
+    }
+
+    #[test]
+    fn check_auth_rejects_missing_header() {
+        let (status, _) = check_auth(&HeaderMap::new(), "Basic xxx").unwrap_err();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn check_auth_rejects_wrong_credentials() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Basic wrong"));
+        let (status, _) = check_auth(&headers, "Basic correct").unwrap_err();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

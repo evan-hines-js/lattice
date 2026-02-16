@@ -104,8 +104,34 @@ pub struct WebhookProvider {
     /// HTTP method (GET, POST, etc.)
     #[serde(default = "default_get")]
     pub method: String,
+    /// HTTP headers to send (supports Go template syntax for secret references)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// Secret references available in the templating engine
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<WebhookSecret>,
     /// Result extraction configuration
     pub result: WebhookResult,
+}
+
+/// Secret reference for ESO webhook provider templating
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookSecret {
+    /// Name used to reference this secret in Go templates (e.g., `{{ .auth.username }}`)
+    pub name: String,
+    /// Reference to the K8s Secret containing the credentials
+    pub secret_ref: WebhookSecretRef,
+}
+
+/// Reference to a K8s Secret for webhook authentication
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookSecretRef {
+    /// Namespace of the Secret (required for ClusterSecretStore)
+    pub namespace: String,
+    /// Name of the K8s Secret
+    pub name: String,
 }
 
 fn default_get() -> String {
@@ -671,6 +697,8 @@ mod tests {
             webhook: Some(WebhookProvider {
                 url: "http://lattice-local-secrets.lattice-system.svc:8787/secret/{{ .remoteRef.key }}".to_string(),
                 method: "GET".to_string(),
+                headers: BTreeMap::new(),
+                secrets: vec![],
                 result: WebhookResult {
                     json_path: "$".to_string(),
                 },
