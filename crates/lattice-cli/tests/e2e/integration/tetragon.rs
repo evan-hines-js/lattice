@@ -29,7 +29,8 @@ use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_policy_crd, delete_cedar_policies_by_label, delete_namespace,
     deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies,
-    setup_regcreds_infrastructure, wait_for_pod_running, TestHarness, BUSYBOX_IMAGE,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_pod_running, TestHarness,
+    BUSYBOX_IMAGE,
 };
 
 const NS_DEFAULT: &str = "tetragon-t1";
@@ -37,8 +38,17 @@ const NS_PROBE_SHELL: &str = "tetragon-t2";
 const NS_CMD_SHELL: &str = "tetragon-t3";
 const NS_SIDECAR_SHELL: &str = "tetragon-t4";
 const NS_ENFORCEMENT: &str = "tetragon-t5";
+const NS_ALLOWED_BINARIES: &str = "tetragon-t6";
+const NS_ALLOWED_BINARIES_CEDAR: &str = "tetragon-t7";
+const NS_WILDCARD_BINARIES: &str = "tetragon-t8";
+const NS_IMPLICIT_WILDCARD: &str = "tetragon-t9";
+const NS_IMPLICIT_CEDAR_DENY: &str = "tetragon-t10";
+const NS_MISSING_ENTRYPOINT: &str = "tetragon-t11";
 
 const TEST_LABEL: &str = "tetragon";
+
+/// Default timeout for waiting on Tetragon policy enforcement.
+const ENFORCEMENT_TIMEOUT: Duration = Duration::from_secs(300);
 
 // =============================================================================
 // Cedar helpers
@@ -69,6 +79,72 @@ async fn cleanup_policies(kubeconfig: &str) {
 // Service builders
 // =============================================================================
 
+/// Default security context for tetragon test containers.
+/// Docker KIND clusters need AppArmor Unconfined and runAsNonRoot disabled.
+fn default_security() -> SecurityContext {
+    SecurityContext {
+        apparmor_profile: Some("Unconfined".to_string()),
+        run_as_non_root: Some(false),
+        ..Default::default()
+    }
+}
+
+/// Default resource limits for tetragon test containers.
+fn default_resources() -> ResourceRequirements {
+    ResourceRequirements {
+        limits: Some(ResourceQuantity {
+            cpu: Some("100m".to_string()),
+            memory: Some("64Mi".to_string()),
+        }),
+        ..Default::default()
+    }
+}
+
+/// Default port spec for tetragon test services.
+fn default_ports() -> BTreeMap<String, PortSpec> {
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 8080,
+            target_port: None,
+            protocol: None,
+        },
+    );
+    ports
+}
+
+/// Wrap containers (and optional sidecars) into a LatticeService with standard metadata and ports.
+fn wrap_service(
+    name: &str,
+    namespace: &str,
+    containers: BTreeMap<String, ContainerSpec>,
+    sidecars: BTreeMap<String, SidecarSpec>,
+) -> LatticeService {
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            workload: WorkloadSpec {
+                containers,
+                service: Some(ServicePortsSpec {
+                    ports: default_ports(),
+                }),
+                ..Default::default()
+            },
+            runtime: RuntimeSpec {
+                sidecars,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        status: None,
+    }
+}
+
 fn build_service(
     name: &str,
     namespace: &str,
@@ -92,47 +168,14 @@ fn build_service(
             command: command.or(Some(vec!["sleep".to_string(), "infinity".to_string()])),
             security: Some(sec),
             liveness_probe,
-            resources: Some(ResourceRequirements {
-                limits: Some(ResourceQuantity {
-                    cpu: Some("100m".to_string()),
-                    memory: Some("64Mi".to_string()),
-                }),
-                ..Default::default()
-            }),
+            resources: Some(default_resources()),
             ..Default::default()
         },
     );
 
-    let mut ports = BTreeMap::new();
-    ports.insert(
-        "http".to_string(),
-        PortSpec {
-            port: 8080,
-            target_port: None,
-            protocol: None,
-        },
-    );
-
-    LatticeService {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
-            },
-            runtime: RuntimeSpec::default(),
-            ..Default::default()
-        },
-        status: None,
-    }
+    wrap_service(name, namespace, containers, BTreeMap::new())
 }
 
-/// Build a service with a sidecar whose command uses a shell
 fn build_service_with_sidecar_shell(name: &str, namespace: &str) -> LatticeService {
     let mut containers = BTreeMap::new();
     containers.insert(
@@ -140,29 +183,9 @@ fn build_service_with_sidecar_shell(name: &str, namespace: &str) -> LatticeServi
         ContainerSpec {
             image: BUSYBOX_IMAGE.to_string(),
             command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
-            security: Some(SecurityContext {
-                apparmor_profile: Some("Unconfined".to_string()),
-                run_as_non_root: Some(false),
-                ..Default::default()
-            }),
-            resources: Some(ResourceRequirements {
-                limits: Some(ResourceQuantity {
-                    cpu: Some("100m".to_string()),
-                    memory: Some("64Mi".to_string()),
-                }),
-                ..Default::default()
-            }),
+            security: Some(default_security()),
+            resources: Some(default_resources()),
             ..Default::default()
-        },
-    );
-
-    let mut ports = BTreeMap::new();
-    ports.insert(
-        "http".to_string(),
-        PortSpec {
-            port: 8080,
-            target_port: None,
-            protocol: None,
         },
     );
 
@@ -176,35 +199,51 @@ fn build_service_with_sidecar_shell(name: &str, namespace: &str) -> LatticeServi
                 "-c".to_string(),
                 "tail -f /dev/null".to_string(),
             ]),
-            security: Some(SecurityContext {
-                apparmor_profile: Some("Unconfined".to_string()),
-                run_as_non_root: Some(false),
-                ..Default::default()
-            }),
+            security: Some(default_security()),
             ..Default::default()
         },
     );
 
-    LatticeService {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
+    wrap_service(name, namespace, containers, sidecars)
+}
+
+fn build_service_with_allowed_binaries(
+    name: &str,
+    namespace: &str,
+    allowed_binaries: Vec<String>,
+) -> LatticeService {
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            security: Some(SecurityContext {
+                allowed_binaries,
+                ..default_security()
+            }),
+            resources: Some(default_resources()),
             ..Default::default()
         },
-        spec: LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
-            },
-            runtime: RuntimeSpec {
-                sidecars,
-                ..Default::default()
-            },
+    );
+
+    wrap_service(name, namespace, containers, BTreeMap::new())
+}
+
+/// Build a service with no command (implicit wildcard).
+fn build_service_no_command(name: &str, namespace: &str) -> LatticeService {
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            security: Some(default_security()),
+            resources: Some(default_resources()),
             ..Default::default()
         },
-        status: None,
-    }
+    );
+
+    wrap_service(name, namespace, containers, BTreeMap::new())
 }
 
 // =============================================================================
@@ -217,23 +256,34 @@ async fn wait_for_policies(
     service_name: &str,
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
-    let start = std::time::Instant::now();
-    loop {
-        let all = list_tracing_policies(kubeconfig, namespace).await?;
-        let matching: Vec<String> = all
-            .into_iter()
-            .filter(|n| n.ends_with(&format!("-{service_name}")))
-            .collect();
-        if !matching.is_empty() {
-            return Ok(matching);
-        }
-        if start.elapsed() > timeout {
-            return Err(format!(
-                "Timeout waiting for TracingPolicyNamespaced for {service_name} in {namespace}"
-            ));
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
+    use std::sync::Mutex;
+
+    let result: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    wait_for_condition(
+        &format!("TracingPolicy for {service_name} in {namespace}"),
+        timeout,
+        Duration::from_secs(5),
+        || {
+            let result = &result;
+            async move {
+                let all = list_tracing_policies(kubeconfig, namespace).await?;
+                let matching: Vec<String> = all
+                    .into_iter()
+                    .filter(|n| n.ends_with(&format!("-{service_name}")))
+                    .collect();
+                if !matching.is_empty() {
+                    *result.lock().unwrap() = matching;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+        },
+    )
+    .await?;
+
+    Ok(result.into_inner().unwrap())
 }
 
 fn assert_has(policies: &[String], prefix: &str, svc: &str) {
@@ -269,6 +319,95 @@ async fn get_policy_yaml(kubeconfig: &str, namespace: &str, name: &str) -> Resul
 /// In the allow-binaries policy, NotEqual values are the ALLOWED binaries.
 fn yaml_allows_binary(yaml: &str, binary: &str) -> bool {
     yaml.contains(&format!("- {binary}")) || yaml.contains(&format!("- \"{binary}\""))
+}
+
+/// Exec into a deployment's pod and return stdout on success or stderr on failure.
+fn exec_in_pod_sync(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&str]) -> Result<String, String> {
+    let deploy_ref = format!("deploy/{deploy}");
+    let mut cmd_args = vec![
+        "--kubeconfig",
+        kubeconfig,
+        "exec",
+        deploy_ref.as_str(),
+        "-n",
+        namespace,
+        "--",
+    ];
+    cmd_args.extend_from_slice(args);
+
+    // Don't use run_kubectl (it retries on transient errors); we want raw exit status.
+    let output = std::process::Command::new("kubectl")
+        .args(&cmd_args)
+        .output()
+        .map_err(|e| format!("kubectl exec failed to spawn: {e}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+/// Wait until exec'ing the given command in the pod is SIGKILL'd (returns error).
+///
+/// Tetragon needs time to load policies after they're created. This retries
+/// until the exec fails (indicating enforcement) or the timeout expires.
+async fn wait_for_exec_blocked(
+    kubeconfig: &str,
+    namespace: &str,
+    deploy: &str,
+    args: &[&str],
+    description: &str,
+) -> Result<(), String> {
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+    wait_for_condition(
+        description,
+        ENFORCEMENT_TIMEOUT,
+        Duration::from_secs(3),
+        || {
+            let args = &args;
+            async move {
+                let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                match exec_in_pod_sync(kubeconfig, namespace, deploy, &args_ref) {
+                    Err(_) => Ok(true), // blocked — enforcement working
+                    Ok(_) => Ok(false), // still succeeding — policy not loaded yet
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// Wait until exec'ing the given command in the pod succeeds.
+///
+/// Used for wildcard/exempt cases where the exec should NOT be blocked.
+/// Retries handle transient WebSocket/proxy errors.
+async fn wait_for_exec_allowed(
+    kubeconfig: &str,
+    namespace: &str,
+    deploy: &str,
+    args: &[&str],
+    description: &str,
+) -> Result<(), String> {
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+    wait_for_condition(
+        description,
+        ENFORCEMENT_TIMEOUT,
+        Duration::from_secs(3),
+        || {
+            let args = &args;
+            async move {
+                let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                match exec_in_pod_sync(kubeconfig, namespace, deploy, &args_ref) {
+                    Ok(_) => Ok(true),  // succeeded
+                    Err(_) => Ok(false), // transient failure, retry
+                }
+            }
+        },
+    )
+    .await
 }
 
 // =============================================================================
@@ -401,38 +540,6 @@ async fn test_sidecar_shell_exemption(kubeconfig: &str) -> Result<(), String> {
 // Enforcement tests (exec into pods to verify Tetragon kills blocked actions)
 // =============================================================================
 
-/// Exec into a deployment's pod and return stdout on success or stderr on failure.
-async fn exec_in_pod(
-    kubeconfig: &str,
-    namespace: &str,
-    deploy: &str,
-    args: &[&str],
-) -> Result<String, String> {
-    let deploy_ref = format!("deploy/{deploy}");
-    let mut cmd_args = vec![
-        "--kubeconfig",
-        kubeconfig,
-        "exec",
-        deploy_ref.as_str(),
-        "-n",
-        namespace,
-        "--",
-    ];
-    cmd_args.extend_from_slice(args);
-
-    // Don't use run_kubectl (it retries on transient errors); we want raw exit status.
-    let output = std::process::Command::new("kubectl")
-        .args(&cmd_args)
-        .output()
-        .map_err(|e| format!("kubectl exec failed to spawn: {e}"))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
-}
-
 async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 5: Enforcement — blocked binaries killed, exempted allowed...");
     ensure_fresh_namespace(kubeconfig, NS_ENFORCEMENT).await?;
@@ -463,22 +570,16 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    // Give Tetragon a moment to load the policies
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
     // Check 1: Shell execution should be blocked (SIGKILL)
     info!("[Tetragon] Check 1: shell exec should be killed...");
-    let shell_result = exec_in_pod(
+    wait_for_exec_blocked(
         kubeconfig,
         NS_ENFORCEMENT,
         svc_block,
         &["sh", "-c", "echo hello"],
+        "shell blocked by Tetragon on svc-enforce",
     )
-    .await;
-    assert!(
-        shell_result.is_err(),
-        "Expected shell exec to be killed by Tetragon, but it succeeded: {shell_result:?}"
-    );
+    .await?;
     info!("[Tetragon] Check 1 passed — shell was blocked");
 
     // --- Service with probe shell exemption (shell should be allowed) ---
@@ -512,21 +613,16 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
     // Check 2: Shell should be allowed when exempted via probe
     info!("[Tetragon] Check 2: exempted shell should succeed...");
-    let exempt_result = exec_in_pod(
+    wait_for_exec_allowed(
         kubeconfig,
         NS_ENFORCEMENT,
         svc_exempt,
         &["sh", "-c", "echo hello"],
+        "shell allowed on svc-enforce-exempt (probe exemption)",
     )
-    .await;
-    assert!(
-        exempt_result.is_ok(),
-        "Expected shell exec to succeed (probe exemption), but it failed: {exempt_result:?}"
-    );
+    .await?;
     info!("[Tetragon] Check 2 passed — exempted shell was allowed");
 
     delete_namespace(kubeconfig, NS_ENFORCEMENT).await;
@@ -538,67 +634,6 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
 // Allowed binaries tests
 // =============================================================================
 
-const NS_ALLOWED_BINARIES: &str = "tetragon-t6";
-const NS_ALLOWED_BINARIES_CEDAR: &str = "tetragon-t7";
-const NS_WILDCARD_BINARIES: &str = "tetragon-t8";
-
-fn build_service_with_allowed_binaries(
-    name: &str,
-    namespace: &str,
-    allowed_binaries: Vec<String>,
-) -> LatticeService {
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        "main".to_string(),
-        ContainerSpec {
-            image: BUSYBOX_IMAGE.to_string(),
-            command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
-            security: Some(SecurityContext {
-                apparmor_profile: Some("Unconfined".to_string()),
-                run_as_non_root: Some(false),
-                allowed_binaries,
-                ..Default::default()
-            }),
-            resources: Some(ResourceRequirements {
-                limits: Some(ResourceQuantity {
-                    cpu: Some("100m".to_string()),
-                    memory: Some("64Mi".to_string()),
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    );
-
-    let mut ports = BTreeMap::new();
-    ports.insert(
-        "http".to_string(),
-        PortSpec {
-            port: 8080,
-            target_port: None,
-            protocol: None,
-        },
-    );
-
-    LatticeService {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
-            },
-            runtime: RuntimeSpec::default(),
-            ..Default::default()
-        },
-        status: None,
-    }
-}
-
 /// allowedBinaries whitelist — listed binaries work, unlisted get SIGKILL'd
 async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 6: allowedBinaries whitelist...");
@@ -606,7 +641,6 @@ async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
     apply_security_override(kubeconfig, "permit-tetragon-t6", NS_ALLOWED_BINARIES).await?;
 
     let svc = "svc-binaries";
-    // Allow only /bin/busybox (needed to exec anything in busybox image)
     deploy_and_wait_for_phase(
         kubeconfig,
         NS_ALLOWED_BINARIES,
@@ -636,30 +670,26 @@ async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
         &format!("app.kubernetes.io/name={svc}"),
     )
     .await?;
-    tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Allowed binary should work
-    let ok = exec_in_pod(
+    wait_for_exec_allowed(
         kubeconfig,
         NS_ALLOWED_BINARIES,
         svc,
         &["/bin/busybox", "echo", "hello"],
+        "/bin/busybox allowed in svc-binaries",
     )
-    .await;
-    assert!(ok.is_ok(), "Expected /bin/busybox to be allowed: {ok:?}");
+    .await?;
 
     // Shell should be blocked (not in allowedBinaries)
-    let blocked = exec_in_pod(
+    wait_for_exec_blocked(
         kubeconfig,
         NS_ALLOWED_BINARIES,
         svc,
         &["sh", "-c", "echo hello"],
+        "shell blocked in svc-binaries (not in allowedBinaries)",
     )
-    .await;
-    assert!(
-        blocked.is_err(),
-        "Expected shell to be SIGKILL'd: {blocked:?}"
-    );
+    .await?;
 
     delete_namespace(kubeconfig, NS_ALLOWED_BINARIES).await;
     info!("[Tetragon] Test 6 passed");
@@ -670,7 +700,6 @@ async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
 async fn test_allowed_binaries_cedar_deny(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 7: Cedar deny on allowedBinary...");
     ensure_fresh_namespace(kubeconfig, NS_ALLOWED_BINARIES_CEDAR).await?;
-    // No security override permit → Cedar default-deny should reject
 
     let svc = "svc-cedar-deny";
     let result = deploy_and_wait_for_phase(
@@ -687,7 +716,6 @@ async fn test_allowed_binaries_cedar_deny(kubeconfig: &str) -> Result<(), String
     )
     .await;
 
-    // Should either fail to deploy or land in Failed phase due to Cedar denial
     if result.is_err() {
         info!("[Tetragon] Test 7 passed — deployment rejected by Cedar");
     } else {
@@ -715,14 +743,12 @@ async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> 
     )
     .await?;
 
-    // Wildcard → no binary policy should be created. Wait for pod, then verify.
     wait_for_pod_running(
         kubeconfig,
         NS_WILDCARD_BINARIES,
         &format!("app.kubernetes.io/name={svc}"),
     )
     .await?;
-    tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Verify no binary policy was created
     let all = list_tracing_policies(kubeconfig, NS_WILDCARD_BINARIES).await?;
@@ -733,24 +759,19 @@ async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> 
     );
 
     // Everything should work with wildcard
-    let shell = exec_in_pod(
+    wait_for_exec_allowed(
         kubeconfig,
         NS_WILDCARD_BINARIES,
         svc,
         &["sh", "-c", "echo hello"],
+        "shell allowed with wildcard allowedBinaries",
     )
-    .await;
-    assert!(
-        shell.is_ok(),
-        "Expected shell to work with wildcard: {shell:?}"
-    );
+    .await?;
 
     delete_namespace(kubeconfig, NS_WILDCARD_BINARIES).await;
     info!("[Tetragon] Test 8 passed");
     Ok(())
 }
-
-const NS_IMPLICIT_WILDCARD: &str = "tetragon-t9";
 
 /// Implicit wildcard — no command, no allowedBinaries → no binary restrictions.
 /// Verifies the compiler correctly infers wildcard when the image ENTRYPOINT is unknown.
@@ -760,75 +781,22 @@ async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
     apply_security_override(kubeconfig, "permit-tetragon-t9", NS_IMPLICIT_WILDCARD).await?;
 
     let svc = "svc-implicit";
-    // No command, no allowedBinaries — build manually to avoid build_service's default command
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        "main".to_string(),
-        ContainerSpec {
-            image: BUSYBOX_IMAGE.to_string(),
-            // Busybox default ENTRYPOINT is "sh", so the pod will start
-            security: Some(SecurityContext {
-                apparmor_profile: Some("Unconfined".to_string()),
-                run_as_non_root: Some(false),
-                ..Default::default()
-            }),
-            resources: Some(ResourceRequirements {
-                limits: Some(ResourceQuantity {
-                    cpu: Some("100m".to_string()),
-                    memory: Some("64Mi".to_string()),
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    );
-
-    let mut ports = BTreeMap::new();
-    ports.insert(
-        "http".to_string(),
-        PortSpec {
-            port: 8080,
-            target_port: None,
-            protocol: None,
-        },
-    );
-
-    let service = LatticeService {
-        metadata: ObjectMeta {
-            name: Some(svc.to_string()),
-            namespace: Some(NS_IMPLICIT_WILDCARD.to_string()),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
-            },
-            runtime: RuntimeSpec::default(),
-            ..Default::default()
-        },
-        status: None,
-    };
-
     deploy_and_wait_for_phase(
         kubeconfig,
         NS_IMPLICIT_WILDCARD,
-        service,
+        build_service_no_command(svc, NS_IMPLICIT_WILDCARD),
         "Ready",
         None,
         Duration::from_secs(90),
     )
     .await?;
 
-    // Implicit wildcard → no binary policy should be created. Wait for pod, then verify.
     wait_for_pod_running(
         kubeconfig,
         NS_IMPLICIT_WILDCARD,
         &format!("app.kubernetes.io/name={svc}"),
     )
     .await?;
-    tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Verify no binary policy was created
     let all = list_tracing_policies(kubeconfig, NS_IMPLICIT_WILDCARD).await?;
@@ -839,17 +807,14 @@ async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
     );
 
     // Everything should work — no binary restrictions
-    let shell = exec_in_pod(
+    wait_for_exec_allowed(
         kubeconfig,
         NS_IMPLICIT_WILDCARD,
         svc,
         &["sh", "-c", "echo hello"],
+        "shell allowed with implicit wildcard",
     )
-    .await;
-    assert!(
-        shell.is_ok(),
-        "Expected shell to work with implicit wildcard: {shell:?}"
-    );
+    .await?;
 
     delete_namespace(kubeconfig, NS_IMPLICIT_WILDCARD).await;
     info!("[Tetragon] Test 9 passed");
@@ -860,70 +825,16 @@ async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
 // Negative tests
 // =============================================================================
 
-const NS_IMPLICIT_CEDAR_DENY: &str = "tetragon-t10";
-const NS_MISSING_ENTRYPOINT: &str = "tetragon-t11";
-
 /// No command, no allowedBinaries, no Cedar permit → implicit wildcard denied by Cedar.
 async fn test_implicit_wildcard_cedar_deny(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 10: Implicit wildcard Cedar deny...");
     ensure_fresh_namespace(kubeconfig, NS_IMPLICIT_CEDAR_DENY).await?;
-    // Deliberately no Cedar permit for allowedBinary:*
 
     let svc = "svc-implicit-deny";
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        "main".to_string(),
-        ContainerSpec {
-            image: BUSYBOX_IMAGE.to_string(),
-            // No command, no allowedBinaries → implicit wildcard → Cedar must permit
-            security: Some(SecurityContext {
-                apparmor_profile: Some("Unconfined".to_string()),
-                run_as_non_root: Some(false),
-                ..Default::default()
-            }),
-            resources: Some(ResourceRequirements {
-                limits: Some(ResourceQuantity {
-                    cpu: Some("100m".to_string()),
-                    memory: Some("64Mi".to_string()),
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    );
-
-    let mut ports = BTreeMap::new();
-    ports.insert(
-        "http".to_string(),
-        PortSpec {
-            port: 8080,
-            target_port: None,
-            protocol: None,
-        },
-    );
-
-    let service = LatticeService {
-        metadata: ObjectMeta {
-            name: Some(svc.to_string()),
-            namespace: Some(NS_IMPLICIT_CEDAR_DENY.to_string()),
-            ..Default::default()
-        },
-        spec: LatticeServiceSpec {
-            workload: WorkloadSpec {
-                containers,
-                service: Some(ServicePortsSpec { ports }),
-                ..Default::default()
-            },
-            runtime: RuntimeSpec::default(),
-            ..Default::default()
-        },
-        status: None,
-    };
-
     let result = deploy_and_wait_for_phase(
         kubeconfig,
         NS_IMPLICIT_CEDAR_DENY,
-        service,
+        build_service_no_command(svc, NS_IMPLICIT_CEDAR_DENY),
         "Failed",
         None,
         Duration::from_secs(90),
@@ -949,9 +860,6 @@ async fn test_missing_entrypoint_killed(kubeconfig: &str) -> Result<(), String> 
     apply_security_override(kubeconfig, "permit-tetragon-t11", NS_MISSING_ENTRYPOINT).await?;
 
     let svc = "svc-bad-whitelist";
-    // command: ["sleep", "infinity"] → "sleep" auto-whitelisted
-    // allowedBinaries: ["/usr/bin/curl"] → also whitelisted
-    // But exec'ing "sh" should be killed since it's not in either list
     deploy_and_wait_for_phase(
         kubeconfig,
         NS_MISSING_ENTRYPOINT,
@@ -979,20 +887,16 @@ async fn test_missing_entrypoint_killed(kubeconfig: &str) -> Result<(), String> 
         &format!("app.kubernetes.io/name={svc}"),
     )
     .await?;
-    tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Shell should be killed — not in whitelist
-    let shell = exec_in_pod(
+    wait_for_exec_blocked(
         kubeconfig,
         NS_MISSING_ENTRYPOINT,
         svc,
         &["sh", "-c", "echo hello"],
+        "shell blocked in svc-bad-whitelist (not in allowedBinaries)",
     )
-    .await;
-    assert!(
-        shell.is_err(),
-        "Expected shell to be SIGKILL'd (not in allowedBinaries): {shell:?}"
-    );
+    .await?;
     info!("[Tetragon] Test 11 passed — unlisted binary was killed");
 
     delete_namespace(kubeconfig, NS_MISSING_ENTRYPOINT).await;

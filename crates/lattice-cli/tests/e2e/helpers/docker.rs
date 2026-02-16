@@ -7,7 +7,7 @@ use lattice_common::crd::BootstrapProvider;
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use tracing::info;
 
-use super::{kubeconfig_local_path, kubeconfig_path, run_id, DOCKER_KIND_GATEWAY, DOCKER_KIND_SUBNET};
+use super::{kubeconfig_local_path, kubeconfig_path, DOCKER_KIND_GATEWAY, DOCKER_KIND_SUBNET};
 
 // =============================================================================
 // Docker Network Helpers

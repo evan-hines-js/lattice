@@ -6,16 +6,13 @@ use std::time::Duration;
 
 use kube::api::Api;
 use lattice_common::crd::LatticeService;
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use lattice_common::LOCAL_SECRETS_NAMESPACE;
 use tracing::info;
 
 use super::cedar::{
     apply_apparmor_override_policy, apply_binary_wildcard_override_policy, apply_cedar_policy_crd,
 };
-use super::cluster::{
-    load_registry_credentials, wait_for_cluster_secret_store_ready,
-};
+use super::cluster::load_registry_credentials;
 use super::docker::run_kubectl;
 use super::kubernetes::{client_from_kubeconfig, create_with_retry};
 use super::{
