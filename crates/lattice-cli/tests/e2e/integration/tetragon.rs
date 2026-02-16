@@ -29,7 +29,7 @@ use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_policy_crd, delete_cedar_policies_by_label, delete_namespace,
     deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies,
-    setup_regcreds_infrastructure, wait_for_pod_running, BUSYBOX_IMAGE,
+    setup_regcreds_infrastructure, wait_for_pod_running, TestHarness, BUSYBOX_IMAGE,
 };
 
 const NS_DEFAULT: &str = "tetragon-t1";
@@ -1011,19 +1011,21 @@ pub async fn run_tetragon_tests(ctx: &InfraContext) -> Result<(), String> {
     cleanup_policies(kubeconfig).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    tokio::try_join!(
-        test_default_security(kubeconfig),
-        test_probe_shell_exemption(kubeconfig),
-        test_cmd_shell_exemption(kubeconfig),
-        test_sidecar_shell_exemption(kubeconfig),
-        test_enforcement(kubeconfig),
-        test_allowed_binaries(kubeconfig),
-        test_allowed_binaries_cedar_deny(kubeconfig),
-        test_wildcard_allowed_binaries(kubeconfig),
-        test_implicit_wildcard(kubeconfig),
-        test_implicit_wildcard_cedar_deny(kubeconfig),
-        test_missing_entrypoint_killed(kubeconfig),
-    )?;
+    let harness = TestHarness::new("Tetragon");
+    tokio::join!(
+        harness.run("Default security", || test_default_security(kubeconfig)),
+        harness.run("Probe shell exemption", || test_probe_shell_exemption(kubeconfig)),
+        harness.run("Cmd shell exemption", || test_cmd_shell_exemption(kubeconfig)),
+        harness.run("Sidecar shell exemption", || test_sidecar_shell_exemption(kubeconfig)),
+        harness.run("Enforcement", || test_enforcement(kubeconfig)),
+        harness.run("Allowed binaries", || test_allowed_binaries(kubeconfig)),
+        harness.run("Allowed binaries cedar deny", || test_allowed_binaries_cedar_deny(kubeconfig)),
+        harness.run("Wildcard allowed binaries", || test_wildcard_allowed_binaries(kubeconfig)),
+        harness.run("Implicit wildcard", || test_implicit_wildcard(kubeconfig)),
+        harness.run("Implicit wildcard cedar deny", || test_implicit_wildcard_cedar_deny(kubeconfig)),
+        harness.run("Missing entrypoint killed", || test_missing_entrypoint_killed(kubeconfig)),
+    );
+    harness.finish()?;
 
     cleanup_policies(kubeconfig).await;
     info!("[Tetragon] All runtime enforcement tests passed!");

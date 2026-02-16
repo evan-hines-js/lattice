@@ -31,7 +31,7 @@ use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_policy_crd, create_service_with_secrets, delete_cedar_policies_by_label,
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace,
-    setup_regcreds_infrastructure, wait_for_service_phase,
+    setup_regcreds_infrastructure, wait_for_service_phase, TestHarness,
 };
 
 // =============================================================================
@@ -399,19 +399,20 @@ pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Run all tests concurrently — each uses its own namespace
-    let result = tokio::try_join!(
-        test_default_deny(kubeconfig),
-        test_permit_specific_path(kubeconfig),
-        test_forbid_overrides_permit(kubeconfig),
-        test_namespace_isolation(kubeconfig),
-        test_policy_lifecycle(kubeconfig),
-        test_provider_scoped_access(kubeconfig),
+    let harness = TestHarness::new("Cedar Secrets");
+    tokio::join!(
+        harness.run("Default deny", || test_default_deny(kubeconfig)),
+        harness.run("Permit specific path", || test_permit_specific_path(kubeconfig)),
+        harness.run("Forbid overrides permit", || test_forbid_overrides_permit(kubeconfig)),
+        harness.run("Namespace isolation", || test_namespace_isolation(kubeconfig)),
+        harness.run("Policy lifecycle", || test_policy_lifecycle(kubeconfig)),
+        harness.run("Provider scoped access", || test_provider_scoped_access(kubeconfig)),
     );
 
     // Only clean up policies on success — on failure, leave them in place so the
     // operator can self-heal after crashes/restarts. The pre-test cleanup (above)
     // handles leftovers from previous failed runs.
-    let result = result.map_err(|e| e.to_string());
+    let result = harness.finish();
     if result.is_ok() {
         cleanup_cedar_secret_policies(kubeconfig).await;
     }
