@@ -392,6 +392,9 @@ mod tests {
     #[test]
     fn pod_selector_for_service() {
         let ps = PodSelector::for_service("my-app");
-        assert_eq!(ps.match_labels.get("app.kubernetes.io/name").unwrap(), "my-app");
+        assert_eq!(
+            ps.match_labels.get("app.kubernetes.io/name").unwrap(),
+            "my-app"
+        );
     }
 }

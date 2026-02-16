@@ -11,7 +11,9 @@ use kube::{
     config::{KubeConfigOptions, Kubeconfig},
     Client,
 };
-use lattice_common::crd::{BootstrapProvider, ClusterPhase, LatticeExternalService, LatticeService};
+use lattice_common::crd::{
+    BootstrapProvider, ClusterPhase, LatticeExternalService, LatticeService,
+};
 use lattice_common::{
     retry::{retry_with_backoff, RetryConfig},
     LABEL_NAME, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_WEBHOOK_STORE_NAME,
@@ -2063,6 +2065,27 @@ pub async fn apply_apparmor_override_policy(kubeconfig: &str) -> Result<(), Stri
     .await
 }
 
+/// Apply a Cedar policy permitting binary wildcard for all services.
+///
+/// When containers don't declare an explicit `command`, the compiler infers an
+/// implicit `allowedBinaries: ["*"]` wildcard. Fixtures that explicitly set
+/// `allowedBinaries: ["*"]` also generate this override. This blanket permit
+/// authorizes all such cases across all namespaces.
+pub async fn apply_binary_wildcard_override_policy(kubeconfig: &str) -> Result<(), String> {
+    apply_cedar_policy_crd(
+        kubeconfig,
+        "permit-binary-wildcard",
+        "e2e",
+        50,
+        r#"permit(
+  principal,
+  action == Lattice::Action::"OverrideSecurity",
+  resource == Lattice::SecurityOverride::"allowedBinary:*"
+);"#,
+    )
+    .await
+}
+
 pub async fn apply_run_as_root_override_policy(
     kubeconfig: &str,
     namespace: &str,
@@ -3180,6 +3203,9 @@ pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), Strin
 
     // KIND clusters don't have AppArmor
     apply_apparmor_override_policy(kubeconfig).await?;
+
+    // Permit binary wildcard for containers without explicit command or with allowedBinaries: ["*"]
+    apply_binary_wildcard_override_policy(kubeconfig).await?;
 
     info!("[Regcreds] Infrastructure ready (provider + source secret + Cedar policies)");
     Ok(())

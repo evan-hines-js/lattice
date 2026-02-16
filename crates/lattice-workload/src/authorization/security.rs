@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 
 use lattice_cedar::{PolicyEngine, SecurityAuthzRequest, SecurityOverrideRequest};
-use lattice_common::crd::{RuntimeSpec, SecurityContext, WorkloadSpec};
+use lattice_common::crd::{
+    has_unknown_binary_entrypoint, RuntimeSpec, SecurityContext, WorkloadSpec,
+};
 
 use crate::error::CompilationError;
 
@@ -104,23 +106,48 @@ fn collect_security_overrides(
 
     // Container-level overrides
     for (name, container) in &workload.containers {
-        collect_container_overrides(&mut overrides, name, container.security.as_ref());
+        collect_container_overrides(
+            &mut overrides,
+            name,
+            container.security.as_ref(),
+            &container.command,
+        );
     }
     for (name, sidecar) in &runtime.sidecars {
-        collect_container_overrides(&mut overrides, name, sidecar.security.as_ref());
+        collect_container_overrides(
+            &mut overrides,
+            name,
+            sidecar.security.as_ref(),
+            &sidecar.command,
+        );
     }
 
     overrides
 }
 
 /// Collect security overrides from a single container's SecurityContext.
+///
+/// When the container has an unknown binary entrypoint (no `command` and no
+/// `allowedBinaries`), Tetragon infers an implicit wildcard. Cedar must
+/// authorize it via an `allowedBinary:*` override.
 fn collect_container_overrides(
     overrides: &mut Vec<SecurityOverrideRequest>,
     container_name: &str,
     security: Option<&SecurityContext>,
+    command: &Option<Vec<String>>,
 ) {
-    let Some(s) = security else { return };
     let cname = Some(container_name.to_string());
+
+    // Unknown entrypoint → implicit wildcard requires Cedar authorization
+    if has_unknown_binary_entrypoint(command, &security.cloned()) {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "allowedBinary:*".into(),
+            category: "binary".into(),
+            container: cname.clone(),
+        });
+    }
+
+    let Some(s) = security else { return };
 
     for cap in &s.capabilities {
         overrides.push(SecurityOverrideRequest {
@@ -287,12 +314,38 @@ mod tests {
     }
 
     #[test]
-    fn no_allowed_binaries_no_binary_overrides() {
+    fn no_command_no_allowed_binaries_generates_implicit_wildcard() {
         let mut containers = BTreeMap::new();
         containers.insert(
             "main".to_string(),
             ContainerSpec {
                 image: "test:latest".to_string(),
+                ..Default::default()
+            },
+        );
+        let workload = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec::default();
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        let binary_overrides: Vec<_> = overrides
+            .iter()
+            .filter(|o| o.category == "binary")
+            .collect();
+        assert_eq!(binary_overrides.len(), 1);
+        assert_eq!(binary_overrides[0].override_id, "allowedBinary:*");
+    }
+
+    #[test]
+    fn has_command_no_allowed_binaries_no_binary_overrides() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                command: Some(vec!["/usr/bin/myapp".to_string()]),
                 ..Default::default()
             },
         );

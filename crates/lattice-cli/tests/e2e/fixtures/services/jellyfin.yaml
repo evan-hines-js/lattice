@@ -11,6 +11,7 @@ spec:
         security:
           runAsUser: 0
           apparmorProfile: Unconfined
+          allowedBinaries: ["*"]
         variables:
           JELLYFIN_PublishedServerUrl: "http://jellyfin.media.svc.cluster.local:8096"
         volumes:

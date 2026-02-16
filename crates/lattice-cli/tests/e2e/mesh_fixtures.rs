@@ -67,6 +67,8 @@ pub fn nginx_container() -> ContainerSpec {
         }),
         security: Some(SecurityContext {
             apparmor_profile: Some("Unconfined".to_string()),
+            // No command — image ENTRYPOINT unknown, so allow all binaries.
+            allowed_binaries: vec!["*".to_string()],
             ..Default::default()
         }),
         ..Default::default()
@@ -99,6 +101,9 @@ pub fn curl_container(script: String) -> ContainerSpec {
         security: Some(SecurityContext {
             run_as_user: Some(100), // curl_user UID — K8s needs numeric to verify non-root
             apparmor_profile: Some("Unconfined".to_string()),
+            // Shell scripts invoke child processes (curl, etc.) that we can't enumerate,
+            // so allow all binaries. Cedar still authorizes this override.
+            allowed_binaries: vec!["*".to_string()],
             ..Default::default()
         }),
         ..Default::default()

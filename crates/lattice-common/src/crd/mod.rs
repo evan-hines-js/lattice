@@ -75,8 +75,8 @@ pub use workload::backup::{
     VolumeBackupSpec,
 };
 pub use workload::container::{
-    ContainerSpec, ExecProbe, FileMount, HttpGetProbe, HttpHeader, Probe, SecurityContext,
-    SidecarSpec, VolumeMount,
+    has_unknown_binary_entrypoint, ContainerSpec, ExecProbe, FileMount, HttpGetProbe, HttpHeader,
+    Probe, SecurityContext, SidecarSpec, VolumeMount,
 };
 pub use workload::deploy::{CanarySpec, DeploySpec, DeployStrategy};
 pub use workload::ingress::{

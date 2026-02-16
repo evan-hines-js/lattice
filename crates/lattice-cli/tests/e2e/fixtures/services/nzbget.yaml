@@ -12,6 +12,7 @@ spec:
           runAsUser: 0
           apparmorProfile: Unconfined
           capabilities: [SETUID, SETGID]
+          allowedBinaries: ["*"]
         variables:
           PUID: "1000"
           PGID: "1000"
@@ -88,6 +89,7 @@ spec:
         runAsUser: 0
         capabilities: [NET_ADMIN, SYS_MODULE]
         apparmorProfile: Unconfined
+        allowedBinaries: ["*"]
   imagePullSecrets:
     - ghcr-creds
   replicas: 1
