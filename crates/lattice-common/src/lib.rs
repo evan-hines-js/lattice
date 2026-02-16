@@ -60,6 +60,12 @@ pub const LOCAL_SECRETS_NAMESPACE: &str = "lattice-secrets";
 /// Port for the local secrets webhook (ESO webhook backend)
 pub const LOCAL_SECRETS_PORT: u16 = 8787;
 
+/// K8s Secret name for local webhook authentication credentials.
+///
+/// Contains `username` and `password` keys used for HTTP Basic auth
+/// between ESO and the local secrets webhook.
+pub const LOCAL_WEBHOOK_AUTH_SECRET: &str = "lattice-webhook-auth";
+
 /// ClusterSecretStore name for the built-in local webhook backend.
 ///
 /// Created by the operator on startup via `ensure_local_webhook_infrastructure()`.

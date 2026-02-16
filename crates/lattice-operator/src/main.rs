@@ -161,6 +161,13 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     // Start health server (runs on all pods for K8s probes)
     let health_handle = start_health_server();
 
+    // Ensure webhook auth credentials exist (all pods load or create on first run).
+    // This must happen before starting the webhook so every replica validates the
+    // same credentials. The K8s Secret acts as the coordination point — the first
+    // pod to run creates it, others load the existing one.
+    let webhook_creds =
+        lattice_secret_provider::controller::ensure_webhook_credentials(&client).await?;
+
     // Start the local secrets webhook on ALL pods (before leader election).
     // The webhook is a stateless HTTP reader — any replica can serve ESO requests.
     // Infrastructure setup (namespace, Service, ClusterSecretStore) happens on the
@@ -168,7 +175,8 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     // Service (which selects all operator pods) never routes to a non-listening replica.
     let webhook_client = client.clone();
     tokio::spawn(async move {
-        lattice_secret_provider::webhook::start_webhook_server(webhook_client).await;
+        lattice_secret_provider::webhook::start_webhook_server(webhook_client, webhook_creds)
+            .await;
     });
 
     // Acquire leadership using Kubernetes Lease BEFORE any initialization

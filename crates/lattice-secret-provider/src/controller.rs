@@ -4,12 +4,14 @@
 //! The provider configuration is passed through verbatim from
 //! `SecretProvider.spec.provider` to `ClusterSecretStore.spec.provider`.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
+use rand::Rng;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{SecretProvider, SecretProviderPhase};
@@ -17,13 +19,14 @@ use lattice_common::kube_utils::HasApiResource;
 use lattice_common::{
     ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE,
     LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT,
-    LOCAL_WEBHOOK_STORE_NAME,
+    LOCAL_WEBHOOK_AUTH_SECRET, LOCAL_WEBHOOK_STORE_NAME,
 };
 
 use crate::eso::{
     ClusterSecretStore, ClusterSecretStoreSpec, ExternalSecret, ProviderSpec, WebhookProvider,
-    WebhookResult,
+    WebhookResult, WebhookSecret, WebhookSecretRef,
 };
+use crate::webhook::WebhookCredentials;
 
 /// Service name for the local secrets webhook
 const LOCAL_SECRETS_SERVICE: &str = "lattice-local-secrets";
@@ -37,12 +40,87 @@ const REQUEUE_ERROR_SECS: u64 = 60;
 /// Requeue interval when waiting for ClusterSecretStore to become Ready
 const REQUEUE_WAITING_SECS: u64 = 10;
 
+/// Ensure webhook auth credentials exist, creating them if needed.
+///
+/// On first run, generates a random username and password, stores them in a
+/// K8s Secret in `lattice-system`. On subsequent runs, loads the existing
+/// credentials. Returns the credentials for the webhook server to use.
+pub async fn ensure_webhook_credentials(
+    client: &Client,
+) -> Result<WebhookCredentials, ReconcileError> {
+    let api: Api<k8s_openapi::api::core::v1::Secret> =
+        Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    // Try to load existing credentials
+    if let Ok(secret) = api.get(LOCAL_WEBHOOK_AUTH_SECRET).await {
+        if let Some(data) = secret.data {
+            let username = data
+                .get("username")
+                .and_then(|v| String::from_utf8(v.0.clone()).ok());
+            let password = data
+                .get("password")
+                .and_then(|v| String::from_utf8(v.0.clone()).ok());
+
+            if let (Some(username), Some(password)) = (username, password) {
+                info!("Loaded existing webhook auth credentials");
+                return Ok(WebhookCredentials { username, password });
+            }
+            warn!("Webhook auth secret exists but has missing/invalid fields, regenerating");
+        }
+    }
+
+    // Generate new random credentials
+    let mut rng = rand::thread_rng();
+    let username = format!("lattice-webhook-{:08x}", rng.gen::<u32>());
+    let password: String = (0..32)
+        .map(|_| {
+            let idx = rng.gen_range(0..62);
+            match idx {
+                0..=9 => (b'0' + idx) as char,
+                10..=35 => (b'a' + idx - 10) as char,
+                _ => (b'A' + idx - 36) as char,
+            }
+        })
+        .collect();
+
+    let secret_json = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": LOCAL_WEBHOOK_AUTH_SECRET,
+            "namespace": LATTICE_SYSTEM_NAMESPACE,
+            "labels": {
+                LABEL_MANAGED_BY: LABEL_MANAGED_BY_LATTICE
+            }
+        },
+        "type": "Opaque",
+        "stringData": {
+            "username": &username,
+            "password": &password
+        }
+    });
+
+    let params = PatchParams::apply("lattice-secrets-provider").force();
+    api.patch(
+        LOCAL_WEBHOOK_AUTH_SECRET,
+        &params,
+        &Patch::Apply(&secret_json),
+    )
+    .await
+    .map_err(|e| {
+        ReconcileError::Kube(format!("failed to create webhook auth secret: {e}"))
+    })?;
+
+    info!("Generated new webhook auth credentials");
+    Ok(WebhookCredentials { username, password })
+}
+
 /// Ensure the local webhook infrastructure exists.
 ///
 /// Called once on controller startup (not per-reconcile). Creates:
 /// - `lattice-secrets` namespace for local secret sources
 /// - `lattice-local-secrets` Service pointing at operator pods
-/// - `lattice-local` ClusterSecretStore backed by the webhook
+/// - `lattice-local` ClusterSecretStore backed by the webhook (with auth)
 pub async fn ensure_local_webhook_infrastructure(client: &Client) -> Result<(), ReconcileError> {
     ensure_local_secrets_namespace(client).await?;
     ensure_webhook_service(client).await?;
@@ -419,9 +497,28 @@ fn build_webhook_provider() -> WebhookProvider {
         LOCAL_SECRETS_SERVICE, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT
     );
     let url = format!("{}{}{}", base, ESO_REMOTE_REF_KEY, ESO_PROPERTY_SUFFIX);
+
+    // ESO renders the Go template: reads .auth.username and .auth.password from
+    // the referenced K8s Secret, base64-encodes "user:pass", and sends as Basic auth.
+    let mut headers = BTreeMap::new();
+    headers.insert(
+        "Authorization".to_string(),
+        r#"Basic {{ print .auth.username ":" .auth.password | b64enc }}"#.to_string(),
+    );
+
+    let secrets = vec![WebhookSecret {
+        name: "auth".to_string(),
+        secret_ref: WebhookSecretRef {
+            namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
+            name: LOCAL_WEBHOOK_AUTH_SECRET.to_string(),
+        },
+    }];
+
     WebhookProvider {
         url,
         method: "GET".to_string(),
+        headers,
+        secrets,
         result: WebhookResult {
             json_path: "$".to_string(),
         },
@@ -430,9 +527,7 @@ fn build_webhook_provider() -> WebhookProvider {
 
 /// Ensure the `lattice-secrets` namespace exists for local secret sources
 async fn ensure_local_secrets_namespace(client: &Client) -> Result<(), ReconcileError> {
-    use k8s_openapi::api::core::v1::Namespace;
-
-    let ns_api: Api<Namespace> = Api::all(client.clone());
+    let ns_api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
     let ns = serde_json::json!({
         "apiVersion": "v1",
         "kind": "Namespace",
@@ -460,8 +555,6 @@ async fn ensure_local_secrets_namespace(client: &Client) -> Result<(), Reconcile
 
 /// Ensure the webhook K8s Service exists pointing at operator pods
 async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
-    use k8s_openapi::api::core::v1::Service;
-
     let svc = serde_json::json!({
         "apiVersion": "v1",
         "kind": "Service",
@@ -485,7 +578,8 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
         }
     });
 
-    let svc_api: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let svc_api: Api<k8s_openapi::api::core::v1::Service> =
+        Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let params = PatchParams::apply("lattice-secrets-provider").force();
     svc_api
         .patch(LOCAL_SECRETS_SERVICE, &params, &Patch::Apply(&svc))
@@ -678,6 +772,25 @@ mod tests {
             provider.result.json_path, "$",
             "jsonPath should be $ (property extraction is server-side)"
         );
+
+        // Verify auth header template
+        assert_eq!(
+            provider.headers.get("Authorization").unwrap(),
+            r#"Basic {{ print .auth.username ":" .auth.password | b64enc }}"#,
+            "Authorization header should use ESO Go template for Basic auth"
+        );
+
+        // Verify secret reference
+        assert_eq!(provider.secrets.len(), 1);
+        assert_eq!(provider.secrets[0].name, "auth");
+        assert_eq!(
+            provider.secrets[0].secret_ref.name,
+            LOCAL_WEBHOOK_AUTH_SECRET
+        );
+        assert_eq!(
+            provider.secrets[0].secret_ref.namespace,
+            LATTICE_SYSTEM_NAMESPACE
+        );
     }
 
     #[test]
@@ -685,5 +798,6 @@ mod tests {
         assert_eq!(LOCAL_SECRETS_SERVICE, "lattice-local-secrets");
         assert_eq!(LOCAL_SECRETS_PORT, 8787);
         assert_eq!(LOCAL_SECRETS_NAMESPACE, "lattice-secrets");
+        assert_eq!(LOCAL_WEBHOOK_AUTH_SECRET, "lattice-webhook-auth");
     }
 }

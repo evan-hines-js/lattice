@@ -18,6 +18,10 @@ tokio = { workspace = true }
 # HTTP
 axum = { workspace = true }
 
+# Encoding / random
+base64 = { workspace = true }
+rand = { workspace = true }
+
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
