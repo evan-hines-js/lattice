@@ -126,8 +126,8 @@ pub struct TracingPolicySpec {
 pub struct KprobeSpec {
     /// Kernel function to attach to (e.g., "security_bprm_check")
     pub call: String,
-    /// Whether this is a syscall kprobe
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Whether this is a syscall kprobe (CRD defaults to true, so always serialize)
+    #[serde(default)]
     pub syscall: bool,
     /// Whether to also attach a return probe
     #[serde(default, rename = "return", skip_serializing_if = "is_false")]
