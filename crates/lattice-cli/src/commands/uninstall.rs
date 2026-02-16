@@ -408,6 +408,9 @@ impl Uninstaller {
     async fn run_uninstall(&self) -> Result<()> {
         let bootstrap_client = self.bootstrap_client().await?;
 
+        info!("Installing cert-manager on kind cluster...");
+        crate::commands::ensure_cert_manager(&bootstrap_client).await?;
+
         info!("Installing CAPI providers on kind cluster...");
         self.install_capi_providers().await?;
 

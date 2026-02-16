@@ -2354,6 +2354,7 @@ dependencies = [
  "lattice-cell",
  "lattice-cluster",
  "lattice-common",
+ "lattice-infra",
  "lattice-move",
  "lattice-operator",
  "parking_lot",

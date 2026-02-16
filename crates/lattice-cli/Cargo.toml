@@ -14,6 +14,7 @@ fips = [
     "lattice-capi/fips",
     "lattice-cell/fips",
     "lattice-cluster/fips",
+    "lattice-infra/fips",
     "lattice-move/fips",
 ]
 provider-e2e = []
@@ -24,6 +25,7 @@ lattice-agent.workspace = true
 lattice-capi.workspace = true
 lattice-cell.workspace = true
 lattice-cluster.workspace = true
+lattice-infra.workspace = true
 lattice-move.workspace = true
 lattice-operator = { path = "../lattice-operator", default-features = false }
 
