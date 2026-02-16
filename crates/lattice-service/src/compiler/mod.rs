@@ -669,6 +669,7 @@ mod tests {
                 exclude: vec![],
                 default_policy: VolumeBackupDefault::OptIn,
             }),
+            ..Default::default()
         });
 
         let compiler = test_compiler(&graph, &cedar);
@@ -986,6 +987,7 @@ mod tests {
                 post: vec![],
             }),
             volumes: None,
+            ..Default::default()
         });
 
         // Effective backup from policy merge: has volumes but no hooks
@@ -996,6 +998,7 @@ mod tests {
                 exclude: vec![],
                 default_policy: VolumeBackupDefault::OptIn,
             }),
+            ..Default::default()
         };
 
         let compiler = test_compiler(&graph, &cedar).with_effective_backup(Some(effective));
@@ -1032,6 +1035,7 @@ mod tests {
                 post: vec![],
             }),
             volumes: None,
+            ..Default::default()
         });
 
         // No effective backup — should fall back to inline

@@ -149,7 +149,7 @@ mod tests {
             },
             spec: LatticeRestoreSpec {
                 backup_name: "lattice-default-20260205020012".to_string(),
-                backup_policy_ref: Some("default".to_string()),
+                cluster_backup_ref: Some("default".to_string()),
                 restore_volumes: true,
             },
             status: None,

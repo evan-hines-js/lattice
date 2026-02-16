@@ -15,8 +15,10 @@ use kube::{Api, Client};
 
 use lattice_api::auth::oidc_controller as oidc_provider_ctrl;
 use lattice_api::cedar::validation as cedar_validation_ctrl;
-use lattice_backup::backup_policy_controller as backup_policy_ctrl;
+use lattice_backup::backup_store_controller as backup_store_ctrl;
+use lattice_backup::cluster_backup_controller as cluster_backup_ctrl;
 use lattice_backup::restore_controller as restore_ctrl;
+use lattice_backup::service_backup_controller as service_backup_ctrl;
 use lattice_capi::installer::CapiInstaller;
 use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
@@ -24,9 +26,9 @@ use lattice_cell::parent::ParentServers;
 use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
-    CedarPolicy, CloudProvider, LatticeBackupPolicy, LatticeCluster, LatticeExternalService,
-    LatticeMeshMember, LatticeRestore, LatticeService, LatticeServicePolicy, MonitoringConfig,
-    OIDCProvider, ProviderType, SecretProvider,
+    BackupStore, CedarPolicy, CloudProvider, LatticeCluster, LatticeClusterBackup,
+    LatticeExternalService, LatticeMeshMember, LatticeRestore, LatticeService,
+    LatticeServicePolicy, MonitoringConfig, OIDCProvider, ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, LATTICE_SYSTEM_NAMESPACE};
 use lattice_mesh_member::controller as mesh_member_ctrl;
@@ -305,41 +307,64 @@ pub fn build_provider_controllers(
         )
         .for_each(log_reconcile_result("OIDCProvider"));
 
-    let backup_ctrl = Controller::new(
-        Api::<LatticeBackupPolicy>::all(client.clone()),
+    let store_ctrl = Controller::new(Api::<BackupStore>::all(client.clone()), watcher_config())
+        .shutdown_on_signal()
+        .run(
+            backup_store_ctrl::reconcile,
+            lattice_common::default_error_policy,
+            ctx.clone(),
+        )
+        .for_each(log_reconcile_result("BackupStore"));
+
+    let cluster_backup_ctrl = Controller::new(
+        Api::<LatticeClusterBackup>::all(client.clone()),
         watcher_config(),
     )
     .shutdown_on_signal()
     .run(
-        backup_policy_ctrl::reconcile,
+        cluster_backup_ctrl::reconcile,
         lattice_common::default_error_policy,
         ctx.clone(),
     )
-    .for_each(log_reconcile_result("BackupPolicy"));
+    .for_each(log_reconcile_result("ClusterBackup"));
 
-    let restore_ctrl = Controller::new(Api::<LatticeRestore>::all(client), watcher_config())
+    let restore_ctrl =
+        Controller::new(Api::<LatticeRestore>::all(client.clone()), watcher_config())
+            .shutdown_on_signal()
+            .run(
+                restore_ctrl::reconcile,
+                lattice_common::default_error_policy,
+                ctx.clone(),
+            )
+            .for_each(log_reconcile_result("Restore"));
+
+    let svc_backup_ctrl = Controller::new(Api::<LatticeService>::all(client), watcher_config())
         .shutdown_on_signal()
         .run(
-            restore_ctrl::reconcile,
+            service_backup_ctrl::reconcile,
             lattice_common::default_error_policy,
             ctx,
         )
-        .for_each(log_reconcile_result("Restore"));
+        .for_each(log_reconcile_result("ServiceBackup"));
 
     tracing::info!("- CloudProvider controller");
     tracing::info!("- SecretProvider controller");
     tracing::info!("- CedarPolicy controller");
     tracing::info!("- OIDCProvider controller");
-    tracing::info!("- LatticeBackupPolicy controller");
+    tracing::info!("- BackupStore controller");
+    tracing::info!("- LatticeClusterBackup controller");
     tracing::info!("- LatticeRestore controller");
+    tracing::info!("- ServiceBackupSchedule controller");
 
     vec![
         Box::pin(cloud_ctrl),
         Box::pin(secrets_ctrl),
         Box::pin(cedar_ctrl),
         Box::pin(oidc_ctrl),
-        Box::pin(backup_ctrl),
+        Box::pin(store_ctrl),
+        Box::pin(cluster_backup_ctrl),
         Box::pin(restore_ctrl),
+        Box::pin(svc_backup_ctrl),
     ]
 }
 

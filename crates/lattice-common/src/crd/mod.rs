@@ -2,10 +2,11 @@
 //!
 //! This module contains all CRD definitions used by the Lattice operator.
 
-mod backup_policy;
+mod backup_store;
 mod cedar_policy;
 mod cloud_provider;
 mod cluster;
+mod cluster_backup;
 mod external_service;
 mod job;
 mod mesh_member;
@@ -19,10 +20,9 @@ mod service_policy;
 mod types;
 pub mod workload;
 
-pub use backup_policy::{
-    BackupPolicyPhase, BackupRetentionSpec, BackupScopeSpec, BackupStorageProvider,
-    BackupStorageSpec, LatticeBackupPolicy, LatticeBackupPolicySpec, LatticeBackupPolicyStatus,
-    S3StorageConfig, VolumeSnapshotConfig, VolumeSnapshotMethod,
+pub use backup_store::{
+    AzureStorageConfig, BackupStorageProvider, BackupStorageSpec, BackupStore, BackupStorePhase,
+    BackupStoreSpec, BackupStoreStatus, GcsStorageConfig, S3StorageConfig,
 };
 pub use cedar_policy::{CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus};
 pub use cloud_provider::{
@@ -32,6 +32,10 @@ pub use cloud_provider::{
 pub use cluster::{
     BackupsConfig, ChildClusterHealth, LatticeCluster, LatticeClusterSpec, LatticeClusterStatus,
     MonitoringConfig, WorkerPoolStatus,
+};
+pub use cluster_backup::{
+    BackupRetentionSpec, BackupScopeSpec, ClusterBackupPhase, LatticeClusterBackup,
+    LatticeClusterBackupSpec, LatticeClusterBackupStatus,
 };
 pub use external_service::{
     ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,

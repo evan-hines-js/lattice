@@ -34,6 +34,16 @@ pub enum ReconcileError {
     Internal(String),
 }
 
+impl ReconcileError {
+    /// Check if this error indicates a CRD is not installed (404/not found)
+    pub fn is_crd_not_found(&self) -> bool {
+        let msg = self.to_string();
+        msg.contains("404")
+            || msg.contains("not found")
+            || msg.contains("the server could not find the requested resource")
+    }
+}
+
 /// Standard controller context with a Kubernetes client.
 ///
 /// This is the common context type used by all Lattice controllers.

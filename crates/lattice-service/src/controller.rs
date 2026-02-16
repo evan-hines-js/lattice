@@ -1857,6 +1857,7 @@ mod tests {
                 exclude: vec![],
                 default_policy: VolumeBackupDefault::OptIn,
             }),
+            ..Default::default()
         };
 
         let policy = make_policy("db-backup", "test", 100, Some(policy_backup));
@@ -1891,6 +1892,7 @@ mod tests {
                     exclude: vec![],
                     default_policy: VolumeBackupDefault::OptIn,
                 }),
+                ..Default::default()
             }),
         );
 
@@ -1905,6 +1907,7 @@ mod tests {
                     post: vec![],
                 }),
                 volumes: None,
+                ..Default::default()
             }),
         );
 
@@ -1950,6 +1953,7 @@ mod tests {
                     post: vec![],
                 }),
                 volumes: None,
+                ..Default::default()
             }),
         );
 

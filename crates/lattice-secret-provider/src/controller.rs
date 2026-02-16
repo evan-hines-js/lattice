@@ -108,9 +108,7 @@ pub async fn ensure_webhook_credentials(
         &Patch::Apply(&secret_json),
     )
     .await
-    .map_err(|e| {
-        ReconcileError::Kube(format!("failed to create webhook auth secret: {e}"))
-    })?;
+    .map_err(|e| ReconcileError::Kube(format!("failed to create webhook auth secret: {e}")))?;
 
     info!("Generated new webhook auth credentials");
     Ok(WebhookCredentials { username, password })
@@ -245,7 +243,7 @@ pub async fn reconcile(
                 }
             }
         }
-        Err(e) if is_crd_not_found(&e) => {
+        Err(e) if e.is_crd_not_found() => {
             warn!(
                 secrets_provider = %name,
                 "ESO ClusterSecretStore CRD not found - ESO may not be installed, will retry"
@@ -283,14 +281,6 @@ pub async fn reconcile(
             Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
         }
     }
-}
-
-/// Check if error is due to CRD not found (ESO not installed)
-fn is_crd_not_found(error: &ReconcileError) -> bool {
-    let err_str = error.to_string();
-    err_str.contains("404")
-        || err_str.contains("not found")
-        || err_str.contains("the server could not find the requested resource")
 }
 
 /// Ensure ClusterSecretStore exists for the SecretProvider.
@@ -655,29 +645,29 @@ mod tests {
     #[test]
     fn is_crd_not_found_detects_404() {
         let err = ReconcileError::Kube("404 Not Found".to_string());
-        assert!(is_crd_not_found(&err));
+        assert!(err.is_crd_not_found());
     }
 
     #[test]
     fn is_crd_not_found_detects_not_found() {
         let err = ReconcileError::Kube("resource not found".to_string());
-        assert!(is_crd_not_found(&err));
+        assert!(err.is_crd_not_found());
     }
 
     #[test]
     fn is_crd_not_found_detects_server_message() {
         let err =
             ReconcileError::Kube("the server could not find the requested resource".to_string());
-        assert!(is_crd_not_found(&err));
+        assert!(err.is_crd_not_found());
     }
 
     #[test]
     fn is_crd_not_found_returns_false_for_other_errors() {
         let err = ReconcileError::Kube("connection refused".to_string());
-        assert!(!is_crd_not_found(&err));
+        assert!(!err.is_crd_not_found());
 
         let err = ReconcileError::Validation("invalid spec".to_string());
-        assert!(!is_crd_not_found(&err));
+        assert!(!err.is_crd_not_found());
     }
 
     // =========================================================================
@@ -688,7 +678,7 @@ mod tests {
     fn compute_expected_action(result: Result<(), ReconcileError>) -> Action {
         match result {
             Ok(()) => Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)),
-            Err(e) if is_crd_not_found(&e) => {
+            Err(e) if e.is_crd_not_found() => {
                 Action::requeue(Duration::from_secs(REQUEUE_CRD_NOT_FOUND_SECS))
             }
             Err(_) => Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)),

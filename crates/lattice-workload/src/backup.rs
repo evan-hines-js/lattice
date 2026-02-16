@@ -150,12 +150,27 @@ fn overlay_backup(
     base: Option<&ServiceBackupSpec>,
     overlay: &ServiceBackupSpec,
 ) -> ServiceBackupSpec {
-    let base_hooks = base.and_then(|b| b.hooks.as_ref());
-    let base_volumes = base.and_then(|b| b.volumes.as_ref());
-
     ServiceBackupSpec {
-        hooks: overlay.hooks.clone().or_else(|| base_hooks.cloned()),
-        volumes: overlay.volumes.clone().or_else(|| base_volumes.cloned()),
+        schedule: overlay
+            .schedule
+            .clone()
+            .or_else(|| base.and_then(|b| b.schedule.clone())),
+        store_ref: overlay
+            .store_ref
+            .clone()
+            .or_else(|| base.and_then(|b| b.store_ref.clone())),
+        retention: overlay
+            .retention
+            .clone()
+            .or_else(|| base.and_then(|b| b.retention.clone())),
+        hooks: overlay
+            .hooks
+            .clone()
+            .or_else(|| base.and_then(|b| b.hooks.clone())),
+        volumes: overlay
+            .volumes
+            .clone()
+            .or_else(|| base.and_then(|b| b.volumes.clone())),
     }
 }
 
@@ -196,6 +211,7 @@ mod tests {
                 post: vec![],
             }),
             volumes: None,
+            ..Default::default()
         };
 
         let annotations = compile_backup_annotations(&spec);
@@ -224,6 +240,7 @@ mod tests {
                 post: vec![],
             }),
             volumes: None,
+            ..Default::default()
         };
 
         let annotations = compile_backup_annotations(&spec);
@@ -249,6 +266,7 @@ mod tests {
                 post: vec![make_hook("cleanup", "main", "cleanup")],
             }),
             volumes: None,
+            ..Default::default()
         };
 
         let annotations = compile_backup_annotations(&spec);
@@ -270,6 +288,7 @@ mod tests {
                 exclude: vec![],
                 default_policy: VolumeBackupDefault::OptIn,
             }),
+            ..Default::default()
         };
 
         let annotations = compile_backup_annotations(&spec);
@@ -287,6 +306,7 @@ mod tests {
                 exclude: vec!["tmp".to_string(), "cache".to_string()],
                 default_policy: VolumeBackupDefault::OptOut,
             }),
+            ..Default::default()
         };
 
         let annotations = compile_backup_annotations(&spec);
@@ -307,6 +327,7 @@ mod tests {
         let spec = ServiceBackupSpec {
             hooks: None,
             volumes: None,
+            ..Default::default()
         };
 
         let annotations = compile_backup_annotations(&spec);
@@ -329,6 +350,7 @@ mod tests {
                 exclude: vec![],
                 default_policy: VolumeBackupDefault::OptIn,
             }),
+            ..Default::default()
         };
 
         let inline = ServiceBackupSpec {
@@ -337,6 +359,7 @@ mod tests {
                 post: vec![],
             }),
             volumes: None, // Not set — should fall through to policy
+            ..Default::default()
         };
 
         let result = merge_backup_specs(&[&policy], Some(&inline)).unwrap();
@@ -359,6 +382,7 @@ mod tests {
                 exclude: vec![],
                 default_policy: VolumeBackupDefault::OptIn,
             }),
+            ..Default::default()
         };
 
         let high_priority = ServiceBackupSpec {
@@ -367,6 +391,7 @@ mod tests {
                 post: vec![],
             }),
             volumes: None,
+            ..Default::default()
         };
 
         // Policies passed highest-priority first
@@ -392,6 +417,7 @@ mod tests {
                 post: vec![],
             }),
             volumes: None,
+            ..Default::default()
         };
 
         let result = merge_backup_specs(&[&policy], None).unwrap();
@@ -407,6 +433,7 @@ mod tests {
                 exclude: vec![],
                 default_policy: VolumeBackupDefault::OptIn,
             }),
+            ..Default::default()
         };
 
         let result = merge_backup_specs(&[], Some(&inline)).unwrap();

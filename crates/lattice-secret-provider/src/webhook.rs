@@ -83,10 +83,7 @@ pub async fn start_webhook_server(client: Client, credentials: WebhookCredential
 }
 
 /// Validate the Authorization header against expected credentials.
-fn check_auth(
-    headers: &HeaderMap,
-    expected: &str,
-) -> Result<(), (StatusCode, String)> {
+fn check_auth(headers: &HeaderMap, expected: &str) -> Result<(), (StatusCode, String)> {
     let auth = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -96,10 +93,7 @@ fn check_auth(
         ))?;
 
     if auth != expected {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "invalid credentials".to_string(),
-        ));
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials".to_string()));
     }
 
     Ok(())
@@ -161,10 +155,7 @@ fn resolve_secret(
         Some(value) => Ok(axum::Json(value).into_response()),
         None => Err((
             StatusCode::NOT_FOUND,
-            format!(
-                "property '{}' not found in secret '{}'",
-                property, name
-            ),
+            format!("property '{}' not found in secret '{}'", property, name),
         )),
     }
 }
@@ -231,7 +222,9 @@ mod tests {
 
     #[test]
     fn unlabeled_secret_is_not_source() {
-        assert!(!is_labeled_source(&k8s_openapi::api::core::v1::Secret::default()));
+        assert!(!is_labeled_source(
+            &k8s_openapi::api::core::v1::Secret::default()
+        ));
     }
 
     #[test]
@@ -286,8 +279,7 @@ mod tests {
             username: "user".to_string(),
             password: "pass".to_string(),
         };
-        let expected_b64 =
-            base64::engine::general_purpose::STANDARD.encode("user:pass");
+        let expected_b64 = base64::engine::general_purpose::STANDARD.encode("user:pass");
         assert_eq!(creds.basic_auth_header(), format!("Basic {expected_b64}"));
     }
 
