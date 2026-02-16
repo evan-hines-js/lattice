@@ -417,7 +417,8 @@ async fn test_probe_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     wait_for_policies(kubeconfig, NS_PROBE_SHELL, svc, Duration::from_secs(30)).await?;
-    let yaml = get_policy_yaml(kubeconfig, NS_PROBE_SHELL, &format!("allow-binaries-{svc}")).await?;
+    let yaml =
+        get_policy_yaml(kubeconfig, NS_PROBE_SHELL, &format!("allow-binaries-{svc}")).await?;
     assert!(
         yaml_allows_binary(&yaml, "/bin/sh"),
         "/bin/sh should be auto-allowed for probe"
@@ -477,8 +478,12 @@ async fn test_sidecar_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     wait_for_policies(kubeconfig, NS_SIDECAR_SHELL, svc, Duration::from_secs(30)).await?;
-    let yaml =
-        get_policy_yaml(kubeconfig, NS_SIDECAR_SHELL, &format!("allow-binaries-{svc}")).await?;
+    let yaml = get_policy_yaml(
+        kubeconfig,
+        NS_SIDECAR_SHELL,
+        &format!("allow-binaries-{svc}"),
+    )
+    .await?;
     assert!(
         yaml_allows_binary(&yaml, "/bin/ash"),
         "/bin/ash should be auto-allowed because sidecar command uses it"
@@ -541,16 +546,32 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
         Duration::from_secs(90),
     )
     .await?;
-    wait_for_policies(kubeconfig, NS_ENFORCEMENT, svc_block, Duration::from_secs(30)).await?;
-    wait_for_pod_running(kubeconfig, NS_ENFORCEMENT, &format!("app.kubernetes.io/name={svc_block}"))
-        .await?;
+    wait_for_policies(
+        kubeconfig,
+        NS_ENFORCEMENT,
+        svc_block,
+        Duration::from_secs(30),
+    )
+    .await?;
+    wait_for_pod_running(
+        kubeconfig,
+        NS_ENFORCEMENT,
+        &format!("app.kubernetes.io/name={svc_block}"),
+    )
+    .await?;
 
     // Give Tetragon a moment to load the policies
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Check 1: Shell execution should be blocked (SIGKILL)
     info!("[Tetragon] Check 1: shell exec should be killed...");
-    let shell_result = exec_in_pod(kubeconfig, NS_ENFORCEMENT, svc_block, &["sh", "-c", "echo hello"]).await;
+    let shell_result = exec_in_pod(
+        kubeconfig,
+        NS_ENFORCEMENT,
+        svc_block,
+        &["sh", "-c", "echo hello"],
+    )
+    .await;
     assert!(
         shell_result.is_err(),
         "Expected shell exec to be killed by Tetragon, but it succeeded: {shell_result:?}"
@@ -560,8 +581,13 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
     // Check 2: Rootfs write should be blocked
     // Use /bin/busybox directly since shells are blocked
     info!("[Tetragon] Check 2: rootfs write should be blocked...");
-    let write_result =
-        exec_in_pod(kubeconfig, NS_ENFORCEMENT, svc_block, &["/bin/busybox", "touch", "/testfile"]).await;
+    let write_result = exec_in_pod(
+        kubeconfig,
+        NS_ENFORCEMENT,
+        svc_block,
+        &["/bin/busybox", "touch", "/testfile"],
+    )
+    .await;
     assert!(
         write_result.is_err(),
         "Expected rootfs write to be blocked by Tetragon, but it succeeded: {write_result:?}"
@@ -585,16 +611,31 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
         Duration::from_secs(90),
     )
     .await?;
-    wait_for_policies(kubeconfig, NS_ENFORCEMENT, svc_exempt, Duration::from_secs(30)).await?;
-    wait_for_pod_running(kubeconfig, NS_ENFORCEMENT, &format!("app.kubernetes.io/name={svc_exempt}"))
-        .await?;
+    wait_for_policies(
+        kubeconfig,
+        NS_ENFORCEMENT,
+        svc_exempt,
+        Duration::from_secs(30),
+    )
+    .await?;
+    wait_for_pod_running(
+        kubeconfig,
+        NS_ENFORCEMENT,
+        &format!("app.kubernetes.io/name={svc_exempt}"),
+    )
+    .await?;
 
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Check 3: Shell should be allowed when exempted via probe
     info!("[Tetragon] Check 3: exempted shell should succeed...");
-    let exempt_result =
-        exec_in_pod(kubeconfig, NS_ENFORCEMENT, svc_exempt, &["sh", "-c", "echo hello"]).await;
+    let exempt_result = exec_in_pod(
+        kubeconfig,
+        NS_ENFORCEMENT,
+        svc_exempt,
+        &["sh", "-c", "echo hello"],
+    )
+    .await;
     assert!(
         exempt_result.is_ok(),
         "Expected shell exec to succeed (probe exemption), but it failed: {exempt_result:?}"
@@ -693,7 +734,13 @@ async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    let p = wait_for_policies(kubeconfig, NS_ALLOWED_BINARIES, svc, Duration::from_secs(30)).await?;
+    let p = wait_for_policies(
+        kubeconfig,
+        NS_ALLOWED_BINARIES,
+        svc,
+        Duration::from_secs(30),
+    )
+    .await?;
     assert_has(&p, "allow-binaries", svc);
 
     wait_for_pod_running(
@@ -712,10 +759,7 @@ async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
         &["/bin/busybox", "echo", "hello"],
     )
     .await;
-    assert!(
-        ok.is_ok(),
-        "Expected /bin/busybox to be allowed: {ok:?}"
-    );
+    assert!(ok.is_ok(), "Expected /bin/busybox to be allowed: {ok:?}");
 
     // Shell should be blocked (not in allowedBinaries)
     let blocked = exec_in_pod(
@@ -784,8 +828,13 @@ async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> 
     )
     .await?;
 
-    let p =
-        wait_for_policies(kubeconfig, NS_WILDCARD_BINARIES, svc, Duration::from_secs(30)).await?;
+    let p = wait_for_policies(
+        kubeconfig,
+        NS_WILDCARD_BINARIES,
+        svc,
+        Duration::from_secs(30),
+    )
+    .await?;
     assert_missing(&p, "allow-binaries", svc);
 
     wait_for_pod_running(
@@ -814,6 +863,111 @@ async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> 
     Ok(())
 }
 
+const NS_IMPLICIT_WILDCARD: &str = "tetragon-t12";
+
+/// Test 12: Implicit wildcard — no command, no allowedBinaries → no binary restrictions.
+/// Verifies the compiler correctly infers wildcard when the image ENTRYPOINT is unknown.
+async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
+    info!("[Tetragon] Test 12: Implicit wildcard — no command, no allowedBinaries...");
+    ensure_fresh_namespace(kubeconfig, NS_IMPLICIT_WILDCARD).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t12", NS_IMPLICIT_WILDCARD).await?;
+
+    let svc = "svc-implicit";
+    // No command, no allowedBinaries — build manually to avoid build_service's default command
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            // Busybox default ENTRYPOINT is "sh", so the pod will start
+            security: Some(SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                ..Default::default()
+            }),
+            resources: Some(ResourceRequirements {
+                limits: Some(ResourceQuantity {
+                    cpu: Some("100m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 8080,
+            target_port: None,
+            protocol: None,
+        },
+    );
+
+    let service = LatticeService {
+        metadata: ObjectMeta {
+            name: Some(svc.to_string()),
+            namespace: Some(NS_IMPLICIT_WILDCARD.to_string()),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            workload: WorkloadSpec {
+                containers,
+                service: Some(ServicePortsSpec { ports }),
+                ..Default::default()
+            },
+            runtime: RuntimeSpec::default(),
+            ..Default::default()
+        },
+        status: None,
+    };
+
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_IMPLICIT_WILDCARD,
+        service,
+        "Ready",
+        None,
+        Duration::from_secs(90),
+    )
+    .await?;
+
+    let p = wait_for_policies(
+        kubeconfig,
+        NS_IMPLICIT_WILDCARD,
+        svc,
+        Duration::from_secs(30),
+    )
+    .await?;
+    assert_missing(&p, "allow-binaries", svc);
+
+    wait_for_pod_running(
+        kubeconfig,
+        NS_IMPLICIT_WILDCARD,
+        &format!("app.kubernetes.io/name={svc}"),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Everything should work — no binary restrictions
+    let shell = exec_in_pod(
+        kubeconfig,
+        NS_IMPLICIT_WILDCARD,
+        svc,
+        &["sh", "-c", "echo hello"],
+    )
+    .await;
+    assert!(
+        shell.is_ok(),
+        "Expected shell to work with implicit wildcard: {shell:?}"
+    );
+
+    delete_namespace(kubeconfig, NS_IMPLICIT_WILDCARD).await;
+    info!("[Tetragon] Test 12 passed");
+    Ok(())
+}
+
 // =============================================================================
 // Orchestrator
 // =============================================================================
@@ -838,6 +992,7 @@ pub async fn run_tetragon_tests(ctx: &InfraContext) -> Result<(), String> {
         test_allowed_binaries(kubeconfig),
         test_allowed_binaries_cedar_deny(kubeconfig),
         test_wildcard_allowed_binaries(kubeconfig),
+        test_implicit_wildcard(kubeconfig),
     )?;
 
     cleanup_policies(kubeconfig).await;

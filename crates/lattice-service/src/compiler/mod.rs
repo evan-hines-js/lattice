@@ -342,6 +342,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "nginx:latest".to_string(),
+                command: Some(vec!["nginx".to_string()]),
                 ..Default::default()
             },
         );
