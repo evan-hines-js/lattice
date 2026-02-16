@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use lattice_common::crd::{
-    ContainerSpec, Probe, RuntimeSpec, SecurityContext, SidecarSpec, WorkloadSpec,
+    has_unknown_binary_entrypoint, Probe, RuntimeSpec, SecurityContext, WorkloadSpec,
 };
 use lattice_common::policy::tetragon::{
     KprobeArg, KprobeSpec, MatchArg, PodSelector, Selector, TracingPolicyNamespaced,
@@ -29,18 +29,16 @@ pub fn compile_tracing_policies(
     let mut policies = Vec::new();
 
     // Tier 1: binary execution whitelist
-    // "*" wildcard (explicit or inferred) disables all binary restrictions;
-    // otherwise only declared + auto-detected entrypoints may execute.
-    // Containers with no auto-detected entrypoints AND no allowedBinaries are
-    // treated as allowedBinaries: ["*"] — Cedar must authorize this separately.
     // Explicit allowedBinaries: ["*"] always disables restrictions, even when
     // entrypoints exist (command, probes).
-    let mut allowed_binaries = extract_allowed_binaries(workload, runtime);
+    // If ANY container lacks both `command` and `allowedBinaries`, we can't know
+    // its image ENTRYPOINT, so the whole pod gets implicit wildcard (Tetragon
+    // policies are pod-scoped). Cedar must authorize this separately.
+    let allowed_binaries = extract_allowed_binaries(workload, runtime);
     let entrypoints = extract_entrypoint_binaries(workload, runtime);
-    if allowed_binaries.is_empty() && entrypoints.is_empty() {
-        allowed_binaries.insert("*".to_string());
-    }
-    if !allowed_binaries.contains("*") {
+    let needs_wildcard =
+        allowed_binaries.contains("*") || any_container_unknown_entrypoint(workload, runtime);
+    if !needs_wildcard {
         policies.push(compile_allow_binaries_policy(
             name,
             namespace,
@@ -74,10 +72,7 @@ pub fn compile_tracing_policies(
             "block-setuid",
             name,
             namespace,
-            KprobeSpec::simple(
-                "security_task_fix_setuid",
-                vec![Selector::sigkill()],
-            ),
+            KprobeSpec::simple("security_task_fix_setuid", vec![Selector::sigkill()]),
         ));
     }
 
@@ -152,6 +147,20 @@ fn compile_allow_binaries_policy(
     )
 }
 
+/// Returns true if any container/sidecar has an unknown binary entrypoint,
+/// meaning binary restrictions must be disabled for the whole pod (Tetragon
+/// policies are pod-scoped).
+fn any_container_unknown_entrypoint(workload: &WorkloadSpec, runtime: &RuntimeSpec) -> bool {
+    workload
+        .containers
+        .values()
+        .any(|c| has_unknown_binary_entrypoint(&c.command, &c.security))
+        || runtime
+            .sidecars
+            .values()
+            .any(|s| has_unknown_binary_entrypoint(&s.command, &s.security))
+}
+
 /// Collect `allowed_binaries` from all containers and sidecars (union)
 fn extract_allowed_binaries(workload: &WorkloadSpec, runtime: &RuntimeSpec) -> HashSet<String> {
     let mut binaries = HashSet::new();
@@ -174,42 +183,40 @@ fn extract_allowed_binaries(workload: &WorkloadSpec, runtime: &RuntimeSpec) -> H
 /// killed by the binary whitelist.
 fn extract_entrypoint_binaries(workload: &WorkloadSpec, runtime: &RuntimeSpec) -> HashSet<String> {
     let mut binaries = HashSet::new();
-    for container in workload.containers.values() {
-        collect_entrypoints_from_container(container, &mut binaries);
+    for c in workload.containers.values() {
+        collect_entrypoints(
+            &c.command,
+            &[&c.liveness_probe, &c.readiness_probe, &c.startup_probe],
+            &mut binaries,
+        );
     }
-    for sidecar in runtime.sidecars.values() {
-        collect_entrypoints_from_sidecar(sidecar, &mut binaries);
+    for s in runtime.sidecars.values() {
+        collect_entrypoints(
+            &s.command,
+            &[&s.liveness_probe, &s.readiness_probe, &s.startup_probe],
+            &mut binaries,
+        );
     }
     binaries
 }
 
-fn collect_entrypoints_from_container(c: &ContainerSpec, binaries: &mut HashSet<String>) {
-    collect_command_entrypoint(&c.command, binaries);
-    collect_probe_entrypoint(&c.liveness_probe, binaries);
-    collect_probe_entrypoint(&c.readiness_probe, binaries);
-    collect_probe_entrypoint(&c.startup_probe, binaries);
-}
-
-fn collect_entrypoints_from_sidecar(s: &SidecarSpec, binaries: &mut HashSet<String>) {
-    collect_command_entrypoint(&s.command, binaries);
-    collect_probe_entrypoint(&s.liveness_probe, binaries);
-    collect_probe_entrypoint(&s.readiness_probe, binaries);
-    collect_probe_entrypoint(&s.startup_probe, binaries);
-}
-
-fn collect_command_entrypoint(cmd: &Option<Vec<String>>, binaries: &mut HashSet<String>) {
-    if let Some(args) = cmd {
-        if let Some(binary) = args.first() {
+/// Collect the first element of `command` and exec probe commands into `binaries`.
+fn collect_entrypoints(
+    command: &Option<Vec<String>>,
+    probes: &[&Option<Probe>],
+    binaries: &mut HashSet<String>,
+) {
+    if let Some(cmd) = command {
+        if let Some(binary) = cmd.first() {
             binaries.insert(binary.clone());
         }
     }
-}
-
-fn collect_probe_entrypoint(probe: &Option<Probe>, binaries: &mut HashSet<String>) {
-    if let Some(probe) = probe {
-        if let Some(exec) = &probe.exec {
-            if let Some(binary) = exec.command.first() {
-                binaries.insert(binary.clone());
+    for probe in probes {
+        if let Some(p) = probe {
+            if let Some(exec) = &p.exec {
+                if let Some(binary) = exec.command.first() {
+                    binaries.insert(binary.clone());
+                }
             }
         }
     }
@@ -246,11 +253,6 @@ fn merge_security(agg: &mut SecurityContext, sec: &SecurityContext) {
             agg.capabilities.push(cap.clone());
         }
     }
-    for bin in &sec.allowed_binaries {
-        if !agg.allowed_binaries.contains(bin) {
-            agg.allowed_binaries.push(bin.clone());
-        }
-    }
 }
 
 #[cfg(test)]
@@ -258,7 +260,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use lattice_common::crd::{
-        ContainerSpec, ExecProbe, Probe, RuntimeSpec, SecurityContext, WorkloadSpec,
+        ContainerSpec, ExecProbe, Probe, RuntimeSpec, SecurityContext, SidecarSpec, WorkloadSpec,
     };
 
     use super::*;
@@ -325,6 +327,35 @@ mod tests {
     }
 
     #[test]
+    fn no_command_with_probe_skips_binary_policy() {
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                readiness_probe: Some(Probe {
+                    http_get: None,
+                    exec: Some(ExecProbe {
+                        command: vec!["nc".to_string(), "-z".to_string(), "127.0.0.1".to_string()],
+                    }),
+                }),
+                ..Default::default()
+            },
+        );
+        let w = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+        let r = RuntimeSpec::default();
+        let policies = compile(&w, &r);
+        let n = names(&policies);
+        assert!(
+            !n.contains(&"allow-binaries-my-app"),
+            "Container without command → unknown entrypoint → implicit wildcard"
+        );
+    }
+
+    #[test]
     fn writable_rootfs_skips_file_open() {
         let (w, r) = default_workload(Some(SecurityContext {
             read_only_root_filesystem: Some(false),
@@ -361,6 +392,7 @@ mod tests {
             "main".to_string(),
             ContainerSpec {
                 image: "test:latest".to_string(),
+                command: Some(vec!["/usr/bin/myapp".to_string()]),
                 liveness_probe: Some(Probe {
                     http_get: None,
                     exec: Some(ExecProbe {
@@ -410,13 +442,29 @@ mod tests {
 
     #[test]
     fn sidecar_command_entrypoint_auto_allowed() {
-        let (w, _) = default_workload(None);
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                command: Some(vec!["/usr/bin/myapp".to_string()]),
+                ..Default::default()
+            },
+        );
+        let w = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
         let mut sidecars = BTreeMap::new();
         sidecars.insert(
             "log-shipper".to_string(),
             SidecarSpec {
                 image: "fluent:latest".to_string(),
-                command: Some(vec!["/bin/ash".to_string(), "-c".to_string(), "tail -f /dev/null".to_string()]),
+                command: Some(vec![
+                    "/bin/ash".to_string(),
+                    "-c".to_string(),
+                    "tail -f /dev/null".to_string(),
+                ]),
                 ..Default::default()
             },
         );

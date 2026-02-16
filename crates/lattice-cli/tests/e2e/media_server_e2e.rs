@@ -15,8 +15,8 @@ use lattice_common::crd::{LatticeExternalService, LatticeService};
 use super::helpers::{
     apply_cedar_policy_crd, apply_run_as_root_override_policy, client_from_kubeconfig,
     create_with_retry, ensure_fresh_namespace, ensure_test_cluster_issuer,
-    load_external_service_config, load_service_config, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition, wait_for_service_phase_with_message,
+    load_external_service_config, load_service_config, run_kubectl, setup_regcreds_infrastructure,
+    wait_for_condition, wait_for_service_phase_with_message,
 };
 use super::mesh_helpers::retry_verification;
 

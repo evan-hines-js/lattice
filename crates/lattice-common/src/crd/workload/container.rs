@@ -193,13 +193,31 @@ pub struct SecurityContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apparmor_localhost_profile: Option<String>,
 
-    /// Full binary execution whitelist.
+    /// Binary execution whitelist.
     ///
-    /// When set, only these binaries (plus auto-detected probe/command shells)
-    /// may execute. All other binaries are SIGKILL'd by Tetragon.
-    /// When empty/unset, the default shell-only blocking applies.
+    /// Only these binaries (plus auto-detected command/probe entrypoints) may
+    /// execute. All other binaries are SIGKILL'd by Tetragon at the kernel level.
+    /// Use `["*"]` to disable binary restrictions entirely (Cedar must still
+    /// authorize the override). When empty and no `command` is declared, the
+    /// compiler infers an implicit wildcard since the image ENTRYPOINT is unknown.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_binaries: Vec<String>,
+}
+
+/// Returns true if a container's binary entrypoint is unknown.
+///
+/// A container has unknown entrypoint when it declares no `command` (so the
+/// image ENTRYPOINT is opaque) and no `allowedBinaries` (so we can't restrict).
+/// Both the Tetragon compiler and Cedar authorization use this to decide whether
+/// to infer an implicit wildcard.
+pub fn has_unknown_binary_entrypoint(
+    command: &Option<Vec<String>>,
+    security: &Option<SecurityContext>,
+) -> bool {
+    command.is_none()
+        && security
+            .as_ref()
+            .map_or(true, |s| s.allowed_binaries.is_empty())
 }
 
 // =============================================================================
