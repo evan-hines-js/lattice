@@ -80,6 +80,9 @@ fn build_service(
     if sec.apparmor_profile.is_none() {
         sec.apparmor_profile = Some("Unconfined".to_string());
     }
+    if sec.run_as_non_root.is_none() {
+        sec.run_as_non_root = Some(false);
+    }
 
     let mut containers = BTreeMap::new();
     containers.insert(
@@ -139,6 +142,7 @@ fn build_service_with_sidecar_shell(name: &str, namespace: &str) -> LatticeServi
             command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
             security: Some(SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
+                run_as_non_root: Some(false),
                 ..Default::default()
             }),
             resources: Some(ResourceRequirements {
@@ -174,6 +178,7 @@ fn build_service_with_sidecar_shell(name: &str, namespace: &str) -> LatticeServi
             ]),
             security: Some(SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
+                run_as_non_root: Some(false),
                 ..Default::default()
             }),
             ..Default::default()
@@ -431,7 +436,7 @@ async fn exec_in_pod(
 async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 5: Enforcement — blocked binaries killed, exempted allowed...");
     ensure_fresh_namespace(kubeconfig, NS_ENFORCEMENT).await?;
-    apply_security_override(kubeconfig, "permit-tetragon-t8", NS_ENFORCEMENT).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t5", NS_ENFORCEMENT).await?;
 
     // --- Service with default security (binary whitelist, no exemptions) ---
     let svc_block = "svc-enforce";
@@ -533,9 +538,9 @@ async fn test_enforcement(kubeconfig: &str) -> Result<(), String> {
 // Allowed binaries tests
 // =============================================================================
 
-const NS_ALLOWED_BINARIES: &str = "tetragon-t9";
-const NS_ALLOWED_BINARIES_CEDAR: &str = "tetragon-t10";
-const NS_WILDCARD_BINARIES: &str = "tetragon-t11";
+const NS_ALLOWED_BINARIES: &str = "tetragon-t6";
+const NS_ALLOWED_BINARIES_CEDAR: &str = "tetragon-t7";
+const NS_WILDCARD_BINARIES: &str = "tetragon-t8";
 
 fn build_service_with_allowed_binaries(
     name: &str,
@@ -550,6 +555,7 @@ fn build_service_with_allowed_binaries(
             command: Some(vec!["sleep".to_string(), "infinity".to_string()]),
             security: Some(SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
+                run_as_non_root: Some(false),
                 allowed_binaries,
                 ..Default::default()
             }),
@@ -597,7 +603,7 @@ fn build_service_with_allowed_binaries(
 async fn test_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 6: allowedBinaries whitelist...");
     ensure_fresh_namespace(kubeconfig, NS_ALLOWED_BINARIES).await?;
-    apply_security_override(kubeconfig, "permit-tetragon-t9", NS_ALLOWED_BINARIES).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t6", NS_ALLOWED_BINARIES).await?;
 
     let svc = "svc-binaries";
     // Allow only /bin/busybox (needed to exec anything in busybox image)
@@ -696,7 +702,7 @@ async fn test_allowed_binaries_cedar_deny(kubeconfig: &str) -> Result<(), String
 async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 8: Wildcard allowedBinaries — no binary restrictions...");
     ensure_fresh_namespace(kubeconfig, NS_WILDCARD_BINARIES).await?;
-    apply_security_override(kubeconfig, "permit-tetragon-t11", NS_WILDCARD_BINARIES).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t5", NS_WILDCARD_BINARIES).await?;
 
     let svc = "svc-wildcard";
     deploy_and_wait_for_phase(
@@ -744,14 +750,14 @@ async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> 
     Ok(())
 }
 
-const NS_IMPLICIT_WILDCARD: &str = "tetragon-t12";
+const NS_IMPLICIT_WILDCARD: &str = "tetragon-t9";
 
 /// Implicit wildcard — no command, no allowedBinaries → no binary restrictions.
 /// Verifies the compiler correctly infers wildcard when the image ENTRYPOINT is unknown.
 async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 9: Implicit wildcard — no command, no allowedBinaries...");
     ensure_fresh_namespace(kubeconfig, NS_IMPLICIT_WILDCARD).await?;
-    apply_security_override(kubeconfig, "permit-tetragon-t12", NS_IMPLICIT_WILDCARD).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t9", NS_IMPLICIT_WILDCARD).await?;
 
     let svc = "svc-implicit";
     // No command, no allowedBinaries — build manually to avoid build_service's default command
@@ -763,6 +769,7 @@ async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
             // Busybox default ENTRYPOINT is "sh", so the pod will start
             security: Some(SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
+                run_as_non_root: Some(false),
                 ..Default::default()
             }),
             resources: Some(ResourceRequirements {
@@ -853,8 +860,8 @@ async fn test_implicit_wildcard(kubeconfig: &str) -> Result<(), String> {
 // Negative tests
 // =============================================================================
 
-const NS_IMPLICIT_CEDAR_DENY: &str = "tetragon-t13";
-const NS_MISSING_ENTRYPOINT: &str = "tetragon-t14";
+const NS_IMPLICIT_CEDAR_DENY: &str = "tetragon-t10";
+const NS_MISSING_ENTRYPOINT: &str = "tetragon-t11";
 
 /// No command, no allowedBinaries, no Cedar permit → implicit wildcard denied by Cedar.
 async fn test_implicit_wildcard_cedar_deny(kubeconfig: &str) -> Result<(), String> {
@@ -871,6 +878,7 @@ async fn test_implicit_wildcard_cedar_deny(kubeconfig: &str) -> Result<(), Strin
             // No command, no allowedBinaries → implicit wildcard → Cedar must permit
             security: Some(SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
+                run_as_non_root: Some(false),
                 ..Default::default()
             }),
             resources: Some(ResourceRequirements {
@@ -938,7 +946,7 @@ async fn test_implicit_wildcard_cedar_deny(kubeconfig: &str) -> Result<(), Strin
 async fn test_missing_entrypoint_killed(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 11: Missing entrypoint in allowedBinaries — pod should crash...");
     ensure_fresh_namespace(kubeconfig, NS_MISSING_ENTRYPOINT).await?;
-    apply_security_override(kubeconfig, "permit-tetragon-t14", NS_MISSING_ENTRYPOINT).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t11", NS_MISSING_ENTRYPOINT).await?;
 
     let svc = "svc-bad-whitelist";
     // command: ["sleep", "infinity"] → "sleep" auto-whitelisted

@@ -70,3 +70,50 @@ kubectl apply -f examples/webapp/frontend.yaml
 ### Access
 
 Add `webapp.local` to `/etc/hosts` pointing to your ingress IP, then visit `http://webapp.local` to see the frontend page with live API status.
+
+## Media Stack
+
+The `media/` directory deploys a homelab media server stack with shared storage and bilateral mesh agreements:
+
+```
+sonarr:8989 -> nzbget:6789 (download requests)
+sonarr:8989 -> jellyfin:8096 (library refresh)
+jellyfin:8096 -> repo.jellyfin.org (external, plugin updates)
+nzbget:6789 -> egress-vpn (wireguard egress gateway)
+```
+
+### Bilateral Agreement Matrix
+
+| Service      | Outbound To        | Inbound From |
+|--------------|--------------------|--------------|
+| jellyfin     | jellyfin-repo (ext)| sonarr       |
+| sonarr       | nzbget, jellyfin   | (none)       |
+| nzbget       | egress-vpn         | sonarr       |
+| egress-vpn   | (none)             | nzbget       |
+
+### Shared Volume
+
+Jellyfin owns a 100Gi `media-storage` volume and grants access to sonarr and nzbget via `allowedConsumers`. Sonarr and nzbget reference it by ID without specifying a size.
+
+### VPN Egress Gateway
+
+Nzbget routes its download traffic through a wireguard egress gateway via bilateral mesh agreement. The gateway tunnels all traffic it receives through a wireguard VPN. Edit `egress-vpn.yaml` with your wireguard credentials before deploying.
+
+### Deploy
+
+```bash
+kubectl apply -f examples/media/namespace.yaml
+kubectl apply -f examples/media/jellyfin-repo.yaml
+kubectl apply -f examples/media/jellyfin.yaml
+kubectl apply -f examples/media/sonarr.yaml
+kubectl apply -f examples/media/egress-vpn.yaml
+kubectl apply -f examples/media/nzbget.yaml
+```
+
+### Access
+
+Add `*.home.arpa` entries to `/etc/hosts` pointing to your ingress IP:
+
+- `https://jellyfin.home.arpa` - Jellyfin media server
+- `https://sonarr.home.arpa` - Sonarr TV management
+- `https://nzbget.home.arpa` - NZBGet download client
