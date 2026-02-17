@@ -852,6 +852,11 @@ impl ProxySession {
         let url = pf.url.clone();
         let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator").await?;
 
+        info!(
+            "[ProxySession] To reproduce manually:\n  kubectl --kubeconfig={} port-forward svc/{} {}:{} -n {}",
+            kubeconfig, PROXY_SERVICE_NAME, pf.port(), PROXY_PORT, LATTICE_SYSTEM_NAMESPACE,
+        );
+
         Ok(Self {
             kubeconfig: kubeconfig.to_string(),
             url,

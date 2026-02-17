@@ -107,7 +107,7 @@ pub struct FileMount {
 }
 
 /// Volume mount specification
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeMount {
     /// External volume reference (supports `${...}` placeholders).

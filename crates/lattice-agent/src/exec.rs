@@ -331,10 +331,32 @@ pub async fn execute_exec(
         let _ = h.await;
     }
 
-    // Get exit status
-    if let Some(status) = attached.take_status() {
-        if let Some(status) = status.await {
+    // Get exit status from stream3 and forward to the cell so kubectl
+    // receives the proper exit code. Without this, kubectl always sees exit 0.
+    if let Some(status_future) = attached.take_status() {
+        if let Some(status) = status_future.await {
             debug!(request_id = %request_id, ?status, "Exec completed");
+
+            // Serialize the K8s Status object to JSON — this is what kubectl
+            // expects on the error channel (stream3) to determine exit code.
+            match serde_json::to_vec(&status) {
+                Ok(data) => {
+                    let _ = message_tx
+                        .send(AgentMessage {
+                            cluster_name: cluster_name.clone(),
+                            payload: Some(Payload::ExecData(ExecData {
+                                request_id: request_id.clone(),
+                                stream_id: stream_id::ERROR,
+                                data,
+                                stream_end: true,
+                            })),
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    warn!(request_id = %request_id, error = %e, "Failed to serialize exec status");
+                }
+            }
         }
     }
 
