@@ -218,13 +218,9 @@ pub async fn run_secrets_tests(ctx: &InfraContext) -> Result<(), String> {
     // busybox runs as root
     apply_run_as_root_override_policy(kubeconfig, BASIC_TEST_NAMESPACE, "local-api").await?;
 
-    let result = run_basic_secret_test(kubeconfig).await;
-
-    // Clean up services before policies — the controller re-checks Cedar on every
-    // reconcile, so deleting policies while services still exist causes them to fail.
+    run_basic_secret_test(kubeconfig).await?;
     delete_namespace(kubeconfig, BASIC_TEST_NAMESPACE).await;
     delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=local-secrets").await;
-    result?;
 
     // Run the comprehensive 5-route tests (manages its own Cedar policies)
     run_secrets_route_tests(ctx).await?;
@@ -659,7 +655,7 @@ pub async fn run_secrets_route_tests(ctx: &InfraContext) -> Result<(), String> {
         apply_run_as_root_override_policy(kubeconfig, ROUTES_TEST_NAMESPACE, svc).await?;
     }
 
-    let result = async {
+    async {
         ensure_fresh_namespace(kubeconfig, ROUTES_TEST_NAMESPACE).await?;
 
         // Run per-route tests
@@ -674,13 +670,10 @@ pub async fn run_secrets_route_tests(ctx: &InfraContext) -> Result<(), String> {
 
         Ok::<(), String>(())
     }
-    .await;
+    .await?;
 
-    // Clean up services before policies — the controller re-checks Cedar on every
-    // reconcile, so deleting policies while services still exist causes them to fail.
     delete_namespace(kubeconfig, ROUTES_TEST_NAMESPACE).await;
     delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=secret-routes").await;
-    result?;
 
     info!("[Routes] All secrets route tests passed!");
     Ok(())

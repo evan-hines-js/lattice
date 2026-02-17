@@ -98,7 +98,7 @@ fn compile_allow_binaries_policy(
             "security_bprm_check",
             vec![KprobeArg {
                 index: 0,
-                type_: "file".to_string(),
+                type_: "linux_binprm".to_string(),
                 label: Some("filename".to_string()),
             }],
             selectors,

@@ -405,10 +405,15 @@ async fn handle_remote_exec(
             exec_data = data_rx.recv() => {
                 match exec_data {
                     Some(data) => {
+                        // Stream3 (ERROR channel) carries the K8s Status JSON
+                        // with the process exit code. Forward it to kubectl on
+                        // channel 3 so it can extract the exit code, then close.
                         if data.stream_id == stream_id::ERROR {
-                            let error_msg = String::from_utf8_lossy(&data.data);
-                            error!(request_id = %request_id, error = %error_msg, "Exec error from agent");
-                            send_k8s_error_and_close(&mut ws_sender, error_msg.to_string()).await;
+                            let status_msg = String::from_utf8_lossy(&data.data);
+                            debug!(request_id = %request_id, status = %status_msg, "Exec status from agent (stream3)");
+
+                            let msg = build_k8s_message(channel::ERROR, &data.data);
+                            let _ = ws_sender.send(Message::Binary(msg.into())).await;
                             break;
                         }
 

@@ -11,6 +11,7 @@ use tracing::info;
 
 use super::cedar::{
     apply_apparmor_override_policy, apply_binary_wildcard_override_policy, apply_cedar_policy_crd,
+    apply_test_binaries_override_policy,
 };
 use super::cluster::load_registry_credentials;
 use super::docker::run_kubectl;
@@ -144,6 +145,7 @@ pub fn create_service_with_secrets(
             }),
             security: Some(lattice_common::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
+                allowed_binaries: vec!["/bin/printenv".to_string(), "/bin/cat".to_string()],
                 ..Default::default()
             }),
             ..Default::default()
@@ -638,6 +640,7 @@ pub fn create_service_with_all_secret_routes(
             }),
             security: Some(lattice_common::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
+                allowed_binaries: vec!["/bin/printenv".to_string(), "/bin/cat".to_string()],
                 ..Default::default()
             }),
             ..Default::default()
@@ -1075,6 +1078,9 @@ pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), Strin
 
     // Permit binary wildcard for containers without explicit command or with allowedBinaries: ["*"]
     apply_binary_wildcard_override_policy(kubeconfig).await?;
+
+    // Permit test utility binaries (printenv, cat) for verification via kubectl exec
+    apply_test_binaries_override_policy(kubeconfig).await?;
 
     info!("[Regcreds] Infrastructure ready (provider + source secret + Cedar policies)");
     Ok(())

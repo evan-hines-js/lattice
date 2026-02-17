@@ -17,12 +17,12 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use tracing::info;
+use tracing::{info, warn};
 
 use lattice_common::crd::{
     ContainerSpec, ExecProbe, LatticeService, LatticeServiceSpec, PortSpec, Probe,
     ResourceQuantity, ResourceRequirements, RuntimeSpec, SecurityContext, ServicePortsSpec,
-    SidecarSpec, WorkloadSpec,
+    SidecarSpec, VolumeMount, WorkloadSpec,
 };
 
 use super::super::context::InfraContext;
@@ -30,7 +30,7 @@ use super::super::helpers::{
     apply_cedar_policy_crd, delete_cedar_policies_by_label, delete_namespace,
     deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_pod_running, TestHarness,
-    BUSYBOX_IMAGE,
+    BUSYBOX_IMAGE, NGINX_IMAGE,
 };
 
 const NS_DEFAULT: &str = "tetragon-t1";
@@ -231,14 +231,20 @@ fn build_service_with_allowed_binaries(
 }
 
 /// Build a service with no command (implicit wildcard).
+/// Uses nginx which has a long-running default entrypoint, unlike busybox
+/// whose default `sh` exits immediately in non-interactive mode.
 fn build_service_no_command(name: &str, namespace: &str) -> LatticeService {
+    let mut volumes = BTreeMap::new();
+    volumes.insert("/tmp".to_string(), VolumeMount::default());
+
     let mut containers = BTreeMap::new();
     containers.insert(
         "main".to_string(),
         ContainerSpec {
-            image: BUSYBOX_IMAGE.to_string(),
+            image: NGINX_IMAGE.to_string(),
             security: Some(default_security()),
             resources: Some(default_resources()),
+            volumes,
             ..Default::default()
         },
     );
@@ -321,8 +327,19 @@ fn yaml_allows_binary(yaml: &str, binary: &str) -> bool {
     yaml.contains(&format!("- {binary}")) || yaml.contains(&format!("- \"{binary}\""))
 }
 
-/// Exec into a deployment's pod and return stdout on success or stderr on failure.
-fn exec_in_pod_sync(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&str]) -> Result<String, String> {
+/// Result of exec'ing into a pod. Distinguishes between SIGKILL (Tetragon enforcement),
+/// successful execution, and transient infrastructure errors (proxy, WebSocket, timeout).
+enum ExecResult {
+    /// Process ran and exited successfully (exit 0).
+    Ok(String),
+    /// Process was killed by Tetragon (exit 137 / SIGKILL).
+    Killed,
+    /// Transient infrastructure error (proxy timeout, WebSocket failure, etc.).
+    /// These should be retried — they don't indicate enforcement or lack thereof.
+    TransientError(String),
+}
+
+fn exec_in_pod_sync(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&str]) -> ExecResult {
     let deploy_ref = format!("deploy/{deploy}");
     let mut cmd_args = vec![
         "--kubeconfig",
@@ -335,23 +352,64 @@ fn exec_in_pod_sync(kubeconfig: &str, namespace: &str, deploy: &str, args: &[&st
     ];
     cmd_args.extend_from_slice(args);
 
-    // Don't use run_kubectl (it retries on transient errors); we want raw exit status.
-    let output = std::process::Command::new("kubectl")
+    let output = match std::process::Command::new("kubectl")
         .args(&cmd_args)
         .output()
-        .map_err(|e| format!("kubectl exec failed to spawn: {e}"))?;
+    {
+        Ok(o) => o,
+        Err(e) => {
+            info!("[exec] {deploy} in {namespace}: SPAWN_ERROR ({e})");
+            return ExecResult::TransientError(format!("kubectl exec failed to spawn: {e}"));
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code();
 
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        info!("[exec] {deploy} in {namespace}: OK (exit={exit_code:?}, stdout={stdout:?})");
+        return ExecResult::Ok(stdout);
+    }
+
+    // SIGKILL: exit code 137 (128+9) or stderr mentioning signal/137
+    let is_sigkill = exit_code == Some(137)
+        || stderr.contains("exit code 137")
+        || stderr.contains("signal: killed");
+
+    if is_sigkill {
+        info!("[exec] {deploy} in {namespace}: KILLED (exit={exit_code:?})");
+        return ExecResult::Killed;
+    }
+
+    // Transient proxy/connection errors — not enforcement
+    let is_transient = stderr.contains("WebSocket")
+        || stderr.contains("500 Internal Server Error")
+        || stderr.contains("proxy error")
+        || stderr.contains("timed out")
+        || stderr.contains("connection refused")
+        || stderr.contains("TLS handshake")
+        || stderr.contains("net/http");
+
+    if is_transient {
+        info!("[exec] {deploy} in {namespace}: TRANSIENT (exit={exit_code:?}, stderr={stderr:?})");
+        return ExecResult::TransientError(stderr);
+    }
+
+    // Unknown non-zero exit — could be Tetragon or something else. Log clearly.
+    info!("[exec] {deploy} in {namespace}: UNKNOWN_FAIL (exit={exit_code:?}, stderr={stderr:?})");
+    // Treat exit code > 128 as signal-killed (128+signal_number)
+    if exit_code.map_or(false, |c| c > 128) {
+        ExecResult::Killed
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
+        ExecResult::TransientError(stderr)
     }
 }
 
-/// Wait until exec'ing the given command in the pod is SIGKILL'd (returns error).
+/// Wait until exec'ing the given command in the pod is SIGKILL'd by Tetragon.
 ///
-/// Tetragon needs time to load policies after they're created. This retries
-/// until the exec fails (indicating enforcement) or the timeout expires.
+/// Only counts actual SIGKILL (exit 137) as enforcement — proxy errors and
+/// transient failures are retried, not treated as enforcement.
 async fn wait_for_exec_blocked(
     kubeconfig: &str,
     namespace: &str,
@@ -370,8 +428,15 @@ async fn wait_for_exec_blocked(
             async move {
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 match exec_in_pod_sync(kubeconfig, namespace, deploy, &args_ref) {
-                    Err(_) => Ok(true), // blocked — enforcement working
-                    Ok(_) => Ok(false), // still succeeding — policy not loaded yet
+                    ExecResult::Killed => Ok(true),
+                    ExecResult::Ok(out) => {
+                        warn!("[wait_killed] {deploy} unexpectedly succeeded: {out:?}");
+                        Ok(false)
+                    }
+                    ExecResult::TransientError(e) => {
+                        warn!("[wait_killed] {deploy} transient error: {e}");
+                        Ok(false)
+                    }
                 }
             }
         },
@@ -379,10 +444,10 @@ async fn wait_for_exec_blocked(
     .await
 }
 
-/// Wait until exec'ing the given command in the pod succeeds.
+/// Wait until exec'ing the given command in the pod succeeds (exit 0).
 ///
 /// Used for wildcard/exempt cases where the exec should NOT be blocked.
-/// Retries handle transient WebSocket/proxy errors.
+/// Transient proxy errors are retried.
 async fn wait_for_exec_allowed(
     kubeconfig: &str,
     namespace: &str,
@@ -401,8 +466,15 @@ async fn wait_for_exec_allowed(
             async move {
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 match exec_in_pod_sync(kubeconfig, namespace, deploy, &args_ref) {
-                    Ok(_) => Ok(true),  // succeeded
-                    Err(_) => Ok(false), // transient failure, retry
+                    ExecResult::Ok(_) => Ok(true),
+                    ExecResult::Killed => {
+                        warn!("[wait_allowed] {deploy} unexpectedly killed");
+                        Ok(false)
+                    }
+                    ExecResult::TransientError(e) => {
+                        warn!("[wait_allowed] {deploy} transient error: {e}");
+                        Ok(false)
+                    }
                 }
             }
         },
@@ -417,6 +489,7 @@ async fn wait_for_exec_allowed(
 async fn test_default_security(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 1: Default security — command whitelisted...");
     ensure_fresh_namespace(kubeconfig, NS_DEFAULT).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t1", NS_DEFAULT).await?;
 
     let svc = "svc-default";
     deploy_and_wait_for_phase(
@@ -440,6 +513,7 @@ async fn test_default_security(kubeconfig: &str) -> Result<(), String> {
 async fn test_probe_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 2: Probe shell exemption...");
     ensure_fresh_namespace(kubeconfig, NS_PROBE_SHELL).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t2", NS_PROBE_SHELL).await?;
 
     let svc = "svc-probe";
     let probe = Probe {
@@ -474,10 +548,11 @@ async fn test_probe_shell_exemption(kubeconfig: &str) -> Result<(), String> {
 async fn test_cmd_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 3: Command shell exemption...");
     ensure_fresh_namespace(kubeconfig, NS_CMD_SHELL).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t3", NS_CMD_SHELL).await?;
 
     let svc = "svc-cmd";
     let cmd = vec![
-        "/bin/bash".to_string(),
+        "/bin/sh".to_string(),
         "-c".to_string(),
         "sleep infinity".to_string(),
     ];
@@ -494,8 +569,8 @@ async fn test_cmd_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     wait_for_policies(kubeconfig, NS_CMD_SHELL, svc, Duration::from_secs(30)).await?;
     let yaml = get_policy_yaml(kubeconfig, NS_CMD_SHELL, &format!("allow-binaries-{svc}")).await?;
     assert!(
-        yaml_allows_binary(&yaml, "/bin/bash"),
-        "/bin/bash should be auto-allowed for container command"
+        yaml_allows_binary(&yaml, "/bin/sh"),
+        "/bin/sh should be auto-allowed for container command"
     );
 
     delete_namespace(kubeconfig, NS_CMD_SHELL).await;
@@ -507,6 +582,7 @@ async fn test_cmd_shell_exemption(kubeconfig: &str) -> Result<(), String> {
 async fn test_sidecar_shell_exemption(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 4: Sidecar shell exemption — /bin/ash should be allowed...");
     ensure_fresh_namespace(kubeconfig, NS_SIDECAR_SHELL).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t4", NS_SIDECAR_SHELL).await?;
 
     let svc = "svc-sidecar";
     deploy_and_wait_for_phase(
@@ -730,7 +806,7 @@ async fn test_allowed_binaries_cedar_deny(kubeconfig: &str) -> Result<(), String
 async fn test_wildcard_allowed_binaries(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Test 8: Wildcard allowedBinaries — no binary restrictions...");
     ensure_fresh_namespace(kubeconfig, NS_WILDCARD_BINARIES).await?;
-    apply_security_override(kubeconfig, "permit-tetragon-t5", NS_WILDCARD_BINARIES).await?;
+    apply_security_override(kubeconfig, "permit-tetragon-t8", NS_WILDCARD_BINARIES).await?;
 
     let svc = "svc-wildcard";
     deploy_and_wait_for_phase(
