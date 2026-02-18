@@ -217,7 +217,7 @@ pub fn has_unknown_binary_entrypoint(
     command.is_none()
         && security
             .as_ref()
-            .map_or(true, |s| s.allowed_binaries.is_empty())
+            .is_none_or(|s| s.allowed_binaries.is_empty())
 }
 
 // =============================================================================

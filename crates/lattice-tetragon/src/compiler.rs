@@ -170,12 +170,10 @@ fn collect_entrypoints(
             binaries.insert(binary.clone());
         }
     }
-    for probe in probes {
-        if let Some(p) = probe {
-            if let Some(exec) = &p.exec {
-                if let Some(binary) = exec.command.first() {
-                    binaries.insert(binary.clone());
-                }
+    for p in probes.iter().filter_map(|probe| probe.as_ref()) {
+        if let Some(exec) = &p.exec {
+            if let Some(binary) = exec.command.first() {
+                binaries.insert(binary.clone());
             }
         }
     }

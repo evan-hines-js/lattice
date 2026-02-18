@@ -402,11 +402,19 @@ pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
     let harness = TestHarness::new("Cedar Secrets");
     tokio::join!(
         harness.run("Default deny", || test_default_deny(kubeconfig)),
-        harness.run("Permit specific path", || test_permit_specific_path(kubeconfig)),
-        harness.run("Forbid overrides permit", || test_forbid_overrides_permit(kubeconfig)),
-        harness.run("Namespace isolation", || test_namespace_isolation(kubeconfig)),
+        harness.run("Permit specific path", || test_permit_specific_path(
+            kubeconfig
+        )),
+        harness.run("Forbid overrides permit", || test_forbid_overrides_permit(
+            kubeconfig
+        )),
+        harness.run("Namespace isolation", || test_namespace_isolation(
+            kubeconfig
+        )),
         harness.run("Policy lifecycle", || test_policy_lifecycle(kubeconfig)),
-        harness.run("Provider scoped access", || test_provider_scoped_access(kubeconfig)),
+        harness.run("Provider scoped access", || test_provider_scoped_access(
+            kubeconfig
+        )),
     );
 
     // Only clean up policies on success — on failure, leave them in place so the

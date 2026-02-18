@@ -377,8 +377,16 @@ pub async fn run_cedar_hierarchy_tests(
 
     let harness = TestHarness::new("Cedar");
     tokio::join!(
-        harness.run("Proxy test", || run_cedar_proxy_test(kubeconfig, child_cluster_name, proxy_url)),
-        harness.run("Group test", || run_cedar_group_test(kubeconfig, child_cluster_name, proxy_url)),
+        harness.run("Proxy test", || run_cedar_proxy_test(
+            kubeconfig,
+            child_cluster_name,
+            proxy_url
+        )),
+        harness.run("Group test", || run_cedar_group_test(
+            kubeconfig,
+            child_cluster_name,
+            proxy_url
+        )),
     );
 
     // Safety net: clean up any leftover policies on failure
