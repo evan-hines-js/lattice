@@ -16,9 +16,7 @@ use super::cedar::{
 use super::cluster::load_registry_credentials;
 use super::docker::run_kubectl;
 use super::kubernetes::{client_from_kubeconfig, create_with_retry};
-use super::{
-    wait_for_condition, BUSYBOX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
-};
+use super::{wait_for_condition, BUSYBOX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY};
 
 // =============================================================================
 // LatticeService Test Helpers
@@ -37,8 +35,8 @@ pub fn build_busybox_service(
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        LatticeServiceSpec, PortSpec, ResourceSpec, ResourceType, RuntimeSpec,
-        ServicePortsSpec, WorkloadSpec,
+        LatticeServiceSpec, PortSpec, ResourceSpec, ResourceType, RuntimeSpec, ServicePortsSpec,
+        WorkloadSpec,
     };
 
     // Add ghcr-creds only if not already provided by the caller
@@ -180,8 +178,7 @@ pub fn create_service_with_security_overrides(
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        ContainerSpec, LatticeServiceSpec, PortSpec, RuntimeSpec, ServicePortsSpec,
-        WorkloadSpec,
+        ContainerSpec, LatticeServiceSpec, PortSpec, RuntimeSpec, ServicePortsSpec, WorkloadSpec,
     };
 
     // Docker KIND clusters don't have AppArmor — ensure Unconfined

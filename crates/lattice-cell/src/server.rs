@@ -559,7 +559,9 @@ async fn process_agent_message(
                 "Exec data received"
             );
 
-            // Route exec data to pending exec session handler
+            // Route exec data to pending exec session handler.
+            // Never tear down the channel on individual message failure —
+            // only ExecSession::drop handles cleanup.
             if let Some(sender) = registry.get_pending_exec_data(&data.request_id) {
                 if let Err(e) = sender.try_send(data.clone()) {
                     warn!(
@@ -568,9 +570,6 @@ async fn process_agent_message(
                         error = %e,
                         "Failed to deliver exec data"
                     );
-                    if data.stream_end {
-                        registry.take_pending_exec_data(&data.request_id);
-                    }
                 }
             } else {
                 debug!(
@@ -578,11 +577,6 @@ async fn process_agent_message(
                     request_id = %data.request_id,
                     "Received exec data for unknown session"
                 );
-            }
-
-            // Clean up on stream end
-            if data.stream_end {
-                registry.take_pending_exec_data(&data.request_id);
             }
         }
         Some(Payload::Event(event)) => {

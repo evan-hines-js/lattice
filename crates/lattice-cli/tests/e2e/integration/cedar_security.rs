@@ -402,10 +402,16 @@ pub async fn run_cedar_security_tests(ctx: &InfraContext) -> Result<(), String> 
     tokio::join!(
         harness.run("Default deny", || test_default_deny(kubeconfig)),
         harness.run("Permit capability", || test_permit_capability(kubeconfig)),
-        harness.run("Forbid overrides permit", || test_forbid_overrides_permit(kubeconfig)),
-        harness.run("Namespace isolation", || test_namespace_isolation(kubeconfig)),
+        harness.run("Forbid overrides permit", || test_forbid_overrides_permit(
+            kubeconfig
+        )),
+        harness.run("Namespace isolation", || test_namespace_isolation(
+            kubeconfig
+        )),
         harness.run("Policy lifecycle", || test_policy_lifecycle(kubeconfig)),
-        harness.run("No overrides no policy", || test_no_overrides_no_policy(kubeconfig)),
+        harness.run("No overrides no policy", || test_no_overrides_no_policy(
+            kubeconfig
+        )),
         harness.run("Run as root", || test_run_as_root(kubeconfig)),
     );
 

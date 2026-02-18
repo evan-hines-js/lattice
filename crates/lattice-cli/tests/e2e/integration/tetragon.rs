@@ -994,16 +994,30 @@ pub async fn run_tetragon_tests(ctx: &InfraContext) -> Result<(), String> {
     let harness = TestHarness::new("Tetragon");
     tokio::join!(
         harness.run("Default security", || test_default_security(kubeconfig)),
-        harness.run("Probe shell exemption", || test_probe_shell_exemption(kubeconfig)),
-        harness.run("Cmd shell exemption", || test_cmd_shell_exemption(kubeconfig)),
-        harness.run("Sidecar shell exemption", || test_sidecar_shell_exemption(kubeconfig)),
+        harness.run("Probe shell exemption", || test_probe_shell_exemption(
+            kubeconfig
+        )),
+        harness.run("Cmd shell exemption", || test_cmd_shell_exemption(
+            kubeconfig
+        )),
+        harness.run("Sidecar shell exemption", || test_sidecar_shell_exemption(
+            kubeconfig
+        )),
         harness.run("Enforcement", || test_enforcement(kubeconfig)),
         harness.run("Allowed binaries", || test_allowed_binaries(kubeconfig)),
-        harness.run("Allowed binaries cedar deny", || test_allowed_binaries_cedar_deny(kubeconfig)),
-        harness.run("Wildcard allowed binaries", || test_wildcard_allowed_binaries(kubeconfig)),
+        harness.run("Allowed binaries cedar deny", || {
+            test_allowed_binaries_cedar_deny(kubeconfig)
+        }),
+        harness.run("Wildcard allowed binaries", || {
+            test_wildcard_allowed_binaries(kubeconfig)
+        }),
         harness.run("Implicit wildcard", || test_implicit_wildcard(kubeconfig)),
-        harness.run("Implicit wildcard cedar deny", || test_implicit_wildcard_cedar_deny(kubeconfig)),
-        harness.run("Missing entrypoint killed", || test_missing_entrypoint_killed(kubeconfig)),
+        harness.run("Implicit wildcard cedar deny", || {
+            test_implicit_wildcard_cedar_deny(kubeconfig)
+        }),
+        harness.run("Missing entrypoint killed", || {
+            test_missing_entrypoint_killed(kubeconfig)
+        }),
     );
     harness.finish()?;
 

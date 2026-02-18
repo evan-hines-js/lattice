@@ -79,11 +79,7 @@ impl TestHarness {
         info!("========================================");
         for r in results.iter() {
             let tag = if r.passed { "PASS" } else { "FAIL" };
-            info!(
-                "  {tag}  {:40} {:.1}s",
-                r.name,
-                r.duration.as_secs_f64()
-            );
+            info!("  {tag}  {:40} {:.1}s", r.name, r.duration.as_secs_f64());
             if let Some(ref e) = r.error {
                 // Truncate very long errors to keep the summary readable
                 let truncated = if e.len() > 200 { &e[..200] } else { e };
