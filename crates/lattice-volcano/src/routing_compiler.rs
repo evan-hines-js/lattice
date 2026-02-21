@@ -195,9 +195,7 @@ fn compile_model_route(
 /// If the model has roles containing "prefill" AND "decode" (or matching those
 /// names exactly), and a `kv_connector` is configured, populate the PdGroup.
 fn detect_pd_group(model: &LatticeModel, routing: &ModelRoutingSpec) -> Option<PdGroup> {
-    if routing.kv_connector.is_none() {
-        return None;
-    }
+    routing.kv_connector.as_ref()?;
 
     let has_prefill = model
         .spec

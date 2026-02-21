@@ -533,7 +533,7 @@ async fn remove_scheduling_gates(
             .spec
             .as_ref()
             .and_then(|s| s.scheduling_gates.as_ref())
-            .map_or(false, |gates| {
+            .is_some_and(|gates| {
                 gates
                     .iter()
                     .any(|g| g.name == SCHEDULING_GATE_MODEL_DOWNLOAD)

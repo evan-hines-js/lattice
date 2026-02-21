@@ -298,6 +298,22 @@ fn download_command(
     }
 }
 
+/// Push a value onto a JSON array field, creating the array if absent.
+///
+/// Uses `get_mut` internally so it never inserts null keys — mutable indexing
+/// on `serde_json::Value` silently inserts `Null` for missing keys, which
+/// Kubernetes rejects on array-typed fields.
+fn json_array_push(object: &mut serde_json::Value, key: &str, value: serde_json::Value) {
+    if let Some(obj) = object.as_object_mut() {
+        match obj.get_mut(key).and_then(|v| v.as_array_mut()) {
+            Some(arr) => arr.push(value),
+            None => {
+                obj.insert(key.to_string(), serde_json::json!([value]));
+            }
+        }
+    }
+}
+
 /// Inject model cache volume + volumeMounts into a JSON pod template.
 ///
 /// Adds a PVC-backed volume to `spec.volumes` and a read-only volumeMount
@@ -314,37 +330,19 @@ pub fn inject_model_volume(
             "readOnly": true
         }
     });
-
     let mount = serde_json::json!({
         "name": VOLUME_NAME,
         "mountPath": mount_path,
         "readOnly": true
     });
 
-    // Add volume to spec.volumes
-    let volumes = pod_template["spec"]["volumes"]
-        .as_array_mut();
-    match volumes {
-        Some(arr) => arr.push(volume),
-        None => {
-            pod_template["spec"]["volumes"] = serde_json::json!([volume]);
-        }
-    }
+    let spec = &mut pod_template["spec"];
+    json_array_push(spec, "volumes", volume);
 
-    // Add volumeMount to every container
-    inject_mount_to_containers(&mut pod_template["spec"]["containers"], &mount);
-    inject_mount_to_containers(&mut pod_template["spec"]["initContainers"], &mount);
-}
-
-fn inject_mount_to_containers(containers: &mut serde_json::Value, mount: &serde_json::Value) {
-    if let Some(containers) = containers.as_array_mut() {
-        for container in containers {
-            let mounts = container["volumeMounts"].as_array_mut();
-            match mounts {
-                Some(arr) => arr.push(mount.clone()),
-                None => {
-                    container["volumeMounts"] = serde_json::json!([mount.clone()]);
-                }
+    for key in &["containers", "initContainers"] {
+        if let Some(containers) = spec.get_mut(*key).and_then(|v| v.as_array_mut()) {
+            for container in containers {
+                json_array_push(container, "volumeMounts", mount.clone());
             }
         }
     }
@@ -357,14 +355,7 @@ fn inject_mount_to_containers(containers: &mut serde_json::Value, mount: &serde_
 /// the download Job succeeds.
 pub fn inject_scheduling_gate(pod_template: &mut serde_json::Value) {
     let gate = serde_json::json!({ "name": SCHEDULING_GATE_MODEL_DOWNLOAD });
-
-    let gates = pod_template["spec"]["schedulingGates"].as_array_mut();
-    match gates {
-        Some(arr) => arr.push(gate),
-        None => {
-            pod_template["spec"]["schedulingGates"] = serde_json::json!([gate]);
-        }
-    }
+    json_array_push(&mut pod_template["spec"], "schedulingGates", gate);
 }
 
 #[cfg(test)]
@@ -677,6 +668,42 @@ mod tests {
             assert_eq!(mounts.len(), 1);
             assert_eq!(mounts[0]["name"], VOLUME_NAME);
         }
+    }
+
+    #[test]
+    fn inject_volume_no_null_init_containers() {
+        let mut template = sample_pod_template();
+        assert!(template["spec"]["initContainers"].is_null());
+
+        inject_model_volume(&mut template, "pvc", "/models");
+
+        // initContainers must remain absent — a null value causes K8s API rejection
+        assert!(
+            !template["spec"]
+                .as_object()
+                .unwrap()
+                .contains_key("initContainers"),
+            "initContainers should not be inserted as null"
+        );
+    }
+
+    #[test]
+    fn inject_volume_into_existing_init_containers() {
+        let mut template = serde_json::json!({
+            "metadata": { "labels": {} },
+            "spec": {
+                "containers": [{ "name": "main", "image": "a:latest" }],
+                "initContainers": [{ "name": "init", "image": "b:latest" }]
+            }
+        });
+
+        inject_model_volume(&mut template, "pvc", "/models");
+
+        let mounts = template["spec"]["initContainers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0]["name"], VOLUME_NAME);
     }
 
     #[test]
