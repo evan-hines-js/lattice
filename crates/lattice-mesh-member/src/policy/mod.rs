@@ -12,6 +12,7 @@
 mod cilium;
 mod istio_ambient;
 
+use lattice_common::crd::EgressTarget;
 use lattice_common::graph::{ServiceGraph, ServiceType};
 use lattice_common::policy::cilium::CiliumNetworkPolicy;
 use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
@@ -108,22 +109,7 @@ impl<'a> PolicyCompiler<'a> {
             output.authorization_policies.push(auth_policy);
         }
 
-        // Waypoint: if service has external deps, need ztunnel allow for waypoint→pod
-        let has_external_deps = outbound_edges.iter().any(|edge| {
-            self.graph
-                .get_service(&edge.callee_namespace, &edge.callee_name)
-                .map(|s| s.type_ == ServiceType::External)
-                .unwrap_or(false)
-        });
-        if has_external_deps {
-            if let Some(waypoint_policy) =
-                self.compile_ztunnel_allow_policy(&service_node, namespace)
-            {
-                output.authorization_policies.push(waypoint_policy);
-            }
-        }
-
-        // Cilium policy
+        // Cilium policy (handles inbound, outbound, DNS, FQDN egress, HBONE)
         output.cilium_policies.push(self.compile_cilium_policy(
             &service_node,
             namespace,
@@ -137,8 +123,32 @@ impl<'a> PolicyCompiler<'a> {
         output.peer_authentications.extend(peer_auths);
         output.authorization_policies.extend(auth_policies);
 
-        // ServiceEntries and access policies for external dependencies
-        for edge in &outbound_edges {
+        // External egress: ServiceEntry + AuthorizationPolicy + waypoint
+        // Handles both graph-based LatticeExternalService CRDs and inline FQDN egress.
+        self.compile_egress(&service_node, namespace, &outbound_edges, &mut output);
+
+        output
+    }
+
+    /// Compile all external egress policies in one place.
+    ///
+    /// Handles both graph-based `LatticeExternalService` CRDs (via outbound edges)
+    /// and inline FQDN egress rules (from `ServiceNode.egress_rules`). Generates:
+    ///
+    /// - Istio ServiceEntry per external target
+    /// - Istio AuthorizationPolicy per caller→target pair
+    /// - Ztunnel waypoint allow policy (if any ServiceEntries were generated)
+    ///
+    /// Cilium FQDN egress is handled separately in `compile_cilium_policy()`.
+    fn compile_egress(
+        &self,
+        service_node: &lattice_common::graph::ServiceNode,
+        namespace: &str,
+        outbound_edges: &[lattice_common::graph::ActiveEdge],
+        output: &mut GeneratedPolicies,
+    ) {
+        // Graph-based external services (LatticeExternalService CRDs)
+        for edge in outbound_edges {
             if let Some(callee) = self
                 .graph
                 .get_service(&edge.callee_namespace, &edge.callee_name)
@@ -159,7 +169,36 @@ impl<'a> PolicyCompiler<'a> {
             }
         }
 
-        output
+        // Inline FQDN egress rules (from LatticeMeshMember spec)
+        for rule in &service_node.egress_rules {
+            if let EgressTarget::Fqdn(ref fqdn) = rule.target {
+                output
+                    .service_entries
+                    .push(self.compile_fqdn_egress_service_entry(
+                        &service_node.name,
+                        namespace,
+                        fqdn,
+                        &rule.ports,
+                    ));
+                output
+                    .authorization_policies
+                    .push(self.compile_fqdn_egress_access_policy(
+                        service_node,
+                        namespace,
+                        fqdn,
+                        &rule.ports,
+                    ));
+            }
+        }
+
+        // Waypoint: if any ServiceEntries were generated, need ztunnel allow for waypoint→pod
+        if !output.service_entries.is_empty() {
+            if let Some(waypoint_policy) =
+                self.compile_ztunnel_allow_policy(service_node, namespace)
+            {
+                output.authorization_policies.push(waypoint_policy);
+            }
+        }
     }
 
     /// Check if a string is an IP address (IPv4 or IPv6)
@@ -916,6 +955,170 @@ mod tests {
                 .iter()
                 .any(|ap| ap.metadata.name.starts_with("allow-plaintext-")),
             "strict-only should have no plaintext allow policy"
+        );
+    }
+
+    // =========================================================================
+    // Inline FQDN egress policy generation
+    // =========================================================================
+
+    #[test]
+    fn fqdn_egress_generates_service_entry_and_authz() {
+        use lattice_common::crd::{
+            EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget,
+        };
+
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        // Put a mesh member with an FQDN egress rule
+        let spec = lattice_common::crd::LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app".to_string(),
+                "api".to_string(),
+            )])),
+            ports: vec![MeshMemberPort {
+                port: 8080,
+                name: "http".to_string(),
+                peer_auth: lattice_common::crd::PeerAuth::Strict,
+            }],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![EgressRule {
+                target: EgressTarget::Fqdn("api.stripe.com".to_string()),
+                ports: vec![443],
+            }],
+            allow_peer_traffic: false,
+            ingress: None,
+            service_account: None,
+            depends_all: false,
+        };
+        graph.put_mesh_member(ns, "api", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let output = compiler.compile("api", ns);
+
+        // Should have a ServiceEntry for api.stripe.com
+        assert_eq!(output.service_entries.len(), 1);
+        let entry = &output.service_entries[0];
+        assert!(entry.spec.hosts.contains(&"api.stripe.com".to_string()));
+        assert_eq!(entry.spec.location, "MESH_EXTERNAL");
+        assert_eq!(entry.spec.resolution, "DNS");
+        assert_eq!(entry.spec.ports[0].number, 443);
+        assert_eq!(entry.spec.ports[0].protocol, "HTTPS");
+
+        // Should have an AuthorizationPolicy targeting the ServiceEntry
+        let fqdn_authz = output
+            .authorization_policies
+            .iter()
+            .find(|ap| ap.metadata.name.starts_with("allow-fqdn-"))
+            .expect("should have FQDN egress access policy");
+        assert_eq!(
+            fqdn_authz.spec.target_refs[0].kind, "ServiceEntry",
+            "should target ServiceEntry"
+        );
+        assert!(fqdn_authz.spec.rules[0].from[0]
+            .source
+            .principals
+            .iter()
+            .any(|p| p.contains("api")));
+
+        // Should also have ztunnel waypoint allow policy (has external deps)
+        let waypoint_policy = output
+            .authorization_policies
+            .iter()
+            .find(|ap| ap.metadata.name.starts_with("allow-wp-to-"));
+        assert!(
+            waypoint_policy.is_some(),
+            "should have waypoint allow policy for FQDN egress"
+        );
+    }
+
+    #[test]
+    fn fqdn_egress_without_ports_generates_no_to_block() {
+        use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
+
+        let graph = ServiceGraph::new();
+        let ns = "test-ns";
+
+        let spec = lattice_common::crd::LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app".to_string(),
+                "svc".to_string(),
+            )])),
+            ports: vec![MeshMemberPort {
+                port: 8080,
+                name: "http".to_string(),
+                peer_auth: lattice_common::crd::PeerAuth::Strict,
+            }],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![EgressRule {
+                target: EgressTarget::Fqdn("example.com".to_string()),
+                ports: vec![],
+            }],
+            allow_peer_traffic: false,
+            ingress: None,
+            service_account: None,
+            depends_all: false,
+        };
+        graph.put_mesh_member(ns, "svc", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("svc", ns);
+
+        let fqdn_authz = output
+            .authorization_policies
+            .iter()
+            .find(|ap| ap.metadata.name.starts_with("allow-fqdn-"))
+            .expect("should have FQDN egress access policy");
+        assert!(
+            fqdn_authz.spec.rules[0].to.is_empty(),
+            "no ports means no 'to' block"
+        );
+    }
+
+    #[test]
+    fn fqdn_egress_cilium_gets_fqdn_rule() {
+        use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
+
+        let graph = ServiceGraph::new();
+        let ns = "test-ns";
+
+        let spec = lattice_common::crd::LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app".to_string(),
+                "svc".to_string(),
+            )])),
+            ports: vec![MeshMemberPort {
+                port: 8080,
+                name: "http".to_string(),
+                peer_auth: lattice_common::crd::PeerAuth::Strict,
+            }],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![EgressRule {
+                target: EgressTarget::Fqdn("external.example.com".to_string()),
+                ports: vec![443],
+            }],
+            allow_peer_traffic: false,
+            ingress: None,
+            service_account: None,
+            depends_all: false,
+        };
+        graph.put_mesh_member(ns, "svc", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("svc", ns);
+
+        // Cilium policy should have FQDN egress rule
+        let cnp = &output.cilium_policies[0];
+        assert!(
+            cnp.spec.egress.iter().any(|e| e
+                .to_fqdns
+                .iter()
+                .any(|f| f.match_name == Some("external.example.com".to_string()))),
+            "should have Cilium FQDN egress for external.example.com"
         );
     }
 }

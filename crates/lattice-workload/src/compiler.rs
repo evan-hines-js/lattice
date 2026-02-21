@@ -8,8 +8,9 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    CallerRef, IngressSpec, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort,
-    MeshMemberTarget, PeerAuth, ProviderType, RuntimeSpec, WorkloadSpec,
+    CallerRef, EgressRule, EgressTarget, IngressSpec, LatticeMeshMember, LatticeMeshMemberSpec,
+    MeshMemberPort, MeshMemberTarget, ParsedEndpoint, PeerAuth, ProviderType, ResourceType,
+    RuntimeSpec, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::template::{RenderConfig, TemplateRenderer};
@@ -362,7 +363,28 @@ impl<'a> WorkloadCompiler<'a> {
             })
             .unwrap_or_default();
 
-        let has_mesh_participation = !ports.is_empty() || !dependencies.is_empty();
+        // Detect inline external-service resources (URL id, no graph node)
+        let inline_egress: Vec<EgressRule> = self
+            .workload
+            .resources
+            .iter()
+            .filter(|(_, r)| r.type_ == ResourceType::ExternalService && r.direction.is_outbound())
+            .filter_map(|(name, r)| {
+                let id = r.id.as_deref().unwrap_or(name);
+                // Only if not in graph (not a LatticeExternalService CRD)
+                if graph.get_service(self.namespace, id).is_some() {
+                    return None;
+                }
+                let ep = ParsedEndpoint::parse(id)?;
+                Some(EgressRule {
+                    target: EgressTarget::Fqdn(ep.host),
+                    ports: vec![ep.port],
+                })
+            })
+            .collect();
+
+        let has_mesh_participation =
+            !ports.is_empty() || !dependencies.is_empty() || !inline_egress.is_empty();
         let mesh_member = if service_node.is_some() && has_mesh_participation {
             Some(LatticeMeshMember::new(
                 self.name,
@@ -375,7 +397,7 @@ impl<'a> WorkloadCompiler<'a> {
                     ports,
                     allowed_callers,
                     dependencies,
-                    egress: vec![],
+                    egress: inline_egress,
                     allow_peer_traffic: false,
                     ingress: self.ingress,
                     service_account: None,

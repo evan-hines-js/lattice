@@ -728,7 +728,11 @@ mod tests {
     #[test]
     fn test_command_absolute_path_passes() {
         assert!(validate_command_path(&Some(vec!["/usr/bin/app".to_string()]), "main").is_ok());
-        assert!(validate_command_path(&Some(vec!["/bin/sh".to_string(), "-c".to_string()]), "main").is_ok());
+        assert!(validate_command_path(
+            &Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
+            "main"
+        )
+        .is_ok());
         assert!(validate_command_path(&None, "main").is_ok());
     }
 
@@ -736,14 +740,20 @@ mod tests {
     fn test_command_relative_path_fails() {
         let result = validate_command_path(&Some(vec!["app".to_string()]), "main");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an absolute path"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an absolute path"));
     }
 
     #[test]
     fn test_command_empty_string_fails() {
         let result = validate_command_path(&Some(vec!["".to_string()]), "main");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an absolute path"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an absolute path"));
     }
 
     #[test]
@@ -756,7 +766,10 @@ mod tests {
         };
         let result = sidecar.validate("setup");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("init containers must specify a command"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("init containers must specify a command"));
     }
 
     #[test]
@@ -764,7 +777,11 @@ mod tests {
         let sidecar = SidecarSpec {
             image: "busybox:latest".to_string(),
             init: Some(true),
-            command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), "setup".to_string()]),
+            command: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "setup".to_string(),
+            ]),
             ..Default::default()
         };
         assert!(sidecar.validate("setup").is_ok());
@@ -790,6 +807,9 @@ mod tests {
         };
         let result = sidecar.validate("setup");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an absolute path"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an absolute path"));
     }
 }
