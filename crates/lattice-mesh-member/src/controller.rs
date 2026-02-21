@@ -22,7 +22,7 @@ use lattice_common::crd::{
     Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberStatus, MeshMemberPhase,
     MeshMemberScope, MeshMemberTarget,
 };
-use lattice_common::graph::{ActiveEdge, ServiceGraph};
+use lattice_common::graph::{compute_edge_hash, ServiceGraph};
 use lattice_common::mesh;
 use lattice_common::{CrdKind, CrdRegistry, ReconcileError};
 
@@ -567,39 +567,6 @@ async fn apply_waypoint(
 // =============================================================================
 // Status helpers
 // =============================================================================
-
-/// Compute a stable hash of the active edges for change detection.
-///
-/// When bilateral agreements change (e.g., a new caller declares a dependency),
-/// the edge hash changes even though this member's spec/generation doesn't.
-fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
-    use std::fmt::Write;
-
-    // Sort edges so the hash is stable regardless of graph iteration order.
-    // The graph's edges_in Vec can be reordered by put_node remove+re-insert
-    // cycles, which would otherwise cause spurious hash mismatches and tight
-    // reconciliation loops.
-    let mut sorted_in: Vec<_> = inbound
-        .iter()
-        .map(|e| (&e.caller_namespace, &e.caller_name))
-        .collect();
-    sorted_in.sort();
-
-    let mut sorted_out: Vec<_> = outbound
-        .iter()
-        .map(|e| (&e.callee_namespace, &e.callee_name))
-        .collect();
-    sorted_out.sort();
-
-    let mut input = String::new();
-    for (ns, name) in &sorted_in {
-        let _ = write!(input, "in:{ns}/{name}->");
-    }
-    for (ns, name) in &sorted_out {
-        let _ = write!(input, "out:{ns}/{name}->");
-    }
-    lattice_common::deterministic_hash(&input)
-}
 
 /// Skip reconciliation when the spec (generation) AND graph topology (edge hash) are unchanged.
 ///
