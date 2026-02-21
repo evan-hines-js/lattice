@@ -130,7 +130,8 @@ impl CrdKind {
 /// Uses `DashMap` for per-key granularity: resolving one missing CRD doesn't
 /// block reads for others.
 pub struct CrdRegistry {
-    client: Client,
+    /// Client for API discovery. None in tests (rediscovery becomes a no-op).
+    client: Option<Client>,
     entries: DashMap<CrdKind, ApiResource>,
 }
 
@@ -170,7 +171,10 @@ impl CrdRegistry {
             }
         }
 
-        Self { client, entries }
+        Self {
+            client: Some(client),
+            entries,
+        }
     }
 
     /// Get a CRD, running lazy re-discovery if it was missing at startup.
@@ -201,7 +205,12 @@ impl CrdRegistry {
     async fn rediscover(&self) {
         use kube::discovery::Discovery;
 
-        let discovery = match Discovery::new(self.client.clone()).run().await {
+        let client = match &self.client {
+            Some(c) => c.clone(),
+            None => return, // No client (tests) — skip rediscovery
+        };
+
+        let discovery = match Discovery::new(client).run().await {
             Ok(d) => d,
             Err(e) => {
                 warn!(error = %e, "CRD re-discovery failed");
@@ -225,10 +234,11 @@ impl CrdRegistry {
         }
     }
 
-    /// Populate the registry with hardcoded API versions for all CRDs.
+    /// Create a registry pre-populated with hardcoded API versions and no client.
     ///
-    /// Used as a fallback when API discovery fails entirely, and in tests.
-    pub fn hardcoded_defaults(client: Client) -> Self {
+    /// Rediscovery is a no-op since there's no client. Used in unit tests that
+    /// need CRD resolution without a real API server.
+    pub fn for_testing() -> Self {
         let entries = DashMap::new();
         for kind in ALL_CRD_KINDS {
             entries.insert(
@@ -236,7 +246,20 @@ impl CrdRegistry {
                 build_api_resource(kind.hardcoded_api_version(), kind.kind_str()),
             );
         }
-        Self { client, entries }
+        Self {
+            client: None,
+            entries,
+        }
+    }
+
+    /// Create an empty registry with no entries and no client.
+    ///
+    /// Used to test behavior when CRDs are not installed.
+    pub fn empty_for_testing() -> Self {
+        Self {
+            client: None,
+            entries: DashMap::new(),
+        }
     }
 }
 

@@ -30,7 +30,7 @@ use lattice_common::crd::{
     LatticeExternalService, LatticeJob, LatticeMeshMember, LatticeRestore, LatticeService,
     LatticeServicePolicy, MonitoringConfig, OIDCProvider, ProviderType, SecretProvider,
 };
-use lattice_common::{ControllerContext, CrdKind, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_secret_provider::controller as secrets_provider_ctrl;
 use lattice_service::compiler::VMServiceScrapePhase;
@@ -91,7 +91,6 @@ pub async fn build_service_controllers(
     Arc<lattice_common::graph::ServiceGraph>,
 ) {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
-    let vm_service_scrape_ar = registry.resolve(CrdKind::VMServiceScrape).await;
     let cedar_for_mm = cedar.clone();
     let mut service_ctx = ServiceContext::from_client(
         client.clone(),
@@ -101,10 +100,7 @@ pub async fn build_service_controllers(
         registry.clone(),
         monitoring,
     );
-    service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(
-        vm_service_scrape_ar,
-        Some(client.clone()),
-    ))];
+    service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(registry.clone()))];
 
     // Warm the service graph before controllers start so existing services
     // aren't demoted to Compiling on restart due to missing dependency info.

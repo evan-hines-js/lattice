@@ -166,10 +166,11 @@ pub async fn reconcile(
         None
     };
 
-    // Apply all resources
+    // Resolve all CRDs once for all apply functions
+    let crds = ResolvedCrds::resolve(&ctx.registry).await;
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    apply_policies(&ctx.client, &ctx.registry, namespace, &params, &policies).await?;
+    apply_policies(&ctx.client, &crds, namespace, &params, &policies).await?;
 
     if let Some(ref ingress_resources) = ingress {
         // Use a per-member field manager for the Gateway so each member owns
@@ -180,7 +181,7 @@ pub async fn reconcile(
         let gateway_params = PatchParams::apply(&gateway_field_manager).force();
         apply_ingress(
             &ctx.client,
-            &ctx.registry,
+            &crds,
             namespace,
             &params,
             &gateway_params,
@@ -190,14 +191,7 @@ pub async fn reconcile(
     }
 
     if let Some(ref waypoint_resources) = waypoint {
-        apply_waypoint(
-            &ctx.client,
-            &ctx.registry,
-            namespace,
-            &params,
-            waypoint_resources,
-        )
-        .await?;
+        apply_waypoint(&ctx.client, &crds, namespace, &params, waypoint_resources).await?;
     }
 
     let total = policies.total_count()
@@ -285,6 +279,42 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
 }
 
 // =============================================================================
+// Resolved CRDs — resolved once per reconcile, shared across apply functions
+// =============================================================================
+
+/// All CRD ApiResources needed by the mesh-member apply functions.
+///
+/// Resolved once in the reconcile loop and passed by reference to avoid
+/// duplicate registry lookups across apply_policies/apply_ingress/apply_waypoint.
+struct ResolvedCrds {
+    authorization_policy: Option<ApiResource>,
+    cilium_network_policy: Option<ApiResource>,
+    service_entry: Option<ApiResource>,
+    peer_authentication: Option<ApiResource>,
+    gateway: Option<ApiResource>,
+    http_route: Option<ApiResource>,
+    grpc_route: Option<ApiResource>,
+    tcp_route: Option<ApiResource>,
+    certificate: Option<ApiResource>,
+}
+
+impl ResolvedCrds {
+    async fn resolve(registry: &CrdRegistry) -> Self {
+        Self {
+            authorization_policy: registry.resolve(CrdKind::AuthorizationPolicy).await,
+            cilium_network_policy: registry.resolve(CrdKind::CiliumNetworkPolicy).await,
+            service_entry: registry.resolve(CrdKind::ServiceEntry).await,
+            peer_authentication: registry.resolve(CrdKind::PeerAuthentication).await,
+            gateway: registry.resolve(CrdKind::Gateway).await,
+            http_route: registry.resolve(CrdKind::HttpRoute).await,
+            grpc_route: registry.resolve(CrdKind::GrpcRoute).await,
+            tcp_route: registry.resolve(CrdKind::TcpRoute).await,
+            certificate: registry.resolve(CrdKind::Certificate).await,
+        }
+    }
+}
+
+// =============================================================================
 // SSA apply helpers
 // =============================================================================
 
@@ -343,7 +373,7 @@ async fn apply_if_discovered(
 /// resources but its CRD is not discovered on the cluster.
 async fn apply_policies(
     client: &Client,
-    registry: &CrdRegistry,
+    crds: &ResolvedCrds,
     namespace: &str,
     params: &PatchParams,
     policies: &crate::policy::GeneratedPolicies,
@@ -352,35 +382,31 @@ async fn apply_policies(
 
     let mut items: Vec<(String, &'static str, serde_json::Value, ApiResource)> = Vec::new();
 
-    let auth_ar = registry.resolve(CrdKind::AuthorizationPolicy).await;
     serialize_crd_batch(
         &mut items,
         &policies.authorization_policies,
-        auth_ar.as_ref(),
+        crds.authorization_policy.as_ref(),
         "AuthorizationPolicy",
         |ap| &ap.metadata.name,
     )?;
-    let cilium_ar = registry.resolve(CrdKind::CiliumNetworkPolicy).await;
     serialize_crd_batch(
         &mut items,
         &policies.cilium_policies,
-        cilium_ar.as_ref(),
+        crds.cilium_network_policy.as_ref(),
         "CiliumNetworkPolicy",
         |cnp| &cnp.metadata.name,
     )?;
-    let se_ar = registry.resolve(CrdKind::ServiceEntry).await;
     serialize_crd_batch(
         &mut items,
         &policies.service_entries,
-        se_ar.as_ref(),
+        crds.service_entry.as_ref(),
         "ServiceEntry",
         |se| &se.metadata.name,
     )?;
-    let pa_ar = registry.resolve(CrdKind::PeerAuthentication).await;
     serialize_crd_batch(
         &mut items,
         &policies.peer_authentications,
-        pa_ar.as_ref(),
+        crds.peer_authentication.as_ref(),
         "PeerAuthentication",
         |pa| &pa.metadata.name,
     )?;
@@ -447,76 +473,71 @@ fn serialize_crd_batch<T: serde::Serialize>(
 /// and `params` (shared field manager) for routes and certificates.
 async fn apply_ingress(
     client: &Client,
-    registry: &CrdRegistry,
+    crds: &ResolvedCrds,
     namespace: &str,
     params: &PatchParams,
     gateway_params: &PatchParams,
     ingress: &crate::ingress::GeneratedIngress,
 ) -> Result<(), ReconcileError> {
     if let Some(ref gw) = ingress.gateway {
-        let gw_ar = registry.resolve(CrdKind::Gateway).await;
         apply_if_discovered(
             client,
             namespace,
             gateway_params,
             gw,
-            gw_ar.as_ref(),
+            crds.gateway.as_ref(),
             &gw.metadata.name,
             "Gateway",
         )
         .await?;
     }
 
-    let http_ar = registry.resolve(CrdKind::HttpRoute).await;
     for route in &ingress.http_routes {
         apply_if_discovered(
             client,
             namespace,
             params,
             route,
-            http_ar.as_ref(),
+            crds.http_route.as_ref(),
             &route.metadata.name,
             "HTTPRoute",
         )
         .await?;
     }
 
-    let grpc_ar = registry.resolve(CrdKind::GrpcRoute).await;
     for route in &ingress.grpc_routes {
         apply_if_discovered(
             client,
             namespace,
             params,
             route,
-            grpc_ar.as_ref(),
+            crds.grpc_route.as_ref(),
             &route.metadata.name,
             "GRPCRoute",
         )
         .await?;
     }
 
-    let tcp_ar = registry.resolve(CrdKind::TcpRoute).await;
     for route in &ingress.tcp_routes {
         apply_if_discovered(
             client,
             namespace,
             params,
             route,
-            tcp_ar.as_ref(),
+            crds.tcp_route.as_ref(),
             &route.metadata.name,
             "TCPRoute",
         )
         .await?;
     }
 
-    let cert_ar = registry.resolve(CrdKind::Certificate).await;
     for cert in &ingress.certificates {
         apply_if_discovered(
             client,
             namespace,
             params,
             cert,
-            cert_ar.as_ref(),
+            crds.certificate.as_ref(),
             &cert.metadata.name,
             "Certificate",
         )
@@ -529,19 +550,18 @@ async fn apply_ingress(
 /// Apply compiled waypoint resources
 async fn apply_waypoint(
     client: &Client,
-    registry: &CrdRegistry,
+    crds: &ResolvedCrds,
     namespace: &str,
     params: &PatchParams,
     waypoint: &crate::ingress::GeneratedWaypoint,
 ) -> Result<(), ReconcileError> {
     if let Some(ref gw) = waypoint.gateway {
-        let gw_ar = registry.resolve(CrdKind::Gateway).await;
         apply_if_discovered(
             client,
             namespace,
             params,
             gw,
-            gw_ar.as_ref(),
+            crds.gateway.as_ref(),
             &gw.metadata.name,
             "Gateway",
         )
@@ -549,13 +569,12 @@ async fn apply_waypoint(
     }
 
     if let Some(ref policy) = waypoint.allow_to_waypoint_policy {
-        let auth_ar = registry.resolve(CrdKind::AuthorizationPolicy).await;
         apply_if_discovered(
             client,
             namespace,
             params,
             policy,
-            auth_ar.as_ref(),
+            crds.authorization_policy.as_ref(),
             &policy.metadata.name,
             "AuthorizationPolicy",
         )
