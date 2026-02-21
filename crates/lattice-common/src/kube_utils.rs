@@ -809,6 +809,22 @@ where
     Ok(())
 }
 
+/// Ensure a namespace exists using server-side apply (idempotent, with field manager).
+pub async fn ensure_namespace_ssa(client: &Client, name: &str, manager: &str) -> Result<(), Error> {
+    let api: Api<Namespace> = Api::all(client.clone());
+    let ns = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": { "name": name }
+    });
+    api.patch(name, &PatchParams::apply(manager), &Patch::Apply(&ns))
+        .await
+        .map_err(|e| {
+            Error::internal_with_context("ensure_namespace", format!("failed for {}: {}", name, e))
+        })?;
+    Ok(())
+}
+
 /// Parsed manifest metadata for applying to Kubernetes
 #[derive(Debug, Clone)]
 pub(crate) struct ManifestMetadata {

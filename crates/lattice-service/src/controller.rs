@@ -139,18 +139,6 @@ impl ServiceKubeClientImpl {
     pub fn new(client: Client, registry: Arc<CrdRegistry>) -> Self {
         Self { client, registry }
     }
-
-    /// Ensure a namespace exists for a service's workloads.
-    async fn ensure_namespace(&self, name: &str) -> Result<(), Error> {
-        lattice_common::kube_utils::ensure_namespace(
-            &self.client,
-            name,
-            FIELD_MANAGER,
-        )
-        .await?;
-        debug!(namespace = %name, "ensured namespace exists");
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -253,7 +241,12 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             Service as K8sService, ServiceAccount as K8sSA,
         };
 
-        self.ensure_namespace(namespace).await?;
+        lattice_common::kube_utils::ensure_namespace_ssa(
+            &self.client,
+            namespace,
+            "lattice-service-controller",
+        )
+        .await?;
 
         let params = PatchParams::apply(FIELD_MANAGER).force();
 

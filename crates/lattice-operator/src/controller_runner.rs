@@ -27,8 +27,9 @@ use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     BackupStore, CedarPolicy, CloudProvider, LatticeCluster, LatticeClusterBackup,
-    LatticeExternalService, LatticeJob, LatticeMeshMember, LatticeRestore, LatticeService,
-    LatticeServicePolicy, MonitoringConfig, OIDCProvider, ProviderType, SecretProvider,
+    LatticeExternalService, LatticeJob, LatticeMeshMember, LatticeModel, LatticeRestore,
+    LatticeService, LatticeServicePolicy, MonitoringConfig, OIDCProvider, ProviderType,
+    SecretProvider,
 };
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_mesh_member::controller as mesh_member_ctrl;
@@ -307,6 +308,42 @@ pub async fn build_job_controllers(
     vec![Box::pin(job_ctrl)]
 }
 
+/// Build model controller futures (LatticeModel)
+pub async fn build_model_controllers(
+    client: Client,
+    cluster_name: String,
+    provider_type: ProviderType,
+    cedar: Arc<PolicyEngine>,
+    graph: Arc<lattice_common::graph::ServiceGraph>,
+    registry: Arc<CrdRegistry>,
+) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
+
+    let ctx = Arc::new(lattice_model::controller::ModelContext::new(
+        client.clone(),
+        graph,
+        cluster_name,
+        provider_type,
+        cedar,
+        registry,
+    ));
+
+    let models: Api<LatticeModel> = Api::all(client);
+
+    let model_ctrl = Controller::new(models, watcher_config())
+        .shutdown_on_signal()
+        .run(
+            lattice_model::controller::reconcile,
+            lattice_model::controller::error_policy,
+            ctx,
+        )
+        .for_each(log_reconcile_result("Model"));
+
+    tracing::info!("- LatticeModel controller");
+
+    vec![Box::pin(model_ctrl)]
+}
+
 /// Build provider controller futures (CloudProvider, SecretProvider, CedarPolicy, OIDCProvider)
 pub fn build_provider_controllers(
     client: Client,
@@ -519,6 +556,16 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
         for (task_name, task_spec) in &item.spec.tasks {
             let task_full_name = format!("{}-{}", job_name, task_name);
             graph.put_workload(ns, &task_full_name, &task_spec.workload);
+        }
+    })
+    .await;
+
+    warmup_list::<LatticeModel>(client, "LatticeModels", |item| {
+        let ns = item.metadata.namespace.as_deref().unwrap_or_default();
+        let model_name = item.metadata.name.as_deref().unwrap_or_default();
+        for (role_name, role_spec) in &item.spec.roles {
+            let role_full_name = format!("{}-{}", model_name, role_name);
+            graph.put_workload(ns, &role_full_name, &role_spec.workload);
         }
     })
     .await;

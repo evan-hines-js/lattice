@@ -20,6 +20,7 @@ fips = [
     "lattice-cedar/fips",
     "lattice-mesh-member/fips",
     "lattice-job/fips",
+    "lattice-model/fips",
 ]
 e2e = []
 aws-e2e = []
@@ -41,7 +42,7 @@ lattice-backup.workspace = true
 lattice-cedar.workspace = true
 lattice-mesh-member.workspace = true
 lattice-job.workspace = true
-
+lattice-model.workspace = true
 
 kube.workspace = true
 k8s-openapi.workspace = true

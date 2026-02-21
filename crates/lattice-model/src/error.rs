@@ -1,0 +1,28 @@
+//! Model-specific error types
+
+#[derive(Debug, thiserror::Error)]
+pub enum ModelError {
+    #[error("compilation failed for role '{role}': {source}")]
+    RoleCompilation {
+        role: String,
+        source: lattice_workload::CompilationError,
+    },
+
+    #[error("kubernetes error: {0}")]
+    Kube(#[from] kube::Error),
+
+    #[error("serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    #[error("{0}")]
+    Common(#[from] lattice_common::Error),
+
+    #[error("model has no roles")]
+    NoRoles,
+
+    #[error("missing namespace on LatticeModel")]
+    MissingNamespace,
+
+    #[error("Kthena ModelServing CRD not available")]
+    KthenaCrdMissing,
+}

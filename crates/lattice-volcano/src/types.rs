@@ -85,6 +85,88 @@ pub struct VCJobTaskPolicy {
     pub action: String,
 }
 
+/// Kthena ModelServing resource (`workload.serving.volcano.sh/v1alpha1` Kind: ModelServing)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelServing {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: ModelServingMetadata,
+    pub spec: ModelServingSpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelServingMetadata {
+    pub name: String,
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_references: Vec<OwnerReference>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelServingSpec {
+    pub scheduler_name: String,
+    pub replicas: u32,
+    pub template: ServingGroupTemplate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_strategy: Option<RolloutStrategy>,
+}
+
+/// Template for a serving group containing named roles and gang scheduling policy
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServingGroupTemplate {
+    pub roles: BTreeMap<String, ModelServingRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gang_policy: Option<GangPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+}
+
+/// A single role within a ModelServing (e.g. prefill, decode)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelServingRole {
+    pub replicas: u32,
+    /// Pod template — passed through as pre-serialized JSON from the workload compiler
+    pub template: serde_json::Value,
+}
+
+/// Gang scheduling policy for coordinated role startup
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GangPolicy {
+    /// Minimum replicas per role required for the gang to start
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub min_role_replicas: BTreeMap<String, u32>,
+}
+
+/// Rollout strategy for serving updates
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RolloutStrategy {
+    #[serde(rename = "type")]
+    pub type_: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rolling_update: Option<RollingUpdateConfiguration>,
+}
+
+/// Configuration for rolling update strategy
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RollingUpdateConfiguration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_unavailable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_surge: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +199,45 @@ mod tests {
         let json = serde_json::to_string(&vcjob).unwrap();
         let de: VCJob = serde_json::from_str(&json).unwrap();
         assert_eq!(vcjob, de);
+    }
+
+    #[test]
+    fn model_serving_serialization_roundtrip() {
+        let ms = ModelServing {
+            api_version: "workload.serving.volcano.sh/v1alpha1".to_string(),
+            kind: "ModelServing".to_string(),
+            metadata: ModelServingMetadata {
+                name: "test-model".to_string(),
+                namespace: "default".to_string(),
+                labels: BTreeMap::from([(
+                    "app.kubernetes.io/managed-by".to_string(),
+                    "lattice".to_string(),
+                )]),
+                owner_references: vec![],
+            },
+            spec: ModelServingSpec {
+                scheduler_name: "volcano".to_string(),
+                replicas: 1,
+                template: ServingGroupTemplate {
+                    roles: BTreeMap::from([(
+                        "decode".to_string(),
+                        ModelServingRole {
+                            replicas: 2,
+                            template: serde_json::json!({"spec": {"containers": []}}),
+                        },
+                    )]),
+                    gang_policy: Some(GangPolicy {
+                        min_role_replicas: BTreeMap::from([("decode".to_string(), 2)]),
+                    }),
+                    service_name: Some("test-model".to_string()),
+                },
+                recovery_policy: Some("RestartAll".to_string()),
+                rollout_strategy: None,
+            },
+        };
+
+        let json = serde_json::to_string(&ms).unwrap();
+        let de: ModelServing = serde_json::from_str(&json).unwrap();
+        assert_eq!(ms, de);
     }
 }

@@ -2560,6 +2560,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-model"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "chrono",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "lattice-cedar",
+ "lattice-common",
+ "lattice-secret-provider",
+ "lattice-tetragon",
+ "lattice-volcano",
+ "lattice-workload",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-move"
 version = "0.1.0"
 dependencies = [
@@ -2615,6 +2638,7 @@ dependencies = [
  "lattice-infra",
  "lattice-job",
  "lattice-mesh-member",
+ "lattice-model",
  "lattice-proto",
  "lattice-secret-provider",
  "lattice-service",

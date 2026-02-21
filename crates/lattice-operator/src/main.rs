@@ -350,13 +350,26 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     )
     .await;
 
+    let graph_for_models = graph.clone();
     controllers.extend(
         controller_runner::build_job_controllers(
+            client.clone(),
+            cluster_name.clone(),
+            provider_type,
+            cedar.clone(),
+            graph,
+            registry.clone(),
+        )
+        .await,
+    );
+
+    controllers.extend(
+        controller_runner::build_model_controllers(
             client.clone(),
             cluster_name,
             provider_type,
             cedar.clone(),
-            graph,
+            graph_for_models,
             registry,
         )
         .await,
@@ -449,13 +462,26 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     .await;
     controllers.extend(service_controllers);
 
+    let graph_for_models = graph.clone();
     controllers.extend(
         controller_runner::build_job_controllers(
+            client.clone(),
+            cluster_name.clone(),
+            provider_type,
+            cedar.clone(),
+            graph,
+            registry.clone(),
+        )
+        .await,
+    );
+
+    controllers.extend(
+        controller_runner::build_model_controllers(
             client.clone(),
             cluster_name,
             provider_type,
             cedar.clone(),
-            graph,
+            graph_for_models,
             registry,
         )
         .await,

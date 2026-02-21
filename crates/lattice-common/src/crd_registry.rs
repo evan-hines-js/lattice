@@ -44,6 +44,8 @@ pub enum CrdKind {
     TracingPolicyNamespaced,
     /// Volcano Job (batch.volcano.sh)
     VolcanoJob,
+    /// Kthena ModelServing (workload.serving.volcano.sh)
+    ModelServing,
 }
 
 /// All CrdKind variants for iteration.
@@ -63,6 +65,7 @@ const ALL_CRD_KINDS: &[CrdKind] = &[
     CrdKind::MeshMember,
     CrdKind::TracingPolicyNamespaced,
     CrdKind::VolcanoJob,
+    CrdKind::ModelServing,
 ];
 
 impl CrdKind {
@@ -81,6 +84,7 @@ impl CrdKind {
             Self::Certificate => "cert-manager.io",
             Self::MeshMember => "lattice.dev",
             Self::VolcanoJob => "batch.volcano.sh",
+            Self::ModelServing => "workload.serving.volcano.sh",
         }
     }
 
@@ -102,6 +106,7 @@ impl CrdKind {
             Self::MeshMember => "LatticeMeshMember",
             Self::TracingPolicyNamespaced => "TracingPolicyNamespaced",
             Self::VolcanoJob => "Job",
+            Self::ModelServing => "ModelServing",
         }
     }
 
@@ -120,6 +125,7 @@ impl CrdKind {
             Self::MeshMember => "lattice.dev/v1alpha1",
             Self::TracingPolicyNamespaced => "cilium.io/v1alpha1",
             Self::VolcanoJob => "batch.volcano.sh/v1alpha1",
+            Self::ModelServing => "workload.serving.volcano.sh/v1alpha1",
         }
     }
 }
@@ -291,6 +297,6 @@ mod tests {
     #[test]
     fn all_crd_kinds_is_exhaustive() {
         // Ensure ALL_CRD_KINDS contains every variant
-        assert_eq!(ALL_CRD_KINDS.len(), 15);
+        assert_eq!(ALL_CRD_KINDS.len(), 16);
     }
 }

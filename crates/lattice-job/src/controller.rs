@@ -113,7 +113,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             .await?;
             update_status(
                 &ctx.client,
-                &name,
+                &job,
                 namespace,
                 JobPhase::Running,
                 None,
@@ -148,7 +148,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                     cleanup_graph(&job, &ctx.graph, namespace);
                     update_status(
                         &ctx.client,
-                        &name,
+                        &job,
                         namespace,
                         JobPhase::Succeeded,
                         Some("All tasks completed successfully"),
@@ -162,7 +162,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                     cleanup_graph(&job, &ctx.graph, namespace);
                     update_status(
                         &ctx.client,
-                        &name,
+                        &job,
                         namespace,
                         JobPhase::Failed,
                         Some("Job failed"),
@@ -218,7 +218,8 @@ async fn apply_compiled_job(
 ) -> Result<(), JobError> {
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    ensure_namespace(client, namespace).await?;
+    lattice_common::kube_utils::ensure_namespace_ssa(client, namespace, "lattice-job-controller")
+        .await?;
 
     apply_layers(client, namespace, compiled, registry, volcano_api, &params).await
 }
@@ -315,11 +316,6 @@ async fn apply_layers(
     Ok(())
 }
 
-async fn ensure_namespace(client: &Client, name: &str) -> Result<(), JobError> {
-    lattice_common::kube_utils::ensure_namespace(client, name, FIELD_MANAGER).await?;
-    Ok(())
-}
-
 enum VCJobPhase {
     Completed,
     Failed,
@@ -360,14 +356,38 @@ async fn check_vcjob_status(
     }
 }
 
+/// Check if the LatticeJob status already matches the desired state.
+///
+/// Prevents redundant status patches during the Running phase 15s requeue loop.
+fn is_status_unchanged(
+    job: &LatticeJob,
+    phase: JobPhase,
+    message: Option<&str>,
+    observed_generation: Option<i64>,
+) -> bool {
+    job.status
+        .as_ref()
+        .map(|s| {
+            s.phase == phase
+                && s.message.as_deref() == message
+                && s.observed_generation == observed_generation
+        })
+        .unwrap_or(false)
+}
+
 async fn update_status(
     client: &Client,
-    name: &str,
+    job: &LatticeJob,
     namespace: &str,
     phase: JobPhase,
     message: Option<&str>,
     observed_generation: Option<i64>,
 ) -> Result<(), JobError> {
+    if is_status_unchanged(job, phase.clone(), message, observed_generation) {
+        return Ok(());
+    }
+
+    let name = job.name_any();
     let status = LatticeJobStatus {
         phase,
         message: message.map(|m| m.to_string()),
@@ -375,7 +395,7 @@ async fn update_status(
     };
     lattice_common::kube_utils::patch_resource_status::<LatticeJob>(
         client,
-        name,
+        &name,
         namespace,
         &status,
         FIELD_MANAGER,

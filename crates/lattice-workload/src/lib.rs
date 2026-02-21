@@ -22,6 +22,7 @@ mod compiler;
 pub mod error;
 pub mod helpers;
 pub mod k8s;
+mod pod_template_json;
 
 mod authorization;
 mod pipeline;
@@ -33,3 +34,4 @@ pub use error::CompilationError;
 pub use pipeline::pod_template::CompiledPodTemplate;
 pub use pipeline::secrets::SecretRef;
 pub use pipeline::volumes::{Affinity, PersistentVolumeClaim};
+pub use pod_template_json::pod_template_to_json;
