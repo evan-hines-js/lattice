@@ -5,7 +5,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{debug, info, warn};
@@ -15,10 +14,7 @@ use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE
 
 use crate::velero::{self, VELERO_NAMESPACE};
 
-/// Requeue interval while restore is in progress
-const REQUEUE_IN_PROGRESS_SECS: u64 = 15;
-/// Requeue interval on error
-const REQUEUE_ERROR_SECS: u64 = 60;
+use crate::{REQUEUE_ERROR_SECS, REQUEUE_IN_PROGRESS_SECS};
 
 /// Reconcile a LatticeRestore
 ///
@@ -120,12 +116,12 @@ async fn update_status(
         observed_generation: restore.metadata.generation,
     };
 
-    let patch = serde_json::json!({ "status": status });
-    let api: Api<LatticeRestore> = Api::namespaced(client.clone(), &namespace);
-    api.patch_status(
+    lattice_common::kube_utils::patch_resource_status::<LatticeRestore>(
+        client,
         &name,
-        &PatchParams::apply("lattice-restore-controller"),
-        &Patch::Merge(&patch),
+        &namespace,
+        &status,
+        "lattice-restore-controller",
     )
     .await
     .map_err(|e| ReconcileError::Kube(format!("status update failed: {}", e)))?;

@@ -138,33 +138,14 @@ impl ServiceKubeClientImpl {
         Self { client, registry }
     }
 
-    /// Ensure a namespace exists with ambient mode labels for Istio traffic routing.
-    ///
-    /// Istio ambient mode requires namespaces to have:
-    /// - `istio.io/dataplane-mode: ambient` - enrolls pods into ambient mesh (ztunnel intercepts traffic)
-    ///
-    /// Waypoint routing is per-Service (applied by the service compiler when L7 is needed),
-    /// not per-namespace.
+    /// Ensure a namespace exists for a service's workloads.
     async fn ensure_namespace(&self, name: &str) -> Result<(), Error> {
-        use k8s_openapi::api::core::v1::Namespace;
-
-        let api: Api<Namespace> = Api::all(self.client.clone());
-
-        let ns = serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "Namespace",
-            "metadata": {
-                "name": name
-            }
-        });
-
-        api.patch(
+        lattice_common::kube_utils::ensure_namespace(
+            &self.client,
             name,
-            &PatchParams::apply("lattice-service-controller"),
-            &Patch::Apply(&ns),
+            "lattice-service-controller",
         )
         .await?;
-
         debug!(namespace = %name, "ensured namespace exists");
         Ok(())
     }

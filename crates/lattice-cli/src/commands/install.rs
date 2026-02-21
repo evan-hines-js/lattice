@@ -843,7 +843,7 @@ impl Installer {
         use kube::api::{Api, Patch, PatchParams};
 
         // Ensure namespace exists
-        kube_utils::create_namespace(client, LATTICE_SYSTEM_NAMESPACE)
+        kube_utils::ensure_namespace(client, LATTICE_SYSTEM_NAMESPACE, "lattice-cli")
             .await
             .cmd_err()?;
 
