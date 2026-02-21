@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, ListParams, Patch, PatchParams};
+use kube::api::{Api, ListParams};
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{debug, info, warn};
@@ -18,9 +18,7 @@ use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE
 
 use crate::velero::{self, BackupTemplate, Schedule, ScheduleSpec, VELERO_NAMESPACE};
 
-const REQUEUE_SUCCESS_SECS: u64 = 300;
-const REQUEUE_CRD_NOT_FOUND_SECS: u64 = 30;
-const REQUEUE_ERROR_SECS: u64 = 60;
+use crate::{REQUEUE_CRD_NOT_FOUND_SECS, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 
 /// Reconcile a LatticeClusterBackup into a Velero Schedule
 pub async fn reconcile(
@@ -207,12 +205,12 @@ async fn update_status(
         observed_generation: backup.metadata.generation,
     };
 
-    let patch = serde_json::json!({ "status": status });
-    let api: Api<LatticeClusterBackup> = Api::namespaced(client.clone(), &namespace);
-    api.patch_status(
+    lattice_common::kube_utils::patch_resource_status::<LatticeClusterBackup>(
+        client,
         &name,
-        &PatchParams::apply("lattice-cluster-backup-controller"),
-        &Patch::Merge(&patch),
+        &namespace,
+        &status,
+        "lattice-cluster-backup-controller",
     )
     .await
     .map_err(|e| ReconcileError::Kube(format!("status update failed: {}", e)))?;

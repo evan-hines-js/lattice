@@ -246,27 +246,13 @@ pub fn error_policy(
 
 /// Ensure namespace has `istio.io/dataplane-mode: ambient` label
 async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<(), ReconcileError> {
-    use k8s_openapi::api::core::v1::Namespace;
-
-    let api: Api<Namespace> = Api::all(client.clone());
-    let ns = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Namespace",
-        "metadata": {
-            "name": namespace,
-            "labels": {
-                mesh::DATAPLANE_MODE_LABEL: mesh::DATAPLANE_MODE_AMBIENT
-            }
-        }
-    });
-
-    api.patch(
-        namespace,
-        &PatchParams::apply(FIELD_MANAGER),
-        &Patch::Apply(&ns),
-    )
-    .await
-    .map_err(|e| ReconcileError::Kube(format!("ensure namespace ambient: {e}")))?;
+    let labels = std::collections::BTreeMap::from([(
+        mesh::DATAPLANE_MODE_LABEL.to_string(),
+        mesh::DATAPLANE_MODE_AMBIENT.to_string(),
+    )]);
+    lattice_common::kube_utils::ensure_namespace_with_labels(client, namespace, &labels, FIELD_MANAGER)
+        .await
+        .map_err(|e| ReconcileError::Kube(format!("ensure namespace ambient: {e}")))?;
 
     debug!(namespace = %namespace, "ensured namespace ambient mode");
     Ok(())
