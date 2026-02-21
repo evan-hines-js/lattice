@@ -122,20 +122,29 @@ pub struct ModelServingSpec {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ServingGroupTemplate {
-    pub roles: BTreeMap<String, ModelServingRole>,
+    pub roles: Vec<ModelServingRole>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gang_policy: Option<GangPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_name: Option<String>,
+    pub restart_grace_period_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_topology: Option<serde_json::Value>,
 }
 
 /// A single role within a ModelServing (e.g. prefill, decode)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelServingRole {
+    pub name: String,
     pub replicas: u32,
-    /// Pod template — passed through as pre-serialized JSON from the workload compiler
-    pub template: serde_json::Value,
+    /// Entry pod template — passed through as pre-serialized JSON from the workload compiler
+    pub entry_template: serde_json::Value,
+    /// Number of worker replicas (None = no workers)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_replicas: Option<u32>,
+    /// Worker pod template (None = no workers)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_template: Option<serde_json::Value>,
 }
 
 /// Gang scheduling policy for coordinated role startup
@@ -164,7 +173,7 @@ pub struct RollingUpdateConfiguration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_unavailable: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_surge: Option<String>,
+    pub partition: Option<i32>,
 }
 
 #[cfg(test)]
@@ -219,17 +228,20 @@ mod tests {
                 scheduler_name: "volcano".to_string(),
                 replicas: 1,
                 template: ServingGroupTemplate {
-                    roles: BTreeMap::from([(
-                        "decode".to_string(),
-                        ModelServingRole {
-                            replicas: 2,
-                            template: serde_json::json!({"spec": {"containers": []}}),
-                        },
-                    )]),
+                    roles: vec![ModelServingRole {
+                        name: "decode".to_string(),
+                        replicas: 2,
+                        entry_template: serde_json::json!({"spec": {"containers": []}}),
+                        worker_replicas: Some(4),
+                        worker_template: Some(
+                            serde_json::json!({"spec": {"containers": [{"name": "worker"}]}}),
+                        ),
+                    }],
                     gang_policy: Some(GangPolicy {
                         min_role_replicas: BTreeMap::from([("decode".to_string(), 2)]),
                     }),
-                    service_name: Some("test-model".to_string()),
+                    restart_grace_period_seconds: Some(30),
+                    network_topology: None,
                 },
                 recovery_policy: Some("RestartAll".to_string()),
                 rollout_strategy: None,
@@ -239,5 +251,17 @@ mod tests {
         let json = serde_json::to_string(&ms).unwrap();
         let de: ModelServing = serde_json::from_str(&json).unwrap();
         assert_eq!(ms, de);
+
+        // Verify camelCase serialization of key fields
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let role = &value["spec"]["template"]["roles"][0];
+        assert!(role.get("entryTemplate").is_some());
+        assert!(role.get("workerReplicas").is_some());
+        assert!(role.get("workerTemplate").is_some());
+        assert!(
+            value["spec"]["template"]
+                .get("restartGracePeriodSeconds")
+                .is_some()
+        );
     }
 }

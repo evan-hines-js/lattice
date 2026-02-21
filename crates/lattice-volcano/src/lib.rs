@@ -9,7 +9,7 @@ mod model_serving_compiler;
 mod types;
 
 pub use compiler::compile_vcjob;
-pub use model_serving_compiler::compile_model_serving;
+pub use model_serving_compiler::{compile_model_serving, RoleTemplates};
 pub use types::{
     GangPolicy, ModelServing, ModelServingMetadata, ModelServingRole, ModelServingSpec,
     RollingUpdateConfiguration, RolloutStrategy, ServingGroupTemplate, VCJob, VCJobSpec, VCJobTask,

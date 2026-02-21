@@ -48,7 +48,8 @@ pub use mesh_member::{
     PeerAuth,
 };
 pub use model_serving::{
-    LatticeModel, LatticeModelSpec, LatticeModelStatus, ModelRoleSpec, ModelServingPhase,
+    LatticeModel, LatticeModelSpec, LatticeModelStatus, ModelCondition, ModelRoleSpec,
+    ModelServingPhase,
 };
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,

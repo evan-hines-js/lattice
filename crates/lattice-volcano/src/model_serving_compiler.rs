@@ -12,20 +12,26 @@ use crate::types::{
     OwnerReference, ServingGroupTemplate,
 };
 
+/// Pre-compiled pod templates for a single role (entry + optional worker)
+pub struct RoleTemplates {
+    pub entry_template: serde_json::Value,
+    pub worker_template: Option<serde_json::Value>,
+}
+
 /// Compile a LatticeModel into a Kthena ModelServing resource.
 ///
-/// Takes the LatticeModel and pre-serialized pod template JSON for each role.
+/// Takes the LatticeModel and pre-compiled entry/worker pod templates for each role.
 /// The caller (lattice-model compiler) is responsible for compiling workload specs
 /// into pod templates via `WorkloadCompiler` and serializing them.
 pub fn compile_model_serving(
     model: &LatticeModel,
-    role_pod_templates: &BTreeMap<String, serde_json::Value>,
+    role_templates: &BTreeMap<String, RoleTemplates>,
 ) -> ModelServing {
     let name = model.metadata.name.as_deref().unwrap_or_default();
     let namespace = model.metadata.namespace.as_deref().unwrap_or("default");
     let uid = model.metadata.uid.as_deref().unwrap_or_default();
 
-    let roles = compile_roles(&model.spec.roles, role_pod_templates);
+    let roles = compile_roles(&model.spec.roles, role_templates);
     let gang_policy = compute_gang_policy(&model.spec.roles);
 
     ModelServing {
@@ -56,7 +62,11 @@ pub fn compile_model_serving(
             template: ServingGroupTemplate {
                 roles,
                 gang_policy: Some(gang_policy),
-                service_name: Some(name.to_string()),
+                restart_grace_period_seconds: model
+                    .spec
+                    .restart_grace_period_seconds
+                    .map(|v| v as i64),
+                network_topology: None,
             },
             recovery_policy: model.spec.recovery_policy.clone(),
             rollout_strategy: None,
@@ -66,19 +76,19 @@ pub fn compile_model_serving(
 
 fn compile_roles(
     role_specs: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
-    pod_templates: &BTreeMap<String, serde_json::Value>,
-) -> BTreeMap<String, ModelServingRole> {
+    role_templates: &BTreeMap<String, RoleTemplates>,
+) -> Vec<ModelServingRole> {
     role_specs
         .iter()
         .filter_map(|(role_name, role_spec)| {
-            let template = pod_templates.get(role_name)?.clone();
-            Some((
-                role_name.clone(),
-                ModelServingRole {
-                    replicas: role_spec.replicas,
-                    template,
-                },
-            ))
+            let templates = role_templates.get(role_name)?;
+            Some(ModelServingRole {
+                name: role_name.clone(),
+                replicas: role_spec.replicas,
+                entry_template: templates.entry_template.clone(),
+                worker_replicas: role_spec.worker_replicas,
+                worker_template: templates.worker_template.clone(),
+            })
         })
         .collect()
 }
@@ -124,22 +134,34 @@ mod tests {
         })
     }
 
+    fn make_role(replicas: u32) -> ModelRoleSpec {
+        ModelRoleSpec {
+            replicas,
+            entry_workload: WorkloadSpec::default(),
+            entry_runtime: RuntimeSpec::default(),
+            worker_replicas: None,
+            worker_workload: None,
+            worker_runtime: None,
+        }
+    }
+
+    fn make_entry_only_templates(image: &str) -> RoleTemplates {
+        RoleTemplates {
+            entry_template: test_pod_template(image),
+            worker_template: None,
+        }
+    }
+
     #[test]
     fn single_role_model_serving() {
         let mut roles = BTreeMap::new();
-        roles.insert(
-            "decode".to_string(),
-            ModelRoleSpec {
-                replicas: 2,
-                worker_replicas: 0,
-                workload: WorkloadSpec::default(),
-                runtime: RuntimeSpec::default(),
-            },
-        );
+        roles.insert("decode".to_string(), make_role(2));
 
         let model = test_model(roles);
-        let templates =
-            BTreeMap::from([("decode".to_string(), test_pod_template("decoder:latest"))]);
+        let templates = BTreeMap::from([(
+            "decode".to_string(),
+            make_entry_only_templates("decoder:latest"),
+        )]);
 
         let ms = compile_model_serving(&model, &templates);
 
@@ -148,42 +170,71 @@ mod tests {
         assert_eq!(ms.metadata.name, "test-model");
         assert_eq!(ms.spec.scheduler_name, "volcano");
         assert_eq!(ms.spec.template.roles.len(), 1);
-        assert_eq!(ms.spec.template.roles["decode"].replicas, 2);
+        assert_eq!(ms.spec.template.roles[0].name, "decode");
+        assert_eq!(ms.spec.template.roles[0].replicas, 2);
+        assert!(ms.spec.template.roles[0].worker_template.is_none());
+    }
+
+    #[test]
+    fn single_role_with_workers() {
+        let mut roles = BTreeMap::new();
+        roles.insert(
+            "decode".to_string(),
+            ModelRoleSpec {
+                replicas: 1,
+                entry_workload: WorkloadSpec::default(),
+                entry_runtime: RuntimeSpec::default(),
+                worker_replicas: Some(4),
+                worker_workload: Some(WorkloadSpec::default()),
+                worker_runtime: None,
+            },
+        );
+
+        let model = test_model(roles);
+        let templates = BTreeMap::from([(
+            "decode".to_string(),
+            RoleTemplates {
+                entry_template: test_pod_template("decoder:latest"),
+                worker_template: Some(test_pod_template("decoder-worker:latest")),
+            },
+        )]);
+
+        let ms = compile_model_serving(&model, &templates);
+
+        assert_eq!(ms.spec.template.roles.len(), 1);
+        let role = &ms.spec.template.roles[0];
+        assert_eq!(role.name, "decode");
+        assert_eq!(role.replicas, 1);
+        assert_eq!(role.worker_replicas, Some(4));
+        assert!(role.worker_template.is_some());
     }
 
     #[test]
     fn multi_role_model_serving() {
         let mut roles = BTreeMap::new();
-        roles.insert(
-            "prefill".to_string(),
-            ModelRoleSpec {
-                replicas: 1,
-                worker_replicas: 0,
-                workload: WorkloadSpec::default(),
-                runtime: RuntimeSpec::default(),
-            },
-        );
-        roles.insert(
-            "decode".to_string(),
-            ModelRoleSpec {
-                replicas: 4,
-                worker_replicas: 0,
-                workload: WorkloadSpec::default(),
-                runtime: RuntimeSpec::default(),
-            },
-        );
+        roles.insert("prefill".to_string(), make_role(1));
+        roles.insert("decode".to_string(), make_role(4));
 
         let model = test_model(roles);
         let templates = BTreeMap::from([
-            ("prefill".to_string(), test_pod_template("prefill:latest")),
-            ("decode".to_string(), test_pod_template("decode:latest")),
+            (
+                "prefill".to_string(),
+                make_entry_only_templates("prefill:latest"),
+            ),
+            (
+                "decode".to_string(),
+                make_entry_only_templates("decode:latest"),
+            ),
         ]);
 
         let ms = compile_model_serving(&model, &templates);
 
         assert_eq!(ms.spec.template.roles.len(), 2);
-        assert_eq!(ms.spec.template.roles["prefill"].replicas, 1);
-        assert_eq!(ms.spec.template.roles["decode"].replicas, 4);
+        // BTreeMap iteration is sorted, so "decode" comes before "prefill"
+        assert_eq!(ms.spec.template.roles[0].name, "decode");
+        assert_eq!(ms.spec.template.roles[0].replicas, 4);
+        assert_eq!(ms.spec.template.roles[1].name, "prefill");
+        assert_eq!(ms.spec.template.roles[1].replicas, 1);
     }
 
     #[test]
@@ -202,29 +253,19 @@ mod tests {
     #[test]
     fn gang_policy_computed_from_replicas() {
         let mut roles = BTreeMap::new();
-        roles.insert(
-            "prefill".to_string(),
-            ModelRoleSpec {
-                replicas: 1,
-                worker_replicas: 0,
-                workload: WorkloadSpec::default(),
-                runtime: RuntimeSpec::default(),
-            },
-        );
-        roles.insert(
-            "decode".to_string(),
-            ModelRoleSpec {
-                replicas: 3,
-                worker_replicas: 0,
-                workload: WorkloadSpec::default(),
-                runtime: RuntimeSpec::default(),
-            },
-        );
+        roles.insert("prefill".to_string(), make_role(1));
+        roles.insert("decode".to_string(), make_role(3));
 
         let model = test_model(roles);
         let templates = BTreeMap::from([
-            ("prefill".to_string(), test_pod_template("prefill:latest")),
-            ("decode".to_string(), test_pod_template("decode:latest")),
+            (
+                "prefill".to_string(),
+                make_entry_only_templates("prefill:latest"),
+            ),
+            (
+                "decode".to_string(),
+                make_entry_only_templates("decode:latest"),
+            ),
         ]);
 
         let ms = compile_model_serving(&model, &templates);
@@ -246,5 +287,19 @@ mod tests {
 
         let ms = compile_model_serving(&model, &BTreeMap::new());
         assert_eq!(ms.spec.recovery_policy, Some("RestartAll".to_string()));
+    }
+
+    #[test]
+    fn restart_grace_period_compiled_to_template() {
+        let spec = LatticeModelSpec {
+            restart_grace_period_seconds: Some(30),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid".to_string());
+
+        let ms = compile_model_serving(&model, &BTreeMap::new());
+        assert_eq!(ms.spec.template.restart_grace_period_seconds, Some(30));
     }
 }

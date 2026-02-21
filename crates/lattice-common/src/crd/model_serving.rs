@@ -48,24 +48,32 @@ impl std::fmt::Display for ModelServingPhase {
 /// A single role within a LatticeModel serving workload.
 ///
 /// Each role maps to a Volcano ModelServing role (e.g. prefill, decode)
-/// with its own pod template, replica count, and worker replicas.
+/// with separate entry and optional worker pod templates for disaggregated inference.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRoleSpec {
-    /// Number of replicas for this role
+    /// Number of entry replicas for this role
     #[serde(default = "default_one")]
     pub replicas: u32,
 
-    /// Number of worker replicas
+    /// Entry pod workload spec (containers, volumes, env, etc.)
+    pub entry_workload: WorkloadSpec,
+
+    /// Entry pod runtime extensions (sidecars, sysctls, hostNetwork, etc.)
     #[serde(default)]
-    pub worker_replicas: u32,
+    pub entry_runtime: RuntimeSpec,
 
-    /// Shared workload spec (containers, volumes, env, etc.)
-    pub workload: WorkloadSpec,
+    /// Number of worker replicas (None = no workers)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_replicas: Option<u32>,
 
-    /// Lattice runtime extensions (sidecars, sysctls, hostNetwork, etc.)
-    #[serde(default, flatten)]
-    pub runtime: RuntimeSpec,
+    /// Worker pod workload spec (None = no workers)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_workload: Option<WorkloadSpec>,
+
+    /// Worker pod runtime extensions (falls back to entry_runtime if None)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_runtime: Option<RuntimeSpec>,
 }
 
 fn default_one() -> u32 {
@@ -139,6 +147,38 @@ pub struct LatticeModelStatus {
     /// Human-readable message about current state
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+
+    /// Generation observed by the controller
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+
+    /// Conditions reflecting detailed status from ModelServing
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Vec<ModelCondition>>,
+}
+
+/// A condition on a LatticeModel (mirrored from ModelServing status)
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCondition {
+    /// Condition type (e.g. "Available", "Progressing", "UpdateInProgress")
+    #[serde(rename = "type")]
+    pub type_: String,
+
+    /// Condition status: "True", "False", or "Unknown"
+    pub status: String,
+
+    /// Machine-readable reason for the condition
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Human-readable message
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+
+    /// Timestamp of last transition
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_transition_time: Option<String>,
 }
 
 // =============================================================================
@@ -157,16 +197,34 @@ mod tests {
     }
 
     #[test]
-    fn model_role_spec_composes_with_workload() {
+    fn model_role_spec_entry_only() {
         let role = ModelRoleSpec {
             replicas: 2,
-            worker_replicas: 4,
-            workload: WorkloadSpec::default(),
-            runtime: RuntimeSpec::default(),
+            entry_workload: WorkloadSpec::default(),
+            entry_runtime: RuntimeSpec::default(),
+            worker_replicas: None,
+            worker_workload: None,
+            worker_runtime: None,
         };
-        assert!(role.workload.containers.is_empty());
+        assert!(role.entry_workload.containers.is_empty());
         assert_eq!(role.replicas, 2);
-        assert_eq!(role.worker_replicas, 4);
+        assert_eq!(role.worker_replicas, None);
+    }
+
+    #[test]
+    fn model_role_spec_with_workers() {
+        let role = ModelRoleSpec {
+            replicas: 1,
+            entry_workload: WorkloadSpec::default(),
+            entry_runtime: RuntimeSpec::default(),
+            worker_replicas: Some(4),
+            worker_workload: Some(WorkloadSpec::default()),
+            worker_runtime: None,
+        };
+        assert_eq!(role.replicas, 1);
+        assert_eq!(role.worker_replicas, Some(4));
+        assert!(role.worker_workload.is_some());
+        assert!(role.worker_runtime.is_none());
     }
 
     #[test]
@@ -176,18 +234,22 @@ mod tests {
             "prefill".to_string(),
             ModelRoleSpec {
                 replicas: 1,
-                worker_replicas: 0,
-                workload: WorkloadSpec::default(),
-                runtime: RuntimeSpec::default(),
+                entry_workload: WorkloadSpec::default(),
+                entry_runtime: RuntimeSpec::default(),
+                worker_replicas: None,
+                worker_workload: None,
+                worker_runtime: None,
             },
         );
         roles.insert(
             "decode".to_string(),
             ModelRoleSpec {
                 replicas: 2,
-                worker_replicas: 4,
-                workload: WorkloadSpec::default(),
-                runtime: RuntimeSpec::default(),
+                entry_workload: WorkloadSpec::default(),
+                entry_runtime: RuntimeSpec::default(),
+                worker_replicas: Some(4),
+                worker_workload: Some(WorkloadSpec::default()),
+                worker_runtime: None,
             },
         );
 
@@ -199,7 +261,7 @@ mod tests {
         assert_eq!(spec.roles.len(), 2);
         assert_eq!(spec.roles["prefill"].replicas, 1);
         assert_eq!(spec.roles["decode"].replicas, 2);
-        assert_eq!(spec.roles["decode"].worker_replicas, 4);
+        assert_eq!(spec.roles["decode"].worker_replicas, Some(4));
     }
 
     #[test]

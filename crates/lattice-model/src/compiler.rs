@@ -13,7 +13,7 @@ use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{LatticeMeshMember, LatticeModel, ProviderType};
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
-use lattice_volcano::ModelServing;
+use lattice_volcano::{ModelServing, RoleTemplates};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
 use crate::error::ModelError;
@@ -57,26 +57,26 @@ pub async fn compile_model(
         return Err(ModelError::NoRoles);
     }
 
-    let mut pod_templates: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut role_templates: BTreeMap<String, RoleTemplates> = BTreeMap::new();
     let mut config = CompiledConfig::default();
     let mut mesh_members = Vec::new();
     let mut tracing_policies = Vec::new();
 
     for (role_name, role_spec) in &model.spec.roles {
-        let role_full_name = format!("{}-{}", name, role_name);
+        let entry_full_name = format!("{}-{}", name, role_name);
 
-        // Compile workload → pod template + config resources + mesh member
-        let compiled = WorkloadCompiler::new(
-            &role_full_name,
+        // Compile entry workload (always present)
+        let entry_compiled = WorkloadCompiler::new(
+            &entry_full_name,
             namespace,
-            &role_spec.workload,
-            &role_spec.runtime,
+            &role_spec.entry_workload,
+            &role_spec.entry_runtime,
             provider_type,
         )
         .with_cedar(cedar)
         .with_cluster_name(cluster_name)
         .with_graph(graph)
-        .with_image_pull_secrets(&role_spec.runtime.image_pull_secrets)
+        .with_image_pull_secrets(&role_spec.entry_runtime.image_pull_secrets)
         .compile()
         .await
         .map_err(|e| ModelError::RoleCompilation {
@@ -84,32 +84,83 @@ pub async fn compile_model(
             source: e,
         })?;
 
-        // Convert CompiledPodTemplate to JSON for ModelServing
-        let template_json = lattice_workload::pod_template_to_json(compiled.pod_template)
+        let entry_json = lattice_workload::pod_template_to_json(entry_compiled.pod_template)
             .map_err(ModelError::Serialization)?;
-        pod_templates.insert(role_name.clone(), template_json);
+        config.merge(entry_compiled.config);
 
-        // Collect config resources
-        config.merge(compiled.config);
-
-        // Collect mesh member
-        if let Some(mm) = compiled.mesh_member {
+        if let Some(mm) = entry_compiled.mesh_member {
             mesh_members.push(mm);
         }
 
-        // Compile Tetragon tracing policies for this role
-        let policies = lattice_tetragon::compile_tracing_policies(
-            &role_full_name,
+        let entry_policies = lattice_tetragon::compile_tracing_policies(
+            &entry_full_name,
             namespace,
-            &role_spec.workload,
-            &role_spec.runtime,
+            &role_spec.entry_workload,
+            &role_spec.entry_runtime,
             &[],
         );
-        tracing_policies.extend(policies);
+        tracing_policies.extend(entry_policies);
+
+        // Compile worker workload (if present)
+        let worker_json = if let Some(ref worker_workload) = role_spec.worker_workload {
+            let worker_runtime = role_spec
+                .worker_runtime
+                .as_ref()
+                .unwrap_or(&role_spec.entry_runtime);
+            let worker_name = format!("{}-{}-worker", name, role_name);
+
+            let worker_compiled = WorkloadCompiler::new(
+                &worker_name,
+                namespace,
+                worker_workload,
+                worker_runtime,
+                provider_type,
+            )
+            .with_cedar(cedar)
+            .with_cluster_name(cluster_name)
+            .with_graph(graph)
+            .with_image_pull_secrets(&worker_runtime.image_pull_secrets)
+            .compile()
+            .await
+            .map_err(|e| ModelError::RoleCompilation {
+                role: format!("{}-worker", role_name),
+                source: e,
+            })?;
+
+            let worker_template =
+                lattice_workload::pod_template_to_json(worker_compiled.pod_template)
+                    .map_err(ModelError::Serialization)?;
+            config.merge(worker_compiled.config);
+
+            if let Some(mm) = worker_compiled.mesh_member {
+                mesh_members.push(mm);
+            }
+
+            let worker_policies = lattice_tetragon::compile_tracing_policies(
+                &worker_name,
+                namespace,
+                worker_workload,
+                worker_runtime,
+                &[],
+            );
+            tracing_policies.extend(worker_policies);
+
+            Some(worker_template)
+        } else {
+            None
+        };
+
+        role_templates.insert(
+            role_name.clone(),
+            RoleTemplates {
+                entry_template: entry_json,
+                worker_template: worker_json,
+            },
+        );
     }
 
-    // Build ModelServing from aggregated pod templates
-    let model_serving = lattice_volcano::compile_model_serving(model, &pod_templates);
+    // Build ModelServing from aggregated role templates
+    let model_serving = lattice_volcano::compile_model_serving(model, &role_templates);
 
     Ok(CompiledModel {
         model_serving,
@@ -150,12 +201,14 @@ mod tests {
         );
         ModelRoleSpec {
             replicas,
-            worker_replicas: 0,
-            workload: WorkloadSpec {
+            entry_workload: WorkloadSpec {
                 containers,
                 ..Default::default()
             },
-            runtime: RuntimeSpec::default(),
+            entry_runtime: RuntimeSpec::default(),
+            worker_replicas: None,
+            worker_workload: None,
+            worker_runtime: None,
         }
     }
 
@@ -177,10 +230,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(compiled.model_serving.spec.template.roles.len(), 1);
-        assert_eq!(
-            compiled.model_serving.spec.template.roles["decode"].replicas,
-            2
-        );
+        assert_eq!(compiled.model_serving.spec.template.roles[0].name, "decode");
+        assert_eq!(compiled.model_serving.spec.template.roles[0].replicas, 2);
         assert!(compiled.tracing_policies.is_empty());
     }
 

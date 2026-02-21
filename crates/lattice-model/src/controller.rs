@@ -162,7 +162,7 @@ fn register_graph(model: &LatticeModel, graph: &ServiceGraph, namespace: &str) {
         graph.put_workload(
             namespace,
             &format!("{}-{}", name, role_name),
-            &role_spec.workload,
+            &role_spec.entry_workload,
         );
     }
 }
@@ -226,9 +226,9 @@ async fn apply_layers(
 
     let mut layer1 = ApplyBatch::new(client.clone(), namespace, params);
 
-    // Create a ServiceAccount for each role
-    for role in compiled.model_serving.spec.template.roles.values() {
-        if let Some(sa_name) = role.template["spec"]["serviceAccountName"].as_str() {
+    // Create a ServiceAccount for each role (entry + worker templates)
+    for role in &compiled.model_serving.spec.template.roles {
+        if let Some(sa_name) = role.entry_template["spec"]["serviceAccountName"].as_str() {
             let sa = serde_json::json!({
                 "apiVersion": "v1",
                 "kind": "ServiceAccount",
@@ -239,6 +239,20 @@ async fn apply_layers(
                 "automountServiceAccountToken": false
             });
             layer1.push("ServiceAccount", sa_name, &sa, &sa_ar)?;
+        }
+        if let Some(ref wt) = role.worker_template {
+            if let Some(sa_name) = wt["spec"]["serviceAccountName"].as_str() {
+                let sa = serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "ServiceAccount",
+                    "metadata": {
+                        "name": sa_name,
+                        "namespace": namespace
+                    },
+                    "automountServiceAccountToken": false
+                });
+                layer1.push("ServiceAccount", sa_name, &sa, &sa_ar)?;
+            }
         }
     }
 
@@ -359,12 +373,14 @@ async fn update_status(
     namespace: &str,
     phase: ModelServingPhase,
     message: Option<&str>,
-    _observed_generation: Option<i64>,
+    observed_generation: Option<i64>,
 ) -> Result<(), ModelError> {
     let api: Api<LatticeModel> = Api::namespaced(client.clone(), namespace);
     let status = LatticeModelStatus {
         phase,
         message: message.map(|m| m.to_string()),
+        observed_generation,
+        conditions: None,
     };
     let status_patch = serde_json::json!({ "status": status });
     api.patch_status(

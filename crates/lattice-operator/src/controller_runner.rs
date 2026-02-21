@@ -565,7 +565,7 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
         let model_name = item.metadata.name.as_deref().unwrap_or_default();
         for (role_name, role_spec) in &item.spec.roles {
             let role_full_name = format!("{}-{}", model_name, role_name);
-            graph.put_workload(ns, &role_full_name, &role_spec.workload);
+            graph.put_workload(ns, &role_full_name, &role_spec.entry_workload);
         }
     })
     .await;
