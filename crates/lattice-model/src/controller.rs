@@ -4,8 +4,15 @@
 //! Pending → Loading → Serving | Failed
 //!
 //! Resources are applied in layers to prevent race conditions:
+//! - Layer 0: Model download PVC + Job (only when modelSource is configured)
 //! - Layer 1: ConfigMaps, Secrets, ExternalSecrets, PVCs, MeshMembers, TracingPolicies
 //! - Layer 2: ModelServing (only after mesh/security is ready)
+//! - Layer 3: Routing — ModelServer + ModelRoutes
+//!
+//! When `modelSource` is set, pods are created with a `lattice.dev/model-download`
+//! scheduling gate that keeps them `SchedulingGated` (zero resource usage, no GPU
+//! allocation) until the download Job completes. The Loading phase checks Job status
+//! and removes the gate on success.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +30,7 @@ use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry};
 
 use crate::compiler::{compile_model, CompiledModel};
+use crate::download::{CompiledDownload, SCHEDULING_GATE_MODEL_DOWNLOAD};
 use crate::error::ModelError;
 
 /// Shared context for the LatticeModel controller
@@ -108,6 +116,39 @@ pub async fn reconcile(
             Ok(Action::requeue(Duration::from_secs(15)))
         }
         ModelServingPhase::Loading => {
+            // When modelSource is configured, check download Job before ModelServing
+            if model.spec.model_source.is_some() {
+                let job_name = format!("{}-download", name);
+                match check_download_job_status(&ctx.client, &job_name, namespace).await {
+                    Some(DownloadState::Succeeded) => {
+                        info!(model = %name, "model download job completed");
+                        remove_scheduling_gates(&ctx.client, &name, namespace).await?;
+                    }
+                    Some(DownloadState::Failed) => {
+                        error!(model = %name, "model download job failed");
+                        cleanup_graph(&model, &ctx.graph, namespace);
+                        update_status(
+                            &ctx.client,
+                            &name,
+                            namespace,
+                            ModelServingPhase::Failed,
+                            Some("Model download failed"),
+                            Some(generation),
+                        )
+                        .await?;
+                        return Ok(Action::await_change());
+                    }
+                    Some(DownloadState::Running) => {
+                        info!(model = %name, "model download in progress");
+                        return Ok(Action::requeue(Duration::from_secs(15)));
+                    }
+                    None => {
+                        warn!(model = %name, "download job not found, requeuing");
+                        return Ok(Action::requeue(Duration::from_secs(15)));
+                    }
+                }
+            }
+
             let ms_api = match ctx.registry.resolve(CrdKind::ModelServing).await {
                 Some(ar) => ar,
                 None => {
@@ -218,6 +259,11 @@ async fn apply_layers(
     ms_api: &ApiResource,
     params: &PatchParams,
 ) -> Result<(), ModelError> {
+    // Layer 0: Model download (PVC + Job) — only when modelSource is configured
+    if let Some(ref download) = compiled.download {
+        apply_download_resources(client, namespace, download, params).await?;
+    }
+
     // Layer 1: Infrastructure (config, mesh, security, service accounts)
     let cm_ar = ApiResource::erase::<k8s_openapi::api::core::v1::ConfigMap>(&());
     let secret_ar = ApiResource::erase::<k8s_openapi::api::core::v1::Secret>(&());
@@ -333,6 +379,7 @@ async fn apply_layers(
         mesh_members = compiled.mesh_members.len(),
         tracing_policies = compiled.tracing_policies.len(),
         has_routing = compiled.routing.is_some(),
+        has_download = compiled.download.is_some(),
         "applied compiled model resources"
     );
 
@@ -388,6 +435,154 @@ async fn check_model_serving_status(
             None
         }
     }
+}
+
+/// Apply model download resources (PVC + Job) as Layer 0
+async fn apply_download_resources(
+    client: &Client,
+    namespace: &str,
+    download: &CompiledDownload,
+    params: &PatchParams,
+) -> Result<(), ModelError> {
+    let pvc_ar = ApiResource::erase::<k8s_openapi::api::core::v1::PersistentVolumeClaim>(&());
+    let job_ar = ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&());
+
+    let mut layer0 = ApplyBatch::new(client.clone(), namespace, params);
+    layer0.push(
+        "PersistentVolumeClaim",
+        &download.pvc_name,
+        &download.pvc,
+        &pvc_ar,
+    )?;
+
+    let job_name = download.job["metadata"]["name"]
+        .as_str()
+        .unwrap_or("unknown");
+    layer0.push("Job", job_name, &download.job, &job_ar)?;
+
+    layer0.run("layer-0-model-download").await?;
+
+    info!(
+        pvc = %download.pvc_name,
+        job = %job_name,
+        mount_path = %download.mount_path,
+        "applied model download resources (Layer 0)"
+    );
+
+    Ok(())
+}
+
+enum DownloadState {
+    Succeeded,
+    Failed,
+    Running,
+}
+
+/// Check the status of a model download Job
+async fn check_download_job_status(
+    client: &Client,
+    name: &str,
+    namespace: &str,
+) -> Option<DownloadState> {
+    let jobs: Api<k8s_openapi::api::batch::v1::Job> = Api::namespaced(client.clone(), namespace);
+
+    match jobs.get(name).await {
+        Ok(job) => {
+            let status = job.status.as_ref()?;
+            if status.succeeded.unwrap_or(0) >= 1 {
+                Some(DownloadState::Succeeded)
+            } else if status.failed.unwrap_or(0) >= 3 {
+                Some(DownloadState::Failed)
+            } else {
+                Some(DownloadState::Running)
+            }
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            warn!(job = %name, "download Job not found");
+            None
+        }
+        Err(e) => {
+            warn!(job = %name, error = %e, "failed to check download Job status");
+            None
+        }
+    }
+}
+
+/// Remove the model-download scheduling gate from all ModelServing pods.
+///
+/// Lists pods by the `modelserving.volcano.sh/name` label and patches each
+/// one that has the `lattice.dev/model-download` gate to remove it, allowing
+/// the kube-scheduler to schedule them.
+async fn remove_scheduling_gates(
+    client: &Client,
+    model_name: &str,
+    namespace: &str,
+) -> Result<(), ModelError> {
+    use kube::api::ListParams;
+
+    let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(client.clone(), namespace);
+    let lp = ListParams::default()
+        .labels(&format!("modelserving.volcano.sh/name={}", model_name));
+
+    let pod_list = pods.list(&lp).await?;
+    let mut removed = 0u32;
+
+    for pod in &pod_list {
+        let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
+        let has_gate = pod
+            .spec
+            .as_ref()
+            .and_then(|s| s.scheduling_gates.as_ref())
+            .map_or(false, |gates| {
+                gates
+                    .iter()
+                    .any(|g| g.name == SCHEDULING_GATE_MODEL_DOWNLOAD)
+            });
+
+        if has_gate {
+            // Remove the scheduling gate via JSON merge patch
+            let new_gates: Vec<&k8s_openapi::api::core::v1::PodSchedulingGate> = pod
+                .spec
+                .as_ref()
+                .and_then(|s| s.scheduling_gates.as_ref())
+                .map(|gates| {
+                    gates
+                        .iter()
+                        .filter(|g| g.name != SCHEDULING_GATE_MODEL_DOWNLOAD)
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let patch = if new_gates.is_empty() {
+                serde_json::json!({ "spec": { "schedulingGates": null } })
+            } else {
+                serde_json::json!({ "spec": { "schedulingGates": new_gates } })
+            };
+
+            match pods
+                .patch(
+                    pod_name,
+                    &PatchParams::default(),
+                    &Patch::Merge(&patch),
+                )
+                .await
+            {
+                Ok(_) => {
+                    removed += 1;
+                    info!(pod = %pod_name, "removed model-download scheduling gate");
+                }
+                Err(e) => {
+                    warn!(pod = %pod_name, error = %e, "failed to remove scheduling gate");
+                }
+            }
+        }
+    }
+
+    if removed > 0 {
+        info!(model = %model_name, count = removed, "removed scheduling gates from pods");
+    }
+
+    Ok(())
 }
 
 async fn update_status(

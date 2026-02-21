@@ -20,6 +20,7 @@ use lattice_common::{KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_NAME};
 use lattice_volcano::{CompiledRouting, ModelServing, RoleTemplates};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
+use crate::download::{self, CompiledDownload};
 use crate::error::ModelError;
 
 /// Complete compiled output for a LatticeModel
@@ -35,6 +36,8 @@ pub struct CompiledModel {
     pub tracing_policies: Vec<TracingPolicyNamespaced>,
     /// Kthena routing resources (ModelServer + ModelRoutes)
     pub routing: Option<CompiledRouting>,
+    /// Model download resources (PVC + Job) when modelSource is configured
+    pub download: Option<CompiledDownload>,
 }
 
 /// Compile a LatticeModel into Kubernetes resources.
@@ -165,6 +168,33 @@ pub async fn compile_model(
         );
     }
 
+    // Compile model download (PVC + Job) if modelSource is configured
+    let uid = model.metadata.uid.as_deref().unwrap_or_default();
+    let download = model
+        .spec
+        .model_source
+        .as_ref()
+        .map(|source| download::compile_download(name, namespace, uid, source))
+        .transpose()?;
+
+    // When modelSource is set, inject model cache volume + scheduling gate
+    // into every role's entry and worker pod templates
+    if let Some(ref dl) = download {
+        for templates in role_templates.values_mut() {
+            download::inject_model_volume(
+                &mut templates.entry_template,
+                &dl.pvc_name,
+                &dl.mount_path,
+            );
+            download::inject_scheduling_gate(&mut templates.entry_template);
+
+            if let Some(ref mut worker) = templates.worker_template {
+                download::inject_model_volume(worker, &dl.pvc_name, &dl.mount_path);
+                download::inject_scheduling_gate(worker);
+            }
+        }
+    }
+
     // Build ModelServing from aggregated role templates
     let model_serving = lattice_volcano::compile_model_serving(model, &role_templates);
 
@@ -187,6 +217,7 @@ pub async fn compile_model(
         mesh_members,
         tracing_policies,
         routing,
+        download,
     })
 }
 
@@ -304,7 +335,8 @@ mod tests {
 
     use lattice_common::crd::{
         ContainerSpec, InferenceEngine, KvConnector, LatticeModelSpec, ModelRoleSpec,
-        ModelRouteRule, ModelRouteSpec, ModelRoutingSpec, RuntimeSpec, TargetModel, WorkloadSpec,
+        ModelRouteRule, ModelRouteSpec, ModelRoutingSpec, ModelSourceSpec, RuntimeSpec, TargetModel,
+        WorkloadSpec,
     };
 
     fn make_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
@@ -563,5 +595,84 @@ mod tests {
             .unwrap();
 
         assert!(compiled.routing.is_none());
+    }
+
+    #[tokio::test]
+    async fn model_source_produces_download() {
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), make_role("decoder:latest", 2));
+
+        let spec = LatticeModelSpec {
+            roles,
+            model_source: Some(ModelSourceSpec {
+                uri: "hf://Qwen/Qwen3-8B".to_string(),
+                cache_size: "50Gi".to_string(),
+                storage_class: None,
+                mount_path: None,
+                token_secret: None,
+                downloader_image: None,
+            }),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        let download = compiled.download.as_ref().expect("download should be Some");
+        assert_eq!(download.pvc_name, "test-model-model-cache");
+        assert_eq!(download.mount_path, "/models");
+
+        // Verify scheduling gate + volume injected into pod templates
+        let role = &compiled.model_serving.spec.template.roles[0];
+        let gates = role.entry_template["spec"]["schedulingGates"]
+            .as_array()
+            .expect("schedulingGates should be set");
+        assert!(
+            gates
+                .iter()
+                .any(|g| g["name"] == "lattice.dev/model-download"),
+            "model-download scheduling gate should be present"
+        );
+
+        let volumes = role.entry_template["spec"]["volumes"]
+            .as_array()
+            .expect("volumes should be set");
+        assert!(
+            volumes
+                .iter()
+                .any(|v| v["name"] == "model-cache"),
+            "model-cache volume should be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_model_source_means_no_download() {
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), make_role("decoder:latest", 2));
+
+        let model = make_model(roles);
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        assert!(compiled.download.is_none());
+
+        // Verify no scheduling gate on pod templates
+        let role = &compiled.model_serving.spec.template.roles[0];
+        let gates = role.entry_template["spec"]["schedulingGates"].as_array();
+        assert!(
+            gates.map_or(true, |g| g.is_empty()),
+            "no scheduling gates when model_source is None"
+        );
     }
 }

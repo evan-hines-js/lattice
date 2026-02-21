@@ -8,4 +8,5 @@
 
 pub mod compiler;
 pub mod controller;
+pub mod download;
 pub mod error;

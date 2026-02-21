@@ -270,6 +270,56 @@ pub struct ModelParentRef {
 }
 
 // =============================================================================
+// Model Source
+// =============================================================================
+
+/// Declarative model artifact source for automatic downloading.
+///
+/// Generates a PVC + K8s batch/v1 Job to download model artifacts, and injects
+/// a scheduling gate on all role pod templates so they remain `SchedulingGated`
+/// until the download Job completes and the operator removes the gate.
+///
+/// Supported URI schemes: `hf://` (HuggingFace Hub), `s3://`, `gs://`
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSourceSpec {
+    /// Model URI — determines download method.
+    /// Examples: `hf://Qwen/Qwen3-8B`, `s3://bucket/models/llama`, `gs://bucket/models/llama`
+    pub uri: String,
+
+    /// PVC size for caching downloaded model artifacts (e.g. "50Gi")
+    pub cache_size: String,
+
+    /// Storage class for the PVC (uses cluster default if omitted)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_class: Option<String>,
+
+    /// Mount path in model serving containers (default: "/models")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_path: Option<String>,
+
+    /// K8s Secret reference for authentication tokens
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret: Option<SecretKeySelector>,
+
+    /// Override the default downloader container image
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloader_image: Option<String>,
+}
+
+/// Reference to a key within a K8s Secret
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretKeySelector {
+    /// Secret name
+    pub name: String,
+
+    /// Key within the secret (default: "token")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+// =============================================================================
 // CRD
 // =============================================================================
 
@@ -300,6 +350,10 @@ pub struct LatticeModelSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_grace_period_seconds: Option<u32>,
 
+    /// Declarative model artifact source — auto-generates PVC + download Job + scheduling gates
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_source: Option<ModelSourceSpec>,
+
     /// Model serving roles — each maps to a ModelServing role (e.g. prefill, decode)
     #[serde(default)]
     pub roles: BTreeMap<String, ModelRoleSpec>,
@@ -315,6 +369,7 @@ impl Default for LatticeModelSpec {
             scheduler_name: default_scheduler(),
             recovery_policy: None,
             restart_grace_period_seconds: None,
+            model_source: None,
             roles: BTreeMap::new(),
             routing: None,
         }
@@ -455,5 +510,50 @@ mod tests {
         assert_eq!(ModelServingPhase::Loading.to_string(), "Loading");
         assert_eq!(ModelServingPhase::Serving.to_string(), "Serving");
         assert_eq!(ModelServingPhase::Failed.to_string(), "Failed");
+    }
+
+    #[test]
+    fn model_source_spec_serialization() {
+        let source = ModelSourceSpec {
+            uri: "hf://Qwen/Qwen3-8B".to_string(),
+            cache_size: "50Gi".to_string(),
+            storage_class: Some("fast-nvme".to_string()),
+            mount_path: None,
+            token_secret: Some(SecretKeySelector {
+                name: "hf-creds".to_string(),
+                key: Some("token".to_string()),
+            }),
+            downloader_image: None,
+        };
+
+        let json = serde_json::to_value(&source).unwrap();
+        assert_eq!(json["uri"], "hf://Qwen/Qwen3-8B");
+        assert_eq!(json["cacheSize"], "50Gi");
+        assert_eq!(json["storageClass"], "fast-nvme");
+        assert!(json.get("mountPath").is_none());
+        assert_eq!(json["tokenSecret"]["name"], "hf-creds");
+        assert!(json.get("downloaderImage").is_none());
+    }
+
+    #[test]
+    fn model_source_spec_deserialization() {
+        let json = serde_json::json!({
+            "uri": "s3://bucket/model",
+            "cacheSize": "100Gi"
+        });
+
+        let source: ModelSourceSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(source.uri, "s3://bucket/model");
+        assert_eq!(source.cache_size, "100Gi");
+        assert!(source.storage_class.is_none());
+        assert!(source.mount_path.is_none());
+        assert!(source.token_secret.is_none());
+        assert!(source.downloader_image.is_none());
+    }
+
+    #[test]
+    fn model_spec_default_has_no_model_source() {
+        let spec = LatticeModelSpec::default();
+        assert!(spec.model_source.is_none());
     }
 }

@@ -25,4 +25,10 @@ pub enum ModelError {
 
     #[error("Kthena ModelServing CRD not available")]
     KthenaCrdMissing,
+
+    #[error("invalid model source URI: {0}")]
+    InvalidModelUri(String),
+
+    #[error("model download failed: {0}")]
+    DownloadFailed(String),
 }

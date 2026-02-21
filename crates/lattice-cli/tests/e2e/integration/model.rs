@@ -358,6 +358,16 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
         ));
     }
 
+    // Verify model name
+    let model_field = ms["spec"]["model"]
+        .as_str()
+        .unwrap_or_default();
+    if model_field != "test-model/busybox" {
+        return Err(format!(
+            "ModelServer model should be 'test-model/busybox', got: '{model_field}'"
+        ));
+    }
+
     // Verify workload port
     if ms["spec"]["workloadPort"]["port"].as_u64() != Some(8000) {
         return Err(format!(
@@ -366,7 +376,63 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
         ));
     }
 
-    info!("[Model] ModelServer verified: correct workload selector and inference engine");
+    // Verify PD disaggregation (fixture has kvConnector + prefill/decode roles)
+    let pd_group = &ms["spec"]["workloadSelector"]["pdGroup"];
+    if pd_group.is_null() {
+        return Err("ModelServer pdGroup should be set (fixture has kvConnector + prefill/decode roles)".to_string());
+    }
+    let group_key = pd_group["groupKey"].as_str().unwrap_or_default();
+    if group_key != "modelserving.volcano.sh/group-name" {
+        return Err(format!(
+            "pdGroup groupKey should be 'modelserving.volcano.sh/group-name', got: '{group_key}'"
+        ));
+    }
+    let prefill_role_label = pd_group["prefillLabels"]["modelserving.volcano.sh/role"]
+        .as_str()
+        .unwrap_or_default();
+    if prefill_role_label != "prefill" {
+        return Err(format!(
+            "pdGroup prefillLabels role should be 'prefill', got: '{prefill_role_label}'"
+        ));
+    }
+    let decode_role_label = pd_group["decodeLabels"]["modelserving.volcano.sh/role"]
+        .as_str()
+        .unwrap_or_default();
+    if decode_role_label != "decode" {
+        return Err(format!(
+            "pdGroup decodeLabels role should be 'decode', got: '{decode_role_label}'"
+        ));
+    }
+
+    // Verify kvConnector
+    let kv_type = ms["spec"]["kvConnector"]["type"]
+        .as_str()
+        .unwrap_or_default();
+    if kv_type != "nixl" {
+        return Err(format!(
+            "ModelServer kvConnector type should be 'nixl', got: '{kv_type}'"
+        ));
+    }
+
+    // Verify trafficPolicy retry
+    if ms["spec"]["trafficPolicy"]["retry"]["attempts"].as_u64() != Some(3) {
+        return Err(format!(
+            "ModelServer trafficPolicy retry attempts should be 3, got: {}",
+            ms["spec"]["trafficPolicy"]["retry"]["attempts"]
+        ));
+    }
+
+    // Verify ownerReferences on ModelServer
+    let ms_owner_kind = ms["metadata"]["ownerReferences"][0]["kind"]
+        .as_str()
+        .unwrap_or_default();
+    if ms_owner_kind != "LatticeModel" {
+        return Err(format!(
+            "ModelServer ownerReference kind should be 'LatticeModel', got: '{ms_owner_kind}'"
+        ));
+    }
+
+    info!("[Model] ModelServer verified: model, workload selector, PD group, kvConnector, trafficPolicy, owner ref");
 
     // Verify ModelRoute
     let route_name = format!("{}-default", MODEL_NAME);
@@ -386,6 +452,16 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
     let mr: serde_json::Value = serde_json::from_str(&mr_output)
         .map_err(|e| format!("Failed to parse ModelRoute JSON: {e}"))?;
 
+    // Verify modelName defaults to routing.model
+    let model_name = mr["spec"]["modelName"]
+        .as_str()
+        .unwrap_or_default();
+    if model_name != "test-model/busybox" {
+        return Err(format!(
+            "ModelRoute modelName should be 'test-model/busybox', got: '{model_name}'"
+        ));
+    }
+
     // Verify target model server name defaults to model name
     let target = &mr["spec"]["rules"][0]["targetModels"][0];
     let target_name = target["modelServerName"]
@@ -398,7 +474,261 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
         ));
     }
 
-    info!("[Model] ModelRoute verified: correct target model server reference");
+    // Verify weight on target model
+    if target["weight"].as_u64() != Some(100) {
+        return Err(format!(
+            "ModelRoute target weight should be 100, got: {}",
+            target["weight"]
+        ));
+    }
+
+    // Verify ownerReferences on ModelRoute
+    let mr_owner_kind = mr["metadata"]["ownerReferences"][0]["kind"]
+        .as_str()
+        .unwrap_or_default();
+    if mr_owner_kind != "LatticeModel" {
+        return Err(format!(
+            "ModelRoute ownerReference kind should be 'LatticeModel', got: '{mr_owner_kind}'"
+        ));
+    }
+
+    info!("[Model] ModelRoute verified: modelName, target, weight, owner ref");
+    Ok(())
+}
+
+/// Verify model download PVC was created
+async fn test_model_download_pvc(kubeconfig: &str) -> Result<(), String> {
+    info!("[Model] Verifying model download PVC...");
+
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "pvc",
+        &format!("{}-model-cache", MODEL_NAME),
+        "-n",
+        MODEL_NAMESPACE,
+        "-o",
+        "json",
+    ])
+    .await?;
+
+    let pvc: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse PVC JSON: {e}"))?;
+
+    // Verify size
+    let storage = pvc["spec"]["resources"]["requests"]["storage"]
+        .as_str()
+        .unwrap_or_default();
+    if storage != "50Gi" {
+        return Err(format!("PVC storage should be '50Gi', got: '{storage}'"));
+    }
+
+    // Verify access mode
+    let access_modes = pvc["spec"]["accessModes"]
+        .as_array()
+        .ok_or("PVC accessModes is not an array")?;
+    if !access_modes.iter().any(|m| m == "ReadWriteOnce") {
+        return Err(format!(
+            "PVC should have ReadWriteOnce access mode, got: {:?}",
+            access_modes
+        ));
+    }
+
+    // Verify owner reference
+    let owner_kind = pvc["metadata"]["ownerReferences"][0]["kind"]
+        .as_str()
+        .unwrap_or_default();
+    if owner_kind != "LatticeModel" {
+        return Err(format!(
+            "PVC ownerReference kind should be 'LatticeModel', got: '{owner_kind}'"
+        ));
+    }
+
+    info!("[Model] Model download PVC verified: 50Gi, ReadWriteOnce, correct owner ref");
+    Ok(())
+}
+
+/// Verify model download Job was created
+async fn test_model_download_job(kubeconfig: &str) -> Result<(), String> {
+    info!("[Model] Verifying model download Job...");
+
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "job",
+        &format!("{}-download", MODEL_NAME),
+        "-n",
+        MODEL_NAMESPACE,
+        "-o",
+        "json",
+    ])
+    .await?;
+
+    let job: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse Job JSON: {e}"))?;
+
+    // Verify backoff limit
+    if job["spec"]["backoffLimit"].as_u64() != Some(3) {
+        return Err(format!(
+            "Job backoffLimit should be 3, got: {}",
+            job["spec"]["backoffLimit"]
+        ));
+    }
+
+    // Verify container image (HuggingFace uses python:3.11-slim)
+    let image = job["spec"]["template"]["spec"]["containers"][0]["image"]
+        .as_str()
+        .unwrap_or_default();
+    if image != "python:3.11-slim" {
+        return Err(format!(
+            "Download job image should be 'python:3.11-slim', got: '{image}'"
+        ));
+    }
+
+    // Verify command references the model
+    let cmd = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
+        .as_str()
+        .unwrap_or_default();
+    if !cmd.contains("huggingface-cli download Qwen/Qwen3-8B") {
+        return Err(format!(
+            "Download job command should reference 'Qwen/Qwen3-8B', got: '{cmd}'"
+        ));
+    }
+
+    // Verify PVC volume mount
+    let volume_name = job["spec"]["template"]["spec"]["volumes"][0]["name"]
+        .as_str()
+        .unwrap_or_default();
+    if volume_name != "model-cache" {
+        return Err(format!(
+            "Job should mount 'model-cache' volume, got: '{volume_name}'"
+        ));
+    }
+
+    // Verify owner reference
+    let owner_kind = job["metadata"]["ownerReferences"][0]["kind"]
+        .as_str()
+        .unwrap_or_default();
+    if owner_kind != "LatticeModel" {
+        return Err(format!(
+            "Job ownerReference kind should be 'LatticeModel', got: '{owner_kind}'"
+        ));
+    }
+
+    info!("[Model] Model download Job verified: python:3.11-slim, huggingface-cli, correct owner ref");
+    Ok(())
+}
+
+/// Verify ModelServing pod templates have scheduling gates and model volume
+async fn test_model_serving_has_download_injection(kubeconfig: &str) -> Result<(), String> {
+    info!("[Model] Verifying scheduling gates and model volume on ModelServing...");
+
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "modelservings.workload.serving.volcano.sh",
+        MODEL_NAME,
+        "-n",
+        MODEL_NAMESPACE,
+        "-o",
+        "json",
+    ])
+    .await?;
+
+    let ms: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse ModelServing JSON: {e}"))?;
+
+    let roles = ms["spec"]["template"]["roles"]
+        .as_array()
+        .ok_or("roles is not an array")?;
+
+    for role in roles {
+        let role_name = role["name"].as_str().unwrap_or("unknown");
+
+        // Check scheduling gate on entry template
+        let gates = role["entryTemplate"]["spec"]["schedulingGates"]
+            .as_array()
+            .ok_or(format!(
+                "role '{}' entryTemplate missing schedulingGates",
+                role_name
+            ))?;
+        let has_download_gate = gates
+            .iter()
+            .any(|g| g["name"] == "lattice.dev/model-download");
+        if !has_download_gate {
+            return Err(format!(
+                "role '{}' entryTemplate missing lattice.dev/model-download gate",
+                role_name
+            ));
+        }
+
+        // Check model-cache volume on entry template
+        let empty = vec![];
+        let volumes = role["entryTemplate"]["spec"]["volumes"]
+            .as_array()
+            .unwrap_or(&empty);
+        let has_model_volume = volumes.iter().any(|v| v["name"] == "model-cache");
+        if !has_model_volume {
+            return Err(format!(
+                "role '{}' entryTemplate missing model-cache volume",
+                role_name
+            ));
+        }
+
+        // Check volumeMount on entry template containers
+        let containers = role["entryTemplate"]["spec"]["containers"]
+            .as_array()
+            .ok_or(format!(
+                "role '{}' entryTemplate missing containers",
+                role_name
+            ))?;
+        for container in containers {
+            let c_name = container["name"].as_str().unwrap_or("unknown");
+            let mounts = container["volumeMounts"]
+                .as_array()
+                .unwrap_or(&empty);
+            let has_mount = mounts.iter().any(|m| {
+                m["name"] == "model-cache"
+                    && m["mountPath"] == "/models"
+                    && m["readOnly"] == true
+            });
+            if !has_mount {
+                return Err(format!(
+                    "role '{}' container '{}' missing model-cache volumeMount",
+                    role_name, c_name
+                ));
+            }
+        }
+
+        // Check worker template if present (decode role has workers)
+        if !role["workerTemplate"].is_null() {
+            let worker_gates = role["workerTemplate"]["spec"]["schedulingGates"]
+                .as_array()
+                .ok_or(format!(
+                    "role '{}' workerTemplate missing schedulingGates",
+                    role_name
+                ))?;
+            let worker_has_gate = worker_gates
+                .iter()
+                .any(|g| g["name"] == "lattice.dev/model-download");
+            if !worker_has_gate {
+                return Err(format!(
+                    "role '{}' workerTemplate missing lattice.dev/model-download gate",
+                    role_name
+                ));
+            }
+        }
+
+        info!(
+            "[Model] Role '{}': scheduling gate + model volume verified",
+            role_name
+        );
+    }
+
+    info!("[Model] All role templates have scheduling gates and model volume");
     Ok(())
 }
 
@@ -463,13 +793,24 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
             ));
         }
 
+        // Verify allowPeerTraffic is enabled (PD disaggregation: kvConnector + prefill/decode)
+        let peer_traffic = item["spec"]["allowPeerTraffic"]
+            .as_bool()
+            .unwrap_or(false);
+        if !peer_traffic {
+            return Err(format!(
+                "LatticeMeshMember '{}' should have allowPeerTraffic=true for PD disaggregation",
+                mm_name
+            ));
+        }
+
         info!(
-            "[Model] MeshMember '{}': Kthena router allowed, inference port present",
+            "[Model] MeshMember '{}': Kthena router allowed, inference port present, peer traffic enabled",
             mm_name
         );
     }
 
-    info!("[Model] All mesh members correctly configured for Kthena routing");
+    info!("[Model] All mesh members correctly configured for Kthena routing and PD disaggregation");
     Ok(())
 }
 
@@ -486,6 +827,11 @@ pub async fn run_model_tests(ctx: &InfraContext) -> Result<(), String> {
 
     // Deploy the model
     test_model_deployment(kubeconfig).await?;
+
+    // Verify download resources were created (modelSource configured)
+    test_model_download_pvc(kubeconfig).await?;
+    test_model_download_job(kubeconfig).await?;
+    test_model_serving_has_download_injection(kubeconfig).await?;
 
     // Verify resources were created
     test_model_serving_created(kubeconfig).await?;

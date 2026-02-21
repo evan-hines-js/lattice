@@ -50,8 +50,8 @@ pub use mesh_member::{
 pub use model_serving::{
     HeaderMatchValue, InferenceEngine, KvConnector, LatticeModel, LatticeModelSpec,
     LatticeModelStatus, ModelCondition, ModelMatch, ModelParentRef, ModelRoleSpec,
-    ModelRouteRule, ModelRouteSpec, ModelRoutingSpec, ModelServingPhase, RateLimit, RetryPolicy,
-    TargetModel, TrafficPolicy,
+    ModelRouteRule, ModelRouteSpec, ModelRoutingSpec, ModelServingPhase, ModelSourceSpec, RateLimit,
+    RetryPolicy, SecretKeySelector, TargetModel, TrafficPolicy,
 };
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,

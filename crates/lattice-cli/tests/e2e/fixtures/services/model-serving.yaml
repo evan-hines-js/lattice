@@ -7,6 +7,9 @@ spec:
   schedulerName: volcano
   recoveryPolicy: ServingGroupRecreate
   restartGracePeriodSeconds: 30
+  modelSource:
+    uri: "hf://Qwen/Qwen3-8B"
+    cacheSize: "50Gi"
   roles:
     prefill:
       replicas: 1
@@ -89,6 +92,11 @@ spec:
     inferenceEngine: vLLM
     model: "test-model/busybox"
     port: 8000
+    kvConnector:
+      type: nixl
+    trafficPolicy:
+      retry:
+        attempts: 3
     routes:
       default:
         rules:
