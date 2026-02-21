@@ -74,6 +74,12 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
 
     match phase {
         JobPhase::Pending => {
+            let volcano_api = ctx
+                .registry
+                .resolve(CrdKind::VolcanoJob)
+                .await
+                .ok_or(JobError::VolcanoCrdMissing)?;
+
             let compiled = compile_job(
                 &job,
                 &ctx.graph,
@@ -95,7 +101,8 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             // Register tasks in the graph after successful compilation
             register_graph(&job, &ctx.graph, namespace);
 
-            apply_compiled_job(&ctx.client, namespace, &compiled, &ctx).await?;
+            apply_compiled_job(&ctx.client, namespace, &compiled, &ctx.registry, &volcano_api)
+                .await?;
             update_status(
                 &ctx.client,
                 &name,
@@ -198,27 +205,14 @@ async fn apply_compiled_job(
     client: &Client,
     namespace: &str,
     compiled: &CompiledJob,
-    ctx: &JobContext,
+    registry: &CrdRegistry,
+    volcano_api: &ApiResource,
 ) -> Result<(), JobError> {
     let params = PatchParams::apply("lattice-job-controller").force();
 
     ensure_namespace(client, namespace).await?;
 
-    let volcano_api = ctx
-        .registry
-        .resolve(CrdKind::VolcanoJob)
-        .await
-        .ok_or(JobError::VolcanoCrdMissing)?;
-
-    apply_layers(
-        client,
-        namespace,
-        compiled,
-        &ctx.registry,
-        &volcano_api,
-        &params,
-    )
-    .await
+    apply_layers(client, namespace, compiled, registry, volcano_api, &params).await
 }
 
 async fn apply_layers(

@@ -6,10 +6,11 @@
 //! errors on ports that don't serve Prometheus metrics (HTTP APIs returning HTML,
 //! gRPC ports, etc.).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use kube::discovery::ApiResource;
-use kube::Client;
-use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
+use lattice_common::{CrdKind, CrdRegistry, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 
 use super::{ApplyLayer, CompiledService, DynamicResource};
 use crate::compiler::phase::{CompilationContext, CompilerPhase};
@@ -21,60 +22,19 @@ use crate::compiler::phase::{CompilationContext, CompilerPhase};
 /// - Monitoring is disabled on the cluster
 /// - The service has no port named `metrics`
 ///
-/// If the VMServiceScrape CRD was not discovered at startup (e.g. the VictoriaMetrics
-/// operator is installed in the background), the phase discovers it on demand from
-/// the API server. If the CRD is still not installed, the phase returns an error
-/// so the service retries until it becomes available.
+/// Uses the centralized `CrdRegistry` for lazy CRD discovery. If the VMServiceScrape
+/// CRD is not installed at startup, the registry discovers it on demand.
 pub struct VMServiceScrapePhase {
-    /// Cached ApiResource. Written once when first discovered.
-    api_resource: std::sync::RwLock<Option<ApiResource>>,
-    /// Client for on-demand CRD discovery. None in tests.
-    client: Option<Client>,
+    registry: Arc<CrdRegistry>,
 }
 
 impl VMServiceScrapePhase {
-    /// Create a new `VMServiceScrapePhase`.
-    ///
-    /// If the VMServiceScrape CRD was discovered at startup, pass `Some(ar)`.
-    /// If not, pass `None` — the phase will discover it on demand when a service
-    /// needs it.
-    pub fn new(api_resource: Option<ApiResource>, client: Option<Client>) -> Self {
-        Self {
-            api_resource: std::sync::RwLock::new(api_resource),
-            client,
-        }
+    pub fn new(registry: Arc<CrdRegistry>) -> Self {
+        Self { registry }
     }
 
-    /// Resolve the ApiResource, discovering from the API server if not cached.
-    ///
-    /// Returns `None` only when the CRD is genuinely not installed and there's
-    /// no client to attempt discovery.
     async fn resolve_api_resource(&self) -> Option<ApiResource> {
-        // Fast path: already resolved
-        {
-            let guard = self.api_resource.read().unwrap();
-            if let Some(ar) = guard.as_ref() {
-                return Some(ar.clone());
-            }
-        }
-
-        // Slow path: discover from API server
-        let client = self.client.as_ref()?;
-        let discovery = kube::discovery::Discovery::new(client.clone())
-            .run()
-            .await
-            .ok()?;
-        let discovered = lattice_common::kube_utils::find_discovered_resource(
-            &discovery,
-            "operator.victoriametrics.com",
-            "VMServiceScrape",
-        );
-
-        if let Some(ref ar) = discovered {
-            tracing::info!("discovered VMServiceScrape CRD on demand");
-            *self.api_resource.write().unwrap() = Some(ar.clone());
-        }
-        discovered
+        self.registry.resolve(CrdKind::VMServiceScrape).await
     }
 }
 
@@ -166,12 +126,8 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    /// Build a fake ApiResource for VMServiceScrape
-    fn fake_ar() -> ApiResource {
-        lattice_common::kube_utils::build_api_resource(
-            "operator.victoriametrics.com/v1beta1",
-            "VMServiceScrape",
-        )
+    fn test_registry() -> Arc<CrdRegistry> {
+        Arc::new(CrdRegistry::for_testing())
     }
 
     /// Build a minimal LatticeService with given ports
@@ -254,7 +210,7 @@ mod tests {
     async fn monitoring_disabled_produces_no_extensions() {
         let svc = make_service_with_ports("my-app", "default", &[("http", 80)]);
         let ctx = make_ctx(&svc, false);
-        let phase = VMServiceScrapePhase::new(Some(fake_ar()), None);
+        let phase = VMServiceScrapePhase::new(test_registry());
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).await.unwrap();
@@ -266,7 +222,7 @@ mod tests {
     async fn no_ports_produces_no_extensions() {
         let svc = make_service_with_ports("my-app", "default", &[]);
         let ctx = make_ctx(&svc, true);
-        let phase = VMServiceScrapePhase::new(Some(fake_ar()), None);
+        let phase = VMServiceScrapePhase::new(test_registry());
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).await.unwrap();
@@ -278,7 +234,7 @@ mod tests {
     async fn no_metrics_port_produces_no_extensions() {
         let svc = make_service_with_ports("my-app", "default", &[("http", 80), ("grpc", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = VMServiceScrapePhase::new(Some(fake_ar()), None);
+        let phase = VMServiceScrapePhase::new(test_registry());
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).await.unwrap();
@@ -290,7 +246,7 @@ mod tests {
     async fn crd_not_installed_no_metrics_port_is_noop() {
         let svc = make_service_with_ports("my-app", "default", &[("http", 80)]);
         let ctx = make_ctx(&svc, true);
-        let phase = VMServiceScrapePhase::new(None, None);
+        let phase = VMServiceScrapePhase::new(Arc::new(CrdRegistry::empty_for_testing()));
         let mut compiled = CompiledService::default();
 
         // No metrics port → no-op, even without CRD
@@ -303,7 +259,7 @@ mod tests {
         let svc = make_service_with_ports("my-app", "default", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
         // No CRD, no client → cannot discover
-        let phase = VMServiceScrapePhase::new(None, None);
+        let phase = VMServiceScrapePhase::new(Arc::new(CrdRegistry::empty_for_testing()));
         let mut compiled = CompiledService::default();
 
         let err = phase.compile(&ctx, &mut compiled).await.unwrap_err();
@@ -318,7 +274,7 @@ mod tests {
     async fn metrics_port_produces_vm_service_scrape() {
         let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = VMServiceScrapePhase::new(Some(fake_ar()), None);
+        let phase = VMServiceScrapePhase::new(test_registry());
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).await.unwrap();
@@ -342,7 +298,7 @@ mod tests {
 
         let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = VMServiceScrapePhase::new(Some(fake_ar()), None);
+        let phase = VMServiceScrapePhase::new(test_registry());
         let mut compiled = CompiledService {
             mesh_member: Some(LatticeMeshMember {
                 metadata: kube::api::ObjectMeta {
@@ -385,7 +341,7 @@ mod tests {
             &[("http", 80), ("metrics", 9090), ("grpc", 9000)],
         );
         let ctx = make_ctx(&svc, true);
-        let phase = VMServiceScrapePhase::new(Some(fake_ar()), None);
+        let phase = VMServiceScrapePhase::new(test_registry());
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).await.unwrap();
@@ -401,7 +357,7 @@ mod tests {
     async fn labels_and_selector_match_workload_compiler() {
         let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = VMServiceScrapePhase::new(Some(fake_ar()), None);
+        let phase = VMServiceScrapePhase::new(test_registry());
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).await.unwrap();
@@ -419,7 +375,7 @@ mod tests {
     async fn correct_namespace_and_api_version() {
         let svc = make_service_with_ports("my-app", "staging", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = VMServiceScrapePhase::new(Some(fake_ar()), None);
+        let phase = VMServiceScrapePhase::new(test_registry());
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).await.unwrap();
@@ -434,7 +390,7 @@ mod tests {
     async fn layer_is_infrastructure() {
         let svc = make_service_with_ports("my-app", "default", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);
-        let phase = VMServiceScrapePhase::new(Some(fake_ar()), None);
+        let phase = VMServiceScrapePhase::new(test_registry());
         let mut compiled = CompiledService::default();
 
         phase.compile(&ctx, &mut compiled).await.unwrap();
