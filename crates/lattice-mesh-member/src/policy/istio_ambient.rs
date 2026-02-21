@@ -254,6 +254,99 @@ impl<'a> PolicyCompiler<'a> {
         )
     }
 
+    /// Compile a ServiceEntry for an inline FQDN egress target.
+    ///
+    /// Unlike `compile_service_entry` (which uses graph-based external service nodes),
+    /// this generates a ServiceEntry from a bare FQDN declared inline in the workload spec.
+    pub(super) fn compile_fqdn_egress_service_entry(
+        &self,
+        service_name: &str,
+        namespace: &str,
+        fqdn: &str,
+        ports: &[u16],
+    ) -> ServiceEntry {
+        let se_ports: Vec<ServiceEntryPort> = ports
+            .iter()
+            .map(|&p| {
+                let protocol = match p {
+                    443 => "HTTPS",
+                    80 => "HTTP",
+                    _ => "TCP",
+                };
+                ServiceEntryPort {
+                    number: p,
+                    name: format!("{}-{}", protocol.to_lowercase(), p),
+                    protocol: protocol.to_string(),
+                }
+            })
+            .collect();
+
+        let metadata = ObjectMeta::new(
+            derived_name("se-auto-", &[namespace, service_name, fqdn]),
+            namespace,
+        )
+        .with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
+
+        ServiceEntry::new(
+            metadata,
+            ServiceEntrySpec {
+                hosts: vec![fqdn.to_string()],
+                ports: se_ports,
+                location: "MESH_EXTERNAL".to_string(),
+                resolution: "DNS".to_string(),
+            },
+        )
+    }
+
+    /// Compile an AuthorizationPolicy granting a service access to an inline FQDN egress target.
+    pub(super) fn compile_fqdn_egress_access_policy(
+        &self,
+        service: &ServiceNode,
+        namespace: &str,
+        fqdn: &str,
+        ports: &[u16],
+    ) -> AuthorizationPolicy {
+        let se_name = derived_name("se-auto-", &[namespace, &service.name, fqdn]);
+        let port_strings: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+
+        AuthorizationPolicy::new(
+            ObjectMeta::new(
+                derived_name("allow-fqdn-", &[namespace, &service.name, fqdn]),
+                namespace,
+            ),
+            AuthorizationPolicySpec {
+                target_refs: vec![TargetRef {
+                    group: "networking.istio.io".to_string(),
+                    kind: "ServiceEntry".to_string(),
+                    name: se_name,
+                }],
+                selector: None,
+                action: "ALLOW".to_string(),
+                rules: vec![AuthorizationRule {
+                    from: vec![AuthorizationSource {
+                        source: SourceSpec {
+                            principals: vec![mesh::trust_domain::principal(
+                                &self.cluster_name,
+                                namespace,
+                                service.sa_name(),
+                            )],
+                        },
+                    }],
+                    to: if port_strings.is_empty() {
+                        vec![]
+                    } else {
+                        vec![AuthorizationOperation {
+                            operation: OperationSpec {
+                                ports: port_strings,
+                                hosts: vec![],
+                            },
+                        }]
+                    },
+                }],
+            },
+        )
+    }
+
     /// Compile permissive mTLS policies for non-strict ports.
     ///
     /// - PeerAuthentication: STRICT default with PERMISSIVE overrides per port

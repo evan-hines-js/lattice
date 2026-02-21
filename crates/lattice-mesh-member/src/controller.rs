@@ -153,14 +153,8 @@ pub async fn reconcile(
         .transpose()
         .map_err(|e| ReconcileError::Validation(format!("ingress compilation: {e}")))?;
 
-    // Compile waypoint (if service has external dependencies)
-    let has_external_deps = outbound_edges.iter().any(|edge| {
-        ctx.graph
-            .get_service(&edge.callee_namespace, &edge.callee_name)
-            .map(|s| s.type_ == lattice_common::graph::ServiceType::External)
-            .unwrap_or(false)
-    });
-    let waypoint = if has_external_deps {
+    // Compile waypoint (if policies include ServiceEntries — external or inline FQDN egress)
+    let waypoint = if !policies.service_entries.is_empty() {
         Some(WaypointCompiler::compile(namespace))
     } else {
         None

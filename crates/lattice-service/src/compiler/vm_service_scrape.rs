@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use kube::discovery::ApiResource;
-use lattice_common::{CrdKind, CrdRegistry, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
+use lattice_common::{
+    CrdKind, CrdRegistry, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME,
+};
 
 use super::{ApplyLayer, CompiledService, DynamicResource};
 use crate::compiler::phase::{CompilationContext, CompilerPhase};

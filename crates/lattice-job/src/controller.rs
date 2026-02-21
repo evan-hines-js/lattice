@@ -101,8 +101,14 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             // Register tasks in the graph after successful compilation
             register_graph(&job, &ctx.graph, namespace);
 
-            apply_compiled_job(&ctx.client, namespace, &compiled, &ctx.registry, &volcano_api)
-                .await?;
+            apply_compiled_job(
+                &ctx.client,
+                namespace,
+                &compiled,
+                &ctx.registry,
+                &volcano_api,
+            )
+            .await?;
             update_status(
                 &ctx.client,
                 &name,
