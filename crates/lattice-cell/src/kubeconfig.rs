@@ -18,7 +18,7 @@ use tracing::{debug, info};
 ///
 /// A kubeconfig is considered patched if its server URL contains "/clusters/",
 /// which indicates it's using the proxy path format.
-pub fn is_kubeconfig_patched(kubeconfig_str: &str) -> bool {
+fn is_kubeconfig_patched(kubeconfig_str: &str) -> bool {
     kubeconfig_str.contains("/clusters/")
 }
 
@@ -40,7 +40,7 @@ pub fn is_kubeconfig_patched(kubeconfig_str: &str) -> bool {
 /// * `Ok(Some(patched))` - The patched kubeconfig as a JSON string
 /// * `Ok(None)` - Kubeconfig is already patched, no changes needed
 /// * `Err` - Failed to parse or serialize the kubeconfig
-pub fn patch_kubeconfig_yaml(
+fn patch_kubeconfig_yaml(
     kubeconfig_str: &str,
     proxy_url: &str,
     cluster_name: &str,

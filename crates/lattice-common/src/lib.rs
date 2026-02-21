@@ -171,14 +171,14 @@ impl CellEndpoint {
 /// This secret is created during bootstrap and contains the information
 /// needed to connect back to the parent cell.
 #[derive(Debug, Clone)]
-pub struct ParentConfig {
+pub struct ParentConnectionConfig {
     /// Parsed cell endpoint
     pub endpoint: CellEndpoint,
     /// CA certificate PEM for TLS verification
     pub ca_cert_pem: String,
 }
 
-impl ParentConfig {
+impl ParentConnectionConfig {
     /// Read parent config from the Kubernetes secret
     ///
     /// Returns `None` if the secret doesn't exist (indicating this is a root cluster).

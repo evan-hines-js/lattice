@@ -12,7 +12,7 @@ use lattice_common::crd::NetworkingSpec;
 /// Returns YAML strings for:
 /// - CiliumLoadBalancerIPPool (one per pool in networking spec)
 /// - CiliumL2AnnouncementPolicy (enables L2 announcements)
-pub fn generate_lb_resources(
+pub(crate) fn generate_lb_resources(
     networking: &NetworkingSpec,
 ) -> Result<Vec<String>, serde_json::Error> {
     let mut resources = Vec::new();

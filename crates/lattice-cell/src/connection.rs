@@ -226,6 +226,11 @@ const TEARDOWN_GUARD_TTL: Duration = Duration::from_secs(600);
 /// Connected agents that haven't sent a heartbeat within this window are considered stale.
 pub const HEARTBEAT_STALE_THRESHOLD: Duration = Duration::from_secs(90);
 
+/// TTL for pending K8s API responses and exec data in the cache.
+/// Entries older than this are evicted to prevent unbounded memory growth
+/// from unmatched request/response pairs.
+const PENDING_RESPONSE_TTL: Duration = Duration::from_secs(300);
+
 impl Default for AgentRegistry {
     fn default() -> Self {
         let (connection_tx, _) = broadcast::channel(CONNECTION_CHANNEL_CAPACITY);
@@ -237,10 +242,10 @@ impl Default for AgentRegistry {
             pending_batch_acks: DashMap::new(),
             pending_complete_acks: DashMap::new(),
             pending_k8s_responses: Cache::builder()
-                .time_to_live(Duration::from_secs(300))
+                .time_to_live(PENDING_RESPONSE_TTL)
                 .build(),
             pending_exec_data: moka::sync::Cache::builder()
-                .time_to_live(Duration::from_secs(300))
+                .time_to_live(PENDING_RESPONSE_TTL)
                 .build(),
             proxy_config: parking_lot::RwLock::new(None),
             connection_tx,

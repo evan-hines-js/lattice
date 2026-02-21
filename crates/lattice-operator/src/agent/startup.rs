@@ -16,7 +16,7 @@ use lattice_agent::{
     SharedK8sForwarder,
 };
 use lattice_common::{
-    ParentConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY, LATTICE_SYSTEM_NAMESPACE, TLS_CERT_KEY,
+    ParentConnectionConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY, LATTICE_SYSTEM_NAMESPACE, TLS_CERT_KEY,
     TLS_KEY_KEY,
 };
 
@@ -81,7 +81,7 @@ async fn start_agent_if_needed(
     exec_forwarder: SharedExecForwarder,
 ) -> anyhow::Result<Option<AgentClient>> {
     // Read parent config - if missing, this is a root cluster
-    let parent = match ParentConfig::read(client).await {
+    let parent = match ParentConnectionConfig::read(client).await {
         Ok(Some(config)) => config,
         Ok(None) => {
             tracing::debug!("No parent config secret, this is a root cluster");

@@ -61,8 +61,8 @@ use kube::api::Patch;
 use kube::{Api, Client, CustomResourceExt};
 use lattice_common::crd::{LatticeCluster, ProviderType};
 use lattice_common::{
-    LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_ENDPOINT_KEY,
-    PARENT_CONFIG_SECRET, REGISTRY_CREDENTIALS_SECRET,
+    CsrRequest, CsrResponse, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_CA_KEY,
+    PARENT_CONFIG_ENDPOINT_KEY, PARENT_CONFIG_SECRET, REGISTRY_CREDENTIALS_SECRET,
 };
 #[cfg(test)]
 use lattice_infra::pki::CertificateAuthority;
@@ -144,21 +144,6 @@ pub struct BootstrapResponse {
     pub manifests: Vec<String>,
 }
 
-/// CSR signing request from agent
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CsrRequest {
-    /// CSR in PEM format
-    pub csr_pem: String,
-}
-
-/// CSR signing response with signed certificate
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CsrResponse {
-    /// Signed certificate in PEM format
-    pub certificate_pem: String,
-    /// CA certificate in PEM format (for verifying peer)
-    pub ca_certificate_pem: String,
-}
 
 /// Configuration for registering a cluster for bootstrap
 ///

@@ -24,7 +24,7 @@ use crate::graph::ServiceGraph;
 
 use super::context::ResourceOutputs;
 use super::error::TemplateError;
-pub use super::output::ProvisionOutput;
+use super::output::ProvisionOutput;
 
 /// Context provided to provisioners during resolution
 pub struct ProvisionerContext<'a> {

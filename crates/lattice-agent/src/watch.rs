@@ -21,7 +21,7 @@ use crate::executor::build_url;
 use lattice_proto::{agent_message::Payload, AgentMessage, KubernetesRequest, KubernetesResponse};
 
 /// Build a streaming response chunk (pure function)
-pub fn build_stream_chunk_response(request_id: &str, body: Vec<u8>) -> KubernetesResponse {
+fn build_stream_chunk_response(request_id: &str, body: Vec<u8>) -> KubernetesResponse {
     KubernetesResponse {
         request_id: request_id.to_string(),
         status_code: 200,
@@ -34,7 +34,7 @@ pub fn build_stream_chunk_response(request_id: &str, body: Vec<u8>) -> Kubernete
 }
 
 /// Build an error response for watch failures (pure function)
-pub fn build_watch_error_response(
+fn build_watch_error_response(
     request_id: &str,
     status_code: u32,
     error: &str,
@@ -50,7 +50,7 @@ pub fn build_watch_error_response(
 }
 
 /// Build a stream end response (pure function)
-pub fn build_stream_end_response(request_id: &str) -> KubernetesResponse {
+fn build_stream_end_response(request_id: &str) -> KubernetesResponse {
     KubernetesResponse {
         request_id: request_id.to_string(),
         streaming: true,

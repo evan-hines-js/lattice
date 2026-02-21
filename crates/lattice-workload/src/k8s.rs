@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-pub use lattice_common::kube_utils::ObjectMeta;
+use lattice_common::kube_utils::ObjectMeta;
 use serde::{Deserialize, Serialize};
 
 // =============================================================================

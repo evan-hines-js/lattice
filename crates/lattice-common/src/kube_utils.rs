@@ -152,7 +152,7 @@ pub trait HasApiResource {
 ///
 /// # Returns
 /// The full api_version string (e.g., "cluster.x-k8s.io/v1beta2")
-pub async fn discover_api_version(
+pub(crate) async fn discover_api_version(
     client: &Client,
     group: &str,
     kind: &str,
@@ -254,7 +254,7 @@ pub fn build_api_resource(api_version: &str, kind: &str) -> ApiResource {
 /// Returns `None` if the CRD is not installed (not an error). Use this when
 /// you've already run `Discovery::new(client).run().await` and want to look up
 /// multiple resources from the same discovery pass.
-pub fn find_discovered_resource(
+pub(crate) fn find_discovered_resource(
     discovery: &kube::discovery::Discovery,
     group: &str,
     kind: &str,
@@ -372,7 +372,7 @@ impl HasConditionFields for k8s_openapi::api::apps::v1::DeploymentCondition {
 ///
 /// # Returns
 /// `Ok(())` if the condition was met, or `Err` on timeout or check failure
-pub async fn poll_until<F, Fut>(
+pub(crate) async fn poll_until<F, Fut>(
     timeout: Duration,
     poll_interval: Duration,
     timeout_msg: impl Into<String>,
@@ -739,19 +739,19 @@ pub async fn create_namespace(client: &Client, name: &str) -> Result<(), Error> 
 
 /// Parsed manifest metadata for applying to Kubernetes
 #[derive(Debug, Clone)]
-pub struct ManifestMetadata {
+pub(crate) struct ManifestMetadata {
     /// The parsed JSON value
-    pub value: serde_json::Value,
+    pub(crate) value: serde_json::Value,
     /// Resource name
-    pub name: String,
+    pub(crate) name: String,
     /// Optional namespace
-    pub namespace: Option<String>,
+    pub(crate) namespace: Option<String>,
     /// API resource definition
-    pub api_resource: ApiResource,
+    pub(crate) api_resource: ApiResource,
 }
 
 /// Parse a manifest and extract its metadata
-pub fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> {
+pub(crate) fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> {
     // Parse the manifest - try JSON first, then YAML
     let value: serde_json::Value = if manifest.trim().starts_with('{') {
         serde_json::from_str(manifest).map_err(|e| {
@@ -820,7 +820,7 @@ pub fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> {
 /// assert_eq!(group, "");
 /// assert_eq!(version, "v1");
 /// ```
-pub fn parse_api_version(api_version: &str) -> (String, String) {
+pub(crate) fn parse_api_version(api_version: &str) -> (String, String) {
     if api_version.contains('/') {
         let parts: Vec<&str> = api_version.split('/').collect();
         (parts[0].to_string(), parts[1].to_string())
@@ -834,42 +834,26 @@ pub async fn apply_manifest(client: &Client, manifest: &str) -> Result<(), Error
     let metadata = parse_manifest(manifest)?;
     let patch_params = PatchParams::apply("lattice").force();
 
-    if let Some(ns) = &metadata.namespace {
-        let api: Api<DynamicObject> =
-            Api::namespaced_with(client.clone(), ns, &metadata.api_resource);
-        api.patch(
-            &metadata.name,
-            &patch_params,
-            &Patch::Apply(&metadata.value),
+    let api: Api<DynamicObject> = match &metadata.namespace {
+        Some(ns) => Api::namespaced_with(client.clone(), ns, &metadata.api_resource),
+        None => Api::all_with(client.clone(), &metadata.api_resource),
+    };
+
+    api.patch(
+        &metadata.name,
+        &patch_params,
+        &Patch::Apply(&metadata.value),
+    )
+    .await
+    .map_err(|e| {
+        Error::internal_with_context(
+            "apply_manifest",
+            format!(
+                "Failed to apply {}/{}: {}",
+                metadata.api_resource.kind, metadata.name, e
+            ),
         )
-        .await
-        .map_err(|e| {
-            Error::internal_with_context(
-                "apply_manifest",
-                format!(
-                    "Failed to apply {}/{}: {}",
-                    metadata.api_resource.kind, metadata.name, e
-                ),
-            )
-        })?;
-    } else {
-        let api: Api<DynamicObject> = Api::all_with(client.clone(), &metadata.api_resource);
-        api.patch(
-            &metadata.name,
-            &patch_params,
-            &Patch::Apply(&metadata.value),
-        )
-        .await
-        .map_err(|e| {
-            Error::internal_with_context(
-                "apply_manifest",
-                format!(
-                    "Failed to apply {}/{}: {}",
-                    metadata.api_resource.kind, metadata.name, e
-                ),
-            )
-        })?;
-    }
+    })?;
 
     Ok(())
 }
@@ -997,7 +981,7 @@ pub fn kind_priority(kind: &str) -> u8 {
 /// Handles both YAML (`kind: Foo`) and pretty-printed JSON (`"kind": "Foo"`).
 /// JSON support is needed because Istio/Cilium policies are serialized via
 /// `serde_json::to_string_pretty` and must be ordered correctly during apply.
-pub fn extract_kind(manifest: &str) -> &str {
+pub(crate) fn extract_kind(manifest: &str) -> &str {
     for line in manifest.lines() {
         let trimmed = line.trim();
 
