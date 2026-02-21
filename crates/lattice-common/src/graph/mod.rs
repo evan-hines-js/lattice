@@ -362,6 +362,70 @@ pub struct ActiveEdge {
     pub callee_name: String,
 }
 
+/// Compute a stable hash of active edges for change detection.
+///
+/// Sorts edges by namespace/name so the hash is stable regardless of graph
+/// iteration order, then feeds the result through `deterministic_hash`.
+pub fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
+    use std::fmt::Write;
+
+    let mut sorted_in: Vec<_> = inbound
+        .iter()
+        .map(|e| (&e.caller_namespace, &e.caller_name))
+        .collect();
+    sorted_in.sort();
+
+    let mut sorted_out: Vec<_> = outbound
+        .iter()
+        .map(|e| (&e.callee_namespace, &e.callee_name))
+        .collect();
+    sorted_out.sort();
+
+    let mut input = String::new();
+    for (ns, name) in &sorted_in {
+        let _ = write!(input, "in:{ns}/{name}->");
+    }
+    for (ns, name) in &sorted_out {
+        let _ = write!(input, "out:{ns}/{name}->");
+    }
+    crate::deterministic_hash(&input)
+}
+
+/// Compute a stable hash of active edges plus policy epochs.
+///
+/// Extends `compute_edge_hash` with policy and cedar epoch suffixes so that
+/// policy changes trigger re-reconciliation even when the graph topology is unchanged.
+pub fn compute_edge_hash_with_epochs(
+    inbound: &[ActiveEdge],
+    outbound: &[ActiveEdge],
+    policy_epoch: u64,
+    cedar_epoch: u64,
+) -> String {
+    use std::fmt::Write;
+
+    let mut sorted_in: Vec<_> = inbound
+        .iter()
+        .map(|e| (&e.caller_namespace, &e.caller_name))
+        .collect();
+    sorted_in.sort();
+
+    let mut sorted_out: Vec<_> = outbound
+        .iter()
+        .map(|e| (&e.callee_namespace, &e.callee_name))
+        .collect();
+    sorted_out.sort();
+
+    let mut input = String::new();
+    for (ns, name) in &sorted_in {
+        let _ = write!(input, "in:{ns}/{name}->");
+    }
+    for (ns, name) in &sorted_out {
+        let _ = write!(input, "out:{ns}/{name}->");
+    }
+    let _ = write!(input, "policy:{policy_epoch},cedar:{cedar_epoch}");
+    crate::deterministic_hash(&input)
+}
+
 /// A cached policy node in the service graph
 #[derive(Clone, Debug)]
 pub struct PolicyNode {
@@ -818,6 +882,26 @@ impl ServiceGraph {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Find an external service CRD that governs the given host.
+    ///
+    /// Iterates external service nodes in the namespace and checks if any
+    /// endpoint matches the host. Returns the CRD name if found, None if
+    /// the host is ungoverned.
+    pub fn find_external_by_host(&self, namespace: &str, host: &str) -> Option<String> {
+        self.ns_index.get(namespace).and_then(|index| {
+            index.iter().find_map(|name| {
+                let node = self.get_service(namespace, name)?;
+                if node.type_ == ServiceType::External
+                    && node.endpoints.values().any(|ep| ep.host == host)
+                {
+                    Some(node.name.clone())
+                } else {
+                    None
+                }
+            })
+        })
     }
 
     /// List all mesh members in a namespace
@@ -1922,6 +2006,50 @@ mod tests {
         let inbound = graph.get_active_inbound_edges("prod", "api");
         assert_eq!(inbound.len(), 1);
         assert_eq!(inbound[0].caller_name, VMAGENT_NODE_NAME);
+    }
+
+    // =========================================================================
+    // find_external_by_host Tests
+    // =========================================================================
+
+    #[test]
+    fn test_find_external_by_host_found() {
+        let graph = ServiceGraph::new();
+        let ext_spec = make_external_spec(vec!["*"]);
+        graph.put_external_service("prod", "stripe", &ext_spec);
+
+        let result = graph.find_external_by_host("prod", "api.example.com");
+        assert_eq!(result, Some("stripe".to_string()));
+    }
+
+    #[test]
+    fn test_find_external_by_host_not_found() {
+        let graph = ServiceGraph::new();
+        let ext_spec = make_external_spec(vec!["*"]);
+        graph.put_external_service("prod", "stripe", &ext_spec);
+
+        let result = graph.find_external_by_host("prod", "unknown.example.com");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_external_by_host_wrong_namespace() {
+        let graph = ServiceGraph::new();
+        let ext_spec = make_external_spec(vec!["*"]);
+        graph.put_external_service("prod", "stripe", &ext_spec);
+
+        let result = graph.find_external_by_host("staging", "api.example.com");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_external_by_host_ignores_local_services() {
+        let graph = ServiceGraph::new();
+        let local_spec = make_service_spec(vec![], vec![]);
+        graph.put_service("prod", "api", &local_spec);
+
+        let result = graph.find_external_by_host("prod", "api");
+        assert_eq!(result, None);
     }
 
     #[test]

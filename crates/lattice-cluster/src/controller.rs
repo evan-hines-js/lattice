@@ -180,19 +180,13 @@ impl KubeClientImpl {
 #[async_trait]
 impl KubeClient for KubeClientImpl {
     async fn patch_status(&self, name: &str, status: &LatticeClusterStatus) -> Result<(), Error> {
-        let api: Api<LatticeCluster> = Api::all(self.client.clone());
-
-        let status_patch = serde_json::json!({
-            "status": status
-        });
-
-        api.patch_status(
+        lattice_common::kube_utils::patch_cluster_resource_status::<LatticeCluster>(
+            &self.client,
             name,
-            &PatchParams::apply("lattice-controller"),
-            &Patch::Merge(&status_patch),
+            status,
+            "lattice-cluster-controller",
         )
         .await?;
-
         Ok(())
     }
 
@@ -222,34 +216,18 @@ impl KubeClient for KubeClientImpl {
     }
 
     async fn ensure_namespace(&self, name: &str) -> Result<(), Error> {
-        use k8s_openapi::api::core::v1::Namespace;
-        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-
-        let api: Api<Namespace> = Api::all(self.client.clone());
-
-        // Check if namespace already exists
-        if get_optional(&api, name).await?.is_some() {
-            debug!(namespace = %name, "namespace already exists");
-            return Ok(());
-        }
-
-        // Create the namespace
-        let ns = Namespace {
-            metadata: ObjectMeta {
-                name: Some(name.to_string()),
-                labels: Some(std::collections::BTreeMap::from([(
-                    lattice_common::LABEL_MANAGED_BY.to_string(),
-                    lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
-                )])),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        info!(namespace = %name, "creating namespace for CAPI resources");
-        api.create(&Default::default(), &ns).await?;
-        info!(namespace = %name, "namespace created");
-
+        let labels = std::collections::BTreeMap::from([(
+            lattice_common::LABEL_MANAGED_BY.to_string(),
+            lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
+        )]);
+        lattice_common::kube_utils::ensure_namespace_with_labels(
+            &self.client,
+            name,
+            &labels,
+            "lattice-cluster-controller",
+        )
+        .await?;
+        debug!(namespace = %name, "ensured namespace exists");
         Ok(())
     }
 
@@ -387,7 +365,7 @@ impl KubeClient for KubeClientImpl {
 
         api.patch(
             cluster_name,
-            &PatchParams::apply("lattice-controller"),
+            &PatchParams::apply("lattice-cluster-controller"),
             &Patch::Merge(&patch),
         )
         .await?;
@@ -425,7 +403,7 @@ impl KubeClient for KubeClientImpl {
 
         api.patch(
             cluster_name,
-            &PatchParams::apply("lattice-controller"),
+            &PatchParams::apply("lattice-cluster-controller"),
             &Patch::Merge(&patch),
         )
         .await?;
@@ -1187,7 +1165,7 @@ impl PivotOperations for PivotOperationsImpl {
         if let Err(e) = api
             .patch_status(
                 cluster_name,
-                &PatchParams::apply("lattice-operator"),
+                &PatchParams::apply("lattice-cluster-controller"),
                 &Patch::Merge(&patch),
             )
             .await

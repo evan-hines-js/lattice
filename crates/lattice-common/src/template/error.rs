@@ -17,6 +17,8 @@ pub enum TemplateError {
     Base64(String),
     /// Container image "." placeholder has no config value
     MissingImage(String),
+    /// Inline access denied because an external service CRD governs this host
+    PermissionDenied(String),
 }
 
 impl TemplateError {
@@ -39,6 +41,7 @@ impl fmt::Display for TemplateError {
                 "container '{}' has image: \".\" but no image found in config (expected config.image.{} or config.image)",
                 container, container
             ),
+            Self::PermissionDenied(msg) => write!(f, "permission denied: {}", msg),
         }
     }
 }

@@ -11,7 +11,7 @@ use std::time::Duration;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Namespace, Node, Secret};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
-use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::discovery::ApiResource;
 use kube::{Client, Config};
@@ -715,26 +715,98 @@ pub fn build_cell_service(
     }
 }
 
-/// Create a namespace (idempotent)
-pub async fn create_namespace(client: &Client, name: &str) -> Result<(), Error> {
-    let namespaces: Api<Namespace> = Api::all(client.clone());
+/// Ensure a namespace exists (idempotent).
+///
+/// Uses server-side apply so it never fails on "already exists" and doesn't
+/// race with concurrent creators.
+pub async fn ensure_namespace(
+    client: &Client,
+    name: &str,
+    field_manager: &str,
+) -> Result<(), kube::Error> {
+    let api: Api<Namespace> = Api::all(client.clone());
+    let ns = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": { "name": name }
+    });
+    api.patch(name, &PatchParams::apply(field_manager), &Patch::Apply(&ns))
+        .await?;
+    Ok(())
+}
 
-    let ns = Namespace {
-        metadata: kube::core::ObjectMeta {
-            name: Some(name.to_string()),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+/// Ensure a namespace exists with specific labels (idempotent).
+///
+/// Same as [`ensure_namespace`] but also applies the given labels via
+/// server-side apply.
+pub async fn ensure_namespace_with_labels(
+    client: &Client,
+    name: &str,
+    labels: &BTreeMap<String, String>,
+    field_manager: &str,
+) -> Result<(), kube::Error> {
+    let api: Api<Namespace> = Api::all(client.clone());
+    let ns = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": name,
+            "labels": labels
+        }
+    });
+    api.patch(name, &PatchParams::apply(field_manager), &Patch::Apply(&ns))
+        .await?;
+    Ok(())
+}
 
-    match namespaces.create(&PostParams::default(), &ns).await {
-        Ok(_) => Ok(()),
-        Err(kube::Error::Api(e)) if e.code == 409 => Ok(()), // Already exists
-        Err(e) => Err(Error::internal_with_context(
-            "create_namespace",
-            format!("Failed to create namespace {}: {}", name, e),
-        )),
-    }
+/// Patch the status sub-resource of a namespaced Kubernetes resource.
+///
+/// Serializes `status` into `{ "status": <status> }` and applies it via
+/// merge-patch. This is the standard pattern used by all Lattice controllers.
+///
+/// Returns `kube::Error` so callers can map to their own error type.
+pub async fn patch_resource_status<T>(
+    client: &Client,
+    name: &str,
+    namespace: &str,
+    status: &impl serde::Serialize,
+    field_manager: &str,
+) -> std::result::Result<(), kube::Error>
+where
+    T: kube::Resource<Scope = k8s_openapi::NamespaceResourceScope>
+        + Clone
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug,
+    <T as kube::Resource>::DynamicType: Default,
+{
+    let api: Api<T> = Api::namespaced(client.clone(), namespace);
+    let patch = serde_json::json!({ "status": status });
+    api.patch_status(name, &PatchParams::apply(field_manager), &Patch::Merge(&patch))
+        .await?;
+    Ok(())
+}
+
+/// Patch the status sub-resource of a cluster-scoped Kubernetes resource.
+///
+/// Same as [`patch_resource_status`] but for cluster-scoped (non-namespaced) resources.
+pub async fn patch_cluster_resource_status<T>(
+    client: &Client,
+    name: &str,
+    status: &impl serde::Serialize,
+    field_manager: &str,
+) -> std::result::Result<(), kube::Error>
+where
+    T: kube::Resource<Scope = k8s_openapi::ClusterResourceScope>
+        + Clone
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug,
+    <T as kube::Resource>::DynamicType: Default,
+{
+    let api: Api<T> = Api::all(client.clone());
+    let patch = serde_json::json!({ "status": status });
+    api.patch_status(name, &PatchParams::apply(field_manager), &Patch::Merge(&patch))
+        .await?;
+    Ok(())
 }
 
 /// Parsed manifest metadata for applying to Kubernetes

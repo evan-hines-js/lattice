@@ -502,13 +502,24 @@ pub(crate) fn validate_command_path(
     container_name: &str,
 ) -> Result<(), crate::Error> {
     if let Some(cmd) = command {
-        if let Some(binary) = cmd.first() {
-            if !binary.starts_with('/') {
-                return Err(crate::Error::validation(format!(
-                    "container '{}': command[0] '{}' must be an absolute path (start with '/')",
-                    container_name, binary
-                )));
-            }
+        validate_absolute_command(cmd, container_name)?;
+    }
+    Ok(())
+}
+
+/// Validate that a non-optional command's first element is an absolute path.
+///
+/// Shared by container command validation and backup hook command validation.
+pub fn validate_absolute_command(
+    command: &[String],
+    context_name: &str,
+) -> Result<(), crate::Error> {
+    if let Some(binary) = command.first() {
+        if !binary.starts_with('/') {
+            return Err(crate::Error::validation(format!(
+                "'{}': command[0] '{}' must be an absolute path (start with '/')",
+                context_name, binary
+            )));
         }
     }
     Ok(())
@@ -728,7 +739,11 @@ mod tests {
     #[test]
     fn test_command_absolute_path_passes() {
         assert!(validate_command_path(&Some(vec!["/usr/bin/app".to_string()]), "main").is_ok());
-        assert!(validate_command_path(&Some(vec!["/bin/sh".to_string(), "-c".to_string()]), "main").is_ok());
+        assert!(validate_command_path(
+            &Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
+            "main"
+        )
+        .is_ok());
         assert!(validate_command_path(&None, "main").is_ok());
     }
 
@@ -736,14 +751,20 @@ mod tests {
     fn test_command_relative_path_fails() {
         let result = validate_command_path(&Some(vec!["app".to_string()]), "main");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an absolute path"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an absolute path"));
     }
 
     #[test]
     fn test_command_empty_string_fails() {
         let result = validate_command_path(&Some(vec!["".to_string()]), "main");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an absolute path"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an absolute path"));
     }
 
     #[test]
@@ -756,7 +777,10 @@ mod tests {
         };
         let result = sidecar.validate("setup");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("init containers must specify a command"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("init containers must specify a command"));
     }
 
     #[test]
@@ -764,7 +788,11 @@ mod tests {
         let sidecar = SidecarSpec {
             image: "busybox:latest".to_string(),
             init: Some(true),
-            command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), "setup".to_string()]),
+            command: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "setup".to_string(),
+            ]),
             ..Default::default()
         };
         assert!(sidecar.validate("setup").is_ok());
@@ -790,6 +818,9 @@ mod tests {
         };
         let result = sidecar.validate("setup");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an absolute path"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an absolute path"));
     }
 }

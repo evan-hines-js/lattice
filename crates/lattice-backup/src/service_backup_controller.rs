@@ -20,8 +20,7 @@ use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE
 use crate::cluster_backup_controller::resolve_store;
 use crate::velero::{self, build_service_schedule};
 
-const REQUEUE_SUCCESS_SECS: u64 = 300;
-const REQUEUE_ERROR_SECS: u64 = 60;
+use crate::{REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 
 /// Reconcile a LatticeService's backup schedule
 ///

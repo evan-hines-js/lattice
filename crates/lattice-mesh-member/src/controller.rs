@@ -22,7 +22,7 @@ use lattice_common::crd::{
     Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberStatus, MeshMemberPhase,
     MeshMemberScope, MeshMemberTarget,
 };
-use lattice_common::graph::{ActiveEdge, ServiceGraph};
+use lattice_common::graph::{compute_edge_hash, ServiceGraph};
 use lattice_common::mesh;
 use lattice_common::{CrdKind, CrdRegistry, ReconcileError};
 
@@ -153,14 +153,8 @@ pub async fn reconcile(
         .transpose()
         .map_err(|e| ReconcileError::Validation(format!("ingress compilation: {e}")))?;
 
-    // Compile waypoint (if service has external dependencies)
-    let has_external_deps = outbound_edges.iter().any(|edge| {
-        ctx.graph
-            .get_service(&edge.callee_namespace, &edge.callee_name)
-            .map(|s| s.type_ == lattice_common::graph::ServiceType::External)
-            .unwrap_or(false)
-    });
-    let waypoint = if has_external_deps {
+    // Compile waypoint (if policies include ServiceEntries — external or inline FQDN egress)
+    let waypoint = if !policies.service_entries.is_empty() {
         Some(WaypointCompiler::compile(namespace))
     } else {
         None
@@ -252,27 +246,13 @@ pub fn error_policy(
 
 /// Ensure namespace has `istio.io/dataplane-mode: ambient` label
 async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<(), ReconcileError> {
-    use k8s_openapi::api::core::v1::Namespace;
-
-    let api: Api<Namespace> = Api::all(client.clone());
-    let ns = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Namespace",
-        "metadata": {
-            "name": namespace,
-            "labels": {
-                mesh::DATAPLANE_MODE_LABEL: mesh::DATAPLANE_MODE_AMBIENT
-            }
-        }
-    });
-
-    api.patch(
-        namespace,
-        &PatchParams::apply(FIELD_MANAGER),
-        &Patch::Apply(&ns),
-    )
-    .await
-    .map_err(|e| ReconcileError::Kube(format!("ensure namespace ambient: {e}")))?;
+    let labels = std::collections::BTreeMap::from([(
+        mesh::DATAPLANE_MODE_LABEL.to_string(),
+        mesh::DATAPLANE_MODE_AMBIENT.to_string(),
+    )]);
+    lattice_common::kube_utils::ensure_namespace_with_labels(client, namespace, &labels, FIELD_MANAGER)
+        .await
+        .map_err(|e| ReconcileError::Kube(format!("ensure namespace ambient: {e}")))?;
 
     debug!(namespace = %namespace, "ensured namespace ambient mode");
     Ok(())
@@ -587,39 +567,6 @@ async fn apply_waypoint(
 // =============================================================================
 // Status helpers
 // =============================================================================
-
-/// Compute a stable hash of the active edges for change detection.
-///
-/// When bilateral agreements change (e.g., a new caller declares a dependency),
-/// the edge hash changes even though this member's spec/generation doesn't.
-fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
-    use std::fmt::Write;
-
-    // Sort edges so the hash is stable regardless of graph iteration order.
-    // The graph's edges_in Vec can be reordered by put_node remove+re-insert
-    // cycles, which would otherwise cause spurious hash mismatches and tight
-    // reconciliation loops.
-    let mut sorted_in: Vec<_> = inbound
-        .iter()
-        .map(|e| (&e.caller_namespace, &e.caller_name))
-        .collect();
-    sorted_in.sort();
-
-    let mut sorted_out: Vec<_> = outbound
-        .iter()
-        .map(|e| (&e.callee_namespace, &e.callee_name))
-        .collect();
-    sorted_out.sort();
-
-    let mut input = String::new();
-    for (ns, name) in &sorted_in {
-        let _ = write!(input, "in:{ns}/{name}->");
-    }
-    for (ns, name) in &sorted_out {
-        let _ = write!(input, "out:{ns}/{name}->");
-    }
-    lattice_common::deterministic_hash(&input)
-}
 
 /// Skip reconciliation when the spec (generation) AND graph topology (edge hash) are unchanged.
 ///

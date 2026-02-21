@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, DynamicObject, Patch, PatchParams};
+use kube::api::{Api, DynamicObject, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
@@ -101,8 +101,14 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             // Register tasks in the graph after successful compilation
             register_graph(&job, &ctx.graph, namespace);
 
-            apply_compiled_job(&ctx.client, namespace, &compiled, &ctx.registry, &volcano_api)
-                .await?;
+            apply_compiled_job(
+                &ctx.client,
+                namespace,
+                &compiled,
+                &ctx.registry,
+                &volcano_api,
+            )
+            .await?;
             update_status(
                 &ctx.client,
                 &name,
@@ -308,20 +314,7 @@ async fn apply_layers(
 }
 
 async fn ensure_namespace(client: &Client, name: &str) -> Result<(), JobError> {
-    use k8s_openapi::api::core::v1::Namespace;
-
-    let api: Api<Namespace> = Api::all(client.clone());
-    let ns = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Namespace",
-        "metadata": { "name": name }
-    });
-    api.patch(
-        name,
-        &PatchParams::apply("lattice-job-controller"),
-        &Patch::Apply(&ns),
-    )
-    .await?;
+    lattice_common::kube_utils::ensure_namespace(client, name, "lattice-job-controller").await?;
     Ok(())
 }
 
@@ -373,17 +366,17 @@ async fn update_status(
     message: Option<&str>,
     observed_generation: Option<i64>,
 ) -> Result<(), JobError> {
-    let api: Api<LatticeJob> = Api::namespaced(client.clone(), namespace);
     let status = LatticeJobStatus {
         phase,
         message: message.map(|m| m.to_string()),
         observed_generation,
     };
-    let status_patch = serde_json::json!({ "status": status });
-    api.patch_status(
+    lattice_common::kube_utils::patch_resource_status::<LatticeJob>(
+        client,
         name,
-        &PatchParams::apply("lattice-job-controller"),
-        &Patch::Merge(&status_patch),
+        namespace,
+        &status,
+        "lattice-job-controller",
     )
     .await?;
     Ok(())

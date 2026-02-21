@@ -87,16 +87,19 @@ END {
 '
 
 # Run the check
-# Exclude: build.rs (compile-time), tests/ (E2E tests), benches/ (benchmarks)
+# Exclude: build.rs (compile-time), tests/ (E2E tests), benches/ (benchmarks),
+#          tests.rs (always #[cfg(test)] modules referenced from parent mod.rs)
 if [[ "$VERBOSE" == "--verbose" || "$VERBOSE" == "-v" ]]; then
     find crates -name "*.rs" \
         -not -name "build.rs" \
+        -not -name "tests.rs" \
         -not -path "*/tests/*" \
         -not -path "*/benches/*" \
         -print0 | xargs -0 gawk -v verbose=1 -v max_expect="$MAX_EXPECT" "$AWK_SCRIPT"
 else
     find crates -name "*.rs" \
         -not -name "build.rs" \
+        -not -name "tests.rs" \
         -not -path "*/tests/*" \
         -not -path "*/benches/*" \
         -print0 | xargs -0 gawk -v verbose=0 -v max_expect="$MAX_EXPECT" "$AWK_SCRIPT"
