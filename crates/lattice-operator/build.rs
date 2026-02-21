@@ -19,13 +19,10 @@ struct Versions {
 #[derive(Debug, Clone, Deserialize)]
 struct Chart {
     version: String,
-    repo: String,
+    #[serde(default)]
+    repo: Option<String>,
     chart: String,
     filename: String,
-    #[serde(default)]
-    oci: bool,
-    #[serde(default)]
-    version_prefix: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,13 +141,14 @@ fn download_charts(
 
     std::fs::create_dir_all(charts_dir)?;
 
-    // Collect unique repos (skip OCI repos)
+    // Collect unique repos (skip OCI charts)
     let mut repos: HashMap<String, String> = HashMap::new();
     for chart in versions.charts.values() {
-        if !chart.oci && !repos.contains_key(&chart.repo) {
-            // Extract repo name from chart name (e.g., "cilium/cilium" -> "cilium")
-            if let Some(repo_name) = chart.chart.split('/').next() {
-                repos.insert(chart.repo.clone(), repo_name.to_string());
+        if let Some(repo) = &chart.repo {
+            if !chart.chart.starts_with("oci://") && !repos.contains_key(repo) {
+                if let Some(repo_name) = chart.chart.split('/').next() {
+                    repos.insert(repo.clone(), repo_name.to_string());
+                }
             }
         }
     }
@@ -165,17 +163,17 @@ fn download_charts(
 
     // Download missing charts
     for (name, chart, _path) in &missing {
-        let version = if chart.version_prefix.is_empty() {
-            chart.version.clone()
-        } else {
-            format!("{}{}", chart.version_prefix, chart.version)
-        };
-
         eprintln!("Downloading {} chart v{}...", name, chart.version);
 
-        if chart.oci {
+        if chart.chart.starts_with("oci://") {
             let _ = Command::new("helm")
-                .args(["pull", &chart.chart, "--version", &version, "--destination"])
+                .args([
+                    "pull",
+                    &chart.chart,
+                    "--version",
+                    &format!("v{}", chart.version),
+                    "--destination",
+                ])
                 .arg(charts_dir)
                 .status();
         } else {

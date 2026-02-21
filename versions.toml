@@ -105,6 +105,11 @@ filename = "volcano-{version}.tgz"
 # Model Serving
 # =============================================================================
 
+[charts.kthena]
+version = "0.2.0"
+chart = "oci://ghcr.io/volcano-sh/charts/kthena"
+filename = "kthena-v{version}.tgz"
+
 [runtimes.model-loader]
 version = "v1"
 

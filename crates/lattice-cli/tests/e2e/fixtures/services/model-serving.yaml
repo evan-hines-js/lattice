@@ -1,0 +1,97 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeModel
+metadata:
+  name: llm-serving
+  namespace: serving
+spec:
+  schedulerName: volcano
+  recoveryPolicy: ServingGroupRecreate
+  restartGracePeriodSeconds: 30
+  roles:
+    prefill:
+      replicas: 1
+      entryWorkload:
+        containers:
+          main:
+            image: ghcr.io/evan-hines-js/busybox:latest
+            command: ["/bin/sh", "-c", "echo 'prefill entry'; sleep 300"]
+            resources:
+              requests:
+                cpu: 100m
+                memory: 64Mi
+              limits:
+                cpu: 200m
+                memory: 128Mi
+            security:
+              runAsUser: 65534
+              apparmorProfile: Unconfined
+        resources:
+          ghcr-creds:
+            type: secret
+            id: local-regcreds
+            params:
+              provider: lattice-local
+              refreshInterval: 1h
+      entryRuntime:
+        imagePullSecrets:
+          - ghcr-creds
+    decode:
+      replicas: 2
+      entryWorkload:
+        containers:
+          main:
+            image: ghcr.io/evan-hines-js/busybox:latest
+            command: ["/bin/sh", "-c", "echo 'decode entry'; sleep 300"]
+            resources:
+              requests:
+                cpu: 100m
+                memory: 64Mi
+              limits:
+                cpu: 200m
+                memory: 128Mi
+            security:
+              runAsUser: 65534
+              apparmorProfile: Unconfined
+        resources:
+          ghcr-creds:
+            type: secret
+            id: local-regcreds
+            params:
+              provider: lattice-local
+              refreshInterval: 1h
+      entryRuntime:
+        imagePullSecrets:
+          - ghcr-creds
+      workerReplicas: 4
+      workerWorkload:
+        containers:
+          main:
+            image: ghcr.io/evan-hines-js/busybox:latest
+            command: ["/bin/sh", "-c", "echo 'decode worker'; sleep 300"]
+            resources:
+              requests:
+                cpu: 100m
+                memory: 64Mi
+              limits:
+                cpu: 200m
+                memory: 128Mi
+            security:
+              runAsUser: 65534
+              apparmorProfile: Unconfined
+        resources:
+          ghcr-creds:
+            type: secret
+            id: local-regcreds
+            params:
+              provider: lattice-local
+              refreshInterval: 1h
+  routing:
+    inferenceEngine: vLLM
+    model: "test-model/busybox"
+    port: 8000
+    routes:
+      default:
+        rules:
+          - name: default
+            targetModels:
+              - weight: 100

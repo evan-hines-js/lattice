@@ -293,6 +293,12 @@ pub const VMAGENT_NODE_NAME: &str = "vmagent";
 /// ServiceAccount name for vmagent (used as SPIFFE identity for metrics scraping)
 pub const VMAGENT_SA_NAME: &str = "vmagent-lattice-metrics";
 
+// Kthena well-known identities
+/// Namespace where Kthena inference routing components are deployed
+pub const KTHENA_NAMESPACE: &str = "kthena-system";
+/// ServiceAccount name for the Kthena router (used as SPIFFE identity for inference traffic)
+pub const KTHENA_ROUTER_SA: &str = "kthena-router";
+
 // Service and resource names
 /// Name of the Lattice cell service
 pub const CELL_SERVICE_NAME: &str = "lattice-cell";

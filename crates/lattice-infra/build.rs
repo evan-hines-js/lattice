@@ -82,9 +82,7 @@ fn ensure_charts_downloaded(charts_dir: &Path, versions: &Versions) {
     let mut repos_added = std::collections::HashSet::new();
 
     for (name, chart) in &versions.charts {
-        let (Some(repo), Some(chart_name), Some(filename_pattern)) =
-            (&chart.repo, &chart.chart, &chart.filename)
-        else {
+        let Some(filename_pattern) = &chart.filename else {
             continue;
         };
 
@@ -93,6 +91,47 @@ fn ensure_charts_downloaded(charts_dir: &Path, versions: &Versions) {
         if path.exists() {
             continue;
         }
+
+        let Some(chart_name) = &chart.chart else {
+            continue;
+        };
+
+        // OCI charts: detect from oci:// prefix, pull directly
+        if chart_name.starts_with("oci://") {
+            eprintln!("cargo:warning=Downloading missing OCI chart: {}", filename);
+
+            let output = Command::new("helm")
+                .args([
+                    "pull",
+                    chart_name,
+                    "--version",
+                    &format!("v{}", chart.version),
+                    "--destination",
+                    &charts_dir.to_string_lossy(),
+                ])
+                .output()
+                .unwrap_or_else(|e| panic!("helm pull {} failed: {}", chart_name, e));
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                panic!(
+                    "helm pull {} --version v{} failed: {}",
+                    chart_name, chart.version, stderr
+                );
+            }
+
+            assert!(
+                path.exists(),
+                "helm pull succeeded but {} not found (expected at {})",
+                filename,
+                path.display()
+            );
+            continue;
+        }
+
+        let Some(repo) = &chart.repo else {
+            continue;
+        };
 
         eprintln!("cargo:warning=Downloading missing chart: {}", filename);
 
@@ -709,6 +748,29 @@ fn main() {
     println!(
         "cargo:rustc-env=VOLCANO_VERSION={}",
         versions.charts["volcano"].version
+    );
+
+    // 16. Kthena model serving (Volcano subproject for disaggregated inference)
+    let yaml = run_helm_template(
+        "kthena",
+        &chart(&format!(
+            "kthena-v{}.tgz",
+            versions.charts["kthena"].version
+        )),
+        "kthena-system",
+        &[
+            "--set",
+            "controller.replicas=1",
+            "--set",
+            "router.replicas=1",
+        ],
+    );
+    std::fs::write(out_dir.join("kthena.yaml"), yaml).expect("write kthena.yaml");
+
+    // Set Kthena version env var
+    println!(
+        "cargo:rustc-env=KTHENA_VERSION={}",
+        versions.charts["kthena"].version
     );
 
     // 15. Gateway API CRDs (just copy, not helm)

@@ -48,8 +48,10 @@ pub use mesh_member::{
     PeerAuth,
 };
 pub use model_serving::{
-    LatticeModel, LatticeModelSpec, LatticeModelStatus, ModelCondition, ModelRoleSpec,
-    ModelServingPhase,
+    HeaderMatchValue, InferenceEngine, KvConnector, LatticeModel, LatticeModelSpec,
+    LatticeModelStatus, ModelCondition, ModelMatch, ModelParentRef, ModelRoleSpec,
+    ModelRouteRule, ModelRouteSpec, ModelRoutingSpec, ModelServingPhase, RateLimit, RetryPolicy,
+    TargetModel, TrafficPolicy,
 };
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,

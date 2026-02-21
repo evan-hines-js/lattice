@@ -9,7 +9,6 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::workload::ingress::IngressSpec;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 
 // =============================================================================
@@ -85,6 +84,192 @@ fn default_scheduler() -> String {
 }
 
 // =============================================================================
+// Routing
+// =============================================================================
+
+/// Inference routing configuration for Kthena router.
+///
+/// Compiles to Kthena `ModelServer` + `ModelRoute` resources in the
+/// `networking.serving.volcano.sh/v1alpha1` API group.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRoutingSpec {
+    /// Inference engine framework
+    pub inference_engine: InferenceEngine,
+
+    /// Model name (e.g. "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    pub model: String,
+
+    /// Container port serving inference (default: 8000)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+
+    /// Port protocol (default: "http")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+
+    /// Traffic policy
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_policy: Option<TrafficPolicy>,
+
+    /// KV connector for PD disaggregation (nixl, mooncake, lmcache)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_connector: Option<KvConnector>,
+
+    /// Named routes — each compiles to a Kthena ModelRoute
+    #[serde(default)]
+    pub routes: BTreeMap<String, ModelRouteSpec>,
+}
+
+/// Inference engine framework
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum InferenceEngine {
+    /// vLLM inference engine
+    #[serde(rename = "vLLM")]
+    VLlm,
+    /// SGLang inference engine
+    SGLang,
+}
+
+impl std::fmt::Display for InferenceEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VLlm => write!(f, "vLLM"),
+            Self::SGLang => write!(f, "SGLang"),
+        }
+    }
+}
+
+/// Traffic policy for inference routing
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficPolicy {
+    /// Retry policy for failed requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryPolicy>,
+}
+
+/// Retry policy for inference requests
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryPolicy {
+    /// Number of retry attempts
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
+}
+
+/// KV connector configuration for PD disaggregation
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvConnector {
+    /// Connector type (nixl, mooncake, lmcache)
+    #[serde(rename = "type")]
+    pub type_: String,
+}
+
+/// A single named route targeting this model's ModelServer
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRouteSpec {
+    /// Virtual model name clients use in requests (defaults to model name)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+
+    /// LoRA adapters to match
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_adapters: Option<Vec<String>>,
+
+    /// Routing rules (first match wins)
+    pub rules: Vec<ModelRouteRule>,
+
+    /// Token rate limiting
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimit>,
+
+    /// Bind to a specific Gateway (optional — uses Kthena default if omitted)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_refs: Option<Vec<ModelParentRef>>,
+}
+
+/// A single routing rule within a ModelRoute
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRouteRule {
+    /// Rule name
+    pub name: String,
+
+    /// Header-based matching
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_match: Option<ModelMatch>,
+
+    /// Backend targets (supports weighted canary split)
+    pub target_models: Vec<TargetModel>,
+}
+
+/// Header-based match criteria
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelMatch {
+    /// Header name → match value
+    pub headers: BTreeMap<String, HeaderMatchValue>,
+}
+
+/// Header match value
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderMatchValue {
+    /// Exact string match
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact: Option<String>,
+}
+
+/// A backend target for a routing rule
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetModel {
+    /// ModelServer name (defaults to the model's auto-generated ModelServer)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_server_name: Option<String>,
+
+    /// Traffic weight for canary deployments
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<u32>,
+}
+
+/// Token rate limiting configuration
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimit {
+    /// Maximum input tokens per time unit
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_per_unit: Option<u32>,
+
+    /// Maximum output tokens per time unit
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_per_unit: Option<u32>,
+
+    /// Time unit (e.g. "second", "minute")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// Reference to a parent Gateway for a ModelRoute
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelParentRef {
+    /// Gateway name
+    pub name: String,
+
+    /// Gateway namespace
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+
+    /// Kind (default: Gateway)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+// =============================================================================
 // CRD
 // =============================================================================
 
@@ -119,9 +304,9 @@ pub struct LatticeModelSpec {
     #[serde(default)]
     pub roles: BTreeMap<String, ModelRoleSpec>,
 
-    /// Ingress configuration for exposing the model externally
+    /// Inference routing configuration (compiles to Kthena ModelServer + ModelRoute)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingress: Option<IngressSpec>,
+    pub routing: Option<ModelRoutingSpec>,
 }
 
 impl Default for LatticeModelSpec {
@@ -131,7 +316,7 @@ impl Default for LatticeModelSpec {
             recovery_policy: None,
             restart_grace_period_seconds: None,
             roles: BTreeMap::new(),
-            ingress: None,
+            routing: None,
         }
     }
 }

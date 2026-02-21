@@ -14,6 +14,7 @@ pub mod eso;
 pub mod gpu;
 pub mod istio;
 pub mod keda;
+pub mod kthena;
 pub mod metrics_server;
 pub mod prometheus;
 pub mod tetragon;
@@ -157,6 +158,9 @@ pub async fn generate_core(config: &InfrastructureConfig) -> Result<Vec<String>,
 
     // Volcano gang scheduling (always installed — required for LatticeJob)
     manifests.extend(volcano::generate_volcano().iter().cloned());
+
+    // Kthena model serving (always installed — required for LatticeModel)
+    manifests.extend(kthena::generate_kthena().iter().cloned());
 
     // Tetragon runtime enforcement (eBPF kprobes on LSM hooks)
     manifests.extend(tetragon::generate_tetragon().iter().cloned());

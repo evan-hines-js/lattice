@@ -139,9 +139,9 @@ pub struct ModelServingRole {
     pub replicas: u32,
     /// Entry pod template — passed through as pre-serialized JSON from the workload compiler
     pub entry_template: serde_json::Value,
-    /// Number of worker replicas (None = no workers)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_replicas: Option<u32>,
+    /// Number of worker replicas (0 = no workers). Always serialized — Kthena requires this field.
+    #[serde(default)]
+    pub worker_replicas: u32,
     /// Worker pod template (None = no workers)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_template: Option<serde_json::Value>,
@@ -174,6 +174,194 @@ pub struct RollingUpdateConfiguration {
     pub max_unavailable: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition: Option<i32>,
+}
+
+// =============================================================================
+// Kthena Networking Types (networking.serving.volcano.sh/v1alpha1)
+// =============================================================================
+
+/// Kthena ModelServer resource — registers a model with the inference router
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaModelServer {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: KthenaNetworkingMetadata,
+    pub spec: KthenaModelServerSpec,
+}
+
+/// Shared metadata for Kthena networking resources
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaNetworkingMetadata {
+    pub name: String,
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_references: Vec<OwnerReference>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaModelServerSpec {
+    /// Model name (e.g. "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Inference engine (vLLM, SGLang)
+    pub inference_engine: String,
+
+    /// Selects pods backing this model server
+    pub workload_selector: WorkloadSelector,
+
+    /// Port serving inference traffic
+    pub workload_port: WorkloadPort,
+
+    /// Traffic policy
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_policy: Option<KthenaTrafficPolicy>,
+
+    /// KV connector for PD disaggregation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_connector: Option<KthenaKvConnector>,
+}
+
+/// Label selector for model serving pods, with optional PD disaggregation grouping
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadSelector {
+    pub match_labels: BTreeMap<String, String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_group: Option<PdGroup>,
+}
+
+/// PD disaggregation group — identifies prefill vs decode pods by label
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PdGroup {
+    pub group_key: String,
+    pub prefill_labels: BTreeMap<String, String>,
+    pub decode_labels: BTreeMap<String, String>,
+}
+
+/// Workload port configuration
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadPort {
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+}
+
+/// Traffic policy for Kthena networking resources
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaTrafficPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<KthenaRetryPolicy>,
+}
+
+/// Retry policy for inference requests
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaRetryPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
+}
+
+/// KV connector configuration for PD disaggregation
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaKvConnector {
+    #[serde(rename = "type")]
+    pub type_: String,
+}
+
+/// Kthena ModelRoute resource — defines routing rules for a model
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaModelRoute {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: KthenaNetworkingMetadata,
+    pub spec: KthenaModelRouteSpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaModelRouteSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_adapters: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_refs: Option<Vec<KthenaParentRef>>,
+
+    pub rules: Vec<KthenaRouteRule>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<KthenaRateLimit>,
+}
+
+/// Reference to a parent Gateway
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaParentRef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+/// A single routing rule within a ModelRoute
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaRouteRule {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_match: Option<KthenaModelMatch>,
+    pub target_models: Vec<KthenaTargetModel>,
+}
+
+/// Header-based match criteria for routing
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaModelMatch {
+    pub headers: BTreeMap<String, KthenaHeaderMatch>,
+}
+
+/// Header match value
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaHeaderMatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact: Option<String>,
+}
+
+/// Backend target for a routing rule
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaTargetModel {
+    pub model_server_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<u32>,
+}
+
+/// Token rate limiting for inference traffic
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaRateLimit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_per_unit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_per_unit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 #[cfg(test)]
@@ -232,7 +420,7 @@ mod tests {
                         name: "decode".to_string(),
                         replicas: 2,
                         entry_template: serde_json::json!({"spec": {"containers": []}}),
-                        worker_replicas: Some(4),
+                        worker_replicas: 4,
                         worker_template: Some(
                             serde_json::json!({"spec": {"containers": [{"name": "worker"}]}}),
                         ),
@@ -243,7 +431,7 @@ mod tests {
                     restart_grace_period_seconds: Some(30),
                     network_topology: None,
                 },
-                recovery_policy: Some("RestartAll".to_string()),
+                recovery_policy: Some("ServingGroupRecreate".to_string()),
                 rollout_strategy: None,
             },
         };
@@ -263,5 +451,110 @@ mod tests {
                 .get("restartGracePeriodSeconds")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn model_server_serialization_roundtrip() {
+        let ms = KthenaModelServer {
+            api_version: "networking.serving.volcano.sh/v1alpha1".to_string(),
+            kind: "ModelServer".to_string(),
+            metadata: KthenaNetworkingMetadata {
+                name: "test-model".to_string(),
+                namespace: "default".to_string(),
+                labels: BTreeMap::new(),
+                owner_references: vec![],
+            },
+            spec: KthenaModelServerSpec {
+                model: Some("test-model/base".to_string()),
+                inference_engine: "vLLM".to_string(),
+                workload_selector: WorkloadSelector {
+                    match_labels: BTreeMap::from([(
+                        "modelserving.volcano.sh/name".to_string(),
+                        "test-model".to_string(),
+                    )]),
+                    pd_group: Some(PdGroup {
+                        group_key: "modelserving.volcano.sh/group-name".to_string(),
+                        prefill_labels: BTreeMap::from([(
+                            "modelserving.volcano.sh/role".to_string(),
+                            "prefill".to_string(),
+                        )]),
+                        decode_labels: BTreeMap::from([(
+                            "modelserving.volcano.sh/role".to_string(),
+                            "decode".to_string(),
+                        )]),
+                    }),
+                },
+                workload_port: WorkloadPort {
+                    port: 8000,
+                    protocol: Some("http".to_string()),
+                },
+                traffic_policy: Some(KthenaTrafficPolicy {
+                    retry: Some(KthenaRetryPolicy { attempts: Some(3) }),
+                }),
+                kv_connector: Some(KthenaKvConnector {
+                    type_: "nixl".to_string(),
+                }),
+            },
+        };
+
+        let json = serde_json::to_string(&ms).unwrap();
+        let de: KthenaModelServer = serde_json::from_str(&json).unwrap();
+        assert_eq!(ms, de);
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value["spec"].get("workloadSelector").is_some());
+        assert!(value["spec"].get("workloadPort").is_some());
+        assert!(value["spec"].get("inferenceEngine").is_some());
+        assert!(value["spec"]["workloadSelector"].get("pdGroup").is_some());
+        assert_eq!(value["spec"]["kvConnector"]["type"], "nixl");
+    }
+
+    #[test]
+    fn model_route_serialization_roundtrip() {
+        let mr = KthenaModelRoute {
+            api_version: "networking.serving.volcano.sh/v1alpha1".to_string(),
+            kind: "ModelRoute".to_string(),
+            metadata: KthenaNetworkingMetadata {
+                name: "test-model-default".to_string(),
+                namespace: "default".to_string(),
+                labels: BTreeMap::new(),
+                owner_references: vec![],
+            },
+            spec: KthenaModelRouteSpec {
+                model_name: Some("test-model/base".to_string()),
+                lora_adapters: Some(vec!["adapter-1".to_string()]),
+                parent_refs: None,
+                rules: vec![KthenaRouteRule {
+                    name: "default".to_string(),
+                    model_match: Some(KthenaModelMatch {
+                        headers: BTreeMap::from([(
+                            "x-model-version".to_string(),
+                            KthenaHeaderMatch {
+                                exact: Some("v2".to_string()),
+                            },
+                        )]),
+                    }),
+                    target_models: vec![KthenaTargetModel {
+                        model_server_name: "test-model".to_string(),
+                        weight: Some(100),
+                    }],
+                }],
+                rate_limit: Some(KthenaRateLimit {
+                    input_tokens_per_unit: Some(1000),
+                    output_tokens_per_unit: Some(500),
+                    unit: Some("minute".to_string()),
+                }),
+            },
+        };
+
+        let json = serde_json::to_string(&mr).unwrap();
+        let de: KthenaModelRoute = serde_json::from_str(&json).unwrap();
+        assert_eq!(mr, de);
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value["spec"].get("modelName").is_some());
+        assert!(value["spec"].get("loraAdapters").is_some());
+        assert!(value["spec"].get("rateLimit").is_some());
+        assert_eq!(value["spec"]["rules"][0]["targetModels"][0]["modelServerName"], "test-model");
     }
 }

@@ -46,6 +46,10 @@ pub enum CrdKind {
     VolcanoJob,
     /// Kthena ModelServing (workload.serving.volcano.sh)
     ModelServing,
+    /// Kthena ModelServer (networking.serving.volcano.sh)
+    KthenaModelServer,
+    /// Kthena ModelRoute (networking.serving.volcano.sh)
+    KthenaModelRoute,
 }
 
 /// All CrdKind variants for iteration.
@@ -66,6 +70,8 @@ const ALL_CRD_KINDS: &[CrdKind] = &[
     CrdKind::TracingPolicyNamespaced,
     CrdKind::VolcanoJob,
     CrdKind::ModelServing,
+    CrdKind::KthenaModelServer,
+    CrdKind::KthenaModelRoute,
 ];
 
 impl CrdKind {
@@ -85,6 +91,9 @@ impl CrdKind {
             Self::MeshMember => "lattice.dev",
             Self::VolcanoJob => "batch.volcano.sh",
             Self::ModelServing => "workload.serving.volcano.sh",
+            Self::KthenaModelServer | Self::KthenaModelRoute => {
+                "networking.serving.volcano.sh"
+            }
         }
     }
 
@@ -107,6 +116,8 @@ impl CrdKind {
             Self::TracingPolicyNamespaced => "TracingPolicyNamespaced",
             Self::VolcanoJob => "Job",
             Self::ModelServing => "ModelServing",
+            Self::KthenaModelServer => "ModelServer",
+            Self::KthenaModelRoute => "ModelRoute",
         }
     }
 
@@ -126,6 +137,9 @@ impl CrdKind {
             Self::TracingPolicyNamespaced => "cilium.io/v1alpha1",
             Self::VolcanoJob => "batch.volcano.sh/v1alpha1",
             Self::ModelServing => "workload.serving.volcano.sh/v1alpha1",
+            Self::KthenaModelServer | Self::KthenaModelRoute => {
+                "networking.serving.volcano.sh/v1alpha1"
+            }
         }
     }
 }
@@ -297,6 +311,6 @@ mod tests {
     #[test]
     fn all_crd_kinds_is_exhaustive() {
         // Ensure ALL_CRD_KINDS contains every variant
-        assert_eq!(ALL_CRD_KINDS.len(), 16);
+        assert_eq!(ALL_CRD_KINDS.len(), 18);
     }
 }

@@ -86,7 +86,7 @@ fn compile_roles(
                 name: role_name.clone(),
                 replicas: role_spec.replicas,
                 entry_template: templates.entry_template.clone(),
-                worker_replicas: role_spec.worker_replicas,
+                worker_replicas: role_spec.worker_replicas.unwrap_or(0),
                 worker_template: templates.worker_template.clone(),
             })
         })
@@ -205,7 +205,7 @@ mod tests {
         let role = &ms.spec.template.roles[0];
         assert_eq!(role.name, "decode");
         assert_eq!(role.replicas, 1);
-        assert_eq!(role.worker_replicas, Some(4));
+        assert_eq!(role.worker_replicas, 4);
         assert!(role.worker_template.is_some());
     }
 
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn recovery_policy_propagated() {
         let spec = LatticeModelSpec {
-            recovery_policy: Some("RestartAll".to_string()),
+            recovery_policy: Some("ServingGroupRecreate".to_string()),
             ..Default::default()
         };
         let mut model = LatticeModel::new("test-model", spec);
@@ -286,7 +286,10 @@ mod tests {
         model.metadata.uid = Some("uid".to_string());
 
         let ms = compile_model_serving(&model, &BTreeMap::new());
-        assert_eq!(ms.spec.recovery_policy, Some("RestartAll".to_string()));
+        assert_eq!(
+            ms.spec.recovery_policy,
+            Some("ServingGroupRecreate".to_string())
+        );
     }
 
     #[test]

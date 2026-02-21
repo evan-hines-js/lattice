@@ -10,10 +10,14 @@
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{LatticeMeshMember, LatticeModel, ProviderType};
+use lattice_common::crd::{
+    CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, LatticeModel, MeshMemberPort,
+    MeshMemberTarget, PeerAuth, ProviderType,
+};
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
-use lattice_volcano::{ModelServing, RoleTemplates};
+use lattice_common::{KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_NAME};
+use lattice_volcano::{CompiledRouting, ModelServing, RoleTemplates};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
 use crate::error::ModelError;
@@ -29,6 +33,8 @@ pub struct CompiledModel {
     pub mesh_members: Vec<LatticeMeshMember>,
     /// Tetragon TracingPolicyNamespaced resources — per-role runtime enforcement
     pub tracing_policies: Vec<TracingPolicyNamespaced>,
+    /// Kthena routing resources (ModelServer + ModelRoutes)
+    pub routing: Option<CompiledRouting>,
 }
 
 /// Compile a LatticeModel into Kubernetes resources.
@@ -162,12 +168,133 @@ pub async fn compile_model(
     // Build ModelServing from aggregated role templates
     let model_serving = lattice_volcano::compile_model_serving(model, &role_templates);
 
+    // Compile routing (ModelServer + ModelRoutes) if configured
+    let routing = model
+        .spec
+        .routing
+        .as_ref()
+        .map(|routing_spec| lattice_volcano::compile_model_routing(model, routing_spec));
+
+    // When routing is configured, ensure mesh policies allow the Kthena router
+    // to reach model pods, and enable peer traffic for PD disaggregation.
+    if let Some(ref routing_spec) = model.spec.routing {
+        ensure_routing_mesh_members(name, &model.spec.roles, routing_spec, &mut mesh_members);
+    }
+
     Ok(CompiledModel {
         model_serving,
         config,
         mesh_members,
         tracing_policies,
+        routing,
     })
+}
+
+/// Ensure mesh members allow inference traffic from the Kthena router.
+///
+/// For each model role, this function:
+/// - Adds the Kthena router as an infrastructure allowed caller (its SPIFFE
+///   identity will be used in AuthorizationPolicy since it won't be in the
+///   service graph — same pattern as vmagent, KEDA, etc.)
+/// - Adds the inference port if not already present
+/// - Enables `allow_peer_traffic` when PD disaggregation is active (prefill
+///   and decode roles need to exchange KV cache data)
+///
+/// If a role has no existing mesh member (the workload spec had no service
+/// ports), a new one is created.
+fn ensure_routing_mesh_members(
+    model_name: &str,
+    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+    routing: &lattice_common::crd::ModelRoutingSpec,
+    mesh_members: &mut Vec<LatticeMeshMember>,
+) {
+    let inference_port = routing.port.unwrap_or(8000);
+    let router_caller = CallerRef {
+        name: KTHENA_ROUTER_SA.to_string(),
+        namespace: Some(KTHENA_NAMESPACE.to_string()),
+    };
+    let has_pd = routing.kv_connector.is_some()
+        && lattice_volcano::routing_compiler::has_pd_roles(roles);
+
+    for role_name in roles.keys() {
+        let entry_name = format!("{}-{}", model_name, role_name);
+
+        if let Some(mm) = mesh_members
+            .iter_mut()
+            .find(|mm| mm.metadata.name.as_deref() == Some(entry_name.as_str()))
+        {
+            // Add router as allowed caller if not present
+            if !mm.spec.allowed_callers.contains(&router_caller) {
+                mm.spec.allowed_callers.push(router_caller.clone());
+                mm.spec
+                    .allowed_callers
+                    .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+            }
+
+            // Add inference port if not present
+            if !mm.spec.ports.iter().any(|p| p.port == inference_port) {
+                mm.spec.ports.push(MeshMemberPort {
+                    port: inference_port,
+                    name: "inference".to_string(),
+                    peer_auth: PeerAuth::Strict,
+                });
+            }
+
+            // Enable peer traffic for PD disaggregation
+            if has_pd {
+                mm.spec.allow_peer_traffic = true;
+            }
+        } else {
+            // No existing mesh member — create one for routing
+            let mm = LatticeMeshMember::new(
+                &entry_name,
+                LatticeMeshMemberSpec {
+                    target: MeshMemberTarget::Selector(
+                        [(LABEL_NAME.to_string(), entry_name.clone())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ports: vec![MeshMemberPort {
+                        port: inference_port,
+                        name: "inference".to_string(),
+                        peer_auth: PeerAuth::Strict,
+                    }],
+                    allowed_callers: vec![router_caller.clone()],
+                    dependencies: vec![],
+                    egress: vec![],
+                    allow_peer_traffic: has_pd,
+                    depends_all: false,
+                    ingress: None,
+                    service_account: None,
+                },
+            );
+            mesh_members.push(mm);
+        }
+
+        // Also handle worker mesh members if they exist
+        let worker_name = format!("{}-{}-worker", model_name, role_name);
+        if let Some(wmm) = mesh_members
+            .iter_mut()
+            .find(|mm| mm.metadata.name.as_deref() == Some(worker_name.as_str()))
+        {
+            if !wmm.spec.allowed_callers.contains(&router_caller) {
+                wmm.spec.allowed_callers.push(router_caller.clone());
+                wmm.spec
+                    .allowed_callers
+                    .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+            }
+            if !wmm.spec.ports.iter().any(|p| p.port == inference_port) {
+                wmm.spec.ports.push(MeshMemberPort {
+                    port: inference_port,
+                    name: "inference".to_string(),
+                    peer_auth: PeerAuth::Strict,
+                });
+            }
+            if has_pd {
+                wmm.spec.allow_peer_traffic = true;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -176,7 +303,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use lattice_common::crd::{
-        ContainerSpec, LatticeModelSpec, ModelRoleSpec, RuntimeSpec, WorkloadSpec,
+        ContainerSpec, InferenceEngine, KvConnector, LatticeModelSpec, ModelRoleSpec,
+        ModelRouteRule, ModelRouteSpec, ModelRoutingSpec, RuntimeSpec, TargetModel, WorkloadSpec,
     };
 
     fn make_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
@@ -216,6 +344,34 @@ mod tests {
         PolicyEngine::with_policies("permit(principal, action, resource);").unwrap()
     }
 
+    fn basic_routing() -> ModelRoutingSpec {
+        ModelRoutingSpec {
+            inference_engine: InferenceEngine::VLlm,
+            model: "test-org/test-model".to_string(),
+            port: None,
+            protocol: None,
+            traffic_policy: None,
+            kv_connector: None,
+            routes: BTreeMap::from([(
+                "default".to_string(),
+                ModelRouteSpec {
+                    model_name: None,
+                    lora_adapters: None,
+                    rules: vec![ModelRouteRule {
+                        name: "default".to_string(),
+                        model_match: None,
+                        target_models: vec![TargetModel {
+                            model_server_name: None,
+                            weight: Some(100),
+                        }],
+                    }],
+                    rate_limit: None,
+                    parent_refs: None,
+                },
+            )]),
+        }
+    }
+
     #[tokio::test]
     async fn compile_single_role_model() {
         let mut roles = BTreeMap::new();
@@ -233,6 +389,7 @@ mod tests {
         assert_eq!(compiled.model_serving.spec.template.roles[0].name, "decode");
         assert_eq!(compiled.model_serving.spec.template.roles[0].replicas, 2);
         assert!(compiled.tracing_policies.is_empty());
+        assert!(compiled.routing.is_none());
     }
 
     #[tokio::test]
@@ -250,6 +407,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(compiled.model_serving.spec.template.roles.len(), 2);
+        assert!(compiled.routing.is_none());
     }
 
     #[tokio::test]
@@ -280,5 +438,130 @@ mod tests {
         let result =
             compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar).await;
         assert!(matches!(result, Err(ModelError::MissingNamespace)));
+    }
+
+    #[tokio::test]
+    async fn routing_compiles_model_server_and_routes() {
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), make_role("decoder:latest", 2));
+
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(basic_routing()),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        let routing = compiled.routing.as_ref().expect("routing should be Some");
+        assert_eq!(routing.model_server.metadata.name, "test-model");
+        assert_eq!(routing.model_routes.len(), 1);
+        assert_eq!(routing.model_routes[0].metadata.name, "test-model-default");
+    }
+
+    #[tokio::test]
+    async fn routing_creates_mesh_member_for_kthena_router() {
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), make_role("decoder:latest", 2));
+
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(basic_routing()),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        // Mesh member created for the decode role with router as allowed caller
+        let mm = compiled
+            .mesh_members
+            .iter()
+            .find(|mm| mm.metadata.name.as_deref() == Some("test-model-decode"))
+            .expect("mesh member for decode role should exist");
+
+        let has_router_caller = mm
+            .spec
+            .allowed_callers
+            .iter()
+            .any(|c| c.name == KTHENA_ROUTER_SA && c.namespace.as_deref() == Some(KTHENA_NAMESPACE));
+        assert!(has_router_caller, "Kthena router should be an allowed caller");
+
+        let has_inference_port = mm.spec.ports.iter().any(|p| p.port == 8000);
+        assert!(has_inference_port, "inference port 8000 should be present");
+    }
+
+    #[tokio::test]
+    async fn pd_disaggregation_enables_peer_traffic() {
+        let mut roles = BTreeMap::new();
+        roles.insert("prefill".to_string(), make_role("prefill:latest", 1));
+        roles.insert("decode".to_string(), make_role("decode:latest", 4));
+
+        let mut routing = basic_routing();
+        routing.kv_connector = Some(KvConnector {
+            type_: "nixl".to_string(),
+        });
+
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(routing),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        // Both roles should have allow_peer_traffic=true for KV cache transfer
+        for role_name in &["prefill", "decode"] {
+            let mm_name = format!("test-model-{}", role_name);
+            let mm = compiled
+                .mesh_members
+                .iter()
+                .find(|mm| mm.metadata.name.as_deref() == Some(&mm_name))
+                .unwrap_or_else(|| panic!("mesh member for {} should exist", role_name));
+            assert!(
+                mm.spec.allow_peer_traffic,
+                "{} should have allow_peer_traffic=true for PD disaggregation",
+                role_name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn no_routing_means_no_routing_output() {
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), make_role("decoder:latest", 2));
+
+        let model = make_model(roles);
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        assert!(compiled.routing.is_none());
     }
 }

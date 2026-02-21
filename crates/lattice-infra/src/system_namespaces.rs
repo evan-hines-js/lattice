@@ -30,6 +30,9 @@ pub const GPU: &[&str] = &["gpu-operator"];
 /// Volcano gang scheduling namespace
 pub const VOLCANO: &[&str] = &["volcano-system"];
 
+/// Kthena model serving namespace
+pub const KTHENA: &[&str] = &["kthena-system"];
+
 /// Monitoring namespaces (VictoriaMetrics + KEDA)
 pub const MONITORING: &[&str] = &["monitoring", "keda"];
 
@@ -60,6 +63,7 @@ pub fn all() -> Vec<&'static str> {
         .chain(ESO.iter())
         .chain(GPU.iter())
         .chain(VOLCANO.iter())
+        .chain(KTHENA.iter())
         .chain(MONITORING.iter())
         .chain(CAPI.iter())
         .copied()
@@ -99,6 +103,7 @@ mod tests {
         assert!(namespaces.contains(&"istio-system"));
         assert!(namespaces.contains(&"cert-manager"));
         assert!(namespaces.contains(&"external-secrets"));
+        assert!(namespaces.contains(&"kthena-system"));
         assert!(namespaces.contains(&"capi-system"));
         assert!(namespaces.contains(&"monitoring"));
     }

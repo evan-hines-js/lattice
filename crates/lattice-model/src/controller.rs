@@ -305,11 +305,34 @@ async fn apply_layers(
     )?;
     layer2.run("layer-2-model-serving").await?;
 
+    // Layer 3: Routing — ModelServer + ModelRoutes (after ModelServing pods are labeled)
+    if let Some(ref routing) = compiled.routing {
+        let mut layer3 = ApplyBatch::new(client.clone(), namespace, params);
+
+        if let Some(ref ms_server_ar) = registry.resolve(CrdKind::KthenaModelServer).await {
+            layer3.push(
+                "ModelServer",
+                &routing.model_server.metadata.name,
+                &routing.model_server,
+                ms_server_ar,
+            )?;
+        }
+
+        if let Some(ref mr_ar) = registry.resolve(CrdKind::KthenaModelRoute).await {
+            for route in &routing.model_routes {
+                layer3.push("ModelRoute", &route.metadata.name, route, mr_ar)?;
+            }
+        }
+
+        layer3.run("layer-3-routing").await?;
+    }
+
     info!(
         namespace = %namespace,
         model_serving = %compiled.model_serving.metadata.name,
         mesh_members = compiled.mesh_members.len(),
         tracing_policies = compiled.tracing_policies.len(),
+        has_routing = compiled.routing.is_some(),
         "applied compiled model resources"
     );
 
