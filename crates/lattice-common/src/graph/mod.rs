@@ -362,6 +362,70 @@ pub struct ActiveEdge {
     pub callee_name: String,
 }
 
+/// Compute a stable hash of active edges for change detection.
+///
+/// Sorts edges by namespace/name so the hash is stable regardless of graph
+/// iteration order, then feeds the result through `deterministic_hash`.
+pub fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
+    use std::fmt::Write;
+
+    let mut sorted_in: Vec<_> = inbound
+        .iter()
+        .map(|e| (&e.caller_namespace, &e.caller_name))
+        .collect();
+    sorted_in.sort();
+
+    let mut sorted_out: Vec<_> = outbound
+        .iter()
+        .map(|e| (&e.callee_namespace, &e.callee_name))
+        .collect();
+    sorted_out.sort();
+
+    let mut input = String::new();
+    for (ns, name) in &sorted_in {
+        let _ = write!(input, "in:{ns}/{name}->");
+    }
+    for (ns, name) in &sorted_out {
+        let _ = write!(input, "out:{ns}/{name}->");
+    }
+    crate::deterministic_hash(&input)
+}
+
+/// Compute a stable hash of active edges plus policy epochs.
+///
+/// Extends `compute_edge_hash` with policy and cedar epoch suffixes so that
+/// policy changes trigger re-reconciliation even when the graph topology is unchanged.
+pub fn compute_edge_hash_with_epochs(
+    inbound: &[ActiveEdge],
+    outbound: &[ActiveEdge],
+    policy_epoch: u64,
+    cedar_epoch: u64,
+) -> String {
+    use std::fmt::Write;
+
+    let mut sorted_in: Vec<_> = inbound
+        .iter()
+        .map(|e| (&e.caller_namespace, &e.caller_name))
+        .collect();
+    sorted_in.sort();
+
+    let mut sorted_out: Vec<_> = outbound
+        .iter()
+        .map(|e| (&e.callee_namespace, &e.callee_name))
+        .collect();
+    sorted_out.sort();
+
+    let mut input = String::new();
+    for (ns, name) in &sorted_in {
+        let _ = write!(input, "in:{ns}/{name}->");
+    }
+    for (ns, name) in &sorted_out {
+        let _ = write!(input, "out:{ns}/{name}->");
+    }
+    let _ = write!(input, "policy:{policy_epoch},cedar:{cedar_epoch}");
+    crate::deterministic_hash(&input)
+}
+
 /// A cached policy node in the service graph
 #[derive(Clone, Debug)]
 pub struct PolicyNode {

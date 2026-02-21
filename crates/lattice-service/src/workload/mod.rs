@@ -670,7 +670,11 @@ fn is_valid_promql_metric_name(name: &str) -> bool {
         return false;
     }
     let mut chars = name.chars();
-    let first = chars.next().unwrap();
+    // Safety: we checked is_empty() above, so first char always exists
+    let first = match chars.next() {
+        Some(c) => c,
+        None => return false,
+    };
     if !first.is_ascii_alphabetic() && first != '_' && first != ':' {
         return false;
     }

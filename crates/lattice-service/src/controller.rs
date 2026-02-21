@@ -614,52 +614,6 @@ impl ServiceContext {
 /// Annotation key for the inputs hash used by the reconcile guard.
 const INPUTS_HASH_ANNOTATION: &str = "lattice.dev/inputs-hash";
 
-/// Compute a stable hash of the inputs that affect service compilation.
-///
-/// When bilateral agreements, cedar policies, or service policies change,
-/// the hash changes even though the service spec/generation doesn't.
-///
-/// Two separate epochs are tracked:
-/// - `policy_epoch`: bumped synchronously in the watch handler when a
-///   LatticeServicePolicy changes (graph-level, safe to read immediately)
-/// - `cedar_epoch`: bumped inside `PolicyEngine::reload()` after new cedar
-///   policies are actually loaded (avoids the race where the watch handler
-///   bumps a counter before the engine has the new state)
-fn compute_inputs_hash(
-    inbound: &[lattice_common::graph::ActiveEdge],
-    outbound: &[lattice_common::graph::ActiveEdge],
-    policy_epoch: u64,
-    cedar_epoch: u64,
-) -> String {
-    use std::fmt::Write;
-
-    // Sort edges so the hash is stable regardless of graph iteration order.
-    // The graph's edges_in Vec can be reordered by put_node remove+re-insert
-    // cycles, which would otherwise cause spurious hash mismatches and tight
-    // reconciliation loops.
-    let mut sorted_in: Vec<_> = inbound
-        .iter()
-        .map(|e| (&e.caller_namespace, &e.caller_name))
-        .collect();
-    sorted_in.sort();
-
-    let mut sorted_out: Vec<_> = outbound
-        .iter()
-        .map(|e| (&e.callee_namespace, &e.callee_name))
-        .collect();
-    sorted_out.sort();
-
-    let mut input = String::new();
-    for (ns, name) in &sorted_in {
-        let _ = write!(input, "in:{ns}/{name}->");
-    }
-    for (ns, name) in &sorted_out {
-        let _ = write!(input, "out:{ns}/{name}->");
-    }
-    let _ = write!(input, "policy:{policy_epoch},cedar:{cedar_epoch}");
-    lattice_common::deterministic_hash(&input)
-}
-
 /// Check if reconciliation can be skipped because nothing has changed.
 ///
 /// Returns true when the service is Ready or Failed AND:
@@ -774,7 +728,7 @@ pub async fn reconcile(
             // Compute inputs hash from graph state + policy epochs
             let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
             let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
-            let inputs_hash = compute_inputs_hash(
+            let inputs_hash = lattice_common::graph::compute_edge_hash_with_epochs(
                 &active_in,
                 &active_out,
                 ctx.graph.policy_epoch(),
@@ -801,7 +755,7 @@ pub async fn reconcile(
             // to avoid tight loops on persistent compilation errors.
             let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
             let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
-            let inputs_hash = compute_inputs_hash(
+            let inputs_hash = lattice_common::graph::compute_edge_hash_with_epochs(
                 &active_in,
                 &active_out,
                 ctx.graph.policy_epoch(),
