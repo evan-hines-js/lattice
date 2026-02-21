@@ -6,10 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
-// Re-export provider configs from the providers module
-pub use super::providers::{
-    AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig, ProxmoxConfig,
-};
+use super::providers::{AwsConfig, DockerConfig, OpenStackConfig, ProxmoxConfig};
 
 // =============================================================================
 // Provider Types
@@ -1477,6 +1474,7 @@ mod tests {
 
     mod provider_config {
         use super::*;
+        use crate::crd::providers::Ipv4PoolConfig;
 
         #[test]
         fn test_docker_config() {

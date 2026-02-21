@@ -14,10 +14,10 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::kube_utils::HasApiResource;
+use lattice_common::kube_utils::{HasApiResource, ObjectMeta};
 use lattice_workload::k8s::{
-    ConfigMap, Container, LabelSelector, LocalObjectReference, ObjectMeta, PodSecurityContext,
-    SchedulingGate, Secret, TopologySpreadConstraint, Volume,
+    ConfigMap, Container, LabelSelector, LocalObjectReference, PodSecurityContext, SchedulingGate,
+    Secret, TopologySpreadConstraint, Volume,
 };
 use lattice_workload::{CompilationError, CompiledPodTemplate};
 use serde::{Deserialize, Serialize};

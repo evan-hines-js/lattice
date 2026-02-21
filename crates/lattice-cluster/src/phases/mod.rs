@@ -204,13 +204,13 @@ pub async fn reconcile_infrastructure(
     client: &Client,
     cluster: &LatticeCluster,
 ) -> Result<(), Error> {
-    use lattice_common::ParentConfig;
+    use lattice_common::ParentConnectionConfig;
     use lattice_infra::bootstrap::InfrastructureConfig;
 
     let mut config = InfrastructureConfig::from(cluster);
 
     // Read parent config if it exists (indicates we have an upstream parent cell)
-    if let Some(parent) = ParentConfig::read(client).await? {
+    if let Some(parent) = ParentConnectionConfig::read(client).await? {
         config.parent_host = Some(parent.endpoint.host);
         config.parent_grpc_port = parent.endpoint.grpc_port;
     }

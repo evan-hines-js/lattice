@@ -63,12 +63,14 @@ pub use service_policy::{
     LatticeServicePolicySpec, LatticeServicePolicyStatus, NamespaceSelector, ServicePolicyPhase,
     ServiceSelector,
 };
+pub use providers::{
+    AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig, ProxmoxConfig,
+};
 pub use types::{
-    AwsConfig, BootstrapProvider, ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec,
-    DockerConfig, EndpointsSpec, InstanceType, Ipv4PoolConfig, Ipv6PoolConfig, KubernetesSpec,
-    NetworkPool, NetworkingSpec, NodeResourceSpec, NodeSpec, NodeTaint, OpenStackConfig,
-    ProviderConfig, ProviderSpec, ProviderType, ProxmoxConfig, RegistryMirror, RootVolume,
-    SecretRef, ServiceRef, ServiceSpec, TaintEffect, WorkerPoolSpec,
+    BootstrapProvider, ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec, EndpointsSpec,
+    InstanceType, KubernetesSpec, NetworkPool, NetworkingSpec, NodeResourceSpec, NodeSpec, NodeTaint,
+    ProviderConfig, ProviderSpec, ProviderType, RegistryMirror, RootVolume, SecretRef, ServiceRef,
+    ServiceSpec, TaintEffect, WorkerPoolSpec,
 };
 pub use workload::backup::{
     BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,

@@ -11,7 +11,7 @@ use kube::{Api, Client};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{
-    apply_manifests_with_discovery, ApplyOptions, ParentConfig, LATTICE_SYSTEM_NAMESPACE,
+    apply_manifests_with_discovery, ApplyOptions, ParentConnectionConfig, LATTICE_SYSTEM_NAMESPACE,
 };
 
 use lattice_capi::installer::{
@@ -104,7 +104,7 @@ async fn ensure_general_infrastructure(client: &Client, cluster_mode: bool) -> a
         match &cluster {
             Some(c) => {
                 let mut cfg = InfrastructureConfig::from(c);
-                if let Ok(Some(parent)) = ParentConfig::read(client).await {
+                if let Ok(Some(parent)) = ParentConnectionConfig::read(client).await {
                     cfg.parent_host = Some(parent.endpoint.host);
                     cfg.parent_grpc_port = parent.endpoint.grpc_port;
                 }
