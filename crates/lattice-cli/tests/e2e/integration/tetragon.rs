@@ -186,7 +186,7 @@ fn build_service(
         "main".to_string(),
         ContainerSpec {
             image: BUSYBOX_IMAGE.to_string(),
-            command: command.or(Some(vec!["sleep".to_string(), "infinity".to_string()])),
+            command: command.or(Some(vec!["/bin/sleep".to_string(), "infinity".to_string()])),
             security: Some(sec),
             liveness_probe,
             resources: Some(default_resources()),
