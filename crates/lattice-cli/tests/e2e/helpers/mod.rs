@@ -100,6 +100,66 @@ where
     }
 }
 
+/// Poll a Kubernetes resource's `.status.phase` until it matches the expected value.
+///
+/// Generic over any resource kind (latticeservice, latticemodel, latticejob, etc.).
+/// This is the single implementation behind `wait_for_service_phase`,
+/// `wait_for_model_phase`, etc.
+pub async fn wait_for_resource_phase(
+    kubeconfig: &str,
+    resource_kind: &str,
+    namespace: &str,
+    name: &str,
+    phase: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let kc = kubeconfig.to_string();
+    let kind = resource_kind.to_string();
+    let ns = namespace.to_string();
+    let resource_name = name.to_string();
+    let expected_phase = phase.to_string();
+
+    wait_for_condition(
+        &format!("{} {}/{} to reach {}", resource_kind, namespace, name, phase),
+        timeout,
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let kind = kind.clone();
+            let ns = ns.clone();
+            let resource_name = resource_name.clone();
+            let expected_phase = expected_phase.clone();
+            async move {
+                let output = docker::run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    &kind,
+                    &resource_name,
+                    "-n",
+                    &ns,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ])
+                .await;
+
+                match output {
+                    Ok(current_phase) => {
+                        let current = current_phase.trim();
+                        tracing::info!("{} {}/{} phase: {}", kind, ns, resource_name, current);
+                        Ok(current == expected_phase)
+                    }
+                    Err(e) => {
+                        tracing::info!("{} {}/{} not ready: {}", kind, ns, resource_name, e);
+                        Ok(false)
+                    }
+                }
+            }
+        },
+    )
+    .await
+}
+
 // =============================================================================
 // Shared Constants
 // =============================================================================

@@ -231,8 +231,7 @@ pub fn create_service_with_security_overrides(
 
 /// Wait for a LatticeService to reach the expected phase.
 ///
-/// Polls the service status via kubectl until the phase matches or timeout expires.
-/// Used by Cedar secret tests, ESO pipeline tests, and secrets integration tests.
+/// Thin wrapper around `wait_for_resource_phase` for LatticeService resources.
 pub async fn wait_for_service_phase(
     kubeconfig: &str,
     namespace: &str,
@@ -240,52 +239,8 @@ pub async fn wait_for_service_phase(
     phase: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    let kc = kubeconfig.to_string();
-    let ns = namespace.to_string();
-    let svc_name = name.to_string();
-    let expected_phase = phase.to_string();
-
-    wait_for_condition(
-        &format!("LatticeService {}/{} to reach {}", namespace, name, phase),
-        timeout,
-        Duration::from_secs(5),
-        || {
-            let kc = kc.clone();
-            let ns = ns.clone();
-            let svc_name = svc_name.clone();
-            let expected_phase = expected_phase.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "latticeservice",
-                    &svc_name,
-                    "-n",
-                    &ns,
-                    "-o",
-                    "jsonpath={.status.phase}",
-                ])
-                .await;
-
-                match output {
-                    Ok(current_phase) => {
-                        let current = current_phase.trim();
-                        info!("LatticeService {}/{} phase: {}", ns, svc_name, current);
-                        Ok(current == expected_phase)
-                    }
-                    Err(e) => {
-                        info!(
-                            "Error checking LatticeService {}/{} phase: {}",
-                            ns, svc_name, e
-                        );
-                        Ok(false)
-                    }
-                }
-            }
-        },
-    )
-    .await
+    super::wait_for_resource_phase(kubeconfig, "latticeservice", namespace, name, phase, timeout)
+        .await
 }
 
 /// Wait for a LatticeService to reach the given phase AND have a condition

@@ -17,8 +17,9 @@ use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
-    apply_apparmor_override_policy, apply_yaml_with_retry, delete_namespace, load_fixture_config,
-    run_kubectl, setup_regcreds_infrastructure, wait_for_condition, wait_for_job_complete,
+    apply_yaml_with_retry, delete_namespace, ensure_namespace, load_fixture_config, run_kubectl,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_job_complete,
+    wait_for_resource_phase,
 };
 
 const MODEL_NAMESPACE: &str = "serving";
@@ -29,67 +30,11 @@ fn load_model_fixture() -> Result<lattice_common::crd::LatticeModel, String> {
     load_fixture_config("model-serving.yaml")
 }
 
-/// Wait for a LatticeModel to reach the expected phase
-async fn wait_for_model_phase(
-    kubeconfig: &str,
-    namespace: &str,
-    name: &str,
-    phase: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    let kc = kubeconfig.to_string();
-    let ns = namespace.to_string();
-    let model_name = name.to_string();
-    let expected_phase = phase.to_string();
-
-    wait_for_condition(
-        &format!(
-            "LatticeModel {}/{} to reach {}",
-            namespace, name, phase
-        ),
-        timeout,
-        Duration::from_secs(5),
-        || {
-            let kc = kc.clone();
-            let ns = ns.clone();
-            let model_name = model_name.clone();
-            let expected_phase = expected_phase.clone();
-            async move {
-                let output = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "latticemodel",
-                    &model_name,
-                    "-n",
-                    &ns,
-                    "-o",
-                    "jsonpath={.status.phase}",
-                ])
-                .await;
-
-                match output {
-                    Ok(current_phase) => {
-                        let current = current_phase.trim();
-                        info!("LatticeModel {}/{} phase: {}", ns, model_name, current);
-                        Ok(current == expected_phase)
-                    }
-                    Err(e) => {
-                        info!("LatticeModel {}/{} not ready: {}", ns, model_name, e);
-                        Ok(false)
-                    }
-                }
-            }
-        },
-    )
-    .await
-}
-
 /// Deploy a LatticeModel and verify the controller starts reconciling
 async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Deploying LatticeModel from fixture...");
 
-    super::super::helpers::services::ensure_namespace(kubeconfig, MODEL_NAMESPACE).await?;
+    ensure_namespace(kubeconfig, MODEL_NAMESPACE).await?;
 
     let model = load_model_fixture()?;
     let yaml = serde_json::to_string(&model)
@@ -97,8 +42,9 @@ async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
     apply_yaml_with_retry(kubeconfig, &yaml).await?;
 
     // Wait for controller to pick up and transition to Loading
-    wait_for_model_phase(
+    wait_for_resource_phase(
         kubeconfig,
+        "latticemodel",
         MODEL_NAMESPACE,
         MODEL_NAME,
         "Loading",
@@ -283,8 +229,9 @@ async fn test_tracing_policies_created(kubeconfig: &str) -> Result<(), String> {
 async fn test_model_serving_phase(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Waiting for Serving phase (Kthena processing)...");
 
-    wait_for_model_phase(
+    wait_for_resource_phase(
         kubeconfig,
+        "latticemodel",
         MODEL_NAMESPACE,
         MODEL_NAME,
         "Serving",
@@ -881,11 +828,8 @@ pub async fn run_model_tests(ctx: &InfraContext) -> Result<(), String> {
     let kubeconfig = ctx.require_workload()?;
     info!("[Model] Running LatticeModel integration tests on {kubeconfig}");
 
-    // GHCR registry credentials (model uses ghcr.io/evan-hines-js/busybox)
+    // GHCR registry credentials + Cedar policies (includes AppArmor override)
     setup_regcreds_infrastructure(kubeconfig).await?;
-
-    // Cedar policy for AppArmor override (kind clusters lack AppArmor)
-    apply_apparmor_override_policy(kubeconfig).await?;
 
     // Deploy the model
     test_model_deployment(kubeconfig).await?;
