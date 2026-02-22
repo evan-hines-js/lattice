@@ -62,6 +62,12 @@ pub enum CompilationError {
         details: String,
     },
 
+    /// Cedar policy denied external endpoint access
+    ExternalEndpointAccessDenied {
+        /// Denial details
+        details: String,
+    },
+
     /// Template rendering error
     Template {
         /// The underlying template error
@@ -115,6 +121,9 @@ impl fmt::Display for CompilationError {
             }
             Self::VolumeAccessDenied { details } => {
                 write!(f, "volume access denied: {}", details)
+            }
+            Self::ExternalEndpointAccessDenied { details } => {
+                write!(f, "external endpoint access denied: {}", details)
             }
             Self::Template { source } => {
                 write!(f, "template error: {}", source)
@@ -202,6 +211,13 @@ impl CompilationError {
         }
     }
 
+    /// Create an external-endpoint-access-denied error
+    pub fn external_endpoint_access_denied(details: impl Into<String>) -> Self {
+        Self::ExternalEndpointAccessDenied {
+            details: details.into(),
+        }
+    }
+
     /// Create a file compilation error
     pub fn file_compilation(message: impl Into<String>) -> Self {
         Self::FileCompilation {
@@ -224,6 +240,7 @@ impl CompilationError {
             Self::SecretAccessDenied { .. }
                 | Self::SecurityOverrideDenied { .. }
                 | Self::VolumeAccessDenied { .. }
+                | Self::ExternalEndpointAccessDenied { .. }
         )
     }
 }

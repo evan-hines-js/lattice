@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use lattice_common::crd::{derived_name, EgressTarget};
-use lattice_common::graph::{ActiveEdge, ServiceNode, ServiceType};
+use lattice_common::graph::{ActiveEdge, ServiceNode};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::policy::cilium::{
     CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort,
@@ -82,19 +82,6 @@ impl<'a> PolicyCompiler<'a> {
         // Build egress rules
         let mut egress_rules = Vec::new();
 
-        // Check if service has external FQDN dependencies or FQDN egress rules
-        let has_external_fqdns = outbound_edges.iter().any(|edge| {
-            self.graph
-                .get_service(&edge.callee_namespace, &edge.callee_name)
-                .map(|callee| {
-                    callee.type_ == ServiceType::External
-                        && callee
-                            .endpoints
-                            .values()
-                            .any(|ep| !Self::is_ip_address(&ep.host))
-                })
-                .unwrap_or(false)
-        });
         let has_fqdn_egress = service
             .egress_rules
             .iter()
@@ -120,7 +107,7 @@ impl<'a> PolicyCompiler<'a> {
                         protocol: "TCP".to_string(),
                     },
                 ],
-                rules: if has_external_fqdns || has_fqdn_egress {
+                rules: if has_fqdn_egress {
                     Some(DnsRules {
                         dns: vec![DnsMatch {
                             match_pattern: Some("*".to_string()),
@@ -133,13 +120,10 @@ impl<'a> PolicyCompiler<'a> {
             ..Default::default()
         });
 
-        // HBONE egress for outbound mesh dependencies
-        if !outbound_edges.is_empty() {
+        // HBONE egress for outbound mesh dependencies or external FQDN egress
+        if !outbound_edges.is_empty() || has_fqdn_egress {
             egress_rules.push(Self::hbone_egress_rule());
         }
-
-        // External deps egress (FQDN/CIDR from outbound edges)
-        self.build_egress_rules_for_external_deps(outbound_edges, &mut egress_rules);
 
         // Non-mesh egress rules from spec (entity, CIDR, FQDN)
         for rule in &service.egress_rules {
@@ -184,73 +168,6 @@ impl<'a> PolicyCompiler<'a> {
                 egress: egress_rules,
             },
         )
-    }
-
-    /// Build egress rules for external (non-mesh) dependencies only.
-    /// Local service dependencies are covered by the broad HBONE egress rule.
-    fn build_egress_rules_for_external_deps(
-        &self,
-        outbound_edges: &[ActiveEdge],
-        egress_rules: &mut Vec<CiliumEgressRule>,
-    ) {
-        for edge in outbound_edges {
-            if let Some(callee) = self
-                .graph
-                .get_service(&edge.callee_namespace, &edge.callee_name)
-            {
-                if callee.type_ == ServiceType::External {
-                    self.build_external_dependency_rules(&callee, egress_rules);
-                }
-            }
-        }
-    }
-
-    /// Build egress rules for an external service dependency
-    fn build_external_dependency_rules(
-        &self,
-        callee: &ServiceNode,
-        egress_rules: &mut Vec<CiliumEgressRule>,
-    ) {
-        let (fqdns, cidrs) = Self::categorize_external_endpoints(callee);
-        let to_ports = Self::build_external_port_rules(callee);
-
-        if !fqdns.is_empty() {
-            egress_rules.push(CiliumEgressRule {
-                to_fqdns: fqdns,
-                to_ports: to_ports.clone(),
-                ..Default::default()
-            });
-        }
-
-        if !cidrs.is_empty() {
-            egress_rules.push(CiliumEgressRule {
-                to_cidr: cidrs,
-                to_ports,
-                ..Default::default()
-            });
-        }
-    }
-
-    /// Categorize external endpoints into FQDNs and CIDRs
-    pub(crate) fn categorize_external_endpoints(
-        callee: &ServiceNode,
-    ) -> (Vec<FqdnSelector>, Vec<String>) {
-        let mut fqdns: Vec<FqdnSelector> = Vec::new();
-        let mut cidrs: Vec<String> = Vec::new();
-
-        for ep in callee.endpoints.values() {
-            if Self::is_ip_address(&ep.host) {
-                let prefix = if ep.host.contains(':') { 128 } else { 32 };
-                cidrs.push(format!("{}/{}", ep.host, prefix));
-            } else {
-                fqdns.push(FqdnSelector {
-                    match_name: Some(ep.host.clone()),
-                    match_pattern: None,
-                });
-            }
-        }
-
-        (fqdns, cidrs)
     }
 
     /// Broad HBONE ingress: allow any pod in the cluster to deliver traffic on port 15008.
@@ -310,11 +227,5 @@ impl<'a> PolicyCompiler<'a> {
                 rules: None,
             }]
         }
-    }
-
-    /// Build port rules for external service endpoints (TCP only)
-    fn build_external_port_rules(callee: &ServiceNode) -> Vec<CiliumPortRule> {
-        let ports: Vec<u16> = callee.endpoints.values().map(|ep| ep.port).collect();
-        Self::build_tcp_port_rules(&ports)
     }
 }

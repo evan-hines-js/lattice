@@ -157,12 +157,25 @@ pub fn inbound_allow_all() -> (String, ResourceSpec) {
     )
 }
 
-pub fn external_outbound_dep(name: &str) -> (String, ResourceSpec) {
+pub fn external_outbound_dep(name: &str, url: &str) -> (String, ResourceSpec) {
+    let mut endpoints = serde_json::Map::new();
+    endpoints.insert(
+        "default".to_string(),
+        serde_json::Value::String(url.to_string()),
+    );
+
+    let mut params = BTreeMap::new();
+    params.insert(
+        "endpoints".to_string(),
+        serde_json::Value::Object(endpoints),
+    );
+
     (
         name.to_string(),
         ResourceSpec {
             type_: ResourceType::ExternalService,
             direction: DependencyDirection::Outbound,
+            params: Some(params),
             ..Default::default()
         },
     )

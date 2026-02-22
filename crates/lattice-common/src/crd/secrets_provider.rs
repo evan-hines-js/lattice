@@ -53,22 +53,8 @@ pub struct SecretProviderSpec {
     ///
     /// Uses `x-kubernetes-preserve-unknown-fields` so Kubernetes won't prune
     /// the arbitrary ESO provider fields (url, auth, region, etc.).
-    #[schemars(schema_with = "preserve_unknown_fields_object")]
+    #[schemars(schema_with = "crate::crd::preserve_unknown_fields")]
     pub provider: serde_json::Map<String, serde_json::Value>,
-}
-
-fn preserve_unknown_fields_object(
-    _gen: &mut schemars::gen::SchemaGenerator,
-) -> schemars::schema::Schema {
-    let mut obj = schemars::schema::SchemaObject {
-        instance_type: Some(schemars::schema::InstanceType::Object.into()),
-        ..Default::default()
-    };
-    obj.extensions.insert(
-        "x-kubernetes-preserve-unknown-fields".to_string(),
-        serde_json::json!(true),
-    );
-    obj.into()
 }
 
 /// SecretProvider status

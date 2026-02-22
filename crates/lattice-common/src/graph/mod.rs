@@ -15,9 +15,9 @@ use dashmap::{DashMap, DashSet};
 use tracing::warn;
 
 use crate::crd::{
-    EgressRule, IngressPolicySpec, LatticeExternalServiceSpec, LatticeMeshMemberSpec,
-    LatticeServicePolicy, LatticeServiceSpec, MeshMemberTarget, ParsedEndpoint, PeerAuth,
-    Resolution, ServiceBackupSpec, ServiceSelector, VolumeParams, WorkloadSpec,
+    EgressRule, IngressPolicySpec, LatticeMeshMemberSpec, LatticeServicePolicy, LatticeServiceSpec,
+    MeshMemberTarget, PeerAuth, ServiceBackupSpec, ServiceSelector,
+    VolumeParams, WorkloadSpec,
 };
 
 /// Fully qualified service reference: (namespace, name)
@@ -30,8 +30,6 @@ use crate::{MONITORING_NAMESPACE, VMAGENT_NODE_NAME};
 pub enum ServiceType {
     /// Internal service managed by Lattice
     Local,
-    /// External service defined via LatticeExternalService
-    External,
     /// Pre-existing workload enrolled via LatticeMeshMember
     MeshMember,
     /// Placeholder for a service referenced but not yet defined
@@ -70,10 +68,6 @@ pub struct ServiceNode {
     pub image: Option<String>,
     /// Exposed ports: name -> port mapping
     pub ports: BTreeMap<String, PortMapping>,
-    /// Parsed endpoints (for external services)
-    pub endpoints: BTreeMap<String, ParsedEndpoint>,
-    /// Resolution strategy (for external services)
-    pub resolution: Option<Resolution>,
     /// Custom pod selector labels (for mesh members with non-LABEL_NAME selectors)
     pub selector: Option<BTreeMap<String, String>>,
     /// Target namespace (for namespace-scoped mesh members)
@@ -106,8 +100,10 @@ impl ServiceNode {
                 .collect()
         };
 
+        // Only include internal service dependencies as graph edges.
+        // External-service egress is handled via LatticeMeshMember egress rules.
         let dependencies: Vec<QualifiedName> = workload
-            .dependencies(namespace)
+            .internal_dependencies(namespace)
             .into_iter()
             .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
             .collect();
@@ -140,47 +136,6 @@ impl ServiceNode {
                         .collect()
                 })
                 .unwrap_or_default(),
-            endpoints: BTreeMap::new(),
-            resolution: None,
-            selector: None,
-            target_namespace: None,
-            allow_peer_traffic: false,
-            egress_rules: vec![],
-            service_account: None,
-        }
-    }
-
-    /// Create a new external service node from a LatticeExternalService spec
-    pub fn from_external_spec(
-        namespace: &str,
-        name: &str,
-        spec: &LatticeExternalServiceSpec,
-    ) -> Self {
-        let allows_all = spec.allowed_requesters.iter().any(|c| c == "*");
-
-        // When allows_all is true, the explicit caller list is irrelevant.
-        // External services specify callers by name only - assumed same namespace.
-        let allowed_callers: HashSet<QualifiedName> = if allows_all {
-            HashSet::new()
-        } else {
-            spec.allowed_requesters
-                .iter()
-                .map(|caller| (namespace.to_string(), caller.clone()))
-                .collect()
-        };
-
-        Self {
-            namespace: namespace.to_string(),
-            name: name.to_string(),
-            type_: ServiceType::External,
-            dependencies: vec![],
-            allowed_callers,
-            allows_all,
-            depends_all: false,
-            image: None,
-            ports: BTreeMap::new(),
-            endpoints: spec.valid_endpoints(),
-            resolution: Some(spec.resolution.clone()),
             selector: None,
             target_namespace: None,
             allow_peer_traffic: false,
@@ -247,8 +202,6 @@ impl ServiceNode {
             depends_all: spec.depends_all,
             image: None,
             ports,
-            endpoints: BTreeMap::new(),
-            resolution: None,
             selector,
             target_namespace,
             allow_peer_traffic: spec.allow_peer_traffic,
@@ -269,8 +222,6 @@ impl ServiceNode {
             depends_all: false,
             image: None,
             ports: BTreeMap::new(),
-            endpoints: BTreeMap::new(),
-            resolution: None,
             selector: None,
             target_namespace: None,
             allow_peer_traffic: false,
@@ -547,17 +498,6 @@ impl ServiceGraph {
         self.put_node(node);
     }
 
-    /// Insert or update an external service in the graph
-    pub fn put_external_service(
-        &self,
-        namespace: &str,
-        name: &str,
-        spec: &LatticeExternalServiceSpec,
-    ) {
-        let node = ServiceNode::from_external_spec(namespace, name, spec);
-        self.put_node(node);
-    }
-
     /// Internal: Insert a node and update all edge indices
     fn put_node(&self, node: ServiceNode) {
         let key = (node.namespace.clone(), node.name.clone());
@@ -785,7 +725,7 @@ impl ServiceGraph {
                 };
 
                 let allowed = match callee.type_ {
-                    ServiceType::Local | ServiceType::External | ServiceType::MeshMember => {
+                    ServiceType::Local | ServiceType::MeshMember => {
                         callee.allows(namespace, name)
                     }
                     ServiceType::Unknown => {
@@ -862,46 +802,6 @@ impl ServiceGraph {
                     .collect()
             })
             .unwrap_or_default()
-    }
-
-    /// List all external services in a namespace
-    pub fn list_external_services(&self, namespace: &str) -> Vec<ServiceNode> {
-        self.ns_index
-            .get(namespace)
-            .map(|index| {
-                index
-                    .iter()
-                    .filter_map(|name| {
-                        let node = self.get_service(namespace, name)?;
-                        if node.type_ == ServiceType::External {
-                            Some(node)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Find an external service CRD that governs the given host.
-    ///
-    /// Iterates external service nodes in the namespace and checks if any
-    /// endpoint matches the host. Returns the CRD name if found, None if
-    /// the host is ungoverned.
-    pub fn find_external_by_host(&self, namespace: &str, host: &str) -> Option<String> {
-        self.ns_index.get(namespace).and_then(|index| {
-            index.iter().find_map(|name| {
-                let node = self.get_service(namespace, name)?;
-                if node.type_ == ServiceType::External
-                    && node.endpoints.values().any(|ep| ep.host == host)
-                {
-                    Some(node.name.clone())
-                } else {
-                    None
-                }
-            })
-        })
     }
 
     /// List all mesh members in a namespace
@@ -1138,15 +1038,6 @@ mod tests {
         }
     }
 
-    fn make_external_spec(allowed: Vec<&str>) -> LatticeExternalServiceSpec {
-        LatticeExternalServiceSpec {
-            endpoints: BTreeMap::from([("api".to_string(), "https://api.example.com".to_string())]),
-            allowed_requesters: allowed.into_iter().map(String::from).collect(),
-            resolution: Resolution::Dns,
-            description: None,
-        }
-    }
-
     #[test]
     fn test_put_and_get_service() {
         let graph = ServiceGraph::new();
@@ -1249,24 +1140,6 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].callee_name, "api");
         assert_eq!(edges[0].callee_namespace, "prod");
-    }
-
-    #[test]
-    fn test_external_service() {
-        let graph = ServiceGraph::new();
-
-        // External service allowing api
-        let ext_spec = make_external_spec(vec!["api"]);
-        graph.put_external_service("prod", "stripe", &ext_spec);
-
-        // api depends on stripe
-        let api_spec = make_service_spec(vec!["stripe"], vec![]);
-        graph.put_service("prod", "api", &api_spec);
-
-        // Should have active edge api -> stripe
-        let edges = graph.get_active_outbound_edges("prod", "api");
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].callee_name, "stripe");
     }
 
     #[test]
@@ -1479,33 +1352,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_external_service_wildcard() {
-        let graph = ServiceGraph::new();
-
-        // External service with wildcard
-        let ext_spec = make_external_spec(vec!["*"]);
-        graph.put_external_service("prod", "stripe", &ext_spec);
-
-        let node = graph.get_service("prod", "stripe").unwrap();
-        assert!(node.allows_all, "external service should have allows_all");
-
-        // Any service declaring outbound should get through
-        let api_spec = make_service_spec(vec!["stripe"], vec![]);
-        graph.put_service("prod", "api", &api_spec);
-
-        let worker_spec = make_service_spec(vec!["stripe"], vec![]);
-        graph.put_service("prod", "worker", &worker_spec);
-
-        let outbound_api = graph.get_active_outbound_edges("prod", "api");
-        assert_eq!(outbound_api.len(), 1);
-        assert_eq!(outbound_api[0].callee_name, "stripe");
-
-        let outbound_worker = graph.get_active_outbound_edges("prod", "worker");
-        assert_eq!(outbound_worker.len(), 1);
-        assert_eq!(outbound_worker[0].callee_name, "stripe");
-    }
-
     // =========================================================================
     // Listing and Query Tests
     // =========================================================================
@@ -1518,9 +1364,10 @@ mod tests {
         let local_spec = make_service_spec(vec![], vec![]);
         graph.put_service("test-ns", "local-svc", &local_spec);
 
-        // Add external service
-        let ext_spec = make_external_spec(vec![]);
-        graph.put_external_service("test-ns", "ext-svc", &ext_spec);
+        // Add mesh member (non-local)
+        let labels = BTreeMap::from([("app".to_string(), "ext".to_string())]);
+        let mm_spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec![], vec![]);
+        graph.put_mesh_member("test-ns", "mm-svc", &mm_spec);
 
         let services = graph.list_services("test-ns");
         assert_eq!(services.len(), 1);
@@ -1528,33 +1375,9 @@ mod tests {
     }
 
     #[test]
-    fn test_list_external_services_filters_external_only() {
-        let graph = ServiceGraph::new();
-
-        // Add local service
-        let local_spec = make_service_spec(vec![], vec![]);
-        graph.put_service("test-ns", "local-svc", &local_spec);
-
-        // Add external service
-        let ext_spec = make_external_spec(vec![]);
-        graph.put_external_service("test-ns", "ext-svc", &ext_spec);
-
-        let services = graph.list_external_services("test-ns");
-        assert_eq!(services.len(), 1);
-        assert_eq!(services[0].name, "ext-svc");
-    }
-
-    #[test]
     fn test_list_services_empty_namespace() {
         let graph = ServiceGraph::new();
         let services = graph.list_services("nonexistent");
-        assert!(services.is_empty());
-    }
-
-    #[test]
-    fn test_list_external_services_empty_namespace() {
-        let graph = ServiceGraph::new();
-        let services = graph.list_external_services("nonexistent");
         assert!(services.is_empty());
     }
 
@@ -2006,50 +1829,6 @@ mod tests {
         let inbound = graph.get_active_inbound_edges("prod", "api");
         assert_eq!(inbound.len(), 1);
         assert_eq!(inbound[0].caller_name, VMAGENT_NODE_NAME);
-    }
-
-    // =========================================================================
-    // find_external_by_host Tests
-    // =========================================================================
-
-    #[test]
-    fn test_find_external_by_host_found() {
-        let graph = ServiceGraph::new();
-        let ext_spec = make_external_spec(vec!["*"]);
-        graph.put_external_service("prod", "stripe", &ext_spec);
-
-        let result = graph.find_external_by_host("prod", "api.example.com");
-        assert_eq!(result, Some("stripe".to_string()));
-    }
-
-    #[test]
-    fn test_find_external_by_host_not_found() {
-        let graph = ServiceGraph::new();
-        let ext_spec = make_external_spec(vec!["*"]);
-        graph.put_external_service("prod", "stripe", &ext_spec);
-
-        let result = graph.find_external_by_host("prod", "unknown.example.com");
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_find_external_by_host_wrong_namespace() {
-        let graph = ServiceGraph::new();
-        let ext_spec = make_external_spec(vec!["*"]);
-        graph.put_external_service("prod", "stripe", &ext_spec);
-
-        let result = graph.find_external_by_host("staging", "api.example.com");
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_find_external_by_host_ignores_local_services() {
-        let graph = ServiceGraph::new();
-        let local_spec = make_service_spec(vec![], vec![]);
-        graph.put_service("prod", "api", &local_spec);
-
-        let result = graph.find_external_by_host("prod", "api");
-        assert_eq!(result, None);
     }
 
     #[test]

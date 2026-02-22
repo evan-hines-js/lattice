@@ -307,8 +307,7 @@ fn ensure_routing_mesh_members(
             mesh_members,
             &entry_name,
             &router_caller,
-            inference_port,
-            "inference",
+            Some((inference_port, "inference")),
             needs_peer_traffic,
         );
 
@@ -318,8 +317,7 @@ fn ensure_routing_mesh_members(
             mesh_members,
             &worker_name,
             &router_caller,
-            inference_port,
-            "inference",
+            Some((inference_port, "inference")),
             needs_peer_traffic,
         );
     }
@@ -357,48 +355,24 @@ fn ensure_autoscaling_mesh_members(
 
         let entry_name = format!("{}-{}", model_name, role_name);
 
-        if let Some(port) = metrics_port {
-            ensure_infra_caller_on_mesh_member(
-                mesh_members,
-                &entry_name,
-                &autoscaler_caller,
-                port,
-                "metrics",
-                false,
-            );
-        } else {
-            // No metrics port — only add the caller to an existing mesh member
-            ensure_infra_caller_on_mesh_member(
-                mesh_members,
-                &entry_name,
-                &autoscaler_caller,
-                0, // sentinel — no port to add
-                "",
-                false,
-            );
-        }
+        let metrics = metrics_port.map(|p| (p, "metrics"));
+        ensure_infra_caller_on_mesh_member(
+            mesh_members,
+            &entry_name,
+            &autoscaler_caller,
+            metrics,
+            false,
+        );
 
         // Also handle worker mesh members if they exist
         let worker_name = format!("{}-{}-worker", model_name, role_name);
-        if let Some(port) = metrics_port {
-            augment_existing_mesh_member(
-                mesh_members,
-                &worker_name,
-                &autoscaler_caller,
-                port,
-                "metrics",
-                false,
-            );
-        } else {
-            augment_existing_mesh_member(
-                mesh_members,
-                &worker_name,
-                &autoscaler_caller,
-                0,
-                "",
-                false,
-            );
-        }
+        augment_existing_mesh_member(
+            mesh_members,
+            &worker_name,
+            &autoscaler_caller,
+            metrics,
+            false,
+        );
     }
 }
 
@@ -407,25 +381,24 @@ fn ensure_infra_caller_on_mesh_member(
     mesh_members: &mut Vec<LatticeMeshMember>,
     name: &str,
     caller: &CallerRef,
-    port: u16,
-    port_name: &str,
+    port: Option<(u16, &str)>,
     allow_peer_traffic: bool,
 ) {
     if let Some(mm) = mesh_members
         .iter_mut()
         .find(|mm| mm.metadata.name.as_deref() == Some(name))
     {
-        add_caller_and_port(mm, caller, port, port_name, allow_peer_traffic);
+        add_caller_and_port(mm, caller, port, allow_peer_traffic);
     } else {
         // No existing mesh member — create one
-        let mut ports = Vec::new();
-        if port > 0 {
-            ports.push(MeshMemberPort {
-                port,
-                name: port_name.to_string(),
+        let ports = match port {
+            Some((p, name)) => vec![MeshMemberPort {
+                port: p,
+                name: name.to_string(),
                 peer_auth: PeerAuth::Strict,
-            });
-        }
+            }],
+            None => Vec::new(),
+        };
 
         let mm = LatticeMeshMember::new(
             name,
@@ -458,24 +431,22 @@ fn augment_existing_mesh_member(
     mesh_members: &mut [LatticeMeshMember],
     name: &str,
     caller: &CallerRef,
-    port: u16,
-    port_name: &str,
+    port: Option<(u16, &str)>,
     allow_peer_traffic: bool,
 ) {
     if let Some(mm) = mesh_members
         .iter_mut()
         .find(|mm| mm.metadata.name.as_deref() == Some(name))
     {
-        add_caller_and_port(mm, caller, port, port_name, allow_peer_traffic);
+        add_caller_and_port(mm, caller, port, allow_peer_traffic);
     }
 }
 
-/// Shared logic: add a caller + port to a mesh member, deduplicating both.
+/// Shared logic: add a caller + optional port to a mesh member, deduplicating both.
 fn add_caller_and_port(
     mm: &mut LatticeMeshMember,
     caller: &CallerRef,
-    port: u16,
-    port_name: &str,
+    port: Option<(u16, &str)>,
     allow_peer_traffic: bool,
 ) {
     if !mm.spec.allowed_callers.contains(caller) {
@@ -485,12 +456,14 @@ fn add_caller_and_port(
             .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
     }
 
-    if port > 0 && !mm.spec.ports.iter().any(|p| p.port == port) {
-        mm.spec.ports.push(MeshMemberPort {
-            port,
-            name: port_name.to_string(),
-            peer_auth: PeerAuth::Strict,
-        });
+    if let Some((p, name)) = port {
+        if !mm.spec.ports.iter().any(|existing| existing.port == p) {
+            mm.spec.ports.push(MeshMemberPort {
+                port: p,
+                name: name.to_string(),
+                peer_auth: PeerAuth::Strict,
+            });
+        }
     }
 
     if allow_peer_traffic {
@@ -900,7 +873,7 @@ mod tests {
         let role = &compiled.model_serving.spec.template.roles[0];
         let gates = role.entry_template["spec"]["schedulingGates"].as_array();
         assert!(
-            gates.map_or(true, |g| g.is_empty()),
+            gates.is_none_or(|g| g.is_empty()),
             "no scheduling gates when model_source is None"
         );
     }

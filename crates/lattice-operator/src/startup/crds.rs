@@ -9,9 +9,9 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::{Client, CustomResourceExt};
 
 use lattice_common::crd::{
-    BackupStore, CedarPolicy, CloudProvider, LatticeCluster, LatticeClusterBackup,
-    LatticeExternalService, LatticeJob, LatticeMeshMember, LatticeModel, LatticeRestore,
-    LatticeService, LatticeServicePolicy, OIDCProvider, SecretProvider,
+    BackupStore, CedarPolicy, CloudProvider, LatticeCluster, LatticeClusterBackup, LatticeJob,
+    LatticeMeshMember, LatticeModel, LatticeRestore, LatticeService, LatticeServicePolicy,
+    OIDCProvider, SecretProvider,
 };
 
 /// CRD definition with name and resource
@@ -48,17 +48,13 @@ fn cluster_crds() -> Vec<CrdDef> {
 }
 
 /// CRDs needed by Service mode:
-/// LatticeService, LatticeExternalService, LatticeServicePolicy,
+/// LatticeService, LatticeServicePolicy,
 /// BackupStore, LatticeClusterBackup, LatticeRestore, CedarPolicy, LatticeMeshMember
 fn service_crds() -> Vec<CrdDef> {
     vec![
         CrdDef {
             name: "latticeservices.lattice.dev",
             crd: LatticeService::crd(),
-        },
-        CrdDef {
-            name: "latticeexternalservices.lattice.dev",
-            crd: LatticeExternalService::crd(),
         },
         CrdDef {
             name: "latticeservicepolicies.lattice.dev",

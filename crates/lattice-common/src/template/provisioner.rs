@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use tracing::warn;
 
-use crate::crd::{ParsedEndpoint, ResourceSpec, ResourceType, WorkloadSpec};
+use crate::crd::{ResourceSpec, ResourceType, WorkloadSpec};
 use crate::graph::ServiceGraph;
 
 use super::context::ResourceOutputs;
@@ -177,9 +177,10 @@ impl ResourceProvisioner for ServiceProvisioner {
     }
 }
 
-/// Provisioner for external services (LatticeExternalService)
+/// Provisioner for external services
 ///
-/// Resolves endpoints defined in LatticeExternalService CRDs.
+/// Resolves endpoints from inline `params.endpoints` in the resource spec.
+/// Authorization is handled by Cedar policies during compilation.
 #[derive(Debug, Default)]
 pub struct ExternalServiceProvisioner;
 
@@ -200,61 +201,36 @@ impl ResourceProvisioner for ExternalServiceProvisioner {
         &self,
         resource_name: &str,
         resource: &ResourceSpec,
-        ctx: &ProvisionerContext<'_>,
+        _ctx: &ProvisionerContext<'_>,
     ) -> Result<ResourceOutputs, TemplateError> {
-        // Use the resource's id if provided, otherwise use the resource name
-        let service_name = resource.id.as_deref().unwrap_or(resource_name);
+        // Parse inline params to get endpoints
+        let params = resource
+            .external_service_params()
+            .map_err(|e| TemplateError::Undefined(format!("resource '{}': {}", resource_name, e)))?
+            .ok_or_else(|| {
+                TemplateError::Undefined(format!(
+                    "resource '{}' is not an external-service type",
+                    resource_name
+                ))
+            })?;
 
-        // Try graph lookup first (existing LatticeExternalService CRD by name)
-        if let Some(node) = ctx.graph.get_service(ctx.environment, service_name) {
-            // Get the primary endpoint (first one, or "default" if exists)
-            let endpoint = node
-                .endpoints
-                .get("default")
-                .or_else(|| node.endpoints.values().next())
-                .ok_or_else(|| {
-                    TemplateError::Undefined(format!(
-                        "external service '{}' has no endpoints",
-                        resource_name
-                    ))
-                })?;
+        // Parse endpoints and find the primary one ("default" key, or first)
+        let parsed = params.parsed_endpoints();
+        let endpoint = parsed
+            .get("default")
+            .or_else(|| parsed.values().next())
+            .ok_or_else(|| {
+                TemplateError::Undefined(format!(
+                    "external service '{}' has no valid endpoints",
+                    resource_name
+                ))
+            })?;
 
-            // All outputs are non-sensitive for external services
-            // (if auth is needed, user should use ${secrets.*} namespace)
-            return Ok(ResourceOutputs::builder()
-                .output("host", &endpoint.host)
-                .output("port", endpoint.port.to_string())
-                .output("url", &endpoint.url)
-                .build());
-        }
-
-        // Fallback: if id is a parseable URL, resolve inline
-        if let Some(id) = resource.id.as_deref() {
-            if let Some(ep) = ParsedEndpoint::parse(id) {
-                // Permission check: is this host governed by a LatticeExternalService CRD?
-                if let Some(governing_crd) =
-                    ctx.graph.find_external_by_host(ctx.environment, &ep.host)
-                {
-                    return Err(TemplateError::PermissionDenied(format!(
-                        "external host '{}' is governed by LatticeExternalService '{}'; \
-                         add this service to allowed_requesters or reference it by name",
-                        ep.host, governing_crd
-                    )));
-                }
-
-                return Ok(ResourceOutputs::builder()
-                    .output("host", &ep.host)
-                    .output("port", ep.port.to_string())
-                    .output("url", &ep.url)
-                    .build());
-            }
-        }
-
-        // Neither graph nor inline — error
-        Err(TemplateError::Undefined(format!(
-            "external service '{}' not found in environment '{}' and id is not a parseable URL",
-            service_name, ctx.environment
-        )))
+        Ok(ResourceOutputs::builder()
+            .output("host", &endpoint.host)
+            .output("port", endpoint.port.to_string())
+            .output("url", &endpoint.url)
+            .build())
     }
 }
 
@@ -426,7 +402,7 @@ impl ProvisionerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{DependencyDirection, LatticeExternalServiceSpec, ResourceSpec, ResourceType};
+    use crate::crd::{DependencyDirection, ResourceSpec, ResourceType};
     use std::collections::BTreeMap;
 
     fn make_graph_with_service(env: &str, name: &str, port: u16) -> ServiceGraph {
@@ -464,18 +440,20 @@ mod tests {
         graph
     }
 
-    fn make_graph_with_external(env: &str, name: &str, url: &str) -> ServiceGraph {
-        let graph = ServiceGraph::new();
-
-        let spec = LatticeExternalServiceSpec {
-            endpoints: BTreeMap::from([("default".to_string(), url.to_string())]),
-            allowed_requesters: vec!["*".to_string()],
-            resolution: crate::crd::Resolution::Dns,
-            description: None,
-        };
-
-        graph.put_external_service(env, name, &spec);
-        graph
+    /// Build a ResourceSpec with inline external-service params
+    fn make_external_resource(url: &str) -> ResourceSpec {
+        ResourceSpec {
+            type_: ResourceType::ExternalService,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: Some(BTreeMap::from([(
+                "endpoints".to_string(),
+                serde_json::json!({"default": url}),
+            )])),
+            namespace: None,
+        }
     }
 
     // =========================================================================
@@ -538,24 +516,16 @@ mod tests {
     }
 
     // =========================================================================
-    // Story: ExternalServiceProvisioner resolves external services
+    // Story: ExternalServiceProvisioner resolves from inline params
     // =========================================================================
 
     #[test]
     fn test_external_provisioner_resolves_endpoint() {
-        let graph = make_graph_with_external("prod", "stripe", "https://api.stripe.com");
+        let graph = ServiceGraph::new();
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ExternalServiceProvisioner;
-        let resource = ResourceSpec {
-            type_: ResourceType::ExternalService,
-            direction: DependencyDirection::Outbound,
-            id: None,
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-        };
+        let resource = make_external_resource("https://api.stripe.com");
 
         let outputs = provisioner
             .resolve("stripe", &resource, &ctx)
@@ -571,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn test_external_provisioner_missing_service() {
+    fn test_external_provisioner_missing_params() {
         let graph = ServiceGraph::new();
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
@@ -590,138 +560,118 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // =========================================================================
-    // Story: ExternalServiceProvisioner resolves inline URLs
-    // =========================================================================
-
     #[test]
-    fn test_external_provisioner_inline_url_resolution() {
+    fn test_external_provisioner_explicit_port() {
         let graph = ServiceGraph::new();
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ExternalServiceProvisioner;
-        let resource = ResourceSpec {
-            type_: ResourceType::ExternalService,
-            direction: DependencyDirection::Outbound,
-            id: Some("https://api.stripe.com:443".to_string()),
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-        };
+        let resource = make_external_resource("https://api.stripe.com:8443");
 
         let outputs = provisioner
             .resolve("stripe-api", &resource, &ctx)
-            .expect("inline URL resolution should succeed");
+            .expect("explicit port resolution should succeed");
 
         assert_eq!(
             outputs.outputs.get("host"),
             Some(&"api.stripe.com".to_string())
         );
-        assert_eq!(outputs.outputs.get("port"), Some(&"443".to_string()));
+        assert_eq!(outputs.outputs.get("port"), Some(&"8443".to_string()));
         assert_eq!(
             outputs.outputs.get("url"),
-            Some(&"https://api.stripe.com:443".to_string())
+            Some(&"https://api.stripe.com:8443".to_string())
         );
     }
 
     #[test]
-    fn test_external_provisioner_graph_takes_precedence_over_inline() {
-        let graph = make_graph_with_external("prod", "stripe", "https://api.stripe.com");
-        let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
-
-        let provisioner = ExternalServiceProvisioner;
-        let resource = ResourceSpec {
-            type_: ResourceType::ExternalService,
-            direction: DependencyDirection::Outbound,
-            id: Some("stripe".to_string()),
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-        };
-
-        // Should resolve from graph, not treat "stripe" as a URL
-        let outputs = provisioner
-            .resolve("stripe-api", &resource, &ctx)
-            .expect("graph-first resolution should succeed");
-
-        assert_eq!(
-            outputs.outputs.get("host"),
-            Some(&"api.stripe.com".to_string())
-        );
-    }
-
-    #[test]
-    fn test_external_provisioner_permission_denied_when_crd_governs_host() {
-        let graph = make_graph_with_external("prod", "stripe", "https://api.stripe.com");
-        let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
-
-        let provisioner = ExternalServiceProvisioner;
-        let resource = ResourceSpec {
-            type_: ResourceType::ExternalService,
-            direction: DependencyDirection::Outbound,
-            id: Some("https://api.stripe.com:443".to_string()),
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-        };
-
-        let result = provisioner.resolve("my-stripe", &resource, &ctx);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("permission denied"));
-        assert!(err_msg.contains("api.stripe.com"));
-        assert!(err_msg.contains("stripe"));
-    }
-
-    #[test]
-    fn test_external_provisioner_unparseable_id_falls_through() {
+    fn test_external_provisioner_default_port_https() {
         let graph = ServiceGraph::new();
         let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
 
         let provisioner = ExternalServiceProvisioner;
-        let resource = ResourceSpec {
-            type_: ResourceType::ExternalService,
-            direction: DependencyDirection::Outbound,
-            id: Some("not-a-url-and-not-in-graph".to_string()),
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-        };
-
-        let result = provisioner.resolve("something", &resource, &ctx);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
-    }
-
-    #[test]
-    fn test_external_provisioner_inline_url_default_port() {
-        let graph = ServiceGraph::new();
-        let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
-
-        let provisioner = ExternalServiceProvisioner;
-        let resource = ResourceSpec {
-            type_: ResourceType::ExternalService,
-            direction: DependencyDirection::Outbound,
-            id: Some("https://api.stripe.com".to_string()),
-            class: None,
-            metadata: None,
-            params: None,
-            namespace: None,
-        };
+        let resource = make_external_resource("https://api.stripe.com");
 
         let outputs = provisioner
             .resolve("stripe-api", &resource, &ctx)
-            .expect("inline URL with default port should succeed");
+            .expect("default HTTPS port resolution should succeed");
 
         assert_eq!(
             outputs.outputs.get("host"),
             Some(&"api.stripe.com".to_string())
         );
         assert_eq!(outputs.outputs.get("port"), Some(&"443".to_string()));
+    }
+
+    #[test]
+    fn test_external_provisioner_default_port_http() {
+        let graph = ServiceGraph::new();
+        let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
+
+        let provisioner = ExternalServiceProvisioner;
+        let resource = make_external_resource("http://internal-api.example.com");
+
+        let outputs = provisioner
+            .resolve("internal", &resource, &ctx)
+            .expect("default HTTP port resolution should succeed");
+
+        assert_eq!(
+            outputs.outputs.get("host"),
+            Some(&"internal-api.example.com".to_string())
+        );
+        assert_eq!(outputs.outputs.get("port"), Some(&"80".to_string()));
+    }
+
+    #[test]
+    fn test_external_provisioner_named_endpoint() {
+        let graph = ServiceGraph::new();
+        let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
+
+        let provisioner = ExternalServiceProvisioner;
+        // Provide a named endpoint (not "default") to verify first-endpoint fallback
+        let resource = ResourceSpec {
+            type_: ResourceType::ExternalService,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: Some(BTreeMap::from([(
+                "endpoints".to_string(),
+                serde_json::json!({"api": "https://api.stripe.com"}),
+            )])),
+            namespace: None,
+        };
+
+        let outputs = provisioner
+            .resolve("stripe", &resource, &ctx)
+            .expect("named endpoint resolution should succeed");
+
+        assert_eq!(
+            outputs.outputs.get("host"),
+            Some(&"api.stripe.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_external_provisioner_empty_endpoints() {
+        let graph = ServiceGraph::new();
+        let ctx = ProvisionerContext::new(&graph, "prod", "prod-ns", "cluster.local");
+
+        let provisioner = ExternalServiceProvisioner;
+        let resource = ResourceSpec {
+            type_: ResourceType::ExternalService,
+            direction: DependencyDirection::Outbound,
+            id: None,
+            class: None,
+            metadata: None,
+            params: Some(BTreeMap::from([(
+                "endpoints".to_string(),
+                serde_json::json!({}),
+            )])),
+            namespace: None,
+        };
+
+        let result = provisioner.resolve("empty", &resource, &ctx);
+        assert!(result.is_err());
     }
 
     // =========================================================================

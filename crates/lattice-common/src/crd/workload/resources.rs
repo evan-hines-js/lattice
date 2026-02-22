@@ -50,7 +50,7 @@ pub enum ResourceType {
     /// Internal service (another LatticeService)
     #[default]
     Service,
-    /// External service (LatticeExternalService)
+    /// External service (inline endpoint declaration)
     ExternalService,
     /// Persistent volume (Score-compatible)
     Volume,
@@ -118,7 +118,7 @@ impl ResourceType {
         matches!(self, Self::Service)
     }
 
-    /// Returns true if this is an external service (LatticeExternalService)
+    /// Returns true if this is an external service
     pub fn is_external_service(&self) -> bool {
         matches!(self, Self::ExternalService)
     }
@@ -234,7 +234,11 @@ pub struct ResourceSpec {
     /// Generic parameters that Lattice interprets based on resource type:
     /// - volume: size, storageClass, accessMode
     /// - service: (none - uses Lattice extensions)
+    ///
+    /// Uses `x-kubernetes-preserve-unknown-fields` so Kubernetes won't prune
+    /// nested objects (e.g., external service endpoint maps).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::crd::preserve_unknown_fields")]
     pub params: Option<BTreeMap<String, serde_json::Value>>,
 
     // =========================================================================
@@ -370,6 +374,51 @@ pub struct SecretParams {
     /// `kubernetes.io/basic-auth`, `kubernetes.io/ssh-auth`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_type: Option<String>,
+}
+
+// =============================================================================
+// External Service Resource Configuration (parsed from Score params)
+// =============================================================================
+
+/// Parsed external service parameters from Score's generic `params` field
+///
+/// External services declare their endpoints and resolution strategy inline:
+///
+/// ```yaml
+/// resources:
+///   stripe:
+///     type: external-service
+///     direction: outbound
+///     params:
+///       endpoints:
+///         api: https://api.stripe.com
+///       resolution: dns
+/// ```
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalServiceParams {
+    /// Named endpoints as URLs (e.g., api: https://api.stripe.com)
+    pub endpoints: BTreeMap<String, String>,
+
+    /// How to resolve the external service endpoints (default: dns)
+    #[serde(default)]
+    pub resolution: crate::crd::Resolution,
+}
+
+impl ExternalServiceParams {
+    /// Parse all endpoint URLs into named `ParsedEndpoint` values.
+    ///
+    /// Returns a map of endpoint name → parsed endpoint. URLs are validated
+    /// during `external_service_params()`, so this should not drop any entries
+    /// for valid specs. Uses `filter_map` defensively.
+    pub fn parsed_endpoints(&self) -> BTreeMap<String, crate::crd::ParsedEndpoint> {
+        self.endpoints
+            .iter()
+            .filter_map(|(name, url)| {
+                crate::crd::ParsedEndpoint::parse(url).map(|ep| (name.clone(), ep))
+            })
+            .collect()
+    }
 }
 
 // =============================================================================
@@ -685,6 +734,49 @@ impl ResourceSpec {
                 Ok(Some(secret_params))
             }
             None => Err("secret resource requires 'params' with 'provider'".to_string()),
+        }
+    }
+
+    /// Parse external service params from the generic Score `params` field
+    ///
+    /// Returns:
+    /// - `Ok(None)` if this is not an external-service resource
+    /// - `Ok(Some(params))` if params parsed successfully
+    /// - `Err(msg)` if JSON conversion failed or required fields missing
+    pub fn external_service_params(&self) -> Result<Option<ExternalServiceParams>, String> {
+        if !self.type_.is_external_service() {
+            return Ok(None);
+        }
+        match &self.params {
+            Some(params) => {
+                let value = serde_json::to_value(params).map_err(|e| {
+                    format!("failed to serialize external service params: {}", e)
+                })?;
+                let ext_params: ExternalServiceParams = serde_json::from_value(value)
+                    .map_err(|e| format!("invalid external service params: {}", e))?;
+
+                if ext_params.endpoints.is_empty() {
+                    return Err(
+                        "external service resource requires at least one endpoint in params"
+                            .to_string(),
+                    );
+                }
+
+                // Validate all endpoint URLs parse successfully
+                for (name, url) in &ext_params.endpoints {
+                    if crate::crd::ParsedEndpoint::parse(url).is_none() {
+                        return Err(format!(
+                            "invalid endpoint URL for '{}': {}",
+                            name, url
+                        ));
+                    }
+                }
+
+                Ok(Some(ext_params))
+            }
+            None => Err(
+                "external service resource requires 'params' with 'endpoints'".to_string(),
+            ),
         }
     }
 

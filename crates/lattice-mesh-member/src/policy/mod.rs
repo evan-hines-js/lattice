@@ -124,52 +124,24 @@ impl<'a> PolicyCompiler<'a> {
         output.authorization_policies.extend(auth_policies);
 
         // External egress: ServiceEntry + AuthorizationPolicy + waypoint
-        // Handles both graph-based LatticeExternalService CRDs and inline FQDN egress.
-        self.compile_egress(&service_node, namespace, &outbound_edges, &mut output);
+        // Handles inline external endpoints and FQDN egress rules.
+        self.compile_egress(&service_node, namespace, &mut output);
 
         output
     }
 
-    /// Compile all external egress policies in one place.
+    /// Compile external egress policies from FQDN egress rules.
     ///
-    /// Handles both graph-based `LatticeExternalService` CRDs (via outbound edges)
-    /// and inline FQDN egress rules (from `ServiceNode.egress_rules`). Generates:
-    ///
-    /// - Istio ServiceEntry per external target
-    /// - Istio AuthorizationPolicy per caller→target pair
-    /// - Ztunnel waypoint allow policy (if any ServiceEntries were generated)
+    /// Generates Istio ServiceEntry + AuthorizationPolicy per FQDN target,
+    /// plus a ztunnel waypoint allow policy if any ServiceEntries were generated.
     ///
     /// Cilium FQDN egress is handled separately in `compile_cilium_policy()`.
     fn compile_egress(
         &self,
         service_node: &lattice_common::graph::ServiceNode,
         namespace: &str,
-        outbound_edges: &[lattice_common::graph::ActiveEdge],
         output: &mut GeneratedPolicies,
     ) {
-        // Graph-based external services (LatticeExternalService CRDs)
-        for edge in outbound_edges {
-            if let Some(callee) = self
-                .graph
-                .get_service(&edge.callee_namespace, &edge.callee_name)
-            {
-                if callee.type_ == ServiceType::External {
-                    if let Some(entry) = self.compile_service_entry(&callee, &edge.callee_namespace)
-                    {
-                        output.service_entries.push(entry);
-                    }
-                    output
-                        .authorization_policies
-                        .push(self.compile_external_access_policy(
-                            &service_node.name,
-                            &callee,
-                            namespace,
-                        ));
-                }
-            }
-        }
-
-        // Inline FQDN egress rules (from LatticeMeshMember spec)
         for rule in &service_node.egress_rules {
             if let EgressTarget::Fqdn(ref fqdn) = rule.target {
                 output
@@ -201,11 +173,6 @@ impl<'a> PolicyCompiler<'a> {
         }
     }
 
-    /// Check if a string is an IP address (IPv4 or IPv6)
-    pub(crate) fn is_ip_address(host: &str) -> bool {
-        use std::net::IpAddr;
-        host.parse::<IpAddr>().is_ok()
-    }
 }
 
 // =============================================================================
@@ -216,25 +183,13 @@ impl<'a> PolicyCompiler<'a> {
 mod tests {
     use super::PolicyCompiler;
     use lattice_common::crd::{
-        ContainerSpec, DependencyDirection, LatticeExternalServiceSpec, PortSpec, Resolution,
-        ResourceSpec, ServicePortsSpec, WorkloadSpec,
+        ContainerSpec, DependencyDirection, EgressRule, EgressTarget, PortSpec, ResourceSpec,
+        ServicePortsSpec, WorkloadSpec,
     };
     use lattice_common::graph::ServiceGraph;
     use lattice_common::mesh;
     use lattice_common::policy::cilium::{CiliumEgressRule, FqdnSelector};
     use std::collections::BTreeMap;
-
-    fn make_external_spec(allowed: Vec<&str>) -> LatticeExternalServiceSpec {
-        LatticeExternalServiceSpec {
-            endpoints: BTreeMap::from([(
-                "api".to_string(),
-                "https://api.stripe.com:443".to_string(),
-            )]),
-            allowed_requesters: allowed.into_iter().map(String::from).collect(),
-            resolution: Resolution::Dns,
-            description: None,
-        }
-    }
 
     fn make_service_spec(
         deps: Vec<&str>,
@@ -391,21 +346,23 @@ mod tests {
     }
 
     #[test]
-    fn external_service_generates_service_entry() {
+    fn fqdn_egress_generates_service_entry() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
-        let api_spec = make_service_spec(vec!["stripe-api"], vec![]);
-        graph.put_service(ns, "api", &api_spec);
-
-        graph.put_external_service(ns, "stripe-api", &make_external_spec(vec!["api"]));
+        let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
+        let mut spec = make_mesh_member_spec(labels, vec![], vec![], vec![]);
+        spec.egress = vec![EgressRule {
+            target: EgressTarget::Fqdn("api.stripe.com".to_string()),
+            ports: vec![443],
+        }];
+        graph.put_mesh_member(ns, "api", &spec);
 
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
-        let output = compiler.compile("api", "prod-ns");
+        let output = compiler.compile("api", ns);
 
         assert_eq!(output.service_entries.len(), 1);
         let entry = &output.service_entries[0];
-        assert_eq!(entry.metadata.name, "stripe-api");
         assert!(entry.spec.hosts.contains(&"api.stripe.com".to_string()));
         assert_eq!(entry.spec.location, "MESH_EXTERNAL");
     }
@@ -415,23 +372,31 @@ mod tests {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
-        let api_spec = make_service_spec(vec!["stripe"], vec!["gateway"]);
-        graph.put_service(ns, "api", &api_spec);
+        let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
+        let mut spec = make_mesh_member_spec(
+            labels,
+            vec![("http", 8080, lattice_common::crd::PeerAuth::Strict)],
+            vec!["gateway"],
+            vec![],
+        );
+        spec.egress = vec![EgressRule {
+            target: EgressTarget::Fqdn("api.stripe.com".to_string()),
+            ports: vec![443],
+        }];
+        graph.put_mesh_member(ns, "api", &spec);
 
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        graph.put_external_service(ns, "stripe", &make_external_spec(vec!["api"]));
-
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
-        let output = compiler.compile("api", "prod-ns");
+        let output = compiler.compile("api", ns);
 
         assert_eq!(output.cilium_policies.len(), 1);
 
         // AuthorizationPolicies:
         //    - allow inbound from gateway
         //    - waypoint->pod ztunnel allow policy
-        //    - external access policy for stripe
+        //    - FQDN egress access policy for stripe
         assert_eq!(output.authorization_policies.len(), 3);
 
         assert_eq!(output.service_entries.len(), 1);
@@ -459,13 +424,6 @@ mod tests {
         assert!(json.contains("\"toCIDR\""));
     }
 
-    #[test]
-    fn is_ip_address_detection() {
-        assert!(PolicyCompiler::is_ip_address("1.1.1.1"));
-        assert!(PolicyCompiler::is_ip_address("::1"));
-        assert!(!PolicyCompiler::is_ip_address("example.com"));
-        assert!(!PolicyCompiler::is_ip_address("api.stripe.com"));
-    }
 
     #[test]
     fn wildcard_inbound_generates_policy() {
@@ -487,38 +445,6 @@ mod tests {
             .principals
             .iter()
             .any(|p| p.contains("gateway")));
-    }
-
-    #[test]
-    fn ipv6_cidr_uses_128_prefix() {
-        use lattice_common::crd::ParsedEndpoint;
-
-        let mut node = lattice_common::graph::ServiceNode::unknown("test-ns", "external-svc");
-        node.endpoints.insert(
-            "ipv4".to_string(),
-            ParsedEndpoint {
-                protocol: "tcp".to_string(),
-                host: "192.168.1.1".to_string(),
-                port: 443,
-                url: "tcp://192.168.1.1:443".to_string(),
-            },
-        );
-        node.endpoints.insert(
-            "ipv6".to_string(),
-            ParsedEndpoint {
-                protocol: "tcp".to_string(),
-                host: "2001:db8::1".to_string(),
-                port: 443,
-                url: "tcp://[2001:db8::1]:443".to_string(),
-            },
-        );
-
-        let (fqdns, cidrs) = PolicyCompiler::categorize_external_endpoints(&node);
-
-        assert!(fqdns.is_empty());
-        assert_eq!(cidrs.len(), 2);
-        assert!(cidrs.contains(&"192.168.1.1/32".to_string()));
-        assert!(cidrs.contains(&"2001:db8::1/128".to_string()));
     }
 
     #[test]
@@ -573,17 +499,25 @@ mod tests {
     }
 
     #[test]
-    fn cilium_hbone_with_external_deps() {
+    fn cilium_hbone_with_fqdn_egress() {
         let graph = ServiceGraph::new();
         let ns = "prod-ns";
 
-        let api_spec = make_service_spec(vec!["stripe"], vec!["gateway"]);
-        graph.put_service(ns, "api", &api_spec);
+        let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
+        let mut spec = make_mesh_member_spec(
+            labels,
+            vec![("http", 8080, lattice_common::crd::PeerAuth::Strict)],
+            vec!["gateway"],
+            vec![],
+        );
+        spec.egress = vec![EgressRule {
+            target: EgressTarget::Fqdn("api.stripe.com".to_string()),
+            ports: vec![443],
+        }];
+        graph.put_mesh_member(ns, "api", &spec);
 
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
-
-        graph.put_external_service(ns, "stripe", &make_external_spec(vec!["api"]));
 
         let compiler = PolicyCompiler::new(&graph, "prod-cluster");
         let output = compiler.compile("api", ns);
@@ -601,46 +535,13 @@ mod tests {
                 .to_ports
                 .iter()
                 .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port))),
-            "should have HBONE egress for external deps"
+            "should have HBONE egress for FQDN egress deps"
         );
 
         assert!(
             cnp.spec.egress.iter().any(|e| !e.to_fqdns.is_empty()),
             "should have FQDN egress for stripe"
         );
-    }
-
-    #[test]
-    fn mixed_endpoints_categorized_correctly() {
-        use lattice_common::crd::ParsedEndpoint;
-
-        let mut node = lattice_common::graph::ServiceNode::unknown("test-ns", "external-svc");
-        node.endpoints.insert(
-            "fqdn".to_string(),
-            ParsedEndpoint {
-                protocol: "https".to_string(),
-                host: "api.example.com".to_string(),
-                port: 443,
-                url: "https://api.example.com".to_string(),
-            },
-        );
-        node.endpoints.insert(
-            "ipv4".to_string(),
-            ParsedEndpoint {
-                protocol: "tcp".to_string(),
-                host: "10.0.0.1".to_string(),
-                port: 8080,
-                url: "tcp://10.0.0.1:8080".to_string(),
-            },
-        );
-
-        let (fqdns, cidrs) = PolicyCompiler::categorize_external_endpoints(&node);
-
-        assert_eq!(fqdns.len(), 1);
-        assert_eq!(fqdns[0].match_name, Some("api.example.com".to_string()));
-
-        assert_eq!(cidrs.len(), 1);
-        assert!(cidrs.contains(&"10.0.0.1/32".to_string()));
     }
 
     // =========================================================================

@@ -9,8 +9,7 @@ use std::collections::BTreeMap;
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
     CallerRef, EgressRule, EgressTarget, IngressSpec, LatticeMeshMember, LatticeMeshMemberSpec,
-    MeshMemberPort, MeshMemberTarget, ParsedEndpoint, PeerAuth, ProviderType, ResourceType,
-    RuntimeSpec, WorkloadSpec,
+    MeshMemberPort, MeshMemberTarget, PeerAuth, ProviderType, RuntimeSpec, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::template::{RenderConfig, TemplateRenderer};
@@ -189,6 +188,14 @@ impl<'a> WorkloadCompiler<'a> {
                 self.namespace,
                 self.workload,
                 self.runtime,
+            )
+            .await?;
+
+            crate::authorization::external_endpoints::authorize_external_endpoints(
+                cedar,
+                self.name,
+                self.namespace,
+                self.workload,
             )
             .await?;
         }
@@ -394,27 +401,35 @@ impl<'a> WorkloadCompiler<'a> {
             })
             .unwrap_or_default();
 
-        // Detect inline external-service resources (URL id, no graph node)
+        // Detect inline external-service resources and build FQDN egress rules
+        // from params.endpoints (the inline endpoint model).
         let inline_egress: Vec<EgressRule> = self
             .workload
             .resources
             .iter()
-            .filter(|(_, r)| r.type_ == ResourceType::ExternalService && r.direction.is_outbound())
-            .filter_map(|(name, r)| {
+            .filter(|(_, r)| r.type_.is_external_service() && r.direction.is_outbound())
+            .flat_map(|(name, r)| {
                 let id = r.id.as_deref().unwrap_or(name);
-                // Only if not in graph (not a LatticeExternalService CRD)
+                // Skip if a same-named internal service exists in the graph
                 if graph.get_service(self.namespace, id).is_some() {
-                    return None;
+                    return vec![];
                 }
                 // Try entity reference first (entity:name or entity:name:port)
                 if let Some(rule) = EgressRule::from_entity_id(id) {
-                    return Some(rule);
+                    return vec![rule];
                 }
-                let ep = ParsedEndpoint::parse(id)?;
-                Some(EgressRule {
-                    target: EgressTarget::Fqdn(ep.host),
-                    ports: vec![ep.port],
-                })
+                // Read endpoints from params.endpoints (inline model)
+                if let Ok(Some(params)) = r.external_service_params() {
+                    return params
+                        .parsed_endpoints()
+                        .into_values()
+                        .map(|ep| EgressRule {
+                            target: EgressTarget::Fqdn(ep.host),
+                            ports: vec![ep.port],
+                        })
+                        .collect();
+                }
+                vec![]
             })
             .collect();
 

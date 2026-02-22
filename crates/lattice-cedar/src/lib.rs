@@ -12,8 +12,10 @@
 //! Lattice::Action::"AccessCluster"                  (action)
 //! Lattice::Action::"AccessSecret"                   (action)
 //! Lattice::Action::"AccessVolume"                   (action)
+//! Lattice::Action::"AccessExternalEndpoint"          (action)
 //! Lattice::Action::"OverrideSecurity"               (action)
 //! Lattice::Cluster::"prod"                          (resource)
+//! Lattice::ExternalEndpoint::"api.stripe.com:443"   (resource — host:port)
 //! Lattice::SecretPath::"vault-prod:db/creds"        (resource — provider:path)
 //! Lattice::SecurityOverride::"capability:NET_ADMIN" (resource — override id)
 //! Lattice::Volume::"media/media-storage"            (resource — namespace/volume_id)
@@ -23,12 +25,16 @@
 
 mod engine;
 mod entities;
+mod external_endpoint_auth;
 mod mesh_auth;
 mod secret_auth;
 mod security_auth;
 mod volume_auth;
 
 pub use engine::{ClusterAttributes, DenialReason, Error, PolicyEngine};
+pub use external_endpoint_auth::{
+    ExternalEndpointAuthzRequest, ExternalEndpointAuthzResult, ExternalEndpointDenial,
+};
 pub use mesh_auth::{MeshWildcardRequest, MeshWildcardResult, WildcardDirection};
 pub use secret_auth::{SecretAuthzRequest, SecretAuthzResult, SecretDenial};
 pub use security_auth::{

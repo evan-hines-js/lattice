@@ -33,9 +33,8 @@ use lattice_common::NoopEventPublisher;
 
 use crate::compiler::{ApplyLayer, CompiledService, CompilerPhase, ServiceCompiler};
 use crate::crd::{
-    Condition, ConditionStatus, LatticeExternalService, LatticeExternalServiceStatus,
-    LatticeService, LatticeServicePolicy, LatticeServiceSpec, LatticeServiceStatus,
-    MonitoringConfig, ProviderType, ServiceBackupSpec, ServicePhase,
+    Condition, ConditionStatus, LatticeService, LatticeServicePolicy, LatticeServiceSpec,
+    LatticeServiceStatus, MonitoringConfig, ProviderType, ServiceBackupSpec, ServicePhase,
 };
 use crate::graph::ServiceGraph;
 use crate::Error;
@@ -62,14 +61,6 @@ pub trait ServiceKubeClient: Send + Sync {
         status: &LatticeServiceStatus,
     ) -> Result<(), Error>;
 
-    /// Patch the status of a LatticeExternalService
-    async fn patch_external_service_status(
-        &self,
-        name: &str,
-        namespace: &str,
-        status: &LatticeExternalServiceStatus,
-    ) -> Result<(), Error>;
-
     /// Get a LatticeService by name and namespace
     async fn get_service(
         &self,
@@ -77,18 +68,8 @@ pub trait ServiceKubeClient: Send + Sync {
         namespace: &str,
     ) -> Result<Option<LatticeService>, Error>;
 
-    /// Get a LatticeExternalService by name and namespace
-    async fn get_external_service(
-        &self,
-        name: &str,
-        namespace: &str,
-    ) -> Result<Option<LatticeExternalService>, Error>;
-
     /// List all LatticeServices across all namespaces
     async fn list_services(&self) -> Result<Vec<LatticeService>, Error>;
-
-    /// List all LatticeExternalServices across all namespaces
-    async fn list_external_services(&self) -> Result<Vec<LatticeExternalService>, Error>;
 
     /// List all LatticeServicePolicies across all namespaces
     async fn list_policies(&self) -> Result<Vec<LatticeServicePolicy>, Error>;
@@ -162,25 +143,6 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         Ok(())
     }
 
-    async fn patch_external_service_status(
-        &self,
-        name: &str,
-        namespace: &str,
-        status: &LatticeExternalServiceStatus,
-    ) -> Result<(), Error> {
-        let api: Api<LatticeExternalService> = Api::namespaced(self.client.clone(), namespace);
-        let status_patch = serde_json::json!({ "status": status });
-
-        api.patch_status(
-            name,
-            &PatchParams::apply(FIELD_MANAGER),
-            &Patch::Merge(&status_patch),
-        )
-        .await?;
-
-        Ok(())
-    }
-
     async fn get_service(
         &self,
         name: &str,
@@ -194,27 +156,8 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         }
     }
 
-    async fn get_external_service(
-        &self,
-        name: &str,
-        namespace: &str,
-    ) -> Result<Option<LatticeExternalService>, Error> {
-        let api: Api<LatticeExternalService> = Api::namespaced(self.client.clone(), namespace);
-        match api.get(name).await {
-            Ok(svc) => Ok(Some(svc)),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
     async fn list_services(&self) -> Result<Vec<LatticeService>, Error> {
         let api: Api<LatticeService> = Api::all(self.client.clone());
-        let list = api.list(&Default::default()).await?;
-        Ok(list.items)
-    }
-
-    async fn list_external_services(&self) -> Result<Vec<LatticeExternalService>, Error> {
-        let api: Api<LatticeExternalService> = Api::all(self.client.clone());
         let list = api.list(&Default::default()).await?;
         Ok(list.items)
     }
@@ -767,7 +710,7 @@ pub async fn reconcile(
     }
 }
 
-/// Error policy for LatticeService and LatticeExternalService controllers (kube-rs callback).
+/// Error policy for the LatticeService controller (kube-rs callback).
 ///
 /// Retryable errors (transient): requeue after 30 seconds.
 /// Non-retryable errors (permanent): await spec change.
@@ -1054,59 +997,6 @@ async fn compile_and_apply(
 }
 
 // =============================================================================
-// LatticeExternalService reconciliation
-// =============================================================================
-
-/// Reconcile a LatticeExternalService resource
-///
-/// This function is called whenever a LatticeExternalService is created, updated, or deleted.
-/// It maintains the service graph for network policy generation.
-#[instrument(skip(external, ctx), fields(external_service = %external.name_any()))]
-pub async fn reconcile_external(
-    external: Arc<LatticeExternalService>,
-    ctx: Arc<ServiceContext>,
-) -> Result<Action, Error> {
-    let name = external.name_any();
-    info!("reconciling external service");
-
-    // Validate the external service spec
-    if let Err(e) = external.spec.validate() {
-        warn!(error = %e, "external service validation failed");
-        update_external_status(
-            &external,
-            &ctx,
-            ExternalStatusUpdate::failed(&e.to_string()),
-        )
-        .await?;
-        return Ok(Action::await_change());
-    }
-
-    // Get namespace from metadata (LatticeExternalService is namespace-scoped)
-    let namespace = match external.metadata.namespace.as_deref() {
-        Some(ns) => ns,
-        None => {
-            error!("LatticeExternalService is missing namespace - this is a cluster-scoped resource that needs migration");
-            update_external_status(
-                &external,
-                &ctx,
-                ExternalStatusUpdate::failed("Resource missing namespace"),
-            )
-            .await?;
-            return Ok(Action::await_change());
-        }
-    };
-
-    // Update graph with this external service
-    ctx.graph
-        .put_external_service(namespace, &name, &external.spec);
-
-    // update_external_status skips the patch if already Ready with same message
-    update_external_status(&external, &ctx, ExternalStatusUpdate::ready()).await?;
-
-    Ok(Action::requeue(Duration::from_secs(60)))
-}
-
-// =============================================================================
 // Service cleanup on delete
 // =============================================================================
 
@@ -1125,21 +1015,6 @@ pub fn cleanup_service(service: &LatticeService, ctx: &ServiceContext) {
     };
 
     info!(service = %name, namespace = %namespace, "removing service from graph");
-    ctx.graph.delete_service(namespace, &name);
-}
-
-/// Handle external service deletion by removing from the graph
-pub fn cleanup_external_service(external: &LatticeExternalService, ctx: &ServiceContext) {
-    let name = external.name_any();
-    let namespace = match external.metadata.namespace.as_deref() {
-        Some(ns) => ns,
-        None => {
-            warn!(external_service = %name, "LatticeExternalService missing namespace during cleanup, skipping");
-            return;
-        }
-    };
-
-    info!(external_service = %name, namespace = %namespace, "removing external service from graph");
     ctx.graph.delete_service(namespace, &name);
 }
 
@@ -1261,75 +1136,6 @@ async fn update_service_status(
         .await
 }
 
-/// Status update configuration for LatticeExternalService
-struct ExternalStatusUpdate<'a> {
-    phase: crate::crd::ExternalServicePhase,
-    message: &'a str,
-    condition_type: &'a str,
-    condition_status: ConditionStatus,
-    reason: &'a str,
-}
-
-impl<'a> ExternalStatusUpdate<'a> {
-    fn ready() -> Self {
-        Self {
-            phase: crate::crd::ExternalServicePhase::Ready,
-            message: "External service is configured",
-            condition_type: "Ready",
-            condition_status: ConditionStatus::True,
-            reason: "EndpointsConfigured",
-        }
-    }
-
-    fn failed(message: &'a str) -> Self {
-        Self {
-            phase: crate::crd::ExternalServicePhase::Failed,
-            message,
-            condition_type: "Ready",
-            condition_status: ConditionStatus::False,
-            reason: "ValidationFailed",
-        }
-    }
-}
-
-fn is_external_status_unchanged(
-    external: &LatticeExternalService,
-    phase: crate::crd::ExternalServicePhase,
-    message: &str,
-) -> bool {
-    external
-        .status
-        .as_ref()
-        .map(|s| s.phase == phase && s.message.as_deref() == Some(message))
-        .unwrap_or(false)
-}
-
-async fn update_external_status(
-    external: &LatticeExternalService,
-    ctx: &ServiceContext,
-    update: ExternalStatusUpdate<'_>,
-) -> Result<(), Error> {
-    if is_external_status_unchanged(external, update.phase, update.message) {
-        debug!("external service status unchanged, skipping update");
-        return Ok(());
-    }
-
-    let name = external.name_any();
-    let namespace = external.namespace().unwrap_or_default();
-    let status = LatticeExternalServiceStatus::with_phase(update.phase)
-        .message(update.message)
-        .condition(Condition::new(
-            update.condition_type,
-            update.condition_status,
-            update.reason,
-            update.message,
-        ));
-
-    ctx.kube
-        .patch_external_service_status(&name, &namespace, &status)
-        .await
-}
-
 // =============================================================================
 // Tests
 // =============================================================================
@@ -1339,8 +1145,8 @@ mod tests {
     use super::*;
     use crate::crd::{
         BackupHook, BackupHooksSpec, ContainerSpec, DependencyDirection, HookErrorAction,
-        LatticeExternalServiceSpec, LatticeServicePolicySpec, Resolution, ResourceSpec,
-        ServiceSelector, VolumeBackupDefault, VolumeBackupSpec, WorkloadSpec,
+        LatticeServicePolicySpec, ResourceSpec, ServiceSelector, VolumeBackupDefault,
+        VolumeBackupSpec, WorkloadSpec,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
@@ -1434,26 +1240,6 @@ mod tests {
         }
     }
 
-    fn sample_external_service(name: &str) -> LatticeExternalService {
-        let mut endpoints = BTreeMap::new();
-        endpoints.insert("api".to_string(), "https://api.example.com".to_string());
-
-        LatticeExternalService {
-            metadata: ObjectMeta {
-                name: Some(name.to_string()),
-                namespace: Some("test".to_string()),
-                ..Default::default()
-            },
-            spec: LatticeExternalServiceSpec {
-                endpoints,
-                allowed_requesters: vec!["*".to_string()],
-                resolution: Resolution::Dns,
-                description: None,
-            },
-            status: None,
-        }
-    }
-
     // =========================================================================
     // Mock Setup
     // =========================================================================
@@ -1462,14 +1248,8 @@ mod tests {
         let mut mock = MockServiceKubeClient::new();
         mock.expect_patch_service_status()
             .returning(|_, _, _| Ok(()));
-        mock.expect_patch_external_service_status()
-            .returning(|_, _, _| Ok(()));
         mock.expect_get_service().returning(|_, _| Ok(None));
-        mock.expect_get_external_service()
-            .returning(|_, _| Ok(None));
         mock.expect_list_services().returning(|| Ok(vec![]));
-        mock.expect_list_external_services()
-            .returning(|| Ok(vec![]));
         mock.expect_list_policies()
             .returning(move || Ok(policies.clone()));
         mock.expect_get_namespace_labels()
@@ -1602,25 +1382,6 @@ mod tests {
 
         // Should await change (no requeue)
         assert_eq!(action, Action::await_change());
-    }
-
-    /// Story: External service reconciles immediately to Ready
-    #[tokio::test]
-    async fn external_service_becomes_ready() {
-        let external = Arc::new(sample_external_service("stripe"));
-        let mock_kube = mock_kube_with_policies(vec![]);
-        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
-
-        let action = reconcile_external(external, ctx.clone())
-            .await
-            .expect("reconcile_external should succeed");
-
-        // Should requeue periodically
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
-
-        // External service should be in graph
-        let node = ctx.graph.get_service("test", "stripe");
-        assert!(node.is_some());
     }
 
     // =========================================================================

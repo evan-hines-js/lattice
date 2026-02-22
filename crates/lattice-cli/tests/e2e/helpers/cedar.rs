@@ -257,6 +257,43 @@ pub async fn apply_run_as_root_override_policy(
     .await
 }
 
+/// Apply a Cedar policy permitting a specific service to access specific external endpoints.
+///
+/// Each service gets its own policy listing exactly which endpoints it can reach.
+///
+/// `endpoint_ids` are `"host:port"` strings matching `Lattice::ExternalEndpoint` UIDs.
+pub async fn apply_cedar_external_endpoint_policy(
+    kubeconfig: &str,
+    label: &str,
+    namespace: &str,
+    service_name: &str,
+    endpoint_ids: &[&str],
+) -> Result<(), String> {
+    let resource_conditions: Vec<String> = endpoint_ids
+        .iter()
+        .map(|id| {
+            format!(
+                "resource == Lattice::ExternalEndpoint::\"{}\"",
+                id
+            )
+        })
+        .collect();
+    let resource_expr = resource_conditions.join(" ||\n  ");
+
+    let cedar = format!(
+        r#"permit(
+  principal == Lattice::Service::"{namespace}/{service_name}",
+  action == Lattice::Action::"AccessExternalEndpoint",
+  resource
+) when {{
+  {resource_expr}
+}};"#,
+    );
+
+    let policy_name = format!("permit-ext-{}-{}", namespace, service_name);
+    apply_cedar_policy_crd(kubeconfig, &policy_name, label, 100, &cedar).await
+}
+
 /// Delete all CedarPolicy CRDs matching a label selector.
 pub async fn delete_cedar_policies_by_label(kubeconfig: &str, label_selector: &str) {
     let _ = run_kubectl(&[

@@ -240,6 +240,44 @@ pub(crate) fn build_volume_entity(namespace: &str, volume_id: &str) -> Result<En
 }
 
 // =============================================================================
+// ExternalEndpoint Entity (for external endpoint access)
+// =============================================================================
+
+/// Build an external endpoint entity for external endpoint access authorization
+///
+/// UID: `Lattice::ExternalEndpoint::"host:port"`
+///
+/// Attributes:
+/// - `host`: endpoint hostname
+/// - `port`: endpoint port (as string)
+/// - `protocol`: endpoint protocol (https, tcp, etc.)
+pub(crate) fn build_external_endpoint_entity(
+    host: &str,
+    port: u16,
+    protocol: &str,
+) -> Result<Entity> {
+    let uid_str = format!("{}:{}", host, port);
+    let uid = build_entity_uid("ExternalEndpoint", &uid_str)?;
+
+    let mut attrs = HashMap::new();
+    attrs.insert(
+        "host".to_string(),
+        RestrictedExpression::new_string(host.to_string()),
+    );
+    attrs.insert(
+        "port".to_string(),
+        RestrictedExpression::new_string(port.to_string()),
+    );
+    attrs.insert(
+        "protocol".to_string(),
+        RestrictedExpression::new_string(protocol.to_string()),
+    );
+
+    Entity::new(uid, attrs, HashSet::new())
+        .map_err(|e| Error::Internal(format!("Failed to create external endpoint entity: {}", e)))
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -347,5 +385,29 @@ mod tests {
         let cap = build_security_override_entity("capability:NET_ADMIN", "capability").unwrap();
         let priv_ = build_security_override_entity("privileged", "container").unwrap();
         assert_ne!(cap.uid(), priv_.uid());
+    }
+
+    #[test]
+    fn test_build_external_endpoint_entity() {
+        let entity = build_external_endpoint_entity("api.stripe.com", 443, "https").unwrap();
+        let uid_str = entity.uid().to_string();
+        assert!(uid_str.contains("ExternalEndpoint"));
+        assert!(uid_str.contains("api.stripe.com:443"));
+    }
+
+    #[test]
+    fn test_external_endpoint_entity_different_hosts() {
+        let entity_a =
+            build_external_endpoint_entity("api.stripe.com", 443, "https").unwrap();
+        let entity_b =
+            build_external_endpoint_entity("api.github.com", 443, "https").unwrap();
+        assert_ne!(entity_a.uid(), entity_b.uid());
+    }
+
+    #[test]
+    fn test_external_endpoint_entity_different_ports() {
+        let entity_a = build_external_endpoint_entity("example.com", 443, "https").unwrap();
+        let entity_b = build_external_endpoint_entity("example.com", 8443, "https").unwrap();
+        assert_ne!(entity_a.uid(), entity_b.uid());
     }
 }

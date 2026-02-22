@@ -15,14 +15,12 @@ use rand::prelude::*;
 use tokio::time::sleep;
 use tracing::info;
 
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use lattice_common::crd::{
-    LatticeExternalService, LatticeExternalServiceSpec, LatticeService, Resolution,
-};
+use lattice_common::crd::{LatticeService, ParsedEndpoint};
 
 use super::helpers::{
-    apply_mesh_wildcard_inbound_policy, client_from_kubeconfig, create_with_retry,
-    delete_namespace, ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure,
+    apply_cedar_external_endpoint_policy, apply_mesh_wildcard_inbound_policy,
+    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
+    run_kubectl, setup_regcreds_infrastructure,
 };
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,
@@ -53,7 +51,6 @@ pub struct RandomMeshConfig {
     pub seed: Option<u64>,
     pub num_external_services: usize,
     pub external_outbound_probability: f64,
-    pub external_allow_probability: f64,
     /// Probability that a non-frontend service uses wildcard "allow all inbound"
     pub wildcard_probability: f64,
 }
@@ -69,7 +66,6 @@ impl Default for RandomMeshConfig {
             seed: None,
             num_external_services: 10,
             external_outbound_probability: 0.3,
-            external_allow_probability: 0.6,
             wildcard_probability: 0.15,
         }
     }
@@ -82,8 +78,6 @@ impl Default for RandomMeshConfig {
 #[derive(Debug, Clone)]
 struct RandomExternalService {
     url: String,
-    allowed_requesters: HashSet<String>,
-    resolution: Resolution,
 }
 
 #[derive(Debug, Clone)]
@@ -340,17 +334,10 @@ impl RandomMesh {
         let mut external_services = BTreeMap::new();
 
         for (name, url) in external_urls.iter().take(num_external) {
-            let resolution = if Self::is_ip_based_url(url) {
-                Resolution::Static
-            } else {
-                Resolution::Dns
-            };
             external_services.insert(
                 name.to_string(),
                 RandomExternalService {
                     url: url.to_string(),
-                    allowed_requesters: HashSet::new(),
-                    resolution,
                 },
             );
         }
@@ -380,24 +367,19 @@ impl RandomMesh {
                         .expect("source service should exist")
                         .external_outbound
                         .insert(ext_name.clone());
-                    let is_allowed = rng.gen::<f64>() < config.external_allow_probability;
-                    if is_allowed {
-                        external_services
-                            .get_mut(ext_name)
-                            .expect("external service should exist")
-                            .allowed_requesters
-                            .insert(source_name.clone());
-                    }
+                    // With inline endpoints, the service owns the external dep.
+                    // If the service declares the resource, mesh policies are
+                    // generated for it and the connection is always allowed.
                     expected_connections.push((
                         source_name.clone(),
                         ext_name.clone(),
-                        is_allowed,
+                        true,
                         true,
                     ));
                 }
             }
 
-            // Negative tests for externals
+            // Negative tests: services without the inline resource can't reach the external URL
             let not_dependent: Vec<_> = ext_names
                 .iter()
                 .filter(|e| !services[source_name].external_outbound.contains(*e))
@@ -410,18 +392,6 @@ impl RandomMesh {
                 expected_connections.push((source_name.clone(), ext_name, false, true));
             }
         }
-    }
-
-    fn is_ip_based_url(url: &str) -> bool {
-        use std::net::IpAddr;
-        let host = url
-            .strip_prefix("https://")
-            .or_else(|| url.strip_prefix("http://"))
-            .unwrap_or(url);
-        let host = host.split(':').next().unwrap_or(host);
-        let host = host.split('/').next().unwrap_or(host);
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        host.parse::<IpAddr>().is_ok()
     }
 
     fn stats(&self) -> String {
@@ -516,9 +486,10 @@ impl RandomMesh {
             }
         }
 
-        // External outbound dependencies
+        // External outbound dependencies (inline endpoints)
         for ext_name in &svc.external_outbound {
-            let (key, spec) = external_outbound_dep(ext_name);
+            let url = &self.external_services[ext_name].url;
+            let (key, spec) = external_outbound_dep(ext_name, url);
             resources.insert(key, spec);
         }
 
@@ -532,27 +503,6 @@ impl RandomMesh {
 
         let has_port = !svc.is_traffic_generator;
         build_lattice_service(name, namespace, resources, has_port, container)
-    }
-
-    fn create_external_service(&self, name: &str, namespace: &str) -> LatticeExternalService {
-        let ext_svc = &self.external_services[name];
-        let mut endpoints = BTreeMap::new();
-        endpoints.insert("default".to_string(), ext_svc.url.clone());
-
-        LatticeExternalService {
-            metadata: ObjectMeta {
-                name: Some(name.to_string()),
-                namespace: Some(namespace.to_string()),
-                ..Default::default()
-            },
-            spec: LatticeExternalServiceSpec {
-                endpoints,
-                allowed_requesters: ext_svc.allowed_requesters.iter().cloned().collect(),
-                resolution: ext_svc.resolution.clone(),
-                description: Some(format!("External service: {}", ext_svc.url)),
-            },
-            status: None,
-        }
     }
 
     fn build_test_targets(&self, source_name: &str, namespace: &str) -> Vec<TestTarget> {
@@ -585,25 +535,36 @@ async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
 
-    if !mesh.external_services.is_empty() {
-        info!(
-            "[Random Mesh] Deploying {} external services...",
-            mesh.external_services.len()
-        );
-        let ext_api: Api<LatticeExternalService> =
-            Api::namespaced(client.clone(), RANDOM_MESH_NAMESPACE);
-        for name in mesh.external_services.keys() {
-            let ext_svc = mesh.create_external_service(name, RANDOM_MESH_NAMESPACE);
-            create_with_retry(&ext_api, &ext_svc, name).await?;
-        }
-    }
-
     // Apply Cedar policies for wildcard inbound services
     for svc in mesh.services.values() {
         if svc.allows_all_inbound {
             apply_mesh_wildcard_inbound_policy(kubeconfig_path, RANDOM_MESH_NAMESPACE, &svc.name)
                 .await?;
         }
+    }
+
+    // Apply per-service Cedar policies for external endpoint access
+    for svc in mesh.services.values() {
+        if svc.external_outbound.is_empty() {
+            continue;
+        }
+        let endpoint_ids: Vec<String> = svc
+            .external_outbound
+            .iter()
+            .filter_map(|ext_name| {
+                let url = &mesh.external_services[ext_name].url;
+                ParsedEndpoint::parse(url).map(|ep| format!("{}:{}", ep.host, ep.port))
+            })
+            .collect();
+        let endpoint_refs: Vec<&str> = endpoint_ids.iter().map(|s| s.as_str()).collect();
+        apply_cedar_external_endpoint_policy(
+            kubeconfig_path,
+            "random-mesh",
+            RANDOM_MESH_NAMESPACE,
+            &svc.name,
+            &endpoint_refs,
+        )
+        .await?;
     }
 
     let api: Api<LatticeService> = Api::namespaced(client, RANDOM_MESH_NAMESPACE);

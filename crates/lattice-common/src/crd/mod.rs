@@ -7,7 +7,7 @@ mod cedar_policy;
 mod cloud_provider;
 mod cluster;
 mod cluster_backup;
-mod external_service;
+mod external_endpoint;
 mod job;
 mod mesh_member;
 mod model_serving;
@@ -37,10 +37,7 @@ pub use cluster_backup::{
     BackupRetentionSpec, BackupScopeSpec, ClusterBackupPhase, LatticeClusterBackup,
     LatticeClusterBackupSpec, LatticeClusterBackupStatus,
 };
-pub use external_service::{
-    ExternalServicePhase, LatticeExternalService, LatticeExternalServiceSpec,
-    LatticeExternalServiceStatus, ParsedEndpoint, Resolution,
-};
+pub use external_endpoint::{ParsedEndpoint, Resolution};
 pub use job::{JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus, RestartPolicy};
 pub use mesh_member::{
     derived_name, CallerRef, EgressRule, EgressTarget, LatticeMeshMember, LatticeMeshMemberSpec,
@@ -91,8 +88,8 @@ pub use workload::ingress::{
 };
 pub use workload::ports::{PortSpec, ServicePortsSpec};
 pub use workload::resources::{
-    DependencyDirection, GpuParams, ResourceMetadata, ResourceQuantity, ResourceRequirements,
-    ResourceSpec, ResourceType, VolumeAccessMode, VolumeParams,
+    DependencyDirection, ExternalServiceParams, GpuParams, ResourceMetadata, ResourceQuantity,
+    ResourceRequirements, ResourceSpec, ResourceType, VolumeAccessMode, VolumeParams,
 };
 pub use workload::scaling::{AutoscalingMetric, AutoscalingSpec};
 pub use workload::spec::{RuntimeSpec, WorkloadSpec};
@@ -102,6 +99,26 @@ pub use workload::spec::{RuntimeSpec, WorkloadSpec};
 /// Serde default helper returning `true`
 pub(crate) fn default_true() -> bool {
     true
+}
+
+/// Schema helper: marks a field as `x-kubernetes-preserve-unknown-fields: true`.
+///
+/// Without this, the Kubernetes API server prunes nested objects inside
+/// `additionalProperties` fields (e.g., `endpoints: {"default": "https://..."}` → `{}`).
+///
+/// Used via `#[schemars(schema_with = "crate::crd::preserve_unknown_fields")]`.
+pub(crate) fn preserve_unknown_fields(
+    _gen: &mut schemars::gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    let mut obj = schemars::schema::SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::Object.into()),
+        ..Default::default()
+    };
+    obj.extensions.insert(
+        "x-kubernetes-preserve-unknown-fields".to_string(),
+        serde_json::json!(true),
+    );
+    obj.into()
 }
 
 /// Validate a DNS-style identifier (lowercase alphanumeric with hyphens).

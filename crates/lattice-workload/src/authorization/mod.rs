@@ -2,6 +2,7 @@
 //!
 //! Only called by WorkloadCompiler — not exposed to CRD compilers.
 
+pub(crate) mod external_endpoints;
 pub(crate) mod secrets;
 pub(crate) mod security;
 pub(crate) mod volumes;

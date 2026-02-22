@@ -26,18 +26,16 @@ use lattice_cell::parent::ParentServers;
 use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
-    BackupStore, CedarPolicy, CloudProvider, LatticeCluster, LatticeClusterBackup,
-    LatticeExternalService, LatticeJob, LatticeMeshMember, LatticeModel, LatticeRestore,
-    LatticeService, LatticeServicePolicy, MonitoringConfig, OIDCProvider, ProviderType,
-    SecretProvider,
+    BackupStore, CedarPolicy, CloudProvider, LatticeCluster, LatticeClusterBackup, LatticeJob,
+    LatticeMeshMember, LatticeModel, LatticeRestore, LatticeService, LatticeServicePolicy,
+    MonitoringConfig, OIDCProvider, ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_secret_provider::controller as secrets_provider_ctrl;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{
-    error_policy as service_error_policy, reconcile as service_reconcile, reconcile_external,
-    ServiceContext,
+    error_policy as service_error_policy, reconcile as service_reconcile, ServiceContext,
 };
 use lattice_service::policy_controller as service_policy_ctrl;
 
@@ -77,7 +75,7 @@ pub fn build_cluster_controllers(
     )]
 }
 
-/// Build service controller futures (LatticeService, LatticeExternalService, LatticeServicePolicy)
+/// Build service controller futures (LatticeService, LatticeServicePolicy)
 ///
 /// Returns the controller futures and the shared ServiceGraph (for use by job controllers).
 pub async fn build_service_controllers(
@@ -190,18 +188,6 @@ pub async fn build_service_controllers(
         .run(service_reconcile, service_error_policy, service_ctx.clone())
         .for_each(log_reconcile_result("Service"));
 
-    let ext_ctrl = Controller::new(
-        Api::<LatticeExternalService>::all(client.clone()),
-        watcher_config(),
-    )
-    .shutdown_on_signal()
-    .run(
-        reconcile_external,
-        service_error_policy,
-        service_ctx.clone(),
-    )
-    .for_each(log_reconcile_result("ExternalService"));
-
     let policy_ctx = Arc::new(ControllerContext::new(client.clone()));
     let policy_ctrl = Controller::new(
         Api::<LatticeServicePolicy>::all(client.clone()),
@@ -255,7 +241,6 @@ pub async fn build_service_controllers(
         .for_each(log_reconcile_result("MeshMember"));
 
     tracing::info!("- LatticeService controller");
-    tracing::info!("- LatticeExternalService controller");
     tracing::info!("- LatticeServicePolicy controller");
     tracing::info!("- LatticeMeshMember controller");
 
@@ -264,7 +249,6 @@ pub async fn build_service_controllers(
     (
         vec![
             Box::pin(svc_ctrl),
-            Box::pin(ext_ctrl),
             Box::pin(policy_ctrl),
             Box::pin(mm_ctrl),
         ],
@@ -528,13 +512,6 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
         let ns = item.metadata.namespace.as_deref().unwrap_or_default();
         let name = item.metadata.name.as_deref().unwrap_or_default();
         graph.put_service(ns, name, &item.spec);
-    })
-    .await;
-
-    warmup_list::<LatticeExternalService>(client, "LatticeExternalServices", |item| {
-        let ns = item.metadata.namespace.as_deref().unwrap_or_default();
-        let name = item.metadata.name.as_deref().unwrap_or_default();
-        graph.put_external_service(ns, name, &item.spec);
     })
     .await;
 
