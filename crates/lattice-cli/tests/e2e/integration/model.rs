@@ -443,6 +443,248 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Verify AutoscalingPolicy and AutoscalingPolicyBinding were created for the decode role
+async fn test_model_autoscaling_created(kubeconfig: &str) -> Result<(), String> {
+    info!("[Model] Verifying autoscaling resources (AutoscalingPolicy + AutoscalingPolicyBinding)...");
+
+    let policy_name = format!("{}-decode-scaling", MODEL_NAME);
+
+    // Verify AutoscalingPolicy
+    let ap_output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "autoscalingpolicies.workload.serving.volcano.sh",
+        &policy_name,
+        "-n",
+        MODEL_NAMESPACE,
+        "-o",
+        "json",
+    ])
+    .await?;
+
+    let ap: serde_json::Value = serde_json::from_str(&ap_output)
+        .map_err(|e| format!("Failed to parse AutoscalingPolicy JSON: {e}"))?;
+
+    // Verify apiVersion and kind
+    let api_version = ap["apiVersion"].as_str().unwrap_or_default();
+    if api_version != "workload.serving.volcano.sh/v1alpha1" {
+        return Err(format!(
+            "AutoscalingPolicy apiVersion should be 'workload.serving.volcano.sh/v1alpha1', got: '{api_version}'"
+        ));
+    }
+
+    // Verify metrics
+    let metrics = ap["spec"]["metrics"]
+        .as_array()
+        .ok_or("AutoscalingPolicy spec.metrics is not an array")?;
+    if metrics.len() != 1 {
+        return Err(format!("Expected 1 metric, got: {}", metrics.len()));
+    }
+    let metric_name = metrics[0]["metricName"].as_str().unwrap_or_default();
+    if metric_name != "gpu_kv_cache_usage" {
+        return Err(format!(
+            "Expected metric 'gpu_kv_cache_usage', got: '{metric_name}'"
+        ));
+    }
+    let target_value = metrics[0]["targetValue"].as_f64().unwrap_or(0.0);
+    if (target_value - 0.8).abs() > 0.001 {
+        return Err(format!(
+            "Expected target value 0.8, got: {target_value}"
+        ));
+    }
+
+    // Verify tolerancePercent
+    if ap["spec"]["tolerancePercent"].as_u64() != Some(10) {
+        return Err(format!(
+            "Expected tolerancePercent=10, got: {}",
+            ap["spec"]["tolerancePercent"]
+        ));
+    }
+
+    // Verify behavior
+    let behavior = &ap["spec"]["behavior"];
+    if behavior.is_null() {
+        return Err("AutoscalingPolicy behavior should be set".to_string());
+    }
+
+    // Verify scale-up panic policy
+    let panic = &behavior["scaleUp"]["panicPolicy"];
+    if panic["panicThresholdPercent"].as_u64() != Some(200) {
+        return Err(format!(
+            "Expected panicThresholdPercent=200, got: {}",
+            panic["panicThresholdPercent"]
+        ));
+    }
+    if panic["panicModeHold"].as_str() != Some("5m") {
+        return Err(format!(
+            "Expected panicModeHold='5m', got: {}",
+            panic["panicModeHold"]
+        ));
+    }
+
+    // Verify scale-up stable policy
+    let stable = &behavior["scaleUp"]["stablePolicy"];
+    if stable["stabilizationWindow"].as_str() != Some("1m") {
+        return Err(format!(
+            "Expected scaleUp stabilizationWindow='1m', got: {}",
+            stable["stabilizationWindow"]
+        ));
+    }
+    if stable["period"].as_str() != Some("30s") {
+        return Err(format!(
+            "Expected scaleUp period='30s', got: {}",
+            stable["period"]
+        ));
+    }
+
+    // Verify scale-down behavior
+    let scale_down = &behavior["scaleDown"];
+    if scale_down["stabilizationWindow"].as_str() != Some("5m") {
+        return Err(format!(
+            "Expected scaleDown stabilizationWindow='5m', got: {}",
+            scale_down["stabilizationWindow"]
+        ));
+    }
+    if scale_down["period"].as_str() != Some("1m") {
+        return Err(format!(
+            "Expected scaleDown period='1m', got: {}",
+            scale_down["period"]
+        ));
+    }
+
+    // Verify ownerReferences
+    let ap_owner = ap["metadata"]["ownerReferences"][0]["kind"]
+        .as_str()
+        .unwrap_or_default();
+    if ap_owner != "LatticeModel" {
+        return Err(format!(
+            "AutoscalingPolicy ownerReference kind should be 'LatticeModel', got: '{ap_owner}'"
+        ));
+    }
+
+    info!("[Model] AutoscalingPolicy verified: metrics, tolerance, behavior (panic + stable + scale-down), owner ref");
+
+    // Verify AutoscalingPolicyBinding
+    let apb_output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "autoscalingpolicybindings.workload.serving.volcano.sh",
+        &policy_name,
+        "-n",
+        MODEL_NAMESPACE,
+        "-o",
+        "json",
+    ])
+    .await?;
+
+    let apb: serde_json::Value = serde_json::from_str(&apb_output)
+        .map_err(|e| format!("Failed to parse AutoscalingPolicyBinding JSON: {e}"))?;
+
+    // Verify policyRef
+    let policy_ref_name = apb["spec"]["policyRef"]["name"]
+        .as_str()
+        .unwrap_or_default();
+    if policy_ref_name != policy_name {
+        return Err(format!(
+            "Binding policyRef.name should be '{}', got: '{policy_ref_name}'",
+            policy_name
+        ));
+    }
+
+    // Verify homogeneousTarget
+    let target = &apb["spec"]["homogeneousTarget"];
+
+    // Verify targetRef → ModelServing
+    let target_kind = target["target"]["targetRef"]["kind"]
+        .as_str()
+        .unwrap_or_default();
+    if target_kind != "ModelServing" {
+        return Err(format!(
+            "Binding targetRef kind should be 'ModelServing', got: '{target_kind}'"
+        ));
+    }
+    let target_name = target["target"]["targetRef"]["name"]
+        .as_str()
+        .unwrap_or_default();
+    if target_name != MODEL_NAME {
+        return Err(format!(
+            "Binding targetRef name should be '{}', got: '{target_name}'",
+            MODEL_NAME
+        ));
+    }
+
+    // Verify subTarget → Role/decode
+    let sub_kind = target["target"]["subTarget"]["kind"]
+        .as_str()
+        .unwrap_or_default();
+    if sub_kind != "Role" {
+        return Err(format!(
+            "Binding subTarget kind should be 'Role', got: '{sub_kind}'"
+        ));
+    }
+    let sub_name = target["target"]["subTarget"]["name"]
+        .as_str()
+        .unwrap_or_default();
+    if sub_name != "decode" {
+        return Err(format!(
+            "Binding subTarget name should be 'decode', got: '{sub_name}'"
+        ));
+    }
+
+    // Verify min/max replicas
+    if target["minReplicas"].as_u64() != Some(2) {
+        return Err(format!(
+            "Binding minReplicas should be 2, got: {}",
+            target["minReplicas"]
+        ));
+    }
+    if target["maxReplicas"].as_u64() != Some(8) {
+        return Err(format!(
+            "Binding maxReplicas should be 8, got: {}",
+            target["maxReplicas"]
+        ));
+    }
+
+    // Verify ownerReferences on binding
+    let apb_owner = apb["metadata"]["ownerReferences"][0]["kind"]
+        .as_str()
+        .unwrap_or_default();
+    if apb_owner != "LatticeModel" {
+        return Err(format!(
+            "AutoscalingPolicyBinding ownerReference kind should be 'LatticeModel', got: '{apb_owner}'"
+        ));
+    }
+
+    info!("[Model] AutoscalingPolicyBinding verified: policyRef, target (ModelServing/{}, Role/decode), min=2, max=8, owner ref", MODEL_NAME);
+
+    // Verify prefill role does NOT have autoscaling resources
+    let prefill_policy = format!("{}-prefill-scaling", MODEL_NAME);
+    let prefill_check = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "autoscalingpolicies.workload.serving.volcano.sh",
+        &prefill_policy,
+        "-n",
+        MODEL_NAMESPACE,
+        "-o",
+        "name",
+    ])
+    .await;
+
+    if prefill_check.is_ok() {
+        return Err(format!(
+            "Prefill role should NOT have an AutoscalingPolicy ('{prefill_policy}' should not exist)"
+        ));
+    }
+
+    info!("[Model] Verified: prefill role has no autoscaling resources (as expected)");
+    info!("[Model] All autoscaling resources verified!");
+    Ok(())
+}
+
 /// Verify model download PVC was created
 async fn test_model_download_pvc(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Verifying model download PVC...");
@@ -679,9 +921,9 @@ async fn test_model_serving_has_download_injection(kubeconfig: &str) -> Result<(
     Ok(())
 }
 
-/// Verify LatticeMeshMember resources include Kthena router as allowed caller
+/// Verify LatticeMeshMember resources include Kthena router and autoscaler as allowed callers
 async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Verifying mesh members allow Kthena router traffic...");
+    info!("[Model] Verifying mesh members allow Kthena router and autoscaler traffic...");
 
     let output = run_kubectl(&[
         "--kubeconfig",
@@ -757,7 +999,52 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
         );
     }
 
-    info!("[Model] All mesh members correctly configured for Kthena routing and PD disaggregation");
+    // Verify decode role mesh members have the autoscaler as an allowed caller
+    // (decode has autoscaling configured with entry_workload service port "metrics"=9090)
+    let decode_entry_name = format!("{}-decode", MODEL_NAME);
+    let decode_mm = items
+        .iter()
+        .find(|item| item["metadata"]["name"].as_str() == Some(&decode_entry_name));
+    if let Some(mm) = decode_mm {
+        let empty_arr = vec![];
+        let callers = mm["spec"]["allowedCallers"]
+            .as_array()
+            .unwrap_or(&empty_arr);
+        let has_autoscaler = callers.iter().any(|c| {
+            c["name"].as_str() == Some("kthena-autoscaler")
+                && c["namespace"].as_str() == Some("kthena-system")
+        });
+        if !has_autoscaler {
+            return Err(format!(
+                "LatticeMeshMember '{}' is missing Kthena autoscaler in allowedCallers",
+                decode_entry_name
+            ));
+        }
+
+        let empty_ports = vec![];
+        let ports = mm["spec"]["ports"]
+            .as_array()
+            .unwrap_or(&empty_ports);
+        let has_metrics_port = ports.iter().any(|p| p["port"].as_u64() == Some(9090));
+        if !has_metrics_port {
+            return Err(format!(
+                "LatticeMeshMember '{}' is missing metrics port 9090 (from entry_workload service ports)",
+                decode_entry_name
+            ));
+        }
+
+        info!(
+            "[Model] MeshMember '{}': Kthena autoscaler allowed + metrics port 9090 present",
+            decode_entry_name
+        );
+    } else {
+        return Err(format!(
+            "LatticeMeshMember '{}' not found for autoscaler verification",
+            decode_entry_name
+        ));
+    }
+
+    info!("[Model] All mesh members correctly configured for Kthena routing, autoscaling, and PD disaggregation");
     Ok(())
 }
 
@@ -843,6 +1130,7 @@ pub async fn run_model_tests(ctx: &InfraContext) -> Result<(), String> {
     test_model_serving_created(kubeconfig).await?;
     test_tracing_policies_created(kubeconfig).await?;
     test_model_routing_created(kubeconfig).await?;
+    test_model_autoscaling_created(kubeconfig).await?;
     test_model_mesh_members(kubeconfig).await?;
 
     // Wait for download lifecycle: Job completes + scheduling gates removed

@@ -8,6 +8,7 @@
 //! - Layer 1: ConfigMaps, Secrets, ExternalSecrets, PVCs, MeshMembers, TracingPolicies
 //! - Layer 2: ModelServing (only after mesh/security is ready)
 //! - Layer 3: Routing — ModelServer + ModelRoutes
+//! - Layer 4: Autoscaling — AutoscalingPolicy + AutoscalingPolicyBinding
 //!
 //! When `modelSource` is set, pods are created with a `lattice.dev/model-download`
 //! scheduling gate that keeps them `SchedulingGated` (zero resource usage, no GPU
@@ -429,12 +430,37 @@ async fn apply_layers(
         layer3.run("layer-3-routing").await?;
     }
 
+    // Layer 4: Autoscaling — AutoscalingPolicy + AutoscalingPolicyBinding
+    if let Some(ref autoscaling) = compiled.autoscaling {
+        let mut layer4 = ApplyBatch::new(client.clone(), namespace, params);
+
+        if let Some(ref ap_ar) = registry.resolve(CrdKind::AutoscalingPolicy).await {
+            for policy in &autoscaling.policies {
+                layer4.push("AutoscalingPolicy", &policy.metadata.name, policy, ap_ar)?;
+            }
+        }
+
+        if let Some(ref apb_ar) = registry.resolve(CrdKind::AutoscalingPolicyBinding).await {
+            for binding in &autoscaling.bindings {
+                layer4.push(
+                    "AutoscalingPolicyBinding",
+                    &binding.metadata.name,
+                    binding,
+                    apb_ar,
+                )?;
+            }
+        }
+
+        layer4.run("layer-4-autoscaling").await?;
+    }
+
     info!(
         namespace = %namespace,
         model_serving = %compiled.model_serving.metadata.name,
         mesh_members = compiled.mesh_members.len(),
         tracing_policies = compiled.tracing_policies.len(),
         has_routing = compiled.routing.is_some(),
+        has_autoscaling = compiled.autoscaling.is_some(),
         has_download = compiled.download.is_some(),
         "applied compiled model resources"
     );

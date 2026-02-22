@@ -44,7 +44,7 @@ spec:
         containers:
           main:
             image: ghcr.io/evan-hines-js/busybox:latest
-            command: ["/bin/sh", "-c", "echo 'decode entry'; sleep 300"]
+            command: ["/bin/sh", "-c", "mkdir -p /tmp/www && printf '# HELP gpu_kv_cache_usage KV cache usage ratio\\n# TYPE gpu_kv_cache_usage gauge\\ngpu_kv_cache_usage 0.95\\n' > /tmp/www/metrics && httpd -f -p 9090 -h /tmp/www"]
             resources:
               requests:
                 cpu: 100m
@@ -55,6 +55,10 @@ spec:
             security:
               runAsUser: 65534
               apparmorProfile: Unconfined
+        service:
+          ports:
+            metrics:
+              port: 9090
         resources:
           ghcr-creds:
             type: secret
@@ -65,12 +69,27 @@ spec:
       entryRuntime:
         imagePullSecrets:
           - ghcr-creds
+      autoscaling:
+        max: 8
+        metrics:
+          - metric: gpu_kv_cache_usage
+            target: 0.8
+        tolerancePercent: 10
+        behavior:
+          scaleUp:
+            panicThresholdPercent: 200
+            panicModeHold: "5m"
+            stabilizationWindow: "1m"
+            period: "30s"
+          scaleDown:
+            stabilizationWindow: "5m"
+            period: "1m"
       workerReplicas: 4
       workerWorkload:
         containers:
           main:
             image: ghcr.io/evan-hines-js/busybox:latest
-            command: ["/bin/sh", "-c", "echo 'decode worker'; sleep 300"]
+            command: ["/bin/sh", "-c", "mkdir -p /tmp/www && printf '# HELP gpu_kv_cache_usage KV cache usage ratio\\n# TYPE gpu_kv_cache_usage gauge\\ngpu_kv_cache_usage 0.95\\n' > /tmp/www/metrics && httpd -f -p 9090 -h /tmp/www"]
             resources:
               requests:
                 cpu: 100m

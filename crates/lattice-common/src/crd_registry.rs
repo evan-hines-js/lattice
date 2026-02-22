@@ -50,6 +50,10 @@ pub enum CrdKind {
     KthenaModelServer,
     /// Kthena ModelRoute (networking.serving.volcano.sh)
     KthenaModelRoute,
+    /// Kthena AutoscalingPolicy (workload.serving.volcano.sh)
+    AutoscalingPolicy,
+    /// Kthena AutoscalingPolicyBinding (workload.serving.volcano.sh)
+    AutoscalingPolicyBinding,
 }
 
 /// All CrdKind variants for iteration.
@@ -72,6 +76,8 @@ const ALL_CRD_KINDS: &[CrdKind] = &[
     CrdKind::ModelServing,
     CrdKind::KthenaModelServer,
     CrdKind::KthenaModelRoute,
+    CrdKind::AutoscalingPolicy,
+    CrdKind::AutoscalingPolicyBinding,
 ];
 
 impl CrdKind {
@@ -90,7 +96,9 @@ impl CrdKind {
             Self::Certificate => "cert-manager.io",
             Self::MeshMember => "lattice.dev",
             Self::VolcanoJob => "batch.volcano.sh",
-            Self::ModelServing => "workload.serving.volcano.sh",
+            Self::ModelServing | Self::AutoscalingPolicy | Self::AutoscalingPolicyBinding => {
+                "workload.serving.volcano.sh"
+            }
             Self::KthenaModelServer | Self::KthenaModelRoute => {
                 "networking.serving.volcano.sh"
             }
@@ -118,6 +126,8 @@ impl CrdKind {
             Self::ModelServing => "ModelServing",
             Self::KthenaModelServer => "ModelServer",
             Self::KthenaModelRoute => "ModelRoute",
+            Self::AutoscalingPolicy => "AutoscalingPolicy",
+            Self::AutoscalingPolicyBinding => "AutoscalingPolicyBinding",
         }
     }
 
@@ -136,7 +146,9 @@ impl CrdKind {
             Self::MeshMember => "lattice.dev/v1alpha1",
             Self::TracingPolicyNamespaced => "cilium.io/v1alpha1",
             Self::VolcanoJob => "batch.volcano.sh/v1alpha1",
-            Self::ModelServing => "workload.serving.volcano.sh/v1alpha1",
+            Self::ModelServing | Self::AutoscalingPolicy | Self::AutoscalingPolicyBinding => {
+                "workload.serving.volcano.sh/v1alpha1"
+            }
             Self::KthenaModelServer | Self::KthenaModelRoute => {
                 "networking.serving.volcano.sh/v1alpha1"
             }
@@ -311,6 +323,6 @@ mod tests {
     #[test]
     fn all_crd_kinds_is_exhaustive() {
         // Ensure ALL_CRD_KINDS contains every variant
-        assert_eq!(ALL_CRD_KINDS.len(), 18);
+        assert_eq!(ALL_CRD_KINDS.len(), 20);
     }
 }

@@ -364,6 +364,146 @@ pub struct KthenaRateLimit {
     pub unit: Option<String>,
 }
 
+// =============================================================================
+// Kthena Autoscaling Types (workload.serving.volcano.sh/v1alpha1)
+// =============================================================================
+
+/// Kthena AutoscalingPolicy — defines scaling strategy and metrics
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaAutoscalingPolicy {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: KthenaNetworkingMetadata,
+    pub spec: KthenaAutoscalingPolicySpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaAutoscalingPolicySpec {
+    pub metrics: Vec<KthenaAutoscalingMetric>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<KthenaAutoscalingBehavior>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaAutoscalingMetric {
+    pub metric_name: String,
+    pub target_value: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaAutoscalingBehavior {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_up: Option<KthenaScaleUpBehavior>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_down: Option<KthenaScaleDownBehavior>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaScaleUpBehavior {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panic_policy: Option<KthenaPanicPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_policy: Option<KthenaStablePolicy>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaPanicPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panic_threshold_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panic_mode_hold: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaStablePolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilization_window: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaScaleDownBehavior {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilization_window: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<String>,
+}
+
+/// Kthena AutoscalingPolicyBinding — binds a policy to a ModelServing target
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaAutoscalingPolicyBinding {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: KthenaNetworkingMetadata,
+    pub spec: KthenaAutoscalingPolicyBindingSpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaAutoscalingPolicyBindingSpec {
+    pub policy_ref: KthenaPolicyRef,
+    pub homogeneous_target: KthenaHomogeneousTarget,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaPolicyRef {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaHomogeneousTarget {
+    pub target: KthenaAutoscalingTarget,
+    pub min_replicas: u32,
+    pub max_replicas: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaAutoscalingTarget {
+    pub target_ref: KthenaTargetRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_target: Option<KthenaSubTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric_endpoint: Option<KthenaMetricEndpoint>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaTargetRef {
+    pub kind: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaSubTarget {
+    pub kind: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KthenaMetricEndpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +696,102 @@ mod tests {
         assert!(value["spec"].get("loraAdapters").is_some());
         assert!(value["spec"].get("rateLimit").is_some());
         assert_eq!(value["spec"]["rules"][0]["targetModels"][0]["modelServerName"], "test-model");
+    }
+
+    #[test]
+    fn autoscaling_policy_serialization_roundtrip() {
+        let policy = KthenaAutoscalingPolicy {
+            api_version: "workload.serving.volcano.sh/v1alpha1".to_string(),
+            kind: "AutoscalingPolicy".to_string(),
+            metadata: KthenaNetworkingMetadata {
+                name: "test-model-decode-scaling".to_string(),
+                namespace: "default".to_string(),
+                labels: BTreeMap::new(),
+                owner_references: vec![],
+            },
+            spec: KthenaAutoscalingPolicySpec {
+                metrics: vec![KthenaAutoscalingMetric {
+                    metric_name: "gpu_kv_cache_usage".to_string(),
+                    target_value: 0.8,
+                }],
+                tolerance_percent: Some(10),
+                behavior: Some(KthenaAutoscalingBehavior {
+                    scale_up: Some(KthenaScaleUpBehavior {
+                        panic_policy: Some(KthenaPanicPolicy {
+                            panic_threshold_percent: Some(200),
+                            panic_mode_hold: Some("5m".to_string()),
+                        }),
+                        stable_policy: Some(KthenaStablePolicy {
+                            stabilization_window: Some("1m".to_string()),
+                            period: Some("30s".to_string()),
+                        }),
+                    }),
+                    scale_down: Some(KthenaScaleDownBehavior {
+                        stabilization_window: Some("5m".to_string()),
+                        period: Some("1m".to_string()),
+                    }),
+                }),
+            },
+        };
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let de: KthenaAutoscalingPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(policy, de);
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["spec"]["metrics"][0]["metricName"], "gpu_kv_cache_usage");
+        assert_eq!(value["spec"]["metrics"][0]["targetValue"], 0.8);
+        assert_eq!(value["spec"]["tolerancePercent"], 10);
+        assert!(value["spec"]["behavior"]["scaleUp"]["panicPolicy"].get("panicThresholdPercent").is_some());
+        assert!(value["spec"]["behavior"]["scaleDown"].get("stabilizationWindow").is_some());
+    }
+
+    #[test]
+    fn autoscaling_policy_binding_serialization_roundtrip() {
+        let binding = KthenaAutoscalingPolicyBinding {
+            api_version: "workload.serving.volcano.sh/v1alpha1".to_string(),
+            kind: "AutoscalingPolicyBinding".to_string(),
+            metadata: KthenaNetworkingMetadata {
+                name: "test-model-decode-scaling".to_string(),
+                namespace: "default".to_string(),
+                labels: BTreeMap::new(),
+                owner_references: vec![],
+            },
+            spec: KthenaAutoscalingPolicyBindingSpec {
+                policy_ref: KthenaPolicyRef {
+                    name: "test-model-decode-scaling".to_string(),
+                },
+                homogeneous_target: KthenaHomogeneousTarget {
+                    target: KthenaAutoscalingTarget {
+                        target_ref: KthenaTargetRef {
+                            kind: "ModelServing".to_string(),
+                            name: "test-model".to_string(),
+                        },
+                        sub_target: Some(KthenaSubTarget {
+                            kind: "Role".to_string(),
+                            name: "decode".to_string(),
+                        }),
+                        metric_endpoint: Some(KthenaMetricEndpoint {
+                            uri: Some("/metrics".to_string()),
+                            port: Some(9090),
+                        }),
+                    },
+                    min_replicas: 1,
+                    max_replicas: 10,
+                },
+            },
+        };
+
+        let json = serde_json::to_string(&binding).unwrap();
+        let de: KthenaAutoscalingPolicyBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(binding, de);
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["spec"]["policyRef"]["name"], "test-model-decode-scaling");
+        assert_eq!(value["spec"]["homogeneousTarget"]["target"]["targetRef"]["kind"], "ModelServing");
+        assert_eq!(value["spec"]["homogeneousTarget"]["target"]["subTarget"]["kind"], "Role");
+        assert_eq!(value["spec"]["homogeneousTarget"]["target"]["subTarget"]["name"], "decode");
+        assert_eq!(value["spec"]["homogeneousTarget"]["minReplicas"], 1);
+        assert_eq!(value["spec"]["homogeneousTarget"]["maxReplicas"], 10);
     }
 }

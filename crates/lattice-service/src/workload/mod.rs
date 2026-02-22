@@ -574,7 +574,7 @@ impl WorkloadCompiler {
         let metrics = if autoscaling.metrics.is_empty() {
             vec![AutoscalingMetric {
                 metric: "cpu".to_string(),
-                target: 80,
+                target: 80.0,
             }]
         } else {
             autoscaling.metrics.clone()
@@ -984,7 +984,7 @@ mod tests {
             max: 10,
             metrics: vec![AutoscalingMetric {
                 metric: "vllm_num_requests_waiting".to_string(),
-                target: 5,
+                target: 5.0,
             }],
         });
 

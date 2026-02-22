@@ -226,7 +226,7 @@ pub fn has_pd_roles(roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>
     has_prefill && has_decode
 }
 
-fn owner_reference(name: &str, uid: &str) -> OwnerReference {
+pub(crate) fn owner_reference(name: &str, uid: &str) -> OwnerReference {
     OwnerReference {
         api_version: "lattice.dev/v1alpha1".to_string(),
         kind: "LatticeModel".to_string(),
@@ -265,6 +265,7 @@ mod tests {
             worker_replicas: None,
             worker_workload: None,
             worker_runtime: None,
+            autoscaling: None,
         }
     }
 

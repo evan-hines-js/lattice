@@ -9,6 +9,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::workload::scaling::AutoscalingMetric;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 
 // =============================================================================
@@ -73,10 +74,100 @@ pub struct ModelRoleSpec {
     /// Worker pod runtime extensions (falls back to entry_runtime if None)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_runtime: Option<RuntimeSpec>,
+
+    /// Autoscaling configuration for this role.
+    /// Compiles to Kthena AutoscalingPolicy + AutoscalingPolicyBinding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autoscaling: Option<ModelAutoscalingSpec>,
 }
 
 fn default_one() -> u32 {
     1
+}
+
+// =============================================================================
+// Autoscaling
+// =============================================================================
+
+/// Per-role autoscaling configuration for model serving.
+/// Compiles to Kthena AutoscalingPolicy + AutoscalingPolicyBinding.
+///
+/// Uses the shared `AutoscalingMetric` type for metric definitions (same as LatticeService).
+/// The role's `replicas` field is used as the autoscaling minimum; `max` is the ceiling.
+/// Metrics port is discovered automatically from `entry_workload.service.ports["metrics"]`.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelAutoscalingSpec {
+    /// Maximum replicas Kthena can scale to
+    pub max: u32,
+
+    /// Metrics driving autoscaling decisions
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<AutoscalingMetric>,
+
+    /// Tolerance percent around target before triggering scaling (default: 10)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance_percent: Option<u32>,
+
+    /// Scaling behavior (stabilization windows, panic mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<ModelAutoscalingBehavior>,
+}
+
+/// Scaling behavior configuration for model autoscaling (stabilization windows, panic mode)
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelAutoscalingBehavior {
+    /// Scale-up behavior (panic mode, stabilization)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_up: Option<ModelScaleUpBehavior>,
+    /// Scale-down behavior (stabilization window)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_down: Option<ModelScaleDownBehavior>,
+}
+
+/// Scale-up behavior with optional panic mode for spike detection
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelScaleUpBehavior {
+    /// Spike detection threshold percent (triggers panic mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panic_threshold_percent: Option<u32>,
+    /// Duration to hold panic mode (e.g. "5m")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panic_mode_hold: Option<String>,
+    /// Observation window for sustained load (e.g. "1m")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilization_window: Option<String>,
+    /// Evaluation frequency (e.g. "30s")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<String>,
+}
+
+/// Scale-down behavior with stabilization window
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelScaleDownBehavior {
+    /// Observation window before scaling down (e.g. "5m")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilization_window: Option<String>,
+    /// Evaluation frequency (e.g. "1m")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<String>,
+}
+
+impl ModelRoleSpec {
+    /// Validate role constraints (e.g. replicas must not exceed autoscaling max).
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        if let Some(ref autoscaling) = self.autoscaling {
+            if self.replicas > autoscaling.max {
+                return Err(crate::Error::validation(
+                    "replicas cannot exceed autoscaling max",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_scheduler() -> String {
@@ -446,6 +537,7 @@ mod tests {
             worker_replicas: None,
             worker_workload: None,
             worker_runtime: None,
+            autoscaling: None,
         };
         assert!(role.entry_workload.containers.is_empty());
         assert_eq!(role.replicas, 2);
@@ -461,6 +553,7 @@ mod tests {
             worker_replicas: Some(4),
             worker_workload: Some(WorkloadSpec::default()),
             worker_runtime: None,
+            autoscaling: None,
         };
         assert_eq!(role.replicas, 1);
         assert_eq!(role.worker_replicas, Some(4));
@@ -480,6 +573,7 @@ mod tests {
                 worker_replicas: None,
                 worker_workload: None,
                 worker_runtime: None,
+                autoscaling: None,
             },
         );
         roles.insert(
@@ -491,6 +585,7 @@ mod tests {
                 worker_replicas: Some(4),
                 worker_workload: Some(WorkloadSpec::default()),
                 worker_runtime: None,
+                autoscaling: None,
             },
         );
 

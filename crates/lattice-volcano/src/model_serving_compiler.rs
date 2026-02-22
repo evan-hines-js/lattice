@@ -142,6 +142,7 @@ mod tests {
             worker_replicas: None,
             worker_workload: None,
             worker_runtime: None,
+            autoscaling: None,
         }
     }
 
@@ -187,6 +188,7 @@ mod tests {
                 worker_replicas: Some(4),
                 worker_workload: Some(WorkloadSpec::default()),
                 worker_runtime: None,
+                autoscaling: None,
             },
         );
 

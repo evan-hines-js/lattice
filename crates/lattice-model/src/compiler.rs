@@ -16,8 +16,8 @@ use lattice_common::crd::{
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
-use lattice_common::{KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_NAME};
-use lattice_volcano::{CompiledRouting, ModelServing, RoleTemplates};
+use lattice_common::{KTHENA_AUTOSCALER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_NAME};
+use lattice_volcano::{CompiledAutoscaling, CompiledRouting, ModelServing, RoleTemplates};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
 use crate::download::{self, CompiledDownload};
@@ -36,6 +36,8 @@ pub struct CompiledModel {
     pub tracing_policies: Vec<TracingPolicyNamespaced>,
     /// Kthena routing resources (ModelServer + ModelRoutes)
     pub routing: Option<CompiledRouting>,
+    /// Kthena autoscaling resources (AutoscalingPolicy + AutoscalingPolicyBinding)
+    pub autoscaling: Option<CompiledAutoscaling>,
     /// Model download resources (PVC + Job) when modelSource is configured
     pub download: Option<CompiledDownload>,
 }
@@ -211,12 +213,29 @@ pub async fn compile_model(
         ensure_routing_mesh_members(name, &model.spec.roles, routing_spec, &mut mesh_members);
     }
 
+    // Compile autoscaling (AutoscalingPolicy + AutoscalingPolicyBinding) if configured
+    let autoscaling = {
+        let compiled = lattice_volcano::compile_model_autoscaling(model);
+        if compiled.policies.is_empty() {
+            None
+        } else {
+            Some(compiled)
+        }
+    };
+
+    // When autoscaling is configured, ensure mesh policies allow the Kthena autoscaler
+    // to reach model pods for metrics scraping.
+    if autoscaling.is_some() {
+        ensure_autoscaling_mesh_members(name, &model.spec.roles, &mut mesh_members);
+    }
+
     Ok(CompiledModel {
         model_serving,
         config,
         mesh_members,
         tracing_policies,
         routing,
+        autoscaling,
         download,
     })
 }
@@ -328,15 +347,126 @@ fn ensure_routing_mesh_members(
     }
 }
 
+/// Ensure mesh members allow metrics scraping from the Kthena autoscaler.
+///
+/// For each model role that has autoscaling configured, this function:
+/// - Adds the Kthena autoscaler as an infrastructure allowed caller
+/// - Adds the metrics port discovered from `entry_workload.service.ports["metrics"]`
+///   if present and not already on the mesh member
+///
+/// If a role has no existing mesh member, a new one is created.
+fn ensure_autoscaling_mesh_members(
+    model_name: &str,
+    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+    mesh_members: &mut Vec<LatticeMeshMember>,
+) {
+    let autoscaler_caller = CallerRef {
+        name: KTHENA_AUTOSCALER_SA.to_string(),
+        namespace: Some(KTHENA_NAMESPACE.to_string()),
+    };
+
+    for (role_name, role_spec) in roles {
+        if role_spec.autoscaling.is_none() {
+            continue;
+        }
+
+        let metrics_port = role_spec
+            .entry_workload
+            .service
+            .as_ref()
+            .and_then(|svc| svc.ports.get("metrics"))
+            .map(|ps| ps.port);
+
+        let entry_name = format!("{}-{}", model_name, role_name);
+
+        if let Some(mm) = mesh_members
+            .iter_mut()
+            .find(|mm| mm.metadata.name.as_deref() == Some(entry_name.as_str()))
+        {
+            // Add autoscaler as allowed caller if not present
+            if !mm.spec.allowed_callers.contains(&autoscaler_caller) {
+                mm.spec.allowed_callers.push(autoscaler_caller.clone());
+                mm.spec
+                    .allowed_callers
+                    .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+            }
+
+            // Add metrics port if configured and not already present
+            if let Some(port) = metrics_port {
+                if !mm.spec.ports.iter().any(|p| p.port == port) {
+                    mm.spec.ports.push(MeshMemberPort {
+                        port,
+                        name: "metrics".to_string(),
+                        peer_auth: PeerAuth::Strict,
+                    });
+                }
+            }
+        } else {
+            // No existing mesh member — create one for autoscaler metrics scraping
+            let mut ports = Vec::new();
+            if let Some(port) = metrics_port {
+                ports.push(MeshMemberPort {
+                    port,
+                    name: "metrics".to_string(),
+                    peer_auth: PeerAuth::Strict,
+                });
+            }
+
+            let mm = LatticeMeshMember::new(
+                &entry_name,
+                LatticeMeshMemberSpec {
+                    target: MeshMemberTarget::Selector(
+                        [(LABEL_NAME.to_string(), entry_name.clone())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ports,
+                    allowed_callers: vec![autoscaler_caller.clone()],
+                    dependencies: vec![],
+                    egress: vec![],
+                    allow_peer_traffic: false,
+                    depends_all: false,
+                    ingress: None,
+                    service_account: None,
+                },
+            );
+            mesh_members.push(mm);
+        }
+
+        // Also handle worker mesh members if they exist
+        let worker_name = format!("{}-{}-worker", model_name, role_name);
+        if let Some(wmm) = mesh_members
+            .iter_mut()
+            .find(|mm| mm.metadata.name.as_deref() == Some(worker_name.as_str()))
+        {
+            if !wmm.spec.allowed_callers.contains(&autoscaler_caller) {
+                wmm.spec.allowed_callers.push(autoscaler_caller.clone());
+                wmm.spec
+                    .allowed_callers
+                    .sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+            }
+            if let Some(port) = metrics_port {
+                if !wmm.spec.ports.iter().any(|p| p.port == port) {
+                    wmm.spec.ports.push(MeshMemberPort {
+                        port,
+                        name: "metrics".to_string(),
+                        peer_auth: PeerAuth::Strict,
+                    });
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
     use lattice_common::crd::{
-        ContainerSpec, InferenceEngine, KvConnector, LatticeModelSpec, ModelRoleSpec,
-        ModelRouteRule, ModelRouteSpec, ModelRoutingSpec, ModelSourceSpec, RuntimeSpec, TargetModel,
-        WorkloadSpec,
+        AutoscalingMetric, ContainerSpec, InferenceEngine, KvConnector, LatticeModelSpec,
+        ModelAutoscalingSpec, ModelRoleSpec, ModelRouteRule, ModelRouteSpec, ModelRoutingSpec,
+        ModelSourceSpec, PortSpec, RuntimeSpec, ServicePortsSpec, TargetModel, WorkloadSpec,
     };
 
     fn make_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
@@ -369,6 +499,7 @@ mod tests {
             worker_replicas: None,
             worker_workload: None,
             worker_runtime: None,
+            autoscaling: None,
         }
     }
 
@@ -673,6 +804,118 @@ mod tests {
         assert!(
             gates.map_or(true, |g| g.is_empty()),
             "no scheduling gates when model_source is None"
+        );
+    }
+
+    #[tokio::test]
+    async fn autoscaling_adds_autoscaler_mesh_member() {
+        let mut decode = make_role("decoder:latest", 2);
+        // Add a "metrics" port to the entry workload service so the compiler discovers it
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "metrics".to_string(),
+            PortSpec {
+                port: 9090,
+                target_port: None,
+                protocol: None,
+            },
+        );
+        decode.entry_workload.service = Some(ServicePortsSpec { ports });
+        decode.autoscaling = Some(ModelAutoscalingSpec {
+            max: 8,
+            metrics: vec![AutoscalingMetric {
+                metric: "gpu_kv_cache_usage".to_string(),
+                target: 0.8,
+            }],
+            tolerance_percent: None,
+            behavior: None,
+        });
+
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), decode);
+
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(basic_routing()),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        // Autoscaling resources should be compiled
+        assert!(compiled.autoscaling.is_some());
+
+        // Mesh member should have both router AND autoscaler as allowed callers
+        let mm = compiled
+            .mesh_members
+            .iter()
+            .find(|mm| mm.metadata.name.as_deref() == Some("test-model-decode"))
+            .expect("mesh member for decode role should exist");
+
+        let has_autoscaler = mm.spec.allowed_callers.iter().any(|c| {
+            c.name == KTHENA_AUTOSCALER_SA && c.namespace.as_deref() == Some(KTHENA_NAMESPACE)
+        });
+        assert!(
+            has_autoscaler,
+            "Kthena autoscaler should be an allowed caller"
+        );
+
+        let has_router = mm.spec.allowed_callers.iter().any(|c| {
+            c.name == KTHENA_ROUTER_SA && c.namespace.as_deref() == Some(KTHENA_NAMESPACE)
+        });
+        assert!(has_router, "Kthena router should still be an allowed caller");
+
+        // Metrics port from metricEndpoint should be present
+        let has_metrics_port = mm.spec.ports.iter().any(|p| p.port == 9090 && p.name == "metrics");
+        assert!(
+            has_metrics_port,
+            "metrics port 9090 from metricEndpoint should be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_autoscaling_means_no_autoscaler_in_mesh() {
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), make_role("decoder:latest", 2));
+
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(basic_routing()),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        assert!(compiled.autoscaling.is_none());
+
+        let mm = compiled
+            .mesh_members
+            .iter()
+            .find(|mm| mm.metadata.name.as_deref() == Some("test-model-decode"))
+            .expect("mesh member should exist from routing");
+
+        let has_autoscaler = mm.spec.allowed_callers.iter().any(|c| {
+            c.name == KTHENA_AUTOSCALER_SA && c.namespace.as_deref() == Some(KTHENA_NAMESPACE)
+        });
+        assert!(
+            !has_autoscaler,
+            "Kthena autoscaler should NOT be present when no autoscaling configured"
         );
     }
 }

@@ -21,13 +21,13 @@ impl AutoscalingSpec {
     /// Validate autoscaling metric targets.
     pub fn validate(&self) -> Result<(), crate::Error> {
         for m in &self.metrics {
-            if m.target == 0 {
+            if m.target <= 0.0 {
                 return Err(crate::Error::validation(format!(
                     "autoscaling metric '{}' target must be greater than 0",
                     m.metric
                 )));
             }
-            if (m.metric == "cpu" || m.metric == "memory") && m.target > 100 {
+            if (m.metric == "cpu" || m.metric == "memory") && m.target > 100.0 {
                 return Err(crate::Error::validation(format!(
                     "autoscaling metric '{}' target cannot exceed 100%",
                     m.metric
@@ -46,6 +46,6 @@ impl AutoscalingSpec {
 pub struct AutoscalingMetric {
     /// Metric name ("cpu", "memory", or a custom Prometheus metric)
     pub metric: String,
-    /// Target value (percentage for cpu/memory, absolute for custom metrics)
-    pub target: u32,
+    /// Target value (percentage 0–100 for cpu/memory, arbitrary f64 for custom metrics)
+    pub target: f64,
 }
