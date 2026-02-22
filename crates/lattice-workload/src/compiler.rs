@@ -12,8 +12,8 @@ use lattice_common::crd::{
     MeshMemberPort, MeshMemberTarget, PeerAuth, ProviderType, RuntimeSpec, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
-use lattice_common::template::{RenderConfig, TemplateRenderer};
 use lattice_common::kube_utils::OwnerReference;
+use lattice_common::template::{RenderConfig, TemplateRenderer};
 use lattice_common::LABEL_NAME;
 
 use crate::authorization::VolumeAuthorizationMode;
@@ -260,8 +260,10 @@ impl<'a> WorkloadCompiler<'a> {
             // 8b. Resolve env_from secret resource references
             if let Some(container_spec) = self.workload.containers.get(container_name) {
                 for resource_name in &container_spec.env_from {
-                    let secret_ref =
-                        compiled_secrets.secret_refs.get(resource_name.as_str()).ok_or_else(|| {
+                    let secret_ref = compiled_secrets
+                        .secret_refs
+                        .get(resource_name.as_str())
+                        .ok_or_else(|| {
                             CompilationError::secret(format!(
                                 "container '{}' env_from references '{}' which is not a \
                                  type: secret resource",
@@ -438,30 +440,29 @@ impl<'a> WorkloadCompiler<'a> {
         // Generate mesh member for workloads in the service graph, OR for
         // egress-only workloads (e.g., download jobs) that have inline egress
         // but no graph node.
-        let mesh_member = if has_mesh_participation
-            && (service_node.is_some() || !inline_egress.is_empty())
-        {
-            Some(LatticeMeshMember::new(
-                self.name,
-                LatticeMeshMemberSpec {
-                    target: MeshMemberTarget::Selector(
-                        [(LABEL_NAME.to_string(), self.name.to_string())]
-                            .into_iter()
-                            .collect(),
-                    ),
-                    ports,
-                    allowed_callers,
-                    dependencies,
-                    egress: inline_egress,
-                    allow_peer_traffic: false,
-                    ingress: self.ingress,
-                    service_account: None,
-                    depends_all: false,
-                },
-            ))
-        } else {
-            None
-        };
+        let mesh_member =
+            if has_mesh_participation && (service_node.is_some() || !inline_egress.is_empty()) {
+                Some(LatticeMeshMember::new(
+                    self.name,
+                    LatticeMeshMemberSpec {
+                        target: MeshMemberTarget::Selector(
+                            [(LABEL_NAME.to_string(), self.name.to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        ports,
+                        allowed_callers,
+                        dependencies,
+                        egress: inline_egress,
+                        allow_peer_traffic: false,
+                        ingress: self.ingress,
+                        service_account: None,
+                        depends_all: false,
+                    },
+                ))
+            } else {
+                None
+            };
 
         Ok(CompiledWorkload {
             pod_template,
@@ -471,4 +472,3 @@ impl<'a> WorkloadCompiler<'a> {
         })
     }
 }
-

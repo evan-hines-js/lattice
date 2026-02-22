@@ -749,9 +749,8 @@ impl ResourceSpec {
         }
         match &self.params {
             Some(params) => {
-                let value = serde_json::to_value(params).map_err(|e| {
-                    format!("failed to serialize external service params: {}", e)
-                })?;
+                let value = serde_json::to_value(params)
+                    .map_err(|e| format!("failed to serialize external service params: {}", e))?;
                 let ext_params: ExternalServiceParams = serde_json::from_value(value)
                     .map_err(|e| format!("invalid external service params: {}", e))?;
 
@@ -765,18 +764,13 @@ impl ResourceSpec {
                 // Validate all endpoint URLs parse successfully
                 for (name, url) in &ext_params.endpoints {
                     if crate::crd::ParsedEndpoint::parse(url).is_none() {
-                        return Err(format!(
-                            "invalid endpoint URL for '{}': {}",
-                            name, url
-                        ));
+                        return Err(format!("invalid endpoint URL for '{}': {}", name, url));
                     }
                 }
 
                 Ok(Some(ext_params))
             }
-            None => Err(
-                "external service resource requires 'params' with 'endpoints'".to_string(),
-            ),
+            None => Err("external service resource requires 'params' with 'endpoints'".to_string()),
         }
     }
 

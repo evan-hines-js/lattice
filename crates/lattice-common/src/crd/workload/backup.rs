@@ -195,13 +195,19 @@ mod tests {
 
     #[test]
     fn hook_absolute_command_passes_validation() {
-        let hook = make_hook("freeze", vec!["/bin/sh".to_string(), "-c".to_string(), "sync".to_string()]);
+        let hook = make_hook(
+            "freeze",
+            vec!["/bin/sh".to_string(), "-c".to_string(), "sync".to_string()],
+        );
         assert!(hook.validate().is_ok());
     }
 
     #[test]
     fn hook_relative_command_fails_validation() {
-        let hook = make_hook("bad", vec!["sh".to_string(), "-c".to_string(), "sync".to_string()]);
+        let hook = make_hook(
+            "bad",
+            vec!["sh".to_string(), "-c".to_string(), "sync".to_string()],
+        );
         let err = hook.validate().unwrap_err();
         assert!(err.to_string().contains("must be an absolute path"));
     }
@@ -230,7 +236,10 @@ mod tests {
     fn hook_binaries_collects_from_pre_and_post() {
         let spec = ServiceBackupSpec {
             hooks: Some(BackupHooksSpec {
-                pre: vec![make_hook("freeze", vec!["/bin/sh".to_string(), "-c".to_string()])],
+                pre: vec![make_hook(
+                    "freeze",
+                    vec!["/bin/sh".to_string(), "-c".to_string()],
+                )],
                 post: vec![make_hook("thaw", vec!["/usr/bin/pg_isready".to_string()])],
             }),
             ..Default::default()

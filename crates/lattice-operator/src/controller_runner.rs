@@ -227,7 +227,7 @@ pub async fn build_service_controllers(
                 .into_iter()
                 .filter_map(|dep| {
                     let node = graph.get_service(&ns, &dep)?;
-                    (node.type_ == lattice_common::graph::ServiceType::MeshMember)
+                    node.type_.is_mesh_member()
                         .then(|| ObjectRef::<LatticeMeshMember>::new(&dep).within(&ns))
                 })
                 .collect()
@@ -247,11 +247,7 @@ pub async fn build_service_controllers(
     let graph = service_ctx.graph.clone();
 
     (
-        vec![
-            Box::pin(svc_ctrl),
-            Box::pin(policy_ctrl),
-            Box::pin(mm_ctrl),
-        ],
+        vec![Box::pin(svc_ctrl), Box::pin(policy_ctrl), Box::pin(mm_ctrl)],
         graph,
     )
 }

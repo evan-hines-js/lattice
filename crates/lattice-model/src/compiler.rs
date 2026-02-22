@@ -75,10 +75,12 @@ pub async fn compile_model(
     let mut tracing_policies = Vec::new();
 
     for (role_name, role_spec) in &model.spec.roles {
-        role_spec.validate().map_err(|e| ModelError::RoleValidation {
-            role: role_name.clone(),
-            message: e.to_string(),
-        })?;
+        role_spec
+            .validate()
+            .map_err(|e| ModelError::RoleValidation {
+                role: role_name.clone(),
+                message: e.to_string(),
+            })?;
 
         let entry_full_name = format!("{}-{}", name, role_name);
 
@@ -135,8 +137,7 @@ pub async fn compile_model(
                 let mut cloned = worker_workload.clone();
                 for secret_name in &worker_runtime.image_pull_secrets {
                     if !cloned.resources.contains_key(secret_name) {
-                        if let Some(resource) =
-                            role_spec.entry_workload.resources.get(secret_name)
+                        if let Some(resource) = role_spec.entry_workload.resources.get(secret_name)
                         {
                             cloned
                                 .resources
@@ -294,8 +295,8 @@ fn ensure_routing_mesh_members(
         name: KTHENA_ROUTER_SA.to_string(),
         namespace: Some(KTHENA_NAMESPACE.to_string()),
     };
-    let has_pd = routing.kv_connector.is_some()
-        && lattice_volcano::routing_compiler::has_pd_roles(roles);
+    let has_pd =
+        routing.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(roles);
 
     for role_name in roles.keys() {
         // Only PD roles need peer traffic for KV cache transfer
@@ -672,12 +673,13 @@ mod tests {
             .find(|mm| mm.metadata.name.as_deref() == Some("test-model-decode"))
             .expect("mesh member for decode role should exist");
 
-        let has_router_caller = mm
-            .spec
-            .allowed_callers
-            .iter()
-            .any(|c| c.name == KTHENA_ROUTER_SA && c.namespace.as_deref() == Some(KTHENA_NAMESPACE));
-        assert!(has_router_caller, "Kthena router should be an allowed caller");
+        let has_router_caller = mm.spec.allowed_callers.iter().any(|c| {
+            c.name == KTHENA_ROUTER_SA && c.namespace.as_deref() == Some(KTHENA_NAMESPACE)
+        });
+        assert!(
+            has_router_caller,
+            "Kthena router should be an allowed caller"
+        );
 
         let has_inference_port = mm.spec.ports.iter().any(|p| p.port == 8000);
         assert!(has_inference_port, "inference port 8000 should be present");
@@ -847,9 +849,7 @@ mod tests {
             .as_array()
             .expect("volumes should be set");
         assert!(
-            volumes
-                .iter()
-                .any(|v| v["name"] == "model-cache"),
+            volumes.iter().any(|v| v["name"] == "model-cache"),
             "model-cache volume should be present"
         );
     }
@@ -942,10 +942,17 @@ mod tests {
         let has_router = mm.spec.allowed_callers.iter().any(|c| {
             c.name == KTHENA_ROUTER_SA && c.namespace.as_deref() == Some(KTHENA_NAMESPACE)
         });
-        assert!(has_router, "Kthena router should still be an allowed caller");
+        assert!(
+            has_router,
+            "Kthena router should still be an allowed caller"
+        );
 
         // Metrics port from metricEndpoint should be present
-        let has_metrics_port = mm.spec.ports.iter().any(|p| p.port == 9090 && p.name == "metrics");
+        let has_metrics_port = mm
+            .spec
+            .ports
+            .iter()
+            .any(|p| p.port == 9090 && p.name == "metrics");
         assert!(
             has_metrics_port,
             "metrics port 9090 from metricEndpoint should be present"

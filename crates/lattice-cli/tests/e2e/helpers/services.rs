@@ -239,8 +239,15 @@ pub async fn wait_for_service_phase(
     phase: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    super::wait_for_resource_phase(kubeconfig, "latticeservice", namespace, name, phase, timeout)
-        .await
+    super::wait_for_resource_phase(
+        kubeconfig,
+        "latticeservice",
+        namespace,
+        name,
+        phase,
+        timeout,
+    )
+    .await
 }
 
 /// Wait for a LatticeService to reach the given phase AND have a condition

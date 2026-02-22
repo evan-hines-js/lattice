@@ -115,13 +115,13 @@ impl EndpointEvalContext<'_> {
                     e
                 )))
             })?;
-        let endpoint_entity =
-            build_external_endpoint_entity(self.host, self.port, self.protocol).map_err(|e| {
-                self.denial(DenialReason::InternalError(format!(
-                    "endpoint entity: {}",
-                    e
-                )))
-            })?;
+        let endpoint_entity = build_external_endpoint_entity(self.host, self.port, self.protocol)
+            .map_err(|e| {
+            self.denial(DenialReason::InternalError(format!(
+                "endpoint entity: {}",
+                e
+            )))
+        })?;
 
         self.engine
             .evaluate_service_action(
@@ -316,9 +316,7 @@ mod tests {
             "checkout",
             vec![("bad", "api.evil.com", 443, "https")],
         );
-        let result = engine
-            .authorize_external_endpoints(&denied_request)
-            .await;
+        let result = engine.authorize_external_endpoints(&denied_request).await;
         assert!(!result.is_allowed());
         assert_eq!(result.denied[0].reason, DenialReason::ExplicitForbid);
     }

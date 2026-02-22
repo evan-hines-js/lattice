@@ -20,11 +20,11 @@
 
 use std::collections::BTreeMap;
 
+use lattice_common::crd::workload::container::VolumeMount;
 use lattice_common::crd::{
     ContainerSpec, DependencyDirection, JobTaskSpec, LatticeJob, LatticeJobSpec, ModelSourceSpec,
     ResourceSpec, ResourceType, RestartPolicy, RuntimeSpec, WorkloadSpec,
 };
-use lattice_common::crd::workload::container::VolumeMount;
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::template::TemplateString;
 use lattice_workload::{PersistentVolumeClaim, PvcResources, PvcSpec, PvcStorage};
@@ -158,10 +158,7 @@ pub fn compile_download(
         .volume_pvc_name(&job_name, VOLUME_NAME)
         .expect("volume resource always has a PVC name");
 
-    let access_mode = source
-        .access_mode
-        .as_deref()
-        .unwrap_or("ReadWriteOnce");
+    let access_mode = source.access_mode.as_deref().unwrap_or("ReadWriteOnce");
 
     let owner_ref = OwnerReference {
         api_version: "lattice.dev/v1alpha1".to_string(),
@@ -368,9 +365,7 @@ fn download_command(
             let repo_id = &parsed.path;
             // Derive local dir name from repo_id (e.g. "Qwen/Qwen3-8B" → "Qwen3-8B")
             let local_name = repo_id.rsplit('/').next().unwrap_or(repo_id);
-            let image = custom_image
-                .unwrap_or("python:3.11-slim")
-                .to_string();
+            let image = custom_image.unwrap_or("python:3.11-slim").to_string();
             let cmd = format!(
                 "pip install -q huggingface-hub && huggingface-cli download {} --local-dir {}/{}",
                 repo_id, mount_path, local_name
@@ -379,9 +374,7 @@ fn download_command(
         }
         UriScheme::S3 => {
             let local_name = parsed.path.rsplit('/').next().unwrap_or("model");
-            let image = custom_image
-                .unwrap_or("amazon/aws-cli:latest")
-                .to_string();
+            let image = custom_image.unwrap_or("amazon/aws-cli:latest").to_string();
             let cmd = format!(
                 "aws s3 sync s3://{} {}/{}",
                 parsed.path, mount_path, local_name
@@ -390,9 +383,7 @@ fn download_command(
         }
         UriScheme::Gcs => {
             let local_name = parsed.path.rsplit('/').next().unwrap_or("model");
-            let image = custom_image
-                .unwrap_or("google/cloud-sdk:slim")
-                .to_string();
+            let image = custom_image.unwrap_or("google/cloud-sdk:slim").to_string();
             let cmd = format!(
                 "gsutil -m rsync -r gs://{} {}/{}",
                 parsed.path, mount_path, local_name
@@ -422,11 +413,7 @@ fn json_array_push(object: &mut serde_json::Value, key: &str, value: serde_json:
 ///
 /// Adds a PVC-backed volume to `spec.volumes` and a read-only volumeMount
 /// to every container in `spec.containers` and `spec.initContainers`.
-pub fn inject_model_volume(
-    pod_template: &mut serde_json::Value,
-    pvc_name: &str,
-    mount_path: &str,
-) {
+pub fn inject_model_volume(pod_template: &mut serde_json::Value, pvc_name: &str, mount_path: &str) {
     let volume = serde_json::json!({
         "name": VOLUME_NAME,
         "persistentVolumeClaim": {
@@ -563,11 +550,11 @@ mod tests {
         // Volume reference (no size — PVC is created separately)
         let vol_resource = &task.workload.resources[VOLUME_NAME];
         assert_eq!(vol_resource.type_, ResourceType::Volume);
-        assert_eq!(
-            vol_resource.id.as_deref(),
-            Some("llm-serving-model-cache")
+        assert_eq!(vol_resource.id.as_deref(), Some("llm-serving-model-cache"));
+        assert!(
+            vol_resource.params.is_none(),
+            "volume should be a reference (no params/size)"
         );
-        assert!(vol_resource.params.is_none(), "volume should be a reference (no params/size)");
 
         // Entity egress resource
         let egress_resource = &task.workload.resources["internet"];
@@ -674,7 +661,10 @@ mod tests {
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        assert_eq!(download.pvc.spec.storage_class_name, Some("fast-nvme".to_string()));
+        assert_eq!(
+            download.pvc.spec.storage_class_name,
+            Some("fast-nvme".to_string())
+        );
     }
 
     #[test]
@@ -738,9 +728,15 @@ mod tests {
         let source = hf_source();
         let download = compile_download("test", "ns", "uid-sa", &source).unwrap();
 
-        assert_eq!(download.service_account["metadata"]["name"], "test-download");
+        assert_eq!(
+            download.service_account["metadata"]["name"],
+            "test-download"
+        );
         assert_eq!(download.service_account["metadata"]["namespace"], "ns");
-        assert_eq!(download.service_account["automountServiceAccountToken"], false);
+        assert_eq!(
+            download.service_account["automountServiceAccountToken"],
+            false
+        );
 
         // ServiceAccount ownerReference to LatticeModel
         let sa_owner = &download.service_account["metadata"]["ownerReferences"][0];

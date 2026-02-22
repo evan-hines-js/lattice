@@ -16,8 +16,8 @@ use lattice_agent::{
     SharedK8sForwarder,
 };
 use lattice_common::{
-    ParentConnectionConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY, LATTICE_SYSTEM_NAMESPACE, TLS_CERT_KEY,
-    TLS_KEY_KEY,
+    ParentConnectionConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY, LATTICE_SYSTEM_NAMESPACE,
+    TLS_CERT_KEY, TLS_KEY_KEY,
 };
 
 /// Supervise agent connection with automatic reconnection.

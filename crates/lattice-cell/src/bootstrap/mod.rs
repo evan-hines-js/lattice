@@ -144,7 +144,6 @@ pub struct BootstrapResponse {
     pub manifests: Vec<String>,
 }
 
-
 /// Configuration for registering a cluster for bootstrap
 ///
 /// Groups related parameters for `register_cluster` to improve readability

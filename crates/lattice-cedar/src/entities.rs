@@ -397,10 +397,8 @@ mod tests {
 
     #[test]
     fn test_external_endpoint_entity_different_hosts() {
-        let entity_a =
-            build_external_endpoint_entity("api.stripe.com", 443, "https").unwrap();
-        let entity_b =
-            build_external_endpoint_entity("api.github.com", 443, "https").unwrap();
+        let entity_a = build_external_endpoint_entity("api.stripe.com", 443, "https").unwrap();
+        let entity_b = build_external_endpoint_entity("api.github.com", 443, "https").unwrap();
         assert_ne!(entity_a.uid(), entity_b.uid());
     }
 

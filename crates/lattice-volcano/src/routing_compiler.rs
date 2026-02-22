@@ -13,10 +13,10 @@ use lattice_common::crd::{LatticeModel, ModelRoutingSpec};
 use lattice_common::kube_utils::OwnerReference;
 
 use crate::types::{
-    KthenaHeaderMatch, KthenaKvConnector, KthenaModelMatch, KthenaModelRoute,
-    KthenaModelRouteSpec, KthenaModelServer, KthenaModelServerSpec, KthenaNetworkingMetadata,
-    KthenaParentRef, KthenaRateLimit, KthenaRetryPolicy, KthenaRouteRule, KthenaTargetModel,
-    KthenaTrafficPolicy, PdGroup, WorkloadPort, WorkloadSelector,
+    KthenaHeaderMatch, KthenaKvConnector, KthenaModelMatch, KthenaModelRoute, KthenaModelRouteSpec,
+    KthenaModelServer, KthenaModelServerSpec, KthenaNetworkingMetadata, KthenaParentRef,
+    KthenaRateLimit, KthenaRetryPolicy, KthenaRouteRule, KthenaTargetModel, KthenaTrafficPolicy,
+    PdGroup, WorkloadPort, WorkloadSelector,
 };
 
 const NETWORKING_API_VERSION: &str = "networking.serving.volcano.sh/v1alpha1";
@@ -38,9 +38,7 @@ pub fn compile_model_routing(model: &LatticeModel, routing: &ModelRoutingSpec) -
     let model_routes: Vec<KthenaModelRoute> = routing
         .routes
         .iter()
-        .map(|(route_name, route_spec)| {
-            compile_model_route(model, routing, route_name, route_spec)
-        })
+        .map(|(route_name, route_spec)| compile_model_route(model, routing, route_name, route_spec))
         .collect();
 
     CompiledRouting {
@@ -75,21 +73,21 @@ fn compile_model_server(model: &LatticeModel, routing: &ModelRoutingSpec) -> Kth
             model: Some(routing.model.clone()),
             inference_engine: routing.inference_engine.to_string(),
             workload_selector: WorkloadSelector {
-                match_labels: BTreeMap::from([(
-                    MODEL_SERVING_LABEL.to_string(),
-                    name.to_string(),
-                )]),
+                match_labels: BTreeMap::from([(MODEL_SERVING_LABEL.to_string(), name.to_string())]),
                 pd_group,
             },
             workload_port: WorkloadPort {
                 port: routing.port.unwrap_or(8000),
                 protocol: routing.protocol.clone(),
             },
-            traffic_policy: routing.traffic_policy.as_ref().map(|tp| KthenaTrafficPolicy {
-                retry: tp.retry.as_ref().map(|r| KthenaRetryPolicy {
-                    attempts: r.attempts,
+            traffic_policy: routing
+                .traffic_policy
+                .as_ref()
+                .map(|tp| KthenaTrafficPolicy {
+                    retry: tp.retry.as_ref().map(|r| KthenaRetryPolicy {
+                        attempts: r.attempts,
+                    }),
                 }),
-            }),
             kv_connector: routing.kv_connector.as_ref().map(|kv| KthenaKvConnector {
                 type_: kv.type_.clone(),
             }),
@@ -308,7 +306,12 @@ mod tests {
             Some("test-org/test-model".to_string())
         );
         assert_eq!(compiled.model_server.spec.workload_port.port, 8000);
-        assert!(compiled.model_server.spec.workload_selector.pd_group.is_none());
+        assert!(compiled
+            .model_server
+            .spec
+            .workload_selector
+            .pd_group
+            .is_none());
 
         assert_eq!(compiled.model_routes.len(), 1);
         let route = &compiled.model_routes[0];
@@ -344,16 +347,16 @@ mod tests {
             .as_ref()
             .expect("PdGroup should be set");
         assert_eq!(pd.group_key, GROUP_KEY);
+        assert_eq!(pd.prefill_labels[ROLE_LABEL], "prefill");
+        assert_eq!(pd.decode_labels[ROLE_LABEL], "decode");
         assert_eq!(
-            pd.prefill_labels[ROLE_LABEL],
-            "prefill"
-        );
-        assert_eq!(
-            pd.decode_labels[ROLE_LABEL],
-            "decode"
-        );
-        assert_eq!(
-            compiled.model_server.spec.kv_connector.as_ref().unwrap().type_,
+            compiled
+                .model_server
+                .spec
+                .kv_connector
+                .as_ref()
+                .unwrap()
+                .type_,
             "nixl"
         );
     }
@@ -367,7 +370,12 @@ mod tests {
         let routing = basic_routing();
 
         let compiled = compile_model_routing(&model, &routing);
-        assert!(compiled.model_server.spec.workload_selector.pd_group.is_none());
+        assert!(compiled
+            .model_server
+            .spec
+            .workload_selector
+            .pd_group
+            .is_none());
     }
 
     #[test]
@@ -379,7 +387,12 @@ mod tests {
         });
 
         let compiled = compile_model_routing(&model, &routing);
-        assert!(compiled.model_server.spec.workload_selector.pd_group.is_none());
+        assert!(compiled
+            .model_server
+            .spec
+            .workload_selector
+            .pd_group
+            .is_none());
     }
 
     #[test]
@@ -479,10 +492,7 @@ mod tests {
 
         let rule = &compiled.model_routes[0].spec.rules[0];
         let headers = &rule.model_match.as_ref().unwrap().headers;
-        assert_eq!(
-            headers["x-model-version"].exact,
-            Some("v2".to_string())
-        );
+        assert_eq!(headers["x-model-version"].exact, Some("v2".to_string()));
     }
 
     #[test]
@@ -499,10 +509,7 @@ mod tests {
                 "lora".to_string(),
                 ModelRouteSpec {
                     model_name: Some("custom-model".to_string()),
-                    lora_adapters: Some(vec![
-                        "adapter-a".to_string(),
-                        "adapter-b".to_string(),
-                    ]),
+                    lora_adapters: Some(vec!["adapter-a".to_string(), "adapter-b".to_string()]),
                     rules: vec![ModelRouteRule {
                         name: "default".to_string(),
                         model_match: None,
@@ -577,11 +584,7 @@ mod tests {
             Some(3)
         );
 
-        let rl = compiled.model_routes[0]
-            .spec
-            .rate_limit
-            .as_ref()
-            .unwrap();
+        let rl = compiled.model_routes[0].spec.rate_limit.as_ref().unwrap();
         assert_eq!(rl.input_tokens_per_unit, Some(1000));
         assert_eq!(rl.output_tokens_per_unit, Some(500));
         assert_eq!(rl.unit, Some("minute".to_string()));
@@ -639,11 +642,7 @@ mod tests {
         };
 
         let compiled = compile_model_routing(&model, &routing);
-        let refs = compiled.model_routes[0]
-            .spec
-            .parent_refs
-            .as_ref()
-            .unwrap();
+        let refs = compiled.model_routes[0].spec.parent_refs.as_ref().unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "inference-gw");
         assert_eq!(refs[0].namespace, Some("istio-system".to_string()));
@@ -694,7 +693,12 @@ mod tests {
 
         let compiled = compile_model_routing(&model, &routing);
         assert!(
-            compiled.model_server.spec.workload_selector.pd_group.is_none(),
+            compiled
+                .model_server
+                .spec
+                .workload_selector
+                .pd_group
+                .is_none(),
             "PD should not be detected for non-exact role names"
         );
     }

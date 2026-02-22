@@ -370,12 +370,7 @@ impl RandomMesh {
                     // With inline endpoints, the service owns the external dep.
                     // If the service declares the resource, mesh policies are
                     // generated for it and the connection is always allowed.
-                    expected_connections.push((
-                        source_name.clone(),
-                        ext_name.clone(),
-                        true,
-                        true,
-                    ));
+                    expected_connections.push((source_name.clone(), ext_name.clone(), true, true));
                 }
             }
 

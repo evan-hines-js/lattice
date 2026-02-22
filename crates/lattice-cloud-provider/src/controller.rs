@@ -60,7 +60,14 @@ pub async fn reconcile(
         Ok(()) => {
             info!(cloud_provider = %name, "Credentials reconciled successfully");
 
-            update_status(client, &cp, CloudProviderPhase::Ready, None, Some(generation)).await?;
+            update_status(
+                client,
+                &cp,
+                CloudProviderPhase::Ready,
+                None,
+                Some(generation),
+            )
+            .await?;
 
             // Requeue periodically to re-validate
             Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
@@ -72,7 +79,14 @@ pub async fn reconcile(
                 "Credential reconciliation failed"
             );
 
-            update_status(client, &cp, CloudProviderPhase::Failed, Some(e.to_string()), Some(generation)).await?;
+            update_status(
+                client,
+                &cp,
+                CloudProviderPhase::Failed,
+                Some(e.to_string()),
+                Some(generation),
+            )
+            .await?;
 
             Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
         }
@@ -520,10 +534,30 @@ mod tests {
             observed_generation: Some(1),
         });
 
-        assert!(is_status_unchanged(&cp, CloudProviderPhase::Ready, None, Some(1)));
-        assert!(!is_status_unchanged(&cp, CloudProviderPhase::Failed, None, Some(1)));
-        assert!(!is_status_unchanged(&cp, CloudProviderPhase::Ready, None, Some(2)));
-        assert!(!is_status_unchanged(&cp, CloudProviderPhase::Ready, Some("msg"), Some(1)));
+        assert!(is_status_unchanged(
+            &cp,
+            CloudProviderPhase::Ready,
+            None,
+            Some(1)
+        ));
+        assert!(!is_status_unchanged(
+            &cp,
+            CloudProviderPhase::Failed,
+            None,
+            Some(1)
+        ));
+        assert!(!is_status_unchanged(
+            &cp,
+            CloudProviderPhase::Ready,
+            None,
+            Some(2)
+        ));
+        assert!(!is_status_unchanged(
+            &cp,
+            CloudProviderPhase::Ready,
+            Some("msg"),
+            Some(1)
+        ));
     }
 
     #[tokio::test]

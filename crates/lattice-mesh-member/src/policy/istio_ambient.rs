@@ -44,7 +44,7 @@ impl<'a> PolicyCompiler<'a> {
         namespace: &str,
         inbound_edges: &[ActiveEdge],
     ) -> Option<AuthorizationPolicy> {
-        let has_infra_callers = self.has_infrastructure_callers(service, inbound_edges);
+        let has_infra_callers = self.has_infrastructure_callers(service);
 
         if inbound_edges.is_empty() && !service.allow_peer_traffic && !has_infra_callers {
             return None;
@@ -67,7 +67,7 @@ impl<'a> PolicyCompiler<'a> {
         // Add principals for infrastructure callers (e.g. vmagent) that are in
         // allowed_callers but don't participate in bilateral agreement edges.
         // Their CallerRef name is used directly as the service account name.
-        self.add_infrastructure_caller_principals(service, inbound_edges, &mut principals);
+        self.add_infrastructure_caller_principals(service, &mut principals);
 
         // If allow_peer_traffic, add own principal so pods can talk to each other
         if service.allow_peer_traffic {
@@ -299,11 +299,7 @@ impl<'a> PolicyCompiler<'a> {
     /// exist in the service graph. These are external components (e.g. vmagent) that
     /// bypass bilateral agreement. Graph services that failed bilateral agreement
     /// are NOT included (they must declare the outbound dep).
-    pub(super) fn has_infrastructure_callers(
-        &self,
-        service: &ServiceNode,
-        _inbound_edges: &[ActiveEdge],
-    ) -> bool {
+    pub(super) fn has_infrastructure_callers(&self, service: &ServiceNode) -> bool {
         service
             .allowed_callers
             .iter()
@@ -318,7 +314,6 @@ impl<'a> PolicyCompiler<'a> {
     fn add_infrastructure_caller_principals(
         &self,
         service: &ServiceNode,
-        _inbound_edges: &[ActiveEdge],
         principals: &mut Vec<String>,
     ) {
         for (caller_ns, caller_name) in &service.allowed_callers {

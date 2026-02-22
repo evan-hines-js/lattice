@@ -510,10 +510,7 @@ impl ServiceContext {
         registry: Arc<CrdRegistry>,
         monitoring: MonitoringConfig,
     ) -> Self {
-        let events = Arc::new(KubeEventPublisher::new(
-            client.clone(),
-            FIELD_MANAGER,
-        ));
+        let events = Arc::new(KubeEventPublisher::new(client.clone(), FIELD_MANAGER));
         Self {
             kube: Arc::new(ServiceKubeClientImpl::new(client, registry)),
             graph: Arc::new(ServiceGraph::new()),
@@ -747,7 +744,7 @@ fn check_missing_dependencies(
             let dep_ns = dep.resolve_namespace(namespace);
             graph
                 .get_service(dep_ns, &dep.name)
-                .map(|node| node.type_ == crate::graph::ServiceType::Unknown)
+                .map(|node| node.type_.is_unknown())
                 .unwrap_or(true)
         })
         .map(|dep| {

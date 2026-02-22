@@ -220,13 +220,9 @@ pub async fn reconcile(
                 .await?;
                 register_graph(&model, &ctx.graph, namespace);
                 apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await?;
-                let conditions = read_model_serving_conditions(
-                    &ctx.client,
-                    &name,
-                    namespace,
-                    &ctx.registry,
-                )
-                .await;
+                let conditions =
+                    read_model_serving_conditions(&ctx.client, &name, namespace, &ctx.registry)
+                        .await;
                 update_status(
                     &ctx.client,
                     &name,
@@ -242,16 +238,16 @@ pub async fn reconcile(
 
             // No spec change — monitor health via ModelServing conditions
             let message = "Model is serving inference requests";
-            if is_status_unchanged(&model, ModelServingPhase::Serving, Some(message), Some(generation)) {
+            if is_status_unchanged(
+                &model,
+                ModelServingPhase::Serving,
+                Some(message),
+                Some(generation),
+            ) {
                 return Ok(Action::requeue(Duration::from_secs(60)));
             }
-            let conditions = read_model_serving_conditions(
-                &ctx.client,
-                &name,
-                namespace,
-                &ctx.registry,
-            )
-            .await;
+            let conditions =
+                read_model_serving_conditions(&ctx.client, &name, namespace, &ctx.registry).await;
             update_status(
                 &ctx.client,
                 &name,
@@ -609,11 +605,7 @@ async fn apply_download_resources(
     // Layer 0b: LatticeJob (after PVC exists so the volume reference resolves)
     let lj_api: Api<LatticeJob> = Api::namespaced(client.clone(), namespace);
     lj_api
-        .patch(
-            download.job_name(),
-            params,
-            &Patch::Apply(&download.job),
-        )
+        .patch(download.job_name(), params, &Patch::Apply(&download.job))
         .await?;
 
     info!(
@@ -673,8 +665,7 @@ async fn remove_scheduling_gates(
     use kube::api::ListParams;
 
     let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(client.clone(), namespace);
-    let lp = ListParams::default()
-        .labels(&format!("modelserving.volcano.sh/name={}", model_name));
+    let lp = ListParams::default().labels(&format!("modelserving.volcano.sh/name={}", model_name));
 
     let pod_list = pods.list(&lp).await?;
     let mut removed = 0u32;
@@ -712,11 +703,7 @@ async fn remove_scheduling_gates(
             };
 
             match pods
-                .patch(
-                    pod_name,
-                    &PatchParams::default(),
-                    &Patch::Merge(&patch),
-                )
+                .patch(pod_name, &PatchParams::default(), &Patch::Merge(&patch))
                 .await
             {
                 Ok(_) => {

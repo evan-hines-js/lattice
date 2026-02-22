@@ -58,29 +58,30 @@ pub fn compile_model_autoscaling(model: &LatticeModel) -> CompiledAutoscaling {
             })
             .collect();
 
-        let behavior = autoscaling.behavior.as_ref().map(|b| {
-            KthenaAutoscalingBehavior {
+        let behavior = autoscaling
+            .behavior
+            .as_ref()
+            .map(|b| KthenaAutoscalingBehavior {
                 scale_up: b.scale_up.as_ref().map(|su| {
-                    let panic_policy = if su.panic_threshold_percent.is_some()
-                        || su.panic_mode_hold.is_some()
-                    {
-                        Some(KthenaPanicPolicy {
-                            panic_threshold_percent: su.panic_threshold_percent,
-                            panic_mode_hold: su.panic_mode_hold.clone(),
-                        })
-                    } else {
-                        None
-                    };
-
-                    let stable_policy =
-                        if su.stabilization_window.is_some() || su.period.is_some() {
-                            Some(KthenaStablePolicy {
-                                stabilization_window: su.stabilization_window.clone(),
-                                period: su.period.clone(),
+                    let panic_policy =
+                        if su.panic_threshold_percent.is_some() || su.panic_mode_hold.is_some() {
+                            Some(KthenaPanicPolicy {
+                                panic_threshold_percent: su.panic_threshold_percent,
+                                panic_mode_hold: su.panic_mode_hold.clone(),
                             })
                         } else {
                             None
                         };
+
+                    let stable_policy = if su.stabilization_window.is_some() || su.period.is_some()
+                    {
+                        Some(KthenaStablePolicy {
+                            stabilization_window: su.stabilization_window.clone(),
+                            period: su.period.clone(),
+                        })
+                    } else {
+                        None
+                    };
 
                     KthenaScaleUpBehavior {
                         panic_policy,
@@ -91,8 +92,7 @@ pub fn compile_model_autoscaling(model: &LatticeModel) -> CompiledAutoscaling {
                     stabilization_window: sd.stabilization_window.clone(),
                     period: sd.period.clone(),
                 }),
-            }
-        });
+            });
 
         let metadata = KthenaNetworkingMetadata {
             name: resource_name.clone(),
@@ -292,8 +292,14 @@ mod tests {
         assert_eq!(compiled.bindings.len(), 2);
 
         // BTreeMap orders alphabetically: decode, prefill
-        assert_eq!(compiled.policies[0].metadata.name, "test-model-decode-scaling");
-        assert_eq!(compiled.policies[1].metadata.name, "test-model-prefill-scaling");
+        assert_eq!(
+            compiled.policies[0].metadata.name,
+            "test-model-decode-scaling"
+        );
+        assert_eq!(
+            compiled.policies[1].metadata.name,
+            "test-model-prefill-scaling"
+        );
     }
 
     #[test]
@@ -309,7 +315,10 @@ mod tests {
 
         let compiled = compile_model_autoscaling(&model);
         assert_eq!(compiled.policies.len(), 1);
-        assert_eq!(compiled.policies[0].metadata.name, "test-model-decode-scaling");
+        assert_eq!(
+            compiled.policies[0].metadata.name,
+            "test-model-decode-scaling"
+        );
     }
 
     #[test]

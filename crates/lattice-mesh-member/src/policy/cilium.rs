@@ -74,7 +74,7 @@ impl<'a> PolicyCompiler<'a> {
         // HBONE ingress: ztunnel wraps all inbound traffic on port 15008 in ambient mesh.
         // Required whenever this pod accepts any inbound traffic (mesh callers, webhooks,
         // permissive ports, or infrastructure callers like vmagent).
-        let has_infra_callers = self.has_infrastructure_callers(service, inbound_edges);
+        let has_infra_callers = self.has_infrastructure_callers(service);
         if !inbound_edges.is_empty() || !ingress_rules.is_empty() || has_infra_callers {
             ingress_rules.insert(0, Self::hbone_ingress_rule());
         }

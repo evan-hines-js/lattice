@@ -697,7 +697,9 @@ mod tests {
     #[test]
     fn reconcile_error_kube_helper_formats_context() {
         let err = ReconcileError::kube("failed to apply Deployment", "connection refused");
-        assert!(err.to_string().contains("failed to apply Deployment: connection refused"));
+        assert!(err
+            .to_string()
+            .contains("failed to apply Deployment: connection refused"));
     }
 
     #[test]

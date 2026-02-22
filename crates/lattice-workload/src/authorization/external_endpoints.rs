@@ -28,14 +28,7 @@ pub(crate) async fn authorize_external_endpoints(
             params
                 .parsed_endpoints()
                 .into_values()
-                .map(|ep| {
-                    (
-                        resource_name.clone(),
-                        ep.host,
-                        ep.port,
-                        ep.protocol,
-                    )
-                })
+                .map(|ep| (resource_name.clone(), ep.host, ep.port, ep.protocol))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -56,7 +49,12 @@ pub(crate) async fn authorize_external_endpoints(
         let details = result
             .denied
             .iter()
-            .map(|d| format!("'{}' ({}:{}): {}", d.resource_name, d.host, d.port, d.reason))
+            .map(|d| {
+                format!(
+                    "'{}' ({}:{}): {}",
+                    d.resource_name, d.host, d.port, d.reason
+                )
+            })
             .collect::<Vec<_>>()
             .join("; ");
         return Err(CompilationError::external_endpoint_access_denied(details));

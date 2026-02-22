@@ -204,8 +204,8 @@ impl VolumeCompiler {
             Some(VolumeAccessMode::ReadWriteOnce) | None => "ReadWriteOnce",
         };
 
-        let metadata = ObjectMeta::new(name, namespace)
-            .with_owner_references(owner_references.to_vec());
+        let metadata =
+            ObjectMeta::new(name, namespace).with_owner_references(owner_references.to_vec());
 
         PersistentVolumeClaim {
             api_version: "v1".to_string(),
@@ -402,7 +402,8 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         assert_eq!(output.pvcs.len(), 1);
         let pvc = &output.pvcs[0];
@@ -420,7 +421,8 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
         assert_eq!(output.pvcs.len(), 1);
         let pvc = &output.pvcs[0];
@@ -442,7 +444,8 @@ mod tests {
             }
         }
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let pvc = &output.pvcs[0];
         assert_eq!(pvc.spec.storage_class_name, Some("local-path".to_string()));
@@ -461,7 +464,8 @@ mod tests {
             vec![("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("jellyfin", "media", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("jellyfin", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let pvc = &output.pvcs[0];
         assert_eq!(pvc.spec.access_modes, vec!["ReadWriteMany"]);
@@ -528,7 +532,8 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
         // No PVCs - this is a reference
         assert!(output.pvcs.is_empty());
@@ -563,7 +568,8 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
         // Just PVC + volume + mount — no extra scheduling resources
         assert_eq!(output.pvcs.len(), 1);
@@ -578,7 +584,8 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
         // Should have the PVC-backed pod volume
         assert_eq!(output.volumes.len(), 1);
@@ -604,7 +611,8 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let mounts = output
             .volume_mounts
@@ -623,7 +631,8 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         assert_eq!(output.volumes.len(), 1);
         assert_eq!(output.volumes[0].name, "config");
@@ -660,7 +669,8 @@ mod tests {
     fn no_volumes_returns_empty() {
         let spec = WorkloadSpec::default();
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         assert!(output.is_empty());
     }
@@ -673,7 +683,8 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
         assert!(output.scheduling_gates.is_empty());
     }
 
@@ -717,7 +728,8 @@ mod tests {
     #[test]
     fn emptydir_volume_from_sourceless_mount() {
         let spec = make_emptydir_spec(vec![("/tmp", None, None)]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         // Should generate an emptyDir pod volume
         assert_eq!(output.volumes.len(), 1);
@@ -738,7 +750,8 @@ mod tests {
     #[test]
     fn emptydir_tmpfs_medium() {
         let spec = make_emptydir_spec(vec![("/dev/shm", Some("Memory"), None)]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let vol = &output.volumes[0];
         let ed = vol.empty_dir.as_ref().unwrap();
@@ -749,7 +762,8 @@ mod tests {
     #[test]
     fn emptydir_size_limit() {
         let spec = make_emptydir_spec(vec![("/scratch", None, Some("5Gi"))]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let vol = &output.volumes[0];
         let ed = vol.empty_dir.as_ref().unwrap();
@@ -788,7 +802,8 @@ mod tests {
             },
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         // 1 PVC volume + 2 emptyDir volumes = 3 total
         assert_eq!(output.volumes.len(), 3);
@@ -818,7 +833,8 @@ mod tests {
             ("/tmp", None, None),
             ("/dev/shm", Some("Memory"), None),
         ]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let names: Vec<_> = output.volumes.iter().map(|v| v.name.as_str()).collect();
         assert!(names.contains(&"emptydir-dev-shm"));
@@ -967,7 +983,8 @@ mod tests {
         let spec = make_emptydir_spec(vec![("/tmp", None, None), ("/var/run", None, None)]);
         assert!(spec.resources.is_empty());
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         assert_eq!(output.volumes.len(), 2);
         assert_eq!(output.pvcs.len(), 0); // No PVCs needed

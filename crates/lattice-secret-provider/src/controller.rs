@@ -175,7 +175,15 @@ pub async fn reconcile(
     // Validate spec on every run (cheap, catches edge cases)
     if let Err(msg) = sp.spec.validate() {
         warn!(secrets_provider = %name, error = %msg, "Invalid SecretProvider spec");
-        update_status(client, &sp, SecretProviderPhase::Failed, Some(msg), None, Some(generation)).await?;
+        update_status(
+            client,
+            &sp,
+            SecretProviderPhase::Failed,
+            Some(msg),
+            None,
+            Some(generation),
+        )
+        .await?;
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
     }
 
@@ -209,8 +217,15 @@ pub async fn reconcile(
                     }
 
                     info!(secrets_provider = %name, "ClusterSecretStore is Ready");
-                    update_status(client, &sp, SecretProviderPhase::Ready, None, provider_type, Some(generation))
-                        .await?;
+                    update_status(
+                        client,
+                        &sp,
+                        SecretProviderPhase::Ready,
+                        None,
+                        provider_type,
+                        Some(generation),
+                    )
+                    .await?;
                     Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
                 }
                 Ok(Some((false, msg))) => {
@@ -347,10 +362,9 @@ async fn check_cluster_secret_store_ready(
     let api_resource = ClusterSecretStore::api_resource();
     let css_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
 
-    let css = css_api
-        .get(name)
-        .await
-        .map_err(|e| ReconcileError::kube(format!("failed to get ClusterSecretStore '{name}'"), e))?;
+    let css = css_api.get(name).await.map_err(|e| {
+        ReconcileError::kube(format!("failed to get ClusterSecretStore '{name}'"), e)
+    })?;
 
     let conditions = css
         .data

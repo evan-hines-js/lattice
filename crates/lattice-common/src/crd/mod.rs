@@ -54,6 +54,9 @@ pub use model_serving::{
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,
 };
+pub use providers::{
+    AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig, ProxmoxConfig,
+};
 pub use restore::{LatticeRestore, LatticeRestoreSpec, LatticeRestoreStatus, RestorePhase};
 pub use secrets_provider::{
     SecretProvider, SecretProviderPhase, SecretProviderSpec, SecretProviderStatus,
@@ -64,14 +67,11 @@ pub use service_policy::{
     LatticeServicePolicySpec, LatticeServicePolicyStatus, NamespaceSelector, ServicePolicyPhase,
     ServiceSelector,
 };
-pub use providers::{
-    AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig, ProxmoxConfig,
-};
 pub use types::{
     BootstrapProvider, ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec, EndpointsSpec,
-    InstanceType, KubernetesSpec, NetworkPool, NetworkingSpec, NodeResourceSpec, NodeSpec, NodeTaint,
-    ProviderConfig, ProviderSpec, ProviderType, RegistryMirror, RootVolume, SecretRef, ServiceRef,
-    ServiceSpec, TaintEffect, WorkerPoolSpec,
+    InstanceType, KubernetesSpec, NetworkPool, NetworkingSpec, NodeResourceSpec, NodeSpec,
+    NodeTaint, ProviderConfig, ProviderSpec, ProviderType, RegistryMirror, RootVolume, SecretRef,
+    ServiceRef, ServiceSpec, TaintEffect, WorkerPoolSpec,
 };
 pub use workload::backup::{
     BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,

@@ -575,11 +575,9 @@ mod tests {
         assert!(role.get("entryTemplate").is_some());
         assert!(role.get("workerReplicas").is_some());
         assert!(role.get("workerTemplate").is_some());
-        assert!(
-            value["spec"]["template"]
-                .get("restartGracePeriodSeconds")
-                .is_some()
-        );
+        assert!(value["spec"]["template"]
+            .get("restartGracePeriodSeconds")
+            .is_some());
     }
 
     #[test]
@@ -684,7 +682,10 @@ mod tests {
         assert!(value["spec"].get("modelName").is_some());
         assert!(value["spec"].get("loraAdapters").is_some());
         assert!(value["spec"].get("rateLimit").is_some());
-        assert_eq!(value["spec"]["rules"][0]["targetModels"][0]["modelServerName"], "test-model");
+        assert_eq!(
+            value["spec"]["rules"][0]["targetModels"][0]["modelServerName"],
+            "test-model"
+        );
     }
 
     #[test]
@@ -728,11 +729,18 @@ mod tests {
         assert_eq!(policy, de);
 
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["spec"]["metrics"][0]["metricName"], "gpu_kv_cache_usage");
+        assert_eq!(
+            value["spec"]["metrics"][0]["metricName"],
+            "gpu_kv_cache_usage"
+        );
         assert_eq!(value["spec"]["metrics"][0]["targetValue"], 0.8);
         assert_eq!(value["spec"]["tolerancePercent"], 10);
-        assert!(value["spec"]["behavior"]["scaleUp"]["panicPolicy"].get("panicThresholdPercent").is_some());
-        assert!(value["spec"]["behavior"]["scaleDown"].get("stabilizationWindow").is_some());
+        assert!(value["spec"]["behavior"]["scaleUp"]["panicPolicy"]
+            .get("panicThresholdPercent")
+            .is_some());
+        assert!(value["spec"]["behavior"]["scaleDown"]
+            .get("stabilizationWindow")
+            .is_some());
     }
 
     #[test]
@@ -776,10 +784,22 @@ mod tests {
         assert_eq!(binding, de);
 
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["spec"]["policyRef"]["name"], "test-model-decode-scaling");
-        assert_eq!(value["spec"]["homogeneousTarget"]["target"]["targetRef"]["kind"], "ModelServing");
-        assert_eq!(value["spec"]["homogeneousTarget"]["target"]["subTargets"]["kind"], "Role");
-        assert_eq!(value["spec"]["homogeneousTarget"]["target"]["subTargets"]["name"], "decode");
+        assert_eq!(
+            value["spec"]["policyRef"]["name"],
+            "test-model-decode-scaling"
+        );
+        assert_eq!(
+            value["spec"]["homogeneousTarget"]["target"]["targetRef"]["kind"],
+            "ModelServing"
+        );
+        assert_eq!(
+            value["spec"]["homogeneousTarget"]["target"]["subTargets"]["kind"],
+            "Role"
+        );
+        assert_eq!(
+            value["spec"]["homogeneousTarget"]["target"]["subTargets"]["name"],
+            "decode"
+        );
         assert_eq!(value["spec"]["homogeneousTarget"]["minReplicas"], 1);
         assert_eq!(value["spec"]["homogeneousTarget"]["maxReplicas"], 10);
     }

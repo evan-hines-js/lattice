@@ -828,10 +828,7 @@ impl ContextBuilder {
         use lattice_capi::installer::NativeInstaller;
 
         let events = self.events.unwrap_or_else(|| {
-            Arc::new(KubeEventPublisher::new(
-                self.client.clone(),
-                FIELD_MANAGER,
-            ))
+            Arc::new(KubeEventPublisher::new(self.client.clone(), FIELD_MANAGER))
         });
 
         Context {

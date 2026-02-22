@@ -154,9 +154,7 @@ async fn test_model_serving_created(kubeconfig: &str) -> Result<(), String> {
     }
 
     // Verify schedulerName
-    let scheduler = ms["spec"]["schedulerName"]
-        .as_str()
-        .unwrap_or_default();
+    let scheduler = ms["spec"]["schedulerName"].as_str().unwrap_or_default();
     if scheduler != "volcano" {
         return Err(format!(
             "Expected schedulerName 'volcano', got: '{scheduler}'"
@@ -295,9 +293,7 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
     }
 
     // Verify inference engine
-    let engine = ms["spec"]["inferenceEngine"]
-        .as_str()
-        .unwrap_or_default();
+    let engine = ms["spec"]["inferenceEngine"].as_str().unwrap_or_default();
     if engine != "vLLM" {
         return Err(format!(
             "ModelServer inferenceEngine should be 'vLLM', got: '{engine}'"
@@ -305,9 +301,7 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
     }
 
     // Verify model name
-    let model_field = ms["spec"]["model"]
-        .as_str()
-        .unwrap_or_default();
+    let model_field = ms["spec"]["model"].as_str().unwrap_or_default();
     if model_field != "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" {
         return Err(format!(
             "ModelServer model should be 'deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B', got: '{model_field}'"
@@ -325,7 +319,10 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
     // Verify PD disaggregation (fixture has kvConnector + prefill/decode roles)
     let pd_group = &ms["spec"]["workloadSelector"]["pdGroup"];
     if pd_group.is_null() {
-        return Err("ModelServer pdGroup should be set (fixture has kvConnector + prefill/decode roles)".to_string());
+        return Err(
+            "ModelServer pdGroup should be set (fixture has kvConnector + prefill/decode roles)"
+                .to_string(),
+        );
     }
     let group_key = pd_group["groupKey"].as_str().unwrap_or_default();
     if group_key != "modelserving.volcano.sh/group-name" {
@@ -399,9 +396,7 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to parse ModelRoute JSON: {e}"))?;
 
     // Verify modelName defaults to routing.model
-    let model_name = mr["spec"]["modelName"]
-        .as_str()
-        .unwrap_or_default();
+    let model_name = mr["spec"]["modelName"].as_str().unwrap_or_default();
     if model_name != "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" {
         return Err(format!(
             "ModelRoute modelName should be 'deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B', got: '{model_name}'"
@@ -410,9 +405,7 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
 
     // Verify target model server name defaults to model name
     let target = &mr["spec"]["rules"][0]["targetModels"][0];
-    let target_name = target["modelServerName"]
-        .as_str()
-        .unwrap_or_default();
+    let target_name = target["modelServerName"].as_str().unwrap_or_default();
     if target_name != MODEL_NAME {
         return Err(format!(
             "ModelRoute targetModels should reference '{}', got: '{}'",
@@ -444,7 +437,9 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
 
 /// Verify AutoscalingPolicy and AutoscalingPolicyBinding were created for the decode role
 async fn test_model_autoscaling_created(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Verifying autoscaling resources (AutoscalingPolicy + AutoscalingPolicyBinding)...");
+    info!(
+        "[Model] Verifying autoscaling resources (AutoscalingPolicy + AutoscalingPolicyBinding)..."
+    );
 
     let policy_name = format!("{}-decode-scaling", MODEL_NAME);
 
@@ -488,9 +483,7 @@ async fn test_model_autoscaling_created(kubeconfig: &str) -> Result<(), String> 
     }
     let target_value = metrics[0]["targetValue"].as_f64().unwrap_or(0.0);
     if (target_value - 0.8).abs() > 0.001 {
-        return Err(format!(
-            "Expected target value 0.8, got: {target_value}"
-        ));
+        return Err(format!("Expected target value 0.8, got: {target_value}"));
     }
 
     // Verify tolerancePercent
@@ -702,8 +695,8 @@ async fn test_model_download_pvc(kubeconfig: &str) -> Result<(), String> {
     ])
     .await?;
 
-    let pvc: serde_json::Value = serde_json::from_str(&output)
-        .map_err(|e| format!("Failed to parse PVC JSON: {e}"))?;
+    let pvc: serde_json::Value =
+        serde_json::from_str(&output).map_err(|e| format!("Failed to parse PVC JSON: {e}"))?;
 
     // Verify size
     let storage = pvc["spec"]["resources"]["requests"]["storage"]
@@ -855,9 +848,9 @@ async fn test_model_download_mesh_member(kubeconfig: &str) -> Result<(), String>
     }
 
     // Verify entity egress target
-    let has_world_egress = egress.iter().any(|rule| {
-        rule["target"]["entity"].as_str() == Some("world")
-    });
+    let has_world_egress = egress
+        .iter()
+        .any(|rule| rule["target"]["entity"].as_str() == Some("world"));
     if !has_world_egress {
         return Err(format!(
             "Download mesh member should have Entity(\"world\") egress, got: {:?}",
@@ -866,10 +859,7 @@ async fn test_model_download_mesh_member(kubeconfig: &str) -> Result<(), String>
     }
 
     // Should be egress-only (no ports)
-    let ports = mm["spec"]["ports"]
-        .as_array()
-        .map(|p| p.len())
-        .unwrap_or(0);
+    let ports = mm["spec"]["ports"].as_array().map(|p| p.len()).unwrap_or(0);
     if ports != 0 {
         return Err(format!(
             "Download mesh member should have no ports (egress-only), got: {}",
@@ -947,13 +937,9 @@ async fn test_model_serving_has_download_injection(kubeconfig: &str) -> Result<(
             ))?;
         for container in containers {
             let c_name = container["name"].as_str().unwrap_or("unknown");
-            let mounts = container["volumeMounts"]
-                .as_array()
-                .unwrap_or(&empty);
+            let mounts = container["volumeMounts"].as_array().unwrap_or(&empty);
             let has_mount = mounts.iter().any(|m| {
-                m["name"] == "model-cache"
-                    && m["mountPath"] == "/models"
-                    && m["readOnly"] == true
+                m["name"] == "model-cache" && m["mountPath"] == "/models" && m["readOnly"] == true
             });
             if !has_mount {
                 return Err(format!(
@@ -1032,9 +1018,7 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
     }
 
     for item in &role_items {
-        let mm_name = item["metadata"]["name"]
-            .as_str()
-            .unwrap_or("unknown");
+        let mm_name = item["metadata"]["name"].as_str().unwrap_or("unknown");
 
         // Check that the Kthena router is in allowed_callers
         let empty_arr = vec![];
@@ -1054,9 +1038,7 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
 
         // Check inference port is present
         let empty_ports = vec![];
-        let ports = item["spec"]["ports"]
-            .as_array()
-            .unwrap_or(&empty_ports);
+        let ports = item["spec"]["ports"].as_array().unwrap_or(&empty_ports);
         let has_inference_port = ports.iter().any(|p| p["port"].as_u64() == Some(8000));
         if !has_inference_port {
             return Err(format!(
@@ -1066,9 +1048,7 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
         }
 
         // Verify allowPeerTraffic is enabled (PD disaggregation: kvConnector + prefill/decode)
-        let peer_traffic = item["spec"]["allowPeerTraffic"]
-            .as_bool()
-            .unwrap_or(false);
+        let peer_traffic = item["spec"]["allowPeerTraffic"].as_bool().unwrap_or(false);
         if !peer_traffic {
             return Err(format!(
                 "LatticeMeshMember '{}' should have allowPeerTraffic=true for PD disaggregation",
@@ -1105,9 +1085,7 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
         }
 
         let empty_ports = vec![];
-        let ports = mm["spec"]["ports"]
-            .as_array()
-            .unwrap_or(&empty_ports);
+        let ports = mm["spec"]["ports"].as_array().unwrap_or(&empty_ports);
         let has_metrics_port = ports.iter().any(|p| p["port"].as_u64() == Some(9090));
         if !has_metrics_port {
             return Err(format!(
@@ -1179,8 +1157,8 @@ async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
                     Ok(gates) => {
                         let gates = gates.trim();
                         // Empty or no gates means they've been removed
-                        let removed = gates.is_empty()
-                            || !gates.contains("lattice.dev/model-download");
+                        let removed =
+                            gates.is_empty() || !gates.contains("lattice.dev/model-download");
                         info!(
                             "[Model] Scheduling gates: {}",
                             if gates.is_empty() { "(none)" } else { gates }
@@ -1241,11 +1219,10 @@ pub async fn run_model_tests(ctx: &InfraContext) -> Result<(), String> {
 #[tokio::test]
 #[ignore]
 async fn test_model_standalone() {
-    let session = TestSession::from_env(
-        "Set LATTICE_WORKLOAD_KUBECONFIG to run standalone model tests",
-    )
-    .await
-    .expect("Failed to create test session");
+    let session =
+        TestSession::from_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone model tests")
+            .await
+            .expect("Failed to create test session");
 
     if let Err(e) = run_model_tests(&session.ctx).await {
         panic!("Model tests failed: {e}");

@@ -120,7 +120,10 @@ pub async fn wait_for_resource_phase(
     let expected_phase = phase.to_string();
 
     wait_for_condition(
-        &format!("{} {}/{} to reach {}", resource_kind, namespace, name, phase),
+        &format!(
+            "{} {}/{} to reach {}",
+            resource_kind, namespace, name, phase
+        ),
         timeout,
         Duration::from_secs(5),
         || {

@@ -194,8 +194,8 @@ mod tests {
 
     #[test]
     fn test_parse_http_url() {
-        let endpoint = ParsedEndpoint::parse("http://internal.service.local")
-            .expect("should parse HTTP URL");
+        let endpoint =
+            ParsedEndpoint::parse("http://internal.service.local").expect("should parse HTTP URL");
         assert_eq!(endpoint.protocol, "http");
         assert_eq!(endpoint.host, "internal.service.local");
         assert_eq!(endpoint.port, 80);
@@ -203,8 +203,7 @@ mod tests {
 
     #[test]
     fn test_parse_tcp_url() {
-        let endpoint =
-            ParsedEndpoint::parse("tcp://10.0.0.5:5432").expect("should parse TCP URL");
+        let endpoint = ParsedEndpoint::parse("tcp://10.0.0.5:5432").expect("should parse TCP URL");
         assert_eq!(endpoint.protocol, "tcp");
         assert_eq!(endpoint.host, "10.0.0.5");
         assert_eq!(endpoint.port, 5432);
@@ -212,8 +211,8 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_url() {
-        let endpoint = ParsedEndpoint::parse("grpc://grpc.service.local:9090")
-            .expect("should parse gRPC URL");
+        let endpoint =
+            ParsedEndpoint::parse("grpc://grpc.service.local:9090").expect("should parse gRPC URL");
         assert_eq!(endpoint.protocol, "grpc");
         assert_eq!(endpoint.host, "grpc.service.local");
         assert_eq!(endpoint.port, 9090);
@@ -221,8 +220,8 @@ mod tests {
 
     #[test]
     fn test_parse_host_port_only() {
-        let endpoint = ParsedEndpoint::parse("redis.default.svc:6379")
-            .expect("should parse host:port format");
+        let endpoint =
+            ParsedEndpoint::parse("redis.default.svc:6379").expect("should parse host:port format");
         assert_eq!(endpoint.protocol, "tcp");
         assert_eq!(endpoint.host, "redis.default.svc");
         assert_eq!(endpoint.port, 6379);

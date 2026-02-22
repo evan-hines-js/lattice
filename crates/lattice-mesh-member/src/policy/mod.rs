@@ -13,7 +13,7 @@ mod cilium;
 mod istio_ambient;
 
 use lattice_common::crd::EgressTarget;
-use lattice_common::graph::{ServiceGraph, ServiceType};
+use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::cilium::CiliumNetworkPolicy;
 use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
 use lattice_common::policy::service_entry::ServiceEntry;
@@ -93,7 +93,7 @@ impl<'a> PolicyCompiler<'a> {
             return GeneratedPolicies::default();
         };
 
-        if service_node.type_ == ServiceType::Unknown {
+        if service_node.type_.is_unknown() {
             return GeneratedPolicies::default();
         }
 
@@ -172,7 +172,6 @@ impl<'a> PolicyCompiler<'a> {
             }
         }
     }
-
 }
 
 // =============================================================================
@@ -423,7 +422,6 @@ mod tests {
         assert!(json.contains("\"toFQDNs\""));
         assert!(json.contains("\"toCIDR\""));
     }
-
 
     #[test]
     fn wildcard_inbound_generates_policy() {
@@ -865,9 +863,7 @@ mod tests {
 
     #[test]
     fn fqdn_egress_generates_service_entry_and_authz() {
-        use lattice_common::crd::{
-            EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget,
-        };
+        use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
         let graph = ServiceGraph::new();
         let ns = "prod-ns";

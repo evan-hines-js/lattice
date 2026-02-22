@@ -241,9 +241,7 @@ impl Default for AgentRegistry {
             teardown_in_progress: DashMap::new(),
             pending_batch_acks: DashMap::new(),
             pending_complete_acks: DashMap::new(),
-            pending_k8s_responses: Cache::builder()
-                .time_to_live(PENDING_RESPONSE_TTL)
-                .build(),
+            pending_k8s_responses: Cache::builder().time_to_live(PENDING_RESPONSE_TTL).build(),
             pending_exec_data: moka::sync::Cache::builder()
                 .time_to_live(PENDING_RESPONSE_TTL)
                 .build(),

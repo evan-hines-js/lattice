@@ -99,9 +99,7 @@ impl CrdKind {
             Self::ModelServing | Self::AutoscalingPolicy | Self::AutoscalingPolicyBinding => {
                 "workload.serving.volcano.sh"
             }
-            Self::KthenaModelServer | Self::KthenaModelRoute => {
-                "networking.serving.volcano.sh"
-            }
+            Self::KthenaModelServer | Self::KthenaModelRoute => "networking.serving.volcano.sh",
         }
     }
 

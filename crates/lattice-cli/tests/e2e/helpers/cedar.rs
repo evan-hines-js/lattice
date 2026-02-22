@@ -271,12 +271,7 @@ pub async fn apply_cedar_external_endpoint_policy(
 ) -> Result<(), String> {
     let resource_conditions: Vec<String> = endpoint_ids
         .iter()
-        .map(|id| {
-            format!(
-                "resource == Lattice::ExternalEndpoint::\"{}\"",
-                id
-            )
-        })
+        .map(|id| format!("resource == Lattice::ExternalEndpoint::\"{}\"", id))
         .collect();
     let resource_expr = resource_conditions.join(" ||\n  ");
 

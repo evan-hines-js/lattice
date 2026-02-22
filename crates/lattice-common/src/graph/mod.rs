@@ -16,8 +16,7 @@ use tracing::warn;
 
 use crate::crd::{
     EgressRule, IngressPolicySpec, LatticeMeshMemberSpec, LatticeServicePolicy, LatticeServiceSpec,
-    MeshMemberTarget, PeerAuth, ServiceBackupSpec, ServiceSelector,
-    VolumeParams, WorkloadSpec,
+    MeshMemberTarget, PeerAuth, ServiceBackupSpec, ServiceSelector, VolumeParams, WorkloadSpec,
 };
 
 /// Fully qualified service reference: (namespace, name)
@@ -34,6 +33,23 @@ pub enum ServiceType {
     MeshMember,
     /// Placeholder for a service referenced but not yet defined
     Unknown,
+}
+
+impl ServiceType {
+    /// Returns true if this is a local Lattice-managed service.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+
+    /// Returns true if this is a pre-existing workload enrolled via LatticeMeshMember.
+    pub fn is_mesh_member(&self) -> bool {
+        matches!(self, Self::MeshMember)
+    }
+
+    /// Returns true if this is a placeholder for an undefined service.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
 }
 
 /// K8s Service port mapping: service port -> container targetPort.
@@ -313,11 +329,8 @@ pub struct ActiveEdge {
     pub callee_name: String,
 }
 
-/// Compute a stable hash of active edges for change detection.
-///
-/// Sorts edges by namespace/name so the hash is stable regardless of graph
-/// iteration order, then feeds the result through `deterministic_hash`.
-pub fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
+/// Build a stable, sorted string representation of active edges for hashing.
+fn edge_fingerprint(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
     use std::fmt::Write;
 
     let mut sorted_in: Vec<_> = inbound
@@ -339,7 +352,15 @@ pub fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> Str
     for (ns, name) in &sorted_out {
         let _ = write!(input, "out:{ns}/{name}->");
     }
-    crate::deterministic_hash(&input)
+    input
+}
+
+/// Compute a stable hash of active edges for change detection.
+///
+/// Sorts edges by namespace/name so the hash is stable regardless of graph
+/// iteration order, then feeds the result through `deterministic_hash`.
+pub fn compute_edge_hash(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
+    crate::deterministic_hash(&edge_fingerprint(inbound, outbound))
 }
 
 /// Compute a stable hash of active edges plus policy epochs.
@@ -353,26 +374,7 @@ pub fn compute_edge_hash_with_epochs(
     cedar_epoch: u64,
 ) -> String {
     use std::fmt::Write;
-
-    let mut sorted_in: Vec<_> = inbound
-        .iter()
-        .map(|e| (&e.caller_namespace, &e.caller_name))
-        .collect();
-    sorted_in.sort();
-
-    let mut sorted_out: Vec<_> = outbound
-        .iter()
-        .map(|e| (&e.callee_namespace, &e.callee_name))
-        .collect();
-    sorted_out.sort();
-
-    let mut input = String::new();
-    for (ns, name) in &sorted_in {
-        let _ = write!(input, "in:{ns}/{name}->");
-    }
-    for (ns, name) in &sorted_out {
-        let _ = write!(input, "out:{ns}/{name}->");
-    }
+    let mut input = edge_fingerprint(inbound, outbound);
     let _ = write!(input, "policy:{policy_epoch},cedar:{cedar_epoch}");
     crate::deterministic_hash(&input)
 }
@@ -654,7 +656,7 @@ impl ServiceGraph {
                     Some(c) => c,
                     None => continue,
                 };
-                if caller.type_ == ServiceType::Unknown {
+                if caller.type_.is_unknown() {
                     warn!(
                         caller = %format!("{}/{}", caller_ns, caller_name),
                         callee = %format!("{}/{}", namespace, name),
@@ -690,7 +692,7 @@ impl ServiceGraph {
                 continue;
             }
             match self.get_service(da_ns, da_name) {
-                Some(c) if c.type_ != ServiceType::Unknown => {}
+                Some(c) if !c.type_.is_unknown() => {}
                 _ => continue,
             }
             seen.insert(caller_key);
@@ -724,18 +726,15 @@ impl ServiceGraph {
                     None => continue,
                 };
 
-                let allowed = match callee.type_ {
-                    ServiceType::Local | ServiceType::MeshMember => {
-                        callee.allows(namespace, name)
-                    }
-                    ServiceType::Unknown => {
-                        warn!(
-                            caller = %format!("{}/{}", namespace, name),
-                            callee = %format!("{}/{}", callee_ns, callee_name),
-                            "skipping outbound edge to unknown service (check dependency name)"
-                        );
-                        false
-                    }
+                let allowed = if callee.type_.is_unknown() {
+                    warn!(
+                        caller = %format!("{}/{}", namespace, name),
+                        callee = %format!("{}/{}", callee_ns, callee_name),
+                        "skipping outbound edge to unknown service (check dependency name)"
+                    );
+                    false
+                } else {
+                    callee.allows(namespace, name)
                 };
 
                 if !allowed {
@@ -765,7 +764,7 @@ impl ServiceGraph {
                 if seen.contains(&callee_key) {
                     continue;
                 }
-                if node.type_ == ServiceType::Unknown {
+                if node.type_.is_unknown() {
                     continue;
                 }
                 if !node.allows(namespace, name) {
@@ -793,11 +792,7 @@ impl ServiceGraph {
                     .iter()
                     .filter_map(|name| {
                         let node = self.get_service(namespace, name)?;
-                        if node.type_ == ServiceType::Local {
-                            Some(node)
-                        } else {
-                            None
-                        }
+                        node.type_.is_local().then_some(node)
                     })
                     .collect()
             })
@@ -813,11 +808,7 @@ impl ServiceGraph {
                     .iter()
                     .filter_map(|name| {
                         let node = self.get_service(namespace, name)?;
-                        if node.type_ == ServiceType::MeshMember {
-                            Some(node)
-                        } else {
-                            None
-                        }
+                        node.type_.is_mesh_member().then_some(node)
                     })
                     .collect()
             })

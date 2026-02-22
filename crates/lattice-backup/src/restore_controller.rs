@@ -39,9 +39,7 @@ pub async fn reconcile(
     match current_phase {
         RestorePhase::Pending => {
             let velero_restore = build_velero_restore(&name, &restore);
-            match velero::apply_resource(client, &velero_restore, FIELD_MANAGER)
-                .await
-            {
+            match velero::apply_resource(client, &velero_restore, FIELD_MANAGER).await {
                 Ok(()) => {
                     update_status(
                         client,

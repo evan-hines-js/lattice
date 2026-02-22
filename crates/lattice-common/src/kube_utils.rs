@@ -70,9 +70,7 @@ pub struct OwnerReference {
     pub block_owner_deletion: Option<bool>,
 }
 
-impl From<&OwnerReference>
-    for k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference
-{
+impl From<&OwnerReference> for k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
     fn from(oref: &OwnerReference) -> Self {
         Self {
             api_version: oref.api_version.clone(),
@@ -842,8 +840,12 @@ where
 {
     let api: Api<T> = Api::namespaced(client.clone(), namespace);
     let patch = serde_json::json!({ "status": status });
-    api.patch_status(name, &PatchParams::apply(field_manager), &Patch::Merge(&patch))
-        .await?;
+    api.patch_status(
+        name,
+        &PatchParams::apply(field_manager),
+        &Patch::Merge(&patch),
+    )
+    .await?;
     Ok(())
 }
 
@@ -865,8 +867,12 @@ where
 {
     let api: Api<T> = Api::all(client.clone());
     let patch = serde_json::json!({ "status": status });
-    api.patch_status(name, &PatchParams::apply(field_manager), &Patch::Merge(&patch))
-        .await?;
+    api.patch_status(
+        name,
+        &PatchParams::apply(field_manager),
+        &Patch::Merge(&patch),
+    )
+    .await?;
     Ok(())
 }
 

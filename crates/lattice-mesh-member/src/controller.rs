@@ -250,9 +250,14 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
         mesh::DATAPLANE_MODE_LABEL.to_string(),
         mesh::DATAPLANE_MODE_AMBIENT.to_string(),
     )]);
-    lattice_common::kube_utils::ensure_namespace_with_labels(client, namespace, &labels, FIELD_MANAGER)
-        .await
-        .map_err(|e| ReconcileError::kube("ensure namespace ambient", e))?;
+    lattice_common::kube_utils::ensure_namespace_with_labels(
+        client,
+        namespace,
+        &labels,
+        FIELD_MANAGER,
+    )
+    .await
+    .map_err(|e| ReconcileError::kube("ensure namespace ambient", e))?;
 
     debug!(namespace = %namespace, "ensured namespace ambient mode");
     Ok(())
