@@ -407,7 +407,7 @@ impl<'a> WorkloadCompiler<'a> {
                     return None;
                 }
                 // Try entity reference first (entity:name or entity:name:port)
-                if let Some(rule) = parse_entity_egress(id) {
+                if let Some(rule) = EgressRule::from_entity_id(id) {
                     return Some(rule);
                 }
                 let ep = ParsedEndpoint::parse(id)?;
@@ -457,28 +457,3 @@ impl<'a> WorkloadCompiler<'a> {
     }
 }
 
-/// Parse an entity egress reference from an external-service resource id.
-///
-/// Format: `entity:<name>` or `entity:<name>:<port>`
-/// Examples:
-/// - `entity:world` → Entity("world"), port 443
-/// - `entity:world:443` → Entity("world"), port 443
-/// - `entity:kube-apiserver:6443` → Entity("kube-apiserver"), port 6443
-fn parse_entity_egress(id: &str) -> Option<EgressRule> {
-    let rest = id.strip_prefix("entity:")?;
-    let (name, port) = if let Some((n, p)) = rest.rsplit_once(':') {
-        match p.parse::<u16>() {
-            Ok(port) => (n.to_string(), port),
-            Err(_) => (rest.to_string(), 443),
-        }
-    } else {
-        (rest.to_string(), 443)
-    };
-    if name.is_empty() {
-        return None;
-    }
-    Some(EgressRule {
-        target: EgressTarget::Entity(name),
-        ports: vec![port],
-    })
-}

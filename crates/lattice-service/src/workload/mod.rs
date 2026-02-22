@@ -117,9 +117,6 @@ pub struct PodSpec {
     /// Volumes
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<Volume>,
-    /// Pod affinity rules (for RWO volume co-location)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub affinity: Option<lattice_workload::Affinity>,
     /// Pod-level security context
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_context: Option<PodSecurityContext>,
@@ -468,7 +465,6 @@ impl WorkloadCompiler {
                         containers: pod_template.containers,
                         init_containers: pod_template.init_containers,
                         volumes: pod_template.volumes,
-                        affinity: pod_template.affinity,
                         security_context: pod_template.security_context,
                         host_network: pod_template.host_network,
                         share_process_namespace: pod_template.share_process_namespace,

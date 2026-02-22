@@ -107,7 +107,21 @@ pub async fn reconcile(
 
             register_graph(&model, &ctx.graph, namespace);
 
-            apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await?;
+            if let Err(e) = apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await {
+                cleanup_graph(&model, &ctx.graph, namespace);
+                let msg = format!("Failed to apply resources: {}", e);
+                let _ = update_status(
+                    &ctx.client,
+                    &name,
+                    namespace,
+                    ModelServingPhase::Failed,
+                    Some(&msg),
+                    Some(generation),
+                    None,
+                )
+                .await;
+                return Err(e);
+            }
             update_status(
                 &ctx.client,
                 &name,
@@ -351,28 +365,12 @@ async fn apply_layers(
     // Create a ServiceAccount for each role (entry + worker templates)
     for role in &compiled.model_serving.spec.template.roles {
         if let Some(sa_name) = role.entry_template["spec"]["serviceAccountName"].as_str() {
-            let sa = serde_json::json!({
-                "apiVersion": "v1",
-                "kind": "ServiceAccount",
-                "metadata": {
-                    "name": sa_name,
-                    "namespace": namespace
-                },
-                "automountServiceAccountToken": false
-            });
+            let sa = lattice_common::kube_utils::compile_service_account(sa_name, namespace);
             layer1.push("ServiceAccount", sa_name, &sa, &sa_ar)?;
         }
         if let Some(ref wt) = role.worker_template {
             if let Some(sa_name) = wt["spec"]["serviceAccountName"].as_str() {
-                let sa = serde_json::json!({
-                    "apiVersion": "v1",
-                    "kind": "ServiceAccount",
-                    "metadata": {
-                        "name": sa_name,
-                        "namespace": namespace
-                    },
-                    "automountServiceAccountToken": false
-                });
+                let sa = lattice_common::kube_utils::compile_service_account(sa_name, namespace);
                 layer1.push("ServiceAccount", sa_name, &sa, &sa_ar)?;
             }
         }
@@ -594,14 +592,14 @@ async fn apply_download_resources(
 
     layer0a.push(
         "ServiceAccount",
-        &download.job_name,
+        download.job_name(),
         &download.service_account,
         &sa_ar,
     )?;
 
     layer0a.push(
         "PersistentVolumeClaim",
-        &download.pvc_name,
+        download.pvc_name(),
         &download.pvc,
         &pvc_ar,
     )?;
@@ -612,15 +610,15 @@ async fn apply_download_resources(
     let lj_api: Api<LatticeJob> = Api::namespaced(client.clone(), namespace);
     lj_api
         .patch(
-            &download.job_name,
+            download.job_name(),
             params,
             &Patch::Apply(&download.job),
         )
         .await?;
 
     info!(
-        pvc = %download.pvc_name,
-        job = %download.job_name,
+        pvc = %download.pvc_name(),
+        job = %download.job_name(),
         mount_path = %download.mount_path,
         "applied model download resources (Layer 0)"
     );

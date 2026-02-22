@@ -142,7 +142,7 @@ pub fn compile_model_autoscaling(model: &LatticeModel) -> CompiledAutoscaling {
                             kind: "ModelServing".to_string(),
                             name: name.to_string(),
                         },
-                        sub_target: Some(KthenaSubTarget {
+                        sub_targets: Some(KthenaSubTarget {
                             kind: "Role".to_string(),
                             name: role_name.clone(),
                         }),
@@ -257,7 +257,7 @@ mod tests {
             .spec
             .homogeneous_target
             .target
-            .sub_target
+            .sub_targets
             .as_ref()
             .unwrap();
         assert_eq!(sub.kind, "Role");

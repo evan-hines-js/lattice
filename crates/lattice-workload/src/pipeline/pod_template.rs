@@ -30,7 +30,6 @@ pub struct CompiledPodTemplate {
     pub volumes: Vec<Volume>,
     pub labels: BTreeMap<String, String>,
     pub service_account_name: String,
-    pub affinity: Option<crate::pipeline::volumes::Affinity>,
     pub security_context: Option<PodSecurityContext>,
     pub host_network: Option<bool>,
     pub share_process_namespace: Option<bool>,
@@ -89,11 +88,6 @@ impl PodTemplateCompiler {
             lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
         );
 
-        // Add volume ownership labels (for RWO affinity)
-        for (k, v) in &volumes.pod_labels {
-            labels.insert(k.clone(), v.clone());
-        }
-
         // Build pod volumes from PVCs and emptyDir
         let mut pod_volumes: Vec<Volume> = volumes.volumes.clone();
 
@@ -123,7 +117,6 @@ impl PodTemplateCompiler {
             volumes: pod_volumes,
             labels,
             service_account_name: name.to_string(),
-            affinity: volumes.affinity.clone(),
             security_context,
             host_network: runtime.host_network,
             share_process_namespace: runtime.share_process_namespace,

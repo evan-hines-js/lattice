@@ -476,7 +476,7 @@ pub struct KthenaHomogeneousTarget {
 pub struct KthenaAutoscalingTarget {
     pub target_ref: KthenaTargetRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sub_target: Option<KthenaSubTarget>,
+    pub sub_targets: Option<KthenaSubTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metric_endpoint: Option<KthenaMetricEndpoint>,
 }
@@ -767,7 +767,7 @@ mod tests {
                             kind: "ModelServing".to_string(),
                             name: "test-model".to_string(),
                         },
-                        sub_target: Some(KthenaSubTarget {
+                        sub_targets: Some(KthenaSubTarget {
                             kind: "Role".to_string(),
                             name: "decode".to_string(),
                         }),
@@ -789,8 +789,8 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["spec"]["policyRef"]["name"], "test-model-decode-scaling");
         assert_eq!(value["spec"]["homogeneousTarget"]["target"]["targetRef"]["kind"], "ModelServing");
-        assert_eq!(value["spec"]["homogeneousTarget"]["target"]["subTarget"]["kind"], "Role");
-        assert_eq!(value["spec"]["homogeneousTarget"]["target"]["subTarget"]["name"], "decode");
+        assert_eq!(value["spec"]["homogeneousTarget"]["target"]["subTargets"]["kind"], "Role");
+        assert_eq!(value["spec"]["homogeneousTarget"]["target"]["subTargets"]["name"], "decode");
         assert_eq!(value["spec"]["homogeneousTarget"]["minReplicas"], 1);
         assert_eq!(value["spec"]["homogeneousTarget"]["maxReplicas"], 10);
     }

@@ -125,10 +125,34 @@ pub async fn compile_model(
                 .unwrap_or(&role_spec.entry_runtime);
             let worker_name = format!("{}-{}-worker", name, role_name);
 
+            // When worker_runtime falls back to entry_runtime, imagePullSecrets
+            // may reference secret resources only declared in entry_workload.
+            // Propagate those missing resources so the worker compilation can
+            // resolve them (each compilation creates its own K8s Secret via ESO).
+            let effective_worker_workload;
+            let workload_ref = if role_spec.worker_runtime.is_none() {
+                let mut cloned = worker_workload.clone();
+                for secret_name in &worker_runtime.image_pull_secrets {
+                    if !cloned.resources.contains_key(secret_name) {
+                        if let Some(resource) =
+                            role_spec.entry_workload.resources.get(secret_name)
+                        {
+                            cloned
+                                .resources
+                                .insert(secret_name.clone(), resource.clone());
+                        }
+                    }
+                }
+                effective_worker_workload = cloned;
+                &effective_worker_workload
+            } else {
+                worker_workload
+            };
+
             let worker_compiled = WorkloadCompiler::new(
                 &worker_name,
                 namespace,
-                worker_workload,
+                workload_ref,
                 worker_runtime,
                 provider_type,
             )
@@ -190,13 +214,13 @@ pub async fn compile_model(
         for templates in role_templates.values_mut() {
             download::inject_model_volume(
                 &mut templates.entry_template,
-                &dl.pvc_name,
+                dl.pvc_name(),
                 &dl.mount_path,
             );
             download::inject_scheduling_gate(&mut templates.entry_template);
 
             if let Some(ref mut worker) = templates.worker_template {
-                download::inject_model_volume(worker, &dl.pvc_name, &dl.mount_path);
+                download::inject_model_volume(worker, dl.pvc_name(), &dl.mount_path);
                 download::inject_scheduling_gate(worker);
             }
         }
@@ -471,7 +495,8 @@ mod tests {
     use lattice_common::crd::{
         AutoscalingMetric, ContainerSpec, InferenceEngine, KvConnector, LatticeModelSpec,
         ModelAutoscalingSpec, ModelRoleSpec, ModelRouteRule, ModelRouteSpec, ModelRoutingSpec,
-        ModelSourceSpec, PortSpec, RuntimeSpec, ServicePortsSpec, TargetModel, WorkloadSpec,
+        ModelSourceSpec, PortSpec, ResourceSpec, ResourceType, RuntimeSpec, ServicePortsSpec,
+        TargetModel, WorkloadSpec,
     };
 
     fn make_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
@@ -748,6 +773,7 @@ mod tests {
                 token_secret: None,
                 downloader_image: None,
                 access_mode: None,
+                security: None,
             }),
             ..Default::default()
         };
@@ -763,7 +789,7 @@ mod tests {
             .unwrap();
 
         let download = compiled.download.as_ref().expect("download should be Some");
-        assert_eq!(download.pvc_name, "vol-test-model-model-cache");
+        assert_eq!(download.pvc_name(), "vol-test-model-model-cache");
         assert_eq!(download.mount_path, "/models");
 
         // Verify scheduling gate + volume injected into pod templates
@@ -885,6 +911,80 @@ mod tests {
             has_metrics_port,
             "metrics port 9090 from metricEndpoint should be present"
         );
+    }
+
+    #[tokio::test]
+    async fn worker_inherits_image_pull_secrets_from_entry_runtime() {
+        // When worker_runtime is None, the worker uses entry_runtime. If
+        // entry_runtime has imagePullSecrets referencing resources only in
+        // entry_workload, the compiler should propagate those resources to
+        // the worker workload so compilation succeeds.
+        let mut secret_params = BTreeMap::new();
+        secret_params.insert("provider".to_string(), serde_json::json!("lattice-local"));
+
+        let mut entry_resources = BTreeMap::new();
+        entry_resources.insert(
+            "ghcr-creds".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Secret,
+                id: Some("registry-creds".to_string()),
+                params: Some(secret_params),
+                ..Default::default()
+            },
+        );
+
+        let mut entry_containers = BTreeMap::new();
+        entry_containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "ghcr.io/org/decode:latest".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let mut worker_containers = BTreeMap::new();
+        worker_containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "ghcr.io/org/decode-worker:latest".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let role = ModelRoleSpec {
+            replicas: 1,
+            entry_workload: WorkloadSpec {
+                containers: entry_containers,
+                resources: entry_resources,
+                ..Default::default()
+            },
+            entry_runtime: RuntimeSpec {
+                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                ..Default::default()
+            },
+            worker_replicas: Some(2),
+            worker_workload: Some(WorkloadSpec {
+                containers: worker_containers,
+                // No resources — ghcr-creds only declared in entry
+                ..Default::default()
+            }),
+            worker_runtime: None, // Falls back to entry_runtime
+            autoscaling: None,
+        };
+
+        let mut roles = BTreeMap::new();
+        roles.insert("decode".to_string(), role);
+
+        let model = make_model(roles);
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        // This should succeed — the compiler propagates ghcr-creds to the worker workload
+        let compiled = compile_model(&model, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .expect("worker should compile with entry runtime's imagePullSecrets");
+
+        assert_eq!(compiled.model_serving.spec.template.roles.len(), 1);
     }
 
     #[tokio::test]

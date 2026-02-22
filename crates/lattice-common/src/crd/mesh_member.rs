@@ -144,6 +144,38 @@ pub enum EgressTarget {
     Fqdn(String),
 }
 
+impl EgressRule {
+    /// Parse an entity egress reference from an external-service resource id.
+    ///
+    /// Format: `entity:<name>` or `entity:<name>:<port>`
+    ///
+    /// Returns `None` if `id` doesn't start with `entity:` or the name is empty.
+    ///
+    /// # Examples
+    /// - `entity:world` → Entity("world"), port 443
+    /// - `entity:world:443` → Entity("world"), port 443
+    /// - `entity:kube-apiserver:6443` → Entity("kube-apiserver"), port 6443
+    /// - `entity:name:notaport` → Entity("name:notaport"), port 443
+    pub fn from_entity_id(id: &str) -> Option<Self> {
+        let rest = id.strip_prefix("entity:")?;
+        let (name, port) = if let Some((n, p)) = rest.rsplit_once(':') {
+            match p.parse::<u16>() {
+                Ok(port) => (n.to_string(), port),
+                Err(_) => (rest.to_string(), 443),
+            }
+        } else {
+            (rest.to_string(), 443)
+        };
+        if name.is_empty() {
+            return None;
+        }
+        Some(EgressRule {
+            target: EgressTarget::Entity(name),
+            ports: vec![port],
+        })
+    }
+}
+
 // =============================================================================
 // Status
 // =============================================================================
@@ -403,5 +435,54 @@ mod tests {
         let mut spec = valid_spec();
         spec.target = MeshMemberTarget::Namespace("monitoring".to_string());
         assert_eq!(spec.target_namespace("default"), "monitoring");
+    }
+
+    // =========================================================================
+    // Story: EgressRule::from_entity_id
+    // =========================================================================
+
+    #[test]
+    fn entity_world_default_port() {
+        let rule = EgressRule::from_entity_id("entity:world").unwrap();
+        assert_eq!(rule.target, EgressTarget::Entity("world".to_string()));
+        assert_eq!(rule.ports, vec![443]);
+    }
+
+    #[test]
+    fn entity_world_explicit_443() {
+        let rule = EgressRule::from_entity_id("entity:world:443").unwrap();
+        assert_eq!(rule.target, EgressTarget::Entity("world".to_string()));
+        assert_eq!(rule.ports, vec![443]);
+    }
+
+    #[test]
+    fn entity_kube_apiserver_custom_port() {
+        let rule = EgressRule::from_entity_id("entity:kube-apiserver:6443").unwrap();
+        assert_eq!(
+            rule.target,
+            EgressTarget::Entity("kube-apiserver".to_string())
+        );
+        assert_eq!(rule.ports, vec![6443]);
+    }
+
+    #[test]
+    fn entity_empty_name_returns_none() {
+        assert!(EgressRule::from_entity_id("entity:").is_none());
+    }
+
+    #[test]
+    fn entity_invalid_port_treated_as_name() {
+        let rule = EgressRule::from_entity_id("entity:name:notaport").unwrap();
+        assert_eq!(
+            rule.target,
+            EgressTarget::Entity("name:notaport".to_string())
+        );
+        assert_eq!(rule.ports, vec![443]);
+    }
+
+    #[test]
+    fn non_entity_prefix_returns_none() {
+        assert!(EgressRule::from_entity_id("fqdn:example.com").is_none());
+        assert!(EgressRule::from_entity_id("world:443").is_none());
     }
 }

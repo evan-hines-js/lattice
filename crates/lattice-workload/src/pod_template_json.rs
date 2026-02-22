@@ -36,12 +36,6 @@ pub fn pod_template_to_json(
             serde_json::to_value(&pt.volumes).unwrap_or_default(),
         );
     }
-    if let Some(ref affinity) = pt.affinity {
-        spec_obj.insert(
-            "affinity".to_string(),
-            serde_json::to_value(affinity).unwrap_or_default(),
-        );
-    }
     if let Some(ref sc) = pt.security_context {
         spec_obj.insert(
             "securityContext".to_string(),

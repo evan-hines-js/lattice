@@ -25,7 +25,9 @@ use lattice_common::crd::{
     ResourceSpec, ResourceType, RestartPolicy, RuntimeSpec, WorkloadSpec,
 };
 use lattice_common::crd::workload::container::VolumeMount;
+use lattice_common::kube_utils::OwnerReference;
 use lattice_common::template::TemplateString;
+use lattice_workload::{PersistentVolumeClaim, PvcResources, PvcSpec, PvcStorage};
 
 use crate::error::ModelError;
 
@@ -45,16 +47,24 @@ const VOLUME_NAME: &str = "model-cache";
 pub struct CompiledDownload {
     /// LatticeJob CRD for the download workload (compiled through the Lattice pipeline)
     pub job: LatticeJob,
-    /// PVC for model artifact cache (as JSON for ApplyBatch, owned by LatticeModel)
-    pub pvc: serde_json::Value,
+    /// PVC for model artifact cache (owned by LatticeModel for GC)
+    pub pvc: PersistentVolumeClaim,
     /// ServiceAccount for download pod SPIFFE identity
     pub service_account: serde_json::Value,
-    /// Job name (for controller status checks and logging)
-    pub job_name: String,
-    /// PVC name (for volume references in serving pod templates)
-    pub pvc_name: String,
     /// Mount path for model artifacts in serving containers
     pub mount_path: String,
+}
+
+impl CompiledDownload {
+    /// Job name derived from the LatticeJob metadata
+    pub fn job_name(&self) -> &str {
+        self.job.metadata.name.as_deref().unwrap_or_default()
+    }
+
+    /// PVC name derived from the PersistentVolumeClaim metadata
+    pub fn pvc_name(&self) -> &str {
+        &self.pvc.metadata.name
+    }
 }
 
 /// URI scheme parsed from a model source URI
@@ -92,7 +102,7 @@ fn parse_uri(uri: &str) -> Result<ParsedUri, ModelError> {
         }
         Ok(ParsedUri {
             scheme: UriScheme::S3,
-            path: format!("s3://{}", path),
+            path: path.to_string(),
         })
     } else if let Some(path) = uri.strip_prefix("gs://") {
         if path.is_empty() {
@@ -102,7 +112,7 @@ fn parse_uri(uri: &str) -> Result<ParsedUri, ModelError> {
         }
         Ok(ParsedUri {
             scheme: UriScheme::Gcs,
-            path: format!("gs://{}", path),
+            path: path.to_string(),
         })
     } else {
         Err(ModelError::InvalidModelUri(format!(
@@ -134,21 +144,28 @@ pub fn compile_download(
     // Volume id for cross-workload PVC sharing. VolumeCompiler generates
     // PVC name as vol-{id}, so serving pods reference the same PVC.
     let volume_id = format!("{}-model-cache", model_name);
-    let pvc_name = format!("vol-{}", volume_id);
+    let volume_resource = ResourceSpec {
+        type_: ResourceType::Volume,
+        id: Some(volume_id.clone()),
+        ..Default::default()
+    };
+    let pvc_name = volume_resource
+        .volume_pvc_name(&job_name, VOLUME_NAME)
+        .expect("volume resource always has a PVC name");
 
     let access_mode = source
         .access_mode
         .as_deref()
         .unwrap_or("ReadWriteOnce");
 
-    let owner_ref = serde_json::json!([{
-        "apiVersion": "lattice.dev/v1alpha1",
-        "kind": "LatticeModel",
-        "name": model_name,
-        "uid": uid,
-        "controller": true,
-        "blockOwnerDeletion": true
-    }]);
+    let owner_references = vec![OwnerReference {
+        api_version: "lattice.dev/v1alpha1".to_string(),
+        kind: "LatticeModel".to_string(),
+        name: model_name.to_string(),
+        uid: uid.to_string(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    }];
 
     let pvc = compile_pvc(
         &pvc_name,
@@ -156,26 +173,26 @@ pub fn compile_download(
         &source.cache_size,
         source.storage_class.as_deref(),
         access_mode,
-        &owner_ref,
+        owner_references,
     );
 
     let job = compile_lattice_job(
         &job_name,
         namespace,
+        model_name,
+        uid,
         &volume_id,
         &mount_path,
         &parsed,
         source,
     );
 
-    let service_account = compile_service_account(&job_name, namespace);
+    let service_account = compile_service_account(&job_name, namespace, model_name, uid);
 
     Ok(CompiledDownload {
         job,
         pvc,
         service_account,
-        job_name,
-        pvc_name,
         mount_path,
     })
 }
@@ -186,40 +203,35 @@ fn compile_pvc(
     cache_size: &str,
     storage_class: Option<&str>,
     access_mode: &str,
-    owner_ref: &serde_json::Value,
-) -> serde_json::Value {
-    let mut pvc = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "PersistentVolumeClaim",
-        "metadata": {
-            "name": name,
-            "namespace": namespace,
-            "ownerReferences": owner_ref,
-            "labels": {
-                "app.kubernetes.io/managed-by": "lattice",
-                "app.kubernetes.io/component": "model-cache"
-            }
+    owner_references: Vec<OwnerReference>,
+) -> PersistentVolumeClaim {
+    use lattice_common::kube_utils::ObjectMeta;
+
+    let metadata = ObjectMeta::new(name, namespace)
+        .with_label("app.kubernetes.io/component", "model-cache")
+        .with_owner_references(owner_references);
+
+    PersistentVolumeClaim {
+        api_version: "v1".to_string(),
+        kind: "PersistentVolumeClaim".to_string(),
+        metadata,
+        spec: PvcSpec {
+            access_modes: vec![access_mode.to_string()],
+            resources: PvcResources {
+                requests: PvcStorage {
+                    storage: cache_size.to_string(),
+                },
+            },
+            storage_class_name: storage_class.map(|s| s.to_string()),
         },
-        "spec": {
-            "accessModes": [access_mode],
-            "resources": {
-                "requests": {
-                    "storage": cache_size
-                }
-            }
-        }
-    });
-
-    if let Some(sc) = storage_class {
-        pvc["spec"]["storageClassName"] = serde_json::Value::String(sc.to_string());
     }
-
-    pvc
 }
 
 fn compile_lattice_job(
     name: &str,
     namespace: &str,
+    model_name: &str,
+    model_uid: &str,
     volume_id: &str,
     mount_path: &str,
     parsed: &ParsedUri,
@@ -296,6 +308,7 @@ fn compile_lattice_job(
             ]),
             volumes,
             env_from,
+            security: source.security.clone(),
             ..Default::default()
         },
     );
@@ -325,20 +338,34 @@ fn compile_lattice_job(
 
     let mut job = LatticeJob::new(name, spec);
     job.metadata.namespace = Some(namespace.to_string());
+    job.metadata.owner_references = Some(vec![k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+        api_version: "lattice.dev/v1alpha1".to_string(),
+        kind: "LatticeModel".to_string(),
+        name: model_name.to_string(),
+        uid: model_uid.to_string(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    }]);
     job
 }
 
 /// Compile a ServiceAccount for download pod SPIFFE identity.
-fn compile_service_account(name: &str, namespace: &str) -> serde_json::Value {
-    serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "ServiceAccount",
-        "metadata": {
-            "name": name,
-            "namespace": namespace
-        },
-        "automountServiceAccountToken": false
-    })
+fn compile_service_account(
+    name: &str,
+    namespace: &str,
+    model_name: &str,
+    model_uid: &str,
+) -> serde_json::Value {
+    let mut sa = lattice_common::kube_utils::compile_service_account(name, namespace);
+    sa["metadata"]["ownerReferences"] = serde_json::json!([{
+        "apiVersion": "lattice.dev/v1alpha1",
+        "kind": "LatticeModel",
+        "name": model_name,
+        "uid": model_uid,
+        "controller": true,
+        "blockOwnerDeletion": true
+    }]);
+    sa
 }
 
 /// Returns (image, shell_command) for the download container
@@ -362,27 +389,24 @@ fn download_command(
             (image, cmd)
         }
         UriScheme::S3 => {
-            // parsed.path is already "s3://bucket/path"
-            let bucket_path = &parsed.path;
-            let local_name = bucket_path.rsplit('/').next().unwrap_or("model");
+            let local_name = parsed.path.rsplit('/').next().unwrap_or("model");
             let image = custom_image
                 .unwrap_or("amazon/aws-cli:latest")
                 .to_string();
             let cmd = format!(
-                "aws s3 sync {} {}/{}",
-                bucket_path, mount_path, local_name
+                "aws s3 sync s3://{} {}/{}",
+                parsed.path, mount_path, local_name
             );
             (image, cmd)
         }
         UriScheme::Gcs => {
-            let bucket_path = &parsed.path;
-            let local_name = bucket_path.rsplit('/').next().unwrap_or("model");
+            let local_name = parsed.path.rsplit('/').next().unwrap_or("model");
             let image = custom_image
                 .unwrap_or("google/cloud-sdk:slim")
                 .to_string();
             let cmd = format!(
-                "gsutil -m rsync -r {} {}/{}",
-                bucket_path, mount_path, local_name
+                "gsutil -m rsync -r gs://{} {}/{}",
+                parsed.path, mount_path, local_name
             );
             (image, cmd)
         }
@@ -463,6 +487,7 @@ mod tests {
             token_secret: None,
             downloader_image: None,
             access_mode: None,
+            security: None,
         }
     }
 
@@ -489,14 +514,14 @@ mod tests {
     fn parse_s3_uri() {
         let parsed = parse_uri("s3://my-bucket/models/llama").unwrap();
         assert_eq!(parsed.scheme, UriScheme::S3);
-        assert_eq!(parsed.path, "s3://my-bucket/models/llama");
+        assert_eq!(parsed.path, "my-bucket/models/llama");
     }
 
     #[test]
     fn parse_gs_uri() {
         let parsed = parse_uri("gs://my-bucket/models/llama").unwrap();
         assert_eq!(parsed.scheme, UriScheme::Gcs);
-        assert_eq!(parsed.path, "gs://my-bucket/models/llama");
+        assert_eq!(parsed.path, "my-bucket/models/llama");
     }
 
     #[test]
@@ -514,15 +539,23 @@ mod tests {
         let source = hf_source();
         let download = compile_download("llm-serving", "serving", "uid-123", &source).unwrap();
 
-        assert_eq!(download.pvc_name, "vol-llm-serving-model-cache");
+        assert_eq!(download.pvc_name(), "vol-llm-serving-model-cache");
         assert_eq!(download.mount_path, "/models");
-        assert_eq!(download.job_name, "llm-serving-download");
+        assert_eq!(download.job_name(), "llm-serving-download");
 
         // LatticeJob structure
         let job = &download.job;
         assert_eq!(job.metadata.name.as_deref(), Some("llm-serving-download"));
         assert_eq!(job.metadata.namespace.as_deref(), Some("serving"));
         assert_eq!(job.spec.max_retry, Some(DOWNLOAD_BACKOFF_LIMIT));
+
+        // LatticeJob ownerReference to LatticeModel
+        let job_owner = &job.metadata.owner_references.as_ref().unwrap()[0];
+        assert_eq!(job_owner.kind, "LatticeModel");
+        assert_eq!(job_owner.name, "llm-serving");
+        assert_eq!(job_owner.uid, "uid-123");
+        assert_eq!(job_owner.controller, Some(true));
+        assert_eq!(job_owner.block_owner_deletion, Some(true));
         assert_eq!(job.spec.tasks.len(), 1);
 
         let task = &job.spec.tasks["download"];
@@ -565,17 +598,14 @@ mod tests {
         assert!(!task.workload.resources.contains_key("token"));
 
         // PVC checks (separate from LatticeJob)
-        assert_eq!(download.pvc["metadata"]["name"], "vol-llm-serving-model-cache");
-        assert_eq!(download.pvc["metadata"]["namespace"], "serving");
-        assert_eq!(
-            download.pvc["spec"]["resources"]["requests"]["storage"],
-            "50Gi"
-        );
-        assert_eq!(download.pvc["spec"]["accessModes"][0], "ReadWriteOnce");
-        let pvc_owner = &download.pvc["metadata"]["ownerReferences"][0];
-        assert_eq!(pvc_owner["kind"], "LatticeModel");
-        assert_eq!(pvc_owner["name"], "llm-serving");
-        assert_eq!(pvc_owner["uid"], "uid-123");
+        assert_eq!(download.pvc.metadata.name, "vol-llm-serving-model-cache");
+        assert_eq!(download.pvc.metadata.namespace, "serving");
+        assert_eq!(download.pvc.spec.resources.requests.storage, "50Gi");
+        assert_eq!(download.pvc.spec.access_modes, vec!["ReadWriteOnce"]);
+        let pvc_owner = &download.pvc.metadata.owner_references[0];
+        assert_eq!(pvc_owner.kind, "LatticeModel");
+        assert_eq!(pvc_owner.name, "llm-serving");
+        assert_eq!(pvc_owner.uid, "uid-123");
     }
 
     #[test]
@@ -588,6 +618,7 @@ mod tests {
             token_secret: None,
             downloader_image: None,
             access_mode: None,
+            security: None,
         };
 
         let download = compile_download("my-model", "default", "uid-456", &source).unwrap();
@@ -607,6 +638,7 @@ mod tests {
             token_secret: None,
             downloader_image: None,
             access_mode: None,
+            security: None,
         };
 
         let download = compile_download("my-model", "default", "uid-789", &source).unwrap();
@@ -653,7 +685,7 @@ mod tests {
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        assert_eq!(download.pvc["spec"]["storageClassName"], "fast-nvme");
+        assert_eq!(download.pvc.spec.storage_class_name, Some("fast-nvme".to_string()));
     }
 
     #[test]
@@ -692,6 +724,7 @@ mod tests {
             }),
             downloader_image: None,
             access_mode: None,
+            security: None,
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
@@ -714,11 +747,17 @@ mod tests {
     #[test]
     fn service_account_compiled() {
         let source = hf_source();
-        let download = compile_download("test", "ns", "uid", &source).unwrap();
+        let download = compile_download("test", "ns", "uid-sa", &source).unwrap();
 
         assert_eq!(download.service_account["metadata"]["name"], "test-download");
         assert_eq!(download.service_account["metadata"]["namespace"], "ns");
         assert_eq!(download.service_account["automountServiceAccountToken"], false);
+
+        // ServiceAccount ownerReference to LatticeModel
+        let sa_owner = &download.service_account["metadata"]["ownerReferences"][0];
+        assert_eq!(sa_owner["kind"], "LatticeModel");
+        assert_eq!(sa_owner["name"], "test");
+        assert_eq!(sa_owner["uid"], "uid-sa");
     }
 
     #[test]
@@ -737,8 +776,8 @@ mod tests {
         let vol_resource = &download.job.spec.tasks["download"].workload.resources[VOLUME_NAME];
         let volume_id = vol_resource.id.as_deref().unwrap();
         let expected_pvc_name = format!("vol-{}", volume_id);
-        assert_eq!(download.pvc_name, expected_pvc_name);
-        assert_eq!(download.pvc["metadata"]["name"], expected_pvc_name);
+        assert_eq!(download.pvc_name(), expected_pvc_name);
+        assert_eq!(download.pvc.metadata.name, expected_pvc_name);
     }
 
     #[test]
@@ -749,7 +788,33 @@ mod tests {
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();
-        assert_eq!(download.pvc["spec"]["accessModes"][0], "ReadWriteMany");
+        assert_eq!(download.pvc.spec.access_modes, vec!["ReadWriteMany"]);
+    }
+
+    #[test]
+    fn security_context_propagated_to_download_container() {
+        let source = ModelSourceSpec {
+            security: Some(lattice_common::crd::SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                allowed_binaries: vec!["*".to_string()],
+                ..Default::default()
+            }),
+            ..hf_source()
+        };
+
+        let download = compile_download("test", "ns", "uid", &source).unwrap();
+        let container = &download.job.spec.tasks["download"].workload.containers["download"];
+        let security = container.security.as_ref().expect("security should be set");
+        assert_eq!(security.apparmor_profile.as_deref(), Some("Unconfined"));
+        assert_eq!(security.allowed_binaries, vec!["*"]);
+    }
+
+    #[test]
+    fn no_security_context_when_omitted() {
+        let source = hf_source();
+        let download = compile_download("test", "ns", "uid", &source).unwrap();
+        let container = &download.job.spec.tasks["download"].workload.containers["download"];
+        assert!(container.security.is_none());
     }
 
     #[test]

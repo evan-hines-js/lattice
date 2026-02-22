@@ -400,6 +400,10 @@ pub struct ModelSourceSpec {
     /// PVC access mode (default: "ReadWriteOnce")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_mode: Option<String>,
+
+    /// Security context for the download container (AppArmor, allowed binaries, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<super::workload::container::SecurityContext>,
 }
 
 /// Reference to a K8s Secret whose keys are mounted as env vars via `envFrom`.
@@ -624,6 +628,7 @@ mod tests {
             }),
             downloader_image: None,
             access_mode: None,
+            security: None,
         };
 
         let json = serde_json::to_value(&source).unwrap();

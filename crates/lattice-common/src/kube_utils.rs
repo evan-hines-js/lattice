@@ -745,6 +745,22 @@ pub fn build_cell_service(
     }
 }
 
+/// Compile a minimal ServiceAccount JSON for server-side apply.
+///
+/// Produces a JSON value with `automountServiceAccountToken: false` and
+/// standard metadata. Callers can extend the result (e.g., add ownerReferences).
+pub fn compile_service_account(name: &str, namespace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "metadata": {
+            "name": name,
+            "namespace": namespace
+        },
+        "automountServiceAccountToken": false
+    })
+}
+
 /// Ensure a namespace exists (idempotent).
 ///
 /// Uses server-side apply so it never fails on "already exists" and doesn't

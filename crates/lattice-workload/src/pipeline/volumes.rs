@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::CompilationError;
-use crate::k8s::LabelSelector;
 use lattice_common::crd::{VolumeAccessMode, WorkloadSpec};
 use lattice_common::kube_utils::{ObjectMeta, OwnerReference};
 
@@ -61,42 +60,6 @@ pub struct PvcStorage {
 }
 
 // =============================================================================
-// Pod Affinity Types (for RWO volume co-location)
-// =============================================================================
-
-/// Pod affinity specification
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PodAffinity {
-    /// Required affinity terms - pods must satisfy these
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_during_scheduling_ignored_during_execution: Vec<PodAffinityTerm>,
-}
-
-/// Pod affinity term
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PodAffinityTerm {
-    /// Label selector for matching pods
-    pub label_selector: LabelSelector,
-    /// Topology key (e.g., kubernetes.io/hostname for same-node)
-    pub topology_key: String,
-    /// Namespaces to match pods in
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespaces: Option<Vec<String>>,
-}
-
-/// Full affinity spec for pod
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Affinity {
-    /// Pod affinity rules
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pod_affinity: Option<PodAffinity>,
-}
-
-// =============================================================================
-// =============================================================================
 // Generated Volumes Container
 // =============================================================================
 
@@ -105,10 +68,6 @@ pub struct Affinity {
 pub struct GeneratedVolumes {
     /// PVCs to create (for owned volumes only)
     pub pvcs: Vec<PersistentVolumeClaim>,
-    /// Pod labels to add (for volume ownership)
-    pub pod_labels: BTreeMap<String, String>,
-    /// Pod affinity rules (for RWO volume co-location)
-    pub affinity: Option<Affinity>,
     /// Volumes to add to pod spec
     pub volumes: Vec<crate::k8s::Volume>,
     /// Volume mounts per container (container_name -> mounts)
@@ -121,8 +80,6 @@ pub struct GeneratedVolumes {
 impl GeneratedVolumes {
     pub fn is_empty(&self) -> bool {
         self.pvcs.is_empty()
-            && self.pod_labels.is_empty()
-            && self.affinity.is_none()
             && self.volumes.is_empty()
             && self.volume_mounts.is_empty()
             && self.scheduling_gates.is_empty()
@@ -594,7 +551,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn no_pod_labels_or_affinity_for_rwo_owner() {
+    fn rwo_owner_has_no_extra_resources() {
         let spec = make_spec_with_volumes(
             vec![(
                 "downloads",
@@ -608,13 +565,13 @@ mod tests {
 
         let output = VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
-        // No pod labels — K8s VolumeBinding plugin handles same-PVC scheduling natively
-        assert!(output.pod_labels.is_empty());
-        assert!(output.affinity.is_none());
+        // Just PVC + volume + mount — no extra scheduling resources
+        assert_eq!(output.pvcs.len(), 1);
+        assert_eq!(output.volumes.len(), 1);
     }
 
     #[test]
-    fn no_affinity_for_volume_reference() {
+    fn volume_reference_has_pod_volume() {
         let spec = make_spec_with_volumes(
             vec![],
             vec![("downloads", "media-downloads")],
@@ -623,11 +580,7 @@ mod tests {
 
         let output = VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
-        // No pod affinity — K8s VolumeBinding plugin handles same-PVC scheduling natively
-        assert!(output.affinity.is_none());
-        assert!(output.pod_labels.is_empty());
-
-        // But should still have the PVC-backed pod volume
+        // Should have the PVC-backed pod volume
         assert_eq!(output.volumes.len(), 1);
         assert_eq!(
             output.volumes[0]

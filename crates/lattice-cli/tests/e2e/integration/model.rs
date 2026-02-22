@@ -614,21 +614,21 @@ async fn test_model_autoscaling_created(kubeconfig: &str) -> Result<(), String> 
         ));
     }
 
-    // Verify subTarget → Role/decode
-    let sub_kind = target["target"]["subTarget"]["kind"]
+    // Verify subTargets → Role/decode
+    let sub_kind = target["target"]["subTargets"]["kind"]
         .as_str()
         .unwrap_or_default();
     if sub_kind != "Role" {
         return Err(format!(
-            "Binding subTarget kind should be 'Role', got: '{sub_kind}'"
+            "Binding subTargets kind should be 'Role', got: '{sub_kind}'"
         ));
     }
-    let sub_name = target["target"]["subTarget"]["name"]
+    let sub_name = target["target"]["subTargets"]["name"]
         .as_str()
         .unwrap_or_default();
     if sub_name != "decode" {
         return Err(format!(
-            "Binding subTarget name should be 'decode', got: '{sub_name}'"
+            "Binding subTargets name should be 'decode', got: '{sub_name}'"
         ));
     }
 

@@ -243,15 +243,7 @@ async fn apply_layers(
     // Create a ServiceAccount for each task (required before Volcano can create pods)
     for task in &compiled.vcjob.spec.tasks {
         if let Some(sa_name) = task.template["spec"]["serviceAccountName"].as_str() {
-            let sa = serde_json::json!({
-                "apiVersion": "v1",
-                "kind": "ServiceAccount",
-                "metadata": {
-                    "name": sa_name,
-                    "namespace": namespace
-                },
-                "automountServiceAccountToken": false
-            });
+            let sa = lattice_common::kube_utils::compile_service_account(sa_name, namespace);
             layer1.push("ServiceAccount", sa_name, &sa, &sa_ar)?;
         }
     }
