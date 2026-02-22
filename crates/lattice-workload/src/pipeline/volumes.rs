@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::CompilationError;
 use crate::k8s::LabelSelector;
 use lattice_common::crd::{VolumeAccessMode, WorkloadSpec};
-use lattice_common::kube_utils::ObjectMeta;
+use lattice_common::kube_utils::{ObjectMeta, OwnerReference};
 
 // =============================================================================
 // Kubernetes PVC Types
@@ -156,19 +156,21 @@ pub struct VolumeCompiler;
 impl VolumeCompiler {
     /// Compile volume resources for a workload.
     ///
-    /// Generates PVCs for owned volumes, pod affinity for RWO references,
-    /// and volume mounts for containers and sidecars.
+    /// Generates PVCs for owned volumes and volume mounts for containers
+    /// and sidecars.
     ///
     /// # Arguments
     /// * `service_name` - Name of the service
     /// * `namespace` - Target namespace
     /// * `workload` - WorkloadSpec (containers + resources)
     /// * `sidecars` - Sidecar specs from RuntimeSpec (for sidecar volume mounts)
+    /// * `owner_references` - Owner references to set on generated PVCs for GC cascading
     pub fn compile(
         service_name: &str,
         namespace: &str,
         workload: &WorkloadSpec,
         sidecars: &BTreeMap<String, lattice_common::crd::SidecarSpec>,
+        owner_references: &[OwnerReference],
     ) -> Result<GeneratedVolumes, CompilationError> {
         let mut output = GeneratedVolumes::default();
 
@@ -194,7 +196,7 @@ impl VolumeCompiler {
                         CompilationError::volume(format!("resource '{}': {}", resource_name, e))
                     })?
                     .unwrap_or_default();
-                let pvc = Self::compile_pvc(&pvc_name, namespace, &params);
+                let pvc = Self::compile_pvc(&pvc_name, namespace, &params, owner_references);
                 output.pvcs.push(pvc);
             }
 
@@ -237,6 +239,7 @@ impl VolumeCompiler {
         name: &str,
         namespace: &str,
         params: &lattice_common::crd::VolumeParams,
+        owner_references: &[OwnerReference],
     ) -> PersistentVolumeClaim {
         let access_mode = match params.access_mode {
             Some(VolumeAccessMode::ReadWriteMany) => "ReadWriteMany",
@@ -244,10 +247,13 @@ impl VolumeCompiler {
             Some(VolumeAccessMode::ReadWriteOnce) | None => "ReadWriteOnce",
         };
 
+        let metadata = ObjectMeta::new(name, namespace)
+            .with_owner_references(owner_references.to_vec());
+
         PersistentVolumeClaim {
             api_version: "v1".to_string(),
             kind: "PersistentVolumeClaim".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
+            metadata,
             spec: PvcSpec {
                 access_modes: vec![access_mode.to_string()],
                 resources: PvcResources {
@@ -439,7 +445,7 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         assert_eq!(output.pvcs.len(), 1);
         let pvc = &output.pvcs[0];
@@ -457,7 +463,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
         assert_eq!(output.pvcs.len(), 1);
         let pvc = &output.pvcs[0];
@@ -479,7 +485,7 @@ mod tests {
             }
         }
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let pvc = &output.pvcs[0];
         assert_eq!(pvc.spec.storage_class_name, Some("local-path".to_string()));
@@ -498,10 +504,59 @@ mod tests {
             vec![("/media", "media")],
         );
 
-        let output = VolumeCompiler::compile("jellyfin", "media", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("jellyfin", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let pvc = &output.pvcs[0];
         assert_eq!(pvc.spec.access_modes, vec!["ReadWriteMany"]);
+    }
+
+    // =========================================================================
+    // Story: PVC Owner References
+    // =========================================================================
+
+    #[test]
+    fn pvc_gets_owner_references() {
+        let spec = make_spec_with_volumes(
+            vec![("data", None, "10Gi", None)],
+            vec![],
+            vec![("/data", "data")],
+        );
+
+        let owner_refs = vec![OwnerReference {
+            api_version: "lattice.dev/v1alpha1".to_string(),
+            kind: "LatticeService".to_string(),
+            name: "my-service".to_string(),
+            uid: "abc-123".to_string(),
+            controller: Some(true),
+            block_owner_deletion: Some(true),
+        }];
+
+        let output =
+            VolumeCompiler::compile("my-service", "prod", &spec, &BTreeMap::new(), &owner_refs)
+                .unwrap();
+
+        let pvc = &output.pvcs[0];
+        assert_eq!(pvc.metadata.owner_references.len(), 1);
+        let oref = &pvc.metadata.owner_references[0];
+        assert_eq!(oref.kind, "LatticeService");
+        assert_eq!(oref.name, "my-service");
+        assert_eq!(oref.uid, "abc-123");
+        assert_eq!(oref.controller, Some(true));
+    }
+
+    #[test]
+    fn pvc_no_owner_references_when_empty() {
+        let spec = make_spec_with_volumes(
+            vec![("data", None, "10Gi", None)],
+            vec![],
+            vec![("/data", "data")],
+        );
+
+        let output =
+            VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
+
+        let pvc = &output.pvcs[0];
+        assert!(pvc.metadata.owner_references.is_empty());
     }
 
     // =========================================================================
@@ -516,7 +571,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
         // No PVCs - this is a reference
         assert!(output.pvcs.is_empty());
@@ -551,7 +606,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("nzbget", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
         // No pod labels — K8s VolumeBinding plugin handles same-PVC scheduling natively
         assert!(output.pod_labels.is_empty());
@@ -566,7 +621,7 @@ mod tests {
             vec![("/downloads", "downloads")],
         );
 
-        let output = VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("sonarr", "media", &spec, &BTreeMap::new(), &[]).unwrap();
 
         // No pod affinity — K8s VolumeBinding plugin handles same-PVC scheduling natively
         assert!(output.affinity.is_none());
@@ -596,7 +651,7 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let mounts = output
             .volume_mounts
@@ -615,7 +670,7 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         assert_eq!(output.volumes.len(), 1);
         assert_eq!(output.volumes[0].name, "config");
@@ -652,7 +707,7 @@ mod tests {
     fn no_volumes_returns_empty() {
         let spec = WorkloadSpec::default();
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         assert!(output.is_empty());
     }
@@ -665,7 +720,7 @@ mod tests {
             vec![("/config", "config")],
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
         assert!(output.scheduling_gates.is_empty());
     }
 
@@ -709,7 +764,7 @@ mod tests {
     #[test]
     fn emptydir_volume_from_sourceless_mount() {
         let spec = make_emptydir_spec(vec![("/tmp", None, None)]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         // Should generate an emptyDir pod volume
         assert_eq!(output.volumes.len(), 1);
@@ -730,7 +785,7 @@ mod tests {
     #[test]
     fn emptydir_tmpfs_medium() {
         let spec = make_emptydir_spec(vec![("/dev/shm", Some("Memory"), None)]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let vol = &output.volumes[0];
         let ed = vol.empty_dir.as_ref().unwrap();
@@ -741,7 +796,7 @@ mod tests {
     #[test]
     fn emptydir_size_limit() {
         let spec = make_emptydir_spec(vec![("/scratch", None, Some("5Gi"))]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let vol = &output.volumes[0];
         let ed = vol.empty_dir.as_ref().unwrap();
@@ -780,7 +835,7 @@ mod tests {
             },
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         // 1 PVC volume + 2 emptyDir volumes = 3 total
         assert_eq!(output.volumes.len(), 3);
@@ -810,7 +865,7 @@ mod tests {
             ("/tmp", None, None),
             ("/dev/shm", Some("Memory"), None),
         ]);
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         let names: Vec<_> = output.volumes.iter().map(|v| v.name.as_str()).collect();
         assert!(names.contains(&"emptydir-dev-shm"));
@@ -859,7 +914,7 @@ mod tests {
             },
         );
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &sidecars).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &sidecars, &[]).unwrap();
 
         // Sidecar should get emptyDir volume
         assert_eq!(output.volumes.len(), 1);
@@ -932,7 +987,7 @@ mod tests {
             },
         );
 
-        let output = VolumeCompiler::compile("nzbget", "media", &spec, &sidecars).unwrap();
+        let output = VolumeCompiler::compile("nzbget", "media", &spec, &sidecars, &[]).unwrap();
 
         // Should have exactly 2 volumes (deduplicated), not 4
         let emptydir_volumes: Vec<_> = output
@@ -959,7 +1014,7 @@ mod tests {
         let spec = make_emptydir_spec(vec![("/tmp", None, None), ("/var/run", None, None)]);
         assert!(spec.resources.is_empty());
 
-        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new()).unwrap();
+        let output = VolumeCompiler::compile("myapp", "prod", &spec, &BTreeMap::new(), &[]).unwrap();
 
         assert_eq!(output.volumes.len(), 2);
         assert_eq!(output.pvcs.len(), 0); // No PVCs needed

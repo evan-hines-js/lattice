@@ -50,6 +50,26 @@ use crate::Error;
 // ObjectMeta - Canonical Kubernetes metadata for all compiled resources
 // =============================================================================
 
+/// Kubernetes owner reference for garbage collection cascading.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnerReference {
+    /// API version of the referent (e.g. "lattice.dev/v1alpha1")
+    pub api_version: String,
+    /// Kind of the referent (e.g. "LatticeService", "LatticeJob")
+    pub kind: String,
+    /// Name of the referent
+    pub name: String,
+    /// UID of the referent
+    pub uid: String,
+    /// If true, this reference points to the managing controller
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<bool>,
+    /// If true, the owner cannot be deleted until this reference is removed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_owner_deletion: Option<bool>,
+}
+
 /// Standard Kubernetes ObjectMeta for compiled resources.
 ///
 /// Used by all resource types (workloads, policies, ingress, certificates)
@@ -68,6 +88,9 @@ pub struct ObjectMeta {
     /// Annotations
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub annotations: BTreeMap<String, String>,
+    /// Owner references for GC cascading
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_references: Vec<OwnerReference>,
 }
 
 impl ObjectMeta {
@@ -85,6 +108,7 @@ impl ObjectMeta {
             namespace: namespace.into(),
             labels,
             annotations: BTreeMap::new(),
+            owner_references: Vec::new(),
         }
     }
 
@@ -97,6 +121,12 @@ impl ObjectMeta {
     /// Add an annotation
     pub fn with_annotation(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.annotations.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set owner references for GC cascading
+    pub fn with_owner_references(mut self, refs: Vec<OwnerReference>) -> Self {
+        self.owner_references = refs;
         self
     }
 }

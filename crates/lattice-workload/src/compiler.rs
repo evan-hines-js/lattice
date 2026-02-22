@@ -14,6 +14,7 @@ use lattice_common::crd::{
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::template::{RenderConfig, TemplateRenderer};
+use lattice_common::kube_utils::OwnerReference;
 use lattice_common::LABEL_NAME;
 
 use crate::authorization::VolumeAuthorizationMode;
@@ -51,6 +52,7 @@ pub struct WorkloadCompiler<'a> {
     renderer: TemplateRenderer,
     graph: Option<&'a ServiceGraph>,
     ingress: Option<IngressSpec>,
+    owner_references: Vec<OwnerReference>,
 }
 
 impl<'a> WorkloadCompiler<'a> {
@@ -76,6 +78,7 @@ impl<'a> WorkloadCompiler<'a> {
             renderer: TemplateRenderer::new(),
             graph: None,
             ingress: None,
+            owner_references: Vec::new(),
         }
     }
 
@@ -121,6 +124,12 @@ impl<'a> WorkloadCompiler<'a> {
         self
     }
 
+    /// Set owner references for generated PVCs (GC cascading).
+    pub fn with_owner_references(mut self, refs: Vec<OwnerReference>) -> Self {
+        self.owner_references = refs;
+        self
+    }
+
     /// Compile the workload spec into Kubernetes primitives.
     ///
     /// Runs the full pipeline: volumes → secrets → authorization (Cedar) →
@@ -132,6 +141,7 @@ impl<'a> WorkloadCompiler<'a> {
             self.namespace,
             self.workload,
             &self.runtime.sidecars,
+            &self.owner_references,
         )?;
 
         // 2. Compile secrets
