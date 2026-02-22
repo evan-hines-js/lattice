@@ -41,6 +41,8 @@ use crate::graph::ServiceGraph;
 use crate::Error;
 use lattice_workload::backup::merge_backup_specs;
 
+const FIELD_MANAGER: &str = "lattice-service-controller";
+
 // =============================================================================
 // Traits for dependency injection and testability
 // =============================================================================
@@ -143,7 +145,7 @@ impl ServiceKubeClientImpl {
         lattice_common::kube_utils::ensure_namespace(
             &self.client,
             name,
-            "lattice-service-controller",
+            FIELD_MANAGER,
         )
         .await?;
         debug!(namespace = %name, "ensured namespace exists");
@@ -164,7 +166,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 
         api.patch_status(
             name,
-            &PatchParams::apply("lattice-service-controller"),
+            &PatchParams::apply(FIELD_MANAGER),
             &Patch::Merge(&status_patch),
         )
         .await?;
@@ -183,7 +185,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 
         api.patch_status(
             name,
-            &PatchParams::apply("lattice-service-controller"),
+            &PatchParams::apply(FIELD_MANAGER),
             &Patch::Merge(&status_patch),
         )
         .await?;
@@ -253,7 +255,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 
         self.ensure_namespace(namespace).await?;
 
-        let params = PatchParams::apply("lattice-service-controller").force();
+        let params = PatchParams::apply(FIELD_MANAGER).force();
 
         // ApiResources for native K8s types (used by push via DynamicObject)
         let ar_sa = ApiResource::erase::<K8sSA>(&());
@@ -413,7 +415,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         });
         api.patch(
             name,
-            &PatchParams::apply("lattice-service-controller"),
+            &PatchParams::apply(FIELD_MANAGER),
             &Patch::Merge(&patch),
         )
         .await?;
@@ -574,7 +576,7 @@ impl ServiceContext {
     ) -> Self {
         let events = Arc::new(KubeEventPublisher::new(
             client.clone(),
-            "lattice-service-controller",
+            FIELD_MANAGER,
         ));
         Self {
             kube: Arc::new(ServiceKubeClientImpl::new(client, registry)),

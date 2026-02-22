@@ -20,6 +20,8 @@ use lattice_common::crd::{
 };
 use lattice_common::{ControllerContext, ReconcileError};
 
+const FIELD_MANAGER: &str = "lattice-service-policy-controller";
+
 /// Reconcile a LatticeServicePolicy
 ///
 /// Lists all services, checks which match the policy's selector, and updates
@@ -105,7 +107,7 @@ pub async fn reconcile(
         &name,
         &namespace,
         &status,
-        "lattice-service-policy-controller",
+        FIELD_MANAGER,
     )
     .await
     .map_err(|e| {

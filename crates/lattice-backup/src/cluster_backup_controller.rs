@@ -20,6 +20,8 @@ use crate::velero::{self, BackupTemplate, Schedule, ScheduleSpec, VELERO_NAMESPA
 
 use crate::{REQUEUE_CRD_NOT_FOUND_SECS, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 
+const FIELD_MANAGER: &str = "lattice-cluster-backup-controller";
+
 /// Reconcile a LatticeClusterBackup into a Velero Schedule
 pub async fn reconcile(
     backup: Arc<LatticeClusterBackup>,
@@ -54,7 +56,7 @@ pub async fn reconcile(
     let bsl_name = format!("lattice-{}", store_name);
     let schedule = build_schedule(&name, &backup, &bsl_name);
 
-    match velero::apply_resource(client, &schedule, "lattice-cluster-backup-controller").await {
+    match velero::apply_resource(client, &schedule, FIELD_MANAGER).await {
         Ok(()) => {
             debug!(cluster_backup = %name, "Schedule applied");
         }
@@ -210,7 +212,7 @@ async fn update_status(
         &name,
         &namespace,
         &status,
-        "lattice-cluster-backup-controller",
+        FIELD_MANAGER,
     )
     .await
     .map_err(|e| ReconcileError::kube("status update failed", e))?;
