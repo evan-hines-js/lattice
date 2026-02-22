@@ -19,6 +19,11 @@ use crate::error::ModelError;
 /// The controller removes this gate after the download Job succeeds.
 pub const SCHEDULING_GATE_MODEL_DOWNLOAD: &str = "lattice.dev/model-download";
 
+/// Maximum Job retry count before the controller treats a download as failed.
+/// Used by both `compile_job()` (sets `backoffLimit`) and the controller
+/// (`check_download_job_status` checks `status.failed >= DOWNLOAD_BACKOFF_LIMIT`).
+pub const DOWNLOAD_BACKOFF_LIMIT: u32 = 3;
+
 const DEFAULT_MOUNT_PATH: &str = "/models";
 const VOLUME_NAME: &str = "model-cache";
 
@@ -118,11 +123,17 @@ pub fn compile_download(
         "blockOwnerDeletion": true
     }]);
 
+    let access_mode = source
+        .access_mode
+        .as_deref()
+        .unwrap_or("ReadWriteOnce");
+
     let pvc = compile_pvc(
         &pvc_name,
         namespace,
         &source.cache_size,
         source.storage_class.as_deref(),
+        access_mode,
         &owner_ref,
     );
 
@@ -149,6 +160,7 @@ fn compile_pvc(
     namespace: &str,
     cache_size: &str,
     storage_class: Option<&str>,
+    access_mode: &str,
     owner_ref: &serde_json::Value,
 ) -> serde_json::Value {
     let mut pvc = serde_json::json!({
@@ -164,7 +176,7 @@ fn compile_pvc(
             }
         },
         "spec": {
-            "accessModes": ["ReadWriteOnce"],
+            "accessModes": [access_mode],
             "resources": {
                 "requests": {
                     "storage": cache_size
@@ -213,14 +225,14 @@ fn compile_job(
             }
         },
         "spec": {
-            "backoffLimit": 3,
+            "backoffLimit": DOWNLOAD_BACKOFF_LIMIT,
             "template": {
                 "spec": {
                     "restartPolicy": "OnFailure",
                     "containers": [{
                         "name": "download",
                         "image": image,
-                        "command": ["sh", "-c", command],
+                        "command": ["/bin/sh", "-c", command],
                         "envFrom": env_from,
                         "volumeMounts": [{
                             "name": VOLUME_NAME,
@@ -360,6 +372,7 @@ mod tests {
             mount_path: None,
             token_secret: None,
             downloader_image: None,
+            access_mode: None,
         }
     }
 
@@ -455,6 +468,7 @@ mod tests {
             mount_path: None,
             token_secret: None,
             downloader_image: None,
+            access_mode: None,
         };
 
         let download = compile_download("my-model", "default", "uid-456", &source).unwrap();
@@ -474,6 +488,7 @@ mod tests {
             mount_path: None,
             token_secret: None,
             downloader_image: None,
+            access_mode: None,
         };
 
         let download = compile_download("my-model", "default", "uid-789", &source).unwrap();
@@ -560,6 +575,7 @@ mod tests {
                 name: "aws-creds".to_string(),
             }),
             downloader_image: None,
+            access_mode: None,
         };
 
         let download = compile_download("test", "ns", "uid", &source).unwrap();

@@ -74,6 +74,11 @@ pub async fn compile_model(
     let mut tracing_policies = Vec::new();
 
     for (role_name, role_spec) in &model.spec.roles {
+        role_spec.validate().map_err(|e| ModelError::RoleValidation {
+            role: role_name.clone(),
+            message: e.to_string(),
+        })?;
+
         let entry_full_name = format!("{}-{}", name, role_name);
 
         // Compile entry workload (always present)
@@ -742,6 +747,7 @@ mod tests {
                 mount_path: None,
                 token_secret: None,
                 downloader_image: None,
+                access_mode: None,
             }),
             ..Default::default()
         };

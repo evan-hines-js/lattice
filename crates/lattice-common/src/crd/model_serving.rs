@@ -396,6 +396,10 @@ pub struct ModelSourceSpec {
     /// Override the default downloader container image
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloader_image: Option<String>,
+
+    /// PVC access mode (default: "ReadWriteOnce")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_mode: Option<String>,
 }
 
 /// Reference to a K8s Secret whose keys are mounted as env vars via `envFrom`.
@@ -619,6 +623,7 @@ mod tests {
                 name: "hf-creds".to_string(),
             }),
             downloader_image: None,
+            access_mode: None,
         };
 
         let json = serde_json::to_value(&source).unwrap();

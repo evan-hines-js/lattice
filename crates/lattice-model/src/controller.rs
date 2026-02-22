@@ -33,7 +33,7 @@ use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry};
 
 use crate::compiler::{compile_model, CompiledModel};
-use crate::download::{CompiledDownload, SCHEDULING_GATE_MODEL_DOWNLOAD};
+use crate::download::{CompiledDownload, DOWNLOAD_BACKOFF_LIMIT, SCHEDULING_GATE_MODEL_DOWNLOAD};
 use crate::error::ModelError;
 
 /// Shared context for the LatticeModel controller
@@ -249,7 +249,25 @@ pub async fn reconcile(
             .await?;
             Ok(Action::requeue(Duration::from_secs(60)))
         }
-        ModelServingPhase::Failed => Ok(Action::await_change()),
+        ModelServingPhase::Failed => {
+            // Check if the spec has changed since we entered Failed — if so, retry
+            let observed = model.status.as_ref().and_then(|s| s.observed_generation);
+            if observed != Some(generation) {
+                info!(model = %name, observed = ?observed, current = generation, "spec changed while Failed, retrying");
+                update_status(
+                    &ctx.client,
+                    &name,
+                    namespace,
+                    ModelServingPhase::Pending,
+                    None,
+                    None,
+                    None,
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(5)));
+            }
+            Ok(Action::await_change())
+        }
     }
 }
 
@@ -610,7 +628,7 @@ async fn check_download_job_status(
             let status = job.status.as_ref()?;
             if status.succeeded.unwrap_or(0) >= 1 {
                 Some(DownloadState::Succeeded)
-            } else if status.failed.unwrap_or(0) >= 3 {
+            } else if status.failed.unwrap_or(0) >= DOWNLOAD_BACKOFF_LIMIT as i32 {
                 Some(DownloadState::Failed)
             } else {
                 Some(DownloadState::Running)

@@ -17,6 +17,9 @@ pub enum ModelError {
     #[error("{0}")]
     Common(#[from] lattice_common::Error),
 
+    #[error("role '{role}' validation failed: {message}")]
+    RoleValidation { role: String, message: String },
+
     #[error("model has no roles")]
     NoRoles,
 

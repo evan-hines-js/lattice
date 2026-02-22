@@ -895,7 +895,20 @@ pub(crate) fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> 
 }
 
 /// Parse apiVersion into (group, version)
-pub(crate) fn parse_api_version(api_version: &str) -> (String, String) {
+///
+/// # Examples
+/// ```
+/// use lattice_common::kube_utils::parse_api_version;
+///
+/// let (group, version) = parse_api_version("apps/v1");
+/// assert_eq!(group, "apps");
+/// assert_eq!(version, "v1");
+///
+/// let (group, version) = parse_api_version("v1");
+/// assert_eq!(group, "");
+/// assert_eq!(version, "v1");
+/// ```
+pub fn parse_api_version(api_version: &str) -> (String, String) {
     if api_version.contains('/') {
         let parts: Vec<&str> = api_version.split('/').collect();
         (parts[0].to_string(), parts[1].to_string())
