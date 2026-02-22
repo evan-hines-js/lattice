@@ -22,6 +22,8 @@ use crate::velero::{self, build_service_schedule};
 
 use crate::{REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 
+const FIELD_MANAGER: &str = "lattice-service-backup-controller";
+
 /// Reconcile a LatticeService's backup schedule
 ///
 /// If `spec.backup.schedule` is set, creates a Velero Schedule scoped to this
@@ -60,7 +62,7 @@ pub async fn reconcile(
     let ttl = backup.retention.as_ref().and_then(|r| r.ttl.clone());
     let schedule = build_service_schedule(&name, &namespace, cron, &bsl_name, ttl);
 
-    match velero::apply_resource(&ctx.client, &schedule, "lattice-service-backup-controller").await
+    match velero::apply_resource(&ctx.client, &schedule, FIELD_MANAGER).await
     {
         Ok(()) => {
             debug!(service = %name, "Service backup schedule applied");

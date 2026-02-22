@@ -28,6 +28,8 @@ use lattice_common::crd::{
 };
 use lattice_common::template::extract_secret_refs;
 use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
+
+const FIELD_MANAGER: &str = "lattice-cloud-provider-controller";
 use lattice_secret_provider::eso::{
     apply_external_secret, build_external_secret, build_templated_external_secret,
 };
@@ -143,7 +145,7 @@ async fn reconcile_credentials(client: &Client, cp: &CloudProvider) -> Result<()
                     )
                 };
 
-                apply_external_secret(client, &es, "lattice-cloud-provider-controller").await?;
+                apply_external_secret(client, &es, FIELD_MANAGER).await?;
 
                 debug!(
                     cloud_provider = %cp.name_any(),
@@ -201,7 +203,7 @@ async fn update_status(
         &name,
         &namespace,
         &status,
-        "lattice-cloud-provider-controller",
+        FIELD_MANAGER,
     )
     .await
     .map_err(|e| ReconcileError::kube("failed to update status", e))?;

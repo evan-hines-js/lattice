@@ -16,6 +16,8 @@ use crate::velero::{self, VELERO_NAMESPACE};
 
 use crate::{REQUEUE_ERROR_SECS, REQUEUE_IN_PROGRESS_SECS};
 
+const FIELD_MANAGER: &str = "lattice-restore-controller";
+
 /// Reconcile a LatticeRestore
 ///
 /// Creates the corresponding Velero Restore resource.
@@ -37,7 +39,7 @@ pub async fn reconcile(
     match current_phase {
         RestorePhase::Pending => {
             let velero_restore = build_velero_restore(&name, &restore);
-            match velero::apply_resource(client, &velero_restore, "lattice-restore-controller")
+            match velero::apply_resource(client, &velero_restore, FIELD_MANAGER)
                 .await
             {
                 Ok(()) => {
@@ -121,7 +123,7 @@ async fn update_status(
         &name,
         &namespace,
         &status,
-        "lattice-restore-controller",
+        FIELD_MANAGER,
     )
     .await
     .map_err(|e| ReconcileError::kube("status update failed", e))?;

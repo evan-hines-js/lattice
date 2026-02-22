@@ -23,6 +23,8 @@ use crate::velero::{
 
 use crate::{REQUEUE_CRD_NOT_FOUND_SECS, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 
+const FIELD_MANAGER: &str = "lattice-backup-store-controller";
+
 /// Reconcile a BackupStore into a Velero BackupStorageLocation
 pub async fn reconcile(
     store: Arc<BackupStore>,
@@ -35,7 +37,7 @@ pub async fn reconcile(
 
     let bsl = build_bsl(&name, &store);
 
-    match velero::apply_resource(client, &bsl, "lattice-backup-store-controller").await {
+    match velero::apply_resource(client, &bsl, FIELD_MANAGER).await {
         Ok(()) => {
             debug!(backup_store = %name, "BackupStorageLocation applied");
         }
@@ -178,7 +180,7 @@ async fn update_status(
         &name,
         &namespace,
         &status,
-        "lattice-backup-store-controller",
+        FIELD_MANAGER,
     )
     .await
     .map_err(|e| ReconcileError::kube("status update failed", e))?;

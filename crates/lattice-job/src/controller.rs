@@ -25,6 +25,8 @@ use lattice_common::{CrdKind, CrdRegistry};
 use crate::compiler::{compile_job, CompiledJob};
 use crate::error::JobError;
 
+const FIELD_MANAGER: &str = "lattice-job-controller";
+
 /// Shared context for the LatticeJob controller
 pub struct JobContext {
     pub client: Client,
@@ -214,7 +216,7 @@ async fn apply_compiled_job(
     registry: &CrdRegistry,
     volcano_api: &ApiResource,
 ) -> Result<(), JobError> {
-    let params = PatchParams::apply("lattice-job-controller").force();
+    let params = PatchParams::apply(FIELD_MANAGER).force();
 
     ensure_namespace(client, namespace).await?;
 
@@ -314,7 +316,7 @@ async fn apply_layers(
 }
 
 async fn ensure_namespace(client: &Client, name: &str) -> Result<(), JobError> {
-    lattice_common::kube_utils::ensure_namespace(client, name, "lattice-job-controller").await?;
+    lattice_common::kube_utils::ensure_namespace(client, name, FIELD_MANAGER).await?;
     Ok(())
 }
 
@@ -376,7 +378,7 @@ async fn update_status(
         name,
         namespace,
         &status,
-        "lattice-job-controller",
+        FIELD_MANAGER,
     )
     .await?;
     Ok(())

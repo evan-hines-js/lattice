@@ -45,6 +45,8 @@ use crate::phases::{
     handle_pending, handle_pivoting, handle_provisioning, handle_ready, update_status,
 };
 
+const FIELD_MANAGER: &str = "lattice-cluster-controller";
+
 /// Ready node counts returned by [`KubeClient::get_ready_node_counts`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeCounts {
@@ -184,7 +186,7 @@ impl KubeClient for KubeClientImpl {
             &self.client,
             name,
             status,
-            "lattice-cluster-controller",
+            FIELD_MANAGER,
         )
         .await?;
         Ok(())
@@ -224,7 +226,7 @@ impl KubeClient for KubeClientImpl {
             &self.client,
             name,
             &labels,
-            "lattice-cluster-controller",
+            FIELD_MANAGER,
         )
         .await?;
         debug!(namespace = %name, "ensured namespace exists");
@@ -365,7 +367,7 @@ impl KubeClient for KubeClientImpl {
 
         api.patch(
             cluster_name,
-            &PatchParams::apply("lattice-cluster-controller"),
+            &PatchParams::apply(FIELD_MANAGER),
             &Patch::Merge(&patch),
         )
         .await?;
@@ -403,7 +405,7 @@ impl KubeClient for KubeClientImpl {
 
         api.patch(
             cluster_name,
-            &PatchParams::apply("lattice-cluster-controller"),
+            &PatchParams::apply(FIELD_MANAGER),
             &Patch::Merge(&patch),
         )
         .await?;
@@ -828,7 +830,7 @@ impl ContextBuilder {
         let events = self.events.unwrap_or_else(|| {
             Arc::new(KubeEventPublisher::new(
                 self.client.clone(),
-                "lattice-cluster-controller",
+                FIELD_MANAGER,
             ))
         });
 
@@ -1165,7 +1167,7 @@ impl PivotOperations for PivotOperationsImpl {
         if let Err(e) = api
             .patch_status(
                 cluster_name,
-                &PatchParams::apply("lattice-cluster-controller"),
+                &PatchParams::apply(FIELD_MANAGER),
                 &Patch::Merge(&patch),
             )
             .await
