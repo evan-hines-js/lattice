@@ -10,8 +10,8 @@ use lattice_common::crd::LatticeModel;
 use lattice_common::kube_utils::OwnerReference;
 
 use crate::types::{
-    GangPolicy, ModelServing, ModelServingMetadata, ModelServingRole, ModelServingSpec,
-    ServingGroupTemplate,
+    GangPolicy, ModelServing, ModelServingRole, ModelServingSpec, ServingGroupTemplate,
+    VolcanoMetadata,
 };
 
 /// Pre-compiled pod templates for a single role (entry + optional worker)
@@ -39,7 +39,7 @@ pub fn compile_model_serving(
     ModelServing {
         api_version: "workload.serving.volcano.sh/v1alpha1".to_string(),
         kind: "ModelServing".to_string(),
-        metadata: ModelServingMetadata {
+        metadata: VolcanoMetadata {
             name: name.to_string(),
             namespace: namespace.to_string(),
             labels: BTreeMap::from([
@@ -109,7 +109,9 @@ fn compute_gang_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{LatticeModelSpec, ModelRoleSpec, RuntimeSpec, WorkloadSpec};
+    use lattice_common::crd::{
+        LatticeModelSpec, ModelRoleSpec, RecoveryPolicy, RuntimeSpec, WorkloadSpec,
+    };
 
     fn test_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
         let spec = LatticeModelSpec {
@@ -282,7 +284,7 @@ mod tests {
     #[test]
     fn recovery_policy_propagated() {
         let spec = LatticeModelSpec {
-            recovery_policy: Some("ServingGroupRecreate".to_string()),
+            recovery_policy: Some(RecoveryPolicy::ServingGroupRecreate),
             ..Default::default()
         };
         let mut model = LatticeModel::new("test-model", spec);
@@ -292,7 +294,7 @@ mod tests {
         let ms = compile_model_serving(&model, &BTreeMap::new());
         assert_eq!(
             ms.spec.recovery_policy,
-            Some("ServingGroupRecreate".to_string())
+            Some(RecoveryPolicy::ServingGroupRecreate)
         );
     }
 

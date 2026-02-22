@@ -13,7 +13,7 @@
 ### 1. Clone and build
 
 ```bash
-git clone <repo-url> && cd lattice-model
+git clone <repo-url> && cd lattice
 cargo build
 cargo test
 cargo clippy

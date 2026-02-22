@@ -146,6 +146,7 @@ pub struct OIDCProviderStatus {
 
 /// OIDCProvider phase
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OIDCProviderPhase {
     /// Provider is being validated
     #[default]

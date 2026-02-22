@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Resolution strategy for external service endpoints
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Resolution {
     /// Resolve via DNS
     #[default]

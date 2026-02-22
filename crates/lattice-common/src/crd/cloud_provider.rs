@@ -89,6 +89,7 @@ pub struct CloudProviderSpec {
 /// Supported cloud provider types
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum CloudProviderType {
     /// Amazon Web Services
     AWS,
@@ -180,6 +181,7 @@ pub struct CloudProviderStatus {
 
 /// CloudProvider phase
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CloudProviderPhase {
     /// Provider is being validated
     #[default]

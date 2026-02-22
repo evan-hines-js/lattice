@@ -18,6 +18,7 @@ use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 
 /// Lifecycle phase of a LatticeModel serving workload
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[non_exhaustive]
 pub enum ModelServingPhase {
     /// Model is waiting for configuration
     #[default]
@@ -37,6 +38,22 @@ impl std::fmt::Display for ModelServingPhase {
             Self::Loading => write!(f, "Loading"),
             Self::Serving => write!(f, "Serving"),
             Self::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
+/// Recovery policy for serving groups
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecoveryPolicy {
+    /// Recreate the entire serving group on failure
+    ServingGroupRecreate,
+}
+
+impl std::fmt::Display for RecoveryPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ServingGroupRecreate => write!(f, "ServingGroupRecreate"),
         }
     }
 }
@@ -214,6 +231,7 @@ pub struct ModelRoutingSpec {
 
 /// Inference engine framework
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InferenceEngine {
     /// vLLM inference engine
     #[serde(rename = "vLLM")]
@@ -249,13 +267,36 @@ pub struct RetryPolicy {
     pub attempts: Option<u32>,
 }
 
+/// KV connector type for PD disaggregation
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum KvConnectorType {
+    /// NIXL connector
+    Nixl,
+    /// Mooncake connector
+    Mooncake,
+    /// LMCache connector
+    Lmcache,
+}
+
+impl std::fmt::Display for KvConnectorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Nixl => write!(f, "nixl"),
+            Self::Mooncake => write!(f, "mooncake"),
+            Self::Lmcache => write!(f, "lmcache"),
+        }
+    }
+}
+
 /// KV connector configuration for PD disaggregation
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KvConnector {
     /// Connector type (nixl, mooncake, lmcache)
     #[serde(rename = "type")]
-    pub type_: String,
+    pub type_: KvConnectorType,
 }
 
 /// A single named route targeting this model's ModelServer
@@ -327,6 +368,26 @@ pub struct TargetModel {
     pub weight: Option<u32>,
 }
 
+/// Time unit for rate limiting
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum RateLimitUnit {
+    /// Per-second rate limit
+    Second,
+    /// Per-minute rate limit
+    Minute,
+}
+
+impl std::fmt::Display for RateLimitUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Second => write!(f, "second"),
+            Self::Minute => write!(f, "minute"),
+        }
+    }
+}
+
 /// Token rate limiting configuration
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -339,9 +400,9 @@ pub struct RateLimit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens_per_unit: Option<u32>,
 
-    /// Time unit (e.g. "second", "minute")
+    /// Time unit
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
+    pub unit: Option<RateLimitUnit>,
 }
 
 /// Reference to a parent Gateway for a ModelRoute
@@ -444,7 +505,7 @@ pub struct LatticeModelSpec {
 
     /// Recovery policy for the serving group
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_policy: Option<String>,
+    pub recovery_policy: Option<RecoveryPolicy>,
 
     /// Grace period for restart
     #[serde(default, skip_serializing_if = "Option::is_none")]

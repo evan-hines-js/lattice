@@ -18,6 +18,7 @@ pub mod network;
 pub mod policy;
 pub mod protocol;
 pub mod retry;
+pub mod status_check;
 pub mod telemetry;
 pub mod template;
 pub mod yaml;

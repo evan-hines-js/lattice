@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use lattice_common::crd::{SecretProvider, SecretProviderPhase};
 use lattice_common::kube_utils::HasApiResource;
+use lattice_common::status_check;
 use lattice_common::{
     ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE,
     LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT,
@@ -173,7 +174,8 @@ pub async fn reconcile(
     let generation = sp.metadata.generation.unwrap_or(0);
 
     // Validate spec on every run (cheap, catches edge cases)
-    if let Err(msg) = sp.spec.validate() {
+    if let Err(e) = sp.spec.validate() {
+        let msg = e.to_string();
         warn!(secrets_provider = %name, error = %msg, "Invalid SecretProvider spec");
         update_status(
             client,
@@ -190,7 +192,7 @@ pub async fn reconcile(
     let provider_type = sp.spec.provider_type_name().map(|s| s.to_string());
 
     // Skip full reconcile if spec unchanged and already Ready
-    if is_status_unchanged(&sp, SecretProviderPhase::Ready, None, Some(generation)) {
+    if status_check::is_status_unchanged(sp.status.as_ref(), &SecretProviderPhase::Ready, None, Some(generation)) {
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
     }
 
@@ -614,25 +616,6 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
     Ok(())
 }
 
-/// Check if the SecretProvider status already matches the desired state.
-///
-/// Prevents redundant status patches that would trigger self-reconcile storms.
-fn is_status_unchanged(
-    sp: &SecretProvider,
-    phase: SecretProviderPhase,
-    message: Option<&str>,
-    observed_generation: Option<i64>,
-) -> bool {
-    sp.status
-        .as_ref()
-        .map(|s| {
-            s.phase == phase
-                && s.message.as_deref() == message
-                && s.observed_generation == observed_generation
-        })
-        .unwrap_or(false)
-}
-
 /// Update SecretProvider status
 async fn update_status(
     client: &Client,
@@ -642,7 +625,7 @@ async fn update_status(
     provider_type: Option<String>,
     observed_generation: Option<i64>,
 ) -> Result<(), ReconcileError> {
-    if is_status_unchanged(sp, phase, message.as_deref(), observed_generation) {
+    if status_check::is_status_unchanged(sp.status.as_ref(), &phase, message.as_deref(), observed_generation) {
         debug!(secrets_provider = %sp.name_any(), "Status unchanged, skipping update");
         return Ok(());
     }

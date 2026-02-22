@@ -23,6 +23,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
+use lattice_common::status_check;
 use lattice_common::crd::{
     CloudProvider, CloudProviderPhase, CloudProviderStatus, CloudProviderType,
 };
@@ -50,7 +51,7 @@ pub async fn reconcile(
     let generation = cp.metadata.generation.unwrap_or(0);
 
     // Skip work if spec unchanged and already Ready
-    if is_status_unchanged(&cp, CloudProviderPhase::Ready, None, Some(generation)) {
+    if status_check::is_status_unchanged(cp.status.as_ref(), &CloudProviderPhase::Ready, None, Some(generation)) {
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
@@ -194,25 +195,6 @@ async fn reconcile_credentials(client: &Client, cp: &CloudProvider) -> Result<()
     }
 }
 
-/// Check if the CloudProvider status already matches the desired state.
-///
-/// Prevents redundant status patches that would trigger self-reconcile storms.
-fn is_status_unchanged(
-    cp: &CloudProvider,
-    phase: CloudProviderPhase,
-    message: Option<&str>,
-    observed_generation: Option<i64>,
-) -> bool {
-    cp.status
-        .as_ref()
-        .map(|s| {
-            s.phase == phase
-                && s.message.as_deref() == message
-                && s.observed_generation == observed_generation
-        })
-        .unwrap_or(false)
-}
-
 /// Update CloudProvider status
 async fn update_status(
     client: &Client,
@@ -221,7 +203,7 @@ async fn update_status(
     message: Option<String>,
     observed_generation: Option<i64>,
 ) -> Result<(), ReconcileError> {
-    if is_status_unchanged(cp, phase, message.as_deref(), observed_generation) {
+    if status_check::is_status_unchanged(cp.status.as_ref(), &phase, message.as_deref(), observed_generation) {
         debug!(cloud_provider = %cp.name_any(), "Status unchanged, skipping update");
         return Ok(());
     }
@@ -271,6 +253,7 @@ mod tests {
             CloudProviderType::OpenStack => {
                 ("openstack-prod", Some("RegionOne"), Some(CAPO_NAMESPACE))
             }
+            _ => ("unknown", None, None),
         };
 
         let credentials_secret_ref = creds_namespace.map(|ns| SecretRef {
@@ -534,27 +517,27 @@ mod tests {
             observed_generation: Some(1),
         });
 
-        assert!(is_status_unchanged(
-            &cp,
-            CloudProviderPhase::Ready,
+        assert!(status_check::is_status_unchanged(
+            cp.status.as_ref(),
+            &CloudProviderPhase::Ready,
             None,
             Some(1)
         ));
-        assert!(!is_status_unchanged(
-            &cp,
-            CloudProviderPhase::Failed,
+        assert!(!status_check::is_status_unchanged(
+            cp.status.as_ref(),
+            &CloudProviderPhase::Failed,
             None,
             Some(1)
         ));
-        assert!(!is_status_unchanged(
-            &cp,
-            CloudProviderPhase::Ready,
+        assert!(!status_check::is_status_unchanged(
+            cp.status.as_ref(),
+            &CloudProviderPhase::Ready,
             None,
             Some(2)
         ));
-        assert!(!is_status_unchanged(
-            &cp,
-            CloudProviderPhase::Ready,
+        assert!(!status_check::is_status_unchanged(
+            cp.status.as_ref(),
+            &CloudProviderPhase::Ready,
             Some("msg"),
             Some(1)
         ));

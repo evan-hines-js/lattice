@@ -24,6 +24,7 @@ pub struct IngressSpec {
 
 /// Route kind — which Gateway API route resource to generate.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RouteKind {
     /// Gateway API HTTPRoute (default)
     #[default]
@@ -156,6 +157,7 @@ pub struct PathMatch {
 
 /// Path match type for Gateway API HTTPRoute
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PathMatchType {
     /// Exact path match
     Exact,
@@ -179,6 +181,7 @@ pub struct HeaderMatch {
 
 /// Header match type
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HeaderMatchType {
     /// Exact header value match (default)
     Exact,

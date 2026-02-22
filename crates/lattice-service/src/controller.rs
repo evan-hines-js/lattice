@@ -23,6 +23,7 @@ use tracing::{debug, error, info, instrument, warn};
 #[cfg(test)]
 use mockall::automock;
 
+use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry};
 
 use lattice_cedar::PolicyEngine;
@@ -93,6 +94,9 @@ pub trait ServiceKubeClient: Send + Sync {
         key: &str,
         value: &str,
     ) -> Result<(), Error>;
+
+    /// Check if a LatticeMeshMember is Ready (policies fully applied, including ServiceEntries)
+    async fn is_mesh_member_ready(&self, name: &str, namespace: &str) -> Result<bool, Error>;
 }
 
 /// Real Kubernetes client implementation
@@ -356,6 +360,19 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         )
         .await?;
         Ok(())
+    }
+
+    async fn is_mesh_member_ready(&self, name: &str, namespace: &str) -> Result<bool, Error> {
+        use lattice_common::crd::{LatticeMeshMember, MeshMemberPhase};
+        let api: Api<LatticeMeshMember> = Api::namespaced(self.client.clone(), namespace);
+        match api.get_opt(name).await? {
+            Some(mm) => Ok(mm
+                .status
+                .as_ref()
+                .map(|s| s.phase == MeshMemberPhase::Ready)
+                .unwrap_or(false)),
+            None => Ok(false),
+        }
     }
 }
 
@@ -685,7 +702,7 @@ pub async fn reconcile(
 
             try_compile_and_record(&service, &name, namespace, &ctx, &inputs_hash).await
         }
-        ServicePhase::Failed => {
+        ServicePhase::Failed | _ => {
             // Same guard as Ready: skip retry when spec + inputs are unchanged
             // to avoid tight loops on persistent compilation errors.
             let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
@@ -807,7 +824,8 @@ async fn resolve_policy_defaults(
     (effective_backup, ingress_defaults)
 }
 
-/// Try compiling and applying a service. On success, transition to Ready.
+/// Try compiling and applying a service. On success, transition to Ready only
+/// after all child resources (including the LatticeMeshMember) are reconciled.
 /// On failure, compile_and_apply already sets status to Failed; requeue to retry.
 ///
 /// This is the shared compilation path for Compiling, Ready, and Failed phases.
@@ -820,7 +838,15 @@ async fn try_compile(
     ctx: &ServiceContext,
 ) -> Result<Action, Error> {
     match compile_and_apply(service, name, namespace, ctx).await {
-        Ok(()) => {
+        Ok(has_mesh_member) => {
+            // Don't mark Ready until the MeshMember controller has fully reconciled
+            // (including ServiceEntries). This prevents a race where the LatticeService
+            // reports Ready but external connectivity isn't yet configured.
+            if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
+                debug!("mesh member not yet ready, staying in Compiling");
+                update_service_status(service, ctx, ServiceStatusUpdate::compiling()).await?;
+                return Ok(Action::requeue(Duration::from_secs(5)));
+            }
             update_service_status(
                 service,
                 ctx,
@@ -848,7 +874,13 @@ async fn try_compile_and_record(
     inputs_hash: &str,
 ) -> Result<Action, Error> {
     match compile_and_apply(service, name, namespace, ctx).await {
-        Ok(()) => {
+        Ok(has_mesh_member) => {
+            // Don't mark Ready until the MeshMember controller has fully reconciled
+            if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
+                debug!("mesh member not yet ready, staying in Compiling");
+                update_service_status(service, ctx, ServiceStatusUpdate::compiling()).await?;
+                return Ok(Action::requeue(Duration::from_secs(5)));
+            }
             update_service_status(
                 service,
                 ctx,
@@ -887,12 +919,15 @@ async fn try_compile_and_record(
 ///
 /// On compile failure, publishes a warning event and sets the service to Failed.
 /// On apply failure, sets the service to Failed and returns the error.
+///
+/// Returns `true` if a LatticeMeshMember CR was emitted (the MeshMember controller
+/// must reconcile it before the LatticeService should be considered Ready).
 async fn compile_and_apply(
     service: &LatticeService,
     name: &str,
     namespace: &str,
     ctx: &ServiceContext,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     // Resolve policy defaults (backup + ingress) in one pass
     let (effective_backup, ingress_defaults) =
         resolve_policy_defaults(service, namespace, ctx).await;
@@ -938,7 +973,7 @@ async fn compile_and_apply(
 
             // Skip redundant events when status hasn't changed (status update
             // itself is guarded by update_service_status's idempotency check).
-            if !is_status_unchanged(service, ServicePhase::Failed, &msg, None) {
+            if !status_check::is_status_unchanged(service.status.as_ref(), &ServicePhase::Failed, Some(&msg), None) {
                 let event_reason = if e.is_policy_denied() {
                     match &e {
                         lattice_workload::CompilationError::SecurityOverrideDenied { .. } => {
@@ -971,6 +1006,8 @@ async fn compile_and_apply(
         }
     };
 
+    let has_mesh_member = compiled.mesh_member.is_some();
+
     debug!(
         resources = compiled.resource_count(),
         "applying compiled resources"
@@ -981,7 +1018,7 @@ async fn compile_and_apply(
         .await
     {
         let msg = e.to_string();
-        if !is_status_unchanged(service, ServicePhase::Failed, &msg, None) {
+        if !status_check::is_status_unchanged(service.status.as_ref(), &ServicePhase::Failed, Some(&msg), None) {
             error!(error = %msg, "failed to apply compiled resources");
         } else {
             debug!(error = %msg, "apply still failing");
@@ -990,7 +1027,7 @@ async fn compile_and_apply(
         return Err(e);
     }
 
-    Ok(())
+    Ok(has_mesh_member)
 }
 
 // =============================================================================
@@ -1068,29 +1105,6 @@ impl<'a> ServiceStatusUpdate<'a> {
     }
 }
 
-/// Check if the service status already matches — avoids update loop.
-///
-/// Same pattern as CloudProvider and SecretProvider: skip redundant patches
-/// because `Condition::new()` stamps a fresh `lastTransitionTime` on every call,
-/// making every merge patch "different" and generating a watch event that triggers
-/// another reconcile.
-fn is_status_unchanged(
-    service: &LatticeService,
-    phase: ServicePhase,
-    message: &str,
-    observed_generation: Option<i64>,
-) -> bool {
-    service
-        .status
-        .as_ref()
-        .map(|s| {
-            s.phase == phase
-                && s.message.as_deref() == Some(message)
-                && s.observed_generation == observed_generation
-        })
-        .unwrap_or(false)
-}
-
 /// Update LatticeService status with the given configuration.
 ///
 /// Skips the patch if phase and message already match the current status,
@@ -1101,10 +1115,10 @@ async fn update_service_status(
     update: ServiceStatusUpdate<'_>,
 ) -> Result<(), Error> {
     // Check if status already matches — avoid update loop
-    if is_status_unchanged(
-        service,
-        update.phase,
-        update.message,
+    if status_check::is_status_unchanged(
+        service.status.as_ref(),
+        &update.phase,
+        Some(update.message),
         update.observed_generation,
     ) {
         debug!("status unchanged, skipping update");
@@ -1255,6 +1269,8 @@ mod tests {
             .returning(|_, _, _| Ok(()));
         mock.expect_patch_service_annotation()
             .returning(|_, _, _, _| Ok(()));
+        mock.expect_is_mesh_member_ready()
+            .returning(|_, _| Ok(true));
         mock
     }
 

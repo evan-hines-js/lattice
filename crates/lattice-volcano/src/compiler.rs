@@ -8,7 +8,7 @@ use lattice_common::crd::{LatticeJob, LatticeJobSpec, RestartPolicy};
 
 use lattice_common::kube_utils::OwnerReference;
 
-use crate::types::{VCJob, VCJobMetadata, VCJobSpec, VCJobTask, VCJobTaskPolicy};
+use crate::types::{VCJob, VCJobSpec, VCJobTask, VCJobTaskPolicy, VolcanoMetadata};
 
 /// Compile a LatticeJob into a Volcano VCJob.
 ///
@@ -33,7 +33,7 @@ pub fn compile_vcjob(
     VCJob {
         api_version: "batch.volcano.sh/v1alpha1".to_string(),
         kind: "Job".to_string(),
-        metadata: VCJobMetadata {
+        metadata: VolcanoMetadata {
             name: name.to_string(),
             namespace: namespace.to_string(),
             labels: BTreeMap::from([

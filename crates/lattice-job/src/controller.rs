@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{JobPhase, LatticeJob, LatticeJobStatus, ProviderType};
+use lattice_common::status_check;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry};
@@ -175,6 +176,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             }
         }
         JobPhase::Succeeded | JobPhase::Failed => Ok(Action::await_change()),
+        _ => Ok(Action::await_change()),
     }
 }
 
@@ -348,25 +350,6 @@ async fn check_vcjob_status(
     }
 }
 
-/// Check if the LatticeJob status already matches the desired state.
-///
-/// Prevents redundant status patches during the Running phase 15s requeue loop.
-fn is_status_unchanged(
-    job: &LatticeJob,
-    phase: JobPhase,
-    message: Option<&str>,
-    observed_generation: Option<i64>,
-) -> bool {
-    job.status
-        .as_ref()
-        .map(|s| {
-            s.phase == phase
-                && s.message.as_deref() == message
-                && s.observed_generation == observed_generation
-        })
-        .unwrap_or(false)
-}
-
 async fn update_status(
     client: &Client,
     job: &LatticeJob,
@@ -375,7 +358,7 @@ async fn update_status(
     message: Option<&str>,
     observed_generation: Option<i64>,
 ) -> Result<(), JobError> {
-    if is_status_unchanged(job, phase.clone(), message, observed_generation) {
+    if status_check::is_status_unchanged(job.status.as_ref(), &phase, message, observed_generation) {
         return Ok(());
     }
 

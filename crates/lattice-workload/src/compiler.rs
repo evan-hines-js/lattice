@@ -135,7 +135,7 @@ impl<'a> WorkloadCompiler<'a> {
     /// Runs the full pipeline: volumes → secrets → authorization (Cedar) →
     /// template rendering → env/file compilation → pod template → config hash.
     pub async fn compile(self) -> Result<CompiledWorkload, CompilationError> {
-        // 1. Compile volumes
+        // Compile volumes
         let compiled_volumes = VolumeCompiler::compile(
             self.name,
             self.namespace,
@@ -144,7 +144,7 @@ impl<'a> WorkloadCompiler<'a> {
             &self.owner_references,
         )?;
 
-        // 2. Compile secrets
+        // Compile secrets
         let compiled_secrets = SecretsCompiler::compile(
             self.name,
             self.namespace,
@@ -152,7 +152,7 @@ impl<'a> WorkloadCompiler<'a> {
             self.image_pull_secrets,
         )?;
 
-        // 3-5. Authorization (if Cedar is configured)
+        // Authorization (if Cedar is configured)
         if let Some(cedar) = self.cedar {
             crate::authorization::secrets::authorize_secrets(
                 cedar,
@@ -200,7 +200,7 @@ impl<'a> WorkloadCompiler<'a> {
             .await?;
         }
 
-        // 6. Build template context and render all containers
+        // Build template context and render all containers
         let graph = self.graph.ok_or_else(|| {
             CompilationError::missing_metadata("service graph (call .with_graph())")
         })?;
@@ -218,7 +218,7 @@ impl<'a> WorkloadCompiler<'a> {
             .render_all_containers(self.workload, &template_ctx)
             .map_err(CompilationError::from)?;
 
-        // 7-9. Compile env vars and files per container
+        // Compile env vars and files per container
         let mut env_config_maps = Vec::new();
         let mut env_secrets = Vec::new();
         let mut files_config_maps = Vec::new();
@@ -229,7 +229,7 @@ impl<'a> WorkloadCompiler<'a> {
         let mut per_container_file_mounts = BTreeMap::new();
 
         for (container_name, rendered) in &rendered_containers {
-            // 7. Compile non-secret env vars
+            // Compile non-secret env vars
             let compiled_env = env::compile(
                 self.name,
                 container_name,
@@ -244,7 +244,7 @@ impl<'a> WorkloadCompiler<'a> {
             }
             let mut container_env_from = compiled_env.env_from;
 
-            // 8. Compile ESO-templated env vars
+            // Compile ESO-templated env vars
             if !rendered.eso_templated_variables.is_empty() {
                 let (eso_secrets, eso_env_from) = compile_eso_templated_env_vars(
                     self.name,
@@ -257,7 +257,7 @@ impl<'a> WorkloadCompiler<'a> {
                 container_env_from.extend(eso_env_from);
             }
 
-            // 8b. Resolve env_from secret resource references
+            // Resolve env_from secret resource references
             if let Some(container_spec) = self.workload.containers.get(container_name) {
                 for resource_name in &container_spec.env_from {
                     let secret_ref = compiled_secrets
@@ -281,7 +281,7 @@ impl<'a> WorkloadCompiler<'a> {
 
             per_container_env_from.insert(container_name.clone(), container_env_from);
 
-            // 9. Compile files
+            // Compile files
             let compiled_files = files::compile(
                 self.name,
                 container_name,
@@ -301,7 +301,7 @@ impl<'a> WorkloadCompiler<'a> {
             per_container_file_mounts.insert(container_name.clone(), compiled_files.volume_mounts);
         }
 
-        // 10. Compile pod template
+        // Compile pod template
         let container_data = ContainerCompilationData {
             secret_refs: &compiled_secrets.secret_refs,
             rendered_containers: &rendered_containers,
@@ -319,7 +319,7 @@ impl<'a> WorkloadCompiler<'a> {
             &container_data,
         )?;
 
-        // 11. Assemble config and compute hash
+        // Assemble config and compute hash
         let mut all_external_secrets = compiled_secrets.external_secrets;
         all_external_secrets.extend(file_external_secrets);
 

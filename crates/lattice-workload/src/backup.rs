@@ -76,18 +76,15 @@ fn compile_hook_annotations(
             annotations.insert(format!("{}/timeout{}", prefix, suffix), timeout.clone());
         }
 
-        match hook.on_error {
-            HookErrorAction::Fail => {
-                annotations.insert(format!("{}/on-error{}", prefix, suffix), "Fail".to_string());
-            }
-            HookErrorAction::Continue => {
-                // Continue is the default, but be explicit
-                annotations.insert(
-                    format!("{}/on-error{}", prefix, suffix),
-                    "Continue".to_string(),
-                );
-            }
-        }
+        let on_error = match hook.on_error {
+            HookErrorAction::Fail => "Fail",
+            HookErrorAction::Continue => "Continue",
+            _ => "Continue",
+        };
+        annotations.insert(
+            format!("{}/on-error{}", prefix, suffix),
+            on_error.to_string(),
+        );
     }
 }
 
@@ -115,6 +112,7 @@ fn compile_volume_annotations(
                 );
             }
         }
+        _ => {}
     }
 }
 

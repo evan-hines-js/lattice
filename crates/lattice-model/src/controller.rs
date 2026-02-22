@@ -29,6 +29,7 @@ use lattice_common::crd::{
     JobPhase, LatticeJob, LatticeModel, LatticeModelStatus, ModelCondition, ModelServingPhase,
     ProviderType,
 };
+use lattice_common::status_check;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry};
@@ -36,6 +37,15 @@ use lattice_common::{CrdKind, CrdRegistry};
 use crate::compiler::{compile_model, CompiledModel};
 use crate::download::{CompiledDownload, SCHEDULING_GATE_MODEL_DOWNLOAD};
 use crate::error::ModelError;
+
+/// Requeue interval while loading, downloading, or recompiling after spec change
+const REQUEUE_LOADING: Duration = Duration::from_secs(15);
+/// Requeue interval during steady-state serving (health monitoring)
+const REQUEUE_SERVING: Duration = Duration::from_secs(60);
+/// Requeue interval for fast retry after Failed → Pending transition
+const REQUEUE_RETRY: Duration = Duration::from_secs(5);
+/// Requeue interval after a reconciliation error
+const REQUEUE_ERROR: Duration = Duration::from_secs(30);
 
 /// Shared context for the LatticeModel controller
 pub struct ModelContext {
@@ -132,7 +142,7 @@ pub async fn reconcile(
                 None,
             )
             .await?;
-            Ok(Action::requeue(Duration::from_secs(15)))
+            Ok(Action::requeue(REQUEUE_LOADING))
         }
         ModelServingPhase::Loading => {
             // When modelSource is configured, check download Job before ModelServing
@@ -160,11 +170,11 @@ pub async fn reconcile(
                     }
                     Some(DownloadState::Running) => {
                         info!(model = %name, "model download in progress");
-                        return Ok(Action::requeue(Duration::from_secs(15)));
+                        return Ok(Action::requeue(REQUEUE_LOADING));
                     }
                     None => {
                         warn!(model = %name, "download job not found, requeuing");
-                        return Ok(Action::requeue(Duration::from_secs(15)));
+                        return Ok(Action::requeue(REQUEUE_LOADING));
                     }
                 }
             }
@@ -185,7 +195,7 @@ pub async fn reconcile(
                         conditions,
                     )
                     .await?;
-                    Ok(Action::requeue(Duration::from_secs(60)))
+                    Ok(Action::requeue(REQUEUE_SERVING))
                 }
                 ModelServingState::Failed => {
                     error!(model = %name, "model serving failed");
@@ -202,7 +212,7 @@ pub async fn reconcile(
                     .await?;
                     Ok(Action::await_change())
                 }
-                ModelServingState::Progressing => Ok(Action::requeue(Duration::from_secs(15))),
+                ModelServingState::Progressing => Ok(Action::requeue(REQUEUE_LOADING)),
             }
         }
         ModelServingPhase::Serving => {
@@ -233,18 +243,18 @@ pub async fn reconcile(
                     conditions,
                 )
                 .await?;
-                return Ok(Action::requeue(Duration::from_secs(15)));
+                return Ok(Action::requeue(REQUEUE_LOADING));
             }
 
             // No spec change — monitor health via ModelServing conditions
             let message = "Model is serving inference requests";
-            if is_status_unchanged(
-                &model,
-                ModelServingPhase::Serving,
+            if status_check::is_status_unchanged(
+                model.status.as_ref(),
+                &ModelServingPhase::Serving,
                 Some(message),
                 Some(generation),
             ) {
-                return Ok(Action::requeue(Duration::from_secs(60)));
+                return Ok(Action::requeue(REQUEUE_SERVING));
             }
             let conditions =
                 read_model_serving_conditions(&ctx.client, &name, namespace, &ctx.registry).await;
@@ -258,7 +268,7 @@ pub async fn reconcile(
                 conditions,
             )
             .await?;
-            Ok(Action::requeue(Duration::from_secs(60)))
+            Ok(Action::requeue(REQUEUE_SERVING))
         }
         ModelServingPhase::Failed => {
             // Check if the spec has changed since we entered Failed — if so, retry
@@ -275,10 +285,11 @@ pub async fn reconcile(
                     None,
                 )
                 .await?;
-                return Ok(Action::requeue(Duration::from_secs(5)));
+                return Ok(Action::requeue(REQUEUE_RETRY));
             }
             Ok(Action::await_change())
         }
+        _ => Ok(Action::await_change()),
     }
 }
 
@@ -313,7 +324,7 @@ pub fn error_policy(
         model = %model.name_any(),
         "model reconciliation failed"
     );
-    Action::requeue(Duration::from_secs(30))
+    Action::requeue(REQUEUE_ERROR)
 }
 
 /// Apply compiled model resources in layers using ApplyBatch
@@ -638,7 +649,7 @@ async fn check_download_job_status(
             match phase {
                 JobPhase::Succeeded => Some(DownloadState::Succeeded),
                 JobPhase::Failed => Some(DownloadState::Failed),
-                JobPhase::Pending | JobPhase::Running => Some(DownloadState::Running),
+                JobPhase::Pending | JobPhase::Running | _ => Some(DownloadState::Running),
             }
         }
         Err(kube::Error::Api(ae)) if ae.code == 404 => {
@@ -722,28 +733,6 @@ async fn remove_scheduling_gates(
     }
 
     Ok(())
-}
-
-/// Check if the model status already matches — avoids update loop.
-///
-/// Skip redundant patches because each merge patch generates a watch event
-/// that triggers another reconcile. Critical for the Serving phase which
-/// requeues every 60s.
-fn is_status_unchanged(
-    model: &LatticeModel,
-    phase: ModelServingPhase,
-    message: Option<&str>,
-    observed_generation: Option<i64>,
-) -> bool {
-    model
-        .status
-        .as_ref()
-        .map(|s| {
-            s.phase == phase
-                && s.message.as_deref() == message
-                && s.observed_generation == observed_generation
-        })
-        .unwrap_or(false)
 }
 
 async fn update_status(

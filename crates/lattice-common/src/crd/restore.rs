@@ -11,6 +11,7 @@ use super::types::Condition;
 
 /// Phase of a LatticeRestore
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RestorePhase {
     /// Restore is pending
     #[default]

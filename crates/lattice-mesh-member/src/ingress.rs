@@ -216,6 +216,7 @@ impl IngressCompiler {
                         output.certificates.push(cert);
                     }
                 }
+                _ => {}
             }
         }
 
@@ -450,6 +451,7 @@ impl IngressCompiler {
                             type_: match p.type_ {
                                 PathMatchType::Exact => "Exact",
                                 PathMatchType::PathPrefix => "PathPrefix",
+                                _ => "PathPrefix",
                             }
                             .to_string(),
                             value: p.value.clone(),
@@ -470,6 +472,7 @@ impl IngressCompiler {
                                             lattice_common::crd::HeaderMatchType::RegularExpression => {
                                                 "RegularExpression".to_string()
                                             }
+                                            _ => "Exact".to_string(),
                                         }),
                                     })
                                     .collect(),

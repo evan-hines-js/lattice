@@ -34,6 +34,7 @@ use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 
 /// Service lifecycle phase
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ServicePhase {
     /// Service is waiting for configuration
     #[default]

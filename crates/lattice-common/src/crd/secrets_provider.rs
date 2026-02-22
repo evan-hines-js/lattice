@@ -84,6 +84,7 @@ pub struct SecretProviderStatus {
 
 /// SecretProvider phase
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SecretProviderPhase {
     /// Provider is being validated
     #[default]
@@ -102,18 +103,20 @@ impl SecretProviderSpec {
         self.provider.keys().next().map(|s| s.as_str())
     }
 
-    /// Validate the spec. Returns an error message if invalid.
-    pub fn validate(&self) -> Result<(), String> {
+    /// Validate the spec. Returns an error if invalid.
+    pub fn validate(&self) -> Result<(), crate::Error> {
         if self.provider.is_empty() {
-            return Err("spec.provider must contain exactly one provider key".to_string());
+            return Err(crate::Error::validation(
+                "spec.provider must contain exactly one provider key",
+            ));
         }
         if self.provider.len() > 1 {
             let keys: Vec<&String> = self.provider.keys().collect();
-            return Err(format!(
+            return Err(crate::Error::validation(format!(
                 "spec.provider must contain exactly one provider key, found {}: {:?}",
                 self.provider.len(),
                 keys
-            ));
+            )));
         }
         Ok(())
     }
@@ -229,7 +232,7 @@ spec:
         let spec = SecretProviderSpec {
             provider: serde_json::Map::new(),
         };
-        let err = spec.validate().unwrap_err();
+        let err = spec.validate().unwrap_err().to_string();
         assert!(err.contains("exactly one provider key"));
     }
 
@@ -239,7 +242,7 @@ spec:
         provider.insert("vault".to_string(), serde_json::json!({}));
         provider.insert("aws".to_string(), serde_json::json!({}));
         let spec = SecretProviderSpec { provider };
-        let err = spec.validate().unwrap_err();
+        let err = spec.validate().unwrap_err().to_string();
         assert!(err.contains("exactly one provider key"));
         assert!(err.contains("found 2"));
     }

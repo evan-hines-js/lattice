@@ -154,6 +154,7 @@ impl<'a> PolicyCompiler<'a> {
                         ..Default::default()
                     });
                 }
+                _ => {}
             }
         }
 

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Deployment strategy
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum DeployStrategy {
     /// Rolling update strategy
     #[default]

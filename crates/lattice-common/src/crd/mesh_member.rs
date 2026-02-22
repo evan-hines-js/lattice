@@ -72,6 +72,7 @@ pub struct LatticeMeshMemberSpec {
 /// Target workloads for a mesh member
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum MeshMemberTarget {
     /// Match pods by label selector
     Selector(BTreeMap<String, String>),
@@ -94,6 +95,7 @@ pub struct MeshMemberPort {
 
 /// mTLS enforcement mode per-port
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PeerAuth {
     /// Require mTLS (default)
     #[default]
@@ -135,6 +137,7 @@ pub struct EgressRule {
 /// Target for egress rules
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum EgressTarget {
     /// Cilium entity (e.g., "world", "kube-apiserver")
     Entity(String),
@@ -228,30 +231,39 @@ pub enum MeshMemberScope {
 
 impl LatticeMeshMemberSpec {
     /// Validate the spec
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), crate::Error> {
         // A mesh member must serve traffic (ports), call other services (dependencies),
         // or have non-mesh egress rules
         if self.ports.is_empty() && self.dependencies.is_empty() && self.egress.is_empty() {
-            return Err("at least one port, dependency, or egress rule is required".to_string());
+            return Err(crate::Error::validation(
+                "at least one port, dependency, or egress rule is required",
+            ));
         }
 
         for port in &self.ports {
-            super::validate_dns_label(&port.name, "port name")?;
+            super::validate_dns_label(&port.name, "port name")
+                .map_err(crate::Error::validation)?;
         }
 
         if let MeshMemberTarget::Namespace(ref ns) = self.target {
             if ns.is_empty() {
-                return Err("namespace target cannot be empty".to_string());
+                return Err(crate::Error::validation(
+                    "namespace target cannot be empty",
+                ));
             }
         }
 
         if let MeshMemberTarget::Selector(ref labels) = self.target {
             if labels.is_empty() {
-                return Err("selector must have at least one label".to_string());
+                return Err(crate::Error::validation(
+                    "selector must have at least one label",
+                ));
             }
             for key in labels.keys() {
                 if key.is_empty() {
-                    return Err("selector label key cannot be empty".to_string());
+                    return Err(crate::Error::validation(
+                        "selector label key cannot be empty",
+                    ));
                 }
             }
         }

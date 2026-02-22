@@ -111,6 +111,7 @@ pub struct CedarPolicyStatus {
 
 /// CedarPolicy phase
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CedarPolicyPhase {
     /// Policy is being validated
     #[default]

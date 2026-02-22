@@ -14,9 +14,9 @@ use lattice_common::kube_utils::OwnerReference;
 
 use crate::types::{
     KthenaHeaderMatch, KthenaKvConnector, KthenaModelMatch, KthenaModelRoute, KthenaModelRouteSpec,
-    KthenaModelServer, KthenaModelServerSpec, KthenaNetworkingMetadata, KthenaParentRef,
-    KthenaRateLimit, KthenaRetryPolicy, KthenaRouteRule, KthenaTargetModel, KthenaTrafficPolicy,
-    PdGroup, WorkloadPort, WorkloadSelector,
+    KthenaModelServer, KthenaModelServerSpec, KthenaParentRef, KthenaRateLimit, KthenaRetryPolicy,
+    KthenaRouteRule, KthenaTargetModel, KthenaTrafficPolicy, PdGroup, VolcanoMetadata,
+    WorkloadPort, WorkloadSelector,
 };
 
 const NETWORKING_API_VERSION: &str = "networking.serving.volcano.sh/v1alpha1";
@@ -57,7 +57,7 @@ fn compile_model_server(model: &LatticeModel, routing: &ModelRoutingSpec) -> Kth
     KthenaModelServer {
         api_version: NETWORKING_API_VERSION.to_string(),
         kind: "ModelServer".to_string(),
-        metadata: KthenaNetworkingMetadata {
+        metadata: VolcanoMetadata {
             name: name.to_string(),
             namespace: namespace.to_string(),
             labels: BTreeMap::from([
@@ -165,7 +165,7 @@ fn compile_model_route(
     KthenaModelRoute {
         api_version: NETWORKING_API_VERSION.to_string(),
         kind: "ModelRoute".to_string(),
-        metadata: KthenaNetworkingMetadata {
+        metadata: VolcanoMetadata {
             name: resource_name,
             namespace: namespace.to_string(),
             labels: BTreeMap::from([
@@ -236,9 +236,10 @@ pub(crate) fn owner_reference(name: &str, uid: &str) -> OwnerReference {
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        HeaderMatchValue, InferenceEngine, KvConnector, LatticeModelSpec, ModelMatch,
-        ModelParentRef, ModelRoleSpec, ModelRouteRule, ModelRouteSpec, ModelRoutingSpec, RateLimit,
-        RuntimeSpec, TargetModel, TrafficPolicy, WorkloadSpec,
+        HeaderMatchValue, InferenceEngine, KvConnector, KvConnectorType, LatticeModelSpec,
+        ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
+        ModelRoutingSpec, RateLimit, RateLimitUnit, RuntimeSpec, TargetModel, TrafficPolicy,
+        WorkloadSpec,
     };
 
     fn test_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
@@ -334,7 +335,7 @@ mod tests {
         ]));
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
-            type_: "nixl".to_string(),
+            type_: KvConnectorType::Nixl,
         });
 
         let compiled = compile_model_routing(&model, &routing);
@@ -357,7 +358,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .type_,
-            "nixl"
+            KvConnectorType::Nixl
         );
     }
 
@@ -383,7 +384,7 @@ mod tests {
         let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
-            type_: "nixl".to_string(),
+            type_: KvConnectorType::Nixl,
         });
 
         let compiled = compile_model_routing(&model, &routing);
@@ -561,7 +562,7 @@ mod tests {
                     rate_limit: Some(RateLimit {
                         input_tokens_per_unit: Some(1000),
                         output_tokens_per_unit: Some(500),
-                        unit: Some("minute".to_string()),
+                        unit: Some(RateLimitUnit::Minute),
                     }),
                     parent_refs: None,
                 },
@@ -587,7 +588,7 @@ mod tests {
         let rl = compiled.model_routes[0].spec.rate_limit.as_ref().unwrap();
         assert_eq!(rl.input_tokens_per_unit, Some(1000));
         assert_eq!(rl.output_tokens_per_unit, Some(500));
-        assert_eq!(rl.unit, Some("minute".to_string()));
+        assert_eq!(rl.unit, Some(RateLimitUnit::Minute));
     }
 
     #[test]
@@ -688,7 +689,7 @@ mod tests {
         ]));
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
-            type_: "nixl".to_string(),
+            type_: KvConnectorType::Nixl,
         });
 
         let compiled = compile_model_routing(&model, &routing);

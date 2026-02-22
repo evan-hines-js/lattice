@@ -17,6 +17,7 @@ use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 
 /// Lifecycle phase of a LatticeJob
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[non_exhaustive]
 pub enum JobPhase {
     /// Job is waiting to be scheduled
     #[default]
@@ -46,6 +47,7 @@ impl std::fmt::Display for JobPhase {
 
 /// Pod restart policy for job tasks
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[non_exhaustive]
 pub enum RestartPolicy {
     /// Never restart on failure
     #[default]

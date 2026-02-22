@@ -13,6 +13,7 @@ use super::types::Condition;
 /// Storage provider type for backup destinations
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum BackupStorageProvider {
     /// Amazon S3
     #[default]
@@ -96,6 +97,7 @@ pub struct BackupStorageSpec {
 
 /// Phase of a BackupStore
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BackupStorePhase {
     /// Store is pending configuration
     #[default]

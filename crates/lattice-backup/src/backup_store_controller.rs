@@ -114,6 +114,7 @@ pub fn build_bsl(name: &str, store: &BackupStore) -> BackupStorageLocation {
             let cfg = BTreeMap::new();
             ("azure".to_string(), cfg)
         }
+        _ => ("aws".to_string(), BTreeMap::new()),
     };
 
     let bucket = storage

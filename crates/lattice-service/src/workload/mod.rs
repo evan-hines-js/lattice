@@ -492,7 +492,7 @@ impl WorkloadCompiler {
                     max_surge: Some("25%".to_string()),
                 }),
             }),
-            DeployStrategy::Canary => Some(DeploymentStrategy {
+            DeployStrategy::Canary | _ => Some(DeploymentStrategy {
                 type_: "RollingUpdate".to_string(),
                 rolling_update: Some(RollingUpdateConfig {
                     max_unavailable: Some("0".to_string()),

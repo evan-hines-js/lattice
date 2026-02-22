@@ -24,6 +24,15 @@ use super::super::helpers::{
 const MODEL_NAMESPACE: &str = "serving";
 const MODEL_NAME: &str = "llm-serving";
 
+/// Timeout for waiting on phase transitions (e.g., Pending → Loading)
+const PHASE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Timeout for longer operations (Serving phase, download Job completion)
+const LONG_TIMEOUT: Duration = Duration::from_secs(300);
+/// Interval between polls when waiting for a condition
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Expected HuggingFace model ID used in model-serving fixture
+const EXPECTED_MODEL_ID: &str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+
 /// Load the model-serving fixture
 fn load_model_fixture() -> Result<lattice_common::crd::LatticeModel, String> {
     load_fixture_config("model-serving.yaml")
@@ -47,7 +56,7 @@ async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
         MODEL_NAMESPACE,
         MODEL_NAME,
         "Loading",
-        Duration::from_secs(120),
+        PHASE_TIMEOUT,
     )
     .await?;
 
@@ -232,7 +241,7 @@ async fn test_model_serving_phase(kubeconfig: &str) -> Result<(), String> {
         MODEL_NAMESPACE,
         MODEL_NAME,
         "Serving",
-        Duration::from_secs(300),
+        LONG_TIMEOUT,
     )
     .await?;
 
@@ -302,9 +311,9 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
 
     // Verify model name
     let model_field = ms["spec"]["model"].as_str().unwrap_or_default();
-    if model_field != "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" {
+    if model_field != EXPECTED_MODEL_ID {
         return Err(format!(
-            "ModelServer model should be 'deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B', got: '{model_field}'"
+            "ModelServer model should be '{EXPECTED_MODEL_ID}', got: '{model_field}'"
         ));
     }
 
@@ -397,9 +406,9 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
 
     // Verify modelName defaults to routing.model
     let model_name = mr["spec"]["modelName"].as_str().unwrap_or_default();
-    if model_name != "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" {
+    if model_name != EXPECTED_MODEL_ID {
         return Err(format!(
-            "ModelRoute modelName should be 'deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B', got: '{model_name}'"
+            "ModelRoute modelName should be '{EXPECTED_MODEL_ID}', got: '{model_name}'"
         ));
     }
 
@@ -1120,7 +1129,7 @@ async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
         MODEL_NAMESPACE,
         &job_name,
         "Succeeded",
-        Duration::from_secs(300),
+        LONG_TIMEOUT,
     )
     .await?;
 
@@ -1133,8 +1142,8 @@ async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
 
     wait_for_condition(
         "scheduling gates to be removed from model pods",
-        Duration::from_secs(120),
-        Duration::from_secs(5),
+        PHASE_TIMEOUT,
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let ls = ls.clone();

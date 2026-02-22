@@ -51,6 +51,7 @@ pub struct BackupRetentionSpec {
 
 /// Phase of a LatticeClusterBackup
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClusterBackupPhase {
     /// Backup is pending configuration
     #[default]

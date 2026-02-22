@@ -15,6 +15,7 @@ use super::workload::ingress::IngressTls;
 
 /// Operator for label selector requirements
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LabelSelectorOperator {
     /// Label value must be in the specified set
     In,
@@ -202,6 +203,7 @@ impl ServiceSelector {
 
 /// Phase of a LatticeServicePolicy
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ServicePolicyPhase {
     /// Policy is pending processing
     #[default]

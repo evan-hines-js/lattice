@@ -13,9 +13,9 @@ use crate::types::{
     KthenaAutoscalingBehavior, KthenaAutoscalingMetric, KthenaAutoscalingPolicy,
     KthenaAutoscalingPolicyBinding, KthenaAutoscalingPolicyBindingSpec,
     KthenaAutoscalingPolicySpec, KthenaAutoscalingTarget, KthenaHomogeneousTarget,
-    KthenaMetricEndpoint, KthenaNetworkingMetadata, KthenaPanicPolicy, KthenaPolicyRef,
+    KthenaMetricEndpoint, KthenaPanicPolicy, KthenaPolicyRef,
     KthenaScaleDownBehavior, KthenaScaleUpBehavior, KthenaStablePolicy, KthenaSubTarget,
-    KthenaTargetRef,
+    KthenaTargetRef, VolcanoMetadata,
 };
 
 const WORKLOAD_API_VERSION: &str = "workload.serving.volcano.sh/v1alpha1";
@@ -94,7 +94,7 @@ pub fn compile_model_autoscaling(model: &LatticeModel) -> CompiledAutoscaling {
                 }),
             });
 
-        let metadata = KthenaNetworkingMetadata {
+        let metadata = VolcanoMetadata {
             name: resource_name.clone(),
             namespace: namespace.to_string(),
             labels: BTreeMap::from([

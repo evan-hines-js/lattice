@@ -13,15 +13,16 @@ use serde::{Deserialize, Serialize};
 pub struct VCJob {
     pub api_version: String,
     pub kind: String,
-    pub metadata: VCJobMetadata,
+    pub metadata: VolcanoMetadata,
     pub spec: VCJobSpec,
 }
 
 use lattice_common::kube_utils::OwnerReference;
 
+/// Shared metadata for all Volcano/Kthena resources (VCJob, ModelServing, networking).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct VCJobMetadata {
+pub struct VolcanoMetadata {
     pub name: String,
     pub namespace: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -80,20 +81,10 @@ pub struct VCJobTaskPolicy {
 pub struct ModelServing {
     pub api_version: String,
     pub kind: String,
-    pub metadata: ModelServingMetadata,
+    pub metadata: VolcanoMetadata,
     pub spec: ModelServingSpec,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelServingMetadata {
-    pub name: String,
-    pub namespace: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub owner_references: Vec<OwnerReference>,
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -102,7 +93,7 @@ pub struct ModelServingSpec {
     pub replicas: u32,
     pub template: ServingGroupTemplate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_policy: Option<String>,
+    pub recovery_policy: Option<lattice_common::crd::RecoveryPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout_strategy: Option<RolloutStrategy>,
 }
@@ -175,21 +166,10 @@ pub struct RollingUpdateConfiguration {
 pub struct KthenaModelServer {
     pub api_version: String,
     pub kind: String,
-    pub metadata: KthenaNetworkingMetadata,
+    pub metadata: VolcanoMetadata,
     pub spec: KthenaModelServerSpec,
 }
 
-/// Shared metadata for Kthena networking resources
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct KthenaNetworkingMetadata {
-    pub name: String,
-    pub namespace: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub owner_references: Vec<OwnerReference>,
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -265,7 +245,7 @@ pub struct KthenaRetryPolicy {
 #[serde(rename_all = "camelCase")]
 pub struct KthenaKvConnector {
     #[serde(rename = "type")]
-    pub type_: String,
+    pub type_: lattice_common::crd::KvConnectorType,
 }
 
 /// Kthena ModelRoute resource — defines routing rules for a model
@@ -274,7 +254,7 @@ pub struct KthenaKvConnector {
 pub struct KthenaModelRoute {
     pub api_version: String,
     pub kind: String,
-    pub metadata: KthenaNetworkingMetadata,
+    pub metadata: VolcanoMetadata,
     pub spec: KthenaModelRouteSpec,
 }
 
@@ -350,7 +330,7 @@ pub struct KthenaRateLimit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens_per_unit: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
+    pub unit: Option<lattice_common::crd::RateLimitUnit>,
 }
 
 // =============================================================================
@@ -363,7 +343,7 @@ pub struct KthenaRateLimit {
 pub struct KthenaAutoscalingPolicy {
     pub api_version: String,
     pub kind: String,
-    pub metadata: KthenaNetworkingMetadata,
+    pub metadata: VolcanoMetadata,
     pub spec: KthenaAutoscalingPolicySpec,
 }
 
@@ -435,7 +415,7 @@ pub struct KthenaScaleDownBehavior {
 pub struct KthenaAutoscalingPolicyBinding {
     pub api_version: String,
     pub kind: String,
-    pub metadata: KthenaNetworkingMetadata,
+    pub metadata: VolcanoMetadata,
     pub spec: KthenaAutoscalingPolicyBindingSpec,
 }
 
@@ -502,7 +482,7 @@ mod tests {
         let vcjob = VCJob {
             api_version: "batch.volcano.sh/v1alpha1".to_string(),
             kind: "Job".to_string(),
-            metadata: VCJobMetadata {
+            metadata: VolcanoMetadata {
                 name: "test-job".to_string(),
                 namespace: "default".to_string(),
                 labels: BTreeMap::from([(
@@ -532,7 +512,7 @@ mod tests {
         let ms = ModelServing {
             api_version: "workload.serving.volcano.sh/v1alpha1".to_string(),
             kind: "ModelServing".to_string(),
-            metadata: ModelServingMetadata {
+            metadata: VolcanoMetadata {
                 name: "test-model".to_string(),
                 namespace: "default".to_string(),
                 labels: BTreeMap::from([(
@@ -560,7 +540,7 @@ mod tests {
                     restart_grace_period_seconds: Some(30),
                     network_topology: None,
                 },
-                recovery_policy: Some("ServingGroupRecreate".to_string()),
+                recovery_policy: Some(lattice_common::crd::RecoveryPolicy::ServingGroupRecreate),
                 rollout_strategy: None,
             },
         };
@@ -585,7 +565,7 @@ mod tests {
         let ms = KthenaModelServer {
             api_version: "networking.serving.volcano.sh/v1alpha1".to_string(),
             kind: "ModelServer".to_string(),
-            metadata: KthenaNetworkingMetadata {
+            metadata: VolcanoMetadata {
                 name: "test-model".to_string(),
                 namespace: "default".to_string(),
                 labels: BTreeMap::new(),
@@ -619,7 +599,7 @@ mod tests {
                     retry: Some(KthenaRetryPolicy { attempts: Some(3) }),
                 }),
                 kv_connector: Some(KthenaKvConnector {
-                    type_: "nixl".to_string(),
+                    type_: lattice_common::crd::KvConnectorType::Nixl,
                 }),
             },
         };
@@ -641,7 +621,7 @@ mod tests {
         let mr = KthenaModelRoute {
             api_version: "networking.serving.volcano.sh/v1alpha1".to_string(),
             kind: "ModelRoute".to_string(),
-            metadata: KthenaNetworkingMetadata {
+            metadata: VolcanoMetadata {
                 name: "test-model-default".to_string(),
                 namespace: "default".to_string(),
                 labels: BTreeMap::new(),
@@ -669,7 +649,7 @@ mod tests {
                 rate_limit: Some(KthenaRateLimit {
                     input_tokens_per_unit: Some(1000),
                     output_tokens_per_unit: Some(500),
-                    unit: Some("minute".to_string()),
+                    unit: Some(lattice_common::crd::RateLimitUnit::Minute),
                 }),
             },
         };
@@ -693,7 +673,7 @@ mod tests {
         let policy = KthenaAutoscalingPolicy {
             api_version: "workload.serving.volcano.sh/v1alpha1".to_string(),
             kind: "AutoscalingPolicy".to_string(),
-            metadata: KthenaNetworkingMetadata {
+            metadata: VolcanoMetadata {
                 name: "test-model-decode-scaling".to_string(),
                 namespace: "default".to_string(),
                 labels: BTreeMap::new(),
@@ -748,7 +728,7 @@ mod tests {
         let binding = KthenaAutoscalingPolicyBinding {
             api_version: "workload.serving.volcano.sh/v1alpha1".to_string(),
             kind: "AutoscalingPolicyBinding".to_string(),
-            metadata: KthenaNetworkingMetadata {
+            metadata: VolcanoMetadata {
                 name: "test-model-decode-scaling".to_string(),
                 namespace: "default".to_string(),
                 labels: BTreeMap::new(),

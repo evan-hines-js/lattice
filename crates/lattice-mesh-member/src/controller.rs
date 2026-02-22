@@ -67,12 +67,13 @@ pub async fn reconcile(
 
     // Validate spec
     if let Err(e) = member.spec.validate() {
-        warn!(error = %e, "mesh member validation failed");
+        let msg = e.to_string();
+        warn!(error = %msg, "mesh member validation failed");
         patch_status_with_hash(
             &ctx.client,
             &name,
             namespace,
-            status_failed(&e, member.metadata.generation),
+            status_failed(&msg, member.metadata.generation),
             "",
         )
         .await?;
@@ -136,43 +137,81 @@ pub async fn reconcile(
 
     info!("reconciling mesh member");
 
-    // Ensure namespace has ambient mode label
+    let scope = match member.spec.target {
+        MeshMemberTarget::Selector(_) => MeshMemberScope::Workload,
+        MeshMemberTarget::Namespace(_) => MeshMemberScope::Namespace,
+        _ => MeshMemberScope::Workload,
+    };
+
+    // Do the actual work, then always set status based on outcome
+    match do_reconcile(&member, &name, namespace, &ctx).await {
+        Ok(fully_reconciled) => {
+            // Record graph hash only when fully reconciled so the next
+            // reconcile re-runs when ServiceEntries were deferred.
+            let hash = if fully_reconciled { &graph_hash } else { "" };
+            patch_status_with_hash(
+                &ctx.client,
+                &name,
+                namespace,
+                status_ready(scope, member.metadata.generation),
+                hash,
+            )
+            .await?;
+            let requeue_secs = if fully_reconciled { 60 } else { 10 };
+            Ok(Action::requeue(Duration::from_secs(requeue_secs)))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            warn!(error = %msg, "mesh member reconciliation failed");
+            patch_status_with_hash(
+                &ctx.client,
+                &name,
+                namespace,
+                status_failed(&msg, member.metadata.generation),
+                "",
+            )
+            .await?;
+            Ok(Action::requeue(Duration::from_secs(30)))
+        }
+    }
+}
+
+/// Inner reconciliation logic. Returns `Ok(true)` when fully reconciled (including
+/// ServiceEntries), `Ok(false)` when partially reconciled (ServiceEntries deferred
+/// because waypoint isn't programmed yet), or `Err` on failure.
+async fn do_reconcile(
+    member: &LatticeMeshMember,
+    name: &str,
+    namespace: &str,
+    ctx: &MeshMemberContext,
+) -> Result<bool, ReconcileError> {
     ensure_namespace_ambient(&ctx.client, namespace).await?;
 
-    // Compile policies
-    let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name).compile(&name, namespace);
+    let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name).compile(name, namespace);
 
-    // Compile ingress (if configured)
     let ingress = member
         .spec
         .ingress
         .as_ref()
         .map(|ingress_spec| {
-            IngressCompiler::compile(&name, namespace, ingress_spec, &member.spec.ports)
+            IngressCompiler::compile(name, namespace, ingress_spec, &member.spec.ports)
         })
         .transpose()
         .map_err(|e| ReconcileError::Validation(format!("ingress compilation: {e}")))?;
 
-    // Compile waypoint (if policies include ServiceEntries — external or inline FQDN egress)
     let waypoint = if !policies.service_entries.is_empty() {
         Some(WaypointCompiler::compile(namespace))
     } else {
         None
     };
 
-    // Resolve all CRDs once for all apply functions
     let crds = ResolvedCrds::resolve(&ctx.registry).await;
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    // Apply waypoint BEFORE policies — ServiceEntries reference the waypoint
-    // via `istio.io/use-waypoint` and will fail to bind if it doesn't exist yet
     if let Some(ref waypoint_resources) = waypoint {
         apply_waypoint(&ctx.client, &crds, namespace, &params, waypoint_resources).await?;
     }
 
-    // If ServiceEntries need a waypoint, verify it exists before applying them.
-    // On first reconcile the waypoint was just created and won't be programmed
-    // yet — skip ServiceEntries and let the next requeue pick them up.
     let waypoint_ready = if !policies.service_entries.is_empty() {
         is_waypoint_programmed(&ctx.client, &crds, namespace).await
     } else {
@@ -183,16 +222,11 @@ pub async fn reconcile(
         apply_policies(&ctx.client, &crds, namespace, &params, &policies).await?;
     } else {
         info!("waypoint not yet present, deferring ServiceEntry creation");
-        // Apply everything except ServiceEntries
         let deferred = policies.without_service_entries();
         apply_policies(&ctx.client, &crds, namespace, &params, &deferred).await?;
     }
 
     if let Some(ref ingress_resources) = ingress {
-        // Use a per-member field manager for the Gateway so each member owns
-        // only its own listeners. The Gateway CRD uses `name` as the list map
-        // key on `spec.listeners`, so SSA merges listeners from different
-        // field managers correctly.
         let gateway_field_manager = format!("{}/{}", FIELD_MANAGER, name);
         let gateway_params = PatchParams::apply(&gateway_field_manager).force();
         apply_ingress(
@@ -209,31 +243,9 @@ pub async fn reconcile(
     let total = policies.total_count()
         + ingress.as_ref().map_or(0, |i| i.total_count())
         + waypoint.as_ref().map_or(0, |w| w.total_count());
-
     info!(resources = total, "applied mesh member resources");
 
-    // If ServiceEntries were deferred, don't update the graph hash so the next
-    // reconcile will re-run and apply them once the waypoint is programmed.
-    if !waypoint_ready {
-        info!("requeuing in 10s for deferred ServiceEntries");
-        return Ok(Action::requeue(Duration::from_secs(10)));
-    }
-
-    // Update status and graph hash annotation in a single patch
-    let scope = match member.spec.target {
-        MeshMemberTarget::Selector(_) => MeshMemberScope::Workload,
-        MeshMemberTarget::Namespace(_) => MeshMemberScope::Namespace,
-    };
-    patch_status_with_hash(
-        &ctx.client,
-        &name,
-        namespace,
-        status_ready(scope, member.metadata.generation),
-        &graph_hash,
-    )
-    .await?;
-
-    Ok(Action::requeue(Duration::from_secs(60)))
+    Ok(waypoint_ready)
 }
 
 /// Handle mesh member deletion
@@ -687,7 +699,7 @@ fn status_failed(message: &str, generation: Option<i64>) -> LatticeMeshMemberSta
         conditions: vec![Condition::new(
             "Ready",
             ConditionStatus::False,
-            "ValidationFailed",
+            "ReconcileFailed",
             message,
         )],
     }

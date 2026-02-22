@@ -18,7 +18,7 @@ use super::docker::run_kubectl;
 /// Handles API server readiness issues by retrying with exponential backoff.
 pub async fn apply_yaml_with_retry(kubeconfig: &str, yaml: &str) -> Result<(), String> {
     let retry_config = RetryConfig {
-        max_attempts: 0,
+        max_attempts: 30,
         initial_delay: Duration::from_millis(500),
         max_delay: Duration::from_secs(5),
         backoff_multiplier: 2.0,

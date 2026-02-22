@@ -70,6 +70,7 @@ pub async fn reconcile(
             REQUEUE_IN_PROGRESS_SECS,
         ))),
         RestorePhase::Completed | RestorePhase::Failed => Ok(Action::await_change()),
+        _ => Ok(Action::await_change()),
     }
 }
 

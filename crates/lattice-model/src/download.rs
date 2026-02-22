@@ -156,7 +156,9 @@ pub fn compile_download(
     };
     let pvc_name = volume_resource
         .volume_pvc_name(&job_name, VOLUME_NAME)
-        .expect("volume resource always has a PVC name");
+        .ok_or_else(|| {
+            ModelError::DownloadFailed("volume resource did not produce a PVC name".to_string())
+        })?;
 
     let access_mode = source.access_mode.as_deref().unwrap_or("ReadWriteOnce");
 
@@ -188,7 +190,7 @@ pub fn compile_download(
         source,
     );
 
-    let service_account = compile_service_account(&job_name, namespace, &owner_ref);
+    let service_account = compile_service_account(&job_name, namespace, &owner_ref)?;
 
     Ok(CompiledDownload {
         job,
@@ -347,11 +349,11 @@ fn compile_service_account(
     name: &str,
     namespace: &str,
     owner_ref: &OwnerReference,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, ModelError> {
     let mut sa = lattice_common::kube_utils::compile_service_account(name, namespace);
     sa["metadata"]["ownerReferences"] =
-        serde_json::to_value([owner_ref]).expect("OwnerReference serializes to JSON");
-    sa
+        serde_json::to_value([owner_ref]).map_err(ModelError::Serialization)?;
+    Ok(sa)
 }
 
 /// Returns (image, shell_command) for the download container

@@ -45,11 +45,12 @@ pub use mesh_member::{
     PeerAuth,
 };
 pub use model_serving::{
-    HeaderMatchValue, InferenceEngine, KvConnector, LatticeModel, LatticeModelSpec,
-    LatticeModelStatus, ModelAutoscalingBehavior, ModelAutoscalingSpec, ModelCondition, ModelMatch,
-    ModelParentRef, ModelRoleSpec, ModelRouteRule, ModelRouteSpec, ModelRoutingSpec,
-    ModelScaleDownBehavior, ModelScaleUpBehavior, ModelServingPhase, ModelSourceSpec, RateLimit,
-    RetryPolicy, SecretKeySelector, TargetModel, TrafficPolicy,
+    HeaderMatchValue, InferenceEngine, KvConnector, KvConnectorType, LatticeModel,
+    LatticeModelSpec, LatticeModelStatus, ModelAutoscalingBehavior, ModelAutoscalingSpec,
+    ModelCondition, ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
+    ModelRoutingSpec, ModelScaleDownBehavior, ModelScaleUpBehavior, ModelServingPhase,
+    ModelSourceSpec, RateLimit, RateLimitUnit, RecoveryPolicy, RetryPolicy, SecretKeySelector,
+    TargetModel, TrafficPolicy,
 };
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,

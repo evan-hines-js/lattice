@@ -478,10 +478,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use lattice_common::crd::{
-        AutoscalingMetric, ContainerSpec, InferenceEngine, KvConnector, LatticeModelSpec,
-        ModelAutoscalingSpec, ModelRoleSpec, ModelRouteRule, ModelRouteSpec, ModelRoutingSpec,
-        ModelSourceSpec, PortSpec, ResourceSpec, ResourceType, RuntimeSpec, ServicePortsSpec,
-        TargetModel, WorkloadSpec,
+        AutoscalingMetric, ContainerSpec, InferenceEngine, KvConnector, KvConnectorType,
+        LatticeModelSpec, ModelAutoscalingSpec, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
+        ModelRoutingSpec, ModelSourceSpec, PortSpec, ResourceSpec, ResourceType, RuntimeSpec,
+        ServicePortsSpec, TargetModel, WorkloadSpec,
     };
 
     fn make_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
@@ -693,7 +693,7 @@ mod tests {
 
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
-            type_: "nixl".to_string(),
+            type_: KvConnectorType::Nixl,
         });
 
         let spec = LatticeModelSpec {
@@ -737,7 +737,7 @@ mod tests {
 
         let mut routing = basic_routing();
         routing.kv_connector = Some(KvConnector {
-            type_: "nixl".to_string(),
+            type_: KvConnectorType::Nixl,
         });
 
         let spec = LatticeModelSpec {

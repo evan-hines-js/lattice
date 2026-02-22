@@ -7,6 +7,7 @@ use super::container::validate_absolute_command;
 
 /// Error action for backup hooks
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HookErrorAction {
     /// Continue backup even if hook fails (default)
     #[default]
@@ -65,6 +66,7 @@ pub struct BackupHooksSpec {
 /// Default volume backup behavior
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum VolumeBackupDefault {
     /// All volumes are backed up unless explicitly excluded (default)
     #[default]
