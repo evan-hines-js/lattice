@@ -309,9 +309,9 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
     let model_field = ms["spec"]["model"]
         .as_str()
         .unwrap_or_default();
-    if model_field != "test-model/busybox" {
+    if model_field != "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" {
         return Err(format!(
-            "ModelServer model should be 'test-model/busybox', got: '{model_field}'"
+            "ModelServer model should be 'deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B', got: '{model_field}'"
         ));
     }
 
@@ -403,9 +403,9 @@ async fn test_model_routing_created(kubeconfig: &str) -> Result<(), String> {
     let model_name = mr["spec"]["modelName"]
         .as_str()
         .unwrap_or_default();
-    if model_name != "test-model/busybox" {
+    if model_name != "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" {
         return Err(format!(
-            "ModelRoute modelName should be 'test-model/busybox', got: '{model_name}'"
+            "ModelRoute modelName should be 'deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B', got: '{model_name}'"
         ));
     }
 

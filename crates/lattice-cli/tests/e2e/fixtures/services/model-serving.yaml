@@ -16,8 +16,10 @@ spec:
       entryWorkload:
         containers:
           main:
-            image: ghcr.io/evan-hines-js/busybox:latest
-            command: ["/bin/sh", "-c", "echo 'prefill entry'; sleep 300"]
+            image: ghcr.io/yaozengzeng/vllm-mock:latest
+            command: ["python3", "app.py"]
+            variables:
+              MODEL_NAME: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
             resources:
               requests:
                 cpu: 100m
@@ -27,17 +29,6 @@ spec:
                 memory: 128Mi
             security:
               runAsUser: 65534
-              apparmorProfile: Unconfined
-        resources:
-          ghcr-creds:
-            type: secret
-            id: local-regcreds
-            params:
-              provider: lattice-local
-              refreshInterval: 1h
-      entryRuntime:
-        imagePullSecrets:
-          - ghcr-creds
     decode:
       replicas: 2
       entryWorkload:
@@ -88,8 +79,10 @@ spec:
       workerWorkload:
         containers:
           main:
-            image: ghcr.io/evan-hines-js/busybox:latest
-            command: ["/bin/sh", "-c", "mkdir -p /tmp/www && printf '# HELP gpu_kv_cache_usage KV cache usage ratio\\n# TYPE gpu_kv_cache_usage gauge\\ngpu_kv_cache_usage 0.95\\n' > /tmp/www/metrics && httpd -f -p 9090 -h /tmp/www"]
+            image: ghcr.io/yaozengzeng/vllm-mock:latest
+            command: ["python3", "app.py"]
+            variables:
+              MODEL_NAME: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
             resources:
               requests:
                 cpu: 100m
@@ -99,17 +92,9 @@ spec:
                 memory: 128Mi
             security:
               runAsUser: 65534
-              apparmorProfile: Unconfined
-        resources:
-          ghcr-creds:
-            type: secret
-            id: local-regcreds
-            params:
-              provider: lattice-local
-              refreshInterval: 1h
   routing:
     inferenceEngine: vLLM
-    model: "test-model/busybox"
+    model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
     port: 8000
     kvConnector:
       type: nixl
