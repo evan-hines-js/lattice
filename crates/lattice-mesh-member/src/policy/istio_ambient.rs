@@ -154,10 +154,13 @@ impl<'a> PolicyCompiler<'a> {
 
     /// Compile a ServiceEntry for an inline FQDN egress target.
     ///
-    /// Generates a ServiceEntry from a bare FQDN declared inline in the workload spec.
+    /// ServiceEntry names are derived from (namespace, fqdn) only — NOT per-service.
+    /// This ensures one ServiceEntry per unique host per namespace, preventing Istio
+    /// from merging duplicate hosts and losing AuthorizationPolicy targetRef bindings.
+    /// Each service creates its own AuthorizationPolicy targeting the shared SE.
     pub(super) fn compile_fqdn_egress_service_entry(
         &self,
-        service_name: &str,
+        _service_name: &str,
         namespace: &str,
         fqdn: &str,
         ports: &[u16],
@@ -179,7 +182,7 @@ impl<'a> PolicyCompiler<'a> {
             .collect();
 
         let metadata = ObjectMeta::new(
-            derived_name("se-auto-", &[namespace, service_name, fqdn]),
+            derived_name("se-auto-", &[namespace, fqdn]),
             namespace,
         )
         .with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
@@ -203,7 +206,7 @@ impl<'a> PolicyCompiler<'a> {
         fqdn: &str,
         ports: &[u16],
     ) -> AuthorizationPolicy {
-        let se_name = derived_name("se-auto-", &[namespace, &service.name, fqdn]);
+        let se_name = derived_name("se-auto-", &[namespace, fqdn]);
         let port_strings: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
 
         AuthorizationPolicy::new(
