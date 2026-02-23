@@ -13,9 +13,8 @@ use crate::types::{
     KthenaAutoscalingBehavior, KthenaAutoscalingMetric, KthenaAutoscalingPolicy,
     KthenaAutoscalingPolicyBinding, KthenaAutoscalingPolicyBindingSpec,
     KthenaAutoscalingPolicySpec, KthenaAutoscalingTarget, KthenaHomogeneousTarget,
-    KthenaMetricEndpoint, KthenaPanicPolicy, KthenaPolicyRef,
-    KthenaScaleDownBehavior, KthenaScaleUpBehavior, KthenaStablePolicy, KthenaSubTarget,
-    KthenaTargetRef, VolcanoMetadata,
+    KthenaMetricEndpoint, KthenaPanicPolicy, KthenaPolicyRef, KthenaScaleDownBehavior,
+    KthenaScaleUpBehavior, KthenaStablePolicy, KthenaSubTarget, KthenaTargetRef, VolcanoMetadata,
 };
 
 const WORKLOAD_API_VERSION: &str = "workload.serving.volcano.sh/v1alpha1";
@@ -25,6 +24,18 @@ const WORKLOAD_API_VERSION: &str = "workload.serving.volcano.sh/v1alpha1";
 pub struct CompiledAutoscaling {
     pub policies: Vec<KthenaAutoscalingPolicy>,
     pub bindings: Vec<KthenaAutoscalingPolicyBinding>,
+}
+
+/// Format an f64 as a Kubernetes resource.Quantity string.
+///
+/// Integers are rendered without a decimal point (e.g. `5.0` → `"5"`),
+/// floats keep their decimal representation (e.g. `0.8` → `"0.8"`).
+fn format_quantity(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
 }
 
 /// Compile autoscaling resources from a LatticeModel's per-role autoscaling specs.
@@ -54,7 +65,7 @@ pub fn compile_model_autoscaling(model: &LatticeModel) -> CompiledAutoscaling {
             .iter()
             .map(|m| KthenaAutoscalingMetric {
                 metric_name: m.metric.clone(),
-                target_value: m.target,
+                target_value: format_quantity(m.target),
             })
             .collect();
 
@@ -66,6 +77,7 @@ pub fn compile_model_autoscaling(model: &LatticeModel) -> CompiledAutoscaling {
                     let panic_policy =
                         if su.panic_threshold_percent.is_some() || su.panic_mode_hold.is_some() {
                             Some(KthenaPanicPolicy {
+                                period: su.period.clone().unwrap_or_else(|| "30s".to_string()),
                                 panic_threshold_percent: su.panic_threshold_percent,
                                 panic_mode_hold: su.panic_mode_hold.clone(),
                             })
@@ -238,7 +250,7 @@ mod tests {
         assert_eq!(policy.kind, "AutoscalingPolicy");
         assert_eq!(policy.spec.metrics.len(), 1);
         assert_eq!(policy.spec.metrics[0].metric_name, "gpu_kv_cache_usage");
-        assert_eq!(policy.spec.metrics[0].target_value, 0.8);
+        assert_eq!(policy.spec.metrics[0].target_value, "0.8");
         assert_eq!(policy.spec.tolerance_percent, Some(10));
 
         let binding = &compiled.bindings[0];

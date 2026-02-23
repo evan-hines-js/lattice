@@ -181,11 +181,8 @@ impl<'a> PolicyCompiler<'a> {
             })
             .collect();
 
-        let metadata = ObjectMeta::new(
-            derived_name("se-auto-", &[namespace, fqdn]),
-            namespace,
-        )
-        .with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
+        let metadata = ObjectMeta::new(derived_name("se-auto-", &[namespace, fqdn]), namespace)
+            .with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
 
         ServiceEntry::new(
             metadata,

@@ -243,15 +243,12 @@ impl LatticeMeshMemberSpec {
         }
 
         for port in &self.ports {
-            super::validate_dns_label(&port.name, "port name")
-                .map_err(crate::Error::validation)?;
+            super::validate_dns_label(&port.name, "port name").map_err(crate::Error::validation)?;
         }
 
         if let MeshMemberTarget::Namespace(ref ns) = self.target {
             if ns.is_empty() {
-                return Err(crate::Error::validation(
-                    "namespace target cannot be empty",
-                ));
+                return Err(crate::Error::validation("namespace target cannot be empty"));
             }
         }
 

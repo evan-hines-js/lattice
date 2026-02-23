@@ -763,7 +763,15 @@ fn main() {
             "controller.replicas=1",
             "--set",
             "router.replicas=1",
+            "--set",
+            "global.certManagementMode=cert-manager",
         ],
+    );
+    // Fix upstream chart bug: mutating-webhook annotation references "kthena-webhook-cert"
+    // but the Certificate resource is named "kthena-controller-manager-webhook-cert"
+    let yaml = yaml.replace(
+        "kthena-system/kthena-webhook-cert",
+        "kthena-system/kthena-controller-manager-webhook-cert",
     );
     std::fs::write(out_dir.join("kthena.yaml"), yaml).expect("write kthena.yaml");
 

@@ -18,9 +18,9 @@ use tracing::{error, info, warn};
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{JobPhase, LatticeJob, LatticeJobStatus, ProviderType};
-use lattice_common::status_check;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
+use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry};
 
 use crate::compiler::{compile_job, CompiledJob};
@@ -358,7 +358,8 @@ async fn update_status(
     message: Option<&str>,
     observed_generation: Option<i64>,
 ) -> Result<(), JobError> {
-    if status_check::is_status_unchanged(job.status.as_ref(), &phase, message, observed_generation) {
+    if status_check::is_status_unchanged(job.status.as_ref(), &phase, message, observed_generation)
+    {
         return Ok(());
     }
 

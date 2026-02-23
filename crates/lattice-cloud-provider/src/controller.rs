@@ -23,10 +23,10 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::status_check;
 use lattice_common::crd::{
     CloudProvider, CloudProviderPhase, CloudProviderStatus, CloudProviderType,
 };
+use lattice_common::status_check;
 use lattice_common::template::extract_secret_refs;
 use lattice_common::{
     ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
@@ -51,7 +51,12 @@ pub async fn reconcile(
     let generation = cp.metadata.generation.unwrap_or(0);
 
     // Skip work if spec unchanged and already Ready
-    if status_check::is_status_unchanged(cp.status.as_ref(), &CloudProviderPhase::Ready, None, Some(generation)) {
+    if status_check::is_status_unchanged(
+        cp.status.as_ref(),
+        &CloudProviderPhase::Ready,
+        None,
+        Some(generation),
+    ) {
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
@@ -203,7 +208,12 @@ async fn update_status(
     message: Option<String>,
     observed_generation: Option<i64>,
 ) -> Result<(), ReconcileError> {
-    if status_check::is_status_unchanged(cp.status.as_ref(), &phase, message.as_deref(), observed_generation) {
+    if status_check::is_status_unchanged(
+        cp.status.as_ref(),
+        &phase,
+        message.as_deref(),
+        observed_generation,
+    ) {
         debug!(cloud_provider = %cp.name_any(), "Status unchanged, skipping update");
         return Ok(());
     }

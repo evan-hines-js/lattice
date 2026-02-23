@@ -29,9 +29,9 @@ use lattice_common::crd::{
     JobPhase, LatticeJob, LatticeModel, LatticeModelStatus, ModelCondition, ModelServingPhase,
     ProviderType,
 };
-use lattice_common::status_check;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
+use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry};
 
 use crate::compiler::{compile_model, CompiledModel};

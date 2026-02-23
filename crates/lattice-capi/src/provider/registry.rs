@@ -533,9 +533,18 @@ mod tests {
 
     #[test]
     fn parse_mirror_scheme_strips_http() {
-        assert_eq!(parse_mirror_scheme("http://localhost:5555"), ("localhost:5555", true));
-        assert_eq!(parse_mirror_scheme("https://harbor.corp.com"), ("harbor.corp.com", false));
-        assert_eq!(parse_mirror_scheme("harbor.corp.com"), ("harbor.corp.com", false));
+        assert_eq!(
+            parse_mirror_scheme("http://localhost:5555"),
+            ("localhost:5555", true)
+        );
+        assert_eq!(
+            parse_mirror_scheme("https://harbor.corp.com"),
+            ("harbor.corp.com", false)
+        );
+        assert_eq!(
+            parse_mirror_scheme("harbor.corp.com"),
+            ("harbor.corp.com", false)
+        );
     }
 
     #[test]
@@ -545,9 +554,15 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         let content = files[0]["content"].as_str().unwrap();
-        assert!(content.contains("http://localhost:5555"), "should use http scheme");
+        assert!(
+            content.contains("http://localhost:5555"),
+            "should use http scheme"
+        );
         assert!(!content.contains("https://"), "should not contain https");
-        assert!(content.contains("skip_verify = true"), "should skip TLS verify");
+        assert!(
+            content.contains("skip_verify = true"),
+            "should skip TLS verify"
+        );
     }
 
     #[test]
@@ -556,7 +571,10 @@ mod tests {
         let file = generate_rke2_registries_file(&mirrors);
 
         let content = file["content"].as_str().unwrap();
-        assert!(content.contains("http://localhost:5555"), "should use http scheme");
+        assert!(
+            content.contains("http://localhost:5555"),
+            "should use http scheme"
+        );
         assert!(!content.contains("https://"), "should not contain https");
     }
 
@@ -585,7 +603,10 @@ mod tests {
 
         for m in &resolved {
             assert_eq!(m.mirror, "localhost:5555");
-            assert!(m.plain_http, "all @infra expansions should inherit plain_http");
+            assert!(
+                m.plain_http,
+                "all @infra expansions should inherit plain_http"
+            );
         }
     }
 }

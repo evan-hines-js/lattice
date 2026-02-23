@@ -85,7 +85,6 @@ pub struct ModelServing {
     pub spec: ModelServingSpec,
 }
 
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelServingSpec {
@@ -169,7 +168,6 @@ pub struct KthenaModelServer {
     pub metadata: VolcanoMetadata,
     pub spec: KthenaModelServerSpec,
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -361,7 +359,8 @@ pub struct KthenaAutoscalingPolicySpec {
 #[serde(rename_all = "camelCase")]
 pub struct KthenaAutoscalingMetric {
     pub metric_name: String,
-    pub target_value: f64,
+    /// Serialized as a string to match Kthena's resource.Quantity type
+    pub target_value: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -385,6 +384,8 @@ pub struct KthenaScaleUpBehavior {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KthenaPanicPolicy {
+    /// Required evaluation frequency (e.g. "30s")
+    pub period: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panic_threshold_percent: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -682,12 +683,13 @@ mod tests {
             spec: KthenaAutoscalingPolicySpec {
                 metrics: vec![KthenaAutoscalingMetric {
                     metric_name: "gpu_kv_cache_usage".to_string(),
-                    target_value: 0.8,
+                    target_value: "0.8".to_string(),
                 }],
                 tolerance_percent: Some(10),
                 behavior: Some(KthenaAutoscalingBehavior {
                     scale_up: Some(KthenaScaleUpBehavior {
                         panic_policy: Some(KthenaPanicPolicy {
+                            period: "30s".to_string(),
                             panic_threshold_percent: Some(200),
                             panic_mode_hold: Some("5m".to_string()),
                         }),
@@ -713,7 +715,7 @@ mod tests {
             value["spec"]["metrics"][0]["metricName"],
             "gpu_kv_cache_usage"
         );
-        assert_eq!(value["spec"]["metrics"][0]["targetValue"], 0.8);
+        assert_eq!(value["spec"]["metrics"][0]["targetValue"], "0.8");
         assert_eq!(value["spec"]["tolerancePercent"], 10);
         assert!(value["spec"]["behavior"]["scaleUp"]["panicPolicy"]
             .get("panicThresholdPercent")

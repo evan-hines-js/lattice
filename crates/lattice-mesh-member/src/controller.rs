@@ -330,11 +330,7 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
 /// ServiceEntries with `istio.io/use-waypoint` will fail to bind if applied
 /// before the waypoint is fully programmed. Returns `true` only when the
 /// Gateway has `Programmed: True` in its status conditions.
-async fn is_waypoint_programmed(
-    client: &Client,
-    crds: &ResolvedCrds,
-    namespace: &str,
-) -> bool {
+async fn is_waypoint_programmed(client: &Client, crds: &ResolvedCrds, namespace: &str) -> bool {
     let Some(ref ar) = crds.gateway else {
         return false;
     };

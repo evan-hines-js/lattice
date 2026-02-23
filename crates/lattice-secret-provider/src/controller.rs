@@ -192,7 +192,12 @@ pub async fn reconcile(
     let provider_type = sp.spec.provider_type_name().map(|s| s.to_string());
 
     // Skip full reconcile if spec unchanged and already Ready
-    if status_check::is_status_unchanged(sp.status.as_ref(), &SecretProviderPhase::Ready, None, Some(generation)) {
+    if status_check::is_status_unchanged(
+        sp.status.as_ref(),
+        &SecretProviderPhase::Ready,
+        None,
+        Some(generation),
+    ) {
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
     }
 
@@ -625,7 +630,12 @@ async fn update_status(
     provider_type: Option<String>,
     observed_generation: Option<i64>,
 ) -> Result<(), ReconcileError> {
-    if status_check::is_status_unchanged(sp.status.as_ref(), &phase, message.as_deref(), observed_generation) {
+    if status_check::is_status_unchanged(
+        sp.status.as_ref(),
+        &phase,
+        message.as_deref(),
+        observed_generation,
+    ) {
         debug!(secrets_provider = %sp.name_any(), "Status unchanged, skipping update");
         return Ok(());
     }

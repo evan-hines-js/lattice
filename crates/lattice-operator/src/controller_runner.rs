@@ -227,7 +227,8 @@ pub async fn build_service_controllers(
                 .into_iter()
                 .filter_map(|dep| {
                     let node = graph.get_service(&ns, &dep)?;
-                    node.type_.is_mesh_member()
+                    node.type_
+                        .is_mesh_member()
                         .then(|| ObjectRef::<LatticeMeshMember>::new(&dep).within(&ns))
                 })
                 .collect()

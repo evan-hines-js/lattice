@@ -519,20 +519,11 @@ pub fn inject_docker_registry_mirror(cluster: &mut LatticeCluster) {
     use lattice_common::crd::RegistryMirror;
 
     let mirrors_to_add = [
-        (
-            "docker.io",
-            super::DOCKER_REGISTRY_MIRROR_PORT,
-        ),
-        (
-            "ghcr.io",
-            super::GHCR_REGISTRY_MIRROR_PORT,
-        ),
+        ("docker.io", super::DOCKER_REGISTRY_MIRROR_PORT),
+        ("ghcr.io", super::GHCR_REGISTRY_MIRROR_PORT),
     ];
 
-    let existing = cluster
-        .spec
-        .registry_mirrors
-        .get_or_insert_with(Vec::new);
+    let existing = cluster.spec.registry_mirrors.get_or_insert_with(Vec::new);
 
     for (upstream, port) in mirrors_to_add {
         if !existing.iter().any(|m| m.upstream == upstream) {

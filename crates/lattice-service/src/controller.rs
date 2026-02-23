@@ -973,7 +973,12 @@ async fn compile_and_apply(
 
             // Skip redundant events when status hasn't changed (status update
             // itself is guarded by update_service_status's idempotency check).
-            if !status_check::is_status_unchanged(service.status.as_ref(), &ServicePhase::Failed, Some(&msg), None) {
+            if !status_check::is_status_unchanged(
+                service.status.as_ref(),
+                &ServicePhase::Failed,
+                Some(&msg),
+                None,
+            ) {
                 let event_reason = if e.is_policy_denied() {
                     match &e {
                         lattice_workload::CompilationError::SecurityOverrideDenied { .. } => {
@@ -1018,7 +1023,12 @@ async fn compile_and_apply(
         .await
     {
         let msg = e.to_string();
-        if !status_check::is_status_unchanged(service.status.as_ref(), &ServicePhase::Failed, Some(&msg), None) {
+        if !status_check::is_status_unchanged(
+            service.status.as_ref(),
+            &ServicePhase::Failed,
+            Some(&msg),
+            None,
+        ) {
             error!(error = %msg, "failed to apply compiled resources");
         } else {
             debug!(error = %msg, "apply still failing");

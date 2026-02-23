@@ -39,8 +39,8 @@ use super::helpers::{
     build_and_push_lattice_image, client_from_kubeconfig, create_with_retry,
     delete_cluster_and_wait, ensure_docker_network, extract_docker_cluster_kubeconfig,
     force_delete_docker_cluster, get_docker_kubeconfig, inject_docker_registry_mirror,
-    kubeconfig_path, load_cluster_config, load_registry_credentials, run_id,
-    watch_cluster_phases, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
+    kubeconfig_path, load_cluster_config, load_registry_credentials, run_id, watch_cluster_phases,
+    DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME,
 };
 use super::integration::setup;
 use super::providers::InfraProvider;
