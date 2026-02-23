@@ -210,6 +210,8 @@ pub enum MeshMemberPhase {
     /// Waiting for reconciliation
     #[default]
     Pending,
+    /// Core policies applied, waiting for deferred resources (e.g. ServiceEntries)
+    Progressing,
     /// Policies applied successfully
     Ready,
     /// Policy generation or application failed

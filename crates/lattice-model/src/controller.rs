@@ -120,13 +120,18 @@ pub async fn reconcile(
             if let Err(e) = apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await {
                 cleanup_graph(&model, &ctx.graph, namespace);
                 let msg = format!("Failed to apply resources: {}", e);
+                // Don't set observed_generation — this tells the Failed handler
+                // that the current generation hasn't been fully processed, so it
+                // will transition back to Pending and retry. This is correct
+                // because apply errors are typically transient (webhook not ready,
+                // API server hiccup, etc.).
                 let _ = update_status(
                     &ctx.client,
                     &name,
                     namespace,
                     ModelServingPhase::Failed,
                     Some(&msg),
-                    Some(generation),
+                    None,
                     None,
                 )
                 .await;

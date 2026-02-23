@@ -24,6 +24,7 @@ use lattice_common::crd::{
 };
 use lattice_common::graph::{compute_edge_hash, ServiceGraph};
 use lattice_common::mesh;
+use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry, ReconcileError};
 
 use crate::ingress::{IngressCompiler, WaypointCompiler};
@@ -71,8 +72,7 @@ pub async fn reconcile(
         warn!(error = %msg, "mesh member validation failed");
         patch_status_with_hash(
             &ctx.client,
-            &name,
-            namespace,
+            &member,
             status_failed(&msg, member.metadata.generation),
             "",
         )
@@ -84,44 +84,16 @@ pub async fn reconcile(
     ctx.graph.put_mesh_member(namespace, &name, &member.spec);
 
     // Cedar-gate wildcard inbound/outbound
-    if let Some(node) = ctx.graph.get_service(namespace, &name) {
-        let checks = [
-            (node.allows_all, WildcardDirection::Inbound),
-            (node.depends_all, WildcardDirection::Outbound),
-        ];
-        for (active, direction) in checks {
-            if !active {
-                continue;
-            }
-            let allowed = match &ctx.cedar {
-                Some(cedar) => {
-                    let req = MeshWildcardRequest {
-                        service_name: name.clone(),
-                        namespace: namespace.to_string(),
-                        direction,
-                    };
-                    cedar.authorize_mesh_wildcard(&req).await.is_allowed()
-                }
-                None => false, // No Cedar engine = no wildcards (default-deny)
-            };
-            if !allowed {
-                let msg = format!(
-                    "Cedar policy denied {direction} for {namespace}/{name}; \
-                     add a permit policy for Action::\"AllowWildcard\" on Mesh::\"{}\"",
-                    direction.resource_id(),
-                );
-                warn!(%msg);
-                patch_status_with_hash(
-                    &ctx.client,
-                    &name,
-                    namespace,
-                    status_failed(&msg, member.metadata.generation),
-                    "",
-                )
-                .await?;
-                return Ok(Action::requeue(Duration::from_secs(30)));
-            }
-        }
+    if let Some(denied) = check_cedar_wildcards(&name, namespace, &ctx).await {
+        warn!(msg = %denied);
+        patch_status_with_hash(
+            &ctx.client,
+            &member,
+            status_failed(&denied, member.metadata.generation),
+            "",
+        )
+        .await?;
+        return Ok(Action::requeue(Duration::from_secs(30)));
     }
 
     // Compute edge hash AFTER graph update to capture current bilateral agreements
@@ -143,30 +115,35 @@ pub async fn reconcile(
         _ => MeshMemberScope::Workload,
     };
 
-    // Do the actual work, then always set status based on outcome
     match do_reconcile(&member, &name, namespace, &ctx).await {
-        Ok(fully_reconciled) => {
-            // Record graph hash only when fully reconciled so the next
-            // reconcile re-runs when ServiceEntries were deferred.
-            let hash = if fully_reconciled { &graph_hash } else { "" };
+        Ok(true) => {
             patch_status_with_hash(
                 &ctx.client,
-                &name,
-                namespace,
+                &member,
                 status_ready(scope, member.metadata.generation),
-                hash,
+                &graph_hash,
             )
             .await?;
-            let requeue_secs = if fully_reconciled { 60 } else { 10 };
-            Ok(Action::requeue(Duration::from_secs(requeue_secs)))
+            Ok(Action::requeue(Duration::from_secs(60)))
+        }
+        Ok(false) => {
+            // ServiceEntries deferred (waypoint not programmed yet) —
+            // report Progressing so LatticeService doesn't mark itself Ready.
+            patch_status_with_hash(
+                &ctx.client,
+                &member,
+                status_progressing(scope, member.metadata.generation),
+                "",
+            )
+            .await?;
+            Ok(Action::requeue(Duration::from_secs(10)))
         }
         Err(e) => {
             let msg = e.to_string();
             warn!(error = %msg, "mesh member reconciliation failed");
             patch_status_with_hash(
                 &ctx.client,
-                &name,
-                namespace,
+                &member,
                 status_failed(&msg, member.metadata.generation),
                 "",
             )
@@ -174,6 +151,50 @@ pub async fn reconcile(
             Ok(Action::requeue(Duration::from_secs(30)))
         }
     }
+}
+
+/// Check Cedar wildcard authorization for allows_all/depends_all.
+///
+/// Uses the effective service account name (SPIFFE identity) as the Cedar principal,
+/// not the LatticeMeshMember resource name.
+///
+/// Returns `Some(denial_message)` if a wildcard flag is active but denied by policy,
+/// or `None` if all checks pass.
+async fn check_cedar_wildcards(
+    name: &str,
+    namespace: &str,
+    ctx: &MeshMemberContext,
+) -> Option<String> {
+    let node = ctx.graph.get_service(namespace, name)?;
+    let checks = [
+        (node.allows_all, WildcardDirection::Inbound),
+        (node.depends_all, WildcardDirection::Outbound),
+    ];
+    let sa_name = node.sa_name().to_string();
+    for (active, direction) in checks {
+        if !active {
+            continue;
+        }
+        let allowed = match &ctx.cedar {
+            Some(cedar) => {
+                let req = MeshWildcardRequest {
+                    service_name: sa_name.clone(),
+                    namespace: namespace.to_string(),
+                    direction,
+                };
+                cedar.authorize_mesh_wildcard(&req).await.is_allowed()
+            }
+            None => false, // No Cedar engine = no wildcards (default-deny)
+        };
+        if !allowed {
+            return Some(format!(
+                "Cedar policy denied {direction} for {namespace}/{sa_name}; \
+                 add a permit policy for Action::\"AllowWildcard\" on Mesh::\"{}\"",
+                direction.resource_id(),
+            ));
+        }
+    }
+    None
 }
 
 /// Inner reconciliation logic. Returns `Ok(true)` when fully reconciled (including
@@ -380,16 +401,22 @@ impl ResolvedCrds {
 // SSA apply helpers
 // =============================================================================
 
-/// Apply a single resource via server-side apply using DynamicObject
-async fn apply_resource(
+/// Apply a single resource via server-side apply, erroring if the CRD is not discovered.
+async fn apply_if_discovered(
     client: &Client,
     namespace: &str,
     params: &PatchParams,
     resource: &impl serde::Serialize,
-    ar: &ApiResource,
+    crd: Option<&ApiResource>,
     name: &str,
     kind: &str,
 ) -> Result<(), ReconcileError> {
+    let ar = crd.ok_or_else(|| {
+        ReconcileError::Internal(format!(
+            "{kind} CRD not installed but resource '{name}' needs applying"
+        ))
+    })?;
+
     let mut json = serde_json::to_value(resource)
         .map_err(|e| ReconcileError::Internal(format!("serialize {kind}: {e}")))?;
 
@@ -408,24 +435,6 @@ async fn apply_resource(
 
     debug!(name = %name, kind = %kind, "applied resource");
     Ok(())
-}
-
-/// Apply a resource if the CRD is discovered, error if not
-async fn apply_if_discovered(
-    client: &Client,
-    namespace: &str,
-    params: &PatchParams,
-    resource: &impl serde::Serialize,
-    crd: Option<&ApiResource>,
-    name: &str,
-    kind: &str,
-) -> Result<(), ReconcileError> {
-    match crd {
-        Some(ar) => apply_resource(client, namespace, params, resource, ar, name, kind).await,
-        None => Err(ReconcileError::Internal(format!(
-            "{kind} CRD not installed but resource '{name}' needs applying"
-        ))),
-    }
 }
 
 /// Apply all compiled policies in parallel via server-side apply.
@@ -675,6 +684,21 @@ fn is_status_current(member: &LatticeMeshMember, current_graph_hash: &str) -> bo
     generation_matches && stored_hash.map(|h| h.as_str()) == Some(current_graph_hash)
 }
 
+fn status_progressing(scope: MeshMemberScope, generation: Option<i64>) -> LatticeMeshMemberStatus {
+    LatticeMeshMemberStatus {
+        phase: MeshMemberPhase::Progressing,
+        scope: Some(scope),
+        message: Some("Waiting for waypoint to program ServiceEntries".to_string()),
+        observed_generation: generation,
+        conditions: vec![Condition::new(
+            "Ready",
+            ConditionStatus::False,
+            "WaypointPending",
+            "Waiting for waypoint to program ServiceEntries",
+        )],
+    }
+}
+
 fn status_ready(scope: MeshMemberScope, generation: Option<i64>) -> LatticeMeshMemberStatus {
     LatticeMeshMemberStatus {
         phase: MeshMemberPhase::Ready,
@@ -705,30 +729,67 @@ fn status_failed(message: &str, generation: Option<i64>) -> LatticeMeshMemberSta
     }
 }
 
-/// Patch status and graph hash annotation in a single API call.
+/// Patch graph hash annotation and status, skipping no-op updates.
 ///
-/// Combining both into one merge patch produces exactly one resourceVersion bump,
-/// which means one watch event (caught by `is_status_current`) instead of two.
+/// Compares the desired state against the member's current state and only
+/// issues API calls when something actually changed. This prevents
+/// status-update → watch-event → reconcile tight loops on persistent failures.
+///
+/// The CRD has a status subresource, so annotation and status must be patched
+/// separately. Order matters for crash consistency:
+///   1. Annotation first (optimization — controls `is_status_current` skip gate)
+///   2. Status last (user-visible commit point — phase, scope, message)
+///
+/// If we crash between the two, the next reconcile redoes the work (idempotent).
 async fn patch_status_with_hash(
     client: &Client,
-    name: &str,
-    namespace: &str,
-    status: LatticeMeshMemberStatus,
+    member: &LatticeMeshMember,
+    new_status: LatticeMeshMemberStatus,
     graph_hash: &str,
 ) -> Result<(), ReconcileError> {
-    let api: Api<LatticeMeshMember> = Api::namespaced(client.clone(), namespace);
-    let patch = serde_json::json!({
-        "metadata": { "annotations": { GRAPH_HASH_ANNOTATION: graph_hash } },
-        "status": status,
-    });
+    let name = member.name_any();
+    let namespace = member.metadata.namespace.as_deref().unwrap_or_default();
 
-    api.patch(
-        name,
-        &PatchParams::apply(FIELD_MANAGER),
-        &Patch::Merge(&patch),
-    )
-    .await
-    .map_err(|e| ReconcileError::kube("patch status", e))?;
+    let current_hash = member
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(GRAPH_HASH_ANNOTATION))
+        .map(|h| h.as_str())
+        .unwrap_or_default();
+
+    let status_unchanged = status_check::is_status_unchanged(
+        member.status.as_ref(),
+        &new_status.phase,
+        new_status.message.as_deref(),
+        new_status.observed_generation,
+    );
+
+    if current_hash == graph_hash && status_unchanged {
+        debug!("status and graph hash unchanged, skipping patch");
+        return Ok(());
+    }
+
+    let api: Api<LatticeMeshMember> = Api::namespaced(client.clone(), namespace);
+    let params = PatchParams::apply(FIELD_MANAGER);
+
+    // 1. Graph hash annotation (skip if unchanged)
+    if current_hash != graph_hash {
+        let annotation_patch = serde_json::json!({
+            "metadata": { "annotations": { GRAPH_HASH_ANNOTATION: graph_hash } },
+        });
+        api.patch(&name, &params, &Patch::Merge(&annotation_patch))
+            .await
+            .map_err(|e| ReconcileError::kube("patch annotation", e))?;
+    }
+
+    // 2. Status (skip if unchanged)
+    if !status_unchanged {
+        let status_patch = serde_json::json!({ "status": new_status });
+        api.patch_status(&name, &params, &Patch::Merge(&status_patch))
+            .await
+            .map_err(|e| ReconcileError::kube("patch status", e))?;
+    }
 
     Ok(())
 }

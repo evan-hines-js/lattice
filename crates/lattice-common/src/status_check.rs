@@ -5,9 +5,9 @@
 //! stamps a fresh `lastTransitionTime`), so controllers must skip no-op updates.
 
 use crate::crd::{
-    CloudProviderPhase, CloudProviderStatus, JobPhase, LatticeJobStatus, LatticeModelStatus,
-    LatticeServiceStatus, ModelServingPhase, SecretProviderPhase, SecretProviderStatus,
-    ServicePhase,
+    CloudProviderPhase, CloudProviderStatus, JobPhase, LatticeJobStatus, LatticeMeshMemberStatus,
+    LatticeModelStatus, LatticeServiceStatus, MeshMemberPhase, ModelServingPhase,
+    SecretProviderPhase, SecretProviderStatus, ServicePhase,
 };
 
 /// Trait for CRD status structs that carry phase, message, and observed generation.
@@ -61,6 +61,19 @@ impl StatusFields for CloudProviderStatus {
 
 impl StatusFields for LatticeServiceStatus {
     type Phase = ServicePhase;
+    fn phase(&self) -> &Self::Phase {
+        &self.phase
+    }
+    fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+    fn observed_generation(&self) -> Option<i64> {
+        self.observed_generation
+    }
+}
+
+impl StatusFields for LatticeMeshMemberStatus {
+    type Phase = MeshMemberPhase;
     fn phase(&self) -> &Self::Phase {
         &self.phase
     }
