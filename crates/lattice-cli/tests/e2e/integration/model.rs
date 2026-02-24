@@ -19,6 +19,7 @@ use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     apply_yaml_with_retry, delete_namespace, ensure_namespace, load_fixture_config, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
+    DEFAULT_DOWNLOADER_IMAGE,
 };
 
 const MODEL_NAMESPACE: &str = "serving";
@@ -123,16 +124,16 @@ async fn test_model_serving_created(kubeconfig: &str) -> Result<(), String> {
         return Err("decode role: workerTemplate is null".to_string());
     }
 
-    // Verify prefill role: replicas=1, no workerReplicas/workerTemplate
+    // Verify prefill role: replicas=1, workerReplicas=0 (no workers), no workerTemplate
     if prefill["replicas"].as_u64() != Some(1) {
         return Err(format!(
             "prefill role: expected replicas=1, got: {}",
             prefill["replicas"]
         ));
     }
-    if !prefill["workerReplicas"].is_null() {
+    if prefill["workerReplicas"].as_u64() != Some(0) {
         return Err(format!(
-            "prefill role: expected no workerReplicas, got: {}",
+            "prefill role: expected workerReplicas=0, got: {}",
             prefill["workerReplicas"]
         ));
     }
@@ -490,7 +491,10 @@ async fn test_model_autoscaling_created(kubeconfig: &str) -> Result<(), String> 
             "Expected metric 'gpu_kv_cache_usage', got: '{metric_name}'"
         ));
     }
-    let target_value = metrics[0]["targetValue"].as_f64().unwrap_or(0.0);
+    let target_value = metrics[0]["targetValue"]
+        .as_str()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
     if (target_value - 0.8).abs() > 0.001 {
         return Err(format!("Expected target value 0.8, got: {target_value}"));
     }
@@ -777,13 +781,13 @@ async fn test_model_download_job(kubeconfig: &str) -> Result<(), String> {
 
     let task = &tasks["download"];
 
-    // Verify container image (HuggingFace uses python:3.11-slim)
+    // Verify container image (unified lattice-downloader image)
     let image = task["workload"]["containers"]["download"]["image"]
         .as_str()
         .unwrap_or_default();
-    if image != "python:3.11-slim" {
+    if image != DEFAULT_DOWNLOADER_IMAGE {
         return Err(format!(
-            "Download container image should be 'python:3.11-slim', got: '{image}'"
+            "Download container image should be '{DEFAULT_DOWNLOADER_IMAGE}', got: '{image}'"
         ));
     }
 
@@ -791,7 +795,7 @@ async fn test_model_download_job(kubeconfig: &str) -> Result<(), String> {
     let cmd = task["workload"]["containers"]["download"]["command"][2]
         .as_str()
         .unwrap_or_default();
-    if !cmd.contains("huggingface-cli download hf-internal-testing/tiny-random-LlamaForCausalLM") {
+    if !cmd.contains("hf download hf-internal-testing/tiny-random-LlamaForCausalLM") {
         return Err(format!(
             "Download command should reference 'hf-internal-testing/tiny-random-LlamaForCausalLM', got: '{cmd}'"
         ));
@@ -821,7 +825,7 @@ async fn test_model_download_job(kubeconfig: &str) -> Result<(), String> {
         ));
     }
 
-    info!("[Model] LatticeJob verified: python:3.11-slim, huggingface-cli download, volume + egress resources");
+    info!("[Model] LatticeJob verified: lattice-downloader image, hf download, volume + egress resources");
     Ok(())
 }
 
@@ -1026,14 +1030,13 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
         return Err("No role LatticeMeshMember resources found (only download)".to_string());
     }
 
+    let empty = vec![];
+
     for item in &role_items {
         let mm_name = item["metadata"]["name"].as_str().unwrap_or("unknown");
 
         // Check that the Kthena router is in allowed_callers
-        let empty_arr = vec![];
-        let callers = item["spec"]["allowedCallers"]
-            .as_array()
-            .unwrap_or(&empty_arr);
+        let callers = item["spec"]["allowedCallers"].as_array().unwrap_or(&empty);
         let has_router = callers.iter().any(|c| {
             c["name"].as_str() == Some("kthena-router")
                 && c["namespace"].as_str() == Some("kthena-system")
@@ -1046,8 +1049,7 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
         }
 
         // Check inference port is present
-        let empty_ports = vec![];
-        let ports = item["spec"]["ports"].as_array().unwrap_or(&empty_ports);
+        let ports = item["spec"]["ports"].as_array().unwrap_or(&empty);
         let has_inference_port = ports.iter().any(|p| p["port"].as_u64() == Some(8000));
         if !has_inference_port {
             return Err(format!(
@@ -1076,43 +1078,39 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
     let decode_entry_name = format!("{}-decode", MODEL_NAME);
     let decode_mm = items
         .iter()
-        .find(|item| item["metadata"]["name"].as_str() == Some(&decode_entry_name));
-    if let Some(mm) = decode_mm {
-        let empty_arr = vec![];
-        let callers = mm["spec"]["allowedCallers"]
-            .as_array()
-            .unwrap_or(&empty_arr);
-        let has_autoscaler = callers.iter().any(|c| {
-            c["name"].as_str() == Some("kthena-autoscaler")
-                && c["namespace"].as_str() == Some("kthena-system")
-        });
-        if !has_autoscaler {
-            return Err(format!(
-                "LatticeMeshMember '{}' is missing Kthena autoscaler in allowedCallers",
-                decode_entry_name
-            ));
-        }
-
-        let empty_ports = vec![];
-        let ports = mm["spec"]["ports"].as_array().unwrap_or(&empty_ports);
-        let has_metrics_port = ports.iter().any(|p| p["port"].as_u64() == Some(9090));
-        if !has_metrics_port {
-            return Err(format!(
-                "LatticeMeshMember '{}' is missing metrics port 9090 (from entry_workload service ports)",
-                decode_entry_name
-            ));
-        }
-
-        info!(
-            "[Model] MeshMember '{}': Kthena autoscaler allowed + metrics port 9090 present",
-            decode_entry_name
-        );
-    } else {
-        return Err(format!(
+        .find(|item| item["metadata"]["name"].as_str() == Some(&decode_entry_name))
+        .ok_or(format!(
             "LatticeMeshMember '{}' not found for autoscaler verification",
+            decode_entry_name
+        ))?;
+
+    let callers = decode_mm["spec"]["allowedCallers"]
+        .as_array()
+        .unwrap_or(&empty);
+    let has_autoscaler = callers.iter().any(|c| {
+        c["name"].as_str() == Some("kthena-autoscaler")
+            && c["namespace"].as_str() == Some("kthena-system")
+    });
+    if !has_autoscaler {
+        return Err(format!(
+            "LatticeMeshMember '{}' is missing Kthena autoscaler in allowedCallers",
             decode_entry_name
         ));
     }
+
+    let ports = decode_mm["spec"]["ports"].as_array().unwrap_or(&empty);
+    let has_metrics_port = ports.iter().any(|p| p["port"].as_u64() == Some(9090));
+    if !has_metrics_port {
+        return Err(format!(
+            "LatticeMeshMember '{}' is missing metrics port 9090 (from entry_workload service ports)",
+            decode_entry_name
+        ));
+    }
+
+    info!(
+        "[Model] MeshMember '{}': Kthena autoscaler allowed + metrics port 9090 present",
+        decode_entry_name
+    );
 
     info!("[Model] All mesh members correctly configured for Kthena routing, autoscaling, and PD disaggregation");
     Ok(())

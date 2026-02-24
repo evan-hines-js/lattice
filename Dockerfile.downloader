@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir \
+    huggingface-hub \
+    awscli \
+    gsutil
+
+# Writable home for tool caches (root filesystem is read-only at runtime)
+ENV HOME=/tmp
+
+# No need for root — all writes go to PVC mount and /tmp emptyDir
+USER 65534:65534
+
+ENTRYPOINT ["/bin/sh", "-c"]

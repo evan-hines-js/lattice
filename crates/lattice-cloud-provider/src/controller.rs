@@ -70,7 +70,7 @@ pub async fn reconcile(
                 client,
                 &cp,
                 CloudProviderPhase::Ready,
-                None,
+                Some("Credentials reconciled successfully".to_string()),
                 Some(generation),
             )
             .await?;

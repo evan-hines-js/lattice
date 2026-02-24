@@ -58,6 +58,9 @@ pub struct SecretProviderSpec {
 }
 
 /// SecretProvider status
+///
+/// All optional fields serialize as `null` (no `skip_serializing_if`) so that
+/// merge-patch status updates correctly clear stale values.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretProviderStatus {
@@ -66,19 +69,19 @@ pub struct SecretProviderStatus {
     pub phase: SecretProviderPhase,
 
     /// Human-readable message
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub message: Option<String>,
 
     /// Last time connection was validated
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub last_validated: Option<String>,
 
     /// Detected provider type (first key of spec.provider, e.g. "vault", "aws")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub provider_type: Option<String>,
 
     /// Generation of the spec that was last reconciled
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub observed_generation: Option<i64>,
 }
 

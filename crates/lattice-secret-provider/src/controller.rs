@@ -645,25 +645,20 @@ async fn update_status(
         .namespace()
         .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
 
-    // Build the patch manually instead of serializing SecretProviderStatus,
-    // because Merge patches need explicit `null` to clear fields — serde's
-    // `skip_serializing_if = "Option::is_none"` omits them entirely, which
-    // leaves stale values in place and causes a reconcile loop.
-    let patch = serde_json::json!({
-        "status": {
-            "phase": phase,
-            "message": message,
-            "lastValidated": chrono::Utc::now().to_rfc3339(),
-            "providerType": provider_type,
-            "observedGeneration": observed_generation,
-        }
-    });
+    let status = lattice_common::crd::SecretProviderStatus {
+        phase,
+        message,
+        last_validated: Some(chrono::Utc::now().to_rfc3339()),
+        provider_type,
+        observed_generation,
+    };
 
-    let api: Api<SecretProvider> = Api::namespaced(client.clone(), &namespace);
-    api.patch_status(
+    lattice_common::kube_utils::patch_resource_status::<SecretProvider>(
+        client,
         &name,
-        &PatchParams::apply(FIELD_MANAGER),
-        &Patch::Merge(&patch),
+        &namespace,
+        &status,
+        FIELD_MANAGER,
     )
     .await
     .map_err(|e| ReconcileError::kube("failed to update status", e))?;

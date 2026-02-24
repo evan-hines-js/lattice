@@ -13,7 +13,6 @@ spec:
     security:
       apparmorProfile: Unconfined
       allowedBinaries: ["*"]
-      runAsNonRoot: false
   roles:
     prefill:
       replicas: 1
@@ -33,6 +32,7 @@ spec:
                 memory: 128Mi
             security:
               runAsUser: 65534
+              apparmorProfile: Unconfined
     decode:
       replicas: 2
       entryWorkload:
@@ -40,6 +40,8 @@ spec:
           main:
             image: ghcr.io/evan-hines-js/busybox:latest
             command: ["/bin/sh", "-c", "mkdir -p /tmp/www && printf '# HELP gpu_kv_cache_usage KV cache usage ratio\\n# TYPE gpu_kv_cache_usage gauge\\ngpu_kv_cache_usage 0.95\\n' > /tmp/www/metrics && httpd -f -p 9090 -h /tmp/www"]
+            volumes:
+              /tmp: {}
             resources:
               requests:
                 cpu: 100m
@@ -96,6 +98,7 @@ spec:
                 memory: 128Mi
             security:
               runAsUser: 65534
+              apparmorProfile: Unconfined
   routing:
     inferenceEngine: vLLM
     model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"

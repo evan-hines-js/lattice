@@ -311,40 +311,61 @@ fn service_fixtures_dir() -> PathBuf {
     workspace_root().join("crates/lattice-cli/tests/e2e/fixtures/services")
 }
 
-/// Build and push the lattice Docker image
-pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
-    info!("Building lattice Docker image...");
-
-    let output = std::process::Command::new("./scripts/dev/docker-build.sh")
-        .args(["-t", image])
+/// Run a docker build command and return success/failure
+fn docker_build(cmd: &str, args: &[&str], label: &str) -> Result<(), String> {
+    let output = std::process::Command::new(cmd)
+        .args(args)
         .env("DOCKER_BUILDKIT", "1")
         .current_dir(workspace_root())
         .output()
-        .map_err(|e| format!("Failed to run docker build: {}", e))?;
+        .map_err(|e| format!("docker build ({label}) failed: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
-            "Docker build failed: {}",
+            "docker build ({label}) failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+    Ok(())
+}
 
-    info!("Image built successfully");
-    info!("Pushing image to registry...");
-
+/// Push a docker image to its registry
+fn docker_push(image: &str) -> Result<(), String> {
     let output = std::process::Command::new("docker")
         .args(["push", image])
         .output()
-        .map_err(|e| format!("Failed to push image: {}", e))?;
+        .map_err(|e| format!("docker push failed: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
-            "Docker push failed: {}",
+            "docker push failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+    Ok(())
+}
 
-    info!("Image pushed successfully");
+/// Build and push the lattice Docker image
+pub async fn build_and_push_lattice_image(image: &str) -> Result<(), String> {
+    info!("Building lattice Docker image...");
+    docker_build("./scripts/dev/docker-build.sh", &["-t", image], "lattice")?;
+    info!("Pushing lattice image to registry...");
+    docker_push(image)?;
+    info!("Lattice image pushed successfully");
+    Ok(())
+}
+
+/// Build and push the lattice-downloader Docker image
+pub async fn build_and_push_downloader_image(image: &str) -> Result<(), String> {
+    info!("Building lattice-downloader Docker image...");
+    docker_build(
+        "docker",
+        &["build", "-f", "Dockerfile.downloader", "-t", image, "."],
+        "downloader",
+    )?;
+    info!("Pushing downloader image to registry...");
+    docker_push(image)?;
+    info!("Downloader image pushed successfully");
     Ok(())
 }
 

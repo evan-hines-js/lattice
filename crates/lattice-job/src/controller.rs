@@ -97,6 +97,16 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                 Err(e) => {
                     // Compilation failed — don't leave partial graph entries
                     cleanup_graph(&job, &ctx.graph, namespace);
+                    let msg = format!("Failed to compile job: {}", e);
+                    let _ = update_status(
+                        &ctx.client,
+                        &job,
+                        namespace,
+                        JobPhase::Failed,
+                        Some(&msg),
+                        None,
+                    )
+                    .await;
                     return Err(e);
                 }
             };
@@ -104,20 +114,34 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             // Register tasks in the graph after successful compilation
             register_graph(&job, &ctx.graph, namespace);
 
-            apply_compiled_job(
+            if let Err(e) = apply_compiled_job(
                 &ctx.client,
                 namespace,
                 &compiled,
                 &ctx.registry,
                 &volcano_api,
             )
-            .await?;
+            .await
+            {
+                cleanup_graph(&job, &ctx.graph, namespace);
+                let msg = format!("Failed to apply resources: {}", e);
+                let _ = update_status(
+                    &ctx.client,
+                    &job,
+                    namespace,
+                    JobPhase::Failed,
+                    Some(&msg),
+                    None,
+                )
+                .await;
+                return Err(e);
+            }
             update_status(
                 &ctx.client,
                 &job,
                 namespace,
                 JobPhase::Running,
-                None,
+                Some("Job submitted to Volcano"),
                 Some(generation),
             )
             .await?;

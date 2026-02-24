@@ -154,6 +154,9 @@ impl LatticeServiceSpec {
 // =============================================================================
 
 /// Status for a LatticeService
+///
+/// All optional fields serialize as `null` (no `skip_serializing_if`) so that
+/// merge-patch status updates correctly clear stale values.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeServiceStatus {
@@ -162,23 +165,23 @@ pub struct LatticeServiceStatus {
     pub phase: ServicePhase,
 
     /// Human-readable message about current state
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub message: Option<String>,
 
     /// Conditions representing the service state
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub conditions: Vec<Condition>,
 
     /// Last time manifests were compiled
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub last_compiled_at: Option<DateTime<Utc>>,
 
     /// Observed generation for optimistic concurrency
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub observed_generation: Option<i64>,
 
     /// Resolved dependency URLs
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub resolved_dependencies: BTreeMap<String, String>,
 }
 

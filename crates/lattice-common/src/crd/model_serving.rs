@@ -538,6 +538,9 @@ impl Default for LatticeModelSpec {
 }
 
 /// Status of a LatticeModel serving workload
+///
+/// All optional fields serialize as `null` (no `skip_serializing_if`) so that
+/// merge-patch status updates correctly clear stale values.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeModelStatus {
@@ -546,15 +549,15 @@ pub struct LatticeModelStatus {
     pub phase: ModelServingPhase,
 
     /// Human-readable message about current state
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub message: Option<String>,
 
     /// Generation observed by the controller
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub observed_generation: Option<i64>,
 
     /// Conditions reflecting detailed status from ModelServing
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub conditions: Option<Vec<ModelCondition>>,
 }
 

@@ -155,6 +155,9 @@ pub struct OpenStackProviderConfig {
 }
 
 /// CloudProvider status
+///
+/// All optional fields serialize as `null` (no `skip_serializing_if`) so that
+/// merge-patch status updates correctly clear stale values.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudProviderStatus {
@@ -163,11 +166,11 @@ pub struct CloudProviderStatus {
     pub phase: CloudProviderPhase,
 
     /// Human-readable message
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub message: Option<String>,
 
     /// Last time credentials were validated
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub last_validated: Option<String>,
 
     /// Number of clusters using this provider
@@ -175,7 +178,7 @@ pub struct CloudProviderStatus {
     pub cluster_count: u32,
 
     /// Generation of the spec that was last reconciled
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub observed_generation: Option<i64>,
 }
 

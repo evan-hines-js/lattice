@@ -47,10 +47,10 @@ use lattice_common::crd::LatticeCluster;
 use super::super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::super::context::{ClusterLevel, InfraContext};
 use super::super::helpers::{
-    build_and_push_lattice_image, client_from_kubeconfig, create_with_retry, ensure_docker_network,
-    get_docker_kubeconfig, inject_docker_registry_mirror, kubeconfig_path, load_cluster_config,
-    load_registry_credentials, run_cmd, wait_for_operator_ready, watch_cluster_phases,
-    ProxySession,
+    build_and_push_downloader_image, build_and_push_lattice_image, client_from_kubeconfig,
+    create_with_retry, ensure_docker_network, get_docker_kubeconfig, inject_docker_registry_mirror,
+    kubeconfig_path, load_cluster_config, load_registry_credentials, run_cmd,
+    wait_for_operator_ready, watch_cluster_phases, ProxySession,
 };
 use super::super::providers::InfraProvider;
 use super::{capi, cedar, scaling};
@@ -60,7 +60,8 @@ use super::{capi, cedar, scaling};
 // =============================================================================
 
 use super::super::helpers::{
-    DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+    DEFAULT_DOWNLOADER_IMAGE, DEFAULT_LATTICE_IMAGE, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME,
+    WORKLOAD_CLUSTER_NAME,
 };
 
 /// Configuration for infrastructure setup
@@ -245,10 +246,12 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // Opt-in cleanup of orphaned clusters from previous failed runs
     cleanup_orphan_bootstrap_clusters().await;
 
-    // Build image if configured
+    // Build images if configured
     if config.build_image {
         info!("[Setup] Building and pushing Lattice image...");
         build_and_push_lattice_image(&config.lattice_image).await?;
+        info!("[Setup] Building and pushing downloader image...");
+        build_and_push_downloader_image(DEFAULT_DOWNLOADER_IMAGE).await?;
     }
 
     // Load cluster configurations
@@ -584,6 +587,8 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
     if config.build_image {
         info!("[Setup] Building and pushing Lattice image...");
         build_and_push_lattice_image(&config.lattice_image).await?;
+        info!("[Setup] Building and pushing downloader image...");
+        build_and_push_downloader_image(DEFAULT_DOWNLOADER_IMAGE).await?;
     }
 
     let (_, mut mgmt_cluster) =

@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use tracing::warn;
 
-use crate::crd::{ResourceSpec, ResourceType, WorkloadSpec};
+use crate::crd::{EgressRule, ResourceSpec, ResourceType, WorkloadSpec};
 use crate::graph::ServiceGraph;
 
 use super::context::ResourceOutputs;
@@ -203,6 +203,14 @@ impl ResourceProvisioner for ExternalServiceProvisioner {
         resource: &ResourceSpec,
         _ctx: &ProvisionerContext<'_>,
     ) -> Result<ResourceOutputs, TemplateError> {
+        // Entity-based resources (e.g. entity:world:443) are mesh egress policy
+        // declarations — they don't produce template variables.
+        if let Some(id) = resource.id.as_deref() {
+            if EgressRule::from_entity_id(id).is_some() {
+                return Ok(ResourceOutputs::default());
+            }
+        }
+
         // Parse inline params to get endpoints
         let params = resource
             .external_service_params()

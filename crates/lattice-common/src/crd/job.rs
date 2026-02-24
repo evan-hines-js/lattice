@@ -161,6 +161,9 @@ impl Default for LatticeJobSpec {
 }
 
 /// Status of a LatticeJob
+///
+/// All optional fields serialize as `null` (no `skip_serializing_if`) so that
+/// merge-patch status updates correctly clear stale values.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeJobStatus {
@@ -169,11 +172,11 @@ pub struct LatticeJobStatus {
     pub phase: JobPhase,
 
     /// Human-readable message about current state
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub message: Option<String>,
 
     /// Generation of the spec that was last reconciled
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub observed_generation: Option<i64>,
 }
 

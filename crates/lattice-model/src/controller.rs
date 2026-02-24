@@ -8,7 +8,8 @@
 //! - Layer 1: ConfigMaps, Secrets, ExternalSecrets, PVCs, MeshMembers, TracingPolicies
 //! - Layer 2: ModelServing (only after mesh/security is ready)
 //! - Layer 3: Routing — ModelServer + ModelRoutes
-//! - Layer 4: Autoscaling — AutoscalingPolicy + AutoscalingPolicyBinding
+//! - Layer 4a: Autoscaling — AutoscalingPolicy (must exist before bindings)
+//! - Layer 4b: Autoscaling — AutoscalingPolicyBinding (references policies)
 //!
 //! When `modelSource` is set, pods are created with a `lattice.dev/model-download`
 //! scheduling gate that keeps them `SchedulingGated` (zero resource usage, no GPU
@@ -142,7 +143,7 @@ pub async fn reconcile(
                 &name,
                 namespace,
                 ModelServingPhase::Loading,
-                None,
+                Some("Resources applied, waiting for model serving readiness"),
                 Some(generation),
                 None,
             )
@@ -285,7 +286,7 @@ pub async fn reconcile(
                     &name,
                     namespace,
                     ModelServingPhase::Pending,
-                    None,
+                    Some("Retrying after failure"),
                     None,
                     None,
                 )
@@ -459,28 +460,31 @@ async fn apply_layers(
         layer3.run("layer-3-routing").await?;
     }
 
-    // Layer 4: Autoscaling — AutoscalingPolicy + AutoscalingPolicyBinding
+    // Layer 4: Autoscaling — policies first, then bindings.
+    // The Volcano admission webhook validates that the referenced AutoscalingPolicy
+    // exists when an AutoscalingPolicyBinding is created, so policies must be
+    // applied before bindings.
     if let Some(ref autoscaling) = compiled.autoscaling {
-        let mut layer4 = ApplyBatch::new(client.clone(), namespace, params);
-
         if let Some(ref ap_ar) = registry.resolve(CrdKind::AutoscalingPolicy).await {
+            let mut layer4a = ApplyBatch::new(client.clone(), namespace, params);
             for policy in &autoscaling.policies {
-                layer4.push("AutoscalingPolicy", &policy.metadata.name, policy, ap_ar)?;
+                layer4a.push("AutoscalingPolicy", &policy.metadata.name, policy, ap_ar)?;
             }
+            layer4a.run("layer-4a-autoscaling-policies").await?;
         }
 
         if let Some(ref apb_ar) = registry.resolve(CrdKind::AutoscalingPolicyBinding).await {
+            let mut layer4b = ApplyBatch::new(client.clone(), namespace, params);
             for binding in &autoscaling.bindings {
-                layer4.push(
+                layer4b.push(
                     "AutoscalingPolicyBinding",
                     &binding.metadata.name,
                     binding,
                     apb_ar,
                 )?;
             }
+            layer4b.run("layer-4b-autoscaling-bindings").await?;
         }
-
-        layer4.run("layer-4-autoscaling").await?;
     }
 
     info!(
@@ -749,18 +753,18 @@ async fn update_status(
     observed_generation: Option<i64>,
     conditions: Option<Vec<ModelCondition>>,
 ) -> Result<(), ModelError> {
-    let api: Api<LatticeModel> = Api::namespaced(client.clone(), namespace);
     let status = LatticeModelStatus {
         phase,
         message: message.map(|m| m.to_string()),
         observed_generation,
         conditions,
     };
-    let status_patch = serde_json::json!({ "status": status });
-    api.patch_status(
+    lattice_common::kube_utils::patch_resource_status::<LatticeModel>(
+        client,
         name,
-        &PatchParams::apply("lattice-model-controller"),
-        &Patch::Merge(&status_patch),
+        namespace,
+        &status,
+        "lattice-model-controller",
     )
     .await?;
     Ok(())

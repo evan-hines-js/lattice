@@ -184,6 +184,9 @@ impl EgressRule {
 // =============================================================================
 
 /// Status of a LatticeMeshMember
+///
+/// All optional fields serialize as `null` (no `skip_serializing_if`) so that
+/// merge-patch status updates correctly clear stale values.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeMeshMemberStatus {
@@ -191,13 +194,13 @@ pub struct LatticeMeshMemberStatus {
     #[serde(default)]
     pub phase: MeshMemberPhase,
     /// Workload or Namespace scope
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub scope: Option<MeshMemberScope>,
     /// Human-readable message
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub message: Option<String>,
     /// Last observed generation
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub observed_generation: Option<i64>,
     /// Status conditions
     #[serde(default)]

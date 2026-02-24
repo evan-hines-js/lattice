@@ -13,10 +13,10 @@
 //! with HTTPS egress. The token secret (when configured) uses the `lattice-local` ESO
 //! provider and `env_from` to inject credentials.
 //!
-//! Uses existing public container images per URI scheme:
-//! - `hf://` → `python:3.11-slim` (installs `huggingface-hub`, runs `huggingface-cli download`)
-//! - `s3://` → `amazon/aws-cli` (runs `aws s3 sync`)
-//! - `gs://` → `google/cloud-sdk:slim` (runs `gsutil -m rsync -r`)
+//! Uses a single `lattice-downloader` image with all tools pre-installed:
+//! - `hf://` → `hf download`
+//! - `s3://` → `aws s3 sync`
+//! - `gs://` → `gsutil -m rsync -r`
 
 use std::collections::BTreeMap;
 
@@ -41,6 +41,7 @@ pub const DOWNLOAD_BACKOFF_LIMIT: u32 = 3;
 
 const DEFAULT_MOUNT_PATH: &str = "/models";
 const VOLUME_NAME: &str = "model-cache";
+const DEFAULT_DOWNLOADER_IMAGE: &str = "ghcr.io/evan-hines-js/lattice-downloader:latest";
 
 /// Compiled download resources for a LatticeModel
 #[derive(Debug)]
@@ -89,42 +90,28 @@ struct ParsedUri {
 }
 
 fn parse_uri(uri: &str) -> Result<ParsedUri, ModelError> {
-    if let Some(path) = uri.strip_prefix("hf://") {
-        if path.is_empty() {
-            return Err(ModelError::InvalidModelUri(
-                "hf:// URI must include a repository path".to_string(),
-            ));
-        }
-        Ok(ParsedUri {
-            scheme: UriScheme::HuggingFace,
-            path: path.to_string(),
-        })
-    } else if let Some(path) = uri.strip_prefix("s3://") {
-        if path.is_empty() {
-            return Err(ModelError::InvalidModelUri(
-                "s3:// URI must include a bucket path".to_string(),
-            ));
-        }
-        Ok(ParsedUri {
-            scheme: UriScheme::S3,
-            path: path.to_string(),
-        })
-    } else if let Some(path) = uri.strip_prefix("gs://") {
-        if path.is_empty() {
-            return Err(ModelError::InvalidModelUri(
-                "gs:// URI must include a bucket path".to_string(),
-            ));
-        }
-        Ok(ParsedUri {
-            scheme: UriScheme::Gcs,
-            path: path.to_string(),
-        })
+    let (scheme, path) = if let Some(p) = uri.strip_prefix("hf://") {
+        (UriScheme::HuggingFace, p)
+    } else if let Some(p) = uri.strip_prefix("s3://") {
+        (UriScheme::S3, p)
+    } else if let Some(p) = uri.strip_prefix("gs://") {
+        (UriScheme::Gcs, p)
     } else {
-        Err(ModelError::InvalidModelUri(format!(
-            "unsupported URI scheme (expected hf://, s3://, or gs://): {}",
-            uri
-        )))
+        return Err(ModelError::InvalidModelUri(format!(
+            "unsupported URI scheme (expected hf://, s3://, or gs://): {uri}"
+        )));
+    };
+
+    if path.is_empty() {
+        return Err(ModelError::InvalidModelUri(format!(
+            "empty path in URI: {uri}"
+        )));
     }
+
+    Ok(ParsedUri {
+        scheme,
+        path: path.to_string(),
+    })
 }
 
 /// Compile model download resources from a ModelSourceSpec.
@@ -285,7 +272,7 @@ fn compile_lattice_job(
         env_from.push("token".to_string());
     }
 
-    // Container with volume mount and download command
+    // Container with volume mounts and download command
     let mut volumes = BTreeMap::new();
     volumes.insert(
         mount_path.to_string(),
@@ -297,6 +284,8 @@ fn compile_lattice_job(
             ..Default::default()
         },
     );
+    // Writable /tmp for tool caches (root filesystem is read-only, HOME=/tmp is baked into the image)
+    volumes.insert("/tmp".to_string(), VolumeMount::default());
 
     let mut containers = BTreeMap::new();
     containers.insert(
@@ -362,37 +351,19 @@ fn download_command(
     mount_path: &str,
     custom_image: Option<&str>,
 ) -> (String, String) {
-    match parsed.scheme {
-        UriScheme::HuggingFace => {
-            let repo_id = &parsed.path;
-            // Derive local dir name from repo_id (e.g. "Qwen/Qwen3-8B" → "Qwen3-8B")
-            let local_name = repo_id.rsplit('/').next().unwrap_or(repo_id);
-            let image = custom_image.unwrap_or("python:3.11-slim").to_string();
-            let cmd = format!(
-                "pip install -q huggingface-hub && huggingface-cli download {} --local-dir {}/{}",
-                repo_id, mount_path, local_name
-            );
-            (image, cmd)
-        }
-        UriScheme::S3 => {
-            let local_name = parsed.path.rsplit('/').next().unwrap_or("model");
-            let image = custom_image.unwrap_or("amazon/aws-cli:latest").to_string();
-            let cmd = format!(
-                "aws s3 sync s3://{} {}/{}",
-                parsed.path, mount_path, local_name
-            );
-            (image, cmd)
-        }
-        UriScheme::Gcs => {
-            let local_name = parsed.path.rsplit('/').next().unwrap_or("model");
-            let image = custom_image.unwrap_or("google/cloud-sdk:slim").to_string();
-            let cmd = format!(
-                "gsutil -m rsync -r gs://{} {}/{}",
-                parsed.path, mount_path, local_name
-            );
-            (image, cmd)
-        }
-    }
+    let image = custom_image.unwrap_or(DEFAULT_DOWNLOADER_IMAGE).to_string();
+
+    // Derive local dir name from the last path segment (e.g. "Qwen/Qwen3-8B" → "Qwen3-8B")
+    let local_name = parsed.path.rsplit('/').next().unwrap_or(&parsed.path);
+    let dest = format!("{}/{}", mount_path, local_name);
+
+    let cmd = match parsed.scheme {
+        UriScheme::HuggingFace => format!("hf download {} --local-dir {dest}", parsed.path),
+        UriScheme::S3 => format!("aws s3 sync s3://{} {dest}", parsed.path),
+        UriScheme::Gcs => format!("gsutil -m rsync -r gs://{} {dest}", parsed.path),
+    };
+
+    (image, cmd)
 }
 
 /// Push a value onto a JSON array field, creating the array if absent.
@@ -542,12 +513,14 @@ mod tests {
 
         // Container
         let container = &task.workload.containers["download"];
-        assert_eq!(container.image, "python:3.11-slim");
+        assert_eq!(container.image, DEFAULT_DOWNLOADER_IMAGE);
         let cmd = container.command.as_ref().unwrap();
         assert_eq!(cmd[0], "/bin/sh");
         assert_eq!(cmd[1], "-c");
-        assert!(cmd[2].contains("huggingface-cli download Qwen/Qwen3-8B"));
-        assert!(cmd[2].contains("--local-dir /models/Qwen3-8B"));
+        assert_eq!(
+            cmd[2],
+            "hf download Qwen/Qwen3-8B --local-dir /models/Qwen3-8B"
+        );
 
         // Volume reference (no size — PVC is created separately)
         let vol_resource = &task.workload.resources[VOLUME_NAME];
@@ -601,9 +574,9 @@ mod tests {
 
         let download = compile_download("my-model", "default", "uid-456", &source).unwrap();
         let container = &download.job.spec.tasks["download"].workload.containers["download"];
-        assert_eq!(container.image, "amazon/aws-cli:latest");
+        assert_eq!(container.image, DEFAULT_DOWNLOADER_IMAGE);
         let cmd = &container.command.as_ref().unwrap()[2];
-        assert!(cmd.contains("aws s3 sync s3://my-bucket/models/llama /models/llama"));
+        assert_eq!(cmd, "aws s3 sync s3://my-bucket/models/llama /models/llama");
     }
 
     #[test]
@@ -621,9 +594,12 @@ mod tests {
 
         let download = compile_download("my-model", "default", "uid-789", &source).unwrap();
         let container = &download.job.spec.tasks["download"].workload.containers["download"];
-        assert_eq!(container.image, "google/cloud-sdk:slim");
+        assert_eq!(container.image, DEFAULT_DOWNLOADER_IMAGE);
         let cmd = &container.command.as_ref().unwrap()[2];
-        assert!(cmd.contains("gsutil -m rsync -r gs://my-bucket/models/gemma /models/gemma"));
+        assert_eq!(
+            cmd,
+            "gsutil -m rsync -r gs://my-bucket/models/gemma /models/gemma"
+        );
     }
 
     #[test]
