@@ -43,6 +43,21 @@ use lattice_workload::backup::merge_backup_specs;
 
 const FIELD_MANAGER: &str = "lattice-service-controller";
 
+/// Timeout waiting for ESO to sync imagePullSecret K8s Secrets.
+const IMAGE_PULL_SECRET_TIMEOUT: Duration = Duration::from_secs(120);
+/// Polling interval while waiting for imagePullSecrets.
+const IMAGE_PULL_SECRET_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Requeue interval when service is in Pending phase.
+const REQUEUE_PENDING: Duration = Duration::from_secs(5);
+/// Requeue interval when waiting for dependencies or mesh readiness.
+const REQUEUE_WAITING: Duration = Duration::from_secs(10);
+/// Requeue interval when service is Ready (periodic drift check).
+const REQUEUE_READY: Duration = Duration::from_secs(60);
+/// Requeue interval on persistent failure with unchanged inputs.
+const REQUEUE_FAILED_UNCHANGED: Duration = Duration::from_secs(30);
+/// Requeue interval after a retryable error (error_policy).
+const REQUEUE_ERROR: Duration = Duration::from_secs(30);
+
 // =============================================================================
 // Traits for dependency injection and testability
 // =============================================================================
@@ -423,8 +438,8 @@ impl ServiceKubeClientImpl {
         }
 
         let api: Api<K8sSecret> = Api::namespaced(self.client.clone(), namespace);
-        let timeout = Duration::from_secs(120);
-        let poll_interval = Duration::from_secs(2);
+        let timeout = IMAGE_PULL_SECRET_TIMEOUT;
+        let poll_interval = IMAGE_PULL_SECRET_POLL_INTERVAL;
 
         for secret_name in &secret_names {
             let start = std::time::Instant::now();
@@ -617,8 +632,8 @@ pub async fn reconcile(
     let name = service.name_any();
     info!("reconciling service");
 
-    // Validate the service spec
-    if let Err(e) = service.spec.workload.validate() {
+    // Validate the full service spec (workload, runtime, autoscaling, backup)
+    if let Err(e) = service.spec.validate() {
         warn!(error = %e, "service validation failed");
         update_service_status(&service, &ctx, ServiceStatusUpdate::failed(&e.to_string())).await?;
         // Don't requeue for validation errors - they require spec changes
@@ -657,13 +672,13 @@ pub async fn reconcile(
     match current_phase {
         ServicePhase::Pending => {
             update_service_status(&service, &ctx, ServiceStatusUpdate::compiling()).await?;
-            Ok(Action::requeue(Duration::from_secs(5)))
+            Ok(Action::requeue(REQUEUE_PENDING))
         }
         ServicePhase::Compiling => {
             let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
             if !missing_deps.is_empty() {
                 debug!(?missing_deps, "waiting for dependencies");
-                return Ok(Action::requeue(Duration::from_secs(10)));
+                return Ok(Action::requeue(REQUEUE_WAITING));
             }
 
             let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
@@ -690,14 +705,14 @@ pub async fn reconcile(
             // Skip if spec and external inputs are unchanged
             if is_reconcile_current(&service, &inputs_hash) {
                 debug!("generation and inputs unchanged, skipping reconcile");
-                return Ok(Action::requeue(Duration::from_secs(60)));
+                return Ok(Action::requeue(REQUEUE_READY));
             }
 
             let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
             if !missing_deps.is_empty() {
                 warn!(?missing_deps, "dependencies no longer available");
                 update_service_status(&service, &ctx, ServiceStatusUpdate::compiling()).await?;
-                return Ok(Action::requeue(Duration::from_secs(10)));
+                return Ok(Action::requeue(REQUEUE_WAITING));
             }
 
             try_compile_and_record(&service, &name, namespace, &ctx, &inputs_hash).await
@@ -716,7 +731,7 @@ pub async fn reconcile(
 
             if is_reconcile_current(&service, &inputs_hash) {
                 debug!("generation and inputs unchanged, skipping failed retry");
-                return Ok(Action::requeue(Duration::from_secs(30)));
+                return Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED));
             }
 
             try_compile_and_record(&service, &name, namespace, &ctx, &inputs_hash).await
@@ -741,7 +756,7 @@ pub fn error_policy<T: ResourceExt>(
     );
 
     if error.is_retryable() {
-        Action::requeue(Duration::from_secs(30))
+        Action::requeue(REQUEUE_ERROR)
     } else {
         Action::await_change()
     }
@@ -845,7 +860,7 @@ async fn try_compile(
             if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
                 debug!("mesh member not yet ready, staying in Compiling");
                 update_service_status(service, ctx, ServiceStatusUpdate::compiling()).await?;
-                return Ok(Action::requeue(Duration::from_secs(5)));
+                return Ok(Action::requeue(REQUEUE_PENDING));
             }
             update_service_status(
                 service,
@@ -853,11 +868,11 @@ async fn try_compile(
                 ServiceStatusUpdate::ready(service.metadata.generation),
             )
             .await?;
-            Ok(Action::requeue(Duration::from_secs(60)))
+            Ok(Action::requeue(REQUEUE_READY))
         }
         Err(_) => {
             // compile_and_apply already set status to Failed
-            Ok(Action::requeue(Duration::from_secs(30)))
+            Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED))
         }
     }
 }
@@ -879,7 +894,7 @@ async fn try_compile_and_record(
             if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
                 debug!("mesh member not yet ready, staying in Compiling");
                 update_service_status(service, ctx, ServiceStatusUpdate::compiling()).await?;
-                return Ok(Action::requeue(Duration::from_secs(5)));
+                return Ok(Action::requeue(REQUEUE_PENDING));
             }
             update_service_status(
                 service,
@@ -897,7 +912,7 @@ async fn try_compile_and_record(
             {
                 warn!(error = %e, "failed to patch inputs hash annotation");
             }
-            Ok(Action::requeue(Duration::from_secs(60)))
+            Ok(Action::requeue(REQUEUE_READY))
         }
         Err(_) => {
             // compile_and_apply already set status to Failed.
@@ -910,7 +925,7 @@ async fn try_compile_and_record(
             {
                 warn!(error = %e, "failed to patch inputs hash annotation");
             }
-            Ok(Action::requeue(Duration::from_secs(30)))
+            Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED))
         }
     }
 }
@@ -1317,7 +1332,7 @@ mod tests {
             .expect("reconcile should succeed");
 
         // Should requeue quickly to check dependencies
-        assert_eq!(action, Action::requeue(Duration::from_secs(5)));
+        assert_eq!(action, Action::requeue(REQUEUE_PENDING));
 
         // Service should be in the graph
         let node = ctx.graph.get_service("test", "my-service");
@@ -1342,7 +1357,7 @@ mod tests {
             .expect("reconcile should succeed");
 
         // Should requeue to wait for dependencies
-        assert_eq!(action, Action::requeue(Duration::from_secs(10)));
+        assert_eq!(action, Action::requeue(REQUEUE_WAITING));
     }
 
     /// Story: Service becomes ready when dependencies exist
@@ -1365,7 +1380,7 @@ mod tests {
             .expect("reconcile should succeed");
 
         // Should transition to Ready and requeue periodically
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        assert_eq!(action, Action::requeue(REQUEUE_READY));
     }
 
     /// Story: Service in Ready state stays ready
@@ -1385,7 +1400,7 @@ mod tests {
             .expect("reconcile should succeed");
 
         // Should requeue for periodic drift check
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        assert_eq!(action, Action::requeue(REQUEUE_READY));
     }
 
     /// Story: Invalid service transitions to Failed
@@ -1469,7 +1484,7 @@ mod tests {
         // Bootstrap errors ARE retryable - should requeue with backoff
         let retryable_error = Error::bootstrap("connection timeout");
         let action = error_policy(service, &retryable_error, ctx);
-        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+        assert_eq!(action, Action::requeue(REQUEUE_ERROR));
     }
 
     // =========================================================================

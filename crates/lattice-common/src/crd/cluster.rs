@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    ClusterPhase, Condition, EndpointsSpec, NetworkingSpec, NodeSpec, ProviderSpec, RegistryMirror,
+    ClusterPhase, Condition, EndpointsSpec, NodeSpec, ProviderSpec, RegistryMirror,
 };
 
 /// Monitoring infrastructure configuration.
@@ -82,10 +82,6 @@ pub struct LatticeClusterSpec {
 
     /// Node topology (control plane and worker counts)
     pub nodes: NodeSpec,
-
-    /// Network configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub networking: Option<NetworkingSpec>,
 
     /// Parent configuration - if present, this cluster can accept child connections
     ///
@@ -407,7 +403,7 @@ mod tests {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
-            networking: None,
+
             parent_config: Some(endpoints_spec()),
             services: true,
             gpu: false,
@@ -429,7 +425,7 @@ mod tests {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
-            networking: None,
+
             parent_config: None,
             services: true,
             gpu: false,
@@ -456,7 +452,7 @@ mod tests {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
-            networking: None,
+
             parent_config: Some(endpoints_spec()),
             services: true,
             gpu: false,
@@ -480,7 +476,7 @@ mod tests {
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
-            networking: None,
+
             parent_config: None,
             services: true,
             gpu: false,
@@ -517,7 +513,7 @@ mod tests {
                     },
                 )]),
             },
-            networking: None,
+
             parent_config: None,
             services: true,
             gpu: false,
@@ -541,7 +537,7 @@ mod tests {
             provider_ref: "".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
-            networking: None,
+
             parent_config: None,
             services: true,
             gpu: false,
@@ -650,16 +646,14 @@ provider:
       - "127.0.0.1"
       - "localhost"
   config:
-    docker: {}
+    docker:
+      lbCidr: "172.18.255.1/32"
 nodes:
   controlPlane:
     replicas: 1
   workerPools:
     default:
       replicas: 2
-networking:
-  default:
-    cidr: "172.18.255.1/32"
 parentConfig:
   service:
     type: LoadBalancer
@@ -672,6 +666,11 @@ parentConfig:
         assert_eq!(spec.nodes.control_plane.replicas, 1);
         assert_eq!(spec.nodes.total_workers(), 2);
         assert_eq!(spec.provider.kubernetes.version, "1.35.0");
+        assert_eq!(
+            spec.provider.config.lb_cidr(),
+            Some("172.18.255.1/32"),
+            "lb_cidr should be extracted from docker config"
+        );
         assert_eq!(
             spec.parent_config
                 .as_ref()
@@ -722,7 +721,7 @@ nodes:
             provider_ref: "test-provider".to_string(),
             provider: sample_provider_spec(),
             nodes: sample_node_spec(),
-            networking: None,
+
             parent_config: None,
             services: true,
             gpu: false,
@@ -757,7 +756,7 @@ nodes:
                 provider_ref: "test".to_string(),
                 provider: sample_provider_spec(),
                 nodes: sample_node_spec(),
-                networking: None,
+
                 parent_config: None,
                 services: true,
                 gpu: false,

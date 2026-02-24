@@ -70,9 +70,9 @@ pub use service_policy::{
 };
 pub use types::{
     BootstrapProvider, ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec, EndpointsSpec,
-    InstanceType, KubernetesSpec, NetworkPool, NetworkingSpec, NodeResourceSpec, NodeSpec,
-    NodeTaint, ProviderConfig, ProviderSpec, ProviderType, RegistryMirror, RootVolume, SecretRef,
-    ServiceRef, ServiceSpec, TaintEffect, WorkerPoolSpec,
+    InstanceType, KubernetesSpec, NodeResourceSpec, NodeSpec, NodeTaint, ProviderConfig,
+    ProviderSpec, ProviderType, RegistryMirror, RootVolume, SecretRef, ServiceRef, ServiceSpec,
+    TaintEffect, WorkerPoolSpec,
 };
 pub use workload::backup::{
     BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,

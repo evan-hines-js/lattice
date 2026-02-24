@@ -5,7 +5,7 @@
 //!
 //! Requirements:
 //! - VM template must be on Ceph storage for linked clones
-//! - Explicit `networking` section required for Cilium LB-IPAM
+//! - `lb_cidr` in ProxmoxConfig required for Cilium LB-IPAM
 
 use async_trait::async_trait;
 
@@ -392,6 +392,7 @@ mod tests {
             vmid_max: None,
             skip_cloud_init_status: None,
             skip_qemu_guest_agent: None,
+            lb_cidr: None,
         }
     }
 
@@ -439,7 +440,7 @@ mod tests {
                     )]),
                 },
                 parent_config: None,
-                networking: None,
+
                 services: true,
                 gpu: false,
                 monitoring: MonitoringConfig::default(),

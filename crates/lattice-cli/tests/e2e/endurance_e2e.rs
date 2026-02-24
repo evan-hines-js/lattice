@@ -187,11 +187,9 @@ async fn run_endurance_test() -> Result<(), String> {
                 let mut cluster = workload_template.clone();
                 cluster.metadata.name = Some(name);
 
-                // Update networking CIDR — use /28 range for each cluster
-                if let Some(ref mut networking) = cluster.spec.networking {
-                    if let Some(ref mut default) = networking.default {
-                        default.cidr = format!("{}/28", ip);
-                    }
+                // Update LB CIDR — use /28 range for each cluster
+                if let Some(ref mut docker) = cluster.spec.provider.config.docker {
+                    docker.lb_cidr = Some(format!("{}/28", ip));
                 }
 
                 // Update cert SANs

@@ -23,6 +23,7 @@ members = [
     "crates/lattice-volcano",
     "crates/lattice-job",
     "crates/lattice-model",
+    "crates/lattice-webhook",
 ]
 
 [workspace.package]
@@ -52,6 +53,7 @@ lattice-tetragon = { path = "crates/lattice-tetragon" }
 lattice-volcano = { path = "crates/lattice-volcano" }
 lattice-job = { path = "crates/lattice-job" }
 lattice-model = { path = "crates/lattice-model" }
+lattice-webhook = { path = "crates/lattice-webhook" }
 
 
 # Kubernetes

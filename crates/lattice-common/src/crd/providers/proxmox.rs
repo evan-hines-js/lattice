@@ -243,6 +243,16 @@ pub struct ProxmoxConfig {
     /// Skip QEMU guest agent check
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_qemu_guest_agent: Option<bool>,
+
+    // ==========================================================================
+    // Load Balancer Configuration (Optional)
+    // ==========================================================================
+    /// CIDR block for Cilium LB-IPAM (e.g., "10.0.0.200/28")
+    ///
+    /// Allocates IPs from the physical/VLAN network for LoadBalancer services.
+    /// Must not overlap with the node `ipv4_pool` range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lb_cidr: Option<String>,
 }
 
 #[cfg(test)]

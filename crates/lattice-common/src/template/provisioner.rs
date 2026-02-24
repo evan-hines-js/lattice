@@ -358,13 +358,7 @@ impl ProvisionerRegistry {
     ) -> Result<std::collections::HashMap<String, ResourceOutputs>, TemplateError> {
         let mut outputs = std::collections::HashMap::new();
 
-        for (name, resource) in &spec.resources {
-            // Inbound resources and wildcard mesh resources are policy
-            // declarations — they don't produce template outputs.
-            if resource.is_inbound() || resource.is_mesh_wildcard() {
-                continue;
-            }
-
+        for (name, resource) in provisionable_resources(spec) {
             if let Some(provisioner) = self.get_for_resource(resource) {
                 let resource_outputs = provisioner.resolve(name, resource, ctx)?;
                 outputs.insert(name.clone(), resource_outputs);
@@ -390,13 +384,7 @@ impl ProvisionerRegistry {
     ) -> Result<ProvisionOutput, TemplateError> {
         let mut combined = ProvisionOutput::default();
 
-        for (name, resource) in &spec.resources {
-            // Inbound resources and wildcard mesh resources are policy
-            // declarations — they don't produce template outputs.
-            if resource.is_inbound() || resource.is_mesh_wildcard() {
-                continue;
-            }
-
+        for (name, resource) in provisionable_resources(spec) {
             if let Some(provisioner) = self.get_for_resource(resource) {
                 let output = provisioner.provision(name, resource, ctx)?;
                 combined.merge(output);
@@ -405,6 +393,13 @@ impl ProvisionerRegistry {
 
         Ok(combined)
     }
+}
+
+/// Resources that produce template outputs (excludes inbound and wildcard mesh declarations).
+fn provisionable_resources(spec: &WorkloadSpec) -> impl Iterator<Item = (&String, &ResourceSpec)> {
+    spec.resources
+        .iter()
+        .filter(|(_, r)| !r.is_inbound() && !r.is_mesh_wildcard())
 }
 
 #[cfg(test)]

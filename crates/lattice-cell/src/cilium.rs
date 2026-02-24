@@ -1,33 +1,21 @@
 //! Cilium LB-IPAM resource generation
 //!
 //! Generates CiliumLoadBalancerIPPool and CiliumL2AnnouncementPolicy resources
-//! from LatticeCluster networking configuration.
+//! for on-prem providers (Docker, Proxmox) that need Cilium to allocate
+//! LoadBalancer IPs from a CIDR block.
 
 use serde::{Deserialize, Serialize};
 
-use lattice_common::crd::NetworkingSpec;
-
-/// Generate Cilium LB-IPAM resources from networking spec
+/// Generate Cilium LB-IPAM resources for the given CIDR
 ///
 /// Returns YAML strings for:
-/// - CiliumLoadBalancerIPPool (one per pool in networking spec)
+/// - CiliumLoadBalancerIPPool with the given CIDR
 /// - CiliumL2AnnouncementPolicy (enables L2 announcements)
-pub(crate) fn generate_lb_resources(
-    networking: &NetworkingSpec,
-) -> Result<Vec<String>, serde_json::Error> {
-    let mut resources = Vec::new();
-
-    // Generate IP pool for default network if configured
-    if let Some(ref pool) = networking.default {
-        resources.push(generate_ip_pool("default", &pool.cidr)?);
-    }
-
-    // Always generate L2 announcement policy if we have any pools
-    if !resources.is_empty() {
-        resources.push(generate_l2_policy()?);
-    }
-
-    Ok(resources)
+pub(crate) fn generate_lb_resources(cidr: &str) -> Result<Vec<String>, serde_json::Error> {
+    Ok(vec![
+        generate_ip_pool("default", cidr)?,
+        generate_l2_policy()?,
+    ])
 }
 
 /// Generate a CiliumLoadBalancerIPPool resource
@@ -126,7 +114,6 @@ struct Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::NetworkPool;
 
     #[test]
     fn test_generate_ip_pool() {
@@ -150,28 +137,13 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_lb_resources_with_networking() {
-        let networking = NetworkingSpec {
-            default: Some(NetworkPool {
-                cidr: "10.0.100.0/24".to_string(),
-            }),
-        };
-
-        let resources = generate_lb_resources(&networking).unwrap();
+    fn test_generate_lb_resources() {
+        let resources = generate_lb_resources("10.0.100.0/24").unwrap();
 
         assert_eq!(resources.len(), 2); // IP pool + L2 policy
         assert!(resources[0].contains("CiliumLoadBalancerIPPool"));
         assert!(resources[0].contains("10.0.100.0/24"));
         assert!(resources[1].contains("CiliumL2AnnouncementPolicy"));
-    }
-
-    #[test]
-    fn test_generate_lb_resources_empty_networking() {
-        let networking = NetworkingSpec::default();
-
-        let resources = generate_lb_resources(&networking).unwrap();
-
-        assert!(resources.is_empty());
     }
 
     #[test]

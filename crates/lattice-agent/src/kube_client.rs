@@ -49,6 +49,3 @@ pub async fn create_client_logged(
     }
 }
 
-// Tests for actual logic that uses KubeClientProvider would go here.
-// The mock is meant to be used by other modules testing their logic,
-// not for testing the mock itself.

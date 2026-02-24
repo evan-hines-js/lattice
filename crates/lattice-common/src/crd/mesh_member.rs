@@ -209,6 +209,7 @@ pub struct LatticeMeshMemberStatus {
 
 /// Phase of a mesh member
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MeshMemberPhase {
     /// Waiting for reconciliation
     #[default]
@@ -219,6 +220,17 @@ pub enum MeshMemberPhase {
     Ready,
     /// Policy generation or application failed
     Failed,
+}
+
+impl std::fmt::Display for MeshMemberPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "Pending"),
+            Self::Progressing => write!(f, "Progressing"),
+            Self::Ready => write!(f, "Ready"),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
 }
 
 /// Scope of a mesh member

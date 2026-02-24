@@ -122,6 +122,16 @@ pub enum CedarPolicyPhase {
     Invalid,
 }
 
+impl std::fmt::Display for CedarPolicyPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "Pending"),
+            Self::Valid => write!(f, "Valid"),
+            Self::Invalid => write!(f, "Invalid"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

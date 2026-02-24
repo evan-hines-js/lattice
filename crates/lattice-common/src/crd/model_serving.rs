@@ -524,6 +524,18 @@ pub struct LatticeModelSpec {
     pub routing: Option<ModelRoutingSpec>,
 }
 
+impl LatticeModelSpec {
+    /// Validate the model specification (all roles).
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        for (role_name, role_spec) in &self.roles {
+            role_spec
+                .validate()
+                .map_err(|e| crate::Error::validation(format!("role '{role_name}': {e}")))?;
+        }
+        Ok(())
+    }
+}
+
 impl Default for LatticeModelSpec {
     fn default() -> Self {
         Self {

@@ -98,6 +98,16 @@ pub enum SecretProviderPhase {
     Failed,
 }
 
+impl std::fmt::Display for SecretProviderPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "Pending"),
+            Self::Ready => write!(f, "Ready"),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
 impl SecretProviderSpec {
     /// Returns the provider type name (first key of the provider map).
     ///

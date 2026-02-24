@@ -29,6 +29,7 @@ spec:
         dnsServers:
           - "10.0.0.1"
         virtualIpNetworkInterface: "ens18"
+        lbCidr: "10.0.0.200/28"
   nodes:
     controlPlane:
       replicas: 1
@@ -43,9 +44,6 @@ spec:
           cores: 16
           memoryGib: 32
           diskGib: 100
-  networking:
-    default:
-      cidr: "10.0.0.200/28"
   parentConfig:
     grpcPort: 50051
     bootstrapPort: 8443

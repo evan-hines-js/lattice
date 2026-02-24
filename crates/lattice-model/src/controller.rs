@@ -39,6 +39,8 @@ use crate::compiler::{compile_model, CompiledModel};
 use crate::download::{CompiledDownload, SCHEDULING_GATE_MODEL_DOWNLOAD};
 use crate::error::ModelError;
 
+const FIELD_MANAGER: &str = "lattice-model-controller";
+
 /// Requeue interval while loading, downloading, or recompiling after spec change
 const REQUEUE_LOADING: Duration = Duration::from_secs(15);
 /// Requeue interval during steady-state serving (health monitoring)
@@ -89,6 +91,9 @@ pub async fn reconcile(
         .namespace
         .as_deref()
         .ok_or(ModelError::MissingNamespace)?;
+
+    // Validate the model spec (all roles)
+    model.spec.validate()?;
 
     let generation = model.metadata.generation.unwrap_or(0);
     let phase = model
@@ -340,10 +345,9 @@ async fn apply_compiled_model(
     compiled: &CompiledModel,
     ctx: &ModelContext,
 ) -> Result<(), ModelError> {
-    let params = PatchParams::apply("lattice-model-controller").force();
+    let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    lattice_common::kube_utils::ensure_namespace_ssa(client, namespace, "lattice-model-controller")
-        .await?;
+    lattice_common::kube_utils::ensure_namespace_ssa(client, namespace, FIELD_MANAGER).await?;
 
     let ms_api = ctx
         .registry
@@ -764,7 +768,7 @@ async fn update_status(
         name,
         namespace,
         &status,
-        "lattice-model-controller",
+        FIELD_MANAGER,
     )
     .await?;
     Ok(())

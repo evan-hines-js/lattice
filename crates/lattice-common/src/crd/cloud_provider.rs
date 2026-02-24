@@ -195,6 +195,16 @@ pub enum CloudProviderPhase {
     Failed,
 }
 
+impl std::fmt::Display for CloudProviderPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "Pending"),
+            Self::Ready => write!(f, "Ready"),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
 impl CloudProvider {
     /// Resolve the K8s Secret that contains provider credentials.
     ///

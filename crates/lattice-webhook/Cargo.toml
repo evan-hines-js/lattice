@@ -1,0 +1,40 @@
+[package]
+name = "lattice-webhook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kubernetes ValidatingAdmissionWebhook server for Lattice CRDs"
+
+[dependencies]
+# Internal
+lattice-common = { workspace = true }
+lattice-infra = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# HTTP
+axum = { workspace = true }
+axum-server = { workspace = true }
+
+# Crypto
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tower = { workspace = true }

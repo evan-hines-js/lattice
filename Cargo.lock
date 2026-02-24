@@ -2642,6 +2642,7 @@ dependencies = [
  "lattice-proto",
  "lattice-secret-provider",
  "lattice-service",
+ "lattice-webhook",
  "minijinja",
  "mockall",
  "parking_lot",
@@ -2757,6 +2758,26 @@ dependencies = [
  "lattice-common",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "lattice-webhook"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "axum-server",
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-infra",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
 ]
 
 [[package]]

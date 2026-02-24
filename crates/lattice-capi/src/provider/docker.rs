@@ -441,7 +441,7 @@ mod tests {
                     },
                     worker_pools,
                 },
-                networking: None,
+
                 parent_config: None,
                 services: true,
                 gpu: false,

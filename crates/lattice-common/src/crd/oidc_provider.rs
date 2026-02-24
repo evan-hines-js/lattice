@@ -157,6 +157,16 @@ pub enum OIDCProviderPhase {
     Failed,
 }
 
+impl std::fmt::Display for OIDCProviderPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "Pending"),
+            Self::Ready => write!(f, "Ready"),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

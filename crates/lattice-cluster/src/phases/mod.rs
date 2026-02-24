@@ -416,7 +416,7 @@ async fn get_or_create_bootstrap_token(
         cell_endpoint: cell_endpoint.to_string(),
         ca_certificate: ca_cert.to_string(),
         cluster_manifest,
-        networking: cluster.spec.networking.clone(),
+        lb_cidr: cluster.spec.provider.config.lb_cidr().map(String::from),
         provider: cluster.spec.provider.provider_type(),
         bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
         k8s_version: cluster.spec.provider.kubernetes.version.clone(),

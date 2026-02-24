@@ -23,16 +23,14 @@ spec:
         - "127.0.0.1"
         - "localhost"
     config:
-      docker: {}
+      docker:
+        lbCidr: "172.18.255.16/28"
   nodes:
     controlPlane:
       replicas: 1
     workerPools:
       default:
         replicas: 1
-  networking:
-    default:
-      cidr: "172.18.255.16/28"
   parentConfig:
     grpcPort: 50051
     bootstrapPort: 8443

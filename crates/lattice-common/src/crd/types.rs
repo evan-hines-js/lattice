@@ -249,6 +249,20 @@ impl ProviderConfig {
         }
     }
 
+    /// Get the Cilium LB-IPAM CIDR from the provider config, if configured.
+    ///
+    /// Only on-prem providers (Docker, Proxmox) support this. Cloud providers
+    /// use native load balancers and don't need Cilium LB-IPAM.
+    pub fn lb_cidr(&self) -> Option<&str> {
+        if let Some(ref docker) = self.docker {
+            return docker.lb_cidr.as_deref();
+        }
+        if let Some(ref proxmox) = self.proxmox {
+            return proxmox.lb_cidr.as_deref();
+        }
+        None
+    }
+
     /// Validate that exactly one provider is configured
     pub fn validate(&self) -> Result<(), crate::Error> {
         let count = [
@@ -593,25 +607,6 @@ impl NodeSpec {
 /// Check if a pool ID is valid (lowercase alphanumeric + hyphens, starts with letter)
 fn is_valid_pool_id(id: &str) -> bool {
     super::validate_dns_identifier(id, false).is_ok()
-}
-
-// =============================================================================
-// Network Configuration
-// =============================================================================
-
-/// Network configuration specification
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct NetworkingSpec {
-    /// Default network pool configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<NetworkPool>,
-}
-
-/// Network pool for Cilium LB-IPAM
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct NetworkPool {
-    /// CIDR block for the network pool (e.g., "172.18.255.1/32" for single IP)
-    pub cidr: String,
 }
 
 // =============================================================================
@@ -1516,11 +1511,13 @@ mod tests {
                 vmid_max: None,
                 skip_cloud_init_status: None,
                 skip_qemu_guest_agent: None,
+                lb_cidr: Some("10.0.0.200/28".to_string()),
             };
             let config = ProviderConfig::proxmox(proxmox);
             assert!(config.proxmox.is_some());
             assert_eq!(config.provider_type(), ProviderType::Proxmox);
             assert!(config.validate().is_ok());
+            assert_eq!(config.lb_cidr(), Some("10.0.0.200/28"));
         }
 
         #[test]

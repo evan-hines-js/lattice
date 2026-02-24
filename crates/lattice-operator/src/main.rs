@@ -183,6 +183,14 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
         }
     });
 
+    // Start admission webhook server (all pods, stateless validation)
+    let webhook_client = client.clone();
+    tokio::spawn(async move {
+        if let Err(e) = lattice_webhook::start_webhook_server(webhook_client).await {
+            tracing::error!(error = %e, "Admission webhook server failed");
+        }
+    });
+
     // Acquire leadership using Kubernetes Lease BEFORE any initialization
     // Only the leader should install CRDs and infrastructure
     let elector = Arc::new(LeaderElector::new(
@@ -289,6 +297,9 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
 
     ensure_cluster_crds(client).await?;
 
+    // Register admission webhook now that CRDs exist (avoids chicken-and-egg)
+    spawn_admission_webhook_configuration(client.clone());
+
     // cert-manager + CAPI must complete before controllers (they need CAPI to reconcile)
     ensure_capi_infrastructure(client, Some(&*capi_installer)).await?;
 
@@ -327,6 +338,9 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
 /// Cedar, CrdRegistry, service + provider controllers
 async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     ensure_service_crds(client).await?;
+
+    // Register admission webhook now that CRDs exist (avoids chicken-and-egg)
+    spawn_admission_webhook_configuration(client.clone());
 
     // General infra runs in background (no CAPI in service-only mode)
     let infra_handle = spawn_general_infrastructure(client.clone(), false);
@@ -391,6 +405,33 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     })
 }
 
+/// Spawn admission webhook configuration registration in background.
+///
+/// Reads the CA PEM from the webhook TLS Secret (created by `start_webhook_server`
+/// on all pods before leader election) and applies the `ValidatingWebhookConfiguration`
+/// resource so the K8s API server routes admission requests to the webhook.
+/// Retries with backoff in case the TLS Secret hasn't been created yet.
+fn spawn_admission_webhook_configuration(client: kube::Client) {
+    tokio::spawn(async move {
+        if let Err(e) = retry_with_backoff(
+            &RetryConfig {
+                initial_delay: Duration::from_secs(2),
+                ..RetryConfig::default()
+            },
+            "ensure admission webhook configuration",
+            || async {
+                lattice_webhook::ensure_webhook_configuration(&client)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %e, "failed to register admission webhook configuration");
+        }
+    });
+}
+
 /// Spawn ESO webhook K8s infrastructure (namespace, Service, ClusterSecretStore) in background.
 ///
 /// ESO pods won't schedule until workers are available (no CP toleration),
@@ -424,6 +465,9 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     // 1. Install ALL CRDs (union of cluster + service modes)
     ensure_cluster_crds(client).await?;
     ensure_service_crds(client).await?;
+
+    // Register admission webhook now that CRDs exist (avoids chicken-and-egg)
+    spawn_admission_webhook_configuration(client.clone());
 
     // cert-manager + CAPI must complete before controllers (they need CAPI to reconcile)
     ensure_capi_infrastructure(client, Some(&*capi_installer)).await?;

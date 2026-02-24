@@ -28,6 +28,11 @@ use crate::error::JobError;
 
 const FIELD_MANAGER: &str = "lattice-job-controller";
 
+/// Requeue interval while waiting for job to complete
+const REQUEUE_RUNNING: Duration = Duration::from_secs(15);
+/// Requeue interval after a reconciliation error
+const REQUEUE_ERROR: Duration = Duration::from_secs(30);
+
 /// Shared context for the LatticeJob controller
 pub struct JobContext {
     pub client: Client,
@@ -145,7 +150,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                 Some(generation),
             )
             .await?;
-            Ok(Action::requeue(Duration::from_secs(15)))
+            Ok(Action::requeue(REQUEUE_RUNNING))
         }
         JobPhase::Running => {
             // Guard: spec is immutable once Running — warn if generation changed
@@ -163,7 +168,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                 Some(ar) => ar,
                 None => {
                     warn!(job = %name, "cannot check VCJob status: Volcano CRD not discovered");
-                    return Ok(Action::requeue(Duration::from_secs(15)));
+                    return Ok(Action::requeue(REQUEUE_RUNNING));
                 }
             };
 
@@ -196,7 +201,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                     .await?;
                     Ok(Action::await_change())
                 }
-                _ => Ok(Action::requeue(Duration::from_secs(15))),
+                _ => Ok(Action::requeue(REQUEUE_RUNNING)),
             }
         }
         JobPhase::Succeeded | JobPhase::Failed => Ok(Action::await_change()),
@@ -231,7 +236,7 @@ pub fn error_policy(job: Arc<LatticeJob>, error: &JobError, _ctx: Arc<JobContext
         job = %job.name_any(),
         "job reconciliation failed"
     );
-    Action::requeue(Duration::from_secs(30))
+    Action::requeue(REQUEUE_ERROR)
 }
 
 /// Apply compiled job resources in layers using ApplyBatch

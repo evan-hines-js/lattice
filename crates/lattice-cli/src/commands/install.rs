@@ -570,7 +570,7 @@ impl Installer {
         let config = BootstrapBundleConfig {
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
-            networking: self.cluster.spec.networking.as_ref(),
+            lb_cidr: self.cluster.spec.provider.config.lb_cidr(),
             cluster_name: self.cluster_name(),
             provider: self.provider(),
             k8s_version: &self.cluster.spec.provider.kubernetes.version,
