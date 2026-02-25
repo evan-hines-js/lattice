@@ -6,13 +6,12 @@
 //! # Running Standalone
 //!
 //! ```bash
-//! # Mgmt cluster (direct access)
-//! LATTICE_MGMT_KUBECONFIG=/path/to/mgmt-kubeconfig \
+//! # Direct access (any cluster)
+//! LATTICE_KUBECONFIG=/path/to/kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_capi_standalone -- --ignored --nocapture
 //!
-//! # Workload cluster (through proxy)
-//! LATTICE_MGMT_KUBECONFIG=/path/to/mgmt-kubeconfig \
-//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/workload-proxy-kubeconfig \
+//! # Workload cluster (direct or through proxy)
+//! LATTICE_KUBECONFIG=/path/to/workload-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_capi_workload_standalone -- --ignored --nocapture
 //! ```
 
@@ -20,38 +19,31 @@
 
 use tracing::info;
 
-use super::super::context::{ClusterLevel, InfraContext, TestSession};
 use super::super::helpers::{
     get_mgmt_cluster_name, get_workload_cluster_name, run_kubectl, verify_cluster_capi_resources,
 };
-use super::cedar::apply_e2e_default_policy;
 
-/// Verify CAPI resources exist on a cluster at the specified level
+/// Verify CAPI resources exist on a cluster
 ///
 /// Checks that the cluster has its own CAPI Cluster resource,
 /// indicating it is properly self-managing after pivot.
 ///
 /// # Arguments
 ///
-/// * `ctx` - Infrastructure context
+/// * `kubeconfig` - Path to kubeconfig for the target cluster
 /// * `cluster_name` - Name of the cluster to verify
-/// * `level` - Which cluster level to verify (Mgmt, Workload, or Workload2)
 pub async fn verify_capi_resources(
-    ctx: &InfraContext,
+    kubeconfig: &str,
     cluster_name: &str,
-    level: ClusterLevel,
 ) -> Result<(), String> {
-    let kubeconfig = ctx.kubeconfig_for(level)?;
-    let level_name = level.display_name();
-
     info!(
-        "[Integration/CAPI] Verifying {} cluster CAPI resources...",
-        level_name
+        "[Integration/CAPI] Verifying cluster {} CAPI resources...",
+        cluster_name
     );
     verify_cluster_capi_resources(kubeconfig, cluster_name).await?;
     info!(
-        "[Integration/CAPI] {} cluster {} has CAPI resources",
-        level_name, cluster_name
+        "[Integration/CAPI] Cluster {} has CAPI resources",
+        cluster_name
     );
 
     Ok(())
@@ -75,48 +67,49 @@ pub async fn list_capi_clusters(kubeconfig: &str) -> Result<String, String> {
 // Standalone Tests
 // =============================================================================
 
-/// Standalone test - verify CAPI resources on management cluster
+/// Standalone test - verify CAPI resources on the target cluster
+///
+/// Uses `LATTICE_KUBECONFIG` for direct access.
 #[tokio::test]
 #[ignore]
 async fn test_capi_standalone() {
-    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone CAPI tests")
-        .await
-        .unwrap();
+    use super::super::context::{init_e2e_test, standalone_kubeconfig};
+
+    init_e2e_test();
+    let kubeconfig =
+        standalone_kubeconfig().expect("Set LATTICE_KUBECONFIG to run standalone CAPI tests");
     let cluster_name = get_mgmt_cluster_name();
-    verify_capi_resources(&session.ctx, &cluster_name, ClusterLevel::Mgmt)
+    verify_capi_resources(&kubeconfig, &cluster_name)
         .await
         .unwrap();
 }
 
 /// Standalone test - verify CAPI resources on workload cluster
+///
+/// Uses `LATTICE_KUBECONFIG` for direct access, or falls back to
+/// `LATTICE_MGMT_KUBECONFIG` + `LATTICE_WORKLOAD_KUBECONFIG` with proxy + Cedar policy.
 #[tokio::test]
 #[ignore]
 async fn test_capi_workload_standalone() {
-    let session = TestSession::from_env(
-        "Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG to run standalone CAPI tests",
-    )
-    .await
-    .unwrap();
-    apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
-        .await
-        .unwrap();
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
+
+    init_e2e_test();
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
     let cluster_name = get_workload_cluster_name();
-    verify_capi_resources(&session.ctx, &cluster_name, ClusterLevel::Workload)
+    verify_capi_resources(&resolved.kubeconfig, &cluster_name)
         .await
         .unwrap();
 }
 
 /// Standalone test - list all CAPI clusters
-///
-/// Uses TestSession for consistent test initialization.
 #[tokio::test]
 #[ignore]
 async fn test_list_capi_clusters_standalone() {
-    let session = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone CAPI tests")
-        .await
-        .unwrap();
-    let clusters = list_capi_clusters(&session.ctx.mgmt_kubeconfig)
-        .await
-        .unwrap();
+    use super::super::context::{init_e2e_test, standalone_kubeconfig};
+
+    init_e2e_test();
+    let kubeconfig =
+        standalone_kubeconfig().expect("Set LATTICE_KUBECONFIG to list CAPI clusters");
+    let clusters = list_capi_clusters(&kubeconfig).await.unwrap();
     println!("CAPI Clusters:\n{}", clusters);
 }

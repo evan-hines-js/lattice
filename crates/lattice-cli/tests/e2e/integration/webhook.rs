@@ -5,7 +5,7 @@
 //!
 //! Run standalone:
 //! ```
-//! LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
+//! LATTICE_KUBECONFIG=/path/to/cluster-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_webhook_standalone -- --ignored --nocapture
 //! ```
 
@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use tracing::info;
 
-use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{run_kubectl, wait_for_condition};
 
 const WEBHOOK_TEST_NS: &str = "webhook-test";
@@ -289,7 +288,25 @@ spec:
 // On the workload cluster, the self-cluster is accessed via the workload kubeconfig.
 // On the management cluster, the self-cluster is accessed via the mgmt kubeconfig.
 
-use super::super::helpers::WORKLOAD_CLUSTER_NAME;
+/// Discover the self-cluster name by listing LatticeCluster resources.
+///
+/// Returns `None` if no LatticeCluster exists on the target cluster.
+async fn discover_self_cluster(kubeconfig: &str) -> Result<Option<String>, String> {
+    let output = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "latticecluster",
+        "-o",
+        "jsonpath={.items[0].metadata.name}",
+    ])
+    .await;
+
+    match output {
+        Ok(name) if !name.trim().is_empty() => Ok(Some(name.trim().to_string())),
+        _ => Ok(None),
+    }
+}
 
 /// Fetch the full LatticeCluster YAML for a given cluster name
 async fn get_cluster_yaml(kubeconfig: &str, name: &str) -> Result<String, String> {
@@ -389,10 +406,16 @@ spec:
 /// safe because E2E teardown destroys everything, and standalone runs don't
 /// rely on the workload being a leaf.
 async fn test_parent_config_immutability(kubeconfig: &str) -> Result<(), String> {
-    let cluster_name = WORKLOAD_CLUSTER_NAME;
+    let cluster_name = match discover_self_cluster(kubeconfig).await? {
+        Some(name) => name,
+        None => {
+            info!("[Webhook] No LatticeCluster found on target cluster, skipping parent_config immutability test");
+            return Ok(());
+        }
+    };
 
     // Fetch the existing workload LatticeCluster YAML
-    let original_yaml = get_cluster_yaml(kubeconfig, cluster_name).await?;
+    let original_yaml = get_cluster_yaml(kubeconfig, &cluster_name).await?;
 
     // Verify the workload cluster doesn't already have parent_config
     if original_yaml.contains("parentConfig") {
@@ -405,7 +428,7 @@ async fn test_parent_config_immutability(kubeconfig: &str) -> Result<(), String>
     }
 
     // Fetch the updated YAML (now with parent_config)
-    let current_yaml = get_cluster_yaml(kubeconfig, cluster_name).await?;
+    let current_yaml = get_cluster_yaml(kubeconfig, &cluster_name).await?;
 
     // Modification: try to change grpc_port → should be rejected
     let modified_yaml = current_yaml.replace("grpcPort: 50051", "grpcPort: 9999");
@@ -506,8 +529,7 @@ async fn cleanup(kubeconfig: &str) {
 }
 
 /// Run all webhook integration tests
-pub async fn run_webhook_tests(ctx: &InfraContext) -> Result<(), String> {
-    let kubeconfig = ctx.require_workload()?;
+pub async fn run_webhook_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Webhook] Running admission webhook integration tests on {kubeconfig}");
 
     wait_for_webhook_ready(kubeconfig).await?;
@@ -539,12 +561,9 @@ pub async fn run_webhook_tests(ctx: &InfraContext) -> Result<(), String> {
 #[tokio::test]
 #[ignore]
 async fn test_webhook_standalone() {
-    let session =
-        TestSession::from_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone webhook tests")
-            .await
-            .expect("Failed to create test session");
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
 
-    if let Err(e) = run_webhook_tests(&session.ctx).await {
-        panic!("Webhook tests failed: {e}");
-    }
+    init_e2e_test();
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    run_webhook_tests(&resolved.kubeconfig).await.unwrap();
 }

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tracing::info;
 
-use super::context::{init_e2e_test, ClusterLevel};
+use super::context::init_e2e_test;
 use super::helpers::{run_id, teardown_mgmt_cluster, MGMT_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME};
 use super::integration::{self, setup};
 
@@ -40,10 +40,9 @@ async fn test_scaling_e2e() {
 async fn run() -> Result<(), String> {
     let result = setup::setup_mgmt_and_workload(&setup::SetupConfig::default()).await?;
     integration::scaling::verify_cluster_workers(
-        &result.ctx,
+        result.ctx.require_workload()?,
         WORKLOAD_CLUSTER_NAME,
         1,
-        ClusterLevel::Workload,
     )
     .await?;
     teardown_mgmt_cluster(&result.ctx.mgmt_kubeconfig, MGMT_CLUSTER_NAME).await

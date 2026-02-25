@@ -10,11 +10,17 @@
 //!
 //! # Running Standalone Tests
 //!
+//! Single-cluster tests accept `LATTICE_KUBECONFIG` for direct access to any cluster,
+//! or fall back to `LATTICE_MGMT_KUBECONFIG` + `LATTICE_WORKLOAD_KUBECONFIG` with proxy.
+//!
 //! ```bash
-//! # First, set up infrastructure (run once)
+//! # Direct access (simplest — works with any kubeconfig)
+//! LATTICE_KUBECONFIG=/path/to/cluster-kubeconfig \
+//! cargo test --features provider-e2e --test e2e test_mesh_standalone -- --ignored --nocapture
+//!
+//! # Or set up hierarchy first, then use proxy kubeconfigs
 //! cargo test --features provider-e2e --test e2e test_setup_hierarchy_only -- --ignored --nocapture
 //!
-//! # Then run integration tests against existing clusters
 //! LATTICE_MGMT_KUBECONFIG=/path/to/mgmt-kubeconfig \
 //! LATTICE_WORKLOAD_KUBECONFIG=/path/to/workload-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_mesh_standalone -- --ignored --nocapture

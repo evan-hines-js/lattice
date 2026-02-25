@@ -45,7 +45,7 @@ use lattice_cli::commands::install::Installer;
 use lattice_common::crd::LatticeCluster;
 
 use super::super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
-use super::super::context::{ClusterLevel, InfraContext};
+use super::super::context::InfraContext;
 use super::super::helpers::{
     build_and_push_downloader_image, build_and_push_lattice_image, client_from_kubeconfig,
     create_with_retry, ensure_docker_network, get_docker_kubeconfig, inject_docker_registry_mirror,
@@ -378,7 +378,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig_path).await?;
 
     let ctx = InfraContext::mgmt_only(mgmt_kubeconfig_path.clone(), mgmt_provider);
-    capi::verify_capi_resources(&ctx, MGMT_CLUSTER_NAME, ClusterLevel::Mgmt).await?;
+    capi::verify_capi_resources(&mgmt_kubeconfig_path, MGMT_CLUSTER_NAME).await?;
 
     info!("[Setup] Waiting for management LatticeCluster to be Ready...");
     watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
@@ -436,7 +436,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // =========================================================================
     info!("[Setup/Phase 4.5] Verifying workload cluster...");
 
-    capi::verify_capi_resources(&ctx, WORKLOAD_CLUSTER_NAME, ClusterLevel::Workload).await?;
+    capi::verify_capi_resources(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME).await?;
 
     info!("[Setup] SUCCESS: Workload cluster pivot verified!");
 
@@ -464,7 +464,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
         // Run workload worker verification in parallel with workload2 provisioning
         let (worker_result, phase_result) = tokio::join!(
-            scaling::verify_cluster_workers(&ctx, WORKLOAD_CLUSTER_NAME, 1, ClusterLevel::Workload),
+            scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 1),
             watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None)
         );
         worker_result?;
@@ -496,7 +496,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         let ctx = ctx.with_workload2(workload2_proxy_kc.clone());
 
         info!("[Setup/Phase 6.5] Verifying workload2 cluster...");
-        capi::verify_capi_resources(&ctx, WORKLOAD2_CLUSTER_NAME, ClusterLevel::Workload2).await?;
+        capi::verify_capi_resources(&workload2_proxy_kc, WORKLOAD2_CLUSTER_NAME).await?;
 
         info!("[Setup] SUCCESS: Workload2 cluster verified!");
 
@@ -514,7 +514,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         info!("[Setup/Phase 5] Skipping workload2 cluster (disabled)");
 
         // Just verify workload workers without parallel workload2 provisioning
-        scaling::verify_cluster_workers(&ctx, WORKLOAD_CLUSTER_NAME, 1, ClusterLevel::Workload)
+        scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, 1)
             .await?;
 
         ctx
@@ -639,7 +639,7 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
     let mgmt_client = client_from_kubeconfig(&mgmt_kubeconfig_path).await?;
 
     let ctx = InfraContext::mgmt_only(mgmt_kubeconfig_path.clone(), mgmt_provider);
-    capi::verify_capi_resources(&ctx, MGMT_CLUSTER_NAME, ClusterLevel::Mgmt).await?;
+    capi::verify_capi_resources(&mgmt_kubeconfig_path, MGMT_CLUSTER_NAME).await?;
     watch_cluster_phases(&mgmt_client, MGMT_CLUSTER_NAME, None).await?;
 
     if let Some(ref targets) = chaos_targets {
@@ -695,12 +695,11 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
     result.ctx = result.ctx.with_workload(workload_proxy_kc.clone());
 
     // Verify cluster is operational
-    capi::verify_capi_resources(&result.ctx, WORKLOAD_CLUSTER_NAME, ClusterLevel::Workload).await?;
+    capi::verify_capi_resources(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME).await?;
     scaling::verify_cluster_workers(
-        &result.ctx,
+        &workload_proxy_kc,
         WORKLOAD_CLUSTER_NAME,
         1,
-        ClusterLevel::Workload,
     )
     .await?;
 

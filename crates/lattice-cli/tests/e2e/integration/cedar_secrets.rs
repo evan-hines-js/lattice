@@ -16,7 +16,13 @@
 //! # Running Standalone
 //!
 //! ```bash
-//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/kubeconfig \
+//! # Direct access
+//! LATTICE_KUBECONFIG=/path/to/cluster-kubeconfig \
+//! cargo test --features provider-e2e --test e2e test_cedar_secret_standalone -- --ignored --nocapture
+//!
+//! # Or via proxy
+//! LATTICE_MGMT_KUBECONFIG=/path/to/mgmt-kubeconfig \
+//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/workload-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_cedar_secret_standalone -- --ignored --nocapture
 //! ```
 
@@ -27,7 +33,6 @@ use std::time::Duration;
 use lattice_common::crd::LatticeService;
 use tracing::info;
 
-use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_policy_crd, create_service_with_secrets, delete_cedar_policies_by_label,
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace,
@@ -383,9 +388,7 @@ async fn test_provider_scoped_access(kubeconfig: &str) -> Result<(), String> {
 ///
 /// Called from unified_e2e.rs and per-integration cedar_secrets_e2e.rs.
 /// Each test uses its own namespace so all tests run concurrently.
-pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
-    let kubeconfig = ctx.require_workload()?;
-
+pub async fn run_cedar_secret_tests(kubeconfig: &str) -> Result<(), String> {
     info!(
         "[CedarSecrets] Running Cedar secret authorization tests concurrently on {}",
         kubeconfig
@@ -431,33 +434,20 @@ pub async fn run_cedar_secret_tests(ctx: &InfraContext) -> Result<(), String> {
     Ok(())
 }
 
-/// Start Cedar secret tests asynchronously (for parallel execution in E2E)
-pub async fn start_cedar_secret_tests_async(
-    ctx: &InfraContext,
-) -> Result<tokio::task::JoinHandle<Result<(), String>>, String> {
-    let ctx = ctx.clone();
-    Ok(tokio::spawn(
-        async move { run_cedar_secret_tests(&ctx).await },
-    ))
-}
-
 // =============================================================================
 // Standalone Tests
 // =============================================================================
 
 /// Standalone test — run Cedar secret authorization tests on existing cluster
+///
+/// Uses `LATTICE_KUBECONFIG` for direct access, or falls back to
+/// `LATTICE_MGMT_KUBECONFIG` + `LATTICE_WORKLOAD_KUBECONFIG` with proxy + Cedar policy.
 #[tokio::test]
 #[ignore]
 async fn test_cedar_secret_standalone() {
-    use super::super::context::TestSession;
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
 
-    let session = TestSession::from_env(
-        "Set LATTICE_WORKLOAD_KUBECONFIG to run standalone Cedar secret tests",
-    )
-    .await
-    .expect("Failed to create test session");
-
-    if let Err(e) = run_cedar_secret_tests(&session.ctx).await {
-        panic!("Cedar secret tests failed: {}", e);
-    }
+    init_e2e_test();
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    run_cedar_secret_tests(&resolved.kubeconfig).await.unwrap();
 }

@@ -17,12 +17,12 @@
 //! # Running
 //!
 //! ```bash
-//! # All secrets tests (basic + 5-route)
-//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/kubeconfig \
+//! # All secrets tests (basic + 5-route) — direct access
+//! LATTICE_KUBECONFIG=/path/to/cluster-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_secrets_standalone -- --ignored --nocapture
 //!
 //! # 5-route tests only
-//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/kubeconfig \
+//! LATTICE_KUBECONFIG=/path/to/cluster-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_secrets_routes_standalone -- --ignored --nocapture
 //! ```
 
@@ -34,7 +34,6 @@ use lattice_common::crd::LatticeService;
 use lattice_common::LOCAL_WEBHOOK_STORE_NAME;
 use tracing::info;
 
-use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_secret_policy_for_service, apply_run_as_root_override_policy,
     create_service_with_all_secret_routes, create_service_with_secrets,
@@ -44,7 +43,6 @@ use super::super::helpers::{
     verify_pod_file_content, verify_pod_image_pull_secrets, verify_synced_secret_keys,
     with_run_as_root,
 };
-use super::cedar::apply_e2e_default_policy;
 
 // =============================================================================
 // Constants
@@ -189,12 +187,11 @@ async fn verify_external_secret(
 /// Run all secrets integration tests (local webhook ESO backend).
 ///
 /// Runs the basic CRD-level test first, then the comprehensive 5-route tests.
-pub async fn run_secrets_tests(ctx: &InfraContext) -> Result<(), String> {
-    let kubeconfig = ctx.require_workload()?;
-
+///
+/// Cedar proxy access policy must be applied by the caller when running through a proxy.
+/// E2E tests apply it during setup; standalone tests apply it in their dual-mode fallback.
+pub async fn run_secrets_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Secrets] Running secrets integration tests...");
-
-    apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
 
     // Set up local provider + regcreds (needed for ghcr-creds on every service)
     setup_regcreds_infrastructure(kubeconfig).await?;
@@ -223,7 +220,7 @@ pub async fn run_secrets_tests(ctx: &InfraContext) -> Result<(), String> {
     delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=local-secrets").await;
 
     // Run the comprehensive 5-route tests (manages its own Cedar policies)
-    run_secrets_route_tests(ctx).await?;
+    run_secrets_route_tests(kubeconfig).await?;
 
     info!("[Secrets] All secrets tests passed!");
     Ok(())
@@ -622,8 +619,7 @@ async fn run_all_routes_combined_test(kubeconfig: &str) -> Result<(), String> {
 /// Sets up the local provider and secrets, runs per-route + combined tests.
 /// Each route test verifies a different secret delivery mechanism (env var,
 /// mixed-content env, file mount, imagePullSecrets, dataFrom).
-pub async fn run_secrets_route_tests(ctx: &InfraContext) -> Result<(), String> {
-    let kubeconfig = ctx.require_workload()?;
+pub async fn run_secrets_route_tests(kubeconfig: &str) -> Result<(), String> {
 
     info!("[Routes] Running secrets route tests (5 routes + combined)...");
 
@@ -680,18 +676,6 @@ pub async fn run_secrets_route_tests(ctx: &InfraContext) -> Result<(), String> {
 }
 
 // =============================================================================
-// Async Starter (for parallel execution in E2E)
-// =============================================================================
-
-/// Start secrets tests asynchronously (for parallel execution in E2E)
-pub async fn start_secrets_tests_async(
-    ctx: &InfraContext,
-) -> Result<tokio::task::JoinHandle<Result<(), String>>, String> {
-    let ctx = ctx.clone();
-    Ok(tokio::spawn(async move { run_secrets_tests(&ctx).await }))
-}
-
-// =============================================================================
 // Service Builder Helpers (local to this module)
 // =============================================================================
 
@@ -716,32 +700,26 @@ fn add_secret_env_vars(mut service: LatticeService, vars: &[(&str, &str)]) -> La
 // =============================================================================
 
 /// Standalone test — run all secrets tests on existing cluster
+///
+/// Uses `LATTICE_KUBECONFIG` for direct access, or falls back to
+/// `LATTICE_MGMT_KUBECONFIG` + `LATTICE_WORKLOAD_KUBECONFIG` with proxy + Cedar policy.
 #[tokio::test]
 #[ignore]
 async fn test_secrets_standalone() {
-    use super::super::context::TestSession;
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
 
-    let session = TestSession::from_env("Set LATTICE_WORKLOAD_KUBECONFIG to run secrets tests")
-        .await
-        .expect("Failed to create test session");
-
-    if let Err(e) = run_secrets_tests(&session.ctx).await {
-        panic!("Secrets tests failed: {}", e);
-    }
+    init_e2e_test();
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    run_secrets_tests(&resolved.kubeconfig).await.unwrap();
 }
 
 /// Standalone test — run only the 5-route secrets tests
 #[tokio::test]
 #[ignore]
 async fn test_secrets_routes_standalone() {
-    use super::super::context::TestSession;
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
 
-    let session =
-        TestSession::from_env("Set LATTICE_WORKLOAD_KUBECONFIG to run secrets route tests")
-            .await
-            .expect("Failed to create test session");
-
-    if let Err(e) = run_secrets_route_tests(&session.ctx).await {
-        panic!("Secrets route tests failed: {}", e);
-    }
+    init_e2e_test();
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    run_secrets_route_tests(&resolved.kubeconfig).await.unwrap();
 }

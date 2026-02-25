@@ -6,6 +6,11 @@
 //! # Running Standalone
 //!
 //! ```bash
+//! # Direct access
+//! LATTICE_KUBECONFIG=/path/to/cluster-kubeconfig \
+//! cargo test --features provider-e2e --test e2e test_autoscaling_standalone -- --ignored --nocapture
+//!
+//! # Or via proxy
 //! LATTICE_MGMT_KUBECONFIG=/path/to/mgmt-kubeconfig \
 //! LATTICE_WORKLOAD_KUBECONFIG=/path/to/workload-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_autoscaling_standalone -- --ignored --nocapture
@@ -23,13 +28,11 @@ use lattice_common::crd::{
     ResourceRequirements, SecurityContext, ServicePortsSpec, VolumeMount,
 };
 
-use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace, run_kubectl,
     service_pod_selector, setup_regcreds_infrastructure, wait_for_condition, BUSYBOX_IMAGE,
 };
 use super::super::mesh_fixtures::build_lattice_service;
-use super::cedar::apply_e2e_default_policy;
 
 // =============================================================================
 // Constants
@@ -205,9 +208,9 @@ fn build_metrics_server_service() -> lattice_common::crd::LatticeService {
 /// Run all KEDA autoscaling tests against an existing workload cluster.
 ///
 /// Runs the CPU-based test and the Prometheus-based test sequentially.
-pub async fn run_autoscaling_tests(ctx: &InfraContext) -> Result<(), String> {
-    run_cpu_autoscaling_test(ctx).await?;
-    run_prometheus_autoscaling_test(ctx).await?;
+pub async fn run_autoscaling_tests(kubeconfig: &str) -> Result<(), String> {
+    run_cpu_autoscaling_test(kubeconfig).await?;
+    run_prometheus_autoscaling_test(kubeconfig).await?;
     info!("[Integration/Autoscaling] All autoscaling tests passed!");
     Ok(())
 }
@@ -216,8 +219,7 @@ pub async fn run_autoscaling_tests(ctx: &InfraContext) -> Result<(), String> {
 /// 1. Deploys a CPU-burning LatticeService with autoscaling configured
 /// 2. Verifies the ScaledObject is created with correct spec
 /// 3. Waits for KEDA to scale pods beyond the initial replica count
-async fn run_cpu_autoscaling_test(ctx: &InfraContext) -> Result<(), String> {
-    let kubeconfig = ctx.require_workload()?;
+async fn run_cpu_autoscaling_test(kubeconfig: &str) -> Result<(), String> {
 
     info!("[Integration/Autoscaling/CPU] Starting CPU autoscaling test...");
 
@@ -267,8 +269,7 @@ async fn run_cpu_autoscaling_test(ctx: &InfraContext) -> Result<(), String> {
 /// 1. Deploys an HTTP server exposing a custom Prometheus metric via /metrics
 /// 2. Verifies the ScaledObject is created with a prometheus trigger
 /// 3. Waits for VictoriaMetrics to scrape the metric and KEDA to scale up
-async fn run_prometheus_autoscaling_test(ctx: &InfraContext) -> Result<(), String> {
-    let kubeconfig = ctx.require_workload()?;
+async fn run_prometheus_autoscaling_test(kubeconfig: &str) -> Result<(), String> {
 
     info!("[Integration/Autoscaling/Prom] Starting Prometheus autoscaling test...");
 
@@ -505,16 +506,15 @@ async fn wait_for_scale_up(
 // =============================================================================
 
 /// Standalone test — verify KEDA pod autoscaling on workload cluster
+///
+/// Uses `LATTICE_KUBECONFIG` for direct access, or falls back to
+/// `LATTICE_MGMT_KUBECONFIG` + `LATTICE_WORKLOAD_KUBECONFIG` with proxy + Cedar policy.
 #[tokio::test]
 #[ignore]
 async fn test_autoscaling_standalone() {
-    let session = TestSession::from_env(
-        "Set LATTICE_MGMT_KUBECONFIG and LATTICE_WORKLOAD_KUBECONFIG to run standalone autoscaling tests",
-    )
-    .await
-    .unwrap();
-    apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
-        .await
-        .unwrap();
-    run_autoscaling_tests(&session.ctx).await.unwrap();
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
+
+    init_e2e_test();
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    run_autoscaling_tests(&resolved.kubeconfig).await.unwrap();
 }

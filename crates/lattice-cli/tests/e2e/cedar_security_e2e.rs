@@ -40,6 +40,6 @@ async fn test_cedar_security_e2e() {
 
 async fn run() -> Result<(), String> {
     let result = setup::setup_mgmt_and_workload(&setup::SetupConfig::default()).await?;
-    integration::cedar_security::run_cedar_security_tests(&result.ctx).await?;
+    integration::cedar_security::run_cedar_security_tests(result.ctx.require_workload()?).await?;
     teardown_mgmt_cluster(&result.ctx.mgmt_kubeconfig, MGMT_CLUSTER_NAME).await
 }

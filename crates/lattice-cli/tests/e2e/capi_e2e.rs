@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tracing::info;
 
-use super::context::{init_e2e_test, ClusterLevel};
+use super::context::init_e2e_test;
 use super::helpers::{run_id, teardown_mgmt_cluster, MGMT_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME};
 use super::integration::{self, setup};
 
@@ -41,12 +41,11 @@ async fn run() -> Result<(), String> {
     let result = setup::setup_mgmt_and_workload(&setup::SetupConfig::default()).await?;
 
     // Verify CAPI resources on both management and workload clusters
-    integration::capi::verify_capi_resources(&result.ctx, MGMT_CLUSTER_NAME, ClusterLevel::Mgmt)
+    integration::capi::verify_capi_resources(&result.ctx.mgmt_kubeconfig, MGMT_CLUSTER_NAME)
         .await?;
     integration::capi::verify_capi_resources(
-        &result.ctx,
+        result.ctx.require_workload()?,
         WORKLOAD_CLUSTER_NAME,
-        ClusterLevel::Workload,
     )
     .await?;
 

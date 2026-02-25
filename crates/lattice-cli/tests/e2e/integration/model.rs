@@ -5,7 +5,7 @@
 //!
 //! Run standalone:
 //! ```
-//! LATTICE_WORKLOAD_KUBECONFIG=/tmp/xxx-e2e-workload-kubeconfig \
+//! LATTICE_KUBECONFIG=/path/to/cluster-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_model_standalone -- --ignored --nocapture
 //! ```
 
@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use tracing::info;
 
-use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     apply_yaml_with_retry, delete_namespace, ensure_namespace, load_fixture_config, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
@@ -209,7 +208,7 @@ async fn test_tracing_policies_created(kubeconfig: &str) -> Result<(), String> {
     ])
     .await?;
 
-    let policies: Vec<&str> = output.trim().split_whitespace().collect();
+    let policies: Vec<&str> = output.split_whitespace().collect();
     info!("[Model] Found tracing policies: {:?}", policies);
 
     // Each role's entry should have a tracing policy, plus workers for decode
@@ -1187,8 +1186,7 @@ async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
 }
 
 /// Run all model integration tests
-pub async fn run_model_tests(ctx: &InfraContext) -> Result<(), String> {
-    let kubeconfig = ctx.require_workload()?;
+pub async fn run_model_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Running LatticeModel integration tests on {kubeconfig}");
 
     // GHCR registry credentials + Cedar policies (includes AppArmor override)
@@ -1226,12 +1224,9 @@ pub async fn run_model_tests(ctx: &InfraContext) -> Result<(), String> {
 #[tokio::test]
 #[ignore]
 async fn test_model_standalone() {
-    let session =
-        TestSession::from_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone model tests")
-            .await
-            .expect("Failed to create test session");
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
 
-    if let Err(e) = run_model_tests(&session.ctx).await {
-        panic!("Model tests failed: {e}");
-    }
+    init_e2e_test();
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    run_model_tests(&resolved.kubeconfig).await.unwrap();
 }

@@ -7,7 +7,7 @@
 //! # Running Standalone
 //!
 //! ```bash
-//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/kubeconfig \
+//! LATTICE_KUBECONFIG=/path/to/cluster-kubeconfig \
 //! cargo test --features provider-e2e --test e2e test_tetragon_standalone -- --ignored --nocapture
 //! ```
 
@@ -25,7 +25,6 @@ use lattice_common::crd::{
     SecurityContext, ServicePortsSpec, SidecarSpec, VolumeMount, WorkloadSpec,
 };
 
-use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_policy_crd, delete_cedar_policies_by_label, delete_namespace,
     deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies, run_kubectl,
@@ -1057,8 +1056,7 @@ async fn test_missing_entrypoint_killed(kubeconfig: &str) -> Result<(), String> 
 // Orchestrator
 // =============================================================================
 
-pub async fn run_tetragon_tests(ctx: &InfraContext) -> Result<(), String> {
-    let kubeconfig = ctx.require_workload()?;
+pub async fn run_tetragon_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Running runtime enforcement tests on {kubeconfig}");
 
     setup_regcreds_infrastructure(kubeconfig).await?;
@@ -1107,14 +1105,9 @@ pub async fn run_tetragon_tests(ctx: &InfraContext) -> Result<(), String> {
 #[tokio::test]
 #[ignore]
 async fn test_tetragon_standalone() {
-    use super::super::context::TestSession;
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
 
-    let session =
-        TestSession::from_env("Set LATTICE_WORKLOAD_KUBECONFIG to run standalone Tetragon tests")
-            .await
-            .expect("Failed to create test session");
-
-    if let Err(e) = run_tetragon_tests(&session.ctx).await {
-        panic!("Tetragon tests failed: {e}");
-    }
+    init_e2e_test();
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    run_tetragon_tests(&resolved.kubeconfig).await.unwrap();
 }

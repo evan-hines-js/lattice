@@ -161,91 +161,91 @@ async fn run_full_e2e() -> Result<(), String> {
 
     // Secrets tests
     {
-        let ctx2 = ctx.clone();
+        let kc = ctx.require_workload()?.to_string();
         let sem = pool.clone();
         handles.push((
             "Secrets",
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                integration::secrets::run_secrets_tests(&ctx2).await
+                integration::secrets::run_secrets_tests(&kc).await
             }),
         ));
     }
 
     // Cedar secret authorization tests
     {
-        let ctx2 = ctx.clone();
+        let kc = ctx.require_workload()?.to_string();
         let sem = pool.clone();
         handles.push((
             "Cedar secrets",
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                integration::cedar_secrets::run_cedar_secret_tests(&ctx2).await
+                integration::cedar_secrets::run_cedar_secret_tests(&kc).await
             }),
         ));
     }
 
     // Tetragon runtime enforcement
     {
-        let ctx2 = ctx.clone();
+        let kc = ctx.require_workload()?.to_string();
         let sem = pool.clone();
         handles.push((
             "Tetragon",
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                integration::tetragon::run_tetragon_tests(&ctx2).await
+                integration::tetragon::run_tetragon_tests(&kc).await
             }),
         ));
     }
 
     // Autoscaling: KEDA pod scale-up
     {
-        let ctx2 = ctx.clone();
+        let kc = ctx.require_workload()?.to_string();
         let sem = pool.clone();
         handles.push((
             "Autoscaling",
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                integration::autoscaling::run_autoscaling_tests(&ctx2).await
+                integration::autoscaling::run_autoscaling_tests(&kc).await
             }),
         ));
     }
 
     // Job: Volcano gang scheduling
     {
-        let ctx2 = ctx.clone();
+        let kc = ctx.require_workload()?.to_string();
         let sem = pool.clone();
         handles.push((
             "Job",
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                integration::job::run_job_tests(&ctx2).await
+                integration::job::run_job_tests(&kc).await
             }),
         ));
     }
 
     // Model: Kthena model serving
     {
-        let ctx2 = ctx.clone();
+        let kc = ctx.require_workload()?.to_string();
         let sem = pool.clone();
         handles.push((
             "Model",
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                integration::model::run_model_tests(&ctx2).await
+                integration::model::run_model_tests(&kc).await
             }),
         ));
     }
 
     // Webhook: admission validation
     {
-        let ctx2 = ctx.clone();
+        let kc = ctx.require_workload()?.to_string();
         let sem = pool.clone();
         handles.push((
             "Webhook",
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                integration::webhook::run_webhook_tests(&ctx2).await
+                integration::webhook::run_webhook_tests(&kc).await
             }),
         ));
     }

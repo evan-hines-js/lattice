@@ -15,28 +15,6 @@
 use super::helpers::ProxySession;
 use super::providers::InfraProvider;
 
-/// Identifies which cluster level to operate on
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClusterLevel {
-    /// Management cluster (accessed directly)
-    Mgmt,
-    /// First workload cluster (accessed via mgmt proxy)
-    Workload,
-    /// Second workload cluster (accessed via mgmt proxy, routes through workload)
-    Workload2,
-}
-
-impl ClusterLevel {
-    /// Returns a display name for logging
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            ClusterLevel::Mgmt => "management",
-            ClusterLevel::Workload => "workload",
-            ClusterLevel::Workload2 => "workload2",
-        }
-    }
-}
-
 /// Cluster infrastructure context for tests
 ///
 /// Management cluster is accessed directly. Child clusters (workload, workload2)
@@ -134,15 +112,6 @@ impl InfraContext {
             .ok_or_else(|| "Workload2 kubeconfig not set".to_string())
     }
 
-    /// Get kubeconfig for a specific cluster level
-    pub fn kubeconfig_for(&self, level: ClusterLevel) -> Result<&str, String> {
-        match level {
-            ClusterLevel::Mgmt => Ok(&self.mgmt_kubeconfig),
-            ClusterLevel::Workload => self.require_workload(),
-            ClusterLevel::Workload2 => self.require_workload2(),
-        }
-    }
-
     /// Get all kubeconfigs as (name, path) tuples
     pub fn all_kubeconfigs(&self) -> Vec<(&str, &str)> {
         let mut configs = vec![("mgmt", self.mgmt_kubeconfig.as_str())];
@@ -166,6 +135,64 @@ impl InfraContext {
             "openstack" => InfraProvider::OpenStack,
             _ => InfraProvider::Docker,
         }
+    }
+}
+
+/// Get a kubeconfig for standalone single-cluster tests.
+///
+/// Reads `LATTICE_KUBECONFIG` (preferred) or falls back to `LATTICE_WORKLOAD_KUBECONFIG`.
+/// Returns `None` if neither is set — callers that also support the two-cluster
+/// proxy workflow can fall back to `TestSession::from_env()`.
+pub fn standalone_kubeconfig() -> Option<String> {
+    std::env::var("LATTICE_KUBECONFIG")
+        .ok()
+        .or_else(|| std::env::var("LATTICE_WORKLOAD_KUBECONFIG").ok())
+}
+
+/// Resolved kubeconfig for standalone tests, potentially backed by a proxy session.
+///
+/// If `LATTICE_KUBECONFIG` is set, uses it directly (no proxy needed).
+/// Otherwise falls back to `TestSession` with proxy + Cedar policy.
+/// The session is held to keep the port-forward alive.
+///
+/// # Example
+///
+/// ```ignore
+/// let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+/// run_my_tests(&resolved.kubeconfig).await.unwrap();
+/// ```
+#[cfg(feature = "provider-e2e")]
+pub struct StandaloneKubeconfig {
+    /// The resolved kubeconfig path
+    pub kubeconfig: String,
+    /// Proxy session (kept alive for port-forward). None when using direct access.
+    _session: Option<TestSession>,
+}
+
+#[cfg(feature = "provider-e2e")]
+impl StandaloneKubeconfig {
+    /// Resolve kubeconfig for a standalone test.
+    ///
+    /// Prefers `LATTICE_KUBECONFIG` for direct access. Falls back to
+    /// `LATTICE_MGMT_KUBECONFIG` + `LATTICE_WORKLOAD_KUBECONFIG` with proxy + Cedar policy.
+    pub async fn resolve() -> Result<Self, String> {
+        if let Some(kc) = standalone_kubeconfig() {
+            return Ok(Self {
+                kubeconfig: kc,
+                _session: None,
+            });
+        }
+
+        let session = TestSession::from_env(
+            "Set LATTICE_KUBECONFIG or LATTICE_MGMT_KUBECONFIG + LATTICE_WORKLOAD_KUBECONFIG",
+        )
+        .await?;
+        super::integration::cedar::apply_e2e_default_policy(&session.ctx.mgmt_kubeconfig).await?;
+        let kc = session.ctx.require_workload()?.to_string();
+        Ok(Self {
+            kubeconfig: kc,
+            _session: Some(session),
+        })
     }
 }
 
