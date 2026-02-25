@@ -704,6 +704,51 @@ pub struct ServiceSpec {
     pub type_: String,
 }
 
+impl ServiceSpec {
+    /// Validate the service specification.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        match self.type_.as_str() {
+            "LoadBalancer" | "NodePort" | "ClusterIP" => Ok(()),
+            _ => Err(crate::Error::validation(format!(
+                "service type must be LoadBalancer, NodePort, or ClusterIP, got: {}",
+                self.type_
+            ))),
+        }
+    }
+}
+
+impl EndpointsSpec {
+    /// Validate the endpoints specification.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        if self.grpc_port == 0 {
+            return Err(crate::Error::validation("grpc_port must be non-zero"));
+        }
+        if self.bootstrap_port == 0 {
+            return Err(crate::Error::validation("bootstrap_port must be non-zero"));
+        }
+        if self.proxy_port == 0 {
+            return Err(crate::Error::validation("proxy_port must be non-zero"));
+        }
+        if self.grpc_port == self.bootstrap_port {
+            return Err(crate::Error::validation(
+                "grpc_port and bootstrap_port must be distinct",
+            ));
+        }
+        if self.grpc_port == self.proxy_port {
+            return Err(crate::Error::validation(
+                "grpc_port and proxy_port must be distinct",
+            ));
+        }
+        if self.bootstrap_port == self.proxy_port {
+            return Err(crate::Error::validation(
+                "bootstrap_port and proxy_port must be distinct",
+            ));
+        }
+        self.service.validate()?;
+        Ok(())
+    }
+}
+
 // =============================================================================
 // Service Reference
 // =============================================================================
@@ -1701,6 +1746,96 @@ mod tests {
                 serde_json::from_str(json).expect("EndpointsSpec deserialization should succeed");
             assert_eq!(spec.grpc_port, 50051);
             assert_eq!(spec.bootstrap_port, 8443);
+        }
+    }
+
+    mod endpoints_spec_validation {
+        use super::*;
+
+        fn valid_endpoints() -> EndpointsSpec {
+            EndpointsSpec {
+                grpc_port: 50051,
+                bootstrap_port: 8443,
+                proxy_port: 8081,
+                service: ServiceSpec {
+                    type_: "LoadBalancer".to_string(),
+                },
+            }
+        }
+
+        #[test]
+        fn valid_endpoints_pass() {
+            assert!(valid_endpoints().validate().is_ok());
+        }
+
+        #[test]
+        fn zero_grpc_port_rejected() {
+            let mut spec = valid_endpoints();
+            spec.grpc_port = 0;
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("grpc_port"), "got: {err}");
+        }
+
+        #[test]
+        fn zero_bootstrap_port_rejected() {
+            let mut spec = valid_endpoints();
+            spec.bootstrap_port = 0;
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("bootstrap_port"), "got: {err}");
+        }
+
+        #[test]
+        fn zero_proxy_port_rejected() {
+            let mut spec = valid_endpoints();
+            spec.proxy_port = 0;
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("proxy_port"), "got: {err}");
+        }
+
+        #[test]
+        fn duplicate_grpc_and_bootstrap_rejected() {
+            let mut spec = valid_endpoints();
+            spec.bootstrap_port = spec.grpc_port;
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("distinct"), "got: {err}");
+        }
+
+        #[test]
+        fn duplicate_grpc_and_proxy_rejected() {
+            let mut spec = valid_endpoints();
+            spec.proxy_port = spec.grpc_port;
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("distinct"), "got: {err}");
+        }
+
+        #[test]
+        fn duplicate_bootstrap_and_proxy_rejected() {
+            let mut spec = valid_endpoints();
+            spec.proxy_port = spec.bootstrap_port;
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("distinct"), "got: {err}");
+        }
+
+        #[test]
+        fn invalid_service_type_rejected() {
+            let mut spec = valid_endpoints();
+            spec.service.type_ = "ExternalName".to_string();
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("LoadBalancer"), "got: {err}");
+        }
+
+        #[test]
+        fn nodeport_service_type_accepted() {
+            let mut spec = valid_endpoints();
+            spec.service.type_ = "NodePort".to_string();
+            assert!(spec.validate().is_ok());
+        }
+
+        #[test]
+        fn clusterip_service_type_accepted() {
+            let mut spec = valid_endpoints();
+            spec.service.type_ = "ClusterIP".to_string();
+            assert!(spec.validate().is_ok());
         }
     }
 }

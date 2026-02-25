@@ -132,6 +132,11 @@ impl LatticeClusterSpec {
         // Validate node spec
         self.nodes.validate()?;
 
+        // Validate parent config if present
+        if let Some(ref pc) = self.parent_config {
+            pc.validate()?;
+        }
+
         Ok(())
     }
 }

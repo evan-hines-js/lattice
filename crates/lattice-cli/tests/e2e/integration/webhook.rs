@@ -275,9 +275,226 @@ spec:
     Ok(())
 }
 
+// =============================================================================
+// LatticeCluster parent_config validation tests
+// =============================================================================
+//
+// These tests use the real clusters from the E2E hierarchy instead of creating
+// throwaway clusters, to avoid straining test infrastructure:
+//
+// - Management cluster: has parent_config (it's a parent) → test removal/modification blocked
+// - Workload cluster: no parent_config (leaf) → test promotion allowed, then removal blocked
+//
+// The tests fetch the existing LatticeCluster YAML and re-apply with modifications.
+// On the workload cluster, the self-cluster is accessed via the workload kubeconfig.
+// On the management cluster, the self-cluster is accessed via the mgmt kubeconfig.
+
+use super::super::helpers::WORKLOAD_CLUSTER_NAME;
+
+/// Fetch the full LatticeCluster YAML for a given cluster name
+async fn get_cluster_yaml(kubeconfig: &str, name: &str) -> Result<String, String> {
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "latticecluster",
+        name,
+        "-o",
+        "yaml",
+    ])
+    .await
+}
+
+/// Test: LatticeCluster CREATE with duplicate ports in parentConfig is rejected
+async fn test_cluster_duplicate_ports_rejected(kubeconfig: &str) -> Result<(), String> {
+    let yaml = r#"apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: webhook-test-dup-ports
+spec:
+  providerRef: webhook-test-fake
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      certSANs: ["127.0.0.1"]
+    config:
+      docker: {}
+  nodes:
+    controlPlane:
+      replicas: 1
+    workerPools:
+      default:
+        replicas: 1
+  parentConfig:
+    grpcPort: 8443
+    bootstrapPort: 8443
+    proxyPort: 8081
+    service:
+      type: LoadBalancer
+"#;
+    let err = apply_should_be_rejected(kubeconfig, yaml, "cluster with duplicate ports").await?;
+    if !err.contains("distinct") {
+        return Err(format!(
+            "Expected rejection to mention 'distinct', got: {err}"
+        ));
+    }
+    Ok(())
+}
+
+/// Test: LatticeCluster CREATE with invalid service type is rejected
+async fn test_cluster_invalid_service_type_rejected(kubeconfig: &str) -> Result<(), String> {
+    let yaml = r#"apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: webhook-test-bad-svc-type
+spec:
+  providerRef: webhook-test-fake
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      certSANs: ["127.0.0.1"]
+    config:
+      docker: {}
+  nodes:
+    controlPlane:
+      replicas: 1
+    workerPools:
+      default:
+        replicas: 1
+  parentConfig:
+    grpcPort: 50051
+    bootstrapPort: 8443
+    proxyPort: 8081
+    service:
+      type: ExternalName
+"#;
+    let err =
+        apply_should_be_rejected(kubeconfig, yaml, "cluster with invalid service type").await?;
+    if !err.contains("LoadBalancer") {
+        return Err(format!(
+            "Expected rejection to mention 'LoadBalancer', got: {err}"
+        ));
+    }
+    Ok(())
+}
+
+/// Test parent_config immutability using the live workload cluster.
+///
+/// The workload cluster is a leaf (no parent_config). The test:
+/// - Promotes it by adding parent_config → allowed
+/// - Tries to modify the parent_config → rejected (immutable)
+/// - Tries to remove parent_config → rejected (cannot be removed)
+///
+/// After testing, the parent_config stays on the workload cluster. This is
+/// safe because E2E teardown destroys everything, and standalone runs don't
+/// rely on the workload being a leaf.
+async fn test_parent_config_immutability(kubeconfig: &str) -> Result<(), String> {
+    let cluster_name = WORKLOAD_CLUSTER_NAME;
+
+    // Fetch the existing workload LatticeCluster YAML
+    let original_yaml = get_cluster_yaml(kubeconfig, cluster_name).await?;
+
+    // Verify the workload cluster doesn't already have parent_config
+    if original_yaml.contains("parentConfig") {
+        info!("[Webhook] Workload cluster already has parentConfig, skipping promotion test");
+    } else {
+        // Promotion: add parent_config to the leaf cluster → should be allowed
+        let promoted_yaml = inject_parent_config(&original_yaml);
+        apply_should_succeed(kubeconfig, &promoted_yaml, "promote workload to parent").await?;
+        info!("[Webhook] Workload cluster promoted to parent");
+    }
+
+    // Fetch the updated YAML (now with parent_config)
+    let current_yaml = get_cluster_yaml(kubeconfig, cluster_name).await?;
+
+    // Modification: try to change grpc_port → should be rejected
+    let modified_yaml = current_yaml.replace("grpcPort: 50051", "grpcPort: 9999");
+    if modified_yaml == current_yaml {
+        return Err("Failed to inject modified grpcPort into YAML".to_string());
+    }
+    let err =
+        apply_should_be_rejected(kubeconfig, &modified_yaml, "modify parent_config ports").await?;
+    if !err.contains("immutable") {
+        return Err(format!(
+            "Expected rejection to mention 'immutable', got: {err}"
+        ));
+    }
+
+    // Removal: try to strip parent_config → should be rejected
+    let stripped_yaml = strip_parent_config(&current_yaml);
+    let err =
+        apply_should_be_rejected(kubeconfig, &stripped_yaml, "remove parent_config").await?;
+    if !err.contains("cannot be removed") {
+        return Err(format!(
+            "Expected rejection to mention 'cannot be removed', got: {err}"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Inject a parentConfig block into a LatticeCluster YAML that doesn't have one.
+///
+/// Inserts after the `nodes:` section by finding the `nodes:` key at spec level
+/// and appending parentConfig at the same indent.
+fn inject_parent_config(yaml: &str) -> String {
+    let parent_config_block = r#"  parentConfig:
+    grpcPort: 50051
+    bootstrapPort: 8443
+    proxyPort: 8081
+    service:
+      type: LoadBalancer"#;
+
+    // Insert parentConfig at the end of spec (before status or EOF)
+    if let Some(status_pos) = yaml.find("\nstatus:") {
+        format!(
+            "{}\n{}\n{}",
+            &yaml[..status_pos],
+            parent_config_block,
+            &yaml[status_pos..]
+        )
+    } else {
+        format!("{}\n{}\n", yaml.trim_end(), parent_config_block)
+    }
+}
+
+/// Strip the parentConfig block from a LatticeCluster YAML.
+///
+/// Removes lines from `  parentConfig:` through the end of its nested content.
+fn strip_parent_config(yaml: &str) -> String {
+    let mut result = String::new();
+    let mut skipping = false;
+
+    for line in yaml.lines() {
+        if line.starts_with("  parentConfig:") {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            // Stop skipping when we hit a line at spec level (2-space indent or less)
+            // that isn't blank and isn't deeper-indented content
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+            if !trimmed.is_empty() && indent <= 2 {
+                skipping = false;
+            } else {
+                continue;
+            }
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    result
+}
+
+// =============================================================================
+// Cleanup and main test runner
+// =============================================================================
+
 /// Cleanup test resources
 async fn cleanup(kubeconfig: &str) {
-    info!("[Webhook] Cleaning up test namespace...");
+    info!("[Webhook] Cleaning up test resources...");
     let _ = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
@@ -305,6 +522,13 @@ pub async fn run_webhook_tests(ctx: &InfraContext) -> Result<(), String> {
     test_invalid_service_rejected(kubeconfig).await?;
     test_invalid_model_rejected(kubeconfig).await?;
     test_invalid_mesh_member_rejected(kubeconfig).await?;
+
+    // LatticeCluster EndpointsSpec validation (CREATE rejection — no clusters created)
+    test_cluster_duplicate_ports_rejected(kubeconfig).await?;
+    test_cluster_invalid_service_type_rejected(kubeconfig).await?;
+
+    // LatticeCluster parent_config immutability (uses existing workload cluster)
+    test_parent_config_immutability(kubeconfig).await?;
 
     cleanup(kubeconfig).await;
 

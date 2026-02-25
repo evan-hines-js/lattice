@@ -93,4 +93,47 @@ pub(crate) mod test_helpers {
             .try_into()
             .expect("test AdmissionReview should convert to AdmissionRequest")
     }
+
+    /// Build an UPDATE AdmissionRequest with both object and oldObject JSON.
+    ///
+    /// Same as `make_admission_request` but sets `"operation": "UPDATE"` and
+    /// includes `"oldObject"` for mutation detection.
+    pub fn make_update_admission_request(
+        group: &str,
+        version: &str,
+        resource: &str,
+        object_json: serde_json::Value,
+        old_object_json: serde_json::Value,
+    ) -> AdmissionRequest<DynamicObject> {
+        let review_json = serde_json::json!({
+            "apiVersion": "admission.k8s.io/v1",
+            "kind": "AdmissionReview",
+            "request": {
+                "uid": "test-uid",
+                "kind": {
+                    "group": group,
+                    "version": version,
+                    "kind": "TestKind"
+                },
+                "resource": {
+                    "group": group,
+                    "version": version,
+                    "resource": resource
+                },
+                "operation": "UPDATE",
+                "userInfo": {
+                    "username": "test-user"
+                },
+                "object": object_json,
+                "oldObject": old_object_json,
+                "dryRun": false
+            }
+        });
+
+        let review: AdmissionReview<DynamicObject> =
+            serde_json::from_value(review_json).expect("test AdmissionReview should deserialize");
+        review
+            .try_into()
+            .expect("test AdmissionReview should convert to AdmissionRequest")
+    }
 }

@@ -562,7 +562,30 @@ async fn load_cedar_engine(client: &kube::Client) -> Arc<PolicyEngine> {
     }
 }
 
+/// Check whether the self-cluster CRD has `parent_config` set.
+///
+/// Returns `false` on 404 or any error (safe default for leaf clusters).
+async fn has_parent_config(client: &kube::Client, cluster_name: &Option<String>) -> bool {
+    let Some(name) = cluster_name else {
+        return false;
+    };
+    let clusters: Api<LatticeCluster> = Api::all(client.clone());
+    match clusters.get(name).await {
+        Ok(c) => c.spec.parent_config.is_some(),
+        Err(_) => false,
+    }
+}
+
 /// Set up cell infrastructure (gRPC servers, agent connection, auth proxy)
+///
+/// Always creates `ParentServers` (CA + registries are needed by agent SubtreeForwarder).
+/// Always starts agent connection if `self_cluster_name` is set.
+///
+/// For cells (bootstrap or has parent_config): starts servers, auth proxy, CA rotation,
+/// and crash recovery immediately.
+///
+/// For leaf clusters: spawns a background `cell_activation_watcher` that polls the
+/// self-cluster CRD every 30s and promotes to cell when `parent_config` appears.
 ///
 /// Returns (parent_servers, agent_cancellation_token, auth_proxy_handle)
 async fn setup_cell_infra(
@@ -576,7 +599,7 @@ async fn setup_cell_infra(
 )> {
     let is_bootstrap = lattice_common::is_bootstrap_cluster();
 
-    // Create cell servers
+    // Create cell servers (always — CA + registries needed by agent SubtreeForwarder)
     let parent_config = ParentConfig::default();
     let servers = Arc::new(ParentServers::new(parent_config, client).await?);
 
@@ -600,32 +623,162 @@ async fn setup_cell_infra(
         });
     }
 
-    // Start cell servers with TLS SANs from LoadBalancer
-    let extra_sans = get_cell_server_sans(client, self_cluster_name, is_bootstrap).await;
-    servers
-        .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
-        .await?;
-    tracing::info!("Cell servers started");
+    let is_cell = is_bootstrap || has_parent_config(client, self_cluster_name).await;
 
-    // Start auth proxy server
-    let auth_proxy_handle = start_auth_proxy(
-        client,
-        servers.clone(),
-        self_cluster_name,
-        &extra_sans,
-        cedar,
-    )
-    .await;
+    let auth_proxy_handle = if is_cell {
+        // Start cell servers with TLS SANs from LoadBalancer
+        let extra_sans = get_cell_server_sans(client, self_cluster_name, is_bootstrap).await;
+        servers
+            .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
+            .await?;
+        tracing::info!("Cell servers started");
 
-    // Start CA rotation background task
-    start_ca_rotation(servers.clone());
+        // Start auth proxy server
+        let handle = start_auth_proxy(
+            client,
+            servers.clone(),
+            self_cluster_name,
+            &extra_sans,
+            cedar,
+        )
+        .await;
 
-    // Re-register clusters after restart (crash recovery)
-    if let Some(state) = servers.bootstrap_state().await {
-        re_register_existing_clusters(client, &state, self_cluster_name, &servers).await;
-    }
+        // Start CA rotation background task
+        start_ca_rotation(servers.clone());
+
+        // Re-register clusters after restart (crash recovery)
+        if let Some(state) = servers.bootstrap_state().await {
+            re_register_existing_clusters(client, &state, self_cluster_name, &servers).await;
+        }
+
+        handle
+    } else {
+        // Leaf cluster — spawn background watcher for promotion
+        tracing::info!("Leaf cluster, cell servers deferred until parent_config is set");
+        if let Some(ref name) = self_cluster_name {
+            let watcher_client = client.clone();
+            let watcher_name = name.clone();
+            let watcher_servers = servers.clone();
+            let watcher_cedar = cedar;
+            tokio::spawn(async move {
+                cell_activation_watcher(
+                    watcher_client,
+                    watcher_name,
+                    watcher_servers,
+                    watcher_cedar,
+                )
+                .await;
+            });
+        }
+        None
+    };
 
     Ok((servers, agent_token, auth_proxy_handle))
+}
+
+/// Background task that watches for `parent_config` to appear on the self-cluster CRD.
+///
+/// When promotion is detected (parent_config added), this function:
+/// - Creates the LB Service
+/// - Waits for the LB address
+/// - Starts cell servers with the LB address as a TLS SAN
+/// - Starts auth proxy and CA rotation
+/// - Runs crash recovery (re-register existing clusters)
+async fn cell_activation_watcher(
+    client: kube::Client,
+    self_cluster_name: String,
+    servers: Arc<ParentServers<DefaultManifestGenerator>>,
+    cedar: Arc<PolicyEngine>,
+) {
+    use lattice_operator::startup::{
+        discover_cell_host, ensure_cell_service_exists, LOAD_BALANCER_POLL_INTERVAL,
+    };
+
+    loop {
+        // Already running — done
+        if servers.is_running() {
+            return;
+        }
+
+        // Read self-cluster CRD
+        let clusters: Api<LatticeCluster> = Api::all(client.clone());
+        let cluster = match clusters.get(&self_cluster_name).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(error = %e, "cell_activation_watcher: failed to read self-cluster, retrying");
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+
+        let Some(ref pc) = cluster.spec.parent_config else {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            continue;
+        };
+
+        // parent_config found — promote to cell
+        tracing::info!("parent_config detected, promoting to cell...");
+        let provider_type = cluster.spec.provider.provider_type();
+
+        // Create LB Service
+        if let Err(e) = ensure_cell_service_exists(
+            &client,
+            pc.bootstrap_port,
+            pc.grpc_port,
+            pc.proxy_port,
+            provider_type,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "Failed to create cell Service, retrying");
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            continue;
+        }
+
+        // Wait for LB address
+        let lb_address = loop {
+            match discover_cell_host(&client).await {
+                Ok(Some(host)) => break host,
+                Ok(None) => {
+                    tracing::debug!("Waiting for cell LoadBalancer address...");
+                    tokio::time::sleep(LOAD_BALANCER_POLL_INTERVAL).await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to discover cell host, retrying");
+                    tokio::time::sleep(LOAD_BALANCER_POLL_INTERVAL).await;
+                }
+            }
+        };
+        tracing::info!(host = %lb_address, "Cell host discovered");
+
+        let extra_sans = vec![lb_address];
+
+        // Start cell servers
+        if let Err(e) = servers
+            .ensure_running(DefaultManifestGenerator::new(), &extra_sans, client.clone())
+            .await
+        {
+            tracing::error!(error = %e, "Failed to start cell servers during promotion");
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            continue;
+        }
+        tracing::info!("Cell servers started (promoted to parent)");
+
+        // Start auth proxy
+        let cluster_name = Some(self_cluster_name.clone());
+        start_auth_proxy(&client, servers.clone(), &cluster_name, &extra_sans, cedar).await;
+
+        // Start CA rotation
+        start_ca_rotation(servers.clone());
+
+        // Crash recovery
+        if let Some(state) = servers.bootstrap_state().await {
+            re_register_existing_clusters(&client, &state, &cluster_name, &servers).await;
+        }
+
+        tracing::info!("Cell infrastructure activated (cluster promoted to parent)");
+        return;
+    }
 }
 
 // ---------------------------------------------------------------------------

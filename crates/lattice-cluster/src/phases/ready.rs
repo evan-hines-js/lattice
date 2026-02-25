@@ -170,6 +170,21 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
         }
     }
 
+    // Ensure cell LB Service exists when parent_config is present.
+    // This is idempotent and handles both steady state and the promotion case
+    // (creates the service on the first reconcile after parent_config is added,
+    // rather than waiting up to 30s for the background activation watcher to poll).
+    if let Some(ref pc) = cluster.spec.parent_config {
+        let provider_type = cluster.spec.provider.provider_type();
+        if let Err(e) = ctx
+            .kube
+            .ensure_cell_service(pc.bootstrap_port, pc.grpc_port, pc.proxy_port, &provider_type)
+            .await
+        {
+            warn!(error = %e, "failed to ensure cell LB service, will retry");
+        }
+    }
+
     let capi_namespace = capi_namespace(&name);
 
     // Reconcile Kubernetes version (CP first, then workers).

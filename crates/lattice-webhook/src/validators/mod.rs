@@ -56,7 +56,7 @@ impl Default for ValidatorRegistry {
 
 #[cfg(test)]
 pub(crate) mod tests_common {
-    pub use crate::test_helpers::make_admission_request;
+    pub use crate::test_helpers::{make_admission_request, make_update_admission_request};
 }
 
 #[cfg(test)]
