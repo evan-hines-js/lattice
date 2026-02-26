@@ -43,4 +43,5 @@ pub mod scaling;
 pub mod secrets;
 pub mod setup;
 pub mod tetragon;
+pub mod updates;
 pub mod webhook;

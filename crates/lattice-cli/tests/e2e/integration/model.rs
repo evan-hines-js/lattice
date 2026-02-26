@@ -149,9 +149,11 @@ async fn test_model_serving_created(kubeconfig: &str) -> Result<(), String> {
         return Err("gangPolicy is null".to_string());
     }
     let min_replicas = &gang["minRoleReplicas"];
-    if min_replicas["decode"].as_u64() != Some(2) {
+    // minRoleReplicas is always 1 for all roles (allows partial-capacity startup,
+    // avoids Kthena immutability conflicts on SSA updates when replicas change)
+    if min_replicas["decode"].as_u64() != Some(1) {
         return Err(format!(
-            "gangPolicy: expected decode minRoleReplicas=2, got: {}",
+            "gangPolicy: expected decode minRoleReplicas=1, got: {}",
             min_replicas["decode"]
         ));
     }

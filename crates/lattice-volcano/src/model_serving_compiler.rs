@@ -95,14 +95,17 @@ fn compile_roles(
         .collect()
 }
 
+/// Compute the gang scheduling policy for a ModelServing.
+///
+/// Sets `minRoleReplicas` to 1 for each role. This means the serving group can
+/// start as soon as at least one replica of each role is ready, then scales up
+/// to the full replica count. Using 1 instead of `spec.replicas` avoids
+/// conflicts with Kthena's immutability constraint on `minRoleReplicas` — the
+/// value stays stable across replica changes, so SSA updates never hit a 422.
 fn compute_gang_policy(
     role_specs: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
 ) -> GangPolicy {
-    let min_role_replicas = role_specs
-        .iter()
-        .map(|(name, spec)| (name.clone(), spec.replicas))
-        .collect();
-
+    let min_role_replicas = role_specs.keys().map(|name| (name.clone(), 1)).collect();
     GangPolicy { min_role_replicas }
 }
 
@@ -277,8 +280,9 @@ mod tests {
         let ms = compile_model_serving(&model, &templates);
 
         let gang = ms.spec.template.gang_policy.as_ref().unwrap();
+        // minRoleReplicas is always 1 (start serving with partial capacity)
         assert_eq!(gang.min_role_replicas["prefill"], 1);
-        assert_eq!(gang.min_role_replicas["decode"], 3);
+        assert_eq!(gang.min_role_replicas["decode"], 1);
     }
 
     #[test]

@@ -612,7 +612,15 @@ pub async fn reconcile(
     // Validate the full service spec (workload, runtime, autoscaling, backup)
     if let Err(e) = service.spec.validate() {
         warn!(error = %e, "service validation failed");
-        update_service_status(&service, &ctx, ServiceStatusUpdate::failed(&e.to_string())).await?;
+        update_service_status(
+            &service,
+            &ctx,
+            ServiceStatusUpdate::failed_with_generation(
+                &e.to_string(),
+                service.metadata.generation,
+            ),
+        )
+        .await?;
         // Don't requeue for validation errors - they require spec changes
         return Ok(Action::await_change());
     }
@@ -969,7 +977,7 @@ async fn compile_and_apply(
                 service.status.as_ref(),
                 &ServicePhase::Failed,
                 Some(&msg),
-                None,
+                service.metadata.generation,
             ) {
                 let event_reason = if e.is_policy_denied() {
                     match &e {
@@ -998,7 +1006,12 @@ async fn compile_and_apply(
                 debug!(error = %msg, "compilation still failing");
             }
 
-            update_service_status(service, ctx, ServiceStatusUpdate::failed(&msg)).await?;
+            update_service_status(
+                service,
+                ctx,
+                ServiceStatusUpdate::failed_with_generation(&msg, service.metadata.generation),
+            )
+            .await?;
             return Err(Error::validation(e.to_string()));
         }
     };
@@ -1019,13 +1032,18 @@ async fn compile_and_apply(
             service.status.as_ref(),
             &ServicePhase::Failed,
             Some(&msg),
-            None,
+            service.metadata.generation,
         ) {
             error!(error = %msg, "failed to apply compiled resources");
         } else {
             debug!(error = %msg, "apply still failing");
         }
-        update_service_status(service, ctx, ServiceStatusUpdate::failed(&msg)).await?;
+        update_service_status(
+            service,
+            ctx,
+            ServiceStatusUpdate::failed_with_generation(&msg, service.metadata.generation),
+        )
+        .await?;
         return Err(e);
     }
 
@@ -1103,6 +1121,18 @@ impl<'a> ServiceStatusUpdate<'a> {
             reason: "ValidationFailed",
             set_compiled_at: false,
             observed_generation: None,
+        }
+    }
+
+    fn failed_with_generation(message: &'a str, generation: Option<i64>) -> Self {
+        Self {
+            phase: ServicePhase::Failed,
+            message,
+            condition_type: "Ready",
+            condition_status: ConditionStatus::False,
+            reason: "ValidationFailed",
+            set_compiled_at: false,
+            observed_generation: generation,
         }
     }
 }
@@ -1681,6 +1711,84 @@ mod tests {
 
         assert!(backup.is_none());
         assert!(ingress.is_none());
+    }
+
+    // =========================================================================
+    // Reconcile Guard Tests (is_reconcile_current)
+    // =========================================================================
+
+    fn service_with_status(
+        name: &str,
+        phase: ServicePhase,
+        generation: i64,
+        observed_generation: Option<i64>,
+        inputs_hash: Option<&str>,
+    ) -> LatticeService {
+        let mut svc = sample_service(name);
+        svc.metadata.generation = Some(generation);
+        svc.metadata.annotations = inputs_hash.map(|h| {
+            let mut m = BTreeMap::new();
+            m.insert(INPUTS_HASH_ANNOTATION.to_string(), h.to_string());
+            m
+        });
+        svc.status = Some(
+            LatticeServiceStatus::with_phase(phase).observed_generation(observed_generation),
+        );
+        svc
+    }
+
+    #[test]
+    fn reconcile_guard_skips_ready_with_matching_inputs() {
+        let svc = service_with_status("svc", ServicePhase::Ready, 1, Some(1), Some("hash-abc"));
+        assert!(is_reconcile_current(&svc, "hash-abc"));
+    }
+
+    #[test]
+    fn reconcile_guard_retries_ready_on_generation_change() {
+        let svc = service_with_status("svc", ServicePhase::Ready, 2, Some(1), Some("hash-abc"));
+        assert!(!is_reconcile_current(&svc, "hash-abc"));
+    }
+
+    #[test]
+    fn reconcile_guard_retries_ready_on_hash_change() {
+        let svc = service_with_status("svc", ServicePhase::Ready, 1, Some(1), Some("hash-abc"));
+        assert!(!is_reconcile_current(&svc, "hash-NEW"));
+    }
+
+    /// Failed services with observed_generation and matching hash should be skipped.
+    /// This prevents tight 30s retry loops when the same error recurs.
+    #[test]
+    fn reconcile_guard_skips_failed_with_matching_inputs() {
+        let svc = service_with_status("svc", ServicePhase::Failed, 1, Some(1), Some("hash-abc"));
+        assert!(
+            is_reconcile_current(&svc, "hash-abc"),
+            "Failed service with matching generation + hash should be skipped"
+        );
+    }
+
+    /// Failed services should retry when the spec changes (generation bump).
+    #[test]
+    fn reconcile_guard_retries_failed_on_generation_change() {
+        let svc = service_with_status("svc", ServicePhase::Failed, 2, Some(1), Some("hash-abc"));
+        assert!(!is_reconcile_current(&svc, "hash-abc"));
+    }
+
+    /// Failed services should retry when external inputs change (Cedar policy, graph edges).
+    #[test]
+    fn reconcile_guard_retries_failed_on_hash_change() {
+        let svc = service_with_status("svc", ServicePhase::Failed, 1, Some(1), Some("hash-abc"));
+        assert!(!is_reconcile_current(&svc, "hash-NEW"));
+    }
+
+    /// ServiceStatusUpdate::failed() must set observed_generation so the guard works.
+    #[test]
+    fn failed_status_update_sets_observed_generation() {
+        let update = ServiceStatusUpdate::failed_with_generation("error", Some(3));
+        assert_eq!(
+            update.observed_generation,
+            Some(3),
+            "Failed status must include observed_generation for the reconcile guard to work"
+        );
     }
 
     /// Story: Policy matches only same namespace when no namespace selector

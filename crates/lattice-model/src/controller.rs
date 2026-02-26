@@ -166,6 +166,25 @@ pub async fn reconcile(
             Ok(Action::requeue(REQUEUE_LOADING))
         }
         ModelServingPhase::Loading => {
+            // Check if the spec changed since we compiled in Pending. If so,
+            // go back to Pending to recompile with the new spec. Without this
+            // check, Loading→Serving would stamp the new generation despite
+            // running resources compiled from the old spec.
+            if spec_changed_since_compilation(model.status.as_ref(), generation) {
+                info!(model = %name, "spec changed during Loading, recompiling");
+                update_status(
+                    &ctx.client,
+                    &model,
+                    namespace,
+                    ModelServingPhase::Pending,
+                    Some("Spec changed, recompiling"),
+                    None,
+                    None,
+                )
+                .await?;
+                return Ok(Action::requeue(REQUEUE_RETRY));
+            }
+
             // When modelSource is configured, check download Job before ModelServing
             if model.spec.model_source.is_some() {
                 let job_name = format!("{}-download", name);
@@ -247,16 +266,53 @@ pub async fn reconcile(
             if observed != Some(generation) {
                 // Spec changed — re-compile and re-apply
                 info!(model = %name, observed = ?observed, current = generation, "spec changed, re-applying");
-                let compiled = compile_model(
+                let compiled = match compile_model(
                     &model,
                     &ctx.graph,
                     &ctx.cluster_name,
                     ctx.provider_type,
                     &ctx.cedar,
                 )
-                .await?;
+                .await
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        // Compile errors are permanent — go to Failed
+                        cleanup_graph(&model, &ctx.graph, namespace);
+                        let msg = format!("Failed to recompile after spec change: {}", e);
+                        let _ = update_status(
+                            &ctx.client,
+                            &model,
+                            namespace,
+                            ModelServingPhase::Failed,
+                            Some(&msg),
+                            Some(generation),
+                            None,
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                };
                 register_graph(&model, &ctx.graph, namespace);
-                apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await?;
+                if let Err(e) =
+                    apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await
+                {
+                    // Apply errors are transient — stay in Serving, let
+                    // error_policy retry. Keep the old observed_generation so
+                    // the next reconcile re-enters this recompile path.
+                    let msg = format!("Apply failed after spec change (will retry): {}", e);
+                    let _ = update_status(
+                        &ctx.client,
+                        &model,
+                        namespace,
+                        ModelServingPhase::Serving,
+                        Some(&msg),
+                        observed,
+                        None,
+                    )
+                    .await;
+                    return Err(e);
+                }
                 let conditions =
                     read_model_serving_conditions(&ctx.client, &name, namespace, &ctx.registry)
                         .await;
@@ -777,6 +833,16 @@ async fn remove_scheduling_gates(
     Ok(())
 }
 
+/// Check if the spec changed since the last compilation.
+///
+/// Returns `true` if `observed_generation` (set when resources were last compiled)
+/// doesn't match the current `metadata.generation`. This means the user has updated
+/// the spec and the controller needs to re-compile.
+fn spec_changed_since_compilation(status: Option<&LatticeModelStatus>, generation: i64) -> bool {
+    let observed = status.and_then(|s| s.observed_generation);
+    observed != Some(generation)
+}
+
 async fn update_status(
     client: &Client,
     model: &LatticeModel,
@@ -815,4 +881,95 @@ async fn update_status(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_status(
+        phase: ModelServingPhase,
+        observed_generation: Option<i64>,
+    ) -> LatticeModelStatus {
+        LatticeModelStatus {
+            phase,
+            message: None,
+            observed_generation,
+            conditions: None,
+        }
+    }
+
+    #[test]
+    fn spec_unchanged_when_generation_matches() {
+        let status = make_status(ModelServingPhase::Loading, Some(1));
+        assert!(!spec_changed_since_compilation(Some(&status), 1));
+    }
+
+    #[test]
+    fn spec_changed_when_generation_advances() {
+        let status = make_status(ModelServingPhase::Loading, Some(1));
+        assert!(spec_changed_since_compilation(Some(&status), 2));
+    }
+
+    #[test]
+    fn spec_changed_when_no_observed_generation() {
+        let status = make_status(ModelServingPhase::Loading, None);
+        assert!(spec_changed_since_compilation(Some(&status), 1));
+    }
+
+    /// The Loading phase must detect spec changes. When the user updates a model
+    /// spec while it's Loading, the old compiled resources are still running.
+    /// If Loading doesn't detect the generation mismatch and transitions to
+    /// Serving, it stamps the new generation on the status — making Serving think
+    /// it's up-to-date when it's actually running stale config.
+    #[test]
+    fn loading_must_detect_spec_change() {
+        // Simulates: Pending compiled at gen=1, entered Loading with observed_gen=1.
+        // User updates spec → metadata.generation becomes 2.
+        let status = make_status(ModelServingPhase::Loading, Some(1));
+        let current_generation = 2;
+
+        assert!(
+            spec_changed_since_compilation(Some(&status), current_generation),
+            "Loading phase must detect spec changes to prevent running stale config"
+        );
+    }
+
+    #[test]
+    fn derive_available_state() {
+        let conditions = vec![ModelCondition {
+            type_: "Available".to_string(),
+            status: "True".to_string(),
+            reason: None,
+            message: None,
+            last_transition_time: None,
+        }];
+        assert!(matches!(
+            derive_model_serving_state(Some(&conditions)),
+            ModelServingState::Available
+        ));
+    }
+
+    #[test]
+    fn derive_failed_state() {
+        let conditions = vec![ModelCondition {
+            type_: "Failed".to_string(),
+            status: "True".to_string(),
+            reason: None,
+            message: None,
+            last_transition_time: None,
+        }];
+        assert!(matches!(
+            derive_model_serving_state(Some(&conditions)),
+            ModelServingState::Failed
+        ));
+    }
+
+    #[test]
+    fn derive_progressing_with_no_conditions() {
+        assert!(matches!(
+            derive_model_serving_state(None),
+            ModelServingState::Progressing
+        ));
+    }
 }
