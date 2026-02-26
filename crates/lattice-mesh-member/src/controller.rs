@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
+use kube::api::{Api, DynamicObject, Patch, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
@@ -91,6 +91,7 @@ pub fn read_applied_resources(member: &LatticeMeshMember) -> HashSet<AppliedReso
 }
 
 /// Delete a single resource via the dynamic API, ignoring 404 (already gone).
+/// Wraps the shared `delete_resource_if_exists` with CRD discovery check.
 async fn delete_if_discovered(
     client: &Client,
     namespace: &str,
@@ -103,21 +104,10 @@ async fn delete_if_discovered(
         return Ok(());
     };
 
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
-    match api.delete(name, &DeleteParams::default()).await {
-        Ok(_) => {
-            info!(name = %name, kind = %kind, "deleted orphaned resource");
-            Ok(())
-        }
-        Err(kube::Error::Api(ref resp)) if resp.code == 404 => {
-            debug!(name = %name, kind = %kind, "orphaned resource already gone");
-            Ok(())
-        }
-        Err(e) => Err(ReconcileError::kube(
-            format!("delete orphaned {kind} {name}"),
-            e,
-        )),
-    }
+    lattice_common::kube_utils::delete_resource_if_exists(client, namespace, ar, name, kind)
+        .await
+        .map_err(|e| ReconcileError::kube(format!("delete orphaned {kind} {name}"), e))?;
+    Ok(())
 }
 
 /// Delete resources that were previously applied but are no longer in the compiled set.

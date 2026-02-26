@@ -6,10 +6,12 @@
 //! - Ready → spec change → recompile → Ready
 //! - Failed → spec fix → recover → Ready
 //! - Failed (persistent) → no spec change → observed_generation set, no tight loop
+//! - replicas 2→1 → PDB orphan cleanup (PodDisruptionBudget deleted)
 //!
 //! LatticeModel:
 //! - Serving → spec change → recompile → Serving
 //! - Loading → spec change → detect and recompile (not stamp stale generation)
+//! - Role removal → orphan cleanup (removed role's MeshMember deleted)
 //!
 //! # Running Standalone
 //!
@@ -39,6 +41,10 @@ use super::super::helpers::{
 const NS_READY_UPDATE: &str = "update-t1";
 const NS_FAILED_RECOVER: &str = "update-t2";
 const NS_FAILED_STABLE: &str = "update-t3";
+const NS_MODEL_SPEC_UPDATE: &str = "update-t4";
+const NS_MODEL_LOADING_GAP: &str = "update-t5";
+const NS_PDB_ORPHAN: &str = "update-t6";
+const NS_MODEL_ROLE_ORPHAN: &str = "update-t7";
 
 /// Dummy secret provider name (Cedar denies access → immediate compile failure)
 const DENIED_PROVIDER: &str = "nonexistent-provider";
@@ -88,6 +94,7 @@ async fn test_ready_spec_update(kubeconfig: &str) -> Result<(), String> {
         NS_READY_UPDATE,
         "svc-update-test",
         &patch_json,
+        "merge",
     )
     .await?;
 
@@ -260,7 +267,6 @@ async fn test_failed_sets_observed_generation(kubeconfig: &str) -> Result<(), St
 // Test 4: LatticeModel Serving → spec change → recompile → Serving
 // =============================================================================
 
-const NS_MODEL_SPEC_UPDATE: &str = "update-t4";
 
 /// Deploy a model to Serving, update its spec (replicas), verify the controller
 /// recompiles and observed_generation advances.
@@ -302,6 +308,7 @@ async fn test_model_serving_spec_update(kubeconfig: &str, namespace: &str) -> Re
         namespace,
         "llm-serving",
         &patch_json,
+        "merge",
     )
     .await?;
 
@@ -346,8 +353,6 @@ async fn test_model_serving_spec_update(kubeconfig: &str, namespace: &str) -> Re
 // =============================================================================
 // Test 5: LatticeModel Loading → spec change → detect and recompile
 // =============================================================================
-
-const NS_MODEL_LOADING_GAP: &str = "update-t5";
 
 /// Deploy a model, wait for Loading, then patch the spec (change replicas).
 /// Verify that the controller detects the spec change and recompiles before
@@ -401,6 +406,7 @@ async fn test_model_loading_detects_spec_change(
         namespace,
         "llm-serving",
         &patch_json,
+        "merge",
     )
     .await?;
     info!("[Updates] Patched decode replicas to 3 while Loading");
@@ -451,50 +457,26 @@ async fn test_model_loading_detects_spec_change(
 
 /// Build a minimal LatticeService with no secrets or dependencies.
 fn build_simple_service(name: &str, namespace: &str) -> lattice_common::crd::LatticeService {
-    use lattice_common::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements};
-    use std::collections::BTreeMap;
-
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        "main".to_string(),
-        ContainerSpec {
-            image: BUSYBOX_IMAGE.to_string(),
-            command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
-            resources: Some(ResourceRequirements {
-                requests: Some(ResourceQuantity {
-                    cpu: Some("50m".to_string()),
-                    memory: Some("64Mi".to_string()),
-                }),
-                limits: Some(ResourceQuantity {
-                    cpu: Some("200m".to_string()),
-                    memory: Some("128Mi".to_string()),
-                }),
-            }),
-            security: Some(lattice_common::crd::SecurityContext {
-                apparmor_profile: Some("Unconfined".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    );
-
-    super::super::helpers::build_busybox_service(name, namespace, containers, BTreeMap::new())
+    build_service_with_replicas(name, namespace, 1)
 }
 
 // =============================================================================
 // Helpers (Generic)
 // =============================================================================
 
-/// Patch any CRD resource via `kubectl patch --type=merge`.
+/// Patch any CRD resource via `kubectl patch`.
+/// `patch_type` is one of: "merge", "json", "strategic".
 async fn patch_resource(
     kubeconfig: &str,
     kind: &str,
     namespace: &str,
     name: &str,
     patch: &serde_json::Value,
+    patch_type: &str,
 ) -> Result<(), String> {
     let patch_str =
         serde_json::to_string(patch).map_err(|e| format!("Failed to serialize patch: {e}"))?;
+    let type_flag = format!("--type={patch_type}");
 
     run_kubectl(&[
         "--kubeconfig",
@@ -504,7 +486,7 @@ async fn patch_resource(
         name,
         "-n",
         namespace,
-        "--type=merge",
+        &type_flag,
         "-p",
         &patch_str,
     ])
@@ -691,6 +673,296 @@ async fn get_model_serving_role_replicas(
 }
 
 // =============================================================================
+// Test 6: Service PDB orphan cleanup (replicas 2→1)
+// =============================================================================
+
+/// Deploy a service with replicas=2 (produces PDB), then update to replicas=1.
+/// Verify the PodDisruptionBudget is deleted after the spec update.
+async fn test_service_pdb_orphan_cleanup(kubeconfig: &str) -> Result<(), String> {
+    info!("[Updates] Test 6: Service PDB orphan cleanup (replicas 2→1)");
+    ensure_fresh_namespace(kubeconfig, NS_PDB_ORPHAN).await?;
+
+    // Deploy a service with replicas=2 → produces PDB
+    let svc = build_service_with_replicas("svc-pdb-test", NS_PDB_ORPHAN, 2);
+    deploy_and_wait_for_phase(
+        kubeconfig,
+        NS_PDB_ORPHAN,
+        svc,
+        "Ready",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
+    // Verify PDB exists
+    wait_for_resource_exists(kubeconfig, "pdb", NS_PDB_ORPHAN, "svc-pdb-test", true).await?;
+    info!("[Updates] PDB exists with replicas=2 (expected)");
+
+    let gen_before =
+        get_observed_generation(kubeconfig, NS_PDB_ORPHAN, "svc-pdb-test").await?;
+
+    // Patch replicas to 1 → PDB should be removed
+    let patch_json = serde_json::json!({
+        "spec": { "replicas": 1 }
+    });
+    patch_resource(
+        kubeconfig,
+        "latticeservice",
+        NS_PDB_ORPHAN,
+        "svc-pdb-test",
+        &patch_json,
+        "merge",
+    )
+    .await?;
+
+    // Wait for the controller to reconcile with the new generation
+    let gen_before_i64: i64 = gen_before.parse().unwrap_or(0);
+    wait_for_generation_advance(
+        kubeconfig,
+        NS_PDB_ORPHAN,
+        "svc-pdb-test",
+        gen_before_i64,
+    )
+    .await?;
+
+    // Verify still Ready
+    wait_for_service_phase(
+        kubeconfig,
+        NS_PDB_ORPHAN,
+        "svc-pdb-test",
+        "Ready",
+        None,
+        Duration::from_secs(120),
+    )
+    .await?;
+
+    // Verify PDB is gone
+    wait_for_resource_exists(kubeconfig, "pdb", NS_PDB_ORPHAN, "svc-pdb-test", false).await?;
+    info!("[Updates] PDB deleted after replicas=1 (expected)");
+
+    delete_namespace(kubeconfig, NS_PDB_ORPHAN).await;
+    info!("[Updates] Test 6 passed: PDB orphan cleanup works");
+    Ok(())
+}
+
+// =============================================================================
+// Test 7: Model role removal orphan cleanup
+// =============================================================================
+
+/// Deploy a model with two roles (prefill + decode), then remove prefill.
+/// Verify the removed role's LatticeMeshMember is deleted.
+async fn test_model_role_removal_orphan_cleanup(
+    kubeconfig: &str,
+    namespace: &str,
+) -> Result<(), String> {
+    info!("[Updates] Test 7: Model role removal orphan cleanup");
+    ensure_fresh_namespace(kubeconfig, namespace).await?;
+
+    // Deploy model fixture (has prefill + decode roles)
+    let yaml = load_model_fixture_for_namespace(namespace)?;
+    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+
+    // Wait for Serving
+    wait_for_resource_phase(
+        kubeconfig,
+        "latticemodel",
+        namespace,
+        "llm-serving",
+        "Serving",
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
+    // Verify MeshMembers for both roles exist
+    wait_for_resource_exists(
+        kubeconfig,
+        "latticemeshmember",
+        namespace,
+        "llm-serving-prefill",
+        true,
+    )
+    .await?;
+    wait_for_resource_exists(
+        kubeconfig,
+        "latticemeshmember",
+        namespace,
+        "llm-serving-decode",
+        true,
+    )
+    .await?;
+    info!("[Updates] Both role MeshMembers exist (expected)");
+
+    let gen_before = get_model_observed_generation(kubeconfig, namespace, "llm-serving").await?;
+
+    // Remove the prefill role, keeping only decode.
+    // Must use JSON patch (not merge patch) because merge patch can't remove map keys.
+    let patch_json = serde_json::json!([
+        {
+            "op": "remove",
+            "path": "/spec/roles/prefill"
+        }
+    ]);
+    patch_resource(
+        kubeconfig,
+        "latticemodel",
+        namespace,
+        "llm-serving",
+        &patch_json,
+        "json",
+    )
+    .await?;
+    info!("[Updates] Patched model to remove prefill role");
+
+    // Verify removed role's MeshMember is cleaned up.
+    // The controller runs cleanup_removed_roles before re-applying the
+    // ModelServing, so the MeshMember deletion is the earliest observable
+    // side effect of the spec change.
+    wait_for_resource_exists(
+        kubeconfig,
+        "latticemeshmember",
+        namespace,
+        "llm-serving-prefill",
+        false,
+    )
+    .await?;
+    info!("[Updates] Prefill MeshMember deleted (expected)");
+
+    // Wait for generation to advance (ModelServing is deleted and recreated
+    // because the gang policy's minRoleReplicas key set changed)
+    let gen_before_i64: i64 = gen_before.parse().unwrap_or(0);
+    wait_for_model_generation_advance(kubeconfig, namespace, "llm-serving", gen_before_i64).await?;
+
+    // Verify still Serving
+    wait_for_resource_phase(
+        kubeconfig,
+        "latticemodel",
+        namespace,
+        "llm-serving",
+        "Serving",
+        Duration::from_secs(180),
+    )
+    .await?;
+
+    // Verify remaining role's MeshMember still exists
+    wait_for_resource_exists(
+        kubeconfig,
+        "latticemeshmember",
+        namespace,
+        "llm-serving-decode",
+        true,
+    )
+    .await?;
+    info!("[Updates] Decode MeshMember still exists (expected)");
+
+    delete_namespace(kubeconfig, namespace).await;
+    info!("[Updates] Test 7 passed: Model role removal orphan cleanup works");
+    Ok(())
+}
+
+// =============================================================================
+// Helpers (Resource existence)
+// =============================================================================
+
+/// Wait for a resource to exist or not exist.
+/// If `should_exist` is true, waits until the resource is found.
+/// If `should_exist` is false, waits until the resource returns 404.
+async fn wait_for_resource_exists(
+    kubeconfig: &str,
+    kind: &str,
+    namespace: &str,
+    name: &str,
+    should_exist: bool,
+) -> Result<(), String> {
+    let desc = if should_exist {
+        format!("{kind} {namespace}/{name} to exist")
+    } else {
+        format!("{kind} {namespace}/{name} to be deleted")
+    };
+
+    let kc = kubeconfig.to_string();
+    let kind = kind.to_string();
+    let ns = namespace.to_string();
+    let rname = name.to_string();
+
+    wait_for_condition(
+        &desc,
+        Duration::from_secs(120),
+        Duration::from_secs(3),
+        || {
+            let kc = kc.clone();
+            let kind = kind.clone();
+            let ns = ns.clone();
+            let rname = rname.clone();
+            async move {
+                let result = run_kubectl(&[
+                    "--kubeconfig", &kc,
+                    "get", &kind, &rname,
+                    "-n", &ns,
+                    "-o", "name",
+                ])
+                .await;
+
+                match result {
+                    Ok(_) => Ok(should_exist),  // resource exists
+                    Err(e) if e.contains("NotFound") || e.contains("not found") => {
+                        Ok(!should_exist) // resource doesn't exist
+                    }
+                    Err(e) => Err(format!("error checking {kind} {ns}/{rname}: {e}")),
+                }
+            }
+        },
+    )
+    .await
+}
+
+// =============================================================================
+// Helpers (Service with replicas)
+// =============================================================================
+
+/// Build a LatticeService with a specific replica count.
+fn build_service_with_replicas(
+    name: &str,
+    namespace: &str,
+    replicas: u32,
+) -> lattice_common::crd::LatticeService {
+    use lattice_common::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements};
+    use std::collections::BTreeMap;
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: BUSYBOX_IMAGE.to_string(),
+            command: Some(vec!["/bin/sleep".to_string(), "infinity".to_string()]),
+            resources: Some(ResourceRequirements {
+                requests: Some(ResourceQuantity {
+                    cpu: Some("50m".to_string()),
+                    memory: Some("64Mi".to_string()),
+                }),
+                limits: Some(ResourceQuantity {
+                    cpu: Some("200m".to_string()),
+                    memory: Some("128Mi".to_string()),
+                }),
+            }),
+            security: Some(lattice_common::crd::SecurityContext {
+                apparmor_profile: Some("Unconfined".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+
+    let mut svc = super::super::helpers::build_busybox_service(
+        name,
+        namespace,
+        containers,
+        BTreeMap::new(),
+    );
+    svc.spec.replicas = replicas;
+    svc
+}
+
+// =============================================================================
 // Orchestrators
 // =============================================================================
 
@@ -705,6 +977,9 @@ pub async fn run_service_update_tests(kubeconfig: &str) -> Result<(), String> {
         harness.run("Failed observed_generation", || {
             test_failed_sets_observed_generation(kubeconfig)
         }),
+        harness.run("PDB orphan cleanup", || {
+            test_service_pdb_orphan_cleanup(kubeconfig)
+        }),
     );
 
     harness.finish()
@@ -712,7 +987,13 @@ pub async fn run_service_update_tests(kubeconfig: &str) -> Result<(), String> {
 
 /// Run LatticeModel CRD update integration tests.
 pub async fn run_model_update_tests(kubeconfig: &str) -> Result<(), String> {
-    run_model_update_tests_in(kubeconfig, NS_MODEL_SPEC_UPDATE, NS_MODEL_LOADING_GAP).await
+    run_model_update_tests_in(
+        kubeconfig,
+        NS_MODEL_SPEC_UPDATE,
+        NS_MODEL_LOADING_GAP,
+        NS_MODEL_ROLE_ORPHAN,
+    )
+    .await
 }
 
 /// Run LatticeModel CRD update integration tests with explicit namespaces.
@@ -722,6 +1003,7 @@ pub async fn run_model_update_tests_in(
     kubeconfig: &str,
     ns_spec_update: &str,
     ns_loading_gap: &str,
+    ns_role_orphan: &str,
 ) -> Result<(), String> {
     info!("[Updates] Running LatticeModel update tests on {kubeconfig}");
 
@@ -737,6 +1019,11 @@ pub async fn run_model_update_tests_in(
     harness
         .run("Model Loading detects spec change", || {
             test_model_loading_detects_spec_change(kubeconfig, ns_loading_gap)
+        })
+        .await;
+    harness
+        .run("Model role removal orphan cleanup", || {
+            test_model_role_removal_orphan_cleanup(kubeconfig, ns_role_orphan)
         })
         .await;
 
@@ -781,8 +1068,36 @@ async fn test_model_updates_standalone() {
         .await
         .unwrap();
     // Use distinct namespaces to avoid collisions with test_updates_standalone
-    // which runs concurrently and uses update-t4/update-t5.
-    run_model_update_tests_in(&resolved.kubeconfig, "model-update-t4", "model-update-t5")
+    // which runs concurrently and uses update-t4/update-t5/update-t7.
+    run_model_update_tests_in(
+        &resolved.kubeconfig,
+        "model-update-t4",
+        "model-update-t5",
+        "model-update-t7",
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_orphan_cleanup_standalone() {
+    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
+
+    init_e2e_test();
+    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
         .await
         .unwrap();
+
+    let harness = TestHarness::new("Orphan Cleanup");
+    tokio::join!(
+        harness.run("PDB orphan cleanup", || {
+            test_service_pdb_orphan_cleanup(&resolved.kubeconfig)
+        }),
+        harness.run("Model role removal orphan cleanup", || {
+            test_model_role_removal_orphan_cleanup(&resolved.kubeconfig, "orphan-model-t1")
+        }),
+    );
+    harness.finish().unwrap();
 }

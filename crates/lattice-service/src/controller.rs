@@ -112,6 +112,19 @@ pub trait ServiceKubeClient: Send + Sync {
 
     /// Check if a LatticeMeshMember is Ready (policies fully applied, including ServiceEntries)
     async fn is_mesh_member_ready(&self, name: &str, namespace: &str) -> Result<bool, Error>;
+
+    /// Delete resources that were previously applied but are no longer in the compiled output.
+    ///
+    /// When a spec change causes compilation to produce fewer resources (e.g., removing
+    /// `autoscaling` makes `scaled_object: None`), the apply step only upserts and won't
+    /// delete the old resource. This method handles that cleanup by checking each optional
+    /// resource type and deleting by name if it's no longer in the compiled output.
+    async fn cleanup_orphaned_resources(
+        &self,
+        service_name: &str,
+        namespace: &str,
+        compiled: &CompiledService,
+    ) -> Result<(), Error>;
 }
 
 /// Real Kubernetes client implementation
@@ -365,6 +378,58 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
                 .unwrap_or(false)),
             None => Ok(false),
         }
+    }
+
+    async fn cleanup_orphaned_resources(
+        &self,
+        service_name: &str,
+        namespace: &str,
+        compiled: &CompiledService,
+    ) -> Result<(), Error> {
+        use lattice_common::kube_utils::delete_resource_if_exists;
+
+        let cleanup_err = |kind: &str, e: kube::Error| {
+            Error::internal_with_context(
+                "cleanup_orphaned_resources",
+                format!("delete orphaned {kind} {service_name}: {e}"),
+            )
+        };
+
+        // ScaledObject: if compilation no longer produces one, delete the old one.
+        // Without this, KEDA keeps auto-scaling with stale configuration.
+        if compiled.workloads.scaled_object.is_none() {
+            if let Some(ar) = self.registry.resolve(CrdKind::ScaledObject).await {
+                delete_resource_if_exists(
+                    &self.client, namespace, &ar, service_name, "ScaledObject",
+                )
+                .await
+                .map_err(|e| cleanup_err("ScaledObject", e))?;
+            }
+        }
+
+        // PodDisruptionBudget: if compilation no longer produces one, delete the old one.
+        if compiled.workloads.pdb.is_none() {
+            let ar =
+                lattice_common::kube_utils::build_api_resource("policy/v1", "PodDisruptionBudget");
+            delete_resource_if_exists(
+                &self.client, namespace, &ar, service_name, "PodDisruptionBudget",
+            )
+            .await
+            .map_err(|e| cleanup_err("PodDisruptionBudget", e))?;
+        }
+
+        // LatticeMeshMember: if compilation no longer produces one, delete the old one.
+        if compiled.mesh_member.is_none() {
+            if let Some(ar) = self.registry.resolve(CrdKind::MeshMember).await {
+                delete_resource_if_exists(
+                    &self.client, namespace, &ar, service_name, "LatticeMeshMember",
+                )
+                .await
+                .map_err(|e| cleanup_err("LatticeMeshMember", e))?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -931,6 +996,19 @@ async fn compile_and_apply(
         return Ok(Action::requeue(REQUEUE_FAILED_UNCHANGED));
     }
 
+    // Clean up resources that were previously applied but are no longer needed.
+    // This handles the case where a spec update removes optional features
+    // (e.g., removing autoscaling should delete the ScaledObject).
+    if let Err(e) = ctx
+        .kube
+        .cleanup_orphaned_resources(name, namespace, &compiled)
+        .await
+    {
+        // Orphan cleanup failures are non-fatal — the service is functional,
+        // just has stale resources. Log and continue.
+        warn!(error = %e, "orphan cleanup failed (non-fatal)");
+    }
+
     // Don't mark Ready until the MeshMember controller has fully reconciled
     if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
         debug!("mesh member not yet ready, staying in Compiling");
@@ -1212,6 +1290,8 @@ mod tests {
             .returning(|_, _, _, _| Ok(()));
         mock.expect_is_mesh_member_ready()
             .returning(|_, _| Ok(true));
+        mock.expect_cleanup_orphaned_resources()
+            .returning(|_, _, _| Ok(()));
         mock
     }
 
@@ -1726,5 +1806,90 @@ mod tests {
 
         // Policy is in "other" namespace, service is in "test" — no match
         assert!(backup.is_none());
+    }
+
+    // =========================================================================
+    // Orphan Cleanup Tests — verify resources are cleaned up on spec updates
+    // =========================================================================
+
+    /// Build a mock that tracks whether cleanup was called via an AtomicBool flag.
+    fn mock_kube_tracking_cleanup(
+        flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> MockServiceKubeClient {
+        let mut mock = mock_kube_with_policies(vec![]);
+        // Override the default cleanup expectation to track calls
+        mock.expect_cleanup_orphaned_resources()
+            .returning(move |_, _, _| {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            });
+        mock
+    }
+
+    /// Story: When a Ready service is updated and the compilation no longer produces
+    /// a ScaledObject (autoscaling removed), cleanup_orphaned_resources is called
+    /// with a compiled output that has `scaled_object: None`. This ensures KEDA
+    /// doesn't keep auto-scaling with stale configuration.
+    #[tokio::test]
+    async fn spec_update_triggers_orphan_cleanup() {
+        let cleanup_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock = mock_kube_tracking_cleanup(Arc::clone(&cleanup_called));
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock)));
+
+        let mut service = sample_service("my-svc");
+        service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
+        let service = Arc::new(service);
+        ctx.graph.put_service("test", "my-svc", &service.spec);
+
+        let _action = reconcile(service, ctx).await.expect("reconcile ok");
+
+        assert!(
+            cleanup_called.load(std::sync::atomic::Ordering::SeqCst),
+            "cleanup_orphaned_resources must be called after successful apply"
+        );
+    }
+
+    /// Story: When compilation fails, orphan cleanup should NOT be called
+    /// (we don't want to delete resources based on a failed compilation).
+    #[tokio::test]
+    async fn cleanup_not_called_on_compilation_failure() {
+        let cleanup_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock = mock_kube_tracking_cleanup(Arc::clone(&cleanup_called));
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock)));
+
+        // Service with no containers → validation failure → never reaches apply
+        let mut service = sample_service("bad-svc");
+        service.spec.workload.containers.clear();
+        let service = Arc::new(service);
+
+        let _action = reconcile(service, ctx).await.expect("reconcile ok");
+
+        assert!(
+            !cleanup_called.load(std::sync::atomic::Ordering::SeqCst),
+            "cleanup_orphaned_resources must NOT be called when compilation fails"
+        );
+    }
+
+    /// Story: Orphan cleanup failure is non-fatal — the service should still
+    /// transition to Ready even if cleanup encounters an error.
+    #[tokio::test]
+    async fn cleanup_failure_is_nonfatal() {
+        let mut mock = mock_kube_with_policies(vec![]);
+        mock.expect_cleanup_orphaned_resources()
+            .returning(|_, _, _| Err(Error::internal("cleanup failed")));
+        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock)));
+
+        let mut service = sample_service("my-svc");
+        service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));
+        let service = Arc::new(service);
+        ctx.graph.put_service("test", "my-svc", &service.spec);
+
+        let action = reconcile(service, ctx).await.expect("reconcile ok");
+
+        assert_eq!(
+            action,
+            Action::requeue(REQUEUE_READY),
+            "service should reach Ready even when orphan cleanup fails"
+        );
     }
 }

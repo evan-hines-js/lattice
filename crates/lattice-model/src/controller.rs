@@ -19,7 +19,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::{Api, DynamicObject, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
@@ -266,6 +266,12 @@ pub async fn reconcile(
             if observed != Some(generation) {
                 // Spec changed — re-compile and re-apply
                 info!(model = %name, observed = ?observed, current = generation, "spec changed, re-applying");
+
+                // Snapshot current role keys BEFORE registering new ones.
+                // Used to detect removed roles for graph + resource cleanup.
+                let old_role_keys = current_graph_role_keys(&ctx.graph, &name, namespace);
+                let new_role_keys = spec_role_keys(&name, &model.spec.roles);
+
                 let compiled = match compile_model(
                     &model,
                     &ctx.graph,
@@ -294,6 +300,27 @@ pub async fn reconcile(
                     }
                 };
                 register_graph(&model, &ctx.graph, namespace);
+
+                // Clean up graph nodes and K8s resources for removed roles
+                cleanup_removed_roles(
+                    &ctx.client,
+                    &ctx.graph,
+                    &ctx.registry,
+                    &name,
+                    namespace,
+                    &old_role_keys,
+                    &new_role_keys,
+                )
+                .await;
+
+                // When roles are added or removed, the gang policy's
+                // minRoleReplicas key set changes. Volcano marks that field
+                // immutable, so an SSA update would 422. Delete the old
+                // ModelServing first — the re-apply will create a fresh one.
+                if old_role_keys != new_role_keys {
+                    delete_model_serving(&ctx.client, &ctx.registry, &name, namespace).await;
+                }
+
                 if let Err(e) = apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await
                 {
                     // Apply errors are transient — stay in Serving, let
@@ -394,6 +421,96 @@ fn cleanup_graph(model: &LatticeModel, graph: &ServiceGraph, namespace: &str) {
     let name = model.metadata.name.as_deref().unwrap_or_default();
     for role_name in model.spec.roles.keys() {
         graph.delete_service(namespace, &format!("{}-{}", name, role_name));
+    }
+}
+
+/// Compute the set of role graph keys (e.g. "llm-serving-prefill") from the spec.
+fn spec_role_keys(
+    model_name: &str,
+    roles: &std::collections::BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+) -> std::collections::BTreeSet<String> {
+    roles
+        .keys()
+        .map(|r| format!("{}-{}", model_name, r))
+        .collect()
+}
+
+/// Compute the set of role graph keys currently in the graph for a model.
+///
+/// Enumerates all services in the namespace and filters by the model name prefix.
+/// This captures roles that were registered in a previous reconcile but may have
+/// been removed from the spec.
+fn current_graph_role_keys(
+    graph: &ServiceGraph,
+    model_name: &str,
+    namespace: &str,
+) -> std::collections::BTreeSet<String> {
+    let prefix = format!("{}-", model_name);
+    graph
+        .list_services(namespace)
+        .into_iter()
+        .filter(|node| node.name.starts_with(&prefix))
+        .map(|node| node.name)
+        .collect()
+}
+
+/// Clean up graph nodes and K8s resources for roles that were removed from the spec.
+///
+/// When a model spec changes from e.g. {prefill, decode} to {decode}, the old
+/// "prefill" graph node persists (affecting bilateral agreements) and the old
+/// LatticeMeshMember resource persists (keeping stale policies).
+async fn cleanup_removed_roles(
+    client: &Client,
+    graph: &ServiceGraph,
+    registry: &CrdRegistry,
+    model_name: &str,
+    namespace: &str,
+    old_role_names: &std::collections::BTreeSet<String>,
+    new_role_names: &std::collections::BTreeSet<String>,
+) {
+    let removed: Vec<&String> = old_role_names.difference(new_role_names).collect();
+    if removed.is_empty() {
+        return;
+    }
+
+    info!(model = %model_name, removed = ?removed, "cleaning up removed role resources");
+
+    for role_key in &removed {
+        // Remove from service graph
+        graph.delete_service(namespace, role_key);
+
+        // Delete orphaned LatticeMeshMember
+        if let Some(mm_ar) = registry.resolve(CrdKind::MeshMember).await {
+            if let Err(e) = lattice_common::kube_utils::delete_resource_if_exists(
+                client, namespace, &mm_ar, role_key, "LatticeMeshMember",
+            )
+            .await
+            {
+                warn!(name = %role_key, error = %e, "failed to delete orphaned MeshMember");
+            }
+        }
+    }
+}
+
+/// Delete the ModelServing resource so it can be recreated with a new gang policy.
+///
+/// Volcano marks `gangPolicy.minRoleReplicas` as immutable. When the role set
+/// changes (roles added or removed), an SSA update would get a 422. Deleting
+/// first lets the re-apply create a fresh resource with the correct keys.
+async fn delete_model_serving(
+    client: &Client,
+    registry: &CrdRegistry,
+    model_name: &str,
+    namespace: &str,
+) {
+    let Some(ms_ar) = registry.resolve(CrdKind::ModelServing).await else {
+        return;
+    };
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ms_ar);
+    match api.delete(model_name, &DeleteParams::default()).await {
+        Ok(_) => info!(model = %model_name, "deleted ModelServing for role structure change"),
+        Err(kube::Error::Api(ref resp)) if resp.code == 404 => {}
+        Err(e) => warn!(model = %model_name, error = %e, "failed to delete ModelServing"),
     }
 }
 
@@ -970,5 +1087,113 @@ mod tests {
             derive_model_serving_state(None),
             ModelServingState::Progressing
         ));
+    }
+
+    // =========================================================================
+    // Role Graph Key Tests
+    // =========================================================================
+
+    fn make_minimal_workload() -> lattice_common::crd::workload::spec::WorkloadSpec {
+        use std::collections::BTreeMap;
+        lattice_common::crd::workload::spec::WorkloadSpec {
+            containers: BTreeMap::from([(
+                "main".to_string(),
+                lattice_common::crd::ContainerSpec {
+                    image: "test:latest".to_string(),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }
+    }
+
+    fn make_role() -> lattice_common::crd::ModelRoleSpec {
+        lattice_common::crd::ModelRoleSpec {
+            entry_workload: make_minimal_workload(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn spec_role_keys_computes_correct_keys() {
+        use std::collections::BTreeMap;
+
+        let roles = BTreeMap::from([
+            ("prefill".to_string(), make_role()),
+            ("decode".to_string(), make_role()),
+        ]);
+
+        let keys = spec_role_keys("llm-serving", &roles);
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains("llm-serving-prefill"));
+        assert!(keys.contains("llm-serving-decode"));
+    }
+
+    #[test]
+    fn current_graph_role_keys_finds_matching_entries() {
+        let graph = ServiceGraph::new();
+
+        // Register two roles for model "llm-serving"
+        graph.put_workload("ns", "llm-serving-prefill", &make_minimal_workload());
+        graph.put_workload("ns", "llm-serving-decode", &make_minimal_workload());
+
+        // Register an unrelated service
+        graph.put_workload("ns", "other-service", &make_minimal_workload());
+
+        let keys = current_graph_role_keys(&graph, "llm-serving", "ns");
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains("llm-serving-prefill"));
+        assert!(keys.contains("llm-serving-decode"));
+        assert!(!keys.contains("other-service"));
+    }
+
+    /// When a model spec changes from {prefill, decode} to {decode}, the old
+    /// "prefill" graph node must be identified for cleanup. This test verifies
+    /// that spec_role_keys + current_graph_role_keys correctly identify removed roles.
+    #[test]
+    fn removed_role_detected_via_set_difference() {
+        use std::collections::BTreeMap;
+
+        let graph = ServiceGraph::new();
+
+        // Old spec had both roles
+        graph.put_workload("ns", "llm-decode", &make_minimal_workload());
+        graph.put_workload("ns", "llm-prefill", &make_minimal_workload());
+
+        let old_keys = current_graph_role_keys(&graph, "llm", "ns");
+
+        // New spec only has "decode"
+        let new_roles = BTreeMap::from([("decode".to_string(), make_role())]);
+        let new_keys = spec_role_keys("llm", &new_roles);
+
+        let removed: Vec<&String> = old_keys.difference(&new_keys).collect();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(*removed[0], "llm-prefill");
+    }
+
+    /// Verify that register_graph + cleanup correctly handles role addition.
+    /// Adding a role should NOT trigger cleanup of existing roles.
+    #[test]
+    fn adding_role_does_not_remove_existing() {
+        use std::collections::BTreeMap;
+
+        let graph = ServiceGraph::new();
+
+        // Old spec had one role
+        graph.put_workload("ns", "llm-decode", &make_minimal_workload());
+        let old_keys = current_graph_role_keys(&graph, "llm", "ns");
+
+        // New spec adds a role
+        let new_roles = BTreeMap::from([
+            ("decode".to_string(), make_role()),
+            ("prefill".to_string(), make_role()),
+        ]);
+        let new_keys = spec_role_keys("llm", &new_roles);
+
+        let removed: Vec<&String> = old_keys.difference(&new_keys).collect();
+        assert!(
+            removed.is_empty(),
+            "adding a role should not identify any removals"
+        );
     }
 }

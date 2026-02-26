@@ -1,8 +1,9 @@
 //! Dynamic resource utilities for untyped Kubernetes resource access.
 
-use kube::api::{Api, DynamicObject, ListParams};
+use kube::api::{Api, DeleteParams, DynamicObject, ListParams};
 use kube::discovery::ApiResource;
 use kube::Client;
+use tracing::{debug, info};
 
 use super::api_resource::build_api_resource_with_discovery;
 use crate::Error;
@@ -38,6 +39,31 @@ pub async fn get_dynamic_resource_status_field(
             "get_dynamic_resource_status_field",
             format!("Failed to get {}/{}: {}", ar.kind, name, e),
         )),
+    }
+}
+
+/// Delete a namespaced resource by name, ignoring 404 (already gone or never existed).
+///
+/// Returns `Ok(true)` if the resource was deleted, `Ok(false)` if it was already gone.
+/// Propagates all other errors.
+pub async fn delete_resource_if_exists(
+    client: &Client,
+    namespace: &str,
+    ar: &ApiResource,
+    name: &str,
+    kind: &str,
+) -> Result<bool, kube::Error> {
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
+    match api.delete(name, &DeleteParams::default()).await {
+        Ok(_) => {
+            info!(name = %name, kind = %kind, "deleted orphaned resource");
+            Ok(true)
+        }
+        Err(kube::Error::Api(ref resp)) if resp.code == 404 => {
+            debug!(name = %name, kind = %kind, "resource already gone");
+            Ok(false)
+        }
+        Err(e) => Err(e),
     }
 }
 

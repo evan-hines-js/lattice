@@ -102,6 +102,20 @@ fn default_one() -> u32 {
     1
 }
 
+impl Default for ModelRoleSpec {
+    fn default() -> Self {
+        Self {
+            replicas: default_one(),
+            entry_workload: WorkloadSpec::default(),
+            entry_runtime: RuntimeSpec::default(),
+            worker_replicas: None,
+            worker_workload: None,
+            worker_runtime: None,
+            autoscaling: None,
+        }
+    }
+}
+
 // =============================================================================
 // Autoscaling
 // =============================================================================
