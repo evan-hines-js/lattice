@@ -103,10 +103,10 @@ async fn test_model_serving_created(kubeconfig: &str) -> Result<(), String> {
         .find(|r| r["name"].as_str() == Some("prefill"))
         .ok_or("prefill role not found")?;
 
-    // Verify decode role: replicas=2, workerReplicas=1, both templates present
-    if decode["replicas"].as_u64() != Some(2) {
+    // Verify decode role: replicas=1, workerReplicas=1, both templates present
+    if decode["replicas"].as_u64() != Some(1) {
         return Err(format!(
-            "decode role: expected replicas=2, got: {}",
+            "decode role: expected replicas=1, got: {}",
             decode["replicas"]
         ));
     }
@@ -640,9 +640,9 @@ async fn test_model_autoscaling_created(kubeconfig: &str) -> Result<(), String> 
     }
 
     // Verify min/max replicas
-    if target["minReplicas"].as_u64() != Some(2) {
+    if target["minReplicas"].as_u64() != Some(1) {
         return Err(format!(
-            "Binding minReplicas should be 2, got: {}",
+            "Binding minReplicas should be 1, got: {}",
             target["minReplicas"]
         ));
     }
@@ -663,7 +663,7 @@ async fn test_model_autoscaling_created(kubeconfig: &str) -> Result<(), String> 
         ));
     }
 
-    info!("[Model] AutoscalingPolicyBinding verified: policyRef, target (ModelServing/{}, Role/decode), min=2, max=8, owner ref", MODEL_NAME);
+    info!("[Model] AutoscalingPolicyBinding verified: policyRef, target (ModelServing/{}, Role/decode), min=1, max=8, owner ref", MODEL_NAME);
 
     // Verify prefill role does NOT have autoscaling resources
     let prefill_policy = format!("{}-prefill-scaling", MODEL_NAME);

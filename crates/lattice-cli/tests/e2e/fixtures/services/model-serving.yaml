@@ -53,7 +53,7 @@ spec:
         imagePullSecrets:
           - ghcr-creds
     decode:
-      replicas: 2
+      replicas: 1
       entryWorkload:
         containers:
           main:

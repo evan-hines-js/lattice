@@ -296,12 +296,12 @@ async fn test_model_serving_spec_update(kubeconfig: &str, namespace: &str) -> Re
     let gen_before = get_model_observed_generation(kubeconfig, namespace, "llm-serving").await?;
     info!("[Updates] Model before update: observed_generation = {gen_before}");
 
-    // Patch decode replicas from 2 → 3
+    // Patch decode replicas from 1 → 2
     let patch_json = serde_json::json!({
         "spec": {
             "roles": {
                 "decode": {
-                    "replicas": 3
+                    "replicas": 2
                 }
             }
         }
@@ -334,9 +334,9 @@ async fn test_model_serving_spec_update(kubeconfig: &str, namespace: &str) -> Re
     // Verify ModelServing reflects new replicas
     let decode_replicas =
         get_model_serving_role_replicas(kubeconfig, namespace, "llm-serving", "decode").await?;
-    if decode_replicas != 3 {
+    if decode_replicas != 2 {
         return Err(format!(
-            "ModelServing decode replicas should be 3 after update, got: {decode_replicas}"
+            "ModelServing decode replicas should be 2 after update, got: {decode_replicas}"
         ));
     }
 
@@ -374,7 +374,7 @@ async fn test_model_loading_detects_spec_change(
     info!("[Updates] Test 5: Model Loading → spec change → detect and recompile");
     ensure_fresh_namespace(kubeconfig, namespace).await?;
 
-    // Deploy from fixture (decode.replicas=2 in fixture)
+    // Deploy from fixture (decode.replicas=1 in fixture)
     let yaml = load_model_fixture_for_namespace(namespace)?;
     apply_yaml_with_retry(kubeconfig, &yaml).await?;
 
@@ -393,13 +393,13 @@ async fn test_model_loading_detects_spec_change(
         get_model_observed_generation(kubeconfig, namespace, "llm-serving").await?;
     info!("[Updates] Model at Loading: observed_generation = {gen_at_loading}");
 
-    // Patch decode replicas from 2 → 3 while still Loading
+    // Patch decode replicas from 1 → 2 while still Loading
     // This bumps metadata.generation but the Loading phase won't notice (the gap)
     let patch_json = serde_json::json!({
         "spec": {
             "roles": {
                 "decode": {
-                    "replicas": 3
+                    "replicas": 2
                 }
             }
         }
@@ -413,7 +413,7 @@ async fn test_model_loading_detects_spec_change(
         "merge",
     )
     .await?;
-    info!("[Updates] Patched decode replicas to 3 while Loading");
+    info!("[Updates] Patched decode replicas to 2 while Loading");
 
     // Wait for the model to reach Serving (whether or not it recompiled)
     wait_for_resource_phase(
@@ -426,14 +426,14 @@ async fn test_model_loading_detects_spec_change(
     )
     .await?;
 
-    // The critical check: does the ModelServing have 3 decode replicas (new spec)
-    // or 2 (old spec, stale config)?
+    // The critical check: does the ModelServing have 2 decode replicas (new spec)
+    // or 1 (old spec, stale config)?
     let decode_replicas =
         get_model_serving_role_replicas(kubeconfig, namespace, "llm-serving", "decode").await?;
 
-    if decode_replicas != 3 {
+    if decode_replicas != 2 {
         return Err(format!(
-            "ModelServing decode replicas = {decode_replicas}, expected 3. \
+            "ModelServing decode replicas = {decode_replicas}, expected 2. \
              The Loading phase did not detect the spec change — compiled resources \
              are stale but observed_generation was stamped with the new generation. \
              Loading must check spec_changed_since_compilation and go back to Pending \
