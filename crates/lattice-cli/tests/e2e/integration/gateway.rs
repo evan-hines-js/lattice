@@ -81,8 +81,29 @@ async fn setup_gateway_infrastructure(kubeconfig: &str) -> Result<(), String> {
     setup_regcreds_infrastructure(kubeconfig).await?;
     ensure_test_cluster_issuer(kubeconfig, "e2e-selfsigned").await?;
 
-    // Cedar wildcard inbound policy — allows gateway proxy identity to reach backends
-    let cedar_policies = vec![CedarPolicySpec {
+    // Cedar policies:
+    // - AllowWildcard for each backend (required for inbound_allow_all wildcard callers)
+    // - AccessService for the namespace (allows gateway proxy to reach backends)
+    let mut cedar_policies = Vec::new();
+
+    for svc in ["backend-a", "backend-b", "backend-tls"] {
+        cedar_policies.push(CedarPolicySpec {
+            name: format!("permit-wildcard-inbound-{}", svc),
+            test_label: "gateway-e2e".to_string(),
+            priority: 50,
+            cedar_text: format!(
+                r#"permit(
+  principal == Lattice::Service::"{ns}/{svc}",
+  action == Lattice::Action::"AllowWildcard",
+  resource == Lattice::Mesh::"inbound"
+);"#,
+                ns = GATEWAY_TEST_NAMESPACE,
+                svc = svc,
+            ),
+        });
+    }
+
+    cedar_policies.push(CedarPolicySpec {
         name: "permit-gateway-test-inbound".to_string(),
         test_label: "gateway-e2e".to_string(),
         priority: 50,
@@ -96,7 +117,7 @@ async fn setup_gateway_infrastructure(kubeconfig: &str) -> Result<(), String> {
 }};"#,
             ns = GATEWAY_TEST_NAMESPACE,
         ),
-    }];
+    });
 
     apply_cedar_policies_batch(kubeconfig, cedar_policies, 5).await?;
 
