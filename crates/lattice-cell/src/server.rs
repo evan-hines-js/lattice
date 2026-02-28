@@ -854,6 +854,7 @@ mod tests {
                 kubernetes_version: "1.28.0".to_string(),
                 state: state.into(),
                 api_server_endpoint: format!("https://api.{}:6443", cluster),
+                protocol_version: lattice_proto::PROTOCOL_VERSION,
             })),
         }
     }
@@ -872,6 +873,7 @@ mod tests {
                 kubernetes_version: k8s_version.to_string(),
                 state: state.into(),
                 api_server_endpoint: format!("https://api.{}:6443", cluster),
+                protocol_version: lattice_proto::PROTOCOL_VERSION,
             })),
         }
     }

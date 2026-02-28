@@ -419,15 +419,19 @@ mod tests {
 
     #[test]
     fn kv_connector_auto_injects_topology() {
-        use lattice_common::crd::{KvConnectorConfig, KvConnectorType, ModelRoutingSpec};
+        use lattice_common::crd::{InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec};
 
         let spec = LatticeModelSpec {
             routing: Some(ModelRoutingSpec {
-                kv_connector: Some(KvConnectorConfig {
+                inference_engine: InferenceEngine::VLlm,
+                model: "test-model".to_string(),
+                kv_connector: Some(KvConnector {
                     type_: KvConnectorType::Nixl,
-                    ..Default::default()
                 }),
-                ..Default::default()
+                port: None,
+                protocol: None,
+                traffic_policy: None,
+                routes: Default::default(),
             }),
             ..Default::default()
         };
@@ -450,15 +454,19 @@ mod tests {
 
     #[test]
     fn mooncake_connector_auto_injects_tier_3() {
-        use lattice_common::crd::{KvConnectorConfig, KvConnectorType, ModelRoutingSpec};
+        use lattice_common::crd::{InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec};
 
         let spec = LatticeModelSpec {
             routing: Some(ModelRoutingSpec {
-                kv_connector: Some(KvConnectorConfig {
+                inference_engine: InferenceEngine::VLlm,
+                model: "test-model".to_string(),
+                kv_connector: Some(KvConnector {
                     type_: KvConnectorType::Mooncake,
-                    ..Default::default()
                 }),
-                ..Default::default()
+                port: None,
+                protocol: None,
+                traffic_policy: None,
+                routes: Default::default(),
             }),
             ..Default::default()
         };
