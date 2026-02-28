@@ -52,9 +52,10 @@ pub fn compile_model_serving(
 
     // Resolve topology: explicit spec > auto-inject from kv_connector > None
     let (resolved_topology, auto_topology) = resolve_topology(model);
+    // ModelServing uses a nested schema: {"groupPolicy": {"mode": ..., "highestTierAllowed": N}}
     let network_topology = resolved_topology
         .as_ref()
-        .map(types::network_topology_value);
+        .map(|topo| serde_json::json!({ "groupPolicy": types::network_topology_value(topo) }));
 
     let model_serving = ModelServing {
         api_version: "workload.serving.volcano.sh/v1alpha1".to_string(),
@@ -191,19 +192,7 @@ mod tests {
         model
     }
 
-    fn test_pod_template(image: &str) -> serde_json::Value {
-        serde_json::json!({
-            "metadata": {
-                "labels": {"app": "test"}
-            },
-            "spec": {
-                "containers": [{
-                    "name": "main",
-                    "image": image
-                }]
-            }
-        })
-    }
+    use crate::test_utils::test_pod_template;
 
     fn make_role(replicas: u32) -> ModelRoleSpec {
         ModelRoleSpec {
@@ -409,10 +398,10 @@ mod tests {
         let result = compile_model_serving(&model, &BTreeMap::new(), "test");
         let ms = &result.model_serving;
 
-        // Explicit topology should be used
+        // Explicit topology should be used, wrapped in groupPolicy for ModelServing
         let topo = ms.spec.template.network_topology.as_ref().unwrap();
-        assert_eq!(topo["mode"], "hard");
-        assert_eq!(topo["highestTierAllowed"], 1);
+        assert_eq!(topo["groupPolicy"]["mode"], "hard");
+        assert_eq!(topo["groupPolicy"]["highestTierAllowed"], 1);
         // No auto-injection
         assert!(result.auto_topology.is_none());
     }
@@ -442,10 +431,10 @@ mod tests {
         let result = compile_model_serving(&model, &BTreeMap::new(), "test");
         let ms = &result.model_serving;
 
-        // Auto-injected soft topology with tier 2 for nixl
+        // Auto-injected soft topology with tier 2 for nixl, wrapped in groupPolicy
         let topo = ms.spec.template.network_topology.as_ref().unwrap();
-        assert_eq!(topo["mode"], "soft");
-        assert_eq!(topo["highestTierAllowed"], 2);
+        assert_eq!(topo["groupPolicy"]["mode"], "soft");
+        assert_eq!(topo["groupPolicy"]["highestTierAllowed"], 2);
         // Auto-topology is recorded
         let auto = result.auto_topology.as_ref().unwrap();
         assert_eq!(auto.mode, TopologyMode::Soft);

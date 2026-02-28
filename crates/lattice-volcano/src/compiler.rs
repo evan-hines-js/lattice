@@ -166,19 +166,7 @@ mod tests {
         job
     }
 
-    fn test_pod_template(image: &str) -> serde_json::Value {
-        serde_json::json!({
-            "metadata": {
-                "labels": {"app": "test"}
-            },
-            "spec": {
-                "containers": [{
-                    "name": "main",
-                    "image": image
-                }]
-            }
-        })
-    }
+    use crate::test_utils::test_pod_template;
 
     #[test]
     fn single_task_vcjob() {

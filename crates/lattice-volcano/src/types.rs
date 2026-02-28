@@ -584,7 +584,8 @@ pub struct KthenaMetricEndpoint {
 /// Convert a `WorkloadNetworkTopology` to the Volcano-native JSON representation.
 ///
 /// Produces `{"mode": "hard"|"soft", "highestTierAllowed": N}` for use in
-/// `VCJobSpec.network_topology` and `ServingGroupTemplate.network_topology`.
+/// `VCJobSpec.network_topology` and `PodGroupSpec.network_topology`.
+/// ModelServing callers wrap this in `{"groupPolicy": ...}` at the call site.
 pub fn network_topology_value(
     topo: &lattice_common::crd::WorkloadNetworkTopology,
 ) -> serde_json::Value {
