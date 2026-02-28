@@ -25,7 +25,7 @@ use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry, Retryable};
 
-use crate::compiler::{compile_job, CompiledJob};
+use crate::compiler::{compile_job, CompiledJob, VolcanoWorkload};
 use crate::error::JobError;
 
 const FIELD_MANAGER: &str = "lattice-job-controller";
@@ -81,11 +81,19 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
 
     match phase {
         JobPhase::Pending => {
+            let is_cron = job.spec.is_cron();
+            let crd_kind = if is_cron {
+                CrdKind::VolcanoCronJob
+            } else {
+                CrdKind::VolcanoJob
+            };
             let volcano_api = ctx
                 .registry
-                .resolve(CrdKind::VolcanoJob)
+                .resolve(crd_kind)
                 .await
-                .ok_or(JobError::VolcanoCrdMissing)?;
+                .ok_or(JobError::VolcanoCrdMissing {
+                    kind: crd_kind.kind_str(),
+                })?;
 
             let compiled = compile_job(
                 &job,
@@ -132,14 +140,8 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
             // Register tasks in the graph after successful compilation
             register_graph(&job, &ctx.graph, namespace);
 
-            if let Err(e) = apply_compiled_job(
-                &ctx.client,
-                namespace,
-                &compiled,
-                &ctx.registry,
-                &volcano_api,
-            )
-            .await
+            if let Err(e) =
+                apply_layers(&ctx.client, namespace, &compiled, &ctx.registry, &volcano_api).await
             {
                 cleanup_graph(&job, &ctx.graph, namespace);
                 let msg = format!("Apply failed (will retry): {}", e);
@@ -158,12 +160,18 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                 .await;
                 return Err(e);
             }
+
+            let submit_msg = if is_cron {
+                "Cron job submitted to Volcano"
+            } else {
+                "Job submitted to Volcano"
+            };
             update_status(
                 &ctx.client,
                 &job,
                 namespace,
                 JobPhase::Running,
-                Some("Job submitted to Volcano"),
+                Some(submit_msg),
                 Some(generation),
             )
             .await?;
@@ -181,44 +189,95 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
                 );
             }
 
-            let volcano_api = match ctx.registry.resolve(CrdKind::VolcanoJob).await {
-                Some(ar) => ar,
-                None => {
-                    warn!(job = %name, "cannot check VCJob status: Volcano CRD not discovered");
-                    return Ok(Action::requeue(REQUEUE_RUNNING));
-                }
-            };
+            if job.spec.is_cron() {
+                // Cron jobs are perpetual — verify VCCronJob exists, never transition to Succeeded
+                let cron_api = match ctx.registry.resolve(CrdKind::VolcanoCronJob).await {
+                    Some(ar) => ar,
+                    None => {
+                        warn!(job = %name, "cannot check VCCronJob status: Volcano CronJob CRD not discovered");
+                        return Ok(Action::requeue(REQUEUE_RUNNING));
+                    }
+                };
 
-            match check_vcjob_status(&ctx.client, &name, namespace, &volcano_api).await {
-                Some(VCJobPhase::Completed) => {
-                    info!(job = %name, "job succeeded");
-                    cleanup_graph(&job, &ctx.graph, namespace);
-                    update_status(
-                        &ctx.client,
-                        &job,
-                        namespace,
-                        JobPhase::Succeeded,
-                        Some("All tasks completed successfully"),
-                        Some(generation),
-                    )
-                    .await?;
-                    Ok(Action::await_change())
+                let api: Api<DynamicObject> =
+                    Api::namespaced_with(ctx.client.clone(), namespace, &cron_api);
+                match api.get(&name).await {
+                    Ok(obj) => {
+                        let active = obj
+                            .data
+                            .get("status")
+                            .and_then(|s| s.get("active"))
+                            .and_then(|a| a.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        let last_schedule = obj
+                            .data
+                            .get("status")
+                            .and_then(|s| s.get("lastScheduleTime"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("never");
+                        let msg = format!(
+                            "Cron active: {} job(s), last scheduled: {}",
+                            active, last_schedule
+                        );
+                        let _ = update_status(
+                            &ctx.client,
+                            &job,
+                            namespace,
+                            JobPhase::Running,
+                            Some(&msg),
+                            Some(generation),
+                        )
+                        .await;
+                    }
+                    Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                        warn!(job = %name, "VCCronJob not found — may have been deleted externally");
+                    }
+                    Err(e) => {
+                        warn!(job = %name, error = %e, "failed to check VCCronJob status");
+                    }
                 }
-                Some(VCJobPhase::Failed) => {
-                    error!(job = %name, "job failed");
-                    cleanup_graph(&job, &ctx.graph, namespace);
-                    update_status(
-                        &ctx.client,
-                        &job,
-                        namespace,
-                        JobPhase::Failed,
-                        Some("Job failed"),
-                        Some(generation),
-                    )
-                    .await?;
-                    Ok(Action::await_change())
+                Ok(Action::requeue(REQUEUE_RUNNING))
+            } else {
+                let volcano_api = match ctx.registry.resolve(CrdKind::VolcanoJob).await {
+                    Some(ar) => ar,
+                    None => {
+                        warn!(job = %name, "cannot check VCJob status: Volcano CRD not discovered");
+                        return Ok(Action::requeue(REQUEUE_RUNNING));
+                    }
+                };
+
+                match check_vcjob_status(&ctx.client, &name, namespace, &volcano_api).await {
+                    Some(VCJobPhase::Completed) => {
+                        info!(job = %name, "job succeeded");
+                        cleanup_graph(&job, &ctx.graph, namespace);
+                        update_status(
+                            &ctx.client,
+                            &job,
+                            namespace,
+                            JobPhase::Succeeded,
+                            Some("All tasks completed successfully"),
+                            Some(generation),
+                        )
+                        .await?;
+                        Ok(Action::await_change())
+                    }
+                    Some(VCJobPhase::Failed) => {
+                        error!(job = %name, "job failed");
+                        cleanup_graph(&job, &ctx.graph, namespace);
+                        update_status(
+                            &ctx.client,
+                            &job,
+                            namespace,
+                            JobPhase::Failed,
+                            Some("Job failed"),
+                            Some(generation),
+                        )
+                        .await?;
+                        Ok(Action::await_change())
+                    }
+                    _ => Ok(Action::requeue(REQUEUE_RUNNING)),
                 }
-                _ => Ok(Action::requeue(REQUEUE_RUNNING)),
             }
         }
         JobPhase::Succeeded | JobPhase::Failed => {
@@ -249,8 +308,7 @@ fn cleanup_graph(job: &LatticeJob, graph: &ServiceGraph, namespace: &str) {
     }
 }
 
-/// Apply compiled job resources in layers using ApplyBatch
-async fn apply_compiled_job(
+async fn apply_layers(
     client: &Client,
     namespace: &str,
     compiled: &CompiledJob,
@@ -259,29 +317,24 @@ async fn apply_compiled_job(
 ) -> Result<(), JobError> {
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    lattice_common::kube_utils::ensure_namespace_ssa(client, namespace, FIELD_MANAGER).await?;
+    lattice_common::kube_utils::ensure_namespace(client, namespace, None, FIELD_MANAGER).await?;
 
-    apply_layers(client, namespace, compiled, registry, volcano_api, &params).await
-}
-
-async fn apply_layers(
-    client: &Client,
-    namespace: &str,
-    compiled: &CompiledJob,
-    registry: &CrdRegistry,
-    volcano_api: &ApiResource,
-    params: &PatchParams,
-) -> Result<(), JobError> {
     // Layer 1: Infrastructure (config, mesh, security, service accounts)
     let cm_ar = ApiResource::erase::<k8s_openapi::api::core::v1::ConfigMap>(&());
     let secret_ar = ApiResource::erase::<k8s_openapi::api::core::v1::Secret>(&());
     let pvc_ar = ApiResource::erase::<k8s_openapi::api::core::v1::PersistentVolumeClaim>(&());
     let sa_ar = ApiResource::erase::<k8s_openapi::api::core::v1::ServiceAccount>(&());
 
-    let mut layer1 = ApplyBatch::new(client.clone(), namespace, params);
+    let mut layer1 = ApplyBatch::new(client.clone(), namespace, &params);
+
+    // Extract the VCJob tasks for service account creation (same structure in both variants)
+    let vcjob_tasks = match &compiled.workload {
+        VolcanoWorkload::Job(vcjob) => &vcjob.spec.tasks,
+        VolcanoWorkload::CronJob(cron) => &cron.spec.job_template.spec.tasks,
+    };
 
     // Create a ServiceAccount for each task (required before Volcano can create pods)
-    for task in &compiled.vcjob.spec.tasks {
+    for task in vcjob_tasks {
         if let Some(sa_name) = task.template["spec"]["serviceAccountName"].as_str() {
             let sa = lattice_common::kube_utils::compile_service_account(sa_name, namespace);
             layer1.push("ServiceAccount", sa_name, &sa, &sa_ar)?;
@@ -327,19 +380,23 @@ async fn apply_layers(
 
     layer1.run("layer-1-infrastructure").await?;
 
-    // Layer 2: VCJob (after mesh/security is ready)
-    let mut layer2 = ApplyBatch::new(client.clone(), namespace, params);
-    layer2.push(
-        "VCJob",
-        &compiled.vcjob.metadata.name,
-        &compiled.vcjob,
-        volcano_api,
-    )?;
-    layer2.run("layer-2-vcjob").await?;
+    // Layer 2: Volcano workload (VCJob or VCCronJob, after mesh/security is ready)
+    let mut layer2 = ApplyBatch::new(client.clone(), namespace, &params);
+    let workload_name = match &compiled.workload {
+        VolcanoWorkload::Job(vcjob) => {
+            layer2.push("VCJob", &vcjob.metadata.name, vcjob, volcano_api)?;
+            &vcjob.metadata.name
+        }
+        VolcanoWorkload::CronJob(cron) => {
+            layer2.push("VCCronJob", &cron.metadata.name, cron, volcano_api)?;
+            &cron.metadata.name
+        }
+    };
+    layer2.run("layer-2-volcano-workload").await?;
 
     info!(
         namespace = %namespace,
-        vcjob = %compiled.vcjob.metadata.name,
+        workload = %workload_name,
         mesh_members = compiled.mesh_members.len(),
         tracing_policies = compiled.tracing_policies.len(),
         "applied compiled job resources"

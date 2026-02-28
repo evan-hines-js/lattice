@@ -75,6 +75,51 @@ pub struct VCJobTaskPolicy {
     pub action: String,
 }
 
+// =============================================================================
+// VCCronJob
+// =============================================================================
+
+/// Volcano VCCronJob resource (`batch.volcano.sh/v1alpha1` Kind: CronJob)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VCCronJob {
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: VolcanoMetadata,
+    pub spec: VCCronJobSpec,
+}
+
+/// VCCronJob spec — wraps a VCJob template with cron scheduling fields
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VCCronJobSpec {
+    pub schedule: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_policy: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successful_jobs_history_limit: Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_jobs_history_limit: Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_deadline_seconds: Option<i64>,
+
+    pub job_template: VCCronJobTemplate,
+}
+
+/// Job template embedded in a VCCronJob — contains the VCJob spec
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VCCronJobTemplate {
+    pub spec: VCJobSpec,
+}
+
 /// Kthena ModelServing resource (`workload.serving.volcano.sh/v1alpha1` Kind: ModelServing)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -506,6 +551,63 @@ mod tests {
         let json = serde_json::to_string(&vcjob).unwrap();
         let de: VCJob = serde_json::from_str(&json).unwrap();
         assert_eq!(vcjob, de);
+    }
+
+    #[test]
+    fn vccronjob_serialization_roundtrip() {
+        let cron = VCCronJob {
+            api_version: "batch.volcano.sh/v1alpha1".to_string(),
+            kind: "CronJob".to_string(),
+            metadata: VolcanoMetadata {
+                name: "test-cron".to_string(),
+                namespace: "default".to_string(),
+                labels: BTreeMap::from([(
+                    "app.kubernetes.io/managed-by".to_string(),
+                    "lattice".to_string(),
+                )]),
+                owner_references: vec![],
+            },
+            spec: VCCronJobSpec {
+                schedule: "*/5 * * * *".to_string(),
+                concurrency_policy: Some("Forbid".to_string()),
+                suspend: Some(false),
+                successful_jobs_history_limit: Some(3),
+                failed_jobs_history_limit: Some(1),
+                starting_deadline_seconds: Some(60),
+                job_template: VCCronJobTemplate {
+                    spec: VCJobSpec {
+                        scheduler_name: "volcano".to_string(),
+                        min_available: Some(1),
+                        max_retry: None,
+                        queue: None,
+                        priority_class_name: None,
+                        tasks: vec![VCJobTask {
+                            name: "worker".to_string(),
+                            replicas: 2,
+                            template: serde_json::json!({"spec": {"containers": []}}),
+                            policies: vec![],
+                        }],
+                        policies: vec![],
+                    },
+                },
+            },
+        };
+
+        let json = serde_json::to_string(&cron).unwrap();
+        let de: VCCronJob = serde_json::from_str(&json).unwrap();
+        assert_eq!(cron, de);
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["kind"], "CronJob");
+        assert_eq!(value["spec"]["schedule"], "*/5 * * * *");
+        assert_eq!(value["spec"]["concurrencyPolicy"], "Forbid");
+        assert_eq!(value["spec"]["suspend"], false);
+        assert_eq!(value["spec"]["successfulJobsHistoryLimit"], 3);
+        assert_eq!(value["spec"]["failedJobsHistoryLimit"], 1);
+        assert_eq!(value["spec"]["startingDeadlineSeconds"], 60);
+        assert!(value["spec"]["jobTemplate"]["spec"]
+            .get("schedulerName")
+            .is_some());
     }
 
     #[test]

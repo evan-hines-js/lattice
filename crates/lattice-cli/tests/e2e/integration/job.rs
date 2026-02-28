@@ -22,10 +22,16 @@ use super::super::helpers::{
 
 const JOB_NAMESPACE: &str = "batch";
 const JOB_NAME: &str = "data-pipeline";
+const CRON_JOB_NAME: &str = "scheduled-pipeline";
 
 /// Load the batch-job fixture
 fn load_job_fixture() -> Result<lattice_common::crd::LatticeJob, String> {
     load_fixture_config("batch-job.yaml")
+}
+
+/// Load the cron-job fixture
+fn load_cron_job_fixture() -> Result<lattice_common::crd::LatticeJob, String> {
+    load_fixture_config("cron-job.yaml")
 }
 
 /// Deploy a LatticeJob and verify the controller creates the expected resources
@@ -290,6 +296,121 @@ async fn test_job_completion(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Deploy a cron LatticeJob and verify the controller creates a VCCronJob
+async fn test_cron_job_deployment(kubeconfig: &str) -> Result<(), String> {
+    info!("[CronJob] Deploying cron LatticeJob from fixture...");
+
+    let job = load_cron_job_fixture()?;
+    let yaml = serde_json::to_string(&job)
+        .map_err(|e| format!("Failed to serialize cron job fixture: {e}"))?;
+    apply_yaml_with_retry(kubeconfig, &yaml).await?;
+
+    // Cron jobs stay in Running (perpetual) — never transition to Succeeded
+    wait_for_resource_phase(
+        kubeconfig,
+        "latticejob",
+        JOB_NAMESPACE,
+        CRON_JOB_NAME,
+        "Running",
+        Duration::from_secs(120),
+    )
+    .await?;
+
+    info!("[CronJob] Cron LatticeJob reached Running phase");
+    Ok(())
+}
+
+/// Verify VCCronJob was created with expected schedule and task structure
+async fn test_vccronjob_created(kubeconfig: &str) -> Result<(), String> {
+    info!("[CronJob] Verifying VCCronJob creation...");
+
+    let schedule = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "cronjobs.batch.volcano.sh",
+        CRON_JOB_NAME,
+        "-n",
+        JOB_NAMESPACE,
+        "-o",
+        "jsonpath={.spec.schedule}",
+    ])
+    .await?;
+
+    if schedule.trim() != "*/5 * * * *" {
+        return Err(format!(
+            "Expected schedule '*/5 * * * *', got: '{}'",
+            schedule.trim()
+        ));
+    }
+
+    // Verify concurrencyPolicy
+    let concurrency = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "cronjobs.batch.volcano.sh",
+        CRON_JOB_NAME,
+        "-n",
+        JOB_NAMESPACE,
+        "-o",
+        "jsonpath={.spec.concurrencyPolicy}",
+    ])
+    .await?;
+
+    if concurrency.trim() != "Forbid" {
+        return Err(format!(
+            "Expected concurrencyPolicy 'Forbid', got: '{}'",
+            concurrency.trim()
+        ));
+    }
+
+    // Verify jobTemplate has tasks
+    let task_names = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "cronjobs.batch.volcano.sh",
+        CRON_JOB_NAME,
+        "-n",
+        JOB_NAMESPACE,
+        "-o",
+        "jsonpath={.spec.jobTemplate.spec.tasks[*].name}",
+    ])
+    .await?;
+
+    if !task_names.contains("worker") {
+        return Err(format!(
+            "Expected VCCronJob jobTemplate task 'worker', got: '{}'",
+            task_names.trim()
+        ));
+    }
+
+    // Verify owner reference
+    let owner_kind = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "cronjobs.batch.volcano.sh",
+        CRON_JOB_NAME,
+        "-n",
+        JOB_NAMESPACE,
+        "-o",
+        "jsonpath={.metadata.ownerReferences[0].kind}",
+    ])
+    .await?;
+
+    if owner_kind.trim() != "LatticeJob" {
+        return Err(format!(
+            "Expected ownerReference kind 'LatticeJob', got: '{}'",
+            owner_kind.trim()
+        ));
+    }
+
+    info!("[CronJob] VCCronJob verified: schedule, concurrencyPolicy, tasks, owner reference");
+    Ok(())
+}
+
 /// Run all job integration tests
 pub async fn run_job_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Job] Running LatticeJob integration tests on {kubeconfig}");
@@ -306,7 +427,7 @@ pub async fn run_job_tests(kubeconfig: &str) -> Result<(), String> {
 }
 
 async fn run_job_test_sequence(kubeconfig: &str) -> Result<(), String> {
-    // Deploy the job
+    // Deploy the one-shot job
     test_job_deployment(kubeconfig).await?;
 
     // Verify resources were created
@@ -316,6 +437,10 @@ async fn run_job_test_sequence(kubeconfig: &str) -> Result<(), String> {
 
     // Wait for full lifecycle completion
     test_job_completion(kubeconfig).await?;
+
+    // Cron job tests (reuses the same namespace)
+    test_cron_job_deployment(kubeconfig).await?;
+    test_vccronjob_created(kubeconfig).await?;
 
     info!("[Job] All LatticeJob integration tests passed!");
     Ok(())

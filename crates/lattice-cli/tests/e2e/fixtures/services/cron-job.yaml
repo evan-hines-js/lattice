@@ -1,0 +1,39 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeJob
+metadata:
+  name: scheduled-pipeline
+  namespace: batch
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  queue: default
+  tasks:
+    worker:
+      replicas: 1
+      workload:
+        containers:
+          main:
+            image: ghcr.io/evan-hines-js/busybox:latest
+            command: ["/bin/sh", "-c", "echo 'cron tick'; sleep 5"]
+            resources:
+              requests:
+                cpu: 100m
+                memory: 64Mi
+              limits:
+                cpu: 200m
+                memory: 128Mi
+            security:
+              runAsUser: 65534
+              apparmorProfile: Unconfined
+        resources:
+          ghcr-creds:
+            type: secret
+            id: local-regcreds
+            params:
+              provider: lattice-local
+              refreshInterval: 1h
+      imagePullSecrets:
+        - ghcr-creds
+      restartPolicy: Never

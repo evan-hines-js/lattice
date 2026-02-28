@@ -44,6 +44,8 @@ pub enum CrdKind {
     TracingPolicyNamespaced,
     /// Volcano Job (batch.volcano.sh)
     VolcanoJob,
+    /// Volcano CronJob (batch.volcano.sh)
+    VolcanoCronJob,
     /// Kthena ModelServing (workload.serving.volcano.sh)
     ModelServing,
     /// Kthena ModelServer (networking.serving.volcano.sh)
@@ -73,6 +75,7 @@ const ALL_CRD_KINDS: &[CrdKind] = &[
     CrdKind::MeshMember,
     CrdKind::TracingPolicyNamespaced,
     CrdKind::VolcanoJob,
+    CrdKind::VolcanoCronJob,
     CrdKind::ModelServing,
     CrdKind::KthenaModelServer,
     CrdKind::KthenaModelRoute,
@@ -95,7 +98,7 @@ impl CrdKind {
             }
             Self::Certificate => "cert-manager.io",
             Self::MeshMember => "lattice.dev",
-            Self::VolcanoJob => "batch.volcano.sh",
+            Self::VolcanoJob | Self::VolcanoCronJob => "batch.volcano.sh",
             Self::ModelServing | Self::AutoscalingPolicy | Self::AutoscalingPolicyBinding => {
                 "workload.serving.volcano.sh"
             }
@@ -121,6 +124,7 @@ impl CrdKind {
             Self::MeshMember => "LatticeMeshMember",
             Self::TracingPolicyNamespaced => "TracingPolicyNamespaced",
             Self::VolcanoJob => "Job",
+            Self::VolcanoCronJob => "CronJob",
             Self::ModelServing => "ModelServing",
             Self::KthenaModelServer => "ModelServer",
             Self::KthenaModelRoute => "ModelRoute",
@@ -149,6 +153,7 @@ impl CrdKind {
             "LatticeMeshMember" => Some(Self::MeshMember),
             "TracingPolicyNamespaced" => Some(Self::TracingPolicyNamespaced),
             "Job" => Some(Self::VolcanoJob),
+            "CronJob" => Some(Self::VolcanoCronJob),
             "ModelServing" => Some(Self::ModelServing),
             "ModelServer" => Some(Self::KthenaModelServer),
             "ModelRoute" => Some(Self::KthenaModelRoute),
@@ -172,7 +177,7 @@ impl CrdKind {
             Self::Certificate => "cert-manager.io/v1",
             Self::MeshMember => "lattice.dev/v1alpha1",
             Self::TracingPolicyNamespaced => "cilium.io/v1alpha1",
-            Self::VolcanoJob => "batch.volcano.sh/v1alpha1",
+            Self::VolcanoJob | Self::VolcanoCronJob => "batch.volcano.sh/v1alpha1",
             Self::ModelServing | Self::AutoscalingPolicy | Self::AutoscalingPolicyBinding => {
                 "workload.serving.volcano.sh/v1alpha1"
             }
@@ -350,7 +355,7 @@ mod tests {
     #[test]
     fn all_crd_kinds_is_exhaustive() {
         // Ensure ALL_CRD_KINDS contains every variant
-        assert_eq!(ALL_CRD_KINDS.len(), 20);
+        assert_eq!(ALL_CRD_KINDS.len(), 21);
     }
 
     #[test]

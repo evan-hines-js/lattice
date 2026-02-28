@@ -38,7 +38,10 @@ pub use cluster_backup::{
     LatticeClusterBackupSpec, LatticeClusterBackupStatus,
 };
 pub use external_endpoint::{ParsedEndpoint, Resolution};
-pub use job::{JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus, RestartPolicy};
+pub use job::{
+    ConcurrencyPolicy, JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus,
+    RestartPolicy,
+};
 pub use mesh_member::{
     derived_name, AppliedResourceRef, CallerRef, EgressRule, EgressTarget, LatticeMeshMember,
     LatticeMeshMemberSpec, LatticeMeshMemberStatus, MeshMemberPhase, MeshMemberPort,

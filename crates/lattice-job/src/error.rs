@@ -25,8 +25,8 @@ pub enum JobError {
     #[error("missing namespace on LatticeJob")]
     MissingNamespace,
 
-    #[error("Volcano Job CRD (batch.volcano.sh/Job) not available")]
-    VolcanoCrdMissing,
+    #[error("Volcano {kind} CRD (batch.volcano.sh/{kind}) not available")]
+    VolcanoCrdMissing { kind: &'static str },
 }
 
 impl Retryable for JobError {
@@ -38,7 +38,7 @@ impl Retryable for JobError {
             Self::Common(e) => e.is_retryable(),
             Self::NoTasks => false,
             Self::MissingNamespace => false,
-            Self::VolcanoCrdMissing => true,
+            Self::VolcanoCrdMissing { .. } => true,
         }
     }
 }

@@ -11,7 +11,7 @@ pub mod routing_compiler;
 mod types;
 
 pub use autoscaling_compiler::{compile_model_autoscaling, CompiledAutoscaling};
-pub use compiler::compile_vcjob;
+pub use compiler::{compile_vccronjob, compile_vcjob};
 pub use model_serving_compiler::{compile_model_serving, RoleTemplates};
 pub use routing_compiler::{compile_model_routing, CompiledRouting};
 pub use types::{
@@ -24,6 +24,6 @@ pub use types::{
     KthenaRouteRule, KthenaScaleDownBehavior, KthenaScaleUpBehavior, KthenaStablePolicy,
     KthenaSubTarget, KthenaTargetModel, KthenaTargetRef, KthenaTrafficPolicy, ModelServing,
     ModelServingRole, ModelServingSpec, PdGroup, RollingUpdateConfiguration, RolloutStrategy,
-    ServingGroupTemplate, VCJob, VCJobSpec, VCJobTask, VCJobTaskPolicy, VolcanoMetadata,
-    WorkloadPort, WorkloadSelector,
+    ServingGroupTemplate, VCCronJob, VCCronJobSpec, VCCronJobTemplate, VCJob, VCJobSpec,
+    VCJobTask, VCJobTaskPolicy, VolcanoMetadata, WorkloadPort, WorkloadSelector,
 };

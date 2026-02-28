@@ -1,7 +1,10 @@
 //! LatticeJob CRD types
 //!
-//! Defines `LatticeJob` — batch workloads backed by Volcano VCJob.
+//! Defines `LatticeJob` — batch workloads backed by Volcano VCJob or VCCronJob.
 //! Each job contains named tasks, each with its own `WorkloadSpec` and pod template.
+//!
+//! When `spec.schedule` is set, the controller compiles a VCCronJob (recurring)
+//! instead of a bare VCJob (one-shot).
 
 use std::collections::BTreeMap;
 
@@ -69,6 +72,33 @@ impl std::fmt::Display for RestartPolicy {
 }
 
 // =============================================================================
+// ConcurrencyPolicy
+// =============================================================================
+
+/// Concurrency policy for cron jobs
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[non_exhaustive]
+pub enum ConcurrencyPolicy {
+    /// Allow concurrent job runs
+    #[default]
+    Allow,
+    /// Skip new run if previous is still active
+    Forbid,
+    /// Replace the currently running job with a new one
+    Replace,
+}
+
+impl std::fmt::Display for ConcurrencyPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allow => write!(f, "Allow"),
+            Self::Forbid => write!(f, "Forbid"),
+            Self::Replace => write!(f, "Replace"),
+        }
+    }
+}
+
+// =============================================================================
 // Task Spec
 // =============================================================================
 
@@ -107,7 +137,7 @@ fn default_scheduler() -> String {
 // CRD
 // =============================================================================
 
-/// Batch workload specification backed by Volcano VCJob
+/// Batch workload specification backed by Volcano VCJob or VCCronJob
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "lattice.dev",
@@ -118,6 +148,7 @@ fn default_scheduler() -> String {
     namespaced,
     status = "LatticeJobStatus",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Schedule","type":"string","jsonPath":".spec.schedule","priority":1}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +173,31 @@ pub struct LatticeJobSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_class_name: Option<String>,
 
+    /// Cron schedule expression (e.g. "*/5 * * * *"). When set, compiles to a
+    /// Volcano VCCronJob instead of a VCJob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+
+    /// How to handle concurrent job executions (only relevant for cron jobs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_policy: Option<ConcurrencyPolicy>,
+
+    /// Suspend future executions of this cron job
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend: Option<bool>,
+
+    /// Number of successful finished jobs to retain (default 3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successful_jobs_history_limit: Option<u32>,
+
+    /// Number of failed finished jobs to retain (default 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_jobs_history_limit: Option<u32>,
+
+    /// Deadline in seconds for starting the job if it misses its scheduled time
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_deadline_seconds: Option<i64>,
+
     /// Job tasks — each maps to a Volcano VCJob task with its own pod template
     #[serde(default)]
     pub tasks: BTreeMap<String, JobTaskSpec>,
@@ -155,8 +211,21 @@ impl Default for LatticeJobSpec {
             max_retry: None,
             queue: None,
             priority_class_name: None,
+            schedule: None,
+            concurrency_policy: None,
+            suspend: None,
+            successful_jobs_history_limit: None,
+            failed_jobs_history_limit: None,
+            starting_deadline_seconds: None,
             tasks: BTreeMap::new(),
         }
+    }
+}
+
+impl LatticeJobSpec {
+    /// Returns `true` when this job should compile to a VCCronJob (has a schedule).
+    pub fn is_cron(&self) -> bool {
+        self.schedule.is_some()
     }
 }
 
@@ -252,5 +321,52 @@ mod tests {
         assert_eq!(RestartPolicy::Never.to_string(), "Never");
         assert_eq!(RestartPolicy::OnFailure.to_string(), "OnFailure");
         assert_eq!(RestartPolicy::Always.to_string(), "Always");
+    }
+
+    #[test]
+    fn concurrency_policy_display() {
+        assert_eq!(ConcurrencyPolicy::Allow.to_string(), "Allow");
+        assert_eq!(ConcurrencyPolicy::Forbid.to_string(), "Forbid");
+        assert_eq!(ConcurrencyPolicy::Replace.to_string(), "Replace");
+    }
+
+    #[test]
+    fn is_cron_returns_true_when_schedule_set() {
+        let spec = LatticeJobSpec {
+            schedule: Some("*/5 * * * *".to_string()),
+            ..Default::default()
+        };
+        assert!(spec.is_cron());
+    }
+
+    #[test]
+    fn is_cron_returns_false_when_no_schedule() {
+        let spec = LatticeJobSpec::default();
+        assert!(!spec.is_cron());
+    }
+
+    #[test]
+    fn cron_fields_serde_roundtrip() {
+        let spec = LatticeJobSpec {
+            schedule: Some("0 */6 * * *".to_string()),
+            concurrency_policy: Some(ConcurrencyPolicy::Forbid),
+            suspend: Some(false),
+            successful_jobs_history_limit: Some(5),
+            failed_jobs_history_limit: Some(2),
+            starting_deadline_seconds: Some(300),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&spec).unwrap();
+        let de: LatticeJobSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec, de);
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["schedule"], "0 */6 * * *");
+        assert_eq!(value["concurrencyPolicy"], "Forbid");
+        assert_eq!(value["suspend"], false);
+        assert_eq!(value["successfulJobsHistoryLimit"], 5);
+        assert_eq!(value["failedJobsHistoryLimit"], 2);
+        assert_eq!(value["startingDeadlineSeconds"], 300);
     }
 }

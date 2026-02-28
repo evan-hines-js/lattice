@@ -8,7 +8,10 @@ use lattice_common::crd::{LatticeJob, LatticeJobSpec, RestartPolicy};
 
 use lattice_common::kube_utils::OwnerReference;
 
-use crate::types::{VCJob, VCJobSpec, VCJobTask, VCJobTaskPolicy, VolcanoMetadata};
+use crate::types::{
+    VCCronJob, VCCronJobSpec, VCCronJobTemplate, VCJob, VCJobSpec, VCJobTask, VCJobTaskPolicy,
+    VolcanoMetadata,
+};
 
 /// Compile a LatticeJob into a Volcano VCJob.
 ///
@@ -64,6 +67,35 @@ pub fn compile_vcjob(
     }
 }
 
+/// Compile a LatticeJob into a Volcano VCCronJob.
+///
+/// Wraps the output of `compile_vcjob()` in a VCCronJob with cron scheduling fields.
+/// Panics if `job.spec.schedule` is `None` — caller must check `is_cron()` first.
+pub fn compile_vccronjob(job: &LatticeJob, vcjob: VCJob) -> VCCronJob {
+    let schedule = job
+        .spec
+        .schedule
+        .as_deref()
+        .expect("compile_vccronjob called without schedule");
+
+    VCCronJob {
+        api_version: "batch.volcano.sh/v1alpha1".to_string(),
+        kind: "CronJob".to_string(),
+        metadata: vcjob.metadata.clone(),
+        spec: VCCronJobSpec {
+            schedule: schedule.to_string(),
+            concurrency_policy: job.spec.concurrency_policy.as_ref().map(|p| p.to_string()),
+            suspend: job.spec.suspend,
+            successful_jobs_history_limit: job.spec.successful_jobs_history_limit,
+            failed_jobs_history_limit: job.spec.failed_jobs_history_limit,
+            starting_deadline_seconds: job.spec.starting_deadline_seconds,
+            job_template: VCCronJobTemplate {
+                spec: vcjob.spec,
+            },
+        },
+    }
+}
+
 fn compile_tasks(
     spec: &LatticeJobSpec,
     pod_templates: &BTreeMap<String, serde_json::Value>,
@@ -115,7 +147,9 @@ fn default_policies(max_retry: Option<u32>) -> Vec<VCJobTaskPolicy> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{JobTaskSpec, LatticeJobSpec, RuntimeSpec, WorkloadSpec};
+    use lattice_common::crd::{
+        ConcurrencyPolicy, JobTaskSpec, LatticeJobSpec, RuntimeSpec, WorkloadSpec,
+    };
 
     fn test_job(tasks: BTreeMap<String, JobTaskSpec>) -> LatticeJob {
         let spec = LatticeJobSpec {
@@ -317,5 +351,74 @@ mod tests {
             vcjob.spec.priority_class_name,
             Some("high-priority".to_string())
         );
+    }
+
+    #[test]
+    fn compile_vccronjob_wraps_vcjob() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "worker".to_string(),
+            JobTaskSpec {
+                replicas: 2,
+                workload: WorkloadSpec::default(),
+                runtime: RuntimeSpec::default(),
+                restart_policy: Some(RestartPolicy::Never),
+            },
+        );
+
+        let spec = LatticeJobSpec {
+            schedule: Some("*/10 * * * *".to_string()),
+            concurrency_policy: Some(ConcurrencyPolicy::Forbid),
+            suspend: Some(false),
+            successful_jobs_history_limit: Some(5),
+            failed_jobs_history_limit: Some(2),
+            starting_deadline_seconds: Some(120),
+            tasks,
+            ..Default::default()
+        };
+
+        let job = test_job_with_spec(spec);
+        let templates =
+            BTreeMap::from([("worker".to_string(), test_pod_template("worker:latest"))]);
+        let vcjob = compile_vcjob(&job, &templates);
+        let cron = compile_vccronjob(&job, vcjob);
+
+        assert_eq!(cron.api_version, "batch.volcano.sh/v1alpha1");
+        assert_eq!(cron.kind, "CronJob");
+        assert_eq!(cron.metadata.name, "test-job");
+        assert_eq!(cron.spec.schedule, "*/10 * * * *");
+        assert_eq!(cron.spec.concurrency_policy, Some("Forbid".to_string()));
+        assert_eq!(cron.spec.suspend, Some(false));
+        assert_eq!(cron.spec.successful_jobs_history_limit, Some(5));
+        assert_eq!(cron.spec.failed_jobs_history_limit, Some(2));
+        assert_eq!(cron.spec.starting_deadline_seconds, Some(120));
+        assert_eq!(cron.spec.job_template.spec.tasks.len(), 1);
+        assert_eq!(cron.spec.job_template.spec.scheduler_name, "volcano");
+    }
+
+    #[test]
+    fn compile_vccronjob_defaults() {
+        let spec = LatticeJobSpec {
+            schedule: Some("0 0 * * *".to_string()),
+            ..Default::default()
+        };
+
+        let job = test_job_with_spec(spec);
+        let vcjob = compile_vcjob(&job, &BTreeMap::new());
+        let cron = compile_vccronjob(&job, vcjob);
+
+        assert_eq!(cron.spec.schedule, "0 0 * * *");
+        assert_eq!(cron.spec.concurrency_policy, None);
+        assert_eq!(cron.spec.suspend, None);
+        assert_eq!(cron.spec.successful_jobs_history_limit, None);
+        assert_eq!(cron.spec.failed_jobs_history_limit, None);
+        assert_eq!(cron.spec.starting_deadline_seconds, None);
+    }
+
+    fn test_job_with_spec(spec: LatticeJobSpec) -> LatticeJob {
+        let mut job = LatticeJob::new("test-job", spec);
+        job.metadata.namespace = Some("default".to_string());
+        job.metadata.uid = Some("test-uid-123".to_string());
+        job
     }
 }

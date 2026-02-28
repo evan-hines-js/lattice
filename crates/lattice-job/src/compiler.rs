@@ -13,16 +13,23 @@ use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{LatticeJob, LatticeMeshMember, ProviderType};
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
-use lattice_volcano::VCJob;
+use lattice_volcano::{VCCronJob, VCJob};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
 use crate::error::JobError;
 
+/// Discriminated Volcano workload — either a one-shot VCJob or a scheduled VCCronJob.
+#[derive(Debug)]
+pub enum VolcanoWorkload {
+    Job(VCJob),
+    CronJob(VCCronJob),
+}
+
 /// Complete compiled output for a LatticeJob
 #[derive(Debug)]
 pub struct CompiledJob {
-    /// Volcano VCJob resource
-    pub vcjob: VCJob,
+    /// Volcano workload resource (VCJob or VCCronJob)
+    pub workload: VolcanoWorkload,
     /// Aggregated config resources from all tasks (ConfigMaps, Secrets, ESO, PVCs)
     pub config: CompiledConfig,
     /// LatticeMeshMember CRs — one per task that participates in the mesh
@@ -108,11 +115,16 @@ pub async fn compile_job(
         tracing_policies.extend(policies);
     }
 
-    // Build VCJob from aggregated pod templates
+    // Build VCJob from aggregated pod templates, then wrap in VCCronJob if scheduled
     let vcjob = lattice_volcano::compile_vcjob(job, &pod_templates);
+    let workload = if job.spec.is_cron() {
+        VolcanoWorkload::CronJob(lattice_volcano::compile_vccronjob(job, vcjob))
+    } else {
+        VolcanoWorkload::Job(vcjob)
+    };
 
     Ok(CompiledJob {
-        vcjob,
+        workload,
         config,
         mesh_members,
         tracing_policies,
@@ -177,9 +189,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(compiled.vcjob.spec.tasks.len(), 1);
-        assert_eq!(compiled.vcjob.spec.tasks[0].name, "worker");
-        assert_eq!(compiled.vcjob.spec.tasks[0].replicas, 2);
+        let vcjob = match &compiled.workload {
+            VolcanoWorkload::Job(v) => v,
+            VolcanoWorkload::CronJob(_) => panic!("expected VCJob, got VCCronJob"),
+        };
+        assert_eq!(vcjob.spec.tasks.len(), 1);
+        assert_eq!(vcjob.spec.tasks[0].name, "worker");
+        assert_eq!(vcjob.spec.tasks[0].replicas, 2);
         // No command = implicit wildcard = no binary restriction policies
         assert!(compiled.tracing_policies.is_empty());
     }
@@ -198,8 +214,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(compiled.vcjob.spec.tasks.len(), 2);
-        assert_eq!(compiled.vcjob.spec.min_available, Some(5));
+        let vcjob = match &compiled.workload {
+            VolcanoWorkload::Job(v) => v,
+            VolcanoWorkload::CronJob(_) => panic!("expected VCJob, got VCCronJob"),
+        };
+        assert_eq!(vcjob.spec.tasks.len(), 2);
+        assert_eq!(vcjob.spec.min_available, Some(5));
     }
 
     #[tokio::test]
@@ -228,5 +248,34 @@ mod tests {
 
         let result = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar).await;
         assert!(matches!(result, Err(JobError::MissingNamespace)));
+    }
+
+    #[tokio::test]
+    async fn compile_cron_job_produces_vccronjob() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("worker".to_string(), make_task("worker:latest", 2));
+
+        let spec = LatticeJobSpec {
+            schedule: Some("*/15 * * * *".to_string()),
+            tasks,
+            ..Default::default()
+        };
+        let mut job = LatticeJob::new("cron-test", spec);
+        job.metadata.namespace = Some("default".to_string());
+        job.metadata.uid = Some("uid-cron".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        let cron = match &compiled.workload {
+            VolcanoWorkload::CronJob(c) => c,
+            VolcanoWorkload::Job(_) => panic!("expected VCCronJob, got VCJob"),
+        };
+        assert_eq!(cron.spec.schedule, "*/15 * * * *");
+        assert_eq!(cron.spec.job_template.spec.tasks.len(), 1);
     }
 }
