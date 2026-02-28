@@ -371,11 +371,30 @@ async fn check_vcjob_status(
                 .and_then(|s| s.get("phase"))
                 .and_then(|p| p.as_str());
 
-            match phase {
-                Some("Completed") => Some(VCJobPhase::Completed),
-                Some("Failed" | "Terminated" | "Aborted") => Some(VCJobPhase::Failed),
-                _ => Some(VCJobPhase::Running),
-            }
+            let result = match phase {
+                Some("Completed") => VCJobPhase::Completed,
+                Some("Failed" | "Terminated" | "Aborted") => VCJobPhase::Failed,
+                // Restarting with no retries left is effectively Failed
+                Some("Restarting") => {
+                    let max_retry = obj
+                        .data
+                        .get("spec")
+                        .and_then(|s| s.get("maxRetry"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    if max_retry == 0 {
+                        warn!(job = %name, "VCJob stuck in Restarting with maxRetry=0, treating as Failed");
+                        VCJobPhase::Failed
+                    } else {
+                        VCJobPhase::Running
+                    }
+                }
+                other => {
+                    info!(job = %name, phase = ?other, "VCJob phase");
+                    VCJobPhase::Running
+                }
+            };
+            Some(result)
         }
         Err(kube::Error::Api(ae)) if ae.code == 404 => {
             warn!(job = %name, "VCJob not found");

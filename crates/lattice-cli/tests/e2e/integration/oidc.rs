@@ -279,9 +279,7 @@ pub async fn run_oidc_auth_test(
         },
     )
     .await
-    .map_err(|e| {
-        format!("Expected admin OIDC access to succeed, but it never did: {e}")
-    })?;
+    .map_err(|e| format!("Expected admin OIDC access to succeed, but it never did: {e}"))?;
     info!("[Integration/OIDC] Admin access allowed as expected");
 
     // 6. Verify viewer OIDC token is denied (not in lattice-admins group)

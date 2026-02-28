@@ -395,11 +395,8 @@ pub async fn run_cedar_security_tests(kubeconfig: &str) -> Result<(), String> {
 
     // Clean up any leftover policies from previous runs and wait for deletion
     cleanup_cedar_security_policies(kubeconfig).await;
-    wait_for_no_cedar_policies_with_label(
-        kubeconfig,
-        &format!("lattice.dev/test={}", TEST_LABEL),
-    )
-    .await?;
+    wait_for_no_cedar_policies_with_label(kubeconfig, &format!("lattice.dev/test={}", TEST_LABEL))
+        .await?;
 
     // Docker KIND clusters don't have AppArmor — permit the Unconfined override.
     // Uses "e2e" label so the cedar-security cleanup (which deletes by "cedar-security"

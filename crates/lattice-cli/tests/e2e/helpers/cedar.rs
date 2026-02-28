@@ -322,10 +322,7 @@ async fn count_cedar_policies_with_label(kubeconfig: &str, label_selector: &str)
     .await;
 
     match output {
-        Ok(stdout) => stdout
-            .split_whitespace()
-            .filter(|s| !s.is_empty())
-            .count(),
+        Ok(stdout) => stdout.split_whitespace().filter(|s| !s.is_empty()).count(),
         Err(_) => 0,
     }
 }

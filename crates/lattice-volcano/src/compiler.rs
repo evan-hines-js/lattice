@@ -59,7 +59,7 @@ pub fn compile_vcjob(
             queue: job.spec.queue.clone(),
             priority_class_name: job.spec.priority_class_name.clone(),
             tasks,
-            policies: default_policies(),
+            policies: default_policies(job.spec.max_retry),
         },
     }
 }
@@ -92,17 +92,24 @@ fn compile_tasks(
         .collect()
 }
 
-fn default_policies() -> Vec<VCJobTaskPolicy> {
-    vec![
-        VCJobTaskPolicy {
-            event: "PodEvicted".to_string(),
-            action: "RestartJob".to_string(),
-        },
-        VCJobTaskPolicy {
+fn default_policies(max_retry: Option<u32>) -> Vec<VCJobTaskPolicy> {
+    let mut policies = vec![VCJobTaskPolicy {
+        event: "PodEvicted".to_string(),
+        action: "RestartJob".to_string(),
+    }];
+
+    // Only add PodFailed → RestartJob when retries are enabled.
+    // With maxRetry 0, this policy causes Volcano to enter a Restarting phase
+    // it can never leave, creating a race where the Lattice controller sees
+    // a non-terminal phase and requeues indefinitely.
+    if max_retry.unwrap_or(0) > 0 {
+        policies.push(VCJobTaskPolicy {
             event: "PodFailed".to_string(),
             action: "RestartJob".to_string(),
-        },
-    ]
+        });
+    }
+
+    policies
 }
 
 #[cfg(test)]
@@ -270,10 +277,29 @@ mod tests {
     }
 
     #[test]
-    fn default_policies_present() {
+    fn default_policies_no_retry() {
         let job = test_job(BTreeMap::new());
         let vcjob = compile_vcjob(&job, &BTreeMap::new());
+        // maxRetry defaults to None (0) — only PodEvicted policy, no PodFailed
+        assert_eq!(vcjob.spec.policies.len(), 1);
+        assert_eq!(vcjob.spec.policies[0].event, "PodEvicted");
+    }
+
+    #[test]
+    fn default_policies_with_retry() {
+        let spec = LatticeJobSpec {
+            max_retry: Some(3),
+            ..Default::default()
+        };
+        let mut job = LatticeJob::new("test-job", spec);
+        job.metadata.namespace = Some("default".to_string());
+        job.metadata.uid = Some("uid".to_string());
+
+        let vcjob = compile_vcjob(&job, &BTreeMap::new());
+        // maxRetry > 0 — both PodEvicted and PodFailed policies
         assert_eq!(vcjob.spec.policies.len(), 2);
+        assert_eq!(vcjob.spec.policies[0].event, "PodEvicted");
+        assert_eq!(vcjob.spec.policies[1].event, "PodFailed");
     }
 
     #[test]

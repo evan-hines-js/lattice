@@ -59,7 +59,14 @@ const CEDAR_TEST_LABEL: &str = "vault-secrets";
 /// Route 1: Pure secret env var -> secretKeyRef (Vault backend)
 async fn verify_route1(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     let selector = service_pod_selector("vr1-pure-env");
-    verify_pod_env_var(kubeconfig, namespace, &selector, "DB_PASSWORD", "v@ult-s3cret").await?;
+    verify_pod_env_var(
+        kubeconfig,
+        namespace,
+        &selector,
+        "DB_PASSWORD",
+        "v@ult-s3cret",
+    )
+    .await?;
     verify_pod_env_var(kubeconfig, namespace, &selector, "DB_USERNAME", "admin").await?;
     info!("[Vault/Route1] Pure secret env var test passed!");
     Ok(())
@@ -415,10 +422,7 @@ pub async fn run_vault_secrets_tests(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_vault_route_tests_inner(
-    kubeconfig: &str,
-    namespace: &str,
-) -> Result<(), String> {
+async fn run_vault_route_tests_inner(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     ensure_fresh_namespace(kubeconfig, namespace).await?;
 
     // Build all services
@@ -455,7 +459,10 @@ async fn run_vault_route_tests_inner(
         )],
     );
     let svc3 = with_run_as_root(create_vault_all_routes_service("vr3-file-mount", namespace));
-    let svc4 = with_run_as_root(create_vault_all_routes_service("vr4-pull-secrets", namespace));
+    let svc4 = with_run_as_root(create_vault_all_routes_service(
+        "vr4-pull-secrets",
+        namespace,
+    ));
     let svc5 = with_run_as_root(create_service_with_secrets(
         "vr5-data-from",
         namespace,

@@ -280,7 +280,9 @@ impl AgentClient {
 
         let command_ctx = CommandContext::new(
             self.config.cluster_name.clone(),
-            self.message_tx.clone().expect("message_tx set before spawn"),
+            self.message_tx
+                .clone()
+                .expect("message_tx set before spawn"),
             agent_state.clone(),
             watch_registry.clone(),
             exec_registry.clone(),

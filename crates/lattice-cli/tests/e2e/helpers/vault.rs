@@ -96,10 +96,7 @@ async fn vault_kv_put(path: &str, data: &BTreeMap<String, String>) -> Result<(),
 // =============================================================================
 
 /// Seed a secret into Vault KV v2 at the given path.
-pub async fn seed_vault_secret(
-    path: &str,
-    data: &BTreeMap<String, String>,
-) -> Result<(), String> {
+pub async fn seed_vault_secret(path: &str, data: &BTreeMap<String, String>) -> Result<(), String> {
     vault_kv_put(path, data).await
 }
 

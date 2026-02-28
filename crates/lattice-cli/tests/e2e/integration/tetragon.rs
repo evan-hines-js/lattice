@@ -1062,11 +1062,8 @@ pub async fn run_tetragon_tests(kubeconfig: &str) -> Result<(), String> {
 
     setup_regcreds_infrastructure(kubeconfig).await?;
     cleanup_policies(kubeconfig).await;
-    wait_for_no_cedar_policies_with_label(
-        kubeconfig,
-        &format!("lattice.dev/test={TEST_LABEL}"),
-    )
-    .await?;
+    wait_for_no_cedar_policies_with_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
+        .await?;
 
     let harness = TestHarness::new("Tetragon");
     tokio::join!(
