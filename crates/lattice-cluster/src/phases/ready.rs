@@ -10,7 +10,7 @@ use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_capi::provider::format_capi_version;
+use lattice_capi::provider::{format_capi_version, pool_resource_suffix};
 use lattice_common::crd::{LatticeCluster, LatticeClusterStatus, WorkerPoolStatus};
 use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, Error};
@@ -18,7 +18,7 @@ use lattice_common::{capi_namespace, Error};
 use crate::controller::{
     autoscaling_warning, determine_scaling_action, Context, NodeCounts, ScalingAction,
 };
-use crate::phases::reconcile_infrastructure;
+use crate::phases::{generate_capi_manifests, reconcile_infrastructure};
 
 /// Result of version reconciliation.
 enum VersionStatus {
@@ -261,6 +261,7 @@ async fn reconcile_worker_pools(
 ) -> Result<(u32, BTreeMap<String, WorkerPoolStatus>), Error> {
     let mut total_desired: u32 = 0;
     let mut pool_statuses = BTreeMap::new();
+    let mut missing_pools = Vec::new();
 
     for (pool_id, pool_spec) in &cluster.spec.nodes.worker_pools {
         // Get current MachineDeployment replica count
@@ -279,6 +280,26 @@ async fn reconcile_worker_pools(
         // Log warning if spec.replicas is outside autoscaling bounds
         if let Some(msg) = autoscaling_warning(pool_spec) {
             warn!(pool = %pool_id, "{}", msg);
+        }
+
+        // For missing pools, use spec.replicas as desired (WaitForMachineDeployment returns 0)
+        if matches!(action, ScalingAction::WaitForMachineDeployment) {
+            missing_pools.push(pool_id.clone());
+            total_desired += pool_spec.replicas;
+
+            pool_statuses.insert(
+                pool_id.clone(),
+                WorkerPoolStatus {
+                    desired_replicas: pool_spec.replicas,
+                    current_replicas: 0,
+                    ready_replicas: 0,
+                    autoscaling_enabled: action.is_autoscaling(),
+                    message: Some(
+                        "MachineDeployment not found, creating CAPI resources".to_string(),
+                    ),
+                },
+            );
+            continue;
         }
 
         total_desired += action.desired_replicas();
@@ -312,6 +333,17 @@ async fn reconcile_worker_pools(
         }
     }
 
+    // Create CAPI resources for any pools that don't have MachineDeployments yet
+    if !missing_pools.is_empty() {
+        if let Err(e) = create_missing_pool_resources(cluster, ctx, &missing_pools).await {
+            warn!(
+                pools = ?missing_pools,
+                error = %e,
+                "Failed to create CAPI resources for missing pools, will retry"
+            );
+        }
+    }
+
     Ok((total_desired, pool_statuses))
 }
 
@@ -319,6 +351,9 @@ async fn reconcile_worker_pools(
 ///
 /// Returns true on success, false if the action failed and the caller should
 /// break out of the loop early (returning accumulated pool_statuses).
+///
+/// Note: `WaitForMachineDeployment` is handled before this function is called
+/// (missing pools are collected and their CAPI resources created in bulk).
 async fn execute_scaling_action(
     ctx: &Context,
     name: &str,
@@ -346,13 +381,76 @@ async fn execute_scaling_action(
             true
         }
         ScalingAction::WaitForMachineDeployment => {
-            warn!(
-                pool = %pool_id,
-                "MachineDeployment not found for pool, will retry"
-            );
+            // Should not reach here — handled in reconcile_worker_pools
+            warn!(pool = %pool_id, "Unexpected WaitForMachineDeployment in execute_scaling_action");
             false
         }
     }
+}
+
+/// Generate and apply CAPI resources for worker pools that don't have MachineDeployments.
+///
+/// Generates the full set of CAPI manifests for the cluster, then filters to only
+/// those belonging to the missing pools (matched by the `-pool-{id}` suffix).
+async fn create_missing_pool_resources(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+    missing_pools: &[String],
+) -> Result<(), Error> {
+    let name = cluster.name_any();
+    let capi_ns = capi_namespace(&name);
+
+    info!(
+        cluster = %name,
+        pools = ?missing_pools,
+        "Creating CAPI resources for new worker pools"
+    );
+
+    let all_manifests = generate_capi_manifests(cluster, ctx).await?;
+
+    // Filter to manifests belonging to missing pools.
+    // Pool resources are named with a `-pool-{pool_id}` suffix.
+    let pool_manifests: Vec<_> = all_manifests
+        .into_iter()
+        .filter(|m| {
+            missing_pools
+                .iter()
+                .any(|pool_id| m.metadata.name.ends_with(&pool_resource_suffix(pool_id)))
+        })
+        .collect();
+
+    if pool_manifests.is_empty() {
+        warn!(
+            cluster = %name,
+            pools = ?missing_pools,
+            "No CAPI manifests matched missing pools"
+        );
+        return Ok(());
+    }
+
+    info!(
+        cluster = %name,
+        manifests = pool_manifests.len(),
+        pools = ?missing_pools,
+        "Applying CAPI manifests for new worker pools"
+    );
+
+    ctx.capi.apply_manifests(&pool_manifests, &capi_ns).await?;
+
+    ctx.events
+        .publish(
+            &cluster.object_ref(&()),
+            EventType::Normal,
+            reasons::PROVISIONING_STARTED,
+            actions::PROVISION,
+            Some(format!(
+                "Created CAPI resources for new worker pools: {}",
+                missing_pools.join(", ")
+            )),
+        )
+        .await;
+
+    Ok(())
 }
 
 /// Update cluster status with node counts, worker pool information, and children health.
@@ -364,10 +462,24 @@ async fn update_node_status(
     counts: NodeCounts,
     children_health: Vec<lattice_common::crd::ChildClusterHealth>,
 ) {
-    // For single-pool clusters, set ready_replicas on the pool
-    if pool_statuses.len() == 1 {
-        if let Some(pool_status) = pool_statuses.values_mut().next() {
-            pool_status.ready_replicas = counts.ready_workers;
+    // Distribute ready workers proportionally across pools based on desired_replicas.
+    // This is a stopgap until per-pool node counting via label matching is implemented.
+    let total_desired: u32 = pool_statuses.values().map(|p| p.desired_replicas).sum();
+    if total_desired > 0 && counts.ready_workers > 0 {
+        let mut remaining = counts.ready_workers;
+        let pool_count = pool_statuses.len();
+        for (i, pool_status) in pool_statuses.values_mut().enumerate() {
+            if i == pool_count - 1 {
+                // Last pool gets the remainder to avoid rounding errors
+                pool_status.ready_replicas = remaining;
+            } else {
+                let share = (counts.ready_workers as f64 * pool_status.desired_replicas as f64
+                    / total_desired as f64)
+                    .round() as u32;
+                let capped = share.min(remaining);
+                pool_status.ready_replicas = capped;
+                remaining = remaining.saturating_sub(capped);
+            }
         }
     }
 
