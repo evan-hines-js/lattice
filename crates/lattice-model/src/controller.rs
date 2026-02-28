@@ -607,7 +607,7 @@ async fn apply_compiled_model(
 ) -> Result<(), ModelError> {
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    lattice_common::kube_utils::ensure_namespace_ssa(client, namespace, FIELD_MANAGER).await?;
+    lattice_common::kube_utils::ensure_namespace(client, namespace, None, FIELD_MANAGER).await?;
 
     let ms_api = ctx
         .registry

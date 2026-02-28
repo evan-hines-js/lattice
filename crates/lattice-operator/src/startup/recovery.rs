@@ -225,7 +225,7 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
             .and_then(|s| s.bootstrap_token.as_deref());
 
         bootstrap_state
-            .register_cluster_with_token(registration, existing_token)
+            .register_cluster(registration, existing_token)
             .await;
         tracing::info!(cluster = %name, "re-registered cluster after operator restart");
     }

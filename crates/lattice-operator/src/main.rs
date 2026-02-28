@@ -150,7 +150,7 @@ async fn run_controller(mode: ControllerMode) -> anyhow::Result<()> {
     tracing::info!(?mode, "Starting...");
 
     // Create client with proper timeouts (5s connect, 30s read)
-    let client = lattice_common::kube_utils::create_client(None).await?;
+    let client = lattice_common::kube_utils::create_client(None, None, None).await?;
 
     // Get pod identity from Downward API env vars (set in deployment manifest)
     let pod_name = std::env::var("POD_NAME").unwrap_or_else(|_| {

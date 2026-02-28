@@ -84,7 +84,7 @@ pub async fn create_kind_cluster(name: &str, kubeconfig_path: &Path) -> Result<(
     }
 
     // Wait for nodes to be ready
-    let client = kube_utils::create_client(Some(kubeconfig_path))
+    let client = kube_utils::create_client(Some(kubeconfig_path), None, None)
         .await
         .map_err(|e| Error::command_failed(format!("Failed to create client: {}", e)))?;
 

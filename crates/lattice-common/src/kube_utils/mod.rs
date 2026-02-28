@@ -35,7 +35,7 @@ pub use conditions::{
 
 // client.rs
 pub use client::{
-    create_client, create_client_with_timeout, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT,
+    create_client, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT,
 };
 
 // waiting.rs
@@ -44,7 +44,7 @@ pub use waiting::{
     wait_for_deployment, wait_for_nodes_ready, wait_for_secret,
 };
 // namespace.rs
-pub use namespace::{ensure_namespace, ensure_namespace_ssa, ensure_namespace_with_labels};
+pub use namespace::ensure_namespace;
 
 // manifest.rs
 pub use manifest::{

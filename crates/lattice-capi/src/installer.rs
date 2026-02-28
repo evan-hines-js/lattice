@@ -870,7 +870,7 @@ impl Default for NativeInstaller {
 #[async_trait]
 impl CapiInstaller for NativeInstaller {
     async fn ensure(&self, config: &CapiProviderConfig) -> Result<(), Error> {
-        let client = kube_utils::create_client(None)
+        let client = kube_utils::create_client(None, None, None)
             .await
             .map_err(|e| Error::capi_installation(format!("Failed to create k8s client: {}", e)))?;
 

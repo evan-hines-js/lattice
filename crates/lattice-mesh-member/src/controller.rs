@@ -64,17 +64,17 @@ pub fn collect_resource_refs(
     policies: &crate::policy::GeneratedPolicies,
 ) -> HashSet<AppliedResourceRef> {
     let mut refs = HashSet::new();
-    for ap in &policies.authorization_policies {
+    let mut track = |kind: CrdKind, name: &str| {
         refs.insert(AppliedResourceRef {
-            kind: "AuthorizationPolicy".to_string(),
-            name: ap.metadata.name.clone(),
+            kind: kind.kind_str().to_string(),
+            name: name.to_string(),
         });
+    };
+    for ap in &policies.authorization_policies {
+        track(CrdKind::AuthorizationPolicy, &ap.metadata.name);
     }
     for pa in &policies.peer_authentications {
-        refs.insert(AppliedResourceRef {
-            kind: "PeerAuthentication".to_string(),
-            name: pa.metadata.name.clone(),
-        });
+        track(CrdKind::PeerAuthentication, &pa.metadata.name);
     }
     refs
 }
@@ -87,30 +87,30 @@ pub fn collect_ingress_refs(
     ingress: &crate::ingress::GeneratedIngress,
 ) -> HashSet<AppliedResourceRef> {
     let mut refs = HashSet::new();
-    let mut track = |kind: &str, name: &str| {
+    let mut track = |kind: CrdKind, name: &str| {
         refs.insert(AppliedResourceRef {
-            kind: kind.to_string(),
+            kind: kind.kind_str().to_string(),
             name: name.to_string(),
         });
     };
 
     if let Some(ref cnp) = ingress.gateway_policy {
-        track("CiliumNetworkPolicy", &cnp.metadata.name);
+        track(CrdKind::CiliumNetworkPolicy, &cnp.metadata.name);
     }
     if let Some(ref ap) = ingress.gateway_auth_policy {
-        track("AuthorizationPolicy", &ap.metadata.name);
+        track(CrdKind::AuthorizationPolicy, &ap.metadata.name);
     }
     for route in &ingress.http_routes {
-        track("HTTPRoute", &route.metadata.name);
+        track(CrdKind::HttpRoute, &route.metadata.name);
     }
     for route in &ingress.grpc_routes {
-        track("GRPCRoute", &route.metadata.name);
+        track(CrdKind::GrpcRoute, &route.metadata.name);
     }
     for route in &ingress.tcp_routes {
-        track("TCPRoute", &route.metadata.name);
+        track(CrdKind::TcpRoute, &route.metadata.name);
     }
     for cert in &ingress.certificates {
-        track("Certificate", &cert.metadata.name);
+        track(CrdKind::Certificate, &cert.metadata.name);
     }
     refs
 }
@@ -436,10 +436,10 @@ async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<()
         mesh::DATAPLANE_MODE_LABEL.to_string(),
         mesh::DATAPLANE_MODE_AMBIENT.to_string(),
     )]);
-    lattice_common::kube_utils::ensure_namespace_with_labels(
+    lattice_common::kube_utils::ensure_namespace(
         client,
         namespace,
-        &labels,
+        Some(&labels),
         FIELD_MANAGER,
     )
     .await

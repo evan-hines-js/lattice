@@ -115,36 +115,17 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         self.registry_credentials.as_deref()
     }
 
-    /// Register a cluster for bootstrap
+    /// Register a cluster for bootstrap.
     ///
     /// Creates a bootstrap token and stores the registration in memory.
     /// The token is persisted to LatticeCluster.status.bootstrap_token by the
     /// controller, making it atomic with the cluster and moving with it during pivot.
     ///
-    /// This method is idempotent - if the cluster is already registered in memory,
+    /// This method is idempotent — if the cluster is already registered in memory,
     /// it returns the existing token.
     ///
-    /// # Arguments
-    /// * `registration` - Cluster registration configuration
-    ///
-    /// # Returns
-    /// The bootstrap token (also persisted to LatticeCluster.status by controller)
-    pub async fn register_cluster(&self, registration: ClusterRegistration) -> BootstrapToken {
-        self.register_cluster_with_token(registration, None).await
-    }
-
-    /// Register a cluster with an existing token (for recovery scenarios)
-    ///
-    /// Same as `register_cluster` but uses the provided token instead of generating
-    /// a new one. Used by recovery.rs to restore the token from LatticeCluster.status.
-    ///
-    /// # Arguments
-    /// * `registration` - Cluster registration configuration
-    /// * `existing_token` - Token from LatticeCluster.status.bootstrap_token
-    ///
-    /// # Returns
-    /// The bootstrap token
-    pub async fn register_cluster_with_token(
+    /// Pass `existing_token` to reuse a token from a previous session (recovery).
+    pub async fn register_cluster(
         &self,
         registration: ClusterRegistration,
         existing_token: Option<&str>,
@@ -468,18 +449,20 @@ mod tests {
         // Use a minimal test cluster manifest
         let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"test"}}"#.to_string();
         state
-            .register_cluster(ClusterRegistration {
-                cluster_id: cluster_id.into(),
-                cell_endpoint: cell_endpoint.into(),
-                ca_certificate: ca_certificate.into(),
-                cluster_manifest,
-                lb_cidr: None,
-
-                provider: ProviderType::Docker,
-                bootstrap: lattice_common::crd::BootstrapProvider::default(),
-                k8s_version: "1.32.0".to_string(),
-                autoscaling_enabled: false,
-            })
+            .register_cluster(
+                ClusterRegistration {
+                    cluster_id: cluster_id.into(),
+                    cell_endpoint: cell_endpoint.into(),
+                    ca_certificate: ca_certificate.into(),
+                    cluster_manifest,
+                    lb_cidr: None,
+                    provider: ProviderType::Docker,
+                    bootstrap: lattice_common::crd::BootstrapProvider::default(),
+                    k8s_version: "1.32.0".to_string(),
+                    autoscaling_enabled: false,
+                },
+                None,
+            )
             .await
     }
 

@@ -70,7 +70,7 @@ pub struct Uninstaller {
 
 impl Uninstaller {
     pub async fn new(args: &UninstallArgs) -> Result<Self> {
-        let client = kube_utils::create_client(Some(&args.kubeconfig))
+        let client = kube_utils::create_client(Some(&args.kubeconfig), None, None)
             .await
             .map_err(|e| Error::command_failed(format!("Failed to create client: {}", e)))?;
 
@@ -143,13 +143,13 @@ impl Uninstaller {
     }
 
     async fn target_client(&self) -> Result<Client> {
-        kube_utils::create_client(Some(&self.kubeconfig))
+        kube_utils::create_client(Some(&self.kubeconfig), None, None)
             .await
             .map_err(|e| Error::command_failed(format!("Failed to create target client: {}", e)))
     }
 
     async fn bootstrap_client(&self) -> Result<Client> {
-        kube_utils::create_client(Some(&self.bootstrap_kubeconfig_path()))
+        kube_utils::create_client(Some(&self.bootstrap_kubeconfig_path()), None, None)
             .await
             .map_err(|e| Error::command_failed(format!("Failed to create bootstrap client: {}", e)))
     }

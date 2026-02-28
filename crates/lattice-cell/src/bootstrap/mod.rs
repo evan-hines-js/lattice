@@ -270,17 +270,20 @@ mod tests {
     ) -> BootstrapToken {
         let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"test"}}"#.to_string();
         state
-            .register_cluster(ClusterRegistration {
-                cluster_id: cluster_id.into(),
-                cell_endpoint: cell_endpoint.into(),
-                ca_certificate: ca_certificate.into(),
-                cluster_manifest,
-                lb_cidr: None,
-                provider: ProviderType::Docker,
-                bootstrap: lattice_common::crd::BootstrapProvider::default(),
-                k8s_version: "1.32.0".to_string(),
-                autoscaling_enabled: false,
-            })
+            .register_cluster(
+                ClusterRegistration {
+                    cluster_id: cluster_id.into(),
+                    cell_endpoint: cell_endpoint.into(),
+                    ca_certificate: ca_certificate.into(),
+                    cluster_manifest,
+                    lb_cidr: None,
+                    provider: ProviderType::Docker,
+                    bootstrap: lattice_common::crd::BootstrapProvider::default(),
+                    k8s_version: "1.32.0".to_string(),
+                    autoscaling_enabled: false,
+                },
+                None,
+            )
             .await
     }
 

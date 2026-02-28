@@ -194,10 +194,10 @@ impl KubeClient for KubeClientImpl {
             lattice_common::LABEL_MANAGED_BY.to_string(),
             lattice_common::LABEL_MANAGED_BY_LATTICE.to_string(),
         )]);
-        lattice_common::kube_utils::ensure_namespace_with_labels(
+        lattice_common::kube_utils::ensure_namespace(
             &self.client,
             name,
-            &labels,
+            Some(&labels),
             FIELD_MANAGER,
         )
         .await?;

@@ -13,17 +13,16 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default read timeout for kube clients
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Create a kube client from optional kubeconfig path with default timeouts
-pub async fn create_client(kubeconfig: Option<&Path>) -> Result<Client, Error> {
-    create_client_with_timeout(kubeconfig, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT).await
-}
-
-/// Create a kube client from optional kubeconfig path with custom timeouts
-pub async fn create_client_with_timeout(
+/// Create a kube client from optional kubeconfig path.
+///
+/// Pass `None` for timeouts to use defaults (5s connect, 30s read).
+pub async fn create_client(
     kubeconfig: Option<&Path>,
-    connect_timeout: Duration,
-    read_timeout: Duration,
+    connect_timeout: Option<Duration>,
+    read_timeout: Option<Duration>,
 ) -> Result<Client, Error> {
+    let connect_timeout = connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
+    let read_timeout = read_timeout.unwrap_or(DEFAULT_READ_TIMEOUT);
     match kubeconfig {
         Some(path) => {
             let kubeconfig = Kubeconfig::read_from(path).map_err(|e| {

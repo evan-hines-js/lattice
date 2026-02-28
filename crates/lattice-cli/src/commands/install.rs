@@ -350,7 +350,7 @@ impl Installer {
     }
 
     async fn bootstrap_client(&self) -> Result<Client> {
-        kube_utils::create_client(Some(&self.bootstrap_kubeconfig_path()))
+        kube_utils::create_client(Some(&self.bootstrap_kubeconfig_path()), None, None)
             .await
             .cmd_err()
     }
@@ -364,10 +364,10 @@ impl Installer {
         let connect_timeout = Duration::from_secs(10);
         let read_timeout = Duration::from_secs(30);
 
-        kube_utils::create_client_with_timeout(
+        kube_utils::create_client(
             Some(&kubeconfig_path),
-            connect_timeout,
-            read_timeout,
+            Some(connect_timeout),
+            Some(read_timeout),
         )
         .await
         .cmd_err()
@@ -721,10 +721,10 @@ impl Installer {
             || {
                 let path = kubeconfig_path.clone();
                 async move {
-                    let client = match kube_utils::create_client_with_timeout(
+                    let client = match kube_utils::create_client(
                         Some(&path),
-                        Duration::from_secs(10),
-                        Duration::from_secs(30),
+                        Some(Duration::from_secs(10)),
+                        Some(Duration::from_secs(30)),
                     )
                     .await
                     {
@@ -843,7 +843,7 @@ impl Installer {
         use kube::api::{Api, Patch, PatchParams};
 
         // Ensure namespace exists
-        kube_utils::ensure_namespace(client, LATTICE_SYSTEM_NAMESPACE, "lattice-cli")
+        kube_utils::ensure_namespace(client, LATTICE_SYSTEM_NAMESPACE, None, "lattice-cli")
             .await
             .cmd_err()?;
 

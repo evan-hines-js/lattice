@@ -47,7 +47,7 @@ async fn set_capi_cluster_paused(
     cluster_name: &str,
     paused: bool,
 ) -> Result<(), CapiLifecycleError> {
-    let client = kube_utils::create_client(kubeconfig)
+    let client = kube_utils::create_client(kubeconfig, None, None)
         .await
         .map_err(|e| CapiLifecycleError::ExecutionFailed(e.to_string()))?;
     let ar = cluster_api_resource(&client).await?;
@@ -94,7 +94,7 @@ pub async fn is_capi_cluster_ready(
     namespace: &str,
     cluster_name: &str,
 ) -> Result<bool, CapiLifecycleError> {
-    let client = kube_utils::create_client(kubeconfig)
+    let client = kube_utils::create_client(kubeconfig, None, None)
         .await
         .map_err(|e| CapiLifecycleError::ExecutionFailed(e.to_string()))?;
     is_cluster_ready(&client, namespace, cluster_name).await

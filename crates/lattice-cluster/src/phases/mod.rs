@@ -422,7 +422,7 @@ async fn get_or_create_bootstrap_token(
         k8s_version: cluster.spec.provider.kubernetes.version.clone(),
         autoscaling_enabled,
     };
-    let new_token = bootstrap_state.register_cluster(registration).await;
+    let new_token = bootstrap_state.register_cluster(registration, None).await;
     let token_str = new_token.as_str().to_string();
 
     // Persist the token to LatticeCluster status immediately

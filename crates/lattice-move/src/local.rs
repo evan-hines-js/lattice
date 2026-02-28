@@ -77,11 +77,11 @@ pub async fn local_move(
     namespace: &str,
     cluster_name: &str,
 ) -> Result<MoveResult, MoveError> {
-    let source_client = kube_utils::create_client(Some(source_kubeconfig))
+    let source_client = kube_utils::create_client(Some(source_kubeconfig), None, None)
         .await
         .map_err(|e| MoveError::Discovery(format!("failed to create source client: {}", e)))?;
 
-    let target_client = kube_utils::create_client(Some(target_kubeconfig))
+    let target_client = kube_utils::create_client(Some(target_kubeconfig), None, None)
         .await
         .map_err(|e| MoveError::Discovery(format!("failed to create target client: {}", e)))?;
 

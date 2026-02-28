@@ -212,7 +212,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             Service as K8sService, ServiceAccount as K8sSA,
         };
 
-        lattice_common::kube_utils::ensure_namespace_ssa(&self.client, namespace, FIELD_MANAGER)
+        lattice_common::kube_utils::ensure_namespace(&self.client, namespace, None, FIELD_MANAGER)
             .await?;
 
         let params = PatchParams::apply(FIELD_MANAGER).force();
