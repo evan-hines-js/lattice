@@ -395,7 +395,6 @@ impl WorkloadCompiler {
             output.pod_group = Some(lattice_volcano::compile_service_pod_group(
                 name,
                 namespace,
-                spec.replicas,
                 topology,
             ));
             // Annotate pod template so Volcano associates pods with this PodGroup

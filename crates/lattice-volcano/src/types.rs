@@ -109,10 +109,13 @@ pub struct PodGroupSpec {
 pub const PODGROUP_ANNOTATION: &str = "scheduling.volcano.sh/group-name";
 
 /// Compile a PodGroup for a LatticeService with topology-aware scheduling.
+///
+/// Sets `minMember: 1` so Volcano applies topology placement without gang
+/// scheduling — services should roll out incrementally, not block until all
+/// replicas can be placed simultaneously.
 pub fn compile_service_pod_group(
     name: &str,
     namespace: &str,
-    replicas: u32,
     topology: &lattice_common::crd::WorkloadNetworkTopology,
 ) -> PodGroup {
     PodGroup {
@@ -131,7 +134,7 @@ pub fn compile_service_pod_group(
             owner_references: Vec::new(),
         },
         spec: PodGroupSpec {
-            min_member: replicas,
+            min_member: 1,
             network_topology: Some(network_topology_value(topology)),
         },
     }

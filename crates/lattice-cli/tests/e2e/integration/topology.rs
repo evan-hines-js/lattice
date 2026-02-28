@@ -282,9 +282,9 @@ async fn test_service_with_topology(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     let min_member = pg_output.trim();
-    if min_member != "2" {
+    if min_member != "1" {
         return Err(format!(
-            "Expected PodGroup minMember=2, got: '{}'",
+            "Expected PodGroup minMember=1, got: '{}'",
             min_member
         ));
     }
