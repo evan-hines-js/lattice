@@ -92,6 +92,11 @@ pub async fn reconcile(
     // Validate the model spec (all roles)
     model.spec.validate()?;
 
+    // Snapshot role keys BEFORE refreshing the graph. register_graph
+    // overwrites the graph with the NEW spec's roles, so capturing
+    // after would lose the diff needed to detect removed roles.
+    let pre_register_role_keys = current_graph_role_keys(&ctx.graph, &name, namespace);
+
     // Always ensure roles are in the graph (crash recovery).
     // After a controller restart the in-memory graph is empty, so
     // current_graph_role_keys() would return nothing and removed roles
@@ -302,9 +307,9 @@ pub async fn reconcile(
                 // Spec changed — re-compile and re-apply
                 info!(model = %name, observed = ?observed, current = generation, "spec changed, re-applying");
 
-                // Snapshot current role keys BEFORE registering new ones.
-                // Used to detect removed roles for graph + resource cleanup.
-                let old_role_keys = current_graph_role_keys(&ctx.graph, &name, namespace);
+                // Use the pre-register snapshot captured before register_graph
+                // overwrote the graph with the new spec's roles.
+                let old_role_keys = pre_register_role_keys.clone();
                 let new_role_keys = spec_role_keys(&name, &model.spec.roles);
 
                 let compiled = match compile_model(
