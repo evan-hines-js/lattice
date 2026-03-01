@@ -1,0 +1,97 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeJob
+metadata:
+  name: training-ckpt
+  namespace: training-test
+spec:
+  queue: default
+  maxRetry: 2
+  training:
+    framework: PyTorch
+    coordinatorTask: master
+    checkpoint:
+      interval: "*/1 * * * *"
+      localPath: /checkpoints
+      volumeSize: 1Gi
+      ttl: 1h
+  tasks:
+    master:
+      replicas: 1
+      workload:
+        containers:
+          main:
+            image: ghcr.io/evan-hines-js/busybox:latest
+            command:
+              - /bin/sh
+              - -c
+              - |
+                if [ -f /checkpoints/state.txt ]; then
+                  epoch=$(cat /checkpoints/state.txt)
+                  echo "RESTORED epoch=$epoch"
+                  next=$((epoch + 1))
+                  echo $next > /checkpoints/state.txt
+                else
+                  echo "FRESH start"
+                  echo 0 > /checkpoints/state.txt
+                fi
+                echo "CHECKPOINT_READY"
+                sleep 3600
+            resources:
+              requests:
+                cpu: 50m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+            security:
+              runAsUser: 65534
+              apparmorProfile: Unconfined
+        resources:
+          ghcr-creds:
+            type: secret
+            id: local-regcreds
+            params:
+              provider: lattice-local
+              refreshInterval: 1h
+      imagePullSecrets:
+        - ghcr-creds
+      restartPolicy: Never
+    worker:
+      replicas: 1
+      workload:
+        containers:
+          main:
+            image: ghcr.io/evan-hines-js/busybox:latest
+            command:
+              - /bin/sh
+              - -c
+              - |
+                if [ -f /checkpoints/state.txt ]; then
+                  epoch=$(cat /checkpoints/state.txt)
+                  echo "RESTORED epoch=$epoch"
+                else
+                  echo "FRESH start"
+                  echo 0 > /checkpoints/state.txt
+                fi
+                echo "CHECKPOINT_READY"
+                sleep 3600
+            resources:
+              requests:
+                cpu: 50m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+            security:
+              runAsUser: 65534
+              apparmorProfile: Unconfined
+        resources:
+          ghcr-creds:
+            type: secret
+            id: local-regcreds
+            params:
+              provider: lattice-local
+              refreshInterval: 1h
+      imagePullSecrets:
+        - ghcr-creds
+      restartPolicy: Never

@@ -47,6 +47,7 @@ pub mod secrets;
 pub mod setup;
 pub mod tetragon;
 pub mod topology;
+pub mod training;
 pub mod updates;
 pub mod vault_secrets;
 pub mod webhook;
