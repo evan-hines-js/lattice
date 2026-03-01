@@ -339,19 +339,26 @@ pub struct TrainingConfig {
     #[serde(default)]
     pub framework: TrainingFramework,
 
+    /// Name of the coordinator (rank-0) task. Must match a key in `tasks`.
+    /// Defaults to "master".
+    #[serde(default = "TrainingConfig::default_coordinator_task")]
+    pub coordinator_task: String,
+
     /// Checkpoint configuration. When set, a PVC is mounted on all tasks and
     /// a Velero Schedule periodically snapshots it. On failure the controller
     /// performs stop-the-world recovery: tear down → Velero Restore → restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<CheckpointSpec>,
 
-    /// Elastic scaling bounds. If omitted, job runs with fixed replica counts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elastic: Option<ElasticSpec>,
-
     /// NCCL tuning overrides. Auto-configured by default based on GPU model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nccl: Option<NcclConfig>,
+}
+
+impl TrainingConfig {
+    fn default_coordinator_task() -> String {
+        "master".to_string()
+    }
 }
 
 /// Velero-backed checkpoint configuration for training fault tolerance.
@@ -403,24 +410,6 @@ impl CheckpointSpec {
     pub fn effective_ttl(&self) -> &str {
         self.ttl.as_deref().unwrap_or("72h")
     }
-}
-
-/// Elastic scaling bounds for dynamic worker count adjustment.
-///
-/// When set, the controller manages worker count between min and max
-/// based on GPU availability in the Volcano queue.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ElasticSpec {
-    /// Minimum number of workers (job pauses below this)
-    pub min_workers: u32,
-
-    /// Maximum number of workers (job won't scale beyond this)
-    pub max_workers: u32,
-
-    /// How long to wait for new workers before continuing without them (default: "5m")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scale_timeout: Option<String>,
 }
 
 /// NCCL tuning overrides. Auto-configured by default based on GPU model.
@@ -612,18 +601,6 @@ mod tests {
     }
 
     #[test]
-    fn elastic_spec_serializes() {
-        let elastic = ElasticSpec {
-            min_workers: 2,
-            max_workers: 8,
-            scale_timeout: Some("10m".to_string()),
-        };
-        let json = serde_json::to_string(&elastic).unwrap();
-        let de: ElasticSpec = serde_json::from_str(&json).unwrap();
-        assert_eq!(elastic, de);
-    }
-
-    #[test]
     fn nccl_config_defaults() {
         let nccl = NcclConfig::default();
         assert!(nccl.net_if.is_none());
@@ -637,6 +614,7 @@ mod tests {
     fn training_config_serde_roundtrip() {
         let training = TrainingConfig {
             framework: TrainingFramework::DeepSpeed,
+            coordinator_task: "master".to_string(),
             checkpoint: Some(CheckpointSpec {
                 interval: "*/30 * * * *".to_string(),
                 local_path: None,
@@ -644,11 +622,6 @@ mod tests {
                 storage_class: None,
                 backup_store: None,
                 ttl: None,
-            }),
-            elastic: Some(ElasticSpec {
-                min_workers: 2,
-                max_workers: 8,
-                scale_timeout: None,
             }),
             nccl: Some(NcclConfig {
                 debug: Some("INFO".to_string()),
@@ -678,8 +651,8 @@ mod tests {
             tasks,
             training: Some(TrainingConfig {
                 framework: TrainingFramework::PyTorch,
+                coordinator_task: "master".to_string(),
                 checkpoint: None,
-                elastic: None,
                 nccl: None,
             }),
             ..Default::default()

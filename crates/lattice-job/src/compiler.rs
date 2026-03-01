@@ -15,6 +15,8 @@
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
+use tracing::warn;
+
 use lattice_common::crd::{
     CheckpointSpec, JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, ProviderType,
     ResourceSpec, ResourceType, TrainingConfig, TrainingFramework, VolumeMount, WorkloadSpec,
@@ -80,6 +82,24 @@ pub async fn compile_job(
         return Err(JobError::NoTasks);
     }
 
+    // Validate: cron jobs with checkpoint makes no sense (recovery path is for one-shot jobs)
+    if job.spec.is_cron() {
+        if let Some(ref t) = job.spec.training {
+            if t.checkpoint.is_some() {
+                return Err(JobError::CronWithCheckpoint);
+            }
+        }
+    }
+
+    // Validate: coordinator task must exist
+    if let Some(ref training) = job.spec.training {
+        if !job.spec.tasks.contains_key(&training.coordinator_task) {
+            return Err(JobError::CoordinatorTaskMissing(
+                training.coordinator_task.clone(),
+            ));
+        }
+    }
+
     // Pre-process tasks: if training is set, clone and inject training env vars
     // into each task's workload BEFORE the WorkloadCompiler runs.
     let tasks: BTreeMap<String, JobTaskSpec> = match job.spec.training {
@@ -139,6 +159,15 @@ pub async fn compile_job(
         tracing_policies.extend(policies);
     }
 
+    // Training: label checkpoint PVCs so Velero Schedule and recovery can find them
+    if job.spec.training.is_some() {
+        for pvc in &mut config.pvcs {
+            pvc.metadata
+                .labels
+                .insert("lattice.dev/training-job".to_string(), name.to_string());
+        }
+    }
+
     // Training: compile headless service and Velero schedule
     let uid = job.metadata.uid.as_deref().unwrap_or_default();
     let headless_service = job
@@ -185,12 +214,13 @@ fn prepare_training_tasks(
     training: &TrainingConfig,
 ) -> BTreeMap<String, JobTaskSpec> {
     let world_size: u32 = tasks.values().map(|t| t.replicas).sum();
-    let master_addr = format!("{}-master-0.{}", job_name, job_name);
+    let coordinator = &training.coordinator_task;
+    let coordinator_addr = format!("{}-{}-0.{}", job_name, coordinator, job_name);
 
     let mut result = BTreeMap::new();
     for (task_name, task_spec) in tasks {
         let mut task = task_spec.clone();
-        let is_master = task_name == "master";
+        let is_coordinator = task_name == coordinator;
 
         // Default restart policy to OnFailure for training tasks
         if task.restart_policy.is_none() {
@@ -200,9 +230,9 @@ fn prepare_training_tasks(
         inject_framework_env(
             &mut task.workload,
             &training.framework,
-            &master_addr,
+            &coordinator_addr,
             world_size,
-            is_master,
+            is_coordinator,
         );
 
         inject_nccl_env(&mut task.workload, training.nccl.as_ref());
@@ -220,18 +250,18 @@ fn prepare_training_tasks(
 fn inject_framework_env(
     workload: &mut WorkloadSpec,
     framework: &TrainingFramework,
-    master_addr: &str,
+    coordinator_addr: &str,
     world_size: u32,
-    is_master: bool,
+    is_coordinator: bool,
 ) {
     let env_vars: Vec<(&str, String)> = match framework {
         TrainingFramework::PyTorch | TrainingFramework::DeepSpeed => {
             let mut vars = vec![
-                ("MASTER_ADDR", master_addr.to_string()),
+                ("MASTER_ADDR", coordinator_addr.to_string()),
                 ("MASTER_PORT", DEFAULT_MASTER_PORT.to_string()),
                 ("WORLD_SIZE", world_size.to_string()),
             ];
-            if is_master {
+            if is_coordinator {
                 vars.push(("RANK", "0".to_string()));
             }
             vars
@@ -239,15 +269,18 @@ fn inject_framework_env(
         TrainingFramework::Jax => vec![
             (
                 "JAX_COORDINATOR_ADDRESS",
-                format!("{}:{}", master_addr, DEFAULT_MASTER_PORT),
+                format!("{}:{}", coordinator_addr, DEFAULT_MASTER_PORT),
             ),
             ("JAX_NUM_PROCESSES", world_size.to_string()),
         ],
-        _ => vec![
-            ("MASTER_ADDR", master_addr.to_string()),
-            ("MASTER_PORT", DEFAULT_MASTER_PORT.to_string()),
-            ("WORLD_SIZE", world_size.to_string()),
-        ],
+        _ => {
+            warn!(framework = %framework, "unknown training framework, using generic env vars");
+            vec![
+                ("MASTER_ADDR", coordinator_addr.to_string()),
+                ("MASTER_PORT", DEFAULT_MASTER_PORT.to_string()),
+                ("WORLD_SIZE", world_size.to_string()),
+            ]
+        }
     };
 
     inject_env_all(workload, &env_vars);
@@ -613,8 +646,8 @@ mod tests {
 
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
             checkpoint: None,
-            elastic: None,
             nccl: None,
         };
 
@@ -639,8 +672,8 @@ mod tests {
 
         let training = TrainingConfig {
             framework: TrainingFramework::Jax,
+            coordinator_task: "master".to_string(),
             checkpoint: None,
-            elastic: None,
             nccl: None,
         };
 
@@ -658,8 +691,8 @@ mod tests {
 
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
             checkpoint: None,
-            elastic: None,
             nccl: Some(NcclConfig {
                 debug: Some("INFO".to_string()),
                 net_if: Some("ib0".to_string()),
@@ -683,6 +716,7 @@ mod tests {
 
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
             checkpoint: Some(CheckpointSpec {
                 interval: "*/30 * * * *".to_string(),
                 local_path: None,
@@ -691,7 +725,6 @@ mod tests {
                 backup_store: None,
                 ttl: None,
             }),
-            elastic: None,
             nccl: None,
         };
 
@@ -716,8 +749,8 @@ mod tests {
 
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
             checkpoint: None,
-            elastic: None,
             nccl: None,
         };
 

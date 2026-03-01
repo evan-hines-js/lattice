@@ -557,7 +557,6 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
         }
     })
     .await;
-
 }
 
 /// List all resources of type T and insert each into the graph via `insert_fn`.

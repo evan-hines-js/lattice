@@ -224,6 +224,7 @@ async fn reconcile_running(
         Some(VCJobPhase::Completed) => {
             info!(job = %name, "job succeeded");
             cleanup_graph(job, &ctx.graph, namespace);
+            cleanup_training(job, &ctx.client).await;
             let mut status = current_status(job);
             status.phase = JobPhase::Succeeded;
             status.message = Some("All tasks completed successfully".to_string());
@@ -330,6 +331,7 @@ async fn handle_job_failure(
     } else {
         error!(job = %name, "job failed (no retries left or no checkpoint configured)");
         cleanup_graph(job, &ctx.graph, namespace);
+        cleanup_training(job, &ctx.client).await;
         let mut status = current_status(job);
         status.phase = JobPhase::Failed;
         status.message = Some("Job failed".to_string());
@@ -426,6 +428,7 @@ async fn recover_wait_for_restore(
         Some(VeleroRestorePhase::Failed) => {
             error!(job = %name, "Velero restore failed");
             cleanup_graph(job, &ctx.graph, namespace);
+            cleanup_training(job, &ctx.client).await;
             let mut status = current_status(job);
             status.phase = JobPhase::Failed;
             status.message = Some("Velero checkpoint restore failed".to_string());
@@ -527,6 +530,14 @@ fn cleanup_graph(job: &LatticeJob, graph: &ServiceGraph, namespace: &str) {
     let name = job.metadata.name.as_deref().unwrap_or_default();
     for task_name in job.spec.tasks.keys() {
         graph.delete_service(namespace, &format!("{}-{}", name, task_name));
+    }
+}
+
+/// Clean up training-specific cross-namespace resources (Velero Schedule).
+async fn cleanup_training(job: &LatticeJob, client: &Client) {
+    if job.spec.training.as_ref().and_then(|t| t.checkpoint.as_ref()).is_some() {
+        let name = job.metadata.name.as_deref().unwrap_or_default();
+        cleanup_velero_schedule(client, name).await;
     }
 }
 
@@ -698,7 +709,10 @@ async fn delete_checkpoint_pvcs(client: &Client, job_name: &str, namespace: &str
     }
 }
 
-/// Find the latest Velero Backup for a training job by label selector.
+/// Find the latest completed Velero Backup for a training job.
+///
+/// Sorts by `completionTimestamp` string comparison — works because Velero
+/// uses RFC 3339 timestamps which sort lexicographically.
 async fn find_latest_velero_backup(
     client: &Client,
     job_name: &str,
@@ -884,6 +898,7 @@ fn current_status(job: &LatticeJob) -> LatticeJobStatus {
     job.status.clone().unwrap_or_default()
 }
 
+/// Patch the job status, skipping the write if nothing changed.
 async fn patch_status(
     client: &Client,
     name: &str,
@@ -899,4 +914,27 @@ async fn patch_status(
     )
     .await?;
     Ok(())
+}
+
+// =============================================================================
+// Velero Schedule cleanup
+// =============================================================================
+
+/// Delete the Velero Schedule for a training job (cross-namespace, not GC'd by ownerRef).
+async fn cleanup_velero_schedule(client: &Client, job_name: &str) {
+    let schedule_name = format!("lattice-training-{}", job_name);
+    let ar = ApiResource::from_gvk(&kube::api::GroupVersionKind::gvk(
+        "velero.io",
+        "v1",
+        "Schedule",
+    ));
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), "velero", &ar);
+    match api
+        .delete(&schedule_name, &kube::api::DeleteParams::default())
+        .await
+    {
+        Ok(_) => info!(job = %job_name, "deleted Velero Schedule"),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+        Err(e) => warn!(job = %job_name, error = %e, "failed to delete Velero Schedule"),
+    }
 }
