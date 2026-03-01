@@ -1,7 +1,11 @@
 //! LatticeJob controller implementation
 //!
 //! Reconciles LatticeJob resources through a state machine:
-//! Pending -> Running -> Succeeded/Failed
+//! Pending (compile + submit, wait for VCJob to start) -> Running -> Succeeded/Failed
+//!
+//! The LatticeJob stays in Pending until the VCJob is truly running. Short-lived
+//! jobs that complete before we observe Running transition directly: Pending -> Succeeded.
+//! VCJobs stuck in Pending past PENDING_TIMEOUT transition: Pending -> Failed.
 //!
 //! For training jobs with checkpoints, adds a Recovering phase:
 //! Running -> (failure) -> Recovering -> Running
@@ -42,6 +46,12 @@ const REQUEUE_RUNNING: Duration = Duration::from_secs(15);
 
 /// Requeue interval during recovery (checking Velero Restore status)
 const REQUEUE_RECOVERING: Duration = Duration::from_secs(10);
+
+/// Timeout for VCJob stuck in Pending (e.g. ImagePullBackOff, unschedulable)
+const PENDING_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Message set when the job has been submitted but VCJob isn't running yet
+const SUBMITTED_MESSAGE: &str = "Job submitted to Volcano";
 
 /// Namespace where Velero resources (Schedules, Backups, Restores) live
 pub(crate) const VELERO_NAMESPACE: &str = "velero";
@@ -133,7 +143,7 @@ async fn reconcile_pending(
     } else {
         CrdKind::VolcanoJob
     };
-    let volcano_api = match ctx.registry.resolve(crd_kind).await? {
+    let volcano_api = match resolve_volcano_api(&ctx.registry, crd_kind).await? {
         Some(ar) => ar,
         None => {
             let msg = format!(
@@ -151,6 +161,59 @@ async fn reconcile_pending(
         }
     };
 
+    let already_submitted = job
+        .status
+        .as_ref()
+        .and_then(|s| s.message.as_deref())
+        .map(|m| m.starts_with(SUBMITTED_MESSAGE))
+        .unwrap_or(false);
+
+    if !already_submitted {
+        submit_job(job, ctx, namespace, generation, is_cron, &volcano_api).await?;
+    }
+
+    // Cron jobs go straight to Running — they're perpetual and don't have a "pending" VCJob phase
+    if is_cron {
+        let name = job.name_any();
+        let mut status = current_status(job);
+        status.phase = JobPhase::Running;
+        status.message = Some("Cron job active".to_string());
+        status.observed_generation = Some(generation);
+        patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await?;
+        return Ok(Action::requeue(REQUEUE_RUNNING));
+    }
+
+    // Check VCJob phase — only transition to Running when VCJob is truly running.
+    // Short jobs may complete before we see Running, so handle all terminal phases here too.
+    let name = job.name_any();
+    match check_vcjob_status(&ctx.client, &name, namespace, &volcano_api).await {
+        Some(VCJobPhase::Running) => {
+            info!(job = %name, "VCJob running");
+            let mut status = current_status(job);
+            status.phase = JobPhase::Running;
+            status.message = Some("Job running".to_string());
+            status.observed_generation = Some(generation);
+            patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await?;
+            Ok(Action::requeue(REQUEUE_RUNNING))
+        }
+        Some(VCJobPhase::Completed) => {
+            handle_job_succeeded(job, ctx, &name, namespace, generation).await
+        }
+        Some(VCJobPhase::Failed) => {
+            handle_job_failure(job, ctx, &name, namespace, generation).await
+        }
+        Some(VCJobPhase::Pending) | None => Ok(Action::requeue(REQUEUE_RUNNING)),
+    }
+}
+
+async fn submit_job(
+    job: &LatticeJob,
+    ctx: &JobContext,
+    namespace: &str,
+    generation: i64,
+    is_cron: bool,
+    volcano_api: &ApiResource,
+) -> Result<(), JobError> {
     let compiled = match compile_job(
         job,
         &ctx.graph,
@@ -203,7 +266,7 @@ async fn reconcile_pending(
         namespace,
         &compiled,
         &ctx.registry,
-        &volcano_api,
+        volcano_api,
     )
     .await
     {
@@ -217,18 +280,13 @@ async fn reconcile_pending(
     info!(job = %name, cron = is_cron, "submitted job to Volcano");
 
     let mut status = current_status(job);
-    status.phase = JobPhase::Running;
-    status.message = Some(if is_cron {
-        "Cron job submitted to Volcano".to_string()
-    } else {
-        "Job submitted to Volcano".to_string()
-    });
+    status.message = Some(SUBMITTED_MESSAGE.to_string());
     status.observed_generation = Some(generation);
     if job.spec.training.is_some() {
         status.start_time = Some(chrono::Utc::now().to_rfc3339());
     }
     patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await?;
-    Ok(Action::requeue(REQUEUE_RUNNING))
+    Ok(())
 }
 
 async fn reconcile_running(
@@ -252,7 +310,7 @@ async fn reconcile_running(
         return reconcile_running_cron(job, ctx, name, namespace, generation).await;
     }
 
-    let volcano_api = match ctx.registry.resolve(CrdKind::VolcanoJob).await? {
+    let volcano_api = match resolve_volcano_api(&ctx.registry, CrdKind::VolcanoJob).await? {
         Some(ar) => ar,
         None => {
             warn!(job = %name, "cannot check VCJob status: Volcano CRD not discovered");
@@ -262,16 +320,7 @@ async fn reconcile_running(
 
     match check_vcjob_status(&ctx.client, name, namespace, &volcano_api).await {
         Some(VCJobPhase::Completed) => {
-            info!(job = %name, "job succeeded");
-            cleanup_graph(job, &ctx.graph, namespace);
-            cleanup_training(job, &ctx.client).await;
-            let mut status = current_status(job);
-            status.phase = JobPhase::Succeeded;
-            status.message = Some("All tasks completed successfully".to_string());
-            status.observed_generation = Some(generation);
-            status.completion_time = Some(chrono::Utc::now().to_rfc3339());
-            patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
-            Ok(Action::await_change())
+            handle_job_succeeded(job, ctx, name, namespace, generation).await
         }
         Some(VCJobPhase::Failed) => {
             handle_job_failure(job, ctx, name, namespace, generation).await
@@ -287,7 +336,7 @@ async fn reconcile_running_cron(
     namespace: &str,
     generation: i64,
 ) -> Result<Action, JobError> {
-    let cron_api = match ctx.registry.resolve(CrdKind::VolcanoCronJob).await? {
+    let cron_api = match resolve_volcano_api(&ctx.registry, CrdKind::VolcanoCronJob).await? {
         Some(ar) => ar,
         None => {
             warn!(job = %name, "cannot check VCCronJob status: Volcano CronJob CRD not discovered");
@@ -422,7 +471,7 @@ async fn recover_delete_resources(
 ) -> Result<Action, JobError> {
     info!(job = %name, "recovery: deleting VCJob and checkpoint PVCs");
 
-    let volcano_api = match ctx.registry.resolve(CrdKind::VolcanoJob).await? {
+    let volcano_api = match resolve_volcano_api(&ctx.registry, CrdKind::VolcanoJob).await? {
         Some(ar) => ar,
         None => return Ok(Action::requeue(REQUEUE_RECOVERING)),
     };
@@ -517,7 +566,7 @@ async fn recover_restart(
 ) -> Result<Action, JobError> {
     info!(job = %name, "recovery: re-applying VCJob");
 
-    let volcano_api = match ctx.registry.resolve(CrdKind::VolcanoJob).await? {
+    let volcano_api = match resolve_volcano_api(&ctx.registry, CrdKind::VolcanoJob).await? {
         Some(ar) => ar,
         None => return Ok(Action::requeue(REQUEUE_RECOVERING)),
     };
@@ -544,9 +593,10 @@ async fn recover_restart(
         return Ok(Action::requeue(REQUEUE_RECOVERING));
     }
 
+    // Go back to Pending — wait for the VCJob to actually start before reporting Running
     let mut status = current_status(job);
-    status.phase = JobPhase::Running;
-    status.message = Some("Training restarted from checkpoint".to_string());
+    status.phase = JobPhase::Pending;
+    status.message = Some(SUBMITTED_MESSAGE.to_string());
     status.observed_generation = Some(generation);
     status.recovery_phase = None;
     patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
@@ -931,9 +981,10 @@ async fn create_velero_restore(
 // =============================================================================
 
 enum VCJobPhase {
+    Pending,
+    Running,
     Completed,
     Failed,
-    Running,
 }
 
 async fn check_vcjob_status(
@@ -970,22 +1021,65 @@ async fn check_vcjob_status(
                         VCJobPhase::Running
                     }
                 }
-                other => {
-                    info!(job = %name, phase = ?other, "VCJob phase");
+                Some("Running" | "Completing") => VCJobPhase::Running,
+                Some("Pending" | "Inqueue") | None => {
+                    let age = obj
+                        .creation_timestamp()
+                        .map(|ts| chrono::Utc::now() - ts.0);
+                    let timeout = chrono::Duration::from_std(PENDING_TIMEOUT)
+                        .unwrap_or(chrono::Duration::seconds(300));
+                    if age.map(|a| a > timeout).unwrap_or(false) {
+                        warn!(
+                            job = %name,
+                            age_secs = age.map(|a| a.num_seconds()).unwrap_or(0),
+                            "VCJob stuck in Pending for {}s (timeout {}s), treating as Failed",
+                            age.map(|a| a.num_seconds()).unwrap_or(0),
+                            PENDING_TIMEOUT.as_secs()
+                        );
+                        VCJobPhase::Failed
+                    } else {
+                        VCJobPhase::Pending
+                    }
+                }
+                Some(other) => {
+                    info!(job = %name, phase = other, "unknown VCJob phase");
                     VCJobPhase::Running
                 }
             };
             Some(result)
         }
-        Err(kube::Error::Api(ae)) if ae.code == 404 => {
-            warn!(job = %name, "VCJob not found");
-            None
-        }
+        Err(kube::Error::Api(ae)) if ae.code == 404 => None,
         Err(e) => {
             warn!(job = %name, error = %e, "failed to check VCJob status");
             None
         }
     }
+}
+
+async fn resolve_volcano_api(
+    registry: &CrdRegistry,
+    kind: CrdKind,
+) -> Result<Option<ApiResource>, JobError> {
+    Ok(registry.resolve(kind).await?)
+}
+
+async fn handle_job_succeeded(
+    job: &LatticeJob,
+    ctx: &JobContext,
+    name: &str,
+    namespace: &str,
+    generation: i64,
+) -> Result<Action, JobError> {
+    info!(job = %name, "job succeeded");
+    cleanup_graph(job, &ctx.graph, namespace);
+    cleanup_training(job, &ctx.client).await;
+    let mut status = current_status(job);
+    status.phase = JobPhase::Succeeded;
+    status.message = Some("All tasks completed successfully".to_string());
+    status.observed_generation = Some(generation);
+    status.completion_time = Some(chrono::Utc::now().to_rfc3339());
+    patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
+    Ok(Action::await_change())
 }
 
 // =============================================================================

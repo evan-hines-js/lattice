@@ -1075,7 +1075,10 @@ fn build_simple_job(
                 containers,
                 ..Default::default()
             },
-            runtime: lattice_common::crd::RuntimeSpec::default(),
+            runtime: lattice_common::crd::RuntimeSpec {
+                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                ..Default::default()
+            },
             restart_policy: Some(RestartPolicy::Never),
         },
     );
