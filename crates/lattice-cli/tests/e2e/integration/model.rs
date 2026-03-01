@@ -196,40 +196,53 @@ async fn test_model_serving_created(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify TracingPolicyNamespaced resources were created for each role
+/// Verify TracingPolicyNamespaced resources were created for each role.
+///
+/// Polls with a timeout because Tetragon CRD installation may still be
+/// in progress when the model test starts (race between infra setup and
+/// test execution).
 async fn test_tracing_policies_created(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Verifying TracingPolicyNamespaced resources...");
 
-    let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "tracingpolicynamespaced",
-        "-n",
-        MODEL_NAMESPACE,
-        "-o",
-        "jsonpath={.items[*].metadata.name}",
-    ])
-    .await?;
-
-    let policies: Vec<&str> = output.split_whitespace().collect();
-    info!("[Model] Found tracing policies: {:?}", policies);
-
-    // Each role's entry should have a tracing policy, plus workers for decode
     let expected = [
         format!("allow-binaries-{}-prefill", MODEL_NAME),
         format!("allow-binaries-{}-decode", MODEL_NAME),
         format!("allow-binaries-{}-decode-worker", MODEL_NAME),
     ];
 
-    for expected_name in &expected {
-        if !policies.contains(&expected_name.as_str()) {
-            return Err(format!(
-                "Expected tracing policy '{}', found: {:?}",
-                expected_name, policies
-            ));
-        }
-    }
+    let kc = kubeconfig.to_string();
+    let expected_clone = expected.clone();
+    wait_for_condition(
+        "TracingPolicyNamespaced resources to exist",
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let expected = expected_clone.clone();
+            async move {
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "tracingpolicynamespaced",
+                    "-n",
+                    MODEL_NAMESPACE,
+                    "-o",
+                    "jsonpath={.items[*].metadata.name}",
+                ])
+                .await?;
+
+                let policies: Vec<&str> = output.split_whitespace().collect();
+                for expected_name in &expected {
+                    if !policies.contains(&expected_name.as_str()) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+        },
+    )
+    .await?;
 
     info!("[Model] TracingPolicyNamespaced resources verified (prefill + decode entry + decode worker)");
     Ok(())

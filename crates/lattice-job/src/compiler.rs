@@ -389,9 +389,11 @@ fn inject_rank_env(template: &mut serde_json::Value) {
 
     if let Some(containers) = containers {
         for container in containers {
-            let env = container
-                .as_object_mut()
-                .and_then(|c| c.entry("env").or_insert_with(|| serde_json::json!([])).as_array_mut());
+            let env = container.as_object_mut().and_then(|c| {
+                c.entry("env")
+                    .or_insert_with(|| serde_json::json!([]))
+                    .as_array_mut()
+            });
             if let Some(env) = env {
                 env.push(rank_env.clone());
             }
@@ -716,7 +718,10 @@ mod tests {
         let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
 
         let master_vars = &prepared["master"].workload.containers["main"].variables;
-        assert_eq!(master_vars["MASTER_ADDR"].as_str(), "my-job-master-0.my-job");
+        assert_eq!(
+            master_vars["MASTER_ADDR"].as_str(),
+            "my-job-master-0.my-job"
+        );
         assert_eq!(master_vars["MASTER_PORT"].as_str(), "29500");
         assert_eq!(master_vars["WORLD_SIZE"].as_str(), "4");
         // RANK is NOT in the ConfigMap — it's injected at pod spec level
@@ -787,7 +792,6 @@ mod tests {
                 volume_size: None,
                 storage_class: None,
                 backup_store: None,
-                ttl: None,
             }),
             nccl: None,
         };
@@ -835,10 +839,7 @@ mod tests {
         );
         assert_eq!(svc["spec"]["publishNotReadyAddresses"], true);
         assert_eq!(svc["metadata"]["namespace"], "gpu-ns");
-        assert_eq!(
-            svc["metadata"]["ownerReferences"][0]["kind"],
-            "LatticeJob"
-        );
+        assert_eq!(svc["metadata"]["ownerReferences"][0]["kind"], "LatticeJob");
     }
 
     #[test]
@@ -849,22 +850,16 @@ mod tests {
             volume_size: None,
             storage_class: None,
             backup_store: Some("my-bsl".to_string()),
-            ttl: Some("168h".to_string()),
         };
 
         let schedule = compile_velero_schedule("my-training", "gpu-ns", &ckpt);
         assert_eq!(schedule["apiVersion"], "velero.io/v1");
         assert_eq!(schedule["kind"], "Schedule");
-        assert_eq!(
-            schedule["metadata"]["name"],
-            "lattice-training-my-training"
-        );
+        assert_eq!(schedule["metadata"]["name"], "lattice-training-my-training");
         assert_eq!(schedule["spec"]["schedule"], "*/30 * * * *");
-        assert_eq!(schedule["spec"]["template"]["ttl"], "168h");
-        assert_eq!(
-            schedule["spec"]["template"]["storageLocation"],
-            "my-bsl"
-        );
+        // TTL auto-computed: 30min interval × 3 = 90min
+        assert_eq!(schedule["spec"]["template"]["ttl"], "90m");
+        assert_eq!(schedule["spec"]["template"]["storageLocation"], "my-bsl");
         assert_eq!(
             schedule["spec"]["template"]["defaultVolumesToFsBackup"],
             true
@@ -879,16 +874,14 @@ mod tests {
         let resources = schedule["spec"]["template"]["includedResources"]
             .as_array()
             .expect("includedResources should be an array");
-        let resource_strs: Vec<&str> = resources
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let resource_strs: Vec<&str> = resources.iter().filter_map(|v| v.as_str()).collect();
         assert!(resource_strs.contains(&"persistentvolumeclaims"));
         assert!(resource_strs.contains(&"persistentvolumes"));
         assert!(resource_strs.contains(&"pods"));
 
         assert_eq!(
-            schedule["spec"]["template"]["labelSelector"]["matchLabels"]["lattice.dev/training-job"],
+            schedule["spec"]["template"]["labelSelector"]["matchLabels"]
+                ["lattice.dev/training-job"],
             "my-training"
         );
     }
@@ -901,12 +894,13 @@ mod tests {
             volume_size: None,
             storage_class: None,
             backup_store: None,
-            ttl: None,
         };
 
         let schedule = compile_velero_schedule("my-training", "gpu-ns", &ckpt);
         assert!(
-            schedule["spec"]["template"].get("storageLocation").is_none(),
+            schedule["spec"]["template"]
+                .get("storageLocation")
+                .is_none(),
             "storageLocation should be absent when backup_store is None"
         );
         assert_eq!(
@@ -932,7 +926,6 @@ mod tests {
                     volume_size: None,
                     storage_class: None,
                     backup_store: None,
-                    ttl: None,
                 }),
                 nccl: None,
             }),
@@ -971,14 +964,20 @@ mod tests {
     #[test]
     fn nccl_defaults_h100_sxm() {
         let defaults = nccl_defaults_for_gpu("H100-SXM-80GB");
-        assert!(defaults.iter().any(|(k, v)| *k == "NCCL_ALGO" && v == "Ring,Tree"));
-        assert!(defaults.iter().any(|(k, v)| *k == "NCCL_IB_DISABLE" && v == "0"));
+        assert!(defaults
+            .iter()
+            .any(|(k, v)| *k == "NCCL_ALGO" && v == "Ring,Tree"));
+        assert!(defaults
+            .iter()
+            .any(|(k, v)| *k == "NCCL_IB_DISABLE" && v == "0"));
     }
 
     #[test]
     fn nccl_defaults_l4() {
         let defaults = nccl_defaults_for_gpu("L4");
-        assert!(defaults.iter().any(|(k, v)| *k == "NCCL_IB_DISABLE" && v == "1"));
+        assert!(defaults
+            .iter()
+            .any(|(k, v)| *k == "NCCL_IB_DISABLE" && v == "1"));
     }
 
     #[test]

@@ -31,8 +31,8 @@ use tracing::debug;
 
 use lattice_common::crd::{
     BackupsConfig, BootstrapProvider, CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget,
-    InfraComponentStatus, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec, MonitoringConfig,
-    NetworkTopologyConfig, ProviderType,
+    InfraComponentStatus, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec,
+    MonitoringConfig, NetworkTopologyConfig, ProviderType,
 };
 use lattice_common::{
     DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE, MONITORING_NAMESPACE, VMAGENT_SA_NAME,
@@ -407,7 +407,11 @@ pub async fn apply_phase(
     // Wait for health gates
     let health_namespaces = phase.health_namespaces();
     for ns in &health_namespaces {
-        tracing::info!(phase = phase.name, namespace = ns, "Waiting for deployments");
+        tracing::info!(
+            phase = phase.name,
+            namespace = ns,
+            "Waiting for deployments"
+        );
         kube_utils::wait_for_all_deployments(client, ns, HEALTH_GATE_TIMEOUT)
             .await
             .map_err(|e| anyhow::anyhow!("{} health gate failed ({}): {}", phase.name, ns, e))?;
@@ -478,9 +482,8 @@ fn generate_cilium_policy_manifests() -> Result<Vec<String>, String> {
         serde_json::to_string_pretty(&cilium::generate_default_deny()),
         serde_json::to_string_pretty(&cilium::generate_mesh_proxy_egress_policy()),
     ] {
-        manifests.push(
-            policy.map_err(|e| format!("Failed to serialize CiliumNetworkPolicy: {e}"))?,
-        );
+        manifests
+            .push(policy.map_err(|e| format!("Failed to serialize CiliumNetworkPolicy: {e}"))?);
     }
 
     Ok(manifests)
@@ -703,10 +706,22 @@ mod tests {
 
         // All phases should have at least one component
         for phase in &phases {
-            assert!(!phase.components.is_empty(), "phase {} is empty", phase.name);
+            assert!(
+                !phase.components.is_empty(),
+                "phase {} is empty",
+                phase.name
+            );
             for comp in &phase.components {
-                assert!(!comp.manifests.is_empty(), "component {} has no manifests", comp.name);
-                assert!(!comp.version.is_empty(), "component {} has no version", comp.name);
+                assert!(
+                    !comp.manifests.is_empty(),
+                    "component {} has no manifests",
+                    comp.name
+                );
+                assert!(
+                    !comp.version.is_empty(),
+                    "component {} has no version",
+                    comp.name
+                );
             }
         }
     }

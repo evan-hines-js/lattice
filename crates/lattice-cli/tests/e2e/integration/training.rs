@@ -400,15 +400,9 @@ async fn test_velero_backup_data_exists(kubeconfig: &str, backup_name: &str) -> 
 
                 let all_completed = phases.iter().all(|p| *p == "Completed");
                 if all_completed {
-                    info!(
-                        "[Training] {} PodVolumeBackup(s) completed",
-                        phases.len()
-                    );
+                    info!("[Training] {} PodVolumeBackup(s) completed", phases.len());
                 } else {
-                    info!(
-                        "[Training] PodVolumeBackup phases: {:?}",
-                        phases
-                    );
+                    info!("[Training] PodVolumeBackup phases: {:?}", phases);
                 }
                 Ok(all_completed)
             }
@@ -436,7 +430,10 @@ async fn test_kill_gang_member(kubeconfig: &str) -> Result<(), String> {
         "-n",
         TRAINING_NAMESPACE,
         "-l",
-        &format!("volcano.sh/job-name={},volcano.sh/task-spec=worker", JOB_NAME),
+        &format!(
+            "volcano.sh/job-name={},volcano.sh/task-spec=worker",
+            JOB_NAME
+        ),
         "-o",
         "jsonpath={.items[0].metadata.name}",
     ])
@@ -640,7 +637,10 @@ async fn test_checkpoint_restored(kubeconfig: &str) -> Result<(), String> {
                 if output.contains("RESTORED") {
                     Ok(true)
                 } else if output.contains("FRESH") {
-                    Err("Pods started FRESH — checkpoint data was not restored from backup".to_string())
+                    Err(
+                        "Pods started FRESH — checkpoint data was not restored from backup"
+                            .to_string(),
+                    )
                 } else {
                     Ok(false)
                 }
@@ -774,9 +774,21 @@ async fn cleanup_training_tests(kubeconfig: &str) {
 
     // Delete leftover Velero resources (schedule, backups, restores)
     for (kind, selector_flag, selector) in [
-        ("schedule.velero.io", "--field-selector", &format!("metadata.name={}", schedule_name) as &str),
-        ("backup", "-l", &format!("velero.io/schedule-name={}", schedule_name)),
-        ("restore", "-l", &format!("velero.io/schedule-name={}", schedule_name)),
+        (
+            "schedule.velero.io",
+            "--field-selector",
+            &format!("metadata.name={}", schedule_name) as &str,
+        ),
+        (
+            "backup",
+            "-l",
+            &format!("velero.io/schedule-name={}", schedule_name),
+        ),
+        (
+            "restore",
+            "-l",
+            &format!("velero.io/schedule-name={}", schedule_name),
+        ),
     ] {
         let _ = run_kubectl(&[
             "--kubeconfig",

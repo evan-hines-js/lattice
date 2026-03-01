@@ -25,8 +25,8 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use super::super::context::InfraContext;
 use super::super::helpers::{
-    apply_yaml, get_or_create_proxy, http_get_with_retry, proxy_service_exists,
-    run_kubectl, wait_for_condition,
+    apply_yaml, get_or_create_proxy, http_get_with_retry, proxy_service_exists, run_kubectl,
+    wait_for_condition,
 };
 use super::cedar::{apply_cedar_policy_allow_group, apply_e2e_default_policy};
 

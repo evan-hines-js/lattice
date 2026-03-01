@@ -113,17 +113,8 @@ pub struct TrainingRoleSpec {
 }
 
 pub struct CheckpointSpec {
-    /// How often to trigger a checkpoint save.
-    pub interval: String,          // e.g., "30m", "1h"
-
-    /// BackupStore reference for checkpoint storage.
-    pub store_ref: String,
-
-    /// Remote path prefix within the store.
-    pub path_prefix: Option<String>,  // default: "checkpoints/{job-name}"
-
-    /// Maximum number of checkpoints to retain (oldest pruned first).
-    pub max_retained: Option<u32>,    // default: 3
+    /// Cron expression for Velero snapshot frequency (e.g., "*/30 * * * *").
+    pub interval: String,
 
     /// Local path inside the container where checkpoints are written.
     pub local_path: Option<String>,   // default: "/checkpoints"
@@ -133,7 +124,12 @@ pub struct CheckpointSpec {
 
     /// Storage class for the checkpoint PVC.
     pub storage_class: Option<String>,
+
+    /// Velero BackupStorageLocation name. If omitted, uses Velero's default BSL.
+    pub backup_store: Option<String>,
 }
+// Retention: always keeps 2 snapshots. TTL is auto-computed as 3 × interval
+// period (e.g., */30 * * * * → TTL 90m). No user-facing retention knobs.
 
 pub struct ElasticSpec {
     /// Minimum number of workers (job pauses below this).

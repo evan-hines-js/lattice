@@ -524,12 +524,15 @@ spec:
     containers:
       main:
         image: busybox:latest
+        command: ["/bin/sh", "-c", "sleep infinity"]
         resources:
           limits:
             cpu: "100m"
             memory: "64Mi"
         security:
+          apparmorProfile: Unconfined
           allowedBinaries: ["*"]
+          runAsUser: 65534
   backup:
     schedule: "0 3 * * *"
   replicas: 1"#

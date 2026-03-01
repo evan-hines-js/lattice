@@ -12,7 +12,7 @@ spec:
         containers:
           main:
             image: ghcr.io/evan-hines-js/busybox:latest
-            command: ["/bin/sh", "-c", "echo 'master ready'; sleep 5"]
+            command: ["/bin/sh", "-c", "echo 'master ready'; sleep 10"]
             resources:
               requests:
                 cpu: 50m
@@ -39,7 +39,7 @@ spec:
         containers:
           main:
             image: ghcr.io/evan-hines-js/busybox:latest
-            command: ["/bin/sh", "-c", "echo 'worker running'; sleep 5"]
+            command: ["/bin/sh", "-c", "echo 'worker running'; sleep 10"]
             resources:
               requests:
                 cpu: 50m

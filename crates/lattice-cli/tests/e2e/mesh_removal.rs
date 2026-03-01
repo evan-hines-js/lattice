@@ -53,7 +53,12 @@ const SERVICE_COUNT: usize = 4;
 fn create_rm_client() -> LatticeService {
     let targets = vec![
         TestTarget::internal("rm-internal", NAMESPACE, true, "bilateral agreement"),
-        TestTarget::internal("rm-wildcard", NAMESPACE, true, "wildcard allows all with outbound"),
+        TestTarget::internal(
+            "rm-wildcard",
+            NAMESPACE,
+            true,
+            "wildcard allows all with outbound",
+        ),
         TestTarget::internal("rm-delete-target", NAMESPACE, true, "bilateral agreement"),
         TestTarget::with_url("rm-client", EXTERNAL_RESOURCE_KEY, EXTERNAL_URL, true),
     ];
@@ -70,7 +75,13 @@ fn create_rm_client() -> LatticeService {
     let (key, spec) = external_outbound_dep(EXTERNAL_RESOURCE_KEY, EXTERNAL_URL);
     resources.insert(key, spec);
 
-    build_lattice_service("rm-client", NAMESPACE, resources, false, curl_container(script))
+    build_lattice_service(
+        "rm-client",
+        NAMESPACE,
+        resources,
+        false,
+        curl_container(script),
+    )
 }
 
 fn create_rm_internal() -> LatticeService {
@@ -301,7 +312,13 @@ async fn test_delete_service(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     // Verify owned resources are gone
-    verify_resource_absent(kubeconfig, NAMESPACE, "latticemeshmember", "rm-delete-target").await?;
+    verify_resource_absent(
+        kubeconfig,
+        NAMESPACE,
+        "latticemeshmember",
+        "rm-delete-target",
+    )
+    .await?;
 
     info!("[Mesh Removal] Phase 4: rm-delete-target fully deleted and traffic BLOCKED");
     Ok(())
@@ -309,7 +326,10 @@ async fn test_delete_service(kubeconfig: &str) -> Result<(), String> {
 
 /// Phase 5: Remove external dep from rm-client → verify external BLOCKED.
 async fn test_remove_external_dep(kubeconfig: &str) -> Result<(), String> {
-    info!("[Mesh Removal] Phase 5: Removing external dep '{}' from rm-client...", EXTERNAL_RESOURCE_KEY);
+    info!(
+        "[Mesh Removal] Phase 5: Removing external dep '{}' from rm-client...",
+        EXTERNAL_RESOURCE_KEY
+    );
 
     remove_resources(kubeconfig, NAMESPACE, "rm-client", &[EXTERNAL_RESOURCE_KEY]).await?;
 

@@ -1131,11 +1131,9 @@ async fn test_job_compile_failure(kubeconfig: &str, namespace: &str) -> Result<(
         get_resource_observed_generation(kubeconfig, "latticejob", namespace, "job-cedar-deny")
             .await?;
     if observed.is_empty() {
-        return Err(
-            "observed_generation is empty on compile-failed job — \
+        return Err("observed_generation is empty on compile-failed job — \
              compile failures must set observed_generation to prevent tight-loop retries"
-                .to_string(),
-        );
+            .to_string());
     }
 
     // Verify status message references the secret denial
@@ -1274,11 +1272,9 @@ async fn test_model_download_failure(kubeconfig: &str, namespace: &str) -> Resul
         get_resource_observed_generation(kubeconfig, "latticemodel", namespace, "bad-download")
             .await?;
     if observed.is_empty() {
-        return Err(
-            "observed_generation is empty on download-failed model — \
+        return Err("observed_generation is empty on download-failed model — \
              Failed status must include observed_generation"
-                .to_string(),
-        );
+            .to_string());
     }
 
     // Verify status message references download failure
@@ -1308,10 +1304,7 @@ async fn test_model_download_failure(kubeconfig: &str, namespace: &str) -> Resul
 }
 
 /// Build a LatticeModel with a model_source pointing to a nonexistent HuggingFace repo.
-fn build_model_with_bad_source(
-    name: &str,
-    namespace: &str,
-) -> lattice_common::crd::LatticeModel {
+fn build_model_with_bad_source(name: &str, namespace: &str) -> lattice_common::crd::LatticeModel {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
         ContainerSpec, LatticeModelSpec, ModelRoleSpec, ModelSourceSpec, ResourceQuantity,
@@ -1443,8 +1436,14 @@ async fn test_service_owner_ref_gc(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     // Verify child resources exist
-    wait_for_resource_exists(kubeconfig, "deployment", NS_OWNER_REF_GC, "svc-gc-test", true)
-        .await?;
+    wait_for_resource_exists(
+        kubeconfig,
+        "deployment",
+        NS_OWNER_REF_GC,
+        "svc-gc-test",
+        true,
+    )
+    .await?;
     wait_for_resource_exists(
         kubeconfig,
         "serviceaccount",

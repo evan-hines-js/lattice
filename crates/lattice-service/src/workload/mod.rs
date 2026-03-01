@@ -409,9 +409,7 @@ impl WorkloadCompiler {
         // Generate PodGroup for topology-aware scheduling
         if let Some(ref topology) = spec.topology {
             output.pod_group = Some(lattice_volcano::compile_service_pod_group(
-                name,
-                namespace,
-                topology,
+                name, namespace, topology,
             ));
             // Annotate pod template so Volcano associates pods with this PodGroup
             deployment.spec.template.metadata.annotations.insert(
@@ -424,13 +422,22 @@ impl WorkloadCompiler {
 
         // Generate Service if ports are defined
         if workload.service.is_some() {
-            output.service =
-                Some(Self::compile_service(name, namespace, workload, &owner_refs));
+            output.service = Some(Self::compile_service(
+                name,
+                namespace,
+                workload,
+                &owner_refs,
+            ));
         }
 
         // Generate PDB for HA services (replicas >= 2)
         if spec.replicas >= 2 {
-            output.pdb = Some(Self::compile_pdb(name, namespace, spec.replicas, &owner_refs));
+            output.pdb = Some(Self::compile_pdb(
+                name,
+                namespace,
+                spec.replicas,
+                &owner_refs,
+            ));
         }
 
         // Generate KEDA ScaledObject if autoscaling is configured
@@ -456,8 +463,7 @@ impl WorkloadCompiler {
         ServiceAccount {
             api_version: "v1".to_string(),
             kind: "ServiceAccount".to_string(),
-            metadata: ObjectMeta::new(name, namespace)
-                .with_owner_references(owner_refs.to_vec()),
+            metadata: ObjectMeta::new(name, namespace).with_owner_references(owner_refs.to_vec()),
             automount_service_account_token: Some(false),
         }
     }
@@ -475,8 +481,7 @@ impl WorkloadCompiler {
         Deployment {
             api_version: "apps/v1".to_string(),
             kind: "Deployment".to_string(),
-            metadata: ObjectMeta::new(name, namespace)
-                .with_owner_references(owner_refs.to_vec()),
+            metadata: ObjectMeta::new(name, namespace).with_owner_references(owner_refs.to_vec()),
             spec: DeploymentSpec {
                 replicas: spec.replicas,
                 selector: LabelSelector {
@@ -545,8 +550,7 @@ impl WorkloadCompiler {
         PodDisruptionBudget {
             api_version: "policy/v1".to_string(),
             kind: "PodDisruptionBudget".to_string(),
-            metadata: ObjectMeta::new(name, namespace)
-                .with_owner_references(owner_refs.to_vec()),
+            metadata: ObjectMeta::new(name, namespace).with_owner_references(owner_refs.to_vec()),
             spec: PdbSpec {
                 min_available: Some(replicas.saturating_sub(1).max(1)),
                 selector: LabelSelector {
@@ -587,8 +591,7 @@ impl WorkloadCompiler {
 
         // Waypoint label is applied conditionally by the service compiler
         // when L7 enforcement is needed (e.g., external dependencies).
-        let metadata =
-            ObjectMeta::new(name, namespace).with_owner_references(owner_refs.to_vec());
+        let metadata = ObjectMeta::new(name, namespace).with_owner_references(owner_refs.to_vec());
 
         Service {
             api_version: "v1".to_string(),
@@ -688,8 +691,7 @@ impl WorkloadCompiler {
         Ok(ScaledObject {
             api_version: ScaledObject::API_VERSION.to_string(),
             kind: ScaledObject::KIND.to_string(),
-            metadata: ObjectMeta::new(name, namespace)
-                .with_owner_references(owner_refs.to_vec()),
+            metadata: ObjectMeta::new(name, namespace).with_owner_references(owner_refs.to_vec()),
             spec: ScaledObjectSpec {
                 scale_target_ref: ScaleTargetRef {
                     api_version: "apps/v1".to_string(),

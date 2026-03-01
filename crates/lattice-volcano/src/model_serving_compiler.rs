@@ -408,7 +408,9 @@ mod tests {
 
     #[test]
     fn kv_connector_auto_injects_topology() {
-        use lattice_common::crd::{InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec};
+        use lattice_common::crd::{
+            InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec,
+        };
 
         let spec = LatticeModelSpec {
             routing: Some(ModelRoutingSpec {
@@ -443,7 +445,9 @@ mod tests {
 
     #[test]
     fn mooncake_connector_auto_injects_tier_3() {
-        use lattice_common::crd::{InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec};
+        use lattice_common::crd::{
+            InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec,
+        };
 
         let spec = LatticeModelSpec {
             routing: Some(ModelRoutingSpec {

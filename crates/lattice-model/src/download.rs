@@ -612,10 +612,7 @@ mod tests {
         let download = compile_download("test", "ns", "uid", &source).unwrap();
         let vol_resource = &download.job.spec.tasks["download"].workload.resources[VOLUME_NAME];
         let vol_params = vol_resource.volume_params().unwrap().unwrap();
-        assert_eq!(
-            vol_params.storage_class,
-            Some("fast-nvme".to_string())
-        );
+        assert_eq!(vol_params.storage_class, Some("fast-nvme".to_string()));
     }
 
     #[test]

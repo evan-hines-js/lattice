@@ -31,6 +31,7 @@ pub async fn setup_minio_backup_storage(kubeconfig: &str) -> Result<(), String> 
     create_velero_credentials(kubeconfig).await?;
     create_backup_storage_location(kubeconfig).await?;
     wait_for_bsl_available(kubeconfig).await?;
+    wait_for_backup_repository_ready(kubeconfig).await?;
 
     info!("[MinIO] MinIO backup storage ready");
     Ok(())
@@ -270,8 +271,7 @@ async fn create_backup_storage_location(kubeconfig: &str) -> Result<(), String> 
         }
     });
 
-    let json =
-        serde_json::to_string(&bsl).map_err(|e| format!("Failed to serialize BSL: {e}"))?;
+    let json = serde_json::to_string(&bsl).map_err(|e| format!("Failed to serialize BSL: {e}"))?;
     apply_yaml(kubeconfig, &json).await?;
 
     info!("[MinIO] BackupStorageLocation 'minio' created");
@@ -314,5 +314,48 @@ async fn wait_for_bsl_available(kubeconfig: &str) -> Result<(), String> {
     .await?;
 
     info!("[MinIO] BackupStorageLocation is Available");
+    Ok(())
+}
+
+/// Wait for a Velero BackupRepository targeting the `minio` BSL to reach Ready.
+///
+/// After a BSL becomes Available, Velero's node-agent creates a BackupRepository
+/// CR to initialize the underlying data store (kopia/restic). PodVolumeBackups
+/// will fail if they fire before this repo is Ready.
+async fn wait_for_backup_repository_ready(kubeconfig: &str) -> Result<(), String> {
+    let kc = kubeconfig.to_string();
+    wait_for_condition(
+        "BackupRepository for 'minio' BSL to be Ready",
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            async move {
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "backuprepositories.velero.io",
+                    "-n",
+                    VELERO_NAMESPACE,
+                    "-o",
+                    "jsonpath={.items[?(@.spec.backupStorageLocation=='minio')].status.phase}",
+                ])
+                .await
+                .unwrap_or_default();
+
+                let phase = output.trim();
+                if phase == "Ready" {
+                    Ok(true)
+                } else {
+                    info!("[MinIO] BackupRepository phase: '{}'", phase);
+                    Ok(false)
+                }
+            }
+        },
+    )
+    .await?;
+
+    info!("[MinIO] BackupRepository is Ready");
     Ok(())
 }

@@ -16,8 +16,8 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config,
-    run_kubectl, setup_regcreds_infrastructure, wait_for_resource_phase, DEFAULT_TIMEOUT,
+    apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config, run_kubectl,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT,
 };
 
 const JOB_NAMESPACE: &str = "batch";
@@ -150,41 +150,52 @@ async fn test_vcjob_created(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify TracingPolicyNamespaced resources were created for each task
+/// Verify TracingPolicyNamespaced resources were created for each task.
+///
+/// Polls with a timeout because Tetragon CRD installation may still be
+/// in progress when the job test starts (race between infra setup and
+/// test execution).
 async fn test_tracing_policies_created(kubeconfig: &str) -> Result<(), String> {
     info!("[Job] Verifying TracingPolicyNamespaced resources...");
 
-    let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "tracingpolicynamespaced",
-        "-n",
-        JOB_NAMESPACE,
-        "-o",
-        "jsonpath={.items[*].metadata.name}",
-    ])
+    let expected = [
+        format!("allow-binaries-{}-master", JOB_NAME),
+        format!("allow-binaries-{}-worker", JOB_NAME),
+    ];
+
+    let kc = kubeconfig.to_string();
+    let expected_clone = expected.clone();
+    wait_for_condition(
+        "TracingPolicyNamespaced resources to exist",
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let expected = expected_clone.clone();
+            async move {
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "tracingpolicynamespaced",
+                    "-n",
+                    JOB_NAMESPACE,
+                    "-o",
+                    "jsonpath={.items[*].metadata.name}",
+                ])
+                .await?;
+
+                let policies: Vec<&str> = output.split_whitespace().collect();
+                for expected_name in &expected {
+                    if !policies.contains(&expected_name.as_str()) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+        },
+    )
     .await?;
-
-    let policies: Vec<&str> = output.split_whitespace().collect();
-    info!("[Job] Found tracing policies: {:?}", policies);
-
-    // Each task should have an allow-binaries policy (command uses /bin/sh, not wildcard)
-    let expected_master = format!("allow-binaries-{}-master", JOB_NAME);
-    let expected_worker = format!("allow-binaries-{}-worker", JOB_NAME);
-
-    if !policies.contains(&expected_master.as_str()) {
-        return Err(format!(
-            "Expected tracing policy '{}', found: {:?}",
-            expected_master, policies
-        ));
-    }
-    if !policies.contains(&expected_worker.as_str()) {
-        return Err(format!(
-            "Expected tracing policy '{}', found: {:?}",
-            expected_worker, policies
-        ));
-    }
 
     info!("[Job] TracingPolicyNamespaced resources verified (master + worker)");
     Ok(())
@@ -263,7 +274,7 @@ async fn test_vcjob_pod_template(kubeconfig: &str) -> Result<(), String> {
 
 /// Verify the job completes successfully (exercises full lifecycle including graph cleanup)
 async fn test_job_completion(kubeconfig: &str) -> Result<(), String> {
-    info!("[Job] Waiting for job to complete (tasks sleep 5s)...");
+    info!("[Job] Waiting for job to complete (tasks sleep 10s)...");
 
     wait_for_resource_phase(
         kubeconfig,

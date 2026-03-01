@@ -14,7 +14,6 @@ spec:
       localPath: /checkpoints
       volumeSize: 1Gi
       backupStore: minio
-      ttl: 1h
   tasks:
     master:
       replicas: 1

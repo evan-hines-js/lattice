@@ -389,8 +389,7 @@ impl<'a> WorkloadCompiler<'a> {
                     graph
                         .get_volume_owner(self.namespace, vol_id)
                         .is_some_and(|owner| {
-                            owner.owner_name != self.name
-                                || owner.owner_namespace != self.namespace
+                            owner.owner_name != self.name || owner.owner_namespace != self.namespace
                         })
                 })
                 .map(|(_, vol_id)| vol_id.to_string())
@@ -437,11 +436,7 @@ impl<'a> WorkloadCompiler<'a> {
                         .map(|vol_id| crate::k8s::PodAffinityTerm {
                             label_selector: crate::k8s::LabelSelector {
                                 match_labels: [(
-                                    format!(
-                                        "{}{}",
-                                        lattice_common::LABEL_VOLUME_PREFIX,
-                                        vol_id
-                                    ),
+                                    format!("{}{}", lattice_common::LABEL_VOLUME_PREFIX, vol_id),
                                     "true".to_string(),
                                 )]
                                 .into_iter()

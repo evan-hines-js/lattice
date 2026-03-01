@@ -389,10 +389,6 @@ pub struct CheckpointSpec {
     /// Velero BackupStorageLocation name. If omitted, uses Velero's default BSL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_store: Option<String>,
-
-    /// TTL for Velero backups (default: "72h")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
 }
 
 impl CheckpointSpec {
@@ -406,9 +402,79 @@ impl CheckpointSpec {
         self.volume_size.as_deref().unwrap_or("50Gi")
     }
 
-    /// Returns the Velero backup TTL, defaulting to "72h".
-    pub fn effective_ttl(&self) -> &str {
-        self.ttl.as_deref().unwrap_or("72h")
+    /// Compute Velero backup TTL to retain exactly 2 snapshots.
+    ///
+    /// Parses the cron `interval` to estimate the period between snapshots,
+    /// then returns `3 × period` as a Velero duration string. This ensures
+    /// 2 snapshots are always live (the 3rd fires just as the 1st expires,
+    /// with a full period of buffer).
+    ///
+    /// Panics at compile-time validation if the cron expression is
+    /// completely unparseable (invalid field count).
+    pub fn effective_ttl(&self) -> String {
+        let minutes = Self::parse_cron_period_minutes(&self.interval);
+        let ttl_minutes = minutes * 3;
+        if ttl_minutes >= 60 && ttl_minutes % 60 == 0 {
+            format!("{}h", ttl_minutes / 60)
+        } else {
+            format!("{}m", ttl_minutes)
+        }
+    }
+
+    /// Parse a standard 5-field cron expression and return the period in minutes.
+    ///
+    /// Determines the dominant frequency from the most-specific varying field:
+    ///
+    /// | minute    | hour   | dom | dow | Result                    |
+    /// |-----------|--------|-----|-----|---------------------------|
+    /// | `*/N`     | `*`    | `*` | `*` | every N minutes           |
+    /// | fixed/`*` | `*/N`  | `*` | `*` | every N hours             |
+    /// | fixed     | `*`    | `*` | `*` | every hour (60 min)       |
+    /// | fixed     | fixed  | `*` | `*` | daily (1440 min)          |
+    /// | fixed     | fixed  | `*` | set | weekly (10080 min)        |
+    /// | fixed     | fixed  | set | `*` | monthly (43200 min)       |
+    fn parse_cron_period_minutes(cron: &str) -> u64 {
+        let fields: Vec<&str> = cron.split_whitespace().collect();
+        assert!(
+            fields.len() == 5,
+            "checkpoint interval must be a 5-field cron expression, got: '{cron}'"
+        );
+        let (minute, hour, dom, _month, dow) =
+            (fields[0], fields[1], fields[2], fields[3], fields[4]);
+
+        // Minute step: `*/N ...` with wildcard hour → every N minutes
+        if let Some(step) = minute.strip_prefix("*/") {
+            if hour == "*" {
+                return step.parse().expect("invalid minute step in cron interval");
+            }
+        }
+
+        // Hour step: `M */N * * *` → every N hours
+        if let Some(step) = hour.strip_prefix("*/") {
+            return step
+                .parse::<u64>()
+                .expect("invalid hour step in cron interval")
+                * 60;
+        }
+
+        // Fixed minute with wildcard hour: `30 * * * *` → hourly
+        if hour == "*" {
+            return 60;
+        }
+
+        // Both minute and hour are fixed — check day fields
+        // Specific day-of-month: `0 2 15 * *` → monthly (~30 days)
+        if dom != "*" {
+            return 43200;
+        }
+
+        // Specific day-of-week: `0 9 * * MON-FRI` → weekly
+        if dow != "*" {
+            return 10080;
+        }
+
+        // All day fields wildcard: `0 2 * * *` → daily
+        1440
     }
 }
 
@@ -578,26 +644,143 @@ mod tests {
             volume_size: None,
             storage_class: None,
             backup_store: None,
-            ttl: None,
         };
         assert_eq!(ckpt.effective_local_path(), "/checkpoints");
         assert_eq!(ckpt.effective_volume_size(), "50Gi");
+        // 30min × 3 = 90min
+        assert_eq!(ckpt.effective_ttl(), "90m");
+    }
+
+    #[test]
+    fn checkpoint_spec_ttl_scales_with_interval() {
+        // Every-minute: 1min × 3 = 3min
+        let ckpt = CheckpointSpec {
+            interval: "*/1 * * * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
+        assert_eq!(ckpt.effective_ttl(), "3m");
+
+        // Every-30-min: 30min × 3 = 90min
+        let ckpt = CheckpointSpec {
+            interval: "*/30 * * * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
+        assert_eq!(ckpt.effective_ttl(), "90m");
+
+        // Hourly: 60min × 3 = 3h
+        let ckpt = CheckpointSpec {
+            interval: "0 */1 * * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
+        assert_eq!(ckpt.effective_ttl(), "3h");
+
+        // Every-2-hours: 120min × 3 = 6h
+        let ckpt = CheckpointSpec {
+            interval: "0 */2 * * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
+        assert_eq!(ckpt.effective_ttl(), "6h");
+
+        // Daily at midnight: 1440min × 3 = 72h
+        let ckpt = CheckpointSpec {
+            interval: "0 0 * * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
         assert_eq!(ckpt.effective_ttl(), "72h");
+
+        // Daily at 2am: 1440min × 3 = 72h
+        let ckpt = CheckpointSpec {
+            interval: "0 2 * * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
+        assert_eq!(ckpt.effective_ttl(), "72h");
+
+        // Weekly (Sunday at midnight): 10080min × 3 = 504h
+        let ckpt = CheckpointSpec {
+            interval: "0 0 * * 0".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
+        assert_eq!(ckpt.effective_ttl(), "504h");
+
+        // Weekdays at 9am: weekly period → 504h
+        let ckpt = CheckpointSpec {
+            interval: "0 9 * * MON-FRI".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
+        assert_eq!(ckpt.effective_ttl(), "504h");
+
+        // Monthly (1st at midnight): 43200min × 3 = 2160h
+        let ckpt = CheckpointSpec {
+            interval: "0 0 1 * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
+        assert_eq!(ckpt.effective_ttl(), "2160h");
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a 5-field cron expression")]
+    fn checkpoint_spec_ttl_panics_on_invalid_cron() {
+        let ckpt = CheckpointSpec {
+            interval: "garbage".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
+        ckpt.effective_ttl();
+    }
+
+    #[test]
+    fn checkpoint_spec_ttl_hourly_fixed_minute() {
+        // `30 * * * *` → every hour at :30
+        let ckpt = CheckpointSpec {
+            interval: "30 * * * *".to_string(),
+            local_path: None,
+            volume_size: None,
+            storage_class: None,
+            backup_store: None,
+        };
+        assert_eq!(ckpt.effective_ttl(), "3h");
     }
 
     #[test]
     fn checkpoint_spec_overrides() {
         let ckpt = CheckpointSpec {
-            interval: "0 * * * *".to_string(),
+            interval: "0 */1 * * *".to_string(),
             local_path: Some("/data/checkpoints".to_string()),
             volume_size: Some("100Gi".to_string()),
             storage_class: Some("ssd".to_string()),
             backup_store: Some("my-bsl".to_string()),
-            ttl: Some("168h".to_string()),
         };
         assert_eq!(ckpt.effective_local_path(), "/data/checkpoints");
         assert_eq!(ckpt.effective_volume_size(), "100Gi");
-        assert_eq!(ckpt.effective_ttl(), "168h");
     }
 
     #[test]
@@ -621,7 +804,6 @@ mod tests {
                 volume_size: None,
                 storage_class: None,
                 backup_store: None,
-                ttl: None,
             }),
             nccl: Some(NcclConfig {
                 debug: Some("INFO".to_string()),

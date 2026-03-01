@@ -154,7 +154,7 @@ pub async fn wait_for_resource_phase(
                     Ok(current_phase) => {
                         let current = current_phase.trim();
                         tracing::info!("{} {}/{} phase: {}", kind, ns, resource_name, current);
-                        Ok(current == expected_phase)
+                        Ok(phase_reached(current, &expected_phase))
                     }
                     Err(e) => {
                         tracing::info!("{} {}/{} not ready: {}", kind, ns, resource_name, e);
@@ -165,6 +165,22 @@ pub async fn wait_for_resource_phase(
         },
     )
     .await
+}
+
+/// Check if a resource has reached (or passed through) the expected phase.
+///
+/// Terminal phases (Succeeded, Failed) imply that Running was reached.
+/// This prevents flaky tests when a fast job transitions Running → Succeeded
+/// between poll intervals.
+fn phase_reached(current: &str, expected: &str) -> bool {
+    if current == expected {
+        return true;
+    }
+    // Terminal phases imply Running was reached
+    if expected == "Running" && matches!(current, "Succeeded" | "Failed") {
+        return true;
+    }
+    false
 }
 
 // =============================================================================

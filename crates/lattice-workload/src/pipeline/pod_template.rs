@@ -12,9 +12,9 @@ use crate::error::CompilationError;
 use crate::helpers::ContainerCompilationData;
 use crate::helpers::{gpu_shm_volume, gpu_tolerations, image_pull_policy, merge_gpu_resources};
 use crate::k8s::{
-    Affinity, AppArmorProfile, Capabilities, Container, ContainerPort, EnvVar,
-    K8sSecurityContext, LabelSelector, LocalObjectReference, PodSecurityContext,
-    ResourceRequirements, SeccompProfile, Sysctl, TopologySpreadConstraint, Volume,
+    Affinity, AppArmorProfile, Capabilities, Container, ContainerPort, EnvVar, K8sSecurityContext,
+    LabelSelector, LocalObjectReference, PodSecurityContext, ResourceRequirements, SeccompProfile,
+    Sysctl, TopologySpreadConstraint, Volume,
 };
 use crate::pipeline::secrets::SecretRef;
 use crate::pipeline::volumes::GeneratedVolumes;
