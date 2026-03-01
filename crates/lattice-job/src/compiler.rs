@@ -18,9 +18,9 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    CheckpointSpec, JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, PortSpec, ProviderType,
-    ResourceSpec, ResourceType, ServicePortsSpec, TrainingConfig, TrainingFramework, VolumeMount,
-    WorkloadSpec,
+    CheckpointSpec, DependencyDirection, JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig,
+    PortSpec, ProviderType, ResourceSpec, ResourceType, ServicePortsSpec, TrainingConfig,
+    TrainingFramework, VolumeMount, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
@@ -175,9 +175,9 @@ pub async fn compile_job(
         tracing_policies.extend(policies);
     }
 
-    // Training: allow inter-pod traffic so all tasks can communicate.
-    // All tasks share the same SA, so allow_peer_traffic on each mesh member
-    // authorizes cross-task traffic (master ↔ worker) via shared SPIFFE identity.
+    // Training: allow intra-task peer traffic (e.g. worker-0 ↔ worker-1).
+    // Cross-task traffic (master ↔ worker) is handled by the bilateral
+    // dependencies injected in prepare_training_tasks.
     if job.spec.training.is_some() {
         for mm in &mut mesh_members {
             mm.spec.allow_peer_traffic = true;
@@ -277,6 +277,12 @@ fn prepare_training_tasks(
         // Without a service port, no mesh member is generated and the cluster-wide
         // default-deny blocks inter-pod traffic on port 29500.
         inject_training_service_port(&mut task.workload);
+
+        // Inject mutual dependencies between all tasks in the gang.
+        // Each task declares every sibling as both inbound (allowed caller) and
+        // outbound (dependency), creating bilateral mesh agreements so the
+        // AuthorizationPolicy allows cross-task traffic (e.g. worker → master).
+        inject_gang_dependencies(&mut task.workload, job_name, task_name, tasks);
 
         let gpu_count = gpu_param(&task.workload, |p| Some(p.count));
         inject_framework_env(
@@ -407,6 +413,43 @@ fn inject_training_service_port(workload: &mut WorkloadSpec) {
         target_port: None,
         protocol: None,
     });
+}
+
+/// Inject bilateral mesh dependencies between all tasks in a training gang.
+///
+/// For each sibling task, adds an inbound resource (allowed caller) and an
+/// outbound resource (dependency). This creates bilateral agreements in the
+/// service graph so Istio AuthorizationPolicies allow cross-task traffic.
+fn inject_gang_dependencies(
+    workload: &mut WorkloadSpec,
+    job_name: &str,
+    task_name: &str,
+    all_tasks: &BTreeMap<String, JobTaskSpec>,
+) {
+    for sibling_name in all_tasks.keys() {
+        if sibling_name == task_name {
+            continue;
+        }
+        let full_sibling_name = format!("{}-{}", job_name, sibling_name);
+
+        // Inbound: allow sibling to call us
+        let inbound_key = format!("{}-inbound", full_sibling_name);
+        workload.resources.entry(inbound_key).or_insert(ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Inbound,
+            id: Some(full_sibling_name.clone()),
+            ..Default::default()
+        });
+
+        // Outbound: we call sibling
+        let outbound_key = format!("{}-outbound", full_sibling_name);
+        workload.resources.entry(outbound_key).or_insert(ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            id: Some(full_sibling_name.clone()),
+            ..Default::default()
+        });
+    }
 }
 
 /// Inject env vars into all containers (does not overwrite existing values).
@@ -977,6 +1020,97 @@ mod tests {
                 mm.metadata.name.as_deref().unwrap_or("?")
             );
         }
+    }
+
+    #[test]
+    fn gang_dependencies_injected_between_tasks() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
+
+        let training = TrainingConfig {
+            framework: TrainingFramework::PyTorch,
+            coordinator_task: "master".to_string(),
+            checkpoint: None,
+            nccl: None,
+        };
+
+        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
+
+        // Master should have outbound+inbound resources for worker
+        let master_res = &prepared["master"].workload.resources;
+        assert!(
+            master_res.values().any(|r| r.direction == DependencyDirection::Outbound
+                && r.id.as_deref() == Some("my-job-worker")),
+            "master should have outbound dep on my-job-worker"
+        );
+        assert!(
+            master_res.values().any(|r| r.direction == DependencyDirection::Inbound
+                && r.id.as_deref() == Some("my-job-worker")),
+            "master should allow inbound from my-job-worker"
+        );
+
+        // Worker should have outbound+inbound resources for master
+        let worker_res = &prepared["worker"].workload.resources;
+        assert!(
+            worker_res.values().any(|r| r.direction == DependencyDirection::Outbound
+                && r.id.as_deref() == Some("my-job-master")),
+            "worker should have outbound dep on my-job-master"
+        );
+        assert!(
+            worker_res.values().any(|r| r.direction == DependencyDirection::Inbound
+                && r.id.as_deref() == Some("my-job-master")),
+            "worker should allow inbound from my-job-master"
+        );
+    }
+
+    #[tokio::test]
+    async fn training_job_bilateral_mesh_agreement() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
+
+        let spec = LatticeJobSpec {
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "master".to_string(),
+                checkpoint: None,
+                nccl: None,
+            }),
+            tasks,
+            ..Default::default()
+        };
+        let mut job = LatticeJob::new("my-train", spec);
+        job.metadata.namespace = Some("default".to_string());
+        job.metadata.uid = Some("uid-bilateral".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        // Graph should have bilateral edges between master and worker
+        let master_inbound = graph.get_active_inbound_edges("default", "my-train-master");
+        let worker_inbound = graph.get_active_inbound_edges("default", "my-train-worker");
+
+        assert!(
+            master_inbound.iter().any(|e| e.caller_name == "my-train-worker"),
+            "master should have inbound edge from worker, got: {:?}",
+            master_inbound.iter().map(|e| &e.caller_name).collect::<Vec<_>>()
+        );
+        assert!(
+            worker_inbound.iter().any(|e| e.caller_name == "my-train-master"),
+            "worker should have inbound edge from master, got: {:?}",
+            worker_inbound.iter().map(|e| &e.caller_name).collect::<Vec<_>>()
+        );
+
+        // Mesh members should have allowed_callers for sibling tasks
+        assert!(
+            compiled.mesh_members.len() >= 2,
+            "expected at least 2 mesh members"
+        );
     }
 
     #[tokio::test]
