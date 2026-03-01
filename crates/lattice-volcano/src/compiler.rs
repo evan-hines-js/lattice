@@ -33,6 +33,20 @@ pub fn compile_vcjob(
         .min_available
         .or_else(|| Some(job.spec.tasks.values().map(|t| t.replicas).sum()));
 
+    // When checkpoint recovery is configured, Lattice manages retries via
+    // Velero restore — not Volcano. Set maxRetry=0 so Volcano transitions
+    // the VCJob straight to Failed, letting the Lattice controller take over.
+    let has_checkpoint = job
+        .spec
+        .training
+        .as_ref()
+        .is_some_and(|t| t.checkpoint.is_some());
+    let vcjob_max_retry = if has_checkpoint {
+        Some(0)
+    } else {
+        job.spec.max_retry
+    };
+
     VCJob {
         api_version: "batch.volcano.sh/v1alpha1".to_string(),
         kind: "Job".to_string(),
@@ -58,11 +72,11 @@ pub fn compile_vcjob(
         spec: VCJobSpec {
             scheduler_name: job.spec.scheduler_name.clone(),
             min_available,
-            max_retry: job.spec.max_retry,
+            max_retry: vcjob_max_retry,
             queue: job.spec.queue.clone(),
             priority_class_name: job.spec.priority_class_name.clone(),
             tasks,
-            policies: default_policies(job.spec.max_retry),
+            policies: default_policies(vcjob_max_retry),
             plugins: BTreeMap::from([("env".to_string(), vec![])]),
             network_topology: job
                 .spec
@@ -328,6 +342,58 @@ mod tests {
         assert_eq!(vcjob.spec.policies.len(), 2);
         assert_eq!(vcjob.spec.policies[0].event, "PodEvicted");
         assert_eq!(vcjob.spec.policies[1].event, "PodFailed");
+    }
+
+    #[test]
+    fn checkpoint_overrides_max_retry_to_zero() {
+        let spec = LatticeJobSpec {
+            max_retry: Some(3),
+            training: Some(lattice_common::crd::TrainingConfig {
+                framework: lattice_common::crd::TrainingFramework::PyTorch,
+                coordinator_task: "master".to_string(),
+                checkpoint: Some(lattice_common::crd::CheckpointSpec {
+                    interval: "*/30 * * * *".to_string(),
+                    local_path: None,
+                    volume_size: None,
+                    storage_class: None,
+                    backup_store: None,
+                }),
+                nccl: None,
+            }),
+            ..Default::default()
+        };
+        let mut job = LatticeJob::new("test-job", spec);
+        job.metadata.namespace = Some("default".to_string());
+        job.metadata.uid = Some("uid".to_string());
+
+        let vcjob = compile_vcjob(&job, &BTreeMap::new());
+        // Lattice manages retries via Velero restore, so VCJob maxRetry must be 0
+        assert_eq!(vcjob.spec.max_retry, Some(0));
+        // No PodFailed policy — Volcano should go straight to Failed
+        assert_eq!(vcjob.spec.policies.len(), 1);
+        assert_eq!(vcjob.spec.policies[0].event, "PodEvicted");
+    }
+
+    #[test]
+    fn training_without_checkpoint_preserves_max_retry() {
+        let spec = LatticeJobSpec {
+            max_retry: Some(3),
+            training: Some(lattice_common::crd::TrainingConfig {
+                framework: lattice_common::crd::TrainingFramework::PyTorch,
+                coordinator_task: "master".to_string(),
+                checkpoint: None,
+                nccl: None,
+            }),
+            ..Default::default()
+        };
+        let mut job = LatticeJob::new("test-job", spec);
+        job.metadata.namespace = Some("default".to_string());
+        job.metadata.uid = Some("uid".to_string());
+
+        let vcjob = compile_vcjob(&job, &BTreeMap::new());
+        // No checkpoint — Volcano handles retries directly
+        assert_eq!(vcjob.spec.max_retry, Some(3));
+        assert_eq!(vcjob.spec.policies.len(), 2);
     }
 
     #[test]
