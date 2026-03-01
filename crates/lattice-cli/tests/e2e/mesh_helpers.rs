@@ -543,6 +543,7 @@ where
 // =============================================================================
 
 /// An edge that was removed and whose denial we need to verify.
+#[derive(Clone)]
 pub struct RemovedEdge {
     /// Traffic generator service name (used as pod label selector)
     pub source: String,
@@ -552,21 +553,24 @@ pub struct RemovedEdge {
     pub blocked_pattern: String,
 }
 
-/// Remove an inbound resource from a LatticeService via JSON merge patch.
+/// Remove one or more resource keys from a LatticeService via JSON merge patch.
 ///
-/// This breaks a bilateral agreement by removing the target's inbound allow
-/// for the given source, causing the connection to be denied.
-pub async fn remove_inbound_edge(
+/// Sets each key to `null` in `spec.workload.resources`, which removes it from
+/// the service's dependency graph. Use this to break bilateral agreements, remove
+/// external dependencies, or strip all inbound/outbound from a service.
+pub async fn remove_resources(
     kubeconfig_path: &str,
     namespace: &str,
-    target_service: &str,
-    inbound_key: &str,
+    service_name: &str,
+    resource_keys: &[&str],
 ) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<LatticeService> = Api::namespaced(client, namespace);
 
     let mut resources_map = serde_json::Map::new();
-    resources_map.insert(inbound_key.to_string(), serde_json::Value::Null);
+    for key in resource_keys {
+        resources_map.insert(key.to_string(), serde_json::Value::Null);
+    }
 
     let patch = serde_json::json!({
         "spec": {
@@ -578,17 +582,99 @@ pub async fn remove_inbound_edge(
 
     patch_with_retry(
         &api,
-        target_service,
+        service_name,
         &PatchParams::default(),
         &Patch::Merge(patch),
     )
     .await?;
 
     info!(
-        "[Edge Removal] Removed inbound '{}' from '{}'",
-        inbound_key, target_service
+        "[Resource Removal] Removed {:?} from '{}'",
+        resource_keys, service_name
     );
     Ok(())
+}
+
+/// Delete a LatticeService and wait for it to be fully removed.
+pub async fn delete_lattice_service(
+    kubeconfig_path: &str,
+    namespace: &str,
+    name: &str,
+) -> Result<(), String> {
+    info!(
+        "[Service Deletion] Deleting LatticeService {}/{}...",
+        namespace, name
+    );
+
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig_path,
+        "delete",
+        "latticeservice",
+        name,
+        "-n",
+        namespace,
+        "--wait=true",
+        "--timeout=120s",
+    ])
+    .await?;
+
+    // Wait for the owned resources to be garbage-collected
+    verify_resource_absent(kubeconfig_path, namespace, "deployment", name).await?;
+    verify_resource_absent(kubeconfig_path, namespace, "service", name).await?;
+
+    info!(
+        "[Service Deletion] LatticeService {}/{} fully deleted",
+        namespace, name
+    );
+    Ok(())
+}
+
+/// Wait until a Kubernetes resource no longer exists.
+pub async fn verify_resource_absent(
+    kubeconfig_path: &str,
+    namespace: &str,
+    kind: &str,
+    name: &str,
+) -> Result<(), String> {
+    let kc = kubeconfig_path.to_string();
+    let ns = namespace.to_string();
+    let k = kind.to_string();
+    let n = name.to_string();
+
+    wait_for_condition(
+        &format!("{} {}/{} to be deleted", kind, namespace, name),
+        DEFAULT_TIMEOUT,
+        Duration::from_secs(5),
+        || {
+            let kc = kc.clone();
+            let ns = ns.clone();
+            let k = k.clone();
+            let n = n.clone();
+            async move {
+                let result = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    &k,
+                    &n,
+                    "-n",
+                    &ns,
+                    "-o",
+                    "name",
+                    "--ignore-not-found",
+                ])
+                .await;
+
+                match result {
+                    Ok(output) => Ok(output.trim().is_empty()),
+                    // kubectl errors (e.g. CRD not installed) count as absent
+                    Err(_) => Ok(true),
+                }
+            }
+        },
+    )
+    .await
 }
 
 /// Wait for removed edges to become denied in traffic generator logs.

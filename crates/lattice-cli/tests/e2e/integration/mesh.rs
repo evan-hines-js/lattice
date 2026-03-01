@@ -21,6 +21,7 @@
 use tracing::info;
 
 use super::super::mesh_random::run_random_mesh_test;
+use super::super::mesh_removal::run_mesh_removal_tests;
 use super::super::mesh_tests::run_mesh_test;
 
 /// Run all mesh bilateral agreement tests
@@ -50,6 +51,11 @@ pub async fn run_mesh_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Integration/Mesh] Running randomized large-scale mesh test...");
     run_random_mesh_test(kubeconfig).await?;
     info!("[Integration/Mesh] Random mesh test passed!");
+
+    // Run mesh removal tests
+    info!("[Integration/Mesh] Running mesh removal tests...");
+    run_mesh_removal_tests(kubeconfig).await?;
+    info!("[Integration/Mesh] Mesh removal tests passed!");
 
     info!("[Integration/Mesh] All mesh tests passed!");
     Ok(())

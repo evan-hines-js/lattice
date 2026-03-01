@@ -82,6 +82,7 @@ mod media_server_e2e;
 mod mesh_fixtures;
 mod mesh_helpers;
 mod mesh_random;
+mod mesh_removal;
 mod mesh_tests;
 mod providers;
 

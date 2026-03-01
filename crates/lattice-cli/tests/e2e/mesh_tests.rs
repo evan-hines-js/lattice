@@ -1,8 +1,11 @@
-//! Service mesh bilateral agreement tests
+//! Fixed 10-service mesh bilateral agreement test
 //!
-//! Orchestrates both the fixed 10-service test and the randomized large-scale test.
+//! Deploys a deterministic 10-service topology and verifies that bilateral
+//! agreements (caller declares outbound + callee declares inbound) produce
+//! the expected ALLOWED/BLOCKED traffic patterns.
+//!
 //! Service construction lives in `mesh_fixtures`, test utilities in `mesh_helpers`,
-//! and random mesh generation in `mesh_random`.
+//! random mesh generation in `mesh_random`, and removal/mutation tests in `mesh_removal`.
 
 #![cfg(feature = "provider-e2e")]
 
@@ -25,9 +28,8 @@ use super::mesh_fixtures::{
     create_public_api, TEST_SERVICES_NAMESPACE, TOTAL_SERVICES,
 };
 use super::mesh_helpers::{
-    check_no_incorrectly_allowed, parse_traffic_result, remove_inbound_edge, retry_verification,
-    wait_for_cycles, wait_for_edges_denied, wait_for_pods_running, wait_for_services_ready,
-    RemovedEdge,
+    check_no_incorrectly_allowed, parse_traffic_result, retry_verification, wait_for_cycles,
+    wait_for_pods_running, wait_for_services_ready,
 };
 
 // =============================================================================
@@ -213,67 +215,6 @@ async fn verify_traffic_patterns(kubeconfig_path: &str) -> Result<(), String> {
 }
 
 // =============================================================================
-// Edge Removal Test
-// =============================================================================
-
-/// Breakable bilateral edges in the fixed mesh.
-/// Each entry: (source_traffic_generator, target_service, inbound_key_to_remove).
-const BREAKABLE_EDGES: &[(&str, &str, &str)] = &[
-    ("frontend-web", "api-gateway", "frontend-web"),
-    ("frontend-web", "api-users", "frontend-web"),
-    ("frontend-mobile", "api-gateway", "frontend-mobile"),
-    ("frontend-mobile", "api-orders", "frontend-mobile"),
-    ("frontend-admin", "api-gateway", "frontend-admin"),
-    ("frontend-admin", "api-users", "frontend-admin"),
-    ("frontend-admin", "api-orders", "frontend-admin"),
-];
-
-/// Remove randomly-chosen bilateral edges and verify they become denied.
-async fn run_fixed_edge_removal(kubeconfig_path: &str) -> Result<(), String> {
-    use rand::seq::SliceRandom;
-
-    info!("[Fixed Mesh] Starting edge removal test...");
-
-    let to_break = {
-        let mut rng = rand::thread_rng();
-        let mut candidates: Vec<_> = BREAKABLE_EDGES.to_vec();
-        candidates.shuffle(&mut rng);
-        candidates[..2.min(candidates.len())].to_vec()
-    };
-
-    for (source, target, inbound_key) in &to_break {
-        info!(
-            "[Fixed Mesh] Breaking edge: {} -> {} (removing inbound '{}')",
-            source, target, inbound_key
-        );
-        remove_inbound_edge(
-            kubeconfig_path,
-            TEST_SERVICES_NAMESPACE,
-            target,
-            inbound_key,
-        )
-        .await?;
-    }
-
-    let removed: Vec<RemovedEdge> = to_break
-        .iter()
-        .map(|(source, target, _)| RemovedEdge {
-            source: source.to_string(),
-            allowed_pattern: format!("{}: ALLOWED", target),
-            blocked_pattern: format!("{}: BLOCKED", target),
-        })
-        .collect();
-
-    wait_for_edges_denied(
-        kubeconfig_path,
-        TEST_SERVICES_NAMESPACE,
-        &removed,
-        "Fixed Mesh Edge Removal",
-    )
-    .await
-}
-
-// =============================================================================
 // Public API
 // =============================================================================
 
@@ -340,26 +281,16 @@ pub async fn start_mesh_test(kubeconfig_path: &str) -> Result<MeshTestHandle, St
 
 /// Run the fixed 10-service mesh test end-to-end.
 ///
-/// After deploying and waiting for pods, polls verification every 15s until
-/// it passes or 5 minutes elapse. Then removes random bilateral edges and
-/// verifies they become denied within 5 minutes.
+/// Deploys all services, waits for pods, then retries verification every 15s
+/// until it passes or 5 minutes elapse. Cleans up on success.
+///
+/// Edge removal/mutation testing lives in `mesh_removal.rs`.
 pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let _handle = start_mesh_test(kubeconfig_path).await?;
 
     let kc = kubeconfig_path.to_string();
     retry_verification("Fixed Mesh", || verify_traffic_patterns(&kc)).await?;
 
-    info!("[Fixed Mesh] Bilateral agreements verified, starting edge removal test...");
-    let edge_result = run_fixed_edge_removal(kubeconfig_path).await;
-
-    if edge_result.is_ok() {
-        delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await;
-    } else {
-        info!(
-            "[Fixed Mesh] Leaving namespace {} for debugging (edge removal test failed)",
-            TEST_SERVICES_NAMESPACE
-        );
-    }
-
-    edge_result
+    delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await;
+    Ok(())
 }
