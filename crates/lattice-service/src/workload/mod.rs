@@ -14,7 +14,8 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::kube_utils::{HasApiResource, ObjectMeta};
+use kube::ResourceExt;
+use lattice_common::kube_utils::{HasApiResource, ObjectMeta, OwnerReference};
 use lattice_workload::k8s::{
     Affinity, Container, LabelSelector, LocalObjectReference, PodSecurityContext, SchedulingGate,
     TopologySpreadConstraint, Volume,
@@ -385,13 +386,25 @@ impl WorkloadCompiler {
     ) -> Result<GeneratedWorkloads, CompilationError> {
         let spec = &service.spec;
         let workload = &spec.workload;
+
+        let owner_ref = OwnerReference {
+            api_version: "lattice.dev/v1alpha1".to_string(),
+            kind: "LatticeService".to_string(),
+            name: name.to_string(),
+            uid: service.uid().unwrap_or_default(),
+            controller: Some(true),
+            block_owner_deletion: Some(true),
+        };
+        let owner_refs = vec![owner_ref];
+
         let mut output = GeneratedWorkloads {
-            service_account: Some(Self::compile_service_account(name, namespace)),
+            service_account: Some(Self::compile_service_account(name, namespace, &owner_refs)),
             ..Default::default()
         };
 
         // Wrap pod template in a Deployment with service-specific fields
-        let mut deployment = Self::build_deployment(name, namespace, spec, pod_template);
+        let mut deployment =
+            Self::build_deployment(name, namespace, spec, pod_template, &owner_refs);
 
         // Generate PodGroup for topology-aware scheduling
         if let Some(ref topology) = spec.topology {
@@ -411,12 +424,13 @@ impl WorkloadCompiler {
 
         // Generate Service if ports are defined
         if workload.service.is_some() {
-            output.service = Some(Self::compile_service(name, namespace, workload));
+            output.service =
+                Some(Self::compile_service(name, namespace, workload, &owner_refs));
         }
 
         // Generate PDB for HA services (replicas >= 2)
         if spec.replicas >= 2 {
-            output.pdb = Some(Self::compile_pdb(name, namespace, spec.replicas));
+            output.pdb = Some(Self::compile_pdb(name, namespace, spec.replicas, &owner_refs));
         }
 
         // Generate KEDA ScaledObject if autoscaling is configured
@@ -427,17 +441,23 @@ impl WorkloadCompiler {
                 spec.replicas,
                 autoscaling,
                 monitoring,
+                &owner_refs,
             )?);
         }
 
         Ok(output)
     }
 
-    fn compile_service_account(name: &str, namespace: &str) -> ServiceAccount {
+    fn compile_service_account(
+        name: &str,
+        namespace: &str,
+        owner_refs: &[OwnerReference],
+    ) -> ServiceAccount {
         ServiceAccount {
             api_version: "v1".to_string(),
             kind: "ServiceAccount".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
+            metadata: ObjectMeta::new(name, namespace)
+                .with_owner_references(owner_refs.to_vec()),
             automount_service_account_token: Some(false),
         }
     }
@@ -448,13 +468,15 @@ impl WorkloadCompiler {
         namespace: &str,
         spec: &LatticeServiceSpec,
         pod_template: CompiledPodTemplate,
+        owner_refs: &[OwnerReference],
     ) -> Deployment {
         let strategy = Self::compile_strategy(spec);
 
         Deployment {
             api_version: "apps/v1".to_string(),
             kind: "Deployment".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
+            metadata: ObjectMeta::new(name, namespace)
+                .with_owner_references(owner_refs.to_vec()),
             spec: DeploymentSpec {
                 replicas: spec.replicas,
                 selector: LabelSelector {
@@ -514,11 +536,17 @@ impl WorkloadCompiler {
     }
 
     /// Compile a PodDisruptionBudget for HA services.
-    fn compile_pdb(name: &str, namespace: &str, replicas: u32) -> PodDisruptionBudget {
+    fn compile_pdb(
+        name: &str,
+        namespace: &str,
+        replicas: u32,
+        owner_refs: &[OwnerReference],
+    ) -> PodDisruptionBudget {
         PodDisruptionBudget {
             api_version: "policy/v1".to_string(),
             kind: "PodDisruptionBudget".to_string(),
-            metadata: ObjectMeta::new(name, namespace),
+            metadata: ObjectMeta::new(name, namespace)
+                .with_owner_references(owner_refs.to_vec()),
             spec: PdbSpec {
                 min_available: Some(replicas.saturating_sub(1).max(1)),
                 selector: LabelSelector {
@@ -532,7 +560,12 @@ impl WorkloadCompiler {
         }
     }
 
-    fn compile_service(name: &str, namespace: &str, workload: &WorkloadSpec) -> Service {
+    fn compile_service(
+        name: &str,
+        namespace: &str,
+        workload: &WorkloadSpec,
+        owner_refs: &[OwnerReference],
+    ) -> Service {
         let mut selector = BTreeMap::new();
         selector.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
 
@@ -554,7 +587,8 @@ impl WorkloadCompiler {
 
         // Waypoint label is applied conditionally by the service compiler
         // when L7 enforcement is needed (e.g., external dependencies).
-        let metadata = ObjectMeta::new(name, namespace);
+        let metadata =
+            ObjectMeta::new(name, namespace).with_owner_references(owner_refs.to_vec());
 
         Service {
             api_version: "v1".to_string(),
@@ -575,6 +609,7 @@ impl WorkloadCompiler {
         replicas: u32,
         autoscaling: &AutoscalingSpec,
         monitoring: &MonitoringConfig,
+        owner_refs: &[OwnerReference],
     ) -> Result<ScaledObject, CompilationError> {
         use lattice_infra::bootstrap::prometheus::{query_path, query_port, query_url};
 
@@ -653,7 +688,8 @@ impl WorkloadCompiler {
         Ok(ScaledObject {
             api_version: ScaledObject::API_VERSION.to_string(),
             kind: ScaledObject::KIND.to_string(),
-            metadata: ObjectMeta::new(name, namespace),
+            metadata: ObjectMeta::new(name, namespace)
+                .with_owner_references(owner_refs.to_vec()),
             spec: ScaledObjectSpec {
                 scale_target_ref: ScaleTargetRef {
                     api_version: "apps/v1".to_string(),
