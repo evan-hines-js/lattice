@@ -12,15 +12,14 @@
 //! - Injects per-pod RANK and NODE_RANK via Volcano env plugin interpolation
 //! - Injects NPROC_PER_NODE from GPU resource count (when GPUs are declared)
 //! - Creates a headless Service for pod DNS resolution
-//! - Adds checkpoint PVCs for fault-tolerant training
+//! - Opts training pods out of ambient mesh for direct L4 peer traffic
 
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    CheckpointSpec, JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, PortSpec, ProviderType,
-    ResourceSpec, ResourceType, ServicePortsSpec, TrainingConfig, TrainingFramework, VolumeMount,
-    WorkloadSpec,
+    JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, PortSpec, ProviderType, ServicePortsSpec,
+    TrainingConfig, TrainingFramework, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
@@ -61,8 +60,8 @@ pub struct CompiledJob {
 /// For each task, runs the shared `WorkloadCompiler` pipeline and `lattice_tetragon`
 /// policy compiler, then aggregates results into a single `CompiledJob`.
 ///
-/// When `spec.training` is set, training env vars (framework, NCCL, checkpoint)
-/// are injected into task workloads before compilation so they appear in the
+/// When `spec.training` is set, training env vars (framework, NCCL) are
+/// injected into task workloads before compilation so they appear in the
 /// final pod templates.
 pub async fn compile_job(
     job: &LatticeJob,
@@ -80,15 +79,6 @@ pub async fn compile_job(
 
     if job.spec.tasks.is_empty() {
         return Err(JobError::NoTasks);
-    }
-
-    // Validate: cron jobs with checkpoint makes no sense (recovery path is for one-shot jobs)
-    if job.spec.is_cron() {
-        if let Some(ref t) = job.spec.training {
-            if t.checkpoint.is_some() {
-                return Err(JobError::CronWithCheckpoint);
-            }
-        }
     }
 
     // Validate: coordinator task must exist
@@ -248,7 +238,7 @@ pub async fn compile_job(
 
 /// Clone tasks and inject training env vars into each task's workload.
 ///
-/// Injects framework env vars, NCCL tuning, and checkpoint PVC/env. This runs
+/// Injects framework env vars and NCCL tuning. This runs
 /// before `WorkloadCompiler` so the injected values appear in pod templates.
 fn prepare_training_tasks(
     job_name: &str,
@@ -277,16 +267,10 @@ fn prepare_training_tasks(
     for (task_name, task_spec) in tasks {
         let mut task = task_spec.clone();
 
-        // Checkpoint training: Never restart — let the failure propagate to
-        // Volcano's PodFailed policy so it triggers a full gang RestartJob.
-        // Non-checkpoint training: OnFailure — let K8s restart transient
-        // container failures without full job restarts.
+        // Default: OnFailure — let K8s restart transient container failures
+        // without full job restarts.
         if task.restart_policy.is_none() {
-            task.restart_policy = Some(if training.checkpoint.is_some() {
-                lattice_common::crd::RestartPolicy::Never
-            } else {
-                lattice_common::crd::RestartPolicy::OnFailure
-            });
+            task.restart_policy = Some(lattice_common::crd::RestartPolicy::OnFailure);
         }
 
         // Inject the master port so WorkloadCompiler creates a LatticeMeshMember.
@@ -304,10 +288,6 @@ fn prepare_training_tasks(
         )?;
 
         inject_nccl_env(&mut task.workload, training.nccl.as_ref());
-
-        if let Some(ref ckpt) = training.checkpoint {
-            inject_checkpoint_volume(&mut task.workload, ckpt);
-        }
 
         result.insert(task_name.clone(), task);
     }
@@ -567,40 +547,6 @@ fn inject_rank_env(template: &mut serde_json::Value, rank_offset: u32) {
     }
 }
 
-/// Add checkpoint PVC resource and CHECKPOINT_DIR env var to all containers.
-fn inject_checkpoint_volume(workload: &mut WorkloadSpec, ckpt: &CheckpointSpec) {
-    let local_path = ckpt.effective_local_path();
-
-    // Add CHECKPOINT_DIR env var
-    for container in workload.containers.values_mut() {
-        container
-            .variables
-            .entry("CHECKPOINT_DIR".to_string())
-            .or_insert_with(|| TemplateString::new(local_path));
-
-        container.volumes.insert(
-            local_path.to_string(),
-            VolumeMount {
-                source: Some(TemplateString::new("${resources.checkpoints}")),
-                ..Default::default()
-            },
-        );
-    }
-
-    // Add checkpoint PVC resource
-    workload.resources.insert(
-        "checkpoints".to_string(),
-        ResourceSpec {
-            type_: ResourceType::Volume,
-            params: Some(BTreeMap::from([(
-                "size".to_string(),
-                serde_json::json!(ckpt.effective_volume_size()),
-            )])),
-            ..Default::default()
-        },
-    );
-}
-
 /// Extract a field from the first GPU resource in the workload.
 fn gpu_param<T>(
     workload: &WorkloadSpec,
@@ -644,8 +590,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use lattice_common::crd::{
-        CheckpointSpec, ContainerSpec, JobTaskSpec, LatticeJobSpec, NcclConfig, ResourceSpec,
-        ResourceType, RestartPolicy, RuntimeSpec, TrainingConfig, TrainingFramework, WorkloadSpec,
+        ContainerSpec, JobTaskSpec, LatticeJobSpec, NcclConfig, ResourceSpec, ResourceType,
+        RestartPolicy, RuntimeSpec, TrainingConfig, TrainingFramework, WorkloadSpec,
     };
 
     fn make_job(tasks: BTreeMap<String, JobTaskSpec>) -> LatticeJob {
@@ -818,7 +764,6 @@ mod tests {
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
             coordinator_task: "master".to_string(),
-            checkpoint: None,
             nccl: None,
         };
 
@@ -855,7 +800,6 @@ mod tests {
         let training = TrainingConfig {
             framework: TrainingFramework::Jax,
             coordinator_task: "master".to_string(),
-            checkpoint: None,
             nccl: None,
         };
 
@@ -876,7 +820,6 @@ mod tests {
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
             coordinator_task: "master".to_string(),
-            checkpoint: None,
             nccl: Some(NcclConfig {
                 debug: Some("INFO".to_string()),
                 net_if: Some("ib0".to_string()),
@@ -893,35 +836,6 @@ mod tests {
     }
 
     #[test]
-    fn prepare_training_injects_checkpoint_volume() {
-        let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
-        tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
-
-        let training = TrainingConfig {
-            framework: TrainingFramework::PyTorch,
-            coordinator_task: "master".to_string(),
-            checkpoint: Some(CheckpointSpec {
-                local_path: None,
-                volume_size: None,
-                storage_class: None,
-            }),
-            nccl: None,
-        };
-
-        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
-
-        // Both master and worker get checkpoint volume
-        for task in prepared.values() {
-            assert_eq!(
-                task.workload.containers["main"].variables["CHECKPOINT_DIR"].as_str(),
-                "/checkpoints"
-            );
-            assert!(task.workload.resources.contains_key("checkpoints"));
-        }
-    }
-
-    #[test]
     fn prepare_training_defaults_restart_policy_to_on_failure() {
         let mut tasks = BTreeMap::new();
         let mut task = make_training_task("train:latest", 1);
@@ -931,7 +845,6 @@ mod tests {
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
             coordinator_task: "master".to_string(),
-            checkpoint: None,
             nccl: None,
         };
 
@@ -939,33 +852,6 @@ mod tests {
         assert_eq!(
             prepared["worker"].restart_policy,
             Some(RestartPolicy::OnFailure)
-        );
-    }
-
-    #[test]
-    fn prepare_training_checkpoint_defaults_restart_policy_to_never() {
-        let mut tasks = BTreeMap::new();
-        let mut task = make_training_task("train:latest", 1);
-        task.restart_policy = None; // unset
-        tasks.insert("worker".to_string(), task);
-
-        let training = TrainingConfig {
-            framework: TrainingFramework::PyTorch,
-            coordinator_task: "master".to_string(),
-            checkpoint: Some(CheckpointSpec {
-                local_path: None,
-                volume_size: None,
-                storage_class: None,
-            }),
-            nccl: None,
-        };
-
-        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
-        // Checkpoint training: Never restart — failures must propagate to
-        // Volcano so the Lattice controller can trigger checkpoint recovery
-        assert_eq!(
-            prepared["worker"].restart_policy,
-            Some(RestartPolicy::Never)
         );
     }
 
@@ -979,7 +865,6 @@ mod tests {
             training: Some(TrainingConfig {
                 framework: TrainingFramework::PyTorch,
                 coordinator_task: "master".to_string(),
-                checkpoint: None,
                 nccl: None,
             }),
             tasks,
@@ -1019,7 +904,6 @@ mod tests {
             training: Some(TrainingConfig {
                 framework: TrainingFramework::PyTorch,
                 coordinator_task: "master".to_string(),
-                checkpoint: None,
                 nccl: None,
             }),
             tasks,
@@ -1071,7 +955,6 @@ mod tests {
             training: Some(TrainingConfig {
                 framework: TrainingFramework::PyTorch,
                 coordinator_task: "master".to_string(),
-                checkpoint: None,
                 nccl: None,
             }),
             tasks,
@@ -1122,7 +1005,6 @@ mod tests {
             training: Some(TrainingConfig {
                 framework: TrainingFramework::PyTorch,
                 coordinator_task: "master".to_string(),
-                checkpoint: None,
                 nccl: None,
             }),
             tasks,
@@ -1174,46 +1056,6 @@ mod tests {
         };
 
         assert!(!vcjob.spec.plugins.contains_key("svc"));
-    }
-
-    #[tokio::test]
-    async fn compile_job_labels_pvcs_for_training() {
-        let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
-        tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
-
-        let spec = LatticeJobSpec {
-            training: Some(TrainingConfig {
-                framework: TrainingFramework::PyTorch,
-                coordinator_task: "master".to_string(),
-                checkpoint: Some(CheckpointSpec {
-                    local_path: None,
-                    volume_size: None,
-                    storage_class: None,
-                }),
-                nccl: None,
-            }),
-            tasks,
-            ..Default::default()
-        };
-        let mut job = LatticeJob::new("my-train", spec);
-        job.metadata.namespace = Some("default".to_string());
-        job.metadata.uid = Some("uid-train".to_string());
-
-        let graph = ServiceGraph::new();
-        let cedar = permit_all_cedar();
-
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
-            .await
-            .unwrap();
-
-        // PVCs should be labeled with the training job name
-        for pvc in &compiled.config.pvcs {
-            assert_eq!(
-                pvc.metadata.labels.get("lattice.dev/training-job"),
-                Some(&"my-train".to_string()),
-            );
-        }
     }
 
     #[test]
@@ -1285,7 +1127,6 @@ mod tests {
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
             coordinator_task: "master".to_string(),
-            checkpoint: None,
             nccl: None,
         };
 
@@ -1313,7 +1154,6 @@ mod tests {
         let training = TrainingConfig {
             framework: TrainingFramework::Jax,
             coordinator_task: "master".to_string(),
-            checkpoint: None,
             nccl: None,
         };
 
@@ -1334,7 +1174,6 @@ mod tests {
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
             coordinator_task: "master".to_string(),
-            checkpoint: None,
             nccl: None,
         };
 
@@ -1481,7 +1320,6 @@ mod tests {
         let training = TrainingConfig {
             framework: TrainingFramework::PyTorch,
             coordinator_task: "master".to_string(),
-            checkpoint: None,
             nccl: None,
         };
 

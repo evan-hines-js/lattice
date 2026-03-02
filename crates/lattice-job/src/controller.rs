@@ -7,8 +7,7 @@
 //! jobs that complete before we observe Running transition directly: Pending -> Succeeded.
 //! VCJobs stuck in Pending past PENDING_TIMEOUT transition: Pending -> Failed.
 //!
-//! For training jobs with checkpoints, Volcano handles retries via its maxRetry
-//! mechanism. PVCs persist across restarts so checkpoint data survives pod failures.
+//! For training jobs, Volcano handles retries via its maxRetry mechanism.
 //!
 //! Resources are applied in layers to prevent race conditions:
 //! - Layer 1: ConfigMaps, Secrets, ExternalSecrets, PVCs, MeshMembers, TracingPolicies,

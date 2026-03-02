@@ -317,8 +317,7 @@ mod tests {
     fn default_policies_always_includes_pod_failed() {
         let job = test_job(BTreeMap::new());
         let vcjob = compile_vcjob(&job, &BTreeMap::new());
-        // Both PodEvicted and PodFailed are always present — the Lattice
-        // controller handles the Restarting+maxRetry=0 case for checkpoint jobs
+        // Both PodEvicted and PodFailed are always present
         assert_eq!(vcjob.spec.policies.len(), 2);
         assert_eq!(vcjob.spec.policies[0].event, "PodEvicted");
         assert_eq!(vcjob.spec.policies[1].event, "PodFailed");

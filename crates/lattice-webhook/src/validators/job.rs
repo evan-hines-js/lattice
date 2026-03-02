@@ -171,44 +171,6 @@ mod tests {
     }
 
     #[test]
-    fn denies_cron_with_checkpoint() {
-        let json = serde_json::json!({
-            "apiVersion": "lattice.dev/v1alpha1",
-            "kind": "LatticeJob",
-            "metadata": { "name": "bad-job", "namespace": "default" },
-            "spec": {
-                "schedule": "*/5 * * * *",
-                "training": {
-                    "framework": "PyTorch",
-                    "coordinatorTask": "worker",
-                    "checkpoint": { "volumeSize": "10Gi" }
-                },
-                "tasks": {
-                    "worker": {
-                        "replicas": 1,
-                        "workload": {
-                            "containers": {
-                                "main": {
-                                    "image": "train:latest",
-                                    "command": ["/usr/bin/python", "-c", "train()"],
-                                    "resources": {
-                                        "limits": { "cpu": "1", "memory": "1Gi" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        let validator = JobValidator;
-        let request = make_admission_request("lattice.dev", "v1alpha1", "latticejobs", json);
-        let response = validator.validate(&request);
-        assert!(!response.allowed, "cron with checkpoint should be denied");
-    }
-
-    #[test]
     fn denies_missing_object() {
         let request: AdmissionRequest<DynamicObject> = AdmissionRequest {
             object: None,

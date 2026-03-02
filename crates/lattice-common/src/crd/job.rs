@@ -7,8 +7,7 @@
 //! instead of a bare VCJob (one-shot).
 //!
 //! When `spec.training` is set, the compiler injects framework-specific env vars
-//! (MASTER_ADDR, WORLD_SIZE, NCCL), creates a headless Service for pod DNS, and
-//! optionally creates checkpoint PVCs for fault tolerance.
+//! (MASTER_ADDR, WORLD_SIZE, NCCL) and creates a headless Service for pod DNS.
 
 use std::collections::BTreeMap;
 
@@ -214,7 +213,7 @@ pub struct LatticeJobSpec {
 
     /// Distributed training configuration. When set, the compiler injects
     /// framework-specific env vars, NCCL tuning, headless Service for pod DNS,
-    /// and checkpoint PVCs for fault tolerance.
+    /// and headless Service for pod DNS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training: Option<TrainingConfig>,
 }
@@ -250,7 +249,6 @@ impl LatticeJobSpec {
     ///
     /// Catches structural errors early (before compilation):
     /// - Empty tasks
-    /// - Cron jobs with checkpoint (incompatible)
     /// - Missing coordinator task
     /// - Training containers without explicit command
     pub fn validate(&self) -> Result<(), crate::Error> {
@@ -264,12 +262,6 @@ impl LatticeJobSpec {
                     "training coordinator task '{}' not found in job tasks",
                     training.coordinator_task
                 )));
-            }
-
-            if self.is_cron() && training.checkpoint.is_some() {
-                return Err(crate::Error::validation(
-                    "cron jobs cannot use training checkpoint recovery",
-                ));
             }
 
             // Training containers must declare explicit commands so the rank
@@ -358,8 +350,8 @@ impl std::fmt::Display for TrainingFramework {
 /// Distributed training configuration for a LatticeJob.
 ///
 /// When set on a LatticeJob, the compiler injects framework-specific env vars
-/// (MASTER_ADDR, WORLD_SIZE, NCCL tuning), creates a headless Service for pod
-/// DNS resolution, and optionally creates checkpoint PVCs.
+/// (MASTER_ADDR, WORLD_SIZE, NCCL tuning) and creates a headless Service for
+/// pod DNS resolution.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainingConfig {
@@ -372,12 +364,6 @@ pub struct TrainingConfig {
     #[serde(default = "TrainingConfig::default_coordinator_task")]
     pub coordinator_task: String,
 
-    /// Checkpoint configuration. When set, a PVC is mounted on all tasks.
-    /// PVCs persist across Volcano gang restarts so checkpoint data survives
-    /// pod failures.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint: Option<CheckpointSpec>,
-
     /// NCCL tuning overrides. Auto-configured by default based on GPU model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nccl: Option<NcclConfig>,
@@ -386,39 +372,6 @@ pub struct TrainingConfig {
 impl TrainingConfig {
     fn default_coordinator_task() -> String {
         "master".to_string()
-    }
-}
-
-/// Checkpoint volume configuration for training fault tolerance.
-///
-/// The compiler creates a PVC mounted at `local_path` (default: `/checkpoints`)
-/// on all training tasks with `CHECKPOINT_DIR` env var. PVCs persist across
-/// Volcano gang restarts so checkpoint data survives pod failures.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CheckpointSpec {
-    /// Local path inside containers where checkpoints are written (default: "/checkpoints")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_path: Option<String>,
-
-    /// PVC size for checkpoint storage (default: "50Gi")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub volume_size: Option<String>,
-
-    /// Storage class for the checkpoint PVC
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_class: Option<String>,
-}
-
-impl CheckpointSpec {
-    /// Returns the local mount path, defaulting to "/checkpoints".
-    pub fn effective_local_path(&self) -> &str {
-        self.local_path.as_deref().unwrap_or("/checkpoints")
-    }
-
-    /// Returns the PVC size, defaulting to "50Gi".
-    pub fn effective_volume_size(&self) -> &str {
-        self.volume_size.as_deref().unwrap_or("50Gi")
     }
 }
 
@@ -577,28 +530,6 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_spec_defaults() {
-        let ckpt = CheckpointSpec {
-            local_path: None,
-            volume_size: None,
-            storage_class: None,
-        };
-        assert_eq!(ckpt.effective_local_path(), "/checkpoints");
-        assert_eq!(ckpt.effective_volume_size(), "50Gi");
-    }
-
-    #[test]
-    fn checkpoint_spec_overrides() {
-        let ckpt = CheckpointSpec {
-            local_path: Some("/data/checkpoints".to_string()),
-            volume_size: Some("100Gi".to_string()),
-            storage_class: Some("ssd".to_string()),
-        };
-        assert_eq!(ckpt.effective_local_path(), "/data/checkpoints");
-        assert_eq!(ckpt.effective_volume_size(), "100Gi");
-    }
-
-    #[test]
     fn nccl_config_defaults() {
         let nccl = NcclConfig::default();
         assert!(nccl.net_if.is_none());
@@ -613,11 +544,6 @@ mod tests {
         let training = TrainingConfig {
             framework: TrainingFramework::DeepSpeed,
             coordinator_task: "master".to_string(),
-            checkpoint: Some(CheckpointSpec {
-                local_path: None,
-                volume_size: None,
-                storage_class: None,
-            }),
             nccl: Some(NcclConfig {
                 debug: Some("INFO".to_string()),
                 ..Default::default()
@@ -647,7 +573,6 @@ mod tests {
             training: Some(TrainingConfig {
                 framework: TrainingFramework::PyTorch,
                 coordinator_task: "master".to_string(),
-                checkpoint: None,
                 nccl: None,
             }),
             ..Default::default()
@@ -757,7 +682,6 @@ mod tests {
             training: Some(TrainingConfig {
                 framework: TrainingFramework::PyTorch,
                 coordinator_task: "master".to_string(),
-                checkpoint: None,
                 nccl: None,
             }),
             ..Default::default()
@@ -785,7 +709,6 @@ mod tests {
             training: Some(TrainingConfig {
                 framework: TrainingFramework::PyTorch,
                 coordinator_task: "nonexistent".to_string(),
-                checkpoint: None,
                 nccl: None,
             }),
             ..Default::default()
@@ -794,33 +717,6 @@ mod tests {
         assert!(
             err.to_string().contains("nonexistent"),
             "should mention missing task name, got: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_denies_cron_with_checkpoint() {
-        let mut tasks = BTreeMap::new();
-        tasks.insert("worker".to_string(), task_with_command(1));
-
-        let spec = LatticeJobSpec {
-            tasks,
-            schedule: Some("*/5 * * * *".to_string()),
-            training: Some(TrainingConfig {
-                framework: TrainingFramework::PyTorch,
-                coordinator_task: "worker".to_string(),
-                checkpoint: Some(CheckpointSpec {
-                    local_path: None,
-                    volume_size: Some("10Gi".to_string()),
-                    storage_class: None,
-                }),
-                nccl: None,
-            }),
-            ..Default::default()
-        };
-        let err = spec.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("cron"),
-            "should mention cron incompatibility, got: {err}"
         );
     }
 
@@ -834,7 +730,6 @@ mod tests {
             training: Some(TrainingConfig {
                 framework: TrainingFramework::PyTorch,
                 coordinator_task: "worker".to_string(),
-                checkpoint: None,
                 nccl: None,
             }),
             ..Default::default()

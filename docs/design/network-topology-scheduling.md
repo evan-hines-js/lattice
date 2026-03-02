@@ -425,9 +425,6 @@ spec:
             params:
               count: 8
               model: H100
-  checkpoint:
-    interval: 30m
-    store_ref: s3-checkpoints
 ```
 
 The training job compiler combines topology with NCCL auto-tuning: `highestTierAllowed: 2` + `model: H100` produces NCCL env vars optimized for intra-rack InfiniBand communication.

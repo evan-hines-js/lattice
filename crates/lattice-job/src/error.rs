@@ -28,9 +28,6 @@ pub enum JobError {
     #[error("Volcano {kind} CRD (batch.volcano.sh/{kind}) not available")]
     VolcanoCrdMissing { kind: &'static str },
 
-    #[error("cron jobs cannot use training checkpoint recovery")]
-    CronWithCheckpoint,
-
     #[error("training coordinator task '{0}' not found in job tasks")]
     CoordinatorTaskMissing(String),
 
@@ -51,7 +48,6 @@ impl Retryable for JobError {
             Self::NoTasks => false,
             Self::MissingNamespace => false,
             Self::VolcanoCrdMissing { .. } => true,
-            Self::CronWithCheckpoint => false,
             Self::CoordinatorTaskMissing(_) => false,
             Self::UnsupportedFramework(_) => false,
             Self::TrainingContainerNoCommand { .. } => false,
