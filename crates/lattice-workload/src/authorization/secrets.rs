@@ -23,7 +23,7 @@ pub(crate) async fn authorize_secrets(
         .filter(|(_, r)| r.type_.is_secret())
         .filter_map(|(resource_name, r)| {
             let remote_key = r.secret_remote_key()?.to_string();
-            let provider = r.secret_params().ok()??.provider;
+            let provider = r.params.as_secret()?.provider.clone();
             Some((resource_name.clone(), remote_key, provider))
         })
         .collect();

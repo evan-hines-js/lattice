@@ -9,6 +9,27 @@ mod service;
 
 use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
+use lattice_common::system_namespaces;
+
+/// Reject workload CRDs deployed in system namespaces.
+///
+/// System namespaces host infrastructure without MeshMember coverage. Deploying
+/// workload CRDs there would create services subject to default-deny without
+/// explicit policies. Infrastructure namespaces WITH MeshMember coverage
+/// (kthena-system, monitoring, keda) are not in the system list.
+pub(crate) fn reject_system_namespace(
+    request: &AdmissionRequest<DynamicObject>,
+) -> Option<AdmissionResponse> {
+    let namespace = request.namespace.as_deref().unwrap_or_default();
+    if system_namespaces::is_system_namespace(namespace) {
+        let response = AdmissionResponse::from(request);
+        Some(response.deny(format!(
+            "workload CRDs cannot be deployed in system namespace '{namespace}'"
+        )))
+    } else {
+        None
+    }
+}
 
 /// Each CRD gets a validator that calls its existing validate() method
 pub trait Validator: Send + Sync {
@@ -58,7 +79,9 @@ impl Default for ValidatorRegistry {
 
 #[cfg(test)]
 pub(crate) mod tests_common {
-    pub use crate::test_helpers::{make_admission_request, make_update_admission_request};
+    pub use crate::test_helpers::{
+        make_admission_request, make_admission_request_in_namespace, make_update_admission_request,
+    };
 }
 
 #[cfg(test)]

@@ -194,7 +194,7 @@ pub async fn build_service_controllers(
                 }
             }
 
-            affected
+            let mut refs: Vec<ObjectRef<LatticeMeshMember>> = affected
                 .into_iter()
                 .filter_map(|dep| {
                     let node = graph.get_service(&ns, &dep)?;
@@ -202,7 +202,20 @@ pub async fn build_service_controllers(
                         .is_mesh_member()
                         .then(|| ObjectRef::<LatticeMeshMember>::new(&dep).within(&ns))
                 })
-                .collect()
+                .collect();
+
+            // depends_all services have dynamic outbound edges that aren't stored
+            // in edges_out, so affected_neighbors() won't find them. Trigger all
+            // depends_all services on any LMM change — the graph-hash skip gate
+            // in the reconciler prevents unnecessary work.
+            for (da_ns, da_name) in graph.depends_all_services() {
+                if da_ns == ns && da_name == name {
+                    continue;
+                }
+                refs.push(ObjectRef::<LatticeMeshMember>::new(&da_name).within(&da_ns));
+            }
+
+            refs
         })
         .shutdown_on_signal()
         .run(

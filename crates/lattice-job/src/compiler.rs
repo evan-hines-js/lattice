@@ -583,7 +583,7 @@ fn gpu_param<T>(
         .resources
         .values()
         .filter(|r| r.type_.is_gpu())
-        .find_map(|r| r.gpu_params().ok().flatten().and_then(|p| f(&p)))
+        .find_map(|r| r.params.as_gpu().and_then(|p| f(p)))
 }
 
 /// NCCL defaults per GPU model.

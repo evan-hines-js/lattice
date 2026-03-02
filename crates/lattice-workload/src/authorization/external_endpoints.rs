@@ -21,9 +21,9 @@ pub(crate) async fn authorize_external_endpoints(
         .iter()
         .filter(|(_, r)| r.type_.is_external_service() && r.direction.is_outbound())
         .flat_map(|(resource_name, r)| {
-            let params = match r.external_service_params() {
-                Ok(Some(p)) => p,
-                _ => return vec![],
+            let params = match r.params.as_external_service() {
+                Some(p) => p,
+                None => return vec![],
             };
             params
                 .parsed_endpoints()

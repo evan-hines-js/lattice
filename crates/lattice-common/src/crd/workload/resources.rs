@@ -190,6 +190,101 @@ pub struct ResourceMetadata {
 }
 
 // =============================================================================
+// Resource Params (typed per resource type)
+// =============================================================================
+
+/// Typed resource parameters, discriminated by `ResourceType`.
+///
+/// Deserialized from the Score `params` field based on the sibling `type` field
+/// in `ResourceSpec`. Each variant carries the strongly-typed parameter struct.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ResourceParams {
+    /// No params (service type, inbound-only declarations, etc.)
+    #[default]
+    None,
+    /// Volume provisioning parameters
+    Volume(VolumeParams),
+    /// Secret store parameters
+    Secret(SecretParams),
+    /// External service endpoint parameters
+    ExternalService(ExternalServiceParams),
+    /// GPU allocation parameters
+    Gpu(GpuParams),
+    /// Custom type parameters (pass-through)
+    Custom(BTreeMap<String, serde_json::Value>),
+}
+
+impl ResourceParams {
+    /// Get typed volume params, if this is a `Volume` variant.
+    pub fn as_volume(&self) -> Option<&VolumeParams> {
+        match self {
+            Self::Volume(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Get typed secret params, if this is a `Secret` variant.
+    pub fn as_secret(&self) -> Option<&SecretParams> {
+        match self {
+            Self::Secret(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Get typed external service params, if this is an `ExternalService` variant.
+    pub fn as_external_service(&self) -> Option<&ExternalServiceParams> {
+        match self {
+            Self::ExternalService(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Get typed GPU params, if this is a `Gpu` variant.
+    pub fn as_gpu(&self) -> Option<&GpuParams> {
+        match self {
+            Self::Gpu(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is `None` (no parameters).
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+impl JsonSchema for ResourceParams {
+    fn schema_name() -> String {
+        "ResourceParams".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        // Accept any object — the actual validation is done by the custom Deserialize
+        // on ResourceSpec which reads `type` first and then parses params.
+        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::Object.into()),
+            extensions: {
+                let mut ext = schemars::Map::new();
+                ext.insert(
+                    "x-kubernetes-preserve-unknown-fields".to_string(),
+                    serde_json::json!(true),
+                );
+                ext
+            },
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "Resource parameters, interpreted based on the sibling 'type' field"
+                        .to_string(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+}
+
+// =============================================================================
 // Resource Spec
 // =============================================================================
 
@@ -200,11 +295,11 @@ pub struct ResourceMetadata {
 /// - `class`: Optional specialization
 /// - `id`: Resource identifier for sharing across workloads
 /// - `metadata`: Annotations and other metadata
-/// - `params`: Provisioner-interpreted parameters (generic object)
+/// - `params`: Provisioner-interpreted parameters (typed per resource type)
 ///
 /// ## Lattice Extensions
 /// - `direction`: Bilateral agreement direction (inbound/outbound/both)
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceSpec {
     // =========================================================================
@@ -229,17 +324,12 @@ pub struct ResourceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ResourceMetadata>,
 
-    /// Provisioner-interpreted parameters (Score: params)
-    ///
-    /// Generic parameters that Lattice interprets based on resource type:
-    /// - volume: size, storageClass, accessMode
-    /// - service: (none - uses Lattice extensions)
+    /// Typed resource parameters, parsed based on `type`.
     ///
     /// Uses `x-kubernetes-preserve-unknown-fields` so Kubernetes won't prune
     /// nested objects (e.g., external service endpoint maps).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::crd::preserve_unknown_fields")]
-    pub params: Option<BTreeMap<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "ResourceParams::is_none")]
+    pub params: ResourceParams,
 
     // =========================================================================
     // Lattice Extensions (additions to Score, not replacements)
@@ -259,6 +349,140 @@ pub struct ResourceSpec {
     /// Use this to reference services in other namespaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+}
+
+/// Custom deserialization for ResourceSpec: reads `type` first, then parses
+/// `params` into the correct `ResourceParams` variant with inline validation.
+impl<'de> Deserialize<'de> for ResourceSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Raw helper that deserializes params as an untyped Value.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawResourceSpec {
+            #[serde(rename = "type", default)]
+            type_: ResourceType,
+            #[serde(default)]
+            class: Option<String>,
+            #[serde(default)]
+            id: Option<String>,
+            #[serde(default)]
+            metadata: Option<ResourceMetadata>,
+            #[serde(default)]
+            params: Option<serde_json::Value>,
+            #[serde(default)]
+            direction: DependencyDirection,
+            #[serde(default)]
+            namespace: Option<String>,
+        }
+
+        let raw = RawResourceSpec::deserialize(deserializer)?;
+
+        let params = match raw.params {
+            None => match &raw.type_ {
+                ResourceType::Volume => ResourceParams::Volume(VolumeParams::default()),
+                ResourceType::Gpu => ResourceParams::Gpu(GpuParams::default()),
+                ResourceType::Secret => {
+                    return Err(serde::de::Error::custom(
+                        "secret resource requires 'params' with 'provider'",
+                    ));
+                }
+                ResourceType::ExternalService => {
+                    return Err(serde::de::Error::custom(
+                        "external service resource requires 'params' with 'endpoints'",
+                    ));
+                }
+                _ => ResourceParams::None,
+            },
+            Some(value) => match &raw.type_ {
+                ResourceType::Volume => {
+                    let p: VolumeParams = serde_json::from_value(value)
+                        .map_err(|e| serde::de::Error::custom(format!("invalid volume params: {e}")))?;
+                    ResourceParams::Volume(p)
+                }
+                ResourceType::Secret => {
+                    let p: SecretParams = serde_json::from_value(value)
+                        .map_err(|e| serde::de::Error::custom(format!("invalid secret params: {e}")))?;
+                    if p.provider.is_empty() {
+                        return Err(serde::de::Error::custom(
+                            "secret resource requires 'provider' in params",
+                        ));
+                    }
+                    if let Some(ref interval) = p.refresh_interval {
+                        validate_duration_string(interval).map_err(|e| {
+                            serde::de::Error::custom(format!(
+                                "secret resource refresh_interval '{}': {}",
+                                interval, e
+                            ))
+                        })?;
+                    }
+                    if let Some(ref secret_type) = p.secret_type {
+                        const VALID_SECRET_TYPES: &[&str] = &[
+                            "Opaque",
+                            "kubernetes.io/tls",
+                            "kubernetes.io/dockerconfigjson",
+                            "kubernetes.io/dockercfg",
+                            "kubernetes.io/basic-auth",
+                            "kubernetes.io/ssh-auth",
+                            "kubernetes.io/service-account-token",
+                            "bootstrap.kubernetes.io/token",
+                        ];
+                        if !VALID_SECRET_TYPES.contains(&secret_type.as_str()) {
+                            return Err(serde::de::Error::custom(format!(
+                                "secret resource secret_type '{}' is not a recognized K8s secret type \
+                                 (valid: {})",
+                                secret_type,
+                                VALID_SECRET_TYPES.join(", ")
+                            )));
+                        }
+                    }
+                    ResourceParams::Secret(p)
+                }
+                ResourceType::ExternalService => {
+                    let p: ExternalServiceParams = serde_json::from_value(value)
+                        .map_err(|e| serde::de::Error::custom(format!("invalid external service params: {e}")))?;
+                    if p.endpoints.is_empty() {
+                        return Err(serde::de::Error::custom(
+                            "external service resource requires at least one endpoint in params",
+                        ));
+                    }
+                    for (name, url) in &p.endpoints {
+                        if crate::crd::ParsedEndpoint::parse(url).is_none() {
+                            return Err(serde::de::Error::custom(format!(
+                                "invalid endpoint URL for '{}': {}",
+                                name, url
+                            )));
+                        }
+                    }
+                    ResourceParams::ExternalService(p)
+                }
+                ResourceType::Gpu => {
+                    let p: GpuParams = serde_json::from_value(value)
+                        .map_err(|e| serde::de::Error::custom(format!("invalid gpu params: {e}")))?;
+                    p.validate().map_err(serde::de::Error::custom)?;
+                    ResourceParams::Gpu(p)
+                }
+                ResourceType::Service => ResourceParams::None,
+                ResourceType::Custom(_) => {
+                    let map: BTreeMap<String, serde_json::Value> = serde_json::from_value(value)
+                        .map_err(|e| serde::de::Error::custom(format!("invalid custom params: {e}")))?;
+                    ResourceParams::Custom(map)
+                }
+            },
+        };
+
+        Ok(ResourceSpec {
+            type_: raw.type_,
+            class: raw.class,
+            id: raw.id,
+            metadata: raw.metadata,
+            params,
+            direction: raw.direction,
+            namespace: raw.namespace,
+        })
+    }
 }
 
 // =============================================================================
@@ -595,33 +819,10 @@ fn parse_gpu_memory_mib(memory: &str) -> Result<u64, String> {
 // =============================================================================
 
 impl ResourceSpec {
-    /// Parse volume params from the generic Score `params` field
-    ///
-    /// Returns:
-    /// - `Ok(None)` if this is not a volume resource
-    /// - `Ok(Some(params))` if params parsed successfully (or defaults if missing)
-    /// - `Err(msg)` if JSON conversion failed (invalid params structure)
-    pub fn volume_params(&self) -> Result<Option<VolumeParams>, String> {
-        if !self.type_.is_volume() {
-            return Ok(None);
-        }
-        match &self.params {
-            Some(params) => {
-                let value = serde_json::to_value(params)
-                    .map_err(|e| format!("failed to serialize volume params: {}", e))?;
-                let volume_params = serde_json::from_value(value)
-                    .map_err(|e| format!("invalid volume params: {}", e))?;
-                Ok(Some(volume_params))
-            }
-            None => Ok(Some(VolumeParams::default())),
-        }
-    }
-
     /// Returns true if this is a volume resource that owns (creates) the PVC
     pub fn is_volume_owner(&self) -> bool {
-        self.volume_params()
-            .ok()
-            .flatten()
+        self.params
+            .as_volume()
             .map(|p| p.size.is_some())
             .unwrap_or(false)
     }
@@ -631,9 +832,8 @@ impl ResourceSpec {
         self.type_.is_volume()
             && self.id.is_some()
             && self
-                .volume_params()
-                .ok()
-                .flatten()
+                .params
+                .as_volume()
                 .map(|p| p.size.is_none())
                 .unwrap_or(true)
     }
@@ -649,24 +849,6 @@ impl ResourceSpec {
         })
     }
 
-    /// Parse GPU params from the generic Score `params` field
-    pub fn gpu_params(&self) -> Result<Option<GpuParams>, String> {
-        if !self.type_.is_gpu() {
-            return Ok(None);
-        }
-        match &self.params {
-            Some(params) => {
-                let value = serde_json::to_value(params)
-                    .map_err(|e| format!("failed to serialize gpu params: {}", e))?;
-                let gpu_params: GpuParams = serde_json::from_value(value)
-                    .map_err(|e| format!("invalid gpu params: {}", e))?;
-                gpu_params.validate()?;
-                Ok(Some(gpu_params))
-            }
-            None => Ok(Some(GpuParams::default())),
-        }
-    }
-
     /// Returns true if this is an inbound resource (policy declaration, not a dependency).
     pub fn is_inbound(&self) -> bool {
         self.direction == DependencyDirection::Inbound
@@ -678,100 +860,6 @@ impl ResourceSpec {
     /// and cannot be resolved to template outputs (no service to look up in the graph).
     pub fn is_mesh_wildcard(&self) -> bool {
         self.type_.is_service_like() && self.id.as_deref() == Some("*")
-    }
-
-    /// Parse secret params from the generic Score `params` field
-    ///
-    /// Returns:
-    /// - `Ok(None)` if this is not a secret resource
-    /// - `Ok(Some(params))` if params parsed successfully
-    /// - `Err(msg)` if JSON conversion failed or required fields missing
-    pub fn secret_params(&self) -> Result<Option<SecretParams>, String> {
-        if !self.type_.is_secret() {
-            return Ok(None);
-        }
-        match &self.params {
-            Some(params) => {
-                let value = serde_json::to_value(params)
-                    .map_err(|e| format!("failed to serialize secret params: {}", e))?;
-                let secret_params: SecretParams = serde_json::from_value(value)
-                    .map_err(|e| format!("invalid secret params: {}", e))?;
-
-                // Validate provider is specified
-                if secret_params.provider.is_empty() {
-                    return Err("secret resource requires 'provider' in params".to_string());
-                }
-
-                // Validate refresh_interval format if specified
-                if let Some(ref interval) = secret_params.refresh_interval {
-                    validate_duration_string(interval).map_err(|e| {
-                        format!("secret resource refresh_interval '{}': {}", interval, e)
-                    })?;
-                }
-
-                // Validate secret_type if specified
-                if let Some(ref secret_type) = secret_params.secret_type {
-                    const VALID_SECRET_TYPES: &[&str] = &[
-                        "Opaque",
-                        "kubernetes.io/tls",
-                        "kubernetes.io/dockerconfigjson",
-                        "kubernetes.io/dockercfg",
-                        "kubernetes.io/basic-auth",
-                        "kubernetes.io/ssh-auth",
-                        "kubernetes.io/service-account-token",
-                        "bootstrap.kubernetes.io/token",
-                    ];
-                    if !VALID_SECRET_TYPES.contains(&secret_type.as_str()) {
-                        return Err(format!(
-                            "secret resource secret_type '{}' is not a recognized K8s secret type \
-                             (valid: {})",
-                            secret_type,
-                            VALID_SECRET_TYPES.join(", ")
-                        ));
-                    }
-                }
-
-                Ok(Some(secret_params))
-            }
-            None => Err("secret resource requires 'params' with 'provider'".to_string()),
-        }
-    }
-
-    /// Parse external service params from the generic Score `params` field
-    ///
-    /// Returns:
-    /// - `Ok(None)` if this is not an external-service resource
-    /// - `Ok(Some(params))` if params parsed successfully
-    /// - `Err(msg)` if JSON conversion failed or required fields missing
-    pub fn external_service_params(&self) -> Result<Option<ExternalServiceParams>, String> {
-        if !self.type_.is_external_service() {
-            return Ok(None);
-        }
-        match &self.params {
-            Some(params) => {
-                let value = serde_json::to_value(params)
-                    .map_err(|e| format!("failed to serialize external service params: {}", e))?;
-                let ext_params: ExternalServiceParams = serde_json::from_value(value)
-                    .map_err(|e| format!("invalid external service params: {}", e))?;
-
-                if ext_params.endpoints.is_empty() {
-                    return Err(
-                        "external service resource requires at least one endpoint in params"
-                            .to_string(),
-                    );
-                }
-
-                // Validate all endpoint URLs parse successfully
-                for (name, url) in &ext_params.endpoints {
-                    if crate::crd::ParsedEndpoint::parse(url).is_none() {
-                        return Err(format!("invalid endpoint URL for '{}': {}", name, url));
-                    }
-                }
-
-                Ok(Some(ext_params))
-            }
-            None => Err("external service resource requires 'params' with 'endpoints'".to_string()),
-        }
     }
 
     /// Get the remote key for this secret resource (from the `id` field).
@@ -1017,17 +1105,15 @@ mod tests {
             type_: ResourceType::Volume,
             ..Default::default()
         };
-        assert!(resource.gpu_params().unwrap().is_none());
+        assert!(resource.params.as_gpu().is_none());
     }
 
     #[test]
     fn test_gpu_params_defaults_without_params() {
-        let resource = ResourceSpec {
-            type_: ResourceType::Gpu,
-            ..Default::default()
-        };
-        // gpu_params returns default GpuParams when no params are specified
-        let gpu = resource.gpu_params().unwrap().unwrap();
+        // Deserialize a GPU resource with no params — should get default GpuParams
+        let json = serde_json::json!({"type": "gpu"});
+        let resource: ResourceSpec = serde_json::from_value(json).unwrap();
+        let gpu = resource.params.as_gpu().unwrap();
         assert_eq!(gpu.count, 0);
     }
 
@@ -1205,67 +1291,63 @@ mod tests {
 
     #[test]
     fn test_secret_params_valid_refresh_interval() {
-        let resource = ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some("vault/path".to_string()),
-            params: Some(BTreeMap::from([
-                ("provider".to_string(), serde_json::json!("vault")),
-                ("refreshInterval".to_string(), serde_json::json!("1h")),
-            ])),
-            ..Default::default()
-        };
-        assert!(resource.secret_params().is_ok());
+        let json = serde_json::json!({
+            "type": "secret",
+            "id": "vault/path",
+            "params": {"provider": "vault", "refreshInterval": "1h"}
+        });
+        let resource: ResourceSpec = serde_json::from_value(json).unwrap();
+        assert!(resource.params.as_secret().is_some());
     }
 
     #[test]
     fn test_secret_params_invalid_refresh_interval() {
-        let resource = ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some("vault/path".to_string()),
-            params: Some(BTreeMap::from([
-                ("provider".to_string(), serde_json::json!("vault")),
-                (
-                    "refreshInterval".to_string(),
-                    serde_json::json!("not-a-duration"),
-                ),
-            ])),
-            ..Default::default()
-        };
-        let result = resource.secret_params();
+        let json = serde_json::json!({
+            "type": "secret",
+            "id": "vault/path",
+            "params": {"provider": "vault", "refreshInterval": "not-a-duration"}
+        });
+        let result = serde_json::from_value::<ResourceSpec>(json);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("refresh_interval"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("refresh_interval"), "error was: {err}");
     }
 
     #[test]
     fn test_secret_params_valid_secret_type() {
-        let resource = ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some("vault/path".to_string()),
-            params: Some(BTreeMap::from([
-                ("provider".to_string(), serde_json::json!("vault")),
-                (
-                    "secretType".to_string(),
-                    serde_json::json!("kubernetes.io/tls"),
-                ),
-            ])),
-            ..Default::default()
-        };
-        assert!(resource.secret_params().is_ok());
+        let json = serde_json::json!({
+            "type": "secret",
+            "id": "vault/path",
+            "params": {"provider": "vault", "secretType": "kubernetes.io/tls"}
+        });
+        let resource: ResourceSpec = serde_json::from_value(json).unwrap();
+        assert!(resource.params.as_secret().is_some());
     }
 
     #[test]
     fn test_secret_params_invalid_secret_type() {
-        let resource = ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some("vault/path".to_string()),
-            params: Some(BTreeMap::from([
-                ("provider".to_string(), serde_json::json!("vault")),
-                ("secretType".to_string(), serde_json::json!("invalid-type")),
-            ])),
-            ..Default::default()
-        };
-        let result = resource.secret_params();
+        let json = serde_json::json!({
+            "type": "secret",
+            "id": "vault/path",
+            "params": {"provider": "vault", "secretType": "invalid-type"}
+        });
+        let result = serde_json::from_value::<ResourceSpec>(json);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not a recognized"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not a recognized"), "error was: {err}");
+    }
+
+    #[test]
+    fn test_resource_params_accessors() {
+        let vol = ResourceParams::Volume(VolumeParams::default());
+        assert!(vol.as_volume().is_some());
+        assert!(vol.as_secret().is_none());
+        assert!(vol.as_gpu().is_none());
+        assert!(vol.as_external_service().is_none());
+        assert!(!vol.is_none());
+
+        let none = ResourceParams::None;
+        assert!(none.is_none());
+        assert!(none.as_volume().is_none());
     }
 }

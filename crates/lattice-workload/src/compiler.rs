@@ -499,11 +499,9 @@ impl<'a> WorkloadCompiler<'a> {
         }
 
         // When the service has ingress routes, the namespace's shared gateway proxy
-        // needs to reach the backend. Add its SA as an infrastructure caller so the
-        // AuthorizationPolicy includes its SPIFFE principal.
-        // This must be AFTER the wildcard override — the `*` wildcard means "accept
-        // all graph services via bilateral agreement" but doesn't cover infrastructure
-        // identities like the gateway proxy SA.
+        // needs to reach the backend. The gateway is registered in the graph by the
+        // MeshMember controller (via IngressCompiler), so this forms a bilateral
+        // agreement: the gateway has depends_all, this service allows it.
         if self.ingress.as_ref().is_some_and(|i| !i.routes.is_empty()) {
             allowed_callers.push(CallerRef {
                 name: mesh::ingress_gateway_sa_name(self.namespace),
@@ -569,7 +567,7 @@ impl<'a> WorkloadCompiler<'a> {
                     return vec![rule];
                 }
                 // Read endpoints from params.endpoints (inline model)
-                if let Ok(Some(params)) = r.external_service_params() {
+                if let Some(params) = r.params.as_external_service() {
                     return params
                         .parsed_endpoints()
                         .into_values()

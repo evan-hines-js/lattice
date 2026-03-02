@@ -4,7 +4,7 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
 use lattice_common::crd::LatticeModel;
 
-use super::Validator;
+use super::{reject_system_namespace, Validator};
 
 /// Validates LatticeModel CREATE and UPDATE requests
 pub struct ModelValidator;
@@ -15,6 +15,10 @@ impl Validator for ModelValidator {
     }
 
     fn validate(&self, request: &AdmissionRequest<DynamicObject>) -> AdmissionResponse {
+        if let Some(denied) = reject_system_namespace(request) {
+            return denied;
+        }
+
         let response = AdmissionResponse::from(request);
 
         let obj = match &request.object {
@@ -39,7 +43,9 @@ impl Validator for ModelValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validators::tests_common::make_admission_request;
+    use crate::validators::tests_common::{
+        make_admission_request, make_admission_request_in_namespace,
+    };
 
     fn valid_model_json() -> serde_json::Value {
         serde_json::json!({
@@ -141,5 +147,27 @@ mod tests {
         let validator = ModelValidator;
         let response = validator.validate(&request);
         assert!(!response.allowed, "missing object should be denied");
+    }
+
+    #[test]
+    fn denies_resource_in_system_namespace() {
+        let validator = ModelValidator;
+        let request = make_admission_request_in_namespace(
+            "lattice.dev",
+            "v1alpha1",
+            "latticemodels",
+            "kube-system",
+            valid_model_json(),
+        );
+        let response = validator.validate(&request);
+        assert!(
+            !response.allowed,
+            "model in system namespace should be denied"
+        );
+        let message = &response.result.message;
+        assert!(
+            message.contains("system namespace"),
+            "error should mention system namespace, got: {message}"
+        );
     }
 }

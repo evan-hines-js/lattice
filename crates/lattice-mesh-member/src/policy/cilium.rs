@@ -170,13 +170,8 @@ impl<'a> PolicyCompiler<'a> {
 
         // HBONE ingress: ztunnel wraps all inbound traffic on port 15008 in ambient mesh.
         // Required whenever this pod accepts any inbound traffic (mesh callers, webhooks,
-        // permissive ports, infrastructure callers like vmagent, or peer traffic).
-        let has_infra_callers = self.has_infrastructure_callers(service);
-        if !inbound_edges.is_empty()
-            || !ingress_rules.is_empty()
-            || has_infra_callers
-            || service.allow_peer_traffic
-        {
+        // permissive ports, or peer traffic).
+        if !inbound_edges.is_empty() || !ingress_rules.is_empty() || service.allow_peer_traffic {
             ingress_rules.insert(0, hbone_ingress_rule());
         }
 
@@ -201,9 +196,46 @@ impl<'a> PolicyCompiler<'a> {
         };
         egress_rules.push(dns_egress_rule(fqdn_rules));
 
-        // HBONE egress for outbound mesh dependencies, external FQDN egress, or peer traffic
-        if !outbound_edges.is_empty() || has_fqdn_egress || service.allow_peer_traffic {
+        // HBONE egress for outbound mesh dependencies to ambient callees,
+        // external FQDN egress, or peer traffic
+        let has_ambient_outbound = outbound_edges.iter().any(|e| {
+            self.graph
+                .get_service(&e.callee_namespace, &e.callee_name)
+                .is_some_and(|c| c.ambient)
+        });
+        if has_ambient_outbound || has_fqdn_egress || service.allow_peer_traffic {
             egress_rules.push(hbone_egress_rule());
+        }
+
+        // Direct egress for outbound edges to non-ambient callees.
+        // HBONE covers ambient-to-ambient traffic via ztunnel, but non-ambient
+        // callees require direct L4 egress on their service ports.
+        for edge in outbound_edges {
+            let callee = match self
+                .graph
+                .get_service(&edge.callee_namespace, &edge.callee_name)
+            {
+                Some(c) => c,
+                None => continue,
+            };
+            if callee.ambient {
+                continue; // HBONE covers this
+            }
+            let mut labels = callee.cilium_match_labels();
+            if edge.callee_namespace != namespace {
+                labels.insert(
+                    CILIUM_LABEL_NAMESPACE.to_string(),
+                    edge.callee_namespace.clone(),
+                );
+            }
+            let port_numbers: Vec<u16> = callee.ports.values().map(|pm| pm.target_port).collect();
+            if !port_numbers.is_empty() {
+                egress_rules.push(CiliumEgressRule {
+                    to_endpoints: vec![EndpointSelector::from_labels(labels)],
+                    to_ports: build_tcp_port_rules(&port_numbers),
+                    ..Default::default()
+                });
+            }
         }
 
         // Non-mesh egress rules from spec (entity, CIDR, FQDN)
@@ -273,32 +305,34 @@ impl<'a> PolicyCompiler<'a> {
             });
         }
 
-        // Infrastructure callers: label-based ingress with port restrictions.
-        // These are callers in allowed_callers that don't exist in the service graph
-        // (e.g. kthena-router, vmagent).
-        let inbound_edges = self
-            .graph
-            .get_active_inbound_edges(namespace, &service.name);
-        for (caller_ns, caller_name) in &service.allowed_callers {
-            if self.graph.get_service(caller_ns, caller_name).is_some() {
-                continue; // Handled by bilateral agreement edges below
-            }
-            let mut labels = BTreeMap::new();
-            labels.insert(CILIUM_LABEL_NAMESPACE.to_string(), caller_ns.clone());
-            labels.insert(
-                format!("k8s:{}", lattice_common::LABEL_NAME),
-                caller_name.clone(),
-            );
-            // Restrict to declared service ports
-            let port_numbers: Vec<u16> = service.ports.values().map(|pm| pm.target_port).collect();
+        // Direct TCP ingress for broadly permissive ports (any source)
+        let broad_ports = service.permissive_port_numbers();
+        if !broad_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
-                from_endpoints: vec![EndpointSelector::from_labels(labels)],
-                to_ports: build_tcp_port_rules(&port_numbers),
+                from_endpoints: vec![EndpointSelector::from_labels(BTreeMap::new())],
+                to_ports: build_tcp_port_rules(&broad_ports),
+                ..Default::default()
+            });
+        }
+
+        // Direct TCP ingress for webhook ports (kube-apiserver, remote-node, host)
+        let webhook_ports = service.webhook_port_numbers();
+        if !webhook_ports.is_empty() {
+            ingress_rules.push(CiliumIngressRule {
+                from_entities: vec![
+                    "remote-node".to_string(),
+                    "kube-apiserver".to_string(),
+                    "host".to_string(),
+                ],
+                to_ports: build_tcp_port_rules(&webhook_ports),
                 ..Default::default()
             });
         }
 
         // Bilateral agreement callers: label-based ingress with port restrictions
+        let inbound_edges = self
+            .graph
+            .get_active_inbound_edges(namespace, &service.name);
         for edge in &inbound_edges {
             let caller = match self
                 .graph
@@ -318,25 +352,6 @@ impl<'a> PolicyCompiler<'a> {
             ingress_rules.push(CiliumIngressRule {
                 from_endpoints: vec![EndpointSelector::from_labels(labels)],
                 to_ports: build_tcp_port_rules(&port_numbers),
-                ..Default::default()
-            });
-        }
-
-        // Implicit vmagent ingress: if the service has a "metrics" port, allow
-        // vmagent to scrape it (same convention as ServiceNode::allows)
-        if let Some(metrics_pm) = service.ports.get("metrics") {
-            let mut vmagent_labels = BTreeMap::new();
-            vmagent_labels.insert(
-                CILIUM_LABEL_NAMESPACE.to_string(),
-                lattice_common::MONITORING_NAMESPACE.to_string(),
-            );
-            vmagent_labels.insert(
-                format!("k8s:{}", lattice_common::LABEL_NAME),
-                lattice_common::VMAGENT_NODE_NAME.to_string(),
-            );
-            ingress_rules.push(CiliumIngressRule {
-                from_endpoints: vec![EndpointSelector::from_labels(vmagent_labels)],
-                to_ports: build_tcp_port_rules(&[metrics_pm.target_port]),
                 ..Default::default()
             });
         }

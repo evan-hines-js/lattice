@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 
 use lattice_common::crd::{
-    derived_name, IngressSpec, IngressTls, MeshMemberPort, PathMatchType, RouteKind,
+    derived_name, IngressSpec, IngressTls, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
+    PathMatchType, RouteKind,
 };
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
@@ -38,6 +39,17 @@ fn unique_listener_ports(listeners: &[GatewayListener]) -> Vec<u16> {
 // Generated Resources
 // =============================================================================
 
+/// Graph registration for an external workload created by a compilation step.
+///
+/// When a compiler creates resources for a workload managed by an external
+/// controller (e.g. Istio gateway pods), it produces a graph registration so
+/// the workload participates in bilateral agreement.
+#[derive(Clone, Debug)]
+pub struct GraphRegistration {
+    pub name: String,
+    pub spec: LatticeMeshMemberSpec,
+}
+
 /// Generated ingress resources (north-south traffic)
 #[derive(Clone, Debug, Default)]
 pub struct GeneratedIngress {
@@ -48,6 +60,8 @@ pub struct GeneratedIngress {
     pub grpc_routes: Vec<GrpcRoute>,
     pub tcp_routes: Vec<TcpRoute>,
     pub certificates: Vec<Certificate>,
+    /// Graph registration for the gateway proxy workload (managed by Istio).
+    pub gateway_graph_registration: Option<GraphRegistration>,
 }
 
 impl GeneratedIngress {
@@ -259,6 +273,24 @@ impl IngressCompiler {
                     listeners: all_listeners,
                 },
             ));
+            output.gateway_graph_registration = Some(GraphRegistration {
+                name: mesh::ingress_gateway_sa_name(namespace),
+                spec: LatticeMeshMemberSpec {
+                    target: MeshMemberTarget::Selector(BTreeMap::from([(
+                        GATEWAY_NAME_LABEL.to_string(),
+                        gateway_name,
+                    )])),
+                    ports: vec![],
+                    allowed_callers: vec![],
+                    dependencies: vec![],
+                    egress: vec![],
+                    allow_peer_traffic: false,
+                    depends_all: true,
+                    ingress: None,
+                    service_account: Some(mesh::ingress_gateway_sa_name(namespace)),
+                    ambient: true,
+                },
+            });
         }
 
         Ok(output)
@@ -1229,5 +1261,36 @@ mod tests {
         let auth_a = out_a.gateway_auth_policy.unwrap();
         let auth_b = out_b.gateway_auth_policy.unwrap();
         assert_ne!(auth_a.metadata.name, auth_b.metadata.name);
+    }
+
+    #[test]
+    fn produces_gateway_graph_registration() {
+        let ingress = make_ingress_spec(vec!["api.example.com"], false);
+        let output = IngressCompiler::compile("api", "prod", &ingress, &single_port()).unwrap();
+
+        let reg = output
+            .gateway_graph_registration
+            .expect("should produce graph registration for gateway");
+        assert_eq!(reg.name, "prod-ingress-istio");
+        assert_eq!(
+            reg.spec.service_account.as_deref(),
+            Some("prod-ingress-istio")
+        );
+        assert!(reg.spec.depends_all, "gateway should use depends_all");
+        assert!(reg.spec.ambient, "gateway should be ambient");
+        assert!(reg.spec.ports.is_empty(), "gateway has no service ports");
+        assert!(
+            reg.spec.allowed_callers.is_empty(),
+            "gateway is not called by other graph participants"
+        );
+
+        let selector = match &reg.spec.target {
+            MeshMemberTarget::Selector(s) => s,
+            _ => panic!("expected selector target"),
+        };
+        assert_eq!(
+            selector.get("gateway.networking.k8s.io/gateway-name"),
+            Some(&"prod-ingress".to_string())
+        );
     }
 }

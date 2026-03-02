@@ -156,7 +156,7 @@ impl PodTemplateCompiler {
             .resources
             .values()
             .find(|r| r.type_.is_gpu())
-            .and_then(|r| r.gpu_params().ok().flatten())
+            .and_then(|r| r.params.as_gpu().cloned())
     }
 
     /// Compile containers from a WorkloadSpec using rendered container data

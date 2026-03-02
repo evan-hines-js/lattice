@@ -4,7 +4,7 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
 use lattice_common::crd::LatticeJob;
 
-use super::Validator;
+use super::{reject_system_namespace, Validator};
 
 /// Validates LatticeJob CREATE and UPDATE requests
 pub struct JobValidator;
@@ -15,6 +15,10 @@ impl Validator for JobValidator {
     }
 
     fn validate(&self, request: &AdmissionRequest<DynamicObject>) -> AdmissionResponse {
+        if let Some(denied) = reject_system_namespace(request) {
+            return denied;
+        }
+
         let response = AdmissionResponse::from(request);
 
         let obj = match &request.object {
@@ -39,7 +43,9 @@ impl Validator for JobValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validators::tests_common::make_admission_request;
+    use crate::validators::tests_common::{
+        make_admission_request, make_admission_request_in_namespace,
+    };
 
     fn valid_job_json() -> serde_json::Value {
         serde_json::json!({
@@ -256,6 +262,28 @@ mod tests {
         assert!(
             response.allowed,
             "job with explicit policies should be allowed"
+        );
+    }
+
+    #[test]
+    fn denies_resource_in_system_namespace() {
+        let validator = JobValidator;
+        let request = make_admission_request_in_namespace(
+            "lattice.dev",
+            "v1alpha1",
+            "latticejobs",
+            "istio-system",
+            valid_job_json(),
+        );
+        let response = validator.validate(&request);
+        assert!(
+            !response.allowed,
+            "job in system namespace should be denied"
+        );
+        let message = &response.result.message;
+        assert!(
+            message.contains("system namespace"),
+            "error should mention system namespace, got: {message}"
         );
     }
 }

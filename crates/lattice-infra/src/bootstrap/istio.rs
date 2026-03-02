@@ -174,7 +174,11 @@ impl IstioReconciler {
                     from: vec![],
                     to: vec![AuthorizationOperation {
                         operation: OperationSpec {
-                            ports: vec!["8443".to_string(), "50051".to_string()],
+                            ports: vec![
+                                "8443".to_string(),
+                                "50051".to_string(),
+                                "8787".to_string(),
+                            ],
                             hosts: vec![],
                         },
                     }],
@@ -288,5 +292,6 @@ mod tests {
             .collect();
         assert!(ports.contains(&"8443"));
         assert!(ports.contains(&"50051"));
+        assert!(ports.contains(&"8787"));
     }
 }

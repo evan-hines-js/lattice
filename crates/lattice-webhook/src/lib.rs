@@ -52,7 +52,7 @@ pub(crate) mod test_helpers {
     use kube::core::admission::{AdmissionRequest, AdmissionReview};
     use kube::core::DynamicObject;
 
-    /// Build an AdmissionRequest with the given GVR and object JSON.
+    /// Build an AdmissionRequest with the given GVR, namespace, and object JSON.
     ///
     /// Constructs a full AdmissionReview JSON and deserializes it, which
     /// ensures all fields are correctly populated regardless of struct
@@ -63,11 +63,23 @@ pub(crate) mod test_helpers {
         resource: &str,
         object_json: serde_json::Value,
     ) -> AdmissionRequest<DynamicObject> {
+        make_admission_request_in_namespace(group, version, resource, "default", object_json)
+    }
+
+    /// Build an AdmissionRequest targeting a specific namespace.
+    pub fn make_admission_request_in_namespace(
+        group: &str,
+        version: &str,
+        resource: &str,
+        namespace: &str,
+        object_json: serde_json::Value,
+    ) -> AdmissionRequest<DynamicObject> {
         let review_json = serde_json::json!({
             "apiVersion": "admission.k8s.io/v1",
             "kind": "AdmissionReview",
             "request": {
                 "uid": "test-uid",
+                "namespace": namespace,
                 "kind": {
                     "group": group,
                     "version": version,
@@ -110,6 +122,7 @@ pub(crate) mod test_helpers {
             "kind": "AdmissionReview",
             "request": {
                 "uid": "test-uid",
+                "namespace": "default",
                 "kind": {
                     "group": group,
                     "version": version,

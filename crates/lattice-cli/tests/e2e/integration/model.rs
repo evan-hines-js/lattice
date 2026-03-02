@@ -1225,29 +1225,33 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
 }
 
 const INFERENCE_TESTER_NAME: &str = "inference-tester";
-const INFERENCE_TESTER_NAMESPACE: &str = "kthena-system";
+const INFERENCE_TESTER_NAMESPACE: &str = "inference-tester";
 
 /// Deploy a long-lived inference tester as a LatticeService that continuously
 /// curls the decode entry service and emits cycle markers with
 /// INFERENCE:VALID / INFERENCE:INVALID results.
-///
-/// Deployed in `kthena-system` (system namespace, exempt from mesh default-deny)
-/// to avoid needing additional mesh policies.
 async fn deploy_inference_tester(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Deploying inference tester LatticeService...");
+
+    ensure_fresh_namespace(kubeconfig, INFERENCE_TESTER_NAMESPACE).await?;
 
     let svc_url = "http://kthena-router.kthena-system.svc.cluster.local/v1/completions";
 
     let script = format!(
         r#"while true; do
 echo "{cycle_start}"
-RESP=$(curl -sf -X POST "{url}" \
+HTTP_CODE=$(curl -s -o /tmp/resp.txt -w '%{{http_code}}' -X POST "{url}" \
   -H "Content-Type: application/json" \
-  -d '{{"model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B","prompt":"hello","max_tokens":1}}' 2>&1) || RESP=""
-if echo "$RESP" | grep -q '"choices"'; then
-  echo "INFERENCE:VALID"
+  -d '{{"model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B","prompt":"hello","max_tokens":1}}' 2>/tmp/curl_err.txt)
+CURL_EXIT=$?
+RESP=$(cat /tmp/resp.txt 2>/dev/null)
+CURL_ERR=$(cat /tmp/curl_err.txt 2>/dev/null)
+if [ "$CURL_EXIT" -ne 0 ]; then
+  echo "INFERENCE:INVALID curl_exit=$CURL_EXIT http=$HTTP_CODE err=$CURL_ERR"
+elif echo "$RESP" | grep -q '"choices"'; then
+  echo "INFERENCE:VALID http=$HTTP_CODE"
 else
-  echo "INFERENCE:INVALID resp=$RESP"
+  echo "INFERENCE:INVALID http=$HTTP_CODE body=$RESP"
 fi
 echo "{cycle_end}"
 sleep 5
@@ -1262,11 +1266,7 @@ done"#,
         "curl".to_string(),
         ContainerSpec {
             image: CURL_IMAGE.clone(),
-            command: Some(vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                script,
-            ]),
+            command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), script]),
             resources: Some(ResourceRequirements {
                 requests: Some(ResourceQuantity {
                     cpu: Some("10m".to_string()),
@@ -1277,6 +1277,30 @@ done"#,
                     memory: Some("64Mi".to_string()),
                 }),
             }),
+            security: Some(SecurityContext {
+                run_as_user: Some(100),
+                apparmor_profile: Some("Unconfined".to_string()),
+                allowed_binaries: vec!["*".to_string()],
+                ..Default::default()
+            }),
+            volumes: {
+                let mut v = BTreeMap::new();
+                v.insert("/tmp".to_string(), Default::default());
+                v
+            },
+            ..Default::default()
+        },
+    );
+
+    use lattice_common::crd::{DependencyDirection, ResourceSpec, ResourceType};
+
+    let mut resources = BTreeMap::new();
+    resources.insert(
+        "kthena-router".to_string(),
+        ResourceSpec {
+            type_: ResourceType::Service,
+            direction: DependencyDirection::Outbound,
+            namespace: Some("kthena-system".to_string()),
             ..Default::default()
         },
     );
@@ -1285,7 +1309,7 @@ done"#,
         INFERENCE_TESTER_NAME,
         INFERENCE_TESTER_NAMESPACE,
         containers,
-        BTreeMap::new(),
+        resources,
     );
 
     deploy_and_wait_for_phase(
@@ -1332,7 +1356,7 @@ async fn test_model_inference(kubeconfig: &str) -> Result<(), String> {
     let start = std::time::Instant::now();
 
     loop {
-        let label = format!("lattice.dev/service={}", INFERENCE_TESTER_NAME);
+        let label = format!("{}={}", lattice_common::LABEL_NAME, INFERENCE_TESTER_NAME);
         let logs = run_kubectl(&[
             "--kubeconfig",
             kubeconfig,
@@ -1558,6 +1582,7 @@ pub async fn run_model_tests(kubeconfig: &str) -> Result<(), String> {
 
     // Cleanup regardless of test result
     cleanup_inference_tester(kubeconfig).await;
+    delete_namespace(kubeconfig, INFERENCE_TESTER_NAMESPACE).await;
     delete_namespace(kubeconfig, MODEL_NAMESPACE).await;
 
     result

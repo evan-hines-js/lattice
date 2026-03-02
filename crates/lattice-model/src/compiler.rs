@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    derived_name, CallerRef, LatticeMeshMember, LatticeModel, MeshMemberPort, PeerAuth,
+    derived_name, CallerRef, LatticeMeshMember, LatticeModel, MeshMemberPort, PeerAuth, PortSpec,
     ProviderType,
 };
 use lattice_common::graph::ServiceGraph;
@@ -91,7 +91,29 @@ pub async fn compile_model(
     }
 
     // Apply defaults to each role via strategic merge patch (compile-time only)
-    let roles = model.spec.merged_roles();
+    let mut roles = model.spec.merged_roles();
+
+    // When routing is configured with a port, inject it as "inference" into each
+    // role's entry workload. Roles like prefill may declare no service.ports,
+    // causing WorkloadCompiler to skip mesh member creation. The inference port
+    // ensures every role gets a mesh member and participates in the service graph.
+    if let Some(ref routing) = model.spec.routing {
+        if let Some(inference_port) = routing.port {
+            for role_spec in roles.values_mut() {
+                let svc = role_spec
+                    .entry_workload
+                    .service
+                    .get_or_insert_with(Default::default);
+                svc.ports
+                    .entry("inference".to_string())
+                    .or_insert(PortSpec {
+                        port: inference_port,
+                        target_port: None,
+                        protocol: None,
+                    });
+            }
+        }
+    }
 
     let mut role_templates: BTreeMap<String, RoleTemplates> = BTreeMap::new();
     let mut config = CompiledConfig::default();
@@ -304,7 +326,7 @@ pub async fn compile_model(
 
     // When routing or autoscaling is configured, ensure mesh policies allow
     // the Kthena router/autoscaler to reach model pods.
-    augment_infra_callers(
+    augment_kthena_callers(
         name,
         &roles,
         model.spec.routing.as_ref(),
@@ -347,8 +369,8 @@ pub async fn compile_model(
 
     // Model serving: opt out of ambient mesh. All model pods share the
     // `lattice.dev/model` group label for Cilium L4 peer traffic rules.
-    // Infrastructure callers (router, autoscaler) are handled by
-    // compile_direct_cilium_policy via label-based ingress.
+    // Kthena callers (router, autoscaler) are handled by bilateral agreement
+    // via compile_direct_cilium_policy label-based ingress.
     for mm in &mut mesh_members {
         mm.spec.ambient = false;
         mm.spec.target = lattice_common::crd::MeshMemberTarget::Selector(
@@ -414,17 +436,21 @@ fn compile_peer_service(
     })
 }
 
-/// Augment mesh members with infrastructure callers for routing and autoscaling.
+/// Augment mesh members with Kthena callers for routing and autoscaling.
 ///
 /// For each model role, adds callers and ports to existing mesh members:
 /// - Kthena router + inference port (when routing is configured)
 /// - Kthena autoscaler + metrics port (when autoscaling is active)
 /// - `allow_peer_traffic` on "prefill"/"decode" roles for PD disaggregation
 ///
+/// These callers form bilateral agreements with the kthena-router and
+/// kthena-autoscaler MeshMembers deployed in kthena-system (which use
+/// `depends_all: true`).
+///
 /// Mesh members must already exist (created by WorkloadCompiler after graph
 /// registration). Workers without mesh members are silently skipped — they
 /// don't receive direct inference traffic.
-fn augment_infra_callers(
+fn augment_kthena_callers(
     model_name: &str,
     roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
     routing: Option<&lattice_common::crd::ModelRoutingSpec>,
@@ -1549,6 +1575,87 @@ mod tests {
         assert!(
             compiled.peer_services.is_empty(),
             "no peer services without kv_connector"
+        );
+    }
+
+    #[tokio::test]
+    async fn prefill_role_without_ports_gets_mesh_member_via_routing_port() {
+        // A prefill role with no service.ports should still get a mesh member
+        // when routing.port is configured, because the inference port is injected.
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "prefill:latest".to_string(),
+                ..Default::default()
+            },
+        );
+        let prefill = ModelRoleSpec {
+            replicas: Some(1),
+            entry_workload: WorkloadSpec {
+                containers,
+                // No service ports declared
+                ..Default::default()
+            },
+            entry_runtime: RuntimeSpec::default(),
+            worker_replicas: None,
+            worker_workload: None,
+            worker_runtime: None,
+            autoscaling: None,
+        };
+
+        let mut roles = BTreeMap::new();
+        roles.insert("prefill".to_string(), prefill);
+        roles.insert("decode".to_string(), make_role("decode:latest", 4));
+
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(basic_routing()),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        register_model_roles(&model, &graph);
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        // Prefill role should have a mesh member with inference port injected
+        let prefill_mm = compiled
+            .mesh_members
+            .iter()
+            .find(|mm| mm.metadata.name.as_deref() == Some("test-model-prefill"))
+            .expect("prefill role should have a mesh member when routing.port is set");
+
+        let has_inference_port = prefill_mm
+            .spec
+            .ports
+            .iter()
+            .any(|p| p.port == 8000 && p.name == "inference");
+        assert!(
+            has_inference_port,
+            "prefill mesh member should have the inference port"
+        );
+
+        // Router should be an allowed caller
+        let has_router = prefill_mm.spec.allowed_callers.iter().any(|c| {
+            c.name == KTHENA_ROUTER_SA && c.namespace.as_deref() == Some(KTHENA_NAMESPACE)
+        });
+        assert!(
+            has_router,
+            "kthena-router should be an allowed caller on prefill"
         );
     }
 }

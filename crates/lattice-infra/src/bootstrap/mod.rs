@@ -24,18 +24,21 @@ pub mod tetragon;
 pub mod velero;
 pub mod volcano;
 
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use kube::ResourceExt;
 use tracing::debug;
 
 use lattice_common::crd::{
-    BackupsConfig, BootstrapProvider, CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget,
-    InfraComponentStatus, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec,
-    MonitoringConfig, NetworkTopologyConfig, ProviderType,
+    BackupsConfig, BootstrapProvider, CallerRef, CedarPolicy, CedarPolicySpec, EgressRule,
+    EgressTarget, InfraComponentStatus, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec,
+    MeshMemberPort, MeshMemberTarget, MonitoringConfig, NetworkTopologyConfig, PeerAuth,
+    ProviderType,
 };
 use lattice_common::{
-    DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE, MONITORING_NAMESPACE, VMAGENT_SA_NAME,
+    DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT,
+    MONITORING_NAMESPACE, VMAGENT_SA_NAME,
 };
 
 /// A single infrastructure component with its name, version, and manifests.
@@ -224,6 +227,20 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
             });
         }
 
+        // Enroll lattice-system in ambient mesh so ESO can reach the operator's
+        // local-secrets webhook via HBONE/mTLS. Applied in Phase 1 so the
+        // namespace label and MeshMember CRD are present before ESO starts in
+        // Phase 2. The static operator-allow AuthorizationPolicy (above) covers
+        // the bootstrap window before the MeshMember controller processes this.
+        let mut operator_manifests = vec![namespace_yaml_ambient(LATTICE_SYSTEM_NAMESPACE)];
+        operator_manifests.extend(serialize_lmms(vec![generate_operator_mesh_member()])?);
+        components.push(InfraComponent {
+            name: "operator-mesh-enrollment",
+            version: "1",
+            manifests: operator_manifests,
+            health_namespace: None,
+        });
+
         phases.push(InfraPhase {
             name: "service-mesh",
             components,
@@ -266,6 +283,30 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
             health_namespace: None, // DaemonSet, not deployments
         });
 
+        // Mesh policies for core components (ESO, Volcano, Kthena)
+        // These must be in Phase 2 because these namespaces are subject to
+        // default-deny after Phase 1 (service-mesh) completes.
+        if !config.skip_service_mesh {
+            let mut mesh_manifests = Vec::new();
+            mesh_manifests.extend(serialize_lmms(eso::generate_eso_mesh_members())?);
+            mesh_manifests.extend(serialize_lmms(volcano::generate_volcano_mesh_members())?);
+            mesh_manifests.extend(serialize_lmms(kthena::generate_kthena_mesh_members())?);
+            mesh_manifests.push(
+                serde_json::to_string_pretty(&generate_kthena_router_cedar_policy())
+                    .map_err(|e| format!("Failed to serialize CedarPolicy: {e}"))?,
+            );
+            mesh_manifests.push(
+                serde_json::to_string_pretty(&generate_kthena_autoscaler_cedar_policy())
+                    .map_err(|e| format!("Failed to serialize CedarPolicy: {e}"))?,
+            );
+            components.push(InfraComponent {
+                name: "core-mesh-policies",
+                version: "1",
+                manifests: mesh_manifests,
+                health_namespace: None,
+            });
+        }
+
         phases.push(InfraPhase {
             name: "core",
             components,
@@ -295,7 +336,7 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
             },
         ];
 
-        // Mesh policies for monitoring components
+        // Mesh policies for monitoring components (keda + monitoring only)
         if !config.skip_service_mesh {
             let mut mesh_manifests = Vec::new();
             mesh_manifests.extend(serialize_lmms(keda::generate_keda_mesh_members())?);
@@ -323,27 +364,49 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
 
     // Phase 4: GPU (conditional)
     if config.gpu {
+        let mut components = vec![InfraComponent {
+            name: "gpu-operator",
+            version: gpu::gpu_operator_version(),
+            manifests: gpu::generate_gpu_stack().to_vec(),
+            health_namespace: Some("gpu-operator"),
+        }];
+
+        if !config.skip_service_mesh {
+            components.push(InfraComponent {
+                name: "gpu-mesh-policies",
+                version: "1",
+                manifests: serialize_lmms(gpu::generate_gpu_mesh_members())?,
+                health_namespace: None,
+            });
+        }
+
         phases.push(InfraPhase {
             name: "gpu",
-            components: vec![InfraComponent {
-                name: "gpu-operator",
-                version: gpu::gpu_operator_version(),
-                manifests: gpu::generate_gpu_stack().to_vec(),
-                health_namespace: Some("gpu-operator"),
-            }],
+            components,
         });
     }
 
     // Phase 5: backup (conditional)
     if config.backups.enabled {
+        let mut components = vec![InfraComponent {
+            name: "velero",
+            version: velero::velero_version(),
+            manifests: velero::generate_velero().to_vec(),
+            health_namespace: Some("velero"),
+        }];
+
+        if !config.skip_service_mesh {
+            components.push(InfraComponent {
+                name: "velero-mesh-policies",
+                version: "1",
+                manifests: serialize_lmms(velero::generate_velero_mesh_members())?,
+                health_namespace: None,
+            });
+        }
+
         phases.push(InfraPhase {
             name: "backup",
-            components: vec![InfraComponent {
-                name: "velero",
-                version: velero::velero_version(),
-                manifests: velero::generate_velero().to_vec(),
-                health_namespace: Some("velero"),
-            }],
+            components,
         });
     }
 
@@ -536,6 +599,56 @@ pub(crate) fn kube_apiserver_egress() -> EgressRule {
     }
 }
 
+/// Generate a LatticeMeshMember for the lattice-operator itself.
+///
+/// Enrolls the operator in the ambient mesh so ESO (also ambient) can reach
+/// the local-secrets webhook via proper HBONE/mTLS instead of an FQDN egress
+/// hack. Ports 8443 (bootstrap webhook) and 50051 (agent gRPC) use Webhook
+/// PeerAuth because their callers lack mesh identity.
+pub fn generate_operator_mesh_member() -> LatticeMeshMember {
+    lmm(
+        "lattice-operator",
+        LATTICE_SYSTEM_NAMESPACE,
+        LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app".to_string(),
+                "lattice-operator".to_string(),
+            )])),
+            ports: vec![
+                MeshMemberPort {
+                    port: DEFAULT_BOOTSTRAP_PORT,
+                    service_port: None,
+                    name: "webhook".to_string(),
+                    peer_auth: PeerAuth::Webhook,
+                },
+                MeshMemberPort {
+                    port: DEFAULT_GRPC_PORT,
+                    service_port: None,
+                    name: "grpc".to_string(),
+                    peer_auth: PeerAuth::Webhook,
+                },
+                MeshMemberPort {
+                    port: LOCAL_SECRETS_PORT,
+                    service_port: None,
+                    name: "local-secrets".to_string(),
+                    peer_auth: PeerAuth::Strict,
+                },
+            ],
+            allowed_callers: vec![CallerRef {
+                name: "external-secrets".to_string(),
+                namespace: Some("external-secrets".to_string()),
+            }],
+            dependencies: vec![],
+            egress: vec![kube_apiserver_egress()],
+            allow_peer_traffic: false,
+            depends_all: false,
+            ingress: None,
+            service_account: None,
+            ambient: true,
+        },
+    )
+}
+
 /// Create a namespaced LatticeMeshMember.
 pub(crate) fn lmm(name: &str, namespace: &str, spec: LatticeMeshMemberSpec) -> LatticeMeshMember {
     let mut member = LatticeMeshMember::new(name, spec);
@@ -559,6 +672,74 @@ fn generate_vmagent_cedar_policy() -> CedarPolicy {
     resource == Lattice::Mesh::"outbound"
 );"#,
                 MONITORING_NAMESPACE, VMAGENT_SA_NAME,
+            ),
+            priority: 0,
+            enabled: true,
+            propagate: true,
+        },
+    );
+    policy.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+    policy
+}
+
+/// Generate the CedarPolicy that permits kthena-router's wildcard traffic.
+///
+/// kthena-router uses `depends_all: true` to reach any model service that
+/// declares it as an allowed caller (outbound), and `allowed_callers: [*]`
+/// so any service can send inference requests through it (inbound).
+fn generate_kthena_router_cedar_policy() -> CedarPolicy {
+    let principal = format!(
+        "{}/{}",
+        lattice_common::KTHENA_NAMESPACE,
+        lattice_common::KTHENA_ROUTER_SA,
+    );
+    let mut policy = CedarPolicy::new(
+        "kthena-router-wildcard",
+        CedarPolicySpec {
+            description: Some(
+                "Allow kthena-router wildcard outbound (model routing) and inbound (inference requests)".to_string(),
+            ),
+            policies: format!(
+                r#"permit(
+    principal == Lattice::Service::"{principal}",
+    action == Lattice::Action::"AllowWildcard",
+    resource == Lattice::Mesh::"outbound"
+);
+
+permit(
+    principal == Lattice::Service::"{principal}",
+    action == Lattice::Action::"AllowWildcard",
+    resource == Lattice::Mesh::"inbound"
+);"#,
+            ),
+            priority: 0,
+            enabled: true,
+            propagate: true,
+        },
+    );
+    policy.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+    policy
+}
+
+/// Generate the CedarPolicy that permits kthena-autoscaler's wildcard outbound.
+///
+/// kthena-autoscaler uses `depends_all: true` to scrape metrics from model
+/// services for autoscaling decisions. This Cedar policy authorizes that wildcard.
+fn generate_kthena_autoscaler_cedar_policy() -> CedarPolicy {
+    let mut policy = CedarPolicy::new(
+        "kthena-autoscaler-wildcard-outbound",
+        CedarPolicySpec {
+            description: Some(
+                "Allow kthena-autoscaler wildcard outbound for model metrics scraping".to_string(),
+            ),
+            policies: format!(
+                r#"permit(
+    principal == Lattice::Service::"{}/{}",
+    action == Lattice::Action::"AllowWildcard",
+    resource == Lattice::Mesh::"outbound"
+);"#,
+                lattice_common::KTHENA_NAMESPACE,
+                lattice_common::KTHENA_AUTOSCALER_SA,
             ),
             priority: 0,
             enabled: true,
@@ -779,5 +960,73 @@ mod tests {
         assert_eq!(status.name, "test");
         assert_eq!(status.desired_version, "1.0.0");
         assert!(status.current_version.is_none());
+    }
+
+    #[test]
+    fn operator_mesh_member_generated() {
+        let member = generate_operator_mesh_member();
+        assert_eq!(member.metadata.name.as_deref(), Some("lattice-operator"));
+        assert_eq!(
+            member.metadata.namespace.as_deref(),
+            Some(LATTICE_SYSTEM_NAMESPACE)
+        );
+        assert!(member.spec.validate().is_ok());
+        assert!(member.spec.ambient);
+
+        // 3 ports: webhook (8443), grpc (50051), local-secrets (8787)
+        assert_eq!(member.spec.ports.len(), 3);
+
+        let webhook = member
+            .spec
+            .ports
+            .iter()
+            .find(|p| p.name == "webhook")
+            .expect("webhook port");
+        assert_eq!(webhook.port, DEFAULT_BOOTSTRAP_PORT);
+        assert_eq!(webhook.peer_auth, PeerAuth::Webhook);
+
+        let grpc = member
+            .spec
+            .ports
+            .iter()
+            .find(|p| p.name == "grpc")
+            .expect("grpc port");
+        assert_eq!(grpc.port, DEFAULT_GRPC_PORT);
+        assert_eq!(grpc.peer_auth, PeerAuth::Webhook);
+
+        let secrets = member
+            .spec
+            .ports
+            .iter()
+            .find(|p| p.name == "local-secrets")
+            .expect("local-secrets port");
+        assert_eq!(secrets.port, LOCAL_SECRETS_PORT);
+        assert_eq!(secrets.peer_auth, PeerAuth::Strict);
+
+        // ESO is the only allowed caller
+        assert_eq!(member.spec.allowed_callers.len(), 1);
+        assert_eq!(member.spec.allowed_callers[0].name, "external-secrets");
+        assert_eq!(
+            member.spec.allowed_callers[0].namespace.as_deref(),
+            Some("external-secrets")
+        );
+    }
+
+    #[test]
+    fn service_mesh_phase_includes_operator_enrollment() {
+        let config = InfrastructureConfig::default();
+        let phases = generate_phases(&config).expect("should generate phases");
+
+        let mesh_phase = phases
+            .iter()
+            .find(|p| p.name == "service-mesh")
+            .expect("service-mesh phase should exist");
+        assert!(
+            mesh_phase
+                .components
+                .iter()
+                .any(|c| c.name == "operator-mesh-enrollment"),
+            "service-mesh phase should include operator mesh enrollment"
+        );
     }
 }

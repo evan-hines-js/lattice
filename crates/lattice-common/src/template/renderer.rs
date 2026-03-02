@@ -663,7 +663,7 @@ mod tests {
     use super::*;
     use crate::crd::{
         ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec,
-        ResourceSpec, ResourceType, ServicePortsSpec, WorkloadSpec,
+        ResourceParams, ResourceSpec, ResourceType, ServicePortsSpec, WorkloadSpec,
     };
     use crate::template::TemplateString;
     use kube::api::ObjectMeta;
@@ -756,7 +756,7 @@ mod tests {
                 id: Some("postgres".to_string()),
                 class: None,
                 metadata: None,
-                params: None,
+                params: ResourceParams::None,
                 namespace: None,
             },
         );
@@ -966,7 +966,7 @@ mod tests {
                 id: Some("postgres".to_string()),
                 class: None,
                 metadata: None,
-                params: None,
+                params: ResourceParams::None,
                 namespace: None,
             },
         );
@@ -2066,7 +2066,7 @@ mod tests {
                 id: Some("postgres".to_string()),
                 class: None,
                 metadata: None,
-                params: None,
+                params: ResourceParams::None,
                 namespace: None,
             },
         );

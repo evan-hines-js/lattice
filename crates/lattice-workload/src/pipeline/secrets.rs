@@ -168,10 +168,8 @@ impl SecretsCompiler {
 
         for (resource_name, resource_spec) in secret_resources {
             let params = resource_spec
-                .secret_params()
-                .map_err(|e| {
-                    CompilationError::secret(format!("secret resource '{}': {}", resource_name, e))
-                })?
+                .params
+                .as_secret()
                 .ok_or_else(|| {
                     CompilationError::secret(format!(
                         "secret resource '{}': missing params",
@@ -238,7 +236,9 @@ impl SecretsCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{ContainerSpec, ResourceSpec, ResourceType, WorkloadSpec};
+    use lattice_common::crd::{
+        ContainerSpec, ResourceParams, ResourceSpec, ResourceType, SecretParams, WorkloadSpec,
+    };
     use std::collections::BTreeMap;
 
     /// (name, remote_key, provider, keys, refresh_interval)
@@ -254,21 +254,17 @@ mod tests {
         let mut resources = BTreeMap::new();
 
         for (name, remote_key, provider, keys, refresh_interval) in secrets {
-            let mut params = BTreeMap::new();
-            params.insert("provider".to_string(), serde_json::json!(provider));
-            if let Some(ks) = keys {
-                params.insert("keys".to_string(), serde_json::json!(ks));
-            }
-            if let Some(ri) = refresh_interval {
-                params.insert("refreshInterval".to_string(), serde_json::json!(ri));
-            }
-
             resources.insert(
                 name.to_string(),
                 ResourceSpec {
                     type_: ResourceType::Secret,
                     id: Some(remote_key.to_string()),
-                    params: Some(params),
+                    params: ResourceParams::Secret(SecretParams {
+                        provider: provider.to_string(),
+                        keys: keys.map(|ks| ks.into_iter().map(|k| k.to_string()).collect()),
+                        refresh_interval: refresh_interval.map(|r| r.to_string()),
+                        secret_type: None,
+                    }),
                     ..Default::default()
                 },
             );
@@ -403,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn error_when_missing_provider() {
+    fn error_when_missing_params() {
         let mut spec = make_spec_with_secrets(vec![(
             "db-creds",
             "database/prod/credentials",
@@ -412,11 +408,9 @@ mod tests {
             None,
         )]);
 
-        // Remove the provider from params
+        // Replace secret params with None to simulate missing params
         if let Some(resource) = spec.resources.get_mut("db-creds") {
-            if let Some(params) = resource.params.as_mut() {
-                params.remove("provider");
-            }
+            resource.params = ResourceParams::None;
         }
 
         let result = SecretsCompiler::compile("myapp", "prod", &spec, &[]);

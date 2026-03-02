@@ -37,7 +37,6 @@
 pub mod bootstrap;
 pub mod mtls;
 pub mod pki;
-pub mod system_namespaces;
 
 /// Upstream container registries extracted at build time from all rendered Helm charts.
 /// Used by lattice-capi to generate containerd mirror configuration.

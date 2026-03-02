@@ -14,11 +14,14 @@ use kube::{Client, ResourceExt};
 use rand::Rng;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{SecretProvider, SecretProviderPhase};
+use lattice_common::crd::{
+    EgressRule, EgressTarget, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget,
+    SecretProvider, SecretProviderPhase,
+};
 use lattice_common::kube_utils::HasApiResource;
 use lattice_common::status_check;
 use lattice_common::{
-    ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE,
+    ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME,
     LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT,
     LOCAL_WEBHOOK_AUTH_SECRET, LOCAL_WEBHOOK_STORE_NAME, REQUEUE_CRD_NOT_FOUND_SECS,
     REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS,
@@ -206,6 +209,9 @@ pub async fn reconcile(
     // Try to create/update the ClusterSecretStore
     match ensure_cluster_secret_store(client, &sp).await {
         Ok(()) => {
+            // Ensure egress policies so ESO can reach external provider endpoints
+            ensure_external_egress_lmm(client, &sp).await?;
+
             // Check if ESO has validated the ClusterSecretStore
             match check_cluster_secret_store_ready(client, &name).await {
                 Ok(Some((true, _))) => {
@@ -355,6 +361,90 @@ async fn ensure_cluster_secret_store(
         .map_err(|e| ReconcileError::kube("failed to apply ClusterSecretStore", e))?;
 
     debug!(secrets_provider = %name, "Applied ClusterSecretStore");
+    Ok(())
+}
+
+/// Namespace where ESO is deployed
+const ESO_NAMESPACE: &str = "external-secrets";
+
+/// Ensure an egress LMM exists for external SecretProvider endpoints.
+///
+/// When a SecretProvider points to an external host (e.g., Vault at 172.18.0.9:8200),
+/// ESO pods need mesh egress policies to reach it. This creates a lightweight
+/// egress-only LatticeMeshMember targeting ESO pods with FQDN egress rules.
+///
+/// If the provider has no external endpoints (e.g., cluster-local webhook), any
+/// existing egress LMM for this provider is deleted.
+async fn ensure_external_egress_lmm(
+    client: &Client,
+    sp: &SecretProvider,
+) -> Result<(), ReconcileError> {
+    let sp_name = sp.name_any();
+    let lmm_name = format!("egress-sp-{}", sp_name);
+    let endpoints = sp.spec.external_endpoints();
+
+    let api: Api<LatticeMeshMember> = Api::namespaced(client.clone(), ESO_NAMESPACE);
+
+    if endpoints.is_empty() {
+        // No external endpoints — delete any existing egress LMM
+        match api.delete(&lmm_name, &Default::default()).await {
+            Ok(_) => {
+                debug!(secrets_provider = %sp_name, "Deleted egress LMM (no external endpoints)");
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(e) => {
+                warn!(secrets_provider = %sp_name, error = %e, "Failed to delete egress LMM");
+            }
+        }
+        return Ok(());
+    }
+
+    let egress_rules: Vec<EgressRule> = endpoints
+        .iter()
+        .map(|ep| EgressRule {
+            target: EgressTarget::Fqdn(ep.host.clone()),
+            ports: vec![ep.port],
+        })
+        .collect();
+
+    let mut lmm = LatticeMeshMember::new(
+        &lmm_name,
+        LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                LABEL_NAME.to_string(),
+                "external-secrets".to_string(),
+            )])),
+            ports: vec![],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: egress_rules,
+            allow_peer_traffic: false,
+            depends_all: false,
+            ingress: None,
+            service_account: Some("external-secrets".to_string()),
+            ambient: true,
+        },
+    );
+    lmm.metadata.namespace = Some(ESO_NAMESPACE.to_string());
+    lmm.metadata.labels = Some(BTreeMap::from([
+        (
+            LABEL_MANAGED_BY.to_string(),
+            "secret-provider-controller".to_string(),
+        ),
+        ("lattice.dev/secrets-provider".to_string(), sp_name.clone()),
+    ]));
+
+    let params = PatchParams::apply(FIELD_MANAGER).force();
+    api.patch(&lmm_name, &params, &Patch::Apply(&lmm))
+        .await
+        .map_err(|e| ReconcileError::kube("failed to apply egress LMM for SecretProvider", e))?;
+
+    info!(
+        secrets_provider = %sp_name,
+        lmm = %lmm_name,
+        endpoints = endpoints.len(),
+        "Ensured egress LMM for external SecretProvider endpoints"
+    );
     Ok(())
 }
 
@@ -822,5 +912,71 @@ mod tests {
         assert_eq!(LOCAL_SECRETS_PORT, 8787);
         assert_eq!(LOCAL_SECRETS_NAMESPACE, "lattice-secrets");
         assert_eq!(LOCAL_WEBHOOK_AUTH_SECRET, "lattice-webhook-auth");
+    }
+
+    // =========================================================================
+    // Egress LMM Construction Tests
+    // =========================================================================
+
+    #[test]
+    fn eso_namespace_constant() {
+        assert_eq!(ESO_NAMESPACE, "external-secrets");
+    }
+
+    /// Build a vault SecretProvider with a given server URL for testing.
+    fn vault_secret_provider(name: &str, server: &str) -> SecretProvider {
+        use lattice_common::crd::SecretProviderSpec;
+
+        let mut provider = serde_json::Map::new();
+        provider.insert(
+            "vault".to_string(),
+            serde_json::json!({"server": server, "path": "secret"}),
+        );
+        let spec = SecretProviderSpec { provider };
+        let mut sp = SecretProvider::new(name, spec);
+        sp.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+        sp
+    }
+
+    #[test]
+    fn egress_lmm_constructed_for_external_vault() {
+        let sp = vault_secret_provider("vault-prod", "https://vault.example.com:8200");
+        let endpoints = sp.spec.external_endpoints();
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].host, "vault.example.com");
+        assert_eq!(endpoints[0].port, 8200);
+
+        // Verify the LMM spec fields match what ensure_external_egress_lmm would build
+        let lmm_name = format!("egress-sp-{}", sp.name_any());
+        assert_eq!(lmm_name, "egress-sp-vault-prod");
+
+        let egress_rules: Vec<EgressRule> = endpoints
+            .iter()
+            .map(|ep| EgressRule {
+                target: EgressTarget::Fqdn(ep.host.clone()),
+                ports: vec![ep.port],
+            })
+            .collect();
+
+        assert_eq!(egress_rules.len(), 1);
+        assert_eq!(
+            egress_rules[0].target,
+            EgressTarget::Fqdn("vault.example.com".to_string())
+        );
+        assert_eq!(egress_rules[0].ports, vec![8200]);
+    }
+
+    #[test]
+    fn egress_lmm_not_needed_for_cluster_local_webhook() {
+        use lattice_common::crd::SecretProviderSpec;
+
+        let mut provider = serde_json::Map::new();
+        provider.insert(
+            "webhook".to_string(),
+            serde_json::json!({"url": "http://lattice-local-secrets.lattice-system.svc:8787/secret/{{ .remoteRef.key }}"}),
+        );
+        let spec = SecretProviderSpec { provider };
+        assert!(spec.external_endpoints().is_empty());
     }
 }

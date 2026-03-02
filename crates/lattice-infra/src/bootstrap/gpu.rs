@@ -3,16 +3,19 @@
 //! Embeds pre-rendered NVIDIA GPU Operator manifests from build time.
 //! GPU scheduling uses Volcano's native vGPU device plugin (deployed alongside Volcano).
 
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use super::{namespace_yaml, split_yaml_documents};
+use lattice_common::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
+
+use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
 
 /// Pre-rendered GPU stack manifests (GPU Operator) with namespaces.
 static GPU_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut manifests = Vec::new();
 
     // GPU Operator
-    manifests.push(namespace_yaml("gpu-operator"));
+    manifests.push(namespace_yaml_ambient("gpu-operator"));
     manifests.extend(split_yaml_documents(include_str!(concat!(
         env!("OUT_DIR"),
         "/gpu-operator.yaml"
@@ -35,6 +38,34 @@ pub fn generate_gpu_stack() -> &'static [String] {
     &GPU_MANIFESTS
 }
 
+/// Generate LatticeMeshMembers for GPU Operator components.
+///
+/// - **gpu-operator**: main operator pod, egress-only (K8s API for CRD reconciliation)
+///
+/// NFD master, GC, and worker DaemonSets are internal to the operator and run
+/// in kube-system (already excluded from mesh policies).
+pub fn generate_gpu_mesh_members() -> Vec<LatticeMeshMember> {
+    vec![lmm(
+        "gpu-operator",
+        "gpu-operator",
+        LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app.kubernetes.io/name".to_string(),
+                "gpu-operator".to_string(),
+            )])),
+            ports: vec![],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![kube_apiserver_egress()],
+            allow_peer_traffic: false,
+            ingress: None,
+            service_account: Some("gpu-operator".to_string()),
+            depends_all: false,
+            ambient: true,
+        },
+    )]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,14 +78,32 @@ mod tests {
 
     #[test]
     fn gpu_namespace_is_correct() {
-        let ns = namespace_yaml("gpu-operator");
+        let ns = namespace_yaml_ambient("gpu-operator");
         assert!(ns.contains("kind: Namespace"));
         assert!(ns.contains("name: gpu-operator"));
+        assert!(
+            ns.contains("istio.io/dataplane-mode: ambient"),
+            "GPU namespace must be enrolled in ambient mesh"
+        );
     }
 
     #[test]
     fn manifests_are_embedded() {
         let manifests = generate_gpu_stack();
         assert!(!manifests.is_empty());
+    }
+
+    #[test]
+    fn gpu_mesh_members_generated() {
+        let members = generate_gpu_mesh_members();
+        assert_eq!(members.len(), 1, "should have gpu-operator only");
+
+        let op = &members[0];
+        assert_eq!(op.metadata.name.as_deref(), Some("gpu-operator"));
+        assert_eq!(op.metadata.namespace.as_deref(), Some("gpu-operator"));
+        assert!(op.spec.validate().is_ok());
+        assert!(op.spec.ambient, "gpu-operator should be ambient");
+        assert!(op.spec.ports.is_empty(), "gpu-operator is egress-only");
+        assert_eq!(op.spec.service_account.as_deref(), Some("gpu-operator"));
     }
 }

@@ -227,7 +227,7 @@ impl CloudProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::ResourceType;
+    use crate::crd::{ResourceParams, ResourceType, SecretParams};
 
     fn make_provider(name: &str, spec: CloudProviderSpec) -> CloudProvider {
         CloudProvider::new(name, spec)
@@ -309,9 +309,6 @@ spec:
 
     #[test]
     fn k8s_secret_ref_eso_mode() {
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!("vault-prod"));
-
         let cp = make_provider(
             "aws-prod",
             CloudProviderSpec {
@@ -321,7 +318,10 @@ spec:
                 credentials: Some(ResourceSpec {
                     type_: ResourceType::Secret,
                     id: Some("infrastructure/aws/prod".to_string()),
-                    params: Some(params),
+                    params: ResourceParams::Secret(SecretParams {
+                        provider: "vault-prod".to_string(),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 credential_data: None,
@@ -411,9 +411,6 @@ spec:
 
     #[test]
     fn eso_credentials_take_priority_over_manual() {
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!("vault"));
-
         let cp = make_provider(
             "test",
             CloudProviderSpec {
@@ -426,7 +423,10 @@ spec:
                 credentials: Some(ResourceSpec {
                     type_: ResourceType::Secret,
                     id: Some("path".to_string()),
-                    params: Some(params),
+                    params: ResourceParams::Secret(SecretParams {
+                        provider: "vault".to_string(),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 credential_data: None,

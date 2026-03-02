@@ -1,0 +1,127 @@
+//! System namespace registry for default-deny policy exclusions
+//!
+//! Single source of truth for namespaces excluded from the cluster-wide
+//! default-deny CiliumClusterwideNetworkPolicy. Only namespaces that have
+//! a circular dependency with the policy infrastructure itself belong here
+//! (e.g., Cilium can't enforce policies on its own pods, the mesh control
+//! plane must operate outside the mesh it manages).
+//!
+//! Namespaces with LatticeMeshMember coverage (kthena-system, monitoring,
+//! keda) are NOT listed here — their pods get explicit CiliumNetworkPolicies
+//! and PeerAuthentication resources from the MeshMember controller.
+
+use crate::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
+
+/// Core Kubernetes namespaces
+pub const CORE: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];
+
+/// Lattice operator namespace (serves webhooks, runs controllers)
+pub const LATTICE: &[&str] = &[LATTICE_SYSTEM_NAMESPACE];
+
+/// CNI (Cilium) namespace — can't enforce policies on itself
+pub const CNI: &[&str] = &["cilium-system"];
+
+/// Service mesh (Istio) namespace — control plane must be outside the mesh
+pub const MESH: &[&str] = &["istio-system"];
+
+/// Certificate management namespace (serves webhooks, no MeshMember yet)
+pub const CERT: &[&str] = &["cert-manager"];
+
+/// Cluster API namespaces (serve webhooks, no MeshMembers yet)
+pub const CAPI: &[&str] = &[
+    "capi-system",
+    "capi-kubeadm-bootstrap-system",
+    "capi-kubeadm-control-plane-system",
+    "rke2-bootstrap-system",
+    "rke2-control-plane-system",
+    "capd-system",
+    CAPO_NAMESPACE,
+    CAPA_NAMESPACE,
+    CAPMOX_NAMESPACE,
+    "capi-ipam-in-cluster-system",
+];
+
+/// Get all system namespaces that should be excluded from default-deny policies.
+///
+/// Returns a sorted, deduplicated list of all infrastructure namespaces.
+pub fn all() -> Vec<&'static str> {
+    let mut namespaces: Vec<&'static str> = CORE
+        .iter()
+        .chain(LATTICE.iter())
+        .chain(CNI.iter())
+        .chain(MESH.iter())
+        .chain(CERT.iter())
+        .chain(CAPI.iter())
+        .copied()
+        .collect();
+
+    namespaces.sort();
+    namespaces.dedup();
+    namespaces
+}
+
+/// Check if a namespace is a system namespace that should be excluded from
+/// default-deny policies.
+pub fn is_system_namespace(namespace: &str) -> bool {
+    all().contains(&namespace)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_returns_sorted_unique_namespaces() {
+        let namespaces = all();
+
+        let mut sorted = namespaces.clone();
+        sorted.sort();
+        assert_eq!(namespaces, sorted);
+
+        let mut deduped = namespaces.clone();
+        deduped.dedup();
+        assert_eq!(namespaces.len(), deduped.len());
+    }
+
+    #[test]
+    fn all_includes_critical_namespaces() {
+        let namespaces = all();
+
+        assert!(namespaces.contains(&"kube-system"));
+        assert!(namespaces.contains(&LATTICE_SYSTEM_NAMESPACE));
+        assert!(namespaces.contains(&"cilium-system"));
+        assert!(namespaces.contains(&"istio-system"));
+        assert!(namespaces.contains(&"cert-manager"));
+        assert!(namespaces.contains(&"capi-system"));
+    }
+
+    #[test]
+    fn mesh_managed_namespaces_excluded() {
+        let namespaces = all();
+
+        // These namespaces have full MeshMember coverage and are NOT system namespaces
+        assert!(!namespaces.contains(&"kthena-system"));
+        assert!(!namespaces.contains(&"monitoring"));
+        assert!(!namespaces.contains(&"keda"));
+    }
+
+    #[test]
+    fn capi_includes_all_providers() {
+        assert!(CAPI.contains(&"capd-system"));
+        assert!(CAPI.contains(&CAPA_NAMESPACE));
+        assert!(CAPI.contains(&CAPO_NAMESPACE));
+        assert!(CAPI.contains(&CAPMOX_NAMESPACE));
+    }
+
+    #[test]
+    fn is_system_namespace_works() {
+        assert!(is_system_namespace("kube-system"));
+        assert!(is_system_namespace("istio-system"));
+        assert!(is_system_namespace("cert-manager"));
+        assert!(!is_system_namespace("kthena-system"));
+        assert!(!is_system_namespace("monitoring"));
+        assert!(!is_system_namespace("keda"));
+        assert!(!is_system_namespace("default"));
+        assert!(!is_system_namespace("my-app"));
+    }
+}

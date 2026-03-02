@@ -3,15 +3,19 @@
 //! Watches OIDCProvider CRDs and validates their OIDC discovery endpoint,
 //! updating status fields (phase, jwks_uri, last_jwks_fetch, message).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{OIDCProvider, OIDCProviderPhase, OIDCProviderStatus};
+use lattice_common::crd::{
+    EgressRule, EgressTarget, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget,
+    OIDCProvider, OIDCProviderPhase, OIDCProviderStatus, ParsedEndpoint,
+};
 use lattice_common::{
     ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
     REQUEUE_SUCCESS_SECS,
@@ -71,6 +75,9 @@ pub async fn reconcile(
     .await
     .map_err(|e| ReconcileError::kube("failed to update OIDCProvider status", e))?;
 
+    // Ensure egress policies so the operator can reach the external issuer
+    ensure_oidc_egress_lmm(client, &provider).await?;
+
     let requeue = if new_status.phase == OIDCProviderPhase::Ready {
         REQUEUE_SUCCESS_SECS
     } else {
@@ -85,6 +92,83 @@ pub async fn reconcile(
     );
 
     Ok(Action::requeue(Duration::from_secs(requeue)))
+}
+
+const FIELD_MANAGER: &str = "lattice-oidc-provider-controller";
+
+/// Ensure an egress LMM exists for an external OIDCProvider issuer URL.
+///
+/// When an OIDCProvider points to an external IdP (e.g., Keycloak at 172.18.0.11:8080),
+/// the operator pods need mesh egress policies to reach it for discovery and JWKS fetch.
+/// This creates a lightweight egress-only LatticeMeshMember targeting operator pods.
+///
+/// If the issuer is cluster-local, any existing egress LMM is deleted.
+async fn ensure_oidc_egress_lmm(
+    client: &Client,
+    provider: &OIDCProvider,
+) -> Result<(), ReconcileError> {
+    let provider_name = provider.name_any();
+    let lmm_name = format!("egress-oidc-{}", provider_name);
+
+    let api: Api<LatticeMeshMember> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    let endpoint =
+        ParsedEndpoint::parse(&provider.spec.issuer_url).filter(|ep| !ep.is_cluster_local());
+
+    let Some(ep) = endpoint else {
+        // Cluster-local or unparseable — delete any existing LMM
+        match api.delete(&lmm_name, &Default::default()).await {
+            Ok(_) => {
+                debug!(oidc_provider = %provider_name, "Deleted egress LMM (cluster-local issuer)");
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(e) => {
+                warn!(oidc_provider = %provider_name, error = %e, "Failed to delete egress LMM");
+            }
+        }
+        return Ok(());
+    };
+
+    let mut lmm = LatticeMeshMember::new(
+        &lmm_name,
+        LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app".to_string(),
+                "lattice-operator".to_string(),
+            )])),
+            ports: vec![],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![EgressRule {
+                target: EgressTarget::Fqdn(ep.host.clone()),
+                ports: vec![ep.port],
+            }],
+            allow_peer_traffic: false,
+            depends_all: false,
+            ingress: None,
+            service_account: Some("lattice-operator".to_string()),
+            ambient: true,
+        },
+    );
+    lmm.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+    lmm.metadata.labels = Some(BTreeMap::from([(
+        "app.kubernetes.io/managed-by".to_string(),
+        "oidc-provider-controller".to_string(),
+    )]));
+
+    let params = PatchParams::apply(FIELD_MANAGER).force();
+    api.patch(&lmm_name, &params, &Patch::Apply(&lmm))
+        .await
+        .map_err(|e| ReconcileError::kube("failed to apply egress LMM for OIDCProvider", e))?;
+
+    info!(
+        oidc_provider = %provider_name,
+        lmm = %lmm_name,
+        host = %ep.host,
+        port = ep.port,
+        "Ensured egress LMM for external OIDCProvider issuer"
+    );
+    Ok(())
 }
 
 /// Validate an OIDCProvider by fetching discovery document and JWKS
@@ -164,5 +248,42 @@ mod tests {
     fn requeue_constants() {
         assert_eq!(REQUEUE_SUCCESS_SECS, 300);
         assert_eq!(REQUEUE_ERROR_SECS, 60);
+    }
+
+    #[test]
+    fn field_manager_constant() {
+        assert_eq!(FIELD_MANAGER, "lattice-oidc-provider-controller");
+    }
+
+    #[test]
+    fn external_issuer_parsed_correctly() {
+        let ep = ParsedEndpoint::parse("https://keycloak.example.com:8080").expect("should parse");
+        assert_eq!(ep.host, "keycloak.example.com");
+        assert_eq!(ep.port, 8080);
+        assert!(!ep.is_cluster_local());
+    }
+
+    #[test]
+    fn cluster_local_issuer_filtered() {
+        let ep =
+            ParsedEndpoint::parse("https://keycloak.auth-system.svc:8443").expect("should parse");
+        assert!(ep.is_cluster_local());
+    }
+
+    #[test]
+    fn egress_lmm_name_format() {
+        let name = format!("egress-oidc-{}", "corporate-idp");
+        assert_eq!(name, "egress-oidc-corporate-idp");
+    }
+
+    #[test]
+    fn egress_lmm_spec_for_external_issuer() {
+        let ep = ParsedEndpoint::parse("http://172.18.0.11:8080").expect("should parse");
+        let egress = EgressRule {
+            target: EgressTarget::Fqdn(ep.host.clone()),
+            ports: vec![ep.port],
+        };
+        assert_eq!(egress.target, EgressTarget::Fqdn("172.18.0.11".to_string()));
+        assert_eq!(egress.ports, vec![8080]);
     }
 }

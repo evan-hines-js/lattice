@@ -11,8 +11,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use rand::prelude::*;
 
 use lattice_common::crd::{
-    ContainerSpec, DependencyDirection, LatticeServiceSpec, PortSpec, ResourceSpec, ResourceType,
-    ServicePortsSpec, WorkloadSpec,
+    ContainerSpec, DependencyDirection, LatticeServiceSpec, PortSpec, ResourceParams, ResourceSpec,
+    ResourceType, ServicePortsSpec, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 
@@ -42,7 +42,7 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
+                params: ResourceParams::None,
                 namespace: None,
             },
         );
@@ -56,7 +56,7 @@ fn service_spec_with_deps(deps: &[&str], callers: &[&str]) -> LatticeServiceSpec
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
+                params: ResourceParams::None,
                 namespace: None,
             },
         );

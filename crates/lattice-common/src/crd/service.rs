@@ -245,8 +245,8 @@ mod tests {
     use crate::crd::workload::container::{ContainerSpec, FileMount};
     use crate::crd::workload::deploy::DeployStrategy;
     use crate::crd::workload::resources::{
-        DependencyDirection, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
-        VolumeAccessMode,
+        DependencyDirection, ResourceParams, ResourceQuantity, ResourceRequirements, ResourceSpec,
+        ResourceType, SecretParams, VolumeAccessMode,
     };
     use crate::template::TemplateString;
 
@@ -705,10 +705,7 @@ workload:
             .get("config")
             .expect("config should exist");
         assert!(config.is_volume_owner());
-        let config_params = config
-            .volume_params()
-            .expect("config volume params")
-            .expect("should have params");
+        let config_params = config.params.as_volume().expect("should have volume params");
         assert_eq!(config_params.size, Some("10Gi".to_string()));
         assert_eq!(config_params.storage_class, Some("local-path".to_string()));
 
@@ -719,10 +716,7 @@ workload:
             .expect("media should exist");
         assert!(media.is_volume_owner());
         assert_eq!(media.id, Some("media-library".to_string()));
-        let media_params = media
-            .volume_params()
-            .expect("media volume params")
-            .expect("should have params");
+        let media_params = media.params.as_volume().expect("should have volume params");
         assert_eq!(media_params.size, Some("1Ti".to_string()));
         assert_eq!(
             media_params.access_mode,
@@ -1316,10 +1310,7 @@ workload:
             .get("my-gpu")
             .expect("should have gpu resource");
         assert!(gpu_resource.type_.is_gpu());
-        let gpu = gpu_resource
-            .gpu_params()
-            .expect("parse gpu params")
-            .expect("should have params");
+        let gpu = gpu_resource.params.as_gpu().expect("should have gpu params");
         assert_eq!(gpu.count, 1);
         assert_eq!(gpu.memory, Some("8Gi".to_string()));
         assert_eq!(gpu.compute, Some(20));
@@ -1342,9 +1333,9 @@ workload:
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("parse");
         let gpu = spec.workload.resources["my-gpu"]
-            .gpu_params()
-            .expect("parse")
-            .expect("params");
+            .params
+            .as_gpu()
+            .expect("should have gpu params");
         assert_eq!(gpu.count, 2);
         assert!(gpu.tolerations.is_none());
     }
@@ -1366,9 +1357,9 @@ workload:
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let spec: LatticeServiceSpec = serde_json::from_value(value).expect("parse");
         let gpu = spec.workload.resources["my-gpu"]
-            .gpu_params()
-            .expect("parse")
-            .expect("params");
+            .params
+            .as_gpu()
+            .expect("should have gpu params");
         assert_eq!(gpu.tolerations, Some(false));
     }
 
@@ -1377,16 +1368,15 @@ workload:
     // =========================================================================
 
     fn secret_resource(remote_key: &str, provider: &str, keys: Option<&[&str]>) -> ResourceSpec {
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!(provider));
-        params.insert("refreshInterval".to_string(), serde_json::json!("1h"));
-        if let Some(keys) = keys {
-            params.insert("keys".to_string(), serde_json::json!(keys));
-        }
         ResourceSpec {
             type_: ResourceType::Secret,
             id: Some(remote_key.to_string()),
-            params: Some(params),
+            params: ResourceParams::Secret(SecretParams {
+                provider: provider.to_string(),
+                refresh_interval: Some("1h".to_string()),
+                keys: keys.map(|k| k.iter().map(|s| s.to_string()).collect()),
+                secret_type: None,
+            }),
             ..Default::default()
         }
     }
@@ -1420,18 +1410,21 @@ workload:
         assert!(matches!(db.type_, ResourceType::Secret));
         assert_eq!(db.id, Some("path/to/db".to_string()));
 
-        let params = db.params.as_ref().expect("params");
-        assert_eq!(params["provider"], serde_json::json!("local-test"));
-        assert_eq!(params["keys"], serde_json::json!(["user", "pass"]));
+        let params = db.params.as_secret().expect("should have secret params");
+        assert_eq!(params.provider, "local-test");
+        assert_eq!(
+            params.keys,
+            Some(vec!["user".to_string(), "pass".to_string()])
+        );
     }
 
     #[test]
     fn secret_resource_without_keys_omits_keys_param() {
         let res = secret_resource("path/to/all", "local-test", None);
-        let params = res.params.as_ref().expect("params");
+        let params = res.params.as_secret().expect("should have secret params");
 
-        assert!(params.get("provider").is_some());
-        assert!(params.get("keys").is_none());
+        assert_eq!(params.provider, "local-test");
+        assert!(params.keys.is_none());
     }
 
     #[test]

@@ -1094,6 +1094,271 @@ pub(crate) mod tests {
     }
 
     // =========================================================================
+    // Ambient-to-non-ambient egress (direct L4)
+    // =========================================================================
+
+    #[test]
+    fn ambient_to_non_ambient_produces_direct_egress_no_hbone() {
+        use lattice_common::crd::PeerAuth;
+
+        let graph = ServiceGraph::new();
+        let ns = "kthena-system";
+
+        // Router: ambient, depends on serving
+        let router_labels = BTreeMap::from([(
+            "app.kubernetes.io/name".to_string(),
+            "kthena-router".to_string(),
+        )]);
+        let router_spec = make_mesh_member_spec(
+            router_labels,
+            vec![("http", 8080, PeerAuth::Strict)],
+            vec![],
+            vec!["serving"],
+        );
+        graph.put_mesh_member(ns, "kthena-router", &router_spec);
+
+        // Serving: non-ambient, allows kthena-router
+        let serving_labels =
+            BTreeMap::from([("lattice.dev/model".to_string(), "my-model".to_string())]);
+        let mut serving_spec = make_mesh_member_spec(
+            serving_labels,
+            vec![("http", 8000, PeerAuth::Strict)],
+            vec!["kthena-router"],
+            vec![],
+        );
+        serving_spec.ambient = false;
+        graph.put_mesh_member(ns, "serving", &serving_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("kthena-router", ns).cilium_policies[0];
+
+        let hbone_port = mesh::HBONE_PORT.to_string();
+
+        // No HBONE egress (only callee is non-ambient)
+        let has_hbone_egress = cnp.spec.egress.iter().any(|e| {
+            e.to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port))
+        });
+        assert!(
+            !has_hbone_egress,
+            "should not have HBONE egress when only callee is non-ambient"
+        );
+
+        // Direct egress rule to serving's port 8000 with label selector
+        let direct_egress = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| {
+                e.to_endpoints.iter().any(|ep| {
+                    ep.match_labels
+                        .get("k8s:lattice.dev/model")
+                        .map_or(false, |v| v == "my-model")
+                })
+            })
+            .expect("should have direct egress rule for non-ambient callee");
+
+        assert!(
+            direct_egress
+                .to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == "8000")),
+            "direct egress should target callee's port"
+        );
+    }
+
+    #[test]
+    fn ambient_to_ambient_produces_hbone_egress_no_direct() {
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        // Gateway: ambient, depends on api
+        let gateway_spec = make_service_spec(vec!["api"], vec![]);
+        graph.put_service(ns, "gateway", &gateway_spec);
+
+        // API: ambient (default), allows gateway
+        let api_spec = make_service_spec(vec![], vec!["gateway"]);
+        graph.put_service(ns, "api", &api_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("gateway", ns).cilium_policies[0];
+
+        let hbone_port = mesh::HBONE_PORT.to_string();
+
+        // HBONE egress present
+        let has_hbone_egress = cnp.spec.egress.iter().any(|e| {
+            e.to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port))
+        });
+        assert!(
+            has_hbone_egress,
+            "should have HBONE egress for ambient callee"
+        );
+
+        // No direct label-based egress to callee (DNS egress has to_endpoints for kube-dns,
+        // but no rule should target the callee's labels)
+        let has_callee_egress = cnp.spec.egress.iter().any(|e| {
+            e.to_endpoints.iter().any(|ep| {
+                ep.match_labels
+                    .get(&format!("k8s:{}", lattice_common::LABEL_NAME))
+                    .map_or(false, |v| v == "api")
+            })
+        });
+        assert!(
+            !has_callee_egress,
+            "should not have direct egress for ambient callee"
+        );
+    }
+
+    #[test]
+    fn mixed_ambient_and_non_ambient_callees_produce_both_rules() {
+        use lattice_common::crd::PeerAuth;
+
+        let graph = ServiceGraph::new();
+        let ns = "prod-ns";
+
+        // Router: ambient, depends on both api (ambient) and serving (non-ambient)
+        let router_labels =
+            BTreeMap::from([("app.kubernetes.io/name".to_string(), "router".to_string())]);
+        let router_spec = make_mesh_member_spec(
+            router_labels,
+            vec![("http", 8080, PeerAuth::Strict)],
+            vec![],
+            vec!["api", "serving"],
+        );
+        graph.put_mesh_member(ns, "router", &router_spec);
+
+        // API: ambient, allows router
+        let api_spec = make_service_spec(vec![], vec!["router"]);
+        graph.put_service(ns, "api", &api_spec);
+
+        // Serving: non-ambient, allows router
+        let serving_labels = BTreeMap::from([("lattice.dev/model".to_string(), "gpt".to_string())]);
+        let mut serving_spec = make_mesh_member_spec(
+            serving_labels,
+            vec![("http", 8000, PeerAuth::Strict)],
+            vec!["router"],
+            vec![],
+        );
+        serving_spec.ambient = false;
+        graph.put_mesh_member(ns, "serving", &serving_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("router", ns).cilium_policies[0];
+
+        let hbone_port = mesh::HBONE_PORT.to_string();
+
+        // HBONE egress for ambient callee (api)
+        let has_hbone_egress = cnp.spec.egress.iter().any(|e| {
+            e.to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port))
+        });
+        assert!(
+            has_hbone_egress,
+            "should have HBONE egress for ambient callee"
+        );
+
+        // Direct egress for non-ambient callee (serving)
+        let direct_egress = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| {
+                e.to_endpoints.iter().any(|ep| {
+                    ep.match_labels
+                        .get("k8s:lattice.dev/model")
+                        .map_or(false, |v| v == "gpt")
+                })
+            })
+            .expect("should have direct egress for non-ambient callee");
+
+        assert!(
+            direct_egress
+                .to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == "8000")),
+            "direct egress should target non-ambient callee's port"
+        );
+    }
+
+    #[test]
+    fn cross_namespace_non_ambient_callee_includes_namespace_label() {
+        use lattice_common::crd::{CallerRef, PeerAuth};
+
+        let graph = ServiceGraph::new();
+
+        // Router in kthena-system, depends on serving in model-ns
+        let router_labels = BTreeMap::from([(
+            "app.kubernetes.io/name".to_string(),
+            "kthena-router".to_string(),
+        )]);
+        let mut router_spec = make_mesh_member_spec(
+            router_labels,
+            vec![("http", 8080, PeerAuth::Strict)],
+            vec![],
+            vec![],
+        );
+        router_spec.depends_all = true;
+        graph.put_mesh_member("kthena-system", "kthena-router", &router_spec);
+
+        // Serving in model-ns, non-ambient, allows kthena-router from kthena-system
+        let serving_labels =
+            BTreeMap::from([("lattice.dev/model".to_string(), "llama".to_string())]);
+        let mut serving_spec = make_mesh_member_spec(
+            serving_labels,
+            vec![("http", 8000, PeerAuth::Strict)],
+            vec![],
+            vec![],
+        );
+        serving_spec.ambient = false;
+        serving_spec.allowed_callers = vec![CallerRef {
+            name: "kthena-router".to_string(),
+            namespace: Some("kthena-system".to_string()),
+        }];
+        graph.put_mesh_member("model-ns", "serving", &serving_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler
+            .compile("kthena-router", "kthena-system")
+            .cilium_policies[0];
+
+        // Direct egress for cross-namespace non-ambient callee
+        let direct_egress = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| {
+                e.to_endpoints.iter().any(|ep| {
+                    ep.match_labels
+                        .get("k8s:lattice.dev/model")
+                        .map_or(false, |v| v == "llama")
+                })
+            })
+            .expect("should have direct egress for cross-namespace non-ambient callee");
+
+        // Must include namespace label for cross-namespace
+        assert!(
+            direct_egress.to_endpoints[0]
+                .match_labels
+                .get(lattice_common::CILIUM_LABEL_NAMESPACE)
+                .map_or(false, |v| v == "model-ns"),
+            "cross-namespace egress should include namespace label"
+        );
+
+        // Port-restricted
+        assert!(
+            direct_egress
+                .to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == "8000")),
+            "direct egress should target callee's port"
+        );
+    }
+
+    // =========================================================================
     // Out-of-ambient (direct L4) policy generation
     // =========================================================================
 
@@ -1261,7 +1526,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn out_of_ambient_infrastructure_caller_ingress() {
+    fn out_of_ambient_bilateral_caller_cross_namespace() {
         use lattice_common::crd::{CallerRef, PeerAuth};
 
         let graph = ServiceGraph::new();
@@ -1275,46 +1540,55 @@ pub(crate) mod tests {
             vec![],
         );
         spec.ambient = false;
-        // Add an infrastructure caller that's NOT in the graph (e.g. kthena-router)
+        // Add kthena-router as an allowed caller
         spec.allowed_callers = vec![CallerRef {
             name: "kthena-router".to_string(),
-            namespace: Some("kthena-ns".to_string()),
+            namespace: Some("kthena-system".to_string()),
         }];
         graph.put_mesh_member(ns, "serving", &spec);
+
+        // kthena-router must exist in graph (bilateral agreement requires graph node)
+        let router_labels = BTreeMap::from([(
+            "app.kubernetes.io/name".to_string(),
+            "kthena-router".to_string(),
+        )]);
+        let mut router_spec = make_mesh_member_spec(router_labels, vec![], vec![], vec![]);
+        router_spec.depends_all = true;
+        graph.put_mesh_member("kthena-system", "kthena-router", &router_spec);
 
         let compiler = PolicyCompiler::new(&graph, "test-cluster");
         let cnp = &compiler.compile("serving", ns).cilium_policies[0];
 
         // Should have an ingress rule with the caller's labels and port restriction
-        let infra_rule = cnp
+        let router_rule = cnp
             .spec
             .ingress
             .iter()
             .find(|r| {
                 r.from_endpoints.iter().any(|ep| {
                     ep.match_labels
-                        .get(&format!("k8s:{}", lattice_common::LABEL_NAME))
+                        .get("k8s:app.kubernetes.io/name")
                         .map_or(false, |v| v == "kthena-router")
                 })
             })
-            .expect("should have infrastructure caller ingress rule");
+            .expect("should have bilateral agreement ingress rule for kthena-router");
 
         // Cross-namespace: should include namespace label
         assert!(
-            infra_rule.from_endpoints[0]
+            router_rule.from_endpoints[0]
                 .match_labels
                 .get(lattice_common::CILIUM_LABEL_NAMESPACE)
-                .map_or(false, |v| v == "kthena-ns"),
+                .map_or(false, |v| v == "kthena-system"),
             "cross-namespace caller should include namespace label"
         );
 
         // Port-restricted to declared ports
         assert!(
-            infra_rule
+            router_rule
                 .to_ports
                 .iter()
                 .any(|pr| pr.ports.iter().any(|p| p.port == "8000")),
-            "infrastructure caller should be port-restricted"
+            "bilateral caller should be port-restricted"
         );
     }
 
@@ -1387,38 +1661,44 @@ pub(crate) mod tests {
         spec.allow_peer_traffic = true;
         graph.put_mesh_member(ns, "worker", &spec);
 
+        // vmagent must exist in graph for bilateral agreement
+        let vmagent_labels = BTreeMap::from([("app".to_string(), "vmagent".to_string())]);
+        let mut vmagent_spec = make_mesh_member_spec(
+            vmagent_labels,
+            vec![("http", 8429, lattice_common::crd::PeerAuth::Strict)],
+            vec![],
+            vec![],
+        );
+        vmagent_spec.depends_all = true;
+        vmagent_spec.service_account = Some(lattice_common::VMAGENT_SA_NAME.to_string());
+        graph.put_mesh_member(
+            lattice_common::MONITORING_NAMESPACE,
+            lattice_common::VMAGENT_NODE_NAME,
+            &vmagent_spec,
+        );
+
         let compiler = PolicyCompiler::new(&graph, "test-cluster");
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
-        // Should have vmagent ingress on metrics port only
+        // vmagent should appear via bilateral agreement (depends_all + auto-injected allowed_caller)
         let vmagent_rule = cnp
             .spec
             .ingress
             .iter()
             .find(|r| {
-                r.from_endpoints.iter().any(|ep| {
-                    ep.match_labels
-                        .get(&format!("k8s:{}", lattice_common::LABEL_NAME))
-                        .map_or(false, |v| v == lattice_common::VMAGENT_NODE_NAME)
-                })
+                r.from_endpoints
+                    .iter()
+                    .any(|ep| ep.match_labels.values().any(|v| v == "vmagent"))
             })
-            .expect("should have vmagent ingress rule for metrics port");
+            .expect("should have vmagent ingress rule via bilateral agreement");
 
+        // Port-restricted to all declared ports (bilateral agreement gives all ports)
         assert!(
-            vmagent_rule
-                .to_ports
+            vmagent_rule.to_ports.iter().any(|pr| pr
+                .ports
                 .iter()
-                .any(|pr| pr.ports.iter().any(|p| p.port == "9090")),
-            "vmagent should be restricted to metrics port"
-        );
-
-        // Should NOT allow vmagent on the master port
-        assert!(
-            !vmagent_rule
-                .to_ports
-                .iter()
-                .any(|pr| pr.ports.iter().any(|p| p.port == "29500")),
-            "vmagent should not access non-metrics ports"
+                .any(|p| p.port == "29500" || p.port == "9090")),
+            "bilateral agreement gives access to all service ports"
         );
     }
 

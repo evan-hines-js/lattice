@@ -109,7 +109,7 @@ impl ServiceNode {
         let caller_refs = workload.allowed_callers(namespace);
         let allows_all = caller_refs.iter().any(|r| r.name == "*");
 
-        let allowed_callers: HashSet<QualifiedName> = if allows_all {
+        let mut allowed_callers: HashSet<QualifiedName> = if allows_all {
             // Keep non-wildcard CallerRefs — these are infrastructure identities
             // (e.g. gateway proxy SA) that need explicit L7 authorization.
             caller_refs
@@ -132,6 +132,34 @@ impl ServiceNode {
             .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
             .collect();
 
+        let ports: BTreeMap<String, PortMapping> = workload
+            .service
+            .as_ref()
+            .map(|svc| {
+                svc.ports
+                    .iter()
+                    .map(|(name, ps)| {
+                        (
+                            name.clone(),
+                            PortMapping {
+                                service_port: ps.port,
+                                target_port: ps.target_port.unwrap_or(ps.port),
+                                peer_auth: PeerAuth::Strict,
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Auto-inject vmagent as allowed caller when a "metrics" port exists
+        if ports.contains_key("metrics") {
+            allowed_callers.insert((
+                MONITORING_NAMESPACE.to_string(),
+                VMAGENT_NODE_NAME.to_string(),
+            ));
+        }
+
         Self {
             namespace: namespace.to_string(),
             name: name.to_string(),
@@ -141,25 +169,7 @@ impl ServiceNode {
             allows_all,
             depends_all: false,
             image: workload.primary_image().map(String::from),
-            ports: workload
-                .service
-                .as_ref()
-                .map(|svc| {
-                    svc.ports
-                        .iter()
-                        .map(|(name, ps)| {
-                            (
-                                name.clone(),
-                                PortMapping {
-                                    service_port: ps.port,
-                                    target_port: ps.target_port.unwrap_or(ps.port),
-                                    peer_auth: PeerAuth::Strict,
-                                },
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+            ports,
             selector: None,
             target_namespace: None,
             allow_peer_traffic: false,
@@ -177,7 +187,7 @@ impl ServiceNode {
     ) -> Self {
         let allows_all = spec.allowed_callers.iter().any(|c| c.name == "*");
 
-        let allowed_callers: HashSet<QualifiedName> = if allows_all {
+        let mut allowed_callers: HashSet<QualifiedName> = if allows_all {
             // Keep non-wildcard CallerRefs — these are infrastructure identities
             // (e.g. gateway proxy SA) that need explicit L7 authorization.
             spec.allowed_callers
@@ -212,6 +222,14 @@ impl ServiceNode {
                 )
             })
             .collect();
+
+        // Auto-inject vmagent as allowed caller when a "metrics" port exists
+        if ports.contains_key("metrics") {
+            allowed_callers.insert((
+                MONITORING_NAMESPACE.to_string(),
+                VMAGENT_NODE_NAME.to_string(),
+            ));
+        }
 
         let selector = match &spec.target {
             MeshMemberTarget::Selector(labels) => Some(labels.clone()),
@@ -320,16 +338,11 @@ impl ServiceNode {
     }
 
     /// Check if this service allows a specific caller (O(1) lookup)
-    ///
-    /// A service with a "metrics" port implicitly allows vmagent for scraping.
     pub fn allows(&self, caller_namespace: &str, caller_name: &str) -> bool {
         self.allows_all
             || self
                 .allowed_callers
                 .contains(&(caller_namespace.to_string(), caller_name.to_string()))
-            || (self.ports.contains_key("metrics")
-                && caller_name == VMAGENT_NODE_NAME
-                && caller_namespace == MONITORING_NAMESPACE)
     }
 }
 
@@ -891,9 +904,9 @@ impl ServiceGraph {
             let Some(ref volume_id) = resource.id else {
                 continue;
             };
-            let params = match resource.volume_params() {
-                Ok(Some(p)) => p,
-                _ => continue,
+            let params = match resource.params.as_volume() {
+                Some(p) => p,
+                None => continue,
             };
             // Only index if this service owns the volume (has size)
             if params.size.is_none() {
@@ -904,10 +917,19 @@ impl ServiceGraph {
                 VolumeOwnership {
                     owner_name: name.to_string(),
                     owner_namespace: namespace.to_string(),
-                    params,
+                    params: params.clone(),
                 },
             );
         }
+    }
+
+    /// Return all services with `depends_all: true`.
+    ///
+    /// These services have dynamic outbound edges that are computed on the fly
+    /// rather than stored in edges_out, so they need explicit re-reconciliation
+    /// triggers when any service in the graph changes.
+    pub fn depends_all_services(&self) -> Vec<QualifiedName> {
+        self.depends_all_nodes.iter().map(|e| e.clone()).collect()
     }
 
     /// Clear all data from the graph
@@ -999,8 +1021,8 @@ mod tests {
     #[test]
     fn test_cross_namespace_dependency() {
         use crate::crd::{
-            ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
-            ServicePortsSpec, WorkloadSpec,
+            ContainerSpec, DependencyDirection, PortSpec, ResourceParams, ResourceSpec,
+            ResourceType, ServicePortsSpec, WorkloadSpec,
         };
 
         let graph = ServiceGraph::new();
@@ -1015,7 +1037,7 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
+                params: ResourceParams::None,
                 namespace: Some("backend".to_string()), // Cross-namespace!
             },
         );
@@ -1188,8 +1210,8 @@ mod tests {
     #[test]
     fn test_wildcard_cross_namespace() {
         use crate::crd::{
-            ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
-            ServicePortsSpec, WorkloadSpec,
+            ContainerSpec, DependencyDirection, PortSpec, ResourceParams, ResourceSpec,
+            ResourceType, ServicePortsSpec, WorkloadSpec,
         };
 
         let graph = ServiceGraph::new();
@@ -1208,7 +1230,7 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
+                params: ResourceParams::None,
                 namespace: Some("backend".to_string()),
             },
         );
@@ -1440,8 +1462,8 @@ mod tests {
         // api depends on prometheus — need cross-namespace dep, build manually
         {
             use crate::crd::{
-                ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
-                ServicePortsSpec, WorkloadSpec,
+                ContainerSpec, DependencyDirection, PortSpec, ResourceParams, ResourceSpec,
+                ResourceType, ServicePortsSpec, WorkloadSpec,
             };
 
             let mut resources = BTreeMap::new();
@@ -1453,7 +1475,7 @@ mod tests {
                     id: None,
                     class: None,
                     metadata: None,
-                    params: None,
+                    params: ResourceParams::None,
                     namespace: Some("monitoring".to_string()),
                 },
             );
@@ -1672,8 +1694,8 @@ mod tests {
 
         // api in prod allows scraper from monitoring
         use crate::crd::{
-            ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ResourceType,
-            ServicePortsSpec, WorkloadSpec,
+            ContainerSpec, DependencyDirection, PortSpec, ResourceParams, ResourceSpec,
+            ResourceType, ServicePortsSpec, WorkloadSpec,
         };
         let mut resources = BTreeMap::new();
         resources.insert(
@@ -1684,7 +1706,7 @@ mod tests {
                 id: None,
                 class: None,
                 metadata: None,
-                params: None,
+                params: ResourceParams::None,
                 namespace: Some("monitoring".to_string()),
             },
         );

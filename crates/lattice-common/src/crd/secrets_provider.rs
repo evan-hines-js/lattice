@@ -116,6 +116,38 @@ impl SecretProviderSpec {
         self.provider.keys().next().map(|s| s.as_str())
     }
 
+    /// Extract external (non-cluster-local) endpoints from the provider configuration.
+    ///
+    /// Inspects known provider types for URL fields:
+    /// - `vault` → `server`
+    /// - `webhook` → `url`
+    /// - `barbican` → `url`
+    ///
+    /// Returns parsed endpoints that are NOT cluster-local (i.e., need external egress).
+    pub fn external_endpoints(&self) -> Vec<super::ParsedEndpoint> {
+        let urls: Vec<&str> = self
+            .provider
+            .iter()
+            .flat_map(|(provider_type, config)| {
+                let field = match provider_type.as_str() {
+                    "vault" => "server",
+                    "webhook" | "barbican" => "url",
+                    _ => return vec![],
+                };
+                config
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        urls.into_iter()
+            .filter_map(super::ParsedEndpoint::parse)
+            .filter(|ep| !ep.is_cluster_local())
+            .collect()
+    }
+
     /// Validate the spec. Returns an error if invalid.
     pub fn validate(&self) -> Result<(), crate::Error> {
         if self.provider.is_empty() {
@@ -277,5 +309,99 @@ spec:
             provider: serde_json::Map::new(),
         };
         assert_eq!(spec.provider_type_name(), None);
+    }
+
+    // =========================================================================
+    // external_endpoints() tests
+    // =========================================================================
+
+    #[test]
+    fn external_endpoints_vault_server() {
+        let mut provider = serde_json::Map::new();
+        provider.insert(
+            "vault".to_string(),
+            serde_json::json!({"server": "https://vault.example.com:8200", "path": "secret"}),
+        );
+        let spec = SecretProviderSpec { provider };
+        let eps = spec.external_endpoints();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].host, "vault.example.com");
+        assert_eq!(eps[0].port, 8200);
+    }
+
+    #[test]
+    fn external_endpoints_vault_default_port() {
+        let mut provider = serde_json::Map::new();
+        provider.insert(
+            "vault".to_string(),
+            serde_json::json!({"server": "https://vault.example.com"}),
+        );
+        let spec = SecretProviderSpec { provider };
+        let eps = spec.external_endpoints();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].host, "vault.example.com");
+        assert_eq!(eps[0].port, 443);
+    }
+
+    #[test]
+    fn external_endpoints_webhook_url() {
+        let mut provider = serde_json::Map::new();
+        provider.insert(
+            "webhook".to_string(),
+            serde_json::json!({"url": "http://webhook.example.com:9090/path"}),
+        );
+        let spec = SecretProviderSpec { provider };
+        let eps = spec.external_endpoints();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].host, "webhook.example.com");
+        assert_eq!(eps[0].port, 9090);
+    }
+
+    #[test]
+    fn external_endpoints_barbican_url() {
+        let mut provider = serde_json::Map::new();
+        provider.insert(
+            "barbican".to_string(),
+            serde_json::json!({"url": "https://barbican.example.com"}),
+        );
+        let spec = SecretProviderSpec { provider };
+        let eps = spec.external_endpoints();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].host, "barbican.example.com");
+        assert_eq!(eps[0].port, 443);
+    }
+
+    #[test]
+    fn external_endpoints_cluster_local_filtered() {
+        let mut provider = serde_json::Map::new();
+        provider.insert(
+            "webhook".to_string(),
+            serde_json::json!({"url": "http://my-webhook.lattice-system.svc:8787/secret"}),
+        );
+        let spec = SecretProviderSpec { provider };
+        let eps = spec.external_endpoints();
+        assert!(
+            eps.is_empty(),
+            "cluster-local endpoints should be filtered out"
+        );
+    }
+
+    #[test]
+    fn external_endpoints_unknown_provider() {
+        let mut provider = serde_json::Map::new();
+        provider.insert(
+            "aws".to_string(),
+            serde_json::json!({"service": "SecretsManager", "region": "us-east-1"}),
+        );
+        let spec = SecretProviderSpec { provider };
+        assert!(spec.external_endpoints().is_empty());
+    }
+
+    #[test]
+    fn external_endpoints_empty_provider() {
+        let spec = SecretProviderSpec {
+            provider: serde_json::Map::new(),
+        };
+        assert!(spec.external_endpoints().is_empty());
     }
 }

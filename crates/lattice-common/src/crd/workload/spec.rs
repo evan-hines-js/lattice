@@ -227,11 +227,7 @@ impl WorkloadSpec {
                 }
             }
 
-            if resource.type_.is_gpu() {
-                resource
-                    .gpu_params()
-                    .map_err(|e| crate::Error::validation(format!("resource '{}': {}", name, e)))?;
-            }
+            // GPU params are validated during deserialization (ResourceSpec custom Deserialize)
         }
 
         Ok(())
@@ -246,7 +242,8 @@ impl WorkloadSpec {
 mod tests {
     use super::super::container::ContainerSpec;
     use super::super::resources::{
-        DependencyDirection, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
+        DependencyDirection, GpuParams, ResourceParams, ResourceQuantity, ResourceRequirements,
+        ResourceSpec, ResourceType, VolumeParams,
     };
     use super::*;
 
@@ -431,10 +428,10 @@ mod tests {
             ResourceSpec {
                 type_: ResourceType::Volume,
                 id: Some("shared-data".to_string()),
-                params: Some(BTreeMap::from([(
-                    "size".to_string(),
-                    serde_json::json!("10Gi"),
-                )])),
+                params: ResourceParams::Volume(VolumeParams {
+                    size: Some("10Gi".to_string()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
@@ -649,13 +646,14 @@ mod tests {
     #[test]
     fn gpu_resource_validation_wired_into_spec() {
         let mut spec = sample_workload();
-        let mut params = BTreeMap::new();
-        params.insert("count".to_string(), serde_json::json!(0));
         spec.resources.insert(
             "my-gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: Some(params),
+                params: ResourceParams::Gpu(GpuParams {
+                    count: 0,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );

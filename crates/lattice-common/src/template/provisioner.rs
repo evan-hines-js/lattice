@@ -146,18 +146,25 @@ impl ResourceProvisioner for ServiceProvisioner {
         // Use the resource's id if provided, otherwise use the resource name
         let service_name = resource.id.as_deref().unwrap_or(resource_name);
 
+        // Cross-namespace: use resource.namespace for both graph lookup and FQDN.
+        // Same-namespace: graph lookup uses environment, FQDN uses namespace.
+        let (graph_ns, fqdn_ns) = match resource.namespace.as_deref() {
+            Some(ns) => (ns, ns),
+            None => (ctx.environment, ctx.namespace),
+        };
+
         // Look up the service in the graph
         let node = ctx
             .graph
-            .get_service(ctx.environment, service_name)
+            .get_service(graph_ns, service_name)
             .ok_or_else(|| {
                 TemplateError::Undefined(format!(
                     "service '{}' not found in environment '{}'",
-                    service_name, ctx.environment
+                    service_name, graph_ns
                 ))
             })?;
 
-        let host = ctx.service_fqdn(service_name);
+        let host = format!("{}.{}.svc.{}", service_name, fqdn_ns, ctx.cluster_domain);
 
         // Get the primary service port (first one, or "http" if exists)
         let port = node
@@ -211,10 +218,10 @@ impl ResourceProvisioner for ExternalServiceProvisioner {
             }
         }
 
-        // Parse inline params to get endpoints
+        // Get typed external service params
         let params = resource
-            .external_service_params()
-            .map_err(|e| TemplateError::Undefined(format!("resource '{}': {}", resource_name, e)))?
+            .params
+            .as_external_service()
             .ok_or_else(|| {
                 TemplateError::Undefined(format!(
                     "resource '{}' is not an external-service type",
@@ -405,7 +412,10 @@ fn provisionable_resources(spec: &WorkloadSpec) -> impl Iterator<Item = (&String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{DependencyDirection, ResourceSpec, ResourceType};
+    use crate::crd::{
+        DependencyDirection, ExternalServiceParams, ResourceParams, ResourceSpec, ResourceType,
+        VolumeParams,
+    };
     use std::collections::BTreeMap;
 
     fn make_graph_with_service(env: &str, name: &str, port: u16) -> ServiceGraph {
@@ -451,10 +461,10 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: Some(BTreeMap::from([(
-                "endpoints".to_string(),
-                serde_json::json!({"default": url}),
-            )])),
+            params: ResourceParams::ExternalService(ExternalServiceParams {
+                endpoints: BTreeMap::from([("default".to_string(), url.to_string())]),
+                ..Default::default()
+            }),
             namespace: None,
         }
     }
@@ -475,7 +485,7 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: None,
+            params: ResourceParams::None,
             namespace: None,
         };
 
@@ -509,7 +519,7 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: None,
+            params: ResourceParams::None,
             namespace: None,
         };
 
@@ -555,7 +565,7 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: None,
+            params: ResourceParams::None,
             namespace: None,
         };
 
@@ -637,10 +647,10 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: Some(BTreeMap::from([(
-                "endpoints".to_string(),
-                serde_json::json!({"api": "https://api.stripe.com"}),
-            )])),
+            params: ResourceParams::ExternalService(ExternalServiceParams {
+                endpoints: BTreeMap::from([("api".to_string(), "https://api.stripe.com".to_string())]),
+                ..Default::default()
+            }),
             namespace: None,
         };
 
@@ -666,10 +676,10 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: Some(BTreeMap::from([(
-                "endpoints".to_string(),
-                serde_json::json!({}),
-            )])),
+            params: ResourceParams::ExternalService(ExternalServiceParams {
+                endpoints: BTreeMap::new(),
+                ..Default::default()
+            }),
             namespace: None,
         };
 
@@ -707,7 +717,7 @@ mod tests {
                 id: Some("postgres".to_string()),
                 class: None,
                 metadata: None,
-                params: None,
+                params: ResourceParams::None,
                 namespace: None,
             },
         );
@@ -791,10 +801,10 @@ mod tests {
             id: None,
             class: None,
             metadata: None,
-            params: Some(BTreeMap::from([(
-                "size".to_string(),
-                serde_json::json!("10Gi"),
-            )])),
+            params: ResourceParams::Volume(VolumeParams {
+                size: Some("10Gi".to_string()),
+                ..Default::default()
+            }),
             namespace: None,
         };
 
@@ -821,10 +831,10 @@ mod tests {
             id: Some("media-library".to_string()),
             class: None,
             metadata: None,
-            params: Some(BTreeMap::from([(
-                "size".to_string(),
-                serde_json::json!("1Ti"),
-            )])),
+            params: ResourceParams::Volume(VolumeParams {
+                size: Some("1Ti".to_string()),
+                ..Default::default()
+            }),
             namespace: None,
         };
 

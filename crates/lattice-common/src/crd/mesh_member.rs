@@ -282,7 +282,11 @@ impl LatticeMeshMemberSpec {
     pub fn validate(&self) -> Result<(), crate::Error> {
         // A mesh member must serve traffic (ports), call other services (dependencies),
         // or have non-mesh egress rules
-        if self.ports.is_empty() && self.dependencies.is_empty() && self.egress.is_empty() {
+        if self.ports.is_empty()
+            && self.dependencies.is_empty()
+            && self.egress.is_empty()
+            && !self.depends_all
+        {
             return Err(crate::Error::validation(
                 "at least one port, dependency, or egress rule is required",
             ));
@@ -418,6 +422,16 @@ mod tests {
         spec.dependencies.clear();
         spec.egress.clear();
         assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn validate_depends_all_only_valid() {
+        let mut spec = valid_spec();
+        spec.ports.clear();
+        spec.dependencies.clear();
+        spec.egress.clear();
+        spec.depends_all = true;
+        assert!(spec.validate().is_ok());
     }
 
     #[test]

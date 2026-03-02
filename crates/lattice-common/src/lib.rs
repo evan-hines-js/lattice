@@ -19,6 +19,7 @@ pub mod policy;
 pub mod protocol;
 pub mod retry;
 pub mod status_check;
+pub mod system_namespaces;
 pub mod telemetry;
 pub mod template;
 pub mod yaml;
@@ -300,6 +301,8 @@ pub const KTHENA_NAMESPACE: &str = "kthena-system";
 pub const KTHENA_ROUTER_SA: &str = "kthena-router";
 /// ServiceAccount name for the Kthena autoscaler (used as SPIFFE identity for metrics scraping)
 pub const KTHENA_AUTOSCALER_SA: &str = "kthena-autoscaler";
+/// ServiceAccount name for the Kthena controller manager (admission webhooks)
+pub const KTHENA_CONTROLLER_MANAGER_SA: &str = "kthena-controller-manager";
 
 // Service and resource names
 /// Name of the Lattice cell service

@@ -42,6 +42,14 @@ pub struct ParsedEndpoint {
 }
 
 impl ParsedEndpoint {
+    /// Returns true if the host is a cluster-local Kubernetes address.
+    ///
+    /// Cluster-local addresses (ending in `.svc` or `.svc.cluster.local`) resolve
+    /// inside the cluster and don't need external egress policies.
+    pub fn is_cluster_local(&self) -> bool {
+        self.host.ends_with(".svc") || self.host.ends_with(".svc.cluster.local")
+    }
+
     /// Parse an endpoint URL into its components
     pub fn parse(url: &str) -> Option<Self> {
         if let Some(stripped) = url.strip_prefix("tcp://") {
@@ -335,5 +343,30 @@ mod tests {
     fn test_resolution_to_istio_format() {
         assert_eq!(Resolution::Dns.to_istio_format(), "DNS");
         assert_eq!(Resolution::Static.to_istio_format(), "STATIC");
+    }
+
+    #[test]
+    fn test_is_cluster_local_svc_suffix() {
+        let ep = ParsedEndpoint::parse("http://my-service.default.svc:8080").expect("should parse");
+        assert!(ep.is_cluster_local());
+    }
+
+    #[test]
+    fn test_is_cluster_local_fqdn_suffix() {
+        let ep = ParsedEndpoint::parse("https://my-service.default.svc.cluster.local:443")
+            .expect("should parse");
+        assert!(ep.is_cluster_local());
+    }
+
+    #[test]
+    fn test_is_not_cluster_local_external() {
+        let ep = ParsedEndpoint::parse("https://vault.example.com:8200").expect("should parse");
+        assert!(!ep.is_cluster_local());
+    }
+
+    #[test]
+    fn test_is_not_cluster_local_ip() {
+        let ep = ParsedEndpoint::parse("http://172.18.0.9:8200").expect("should parse");
+        assert!(!ep.is_cluster_local());
     }
 }

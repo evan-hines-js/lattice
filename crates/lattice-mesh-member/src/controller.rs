@@ -206,6 +206,35 @@ pub async fn reconcile(
     // Update graph (idempotent — crash recovery)
     ctx.graph.put_mesh_member(namespace, &name, &member.spec);
 
+    // Register graph nodes for external workloads referenced by this member.
+    // The ingress compiler produces a graph registration for the gateway proxy
+    // (managed by Istio) so bilateral agreement edges form before policy compilation.
+    if let Some(ingress_spec) = &member.spec.ingress {
+        if let Ok(ingress) =
+            IngressCompiler::compile(&name, namespace, ingress_spec, &member.spec.ports)
+        {
+            if let Some(reg) = &ingress.gateway_graph_registration {
+                ctx.graph.put_mesh_member(namespace, &reg.name, &reg.spec);
+            }
+        }
+    }
+
+    // Log non-graph allowed_callers for observability.
+    for caller in &member.spec.allowed_callers {
+        if caller.name == "*" {
+            continue;
+        }
+        let caller_ns = caller.resolve_namespace(namespace);
+        if ctx.graph.get_service(caller_ns, &caller.name).is_none() {
+            warn!(
+                member = %name,
+                caller_namespace = %caller_ns,
+                caller_name = %caller.name,
+                "allowed_caller not found in service graph — bilateral agreement edge will not form until caller is registered"
+            );
+        }
+    }
+
     // Cedar-gate wildcard inbound/outbound
     if let Some(denied) = check_cedar_wildcards(&name, namespace, &ctx).await {
         warn!(msg = %denied);
@@ -324,7 +353,7 @@ async fn do_reconcile(
     namespace: &str,
     ctx: &MeshMemberContext,
 ) -> Result<(bool, HashSet<AppliedResourceRef>), ReconcileError> {
-    ensure_namespace_ambient(&ctx.client, namespace).await?;
+    ensure_namespace_ambient(&ctx.client, namespace, member.spec.ambient).await?;
 
     let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name).compile(name, namespace);
 
@@ -432,8 +461,21 @@ pub fn cleanup(member: &LatticeMeshMember, ctx: &MeshMemberContext) {
 // Namespace ambient enrollment
 // =============================================================================
 
-/// Ensure namespace has `istio.io/dataplane-mode: ambient` label
-async fn ensure_namespace_ambient(client: &Client, namespace: &str) -> Result<(), ReconcileError> {
+/// Ensure namespace has `istio.io/dataplane-mode: ambient` label.
+///
+/// Only enrolls the namespace when the MeshMember declares `ambient: true`.
+/// Non-ambient members skip enrollment entirely. Webhook ports that need
+/// API server access use `PeerAuth::Webhook` for per-port plaintext handling.
+async fn ensure_namespace_ambient(
+    client: &Client,
+    namespace: &str,
+    ambient: bool,
+) -> Result<(), ReconcileError> {
+    if !ambient {
+        debug!(namespace = %namespace, "member is not ambient, skipping namespace enrollment");
+        return Ok(());
+    }
+
     let labels = std::collections::BTreeMap::from([(
         mesh::DATAPLANE_MODE_LABEL.to_string(),
         mesh::DATAPLANE_MODE_AMBIENT.to_string(),

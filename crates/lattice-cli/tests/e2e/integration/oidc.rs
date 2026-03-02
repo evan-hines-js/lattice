@@ -26,7 +26,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_yaml, get_or_create_proxy, http_get_with_retry, proxy_service_exists, run_kubectl,
-    wait_for_condition,
+    wait_for_condition, DEFAULT_TIMEOUT,
 };
 use super::cedar::{apply_cedar_policy_allow_group, apply_e2e_default_policy};
 
@@ -39,6 +39,12 @@ const KEYCLOAK_HOST_URL: &str = "http://127.0.0.1:8080";
 
 /// Keycloak URL inside Docker/kind network
 const KEYCLOAK_INTERNAL_URL: &str = "http://lattice-keycloak:8080";
+
+/// Docker container name for Keycloak
+const KEYCLOAK_CONTAINER_NAME: &str = "lattice-keycloak";
+
+/// Keycloak port
+const KEYCLOAK_PORT: u16 = 8080;
 
 /// Keycloak realm
 const KEYCLOAK_REALM: &str = "lattice";
@@ -134,7 +140,7 @@ spec:
 async fn wait_for_oidc_provider_ready(kubeconfig: &str) -> Result<(), String> {
     wait_for_condition(
         "OIDCProvider to become Ready",
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(3),
         || async move {
             let phase = run_kubectl(&[
@@ -183,6 +189,14 @@ async fn cleanup_oidc_test_resources(kubeconfig: &str) {
         "--ignore-not-found",
     ])
     .await;
+
+    super::super::helpers::docker::cleanup_docker_dns(
+        kubeconfig,
+        KEYCLOAK_CONTAINER_NAME,
+        LATTICE_SYSTEM_NAMESPACE,
+    )
+    .await;
+
     info!("[Integration/OIDC] Cleanup complete");
 }
 
@@ -192,13 +206,12 @@ async fn cleanup_oidc_test_resources(kubeconfig: &str) {
 
 /// Run OIDC authentication test
 ///
-/// 1. Create OIDCProvider CRD pointing to Keycloak
-/// 2. Wait for Ready status
-/// 3. Get OIDC token as admin user
-/// 4. Create Cedar policy permitting lattice-admins group
-/// 5. Validate admin can access proxy with OIDC token
-/// 6. Validate viewer gets 403 (not in permitted group)
-/// 7. Verify SA tokens still work (fallback)
+/// - Register Docker container DNS so the operator can resolve Keycloak
+/// - Apply OIDCProvider CRD pointing to Keycloak and wait for Ready
+/// - Get OIDC tokens from Keycloak for admin and viewer users
+/// - Create K8s RBAC + Cedar policy permitting lattice-admins group
+/// - Validate admin can access proxy with OIDC token
+/// - Validate viewer gets 403 (not in permitted group)
 pub async fn run_oidc_auth_test(
     parent_kubeconfig: &str,
     child_cluster_name: &str,
@@ -213,21 +226,31 @@ pub async fn run_oidc_auth_test(
     let (proxy_url, _port_forward) =
         get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
 
-    // 1. Apply OIDCProvider CRD
+    // 1. Register Docker container in CoreDNS so the operator can resolve
+    //    `lattice-keycloak` to the real container IP.
+    super::super::helpers::docker::ensure_docker_dns(
+        parent_kubeconfig,
+        KEYCLOAK_CONTAINER_NAME,
+        LATTICE_SYSTEM_NAMESPACE,
+        KEYCLOAK_PORT,
+    )
+    .await?;
+
+    // 2. Apply OIDCProvider CRD
     apply_oidc_provider(parent_kubeconfig).await?;
 
-    // 2. Wait for Ready status
+    // 3. Wait for Ready status
     wait_for_oidc_provider_ready(parent_kubeconfig).await?;
     info!("[Integration/OIDC] OIDCProvider is Ready");
 
-    // 3. Get OIDC tokens from Keycloak (does not depend on operator OIDC reload)
+    // 4. Get OIDC tokens from Keycloak (does not depend on operator OIDC reload)
     let admin_token = get_keycloak_token("admin@lattice.dev", "admin").await?;
     info!("[Integration/OIDC] Got admin token from Keycloak");
 
     let viewer_token = get_keycloak_token("viewer@lattice.dev", "viewer").await?;
     info!("[Integration/OIDC] Got viewer token from Keycloak");
 
-    // 4. Create K8s RBAC bindings so the impersonated OIDC user can list namespaces
+    // 5. Create K8s RBAC bindings so the impersonated OIDC user can list namespaces
     let rbac_yaml = r#"apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

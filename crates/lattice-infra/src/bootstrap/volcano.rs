@@ -8,14 +8,18 @@
 //! (via `webhooks_namespace_selector_expressions` in the Helm values)
 //! so the operator can start before Volcano is ready.
 
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use lattice_common::crd::{NetworkTopologyConfig, ProviderType, TopologyDiscoverySpec};
+use lattice_common::crd::{
+    LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
+    NetworkTopologyConfig, PeerAuth, ProviderType, TopologyDiscoverySpec,
+};
 
-use super::{namespace_yaml, split_yaml_documents};
+use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
 
 static VOLCANO_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let mut manifests = vec![namespace_yaml("volcano-system")];
+    let mut manifests = vec![namespace_yaml_ambient("volcano-system")];
     manifests.extend(split_yaml_documents(include_str!(concat!(
         env!("OUT_DIR"),
         "/volcano.yaml"
@@ -121,6 +125,78 @@ fn auto_label_tiers(provider: ProviderType) -> String {
     }
 }
 
+/// Generate LatticeMeshMembers for Volcano components.
+///
+/// - **volcano-admission**: admission webhooks called by kube-apiserver (port 8443, Webhook mTLS)
+/// - **volcano-controllers**: reconciliation controller, egress-only (K8s API)
+/// - **volcano-scheduler**: batch scheduler, egress-only (K8s API)
+pub fn generate_volcano_mesh_members() -> Vec<LatticeMeshMember> {
+    vec![
+        lmm(
+            "volcano-admission",
+            "volcano-system",
+            LatticeMeshMemberSpec {
+                target: MeshMemberTarget::Selector(BTreeMap::from([(
+                    "app".to_string(),
+                    "volcano-admission".to_string(),
+                )])),
+                ports: vec![MeshMemberPort {
+                    port: 8443,
+                    service_port: None,
+                    name: "webhook".to_string(),
+                    peer_auth: PeerAuth::Webhook,
+                }],
+                allowed_callers: vec![],
+                dependencies: vec![],
+                egress: vec![kube_apiserver_egress()],
+                allow_peer_traffic: false,
+                ingress: None,
+                service_account: Some("volcano-admission".to_string()),
+                depends_all: false,
+                ambient: true,
+            },
+        ),
+        lmm(
+            "volcano-controllers",
+            "volcano-system",
+            LatticeMeshMemberSpec {
+                target: MeshMemberTarget::Selector(BTreeMap::from([(
+                    "app".to_string(),
+                    "volcano-controllers".to_string(),
+                )])),
+                ports: vec![],
+                allowed_callers: vec![],
+                dependencies: vec![],
+                egress: vec![kube_apiserver_egress()],
+                allow_peer_traffic: false,
+                ingress: None,
+                service_account: Some("volcano-controllers".to_string()),
+                depends_all: false,
+                ambient: true,
+            },
+        ),
+        lmm(
+            "volcano-scheduler",
+            "volcano-system",
+            LatticeMeshMemberSpec {
+                target: MeshMemberTarget::Selector(BTreeMap::from([(
+                    "app".to_string(),
+                    "volcano-scheduler".to_string(),
+                )])),
+                ports: vec![],
+                allowed_callers: vec![],
+                dependencies: vec![],
+                egress: vec![kube_apiserver_egress()],
+                allow_peer_traffic: false,
+                ingress: None,
+                service_account: Some("volcano-scheduler".to_string()),
+                depends_all: false,
+                ambient: true,
+            },
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +219,10 @@ mod tests {
             m[0].contains("volcano-system"),
             "First manifest should create the volcano-system namespace"
         );
+        assert!(
+            m[0].contains("istio.io/dataplane-mode: ambient"),
+            "Volcano namespace must be enrolled in ambient mesh"
+        );
     }
 
     #[test]
@@ -160,5 +240,60 @@ mod tests {
                 "MutatingWebhookConfiguration should exclude lattice-system namespace"
             );
         }
+    }
+
+    #[test]
+    fn volcano_mesh_members_generated() {
+        let members = generate_volcano_mesh_members();
+        assert_eq!(
+            members.len(),
+            3,
+            "should have admission + controllers + scheduler"
+        );
+
+        for m in &members {
+            assert_eq!(m.metadata.namespace.as_deref(), Some("volcano-system"));
+            assert!(m.spec.validate().is_ok());
+            assert!(
+                m.spec.ambient,
+                "{} should be ambient",
+                m.metadata.name.as_deref().unwrap()
+            );
+        }
+
+        // admission webhook
+        let adm = members
+            .iter()
+            .find(|m| m.metadata.name.as_deref() == Some("volcano-admission"))
+            .expect("admission member should exist");
+        assert_eq!(adm.spec.ports.len(), 1);
+        assert_eq!(adm.spec.ports[0].port, 8443);
+        assert_eq!(adm.spec.ports[0].peer_auth, PeerAuth::Webhook);
+        assert_eq!(
+            adm.spec.service_account.as_deref(),
+            Some("volcano-admission")
+        );
+
+        // controllers (egress-only)
+        let ctrl = members
+            .iter()
+            .find(|m| m.metadata.name.as_deref() == Some("volcano-controllers"))
+            .expect("controllers member should exist");
+        assert!(ctrl.spec.ports.is_empty(), "controllers is egress-only");
+        assert_eq!(
+            ctrl.spec.service_account.as_deref(),
+            Some("volcano-controllers")
+        );
+
+        // scheduler (egress-only)
+        let sched = members
+            .iter()
+            .find(|m| m.metadata.name.as_deref() == Some("volcano-scheduler"))
+            .expect("scheduler member should exist");
+        assert!(sched.spec.ports.is_empty(), "scheduler is egress-only");
+        assert_eq!(
+            sched.spec.service_account.as_deref(),
+            Some("volcano-scheduler")
+        );
     }
 }

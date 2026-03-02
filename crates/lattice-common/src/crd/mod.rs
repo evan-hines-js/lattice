@@ -93,8 +93,9 @@ pub use workload::ingress::{
 };
 pub use workload::ports::{PortSpec, ServicePortsSpec};
 pub use workload::resources::{
-    DependencyDirection, ExternalServiceParams, GpuParams, ResourceMetadata, ResourceQuantity,
-    ResourceRequirements, ResourceSpec, ResourceType, VolumeAccessMode, VolumeParams,
+    DependencyDirection, ExternalServiceParams, GpuParams, ResourceMetadata, ResourceParams,
+    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, SecretParams,
+    VolumeAccessMode, VolumeParams,
 };
 pub use workload::scaling::{AutoscalingMetric, AutoscalingSpec};
 pub use workload::spec::{RuntimeSpec, WorkloadSpec};

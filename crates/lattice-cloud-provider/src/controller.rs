@@ -127,8 +127,8 @@ async fn reconcile_credentials(client: &Client, cp: &CloudProvider) -> Result<()
             if let Some(ref resource) = cp.spec.credentials {
                 // ESO mode: create ExternalSecret
                 let params = resource
-                    .secret_params()
-                    .map_err(|e| ReconcileError::Validation(format!("credentials: {}", e)))?
+                    .params
+                    .as_secret()
                     .ok_or_else(|| {
                         ReconcileError::Validation(
                             "credentials must have type: secret with params.provider".into(),
@@ -248,7 +248,9 @@ async fn update_status(
 mod tests {
     use super::*;
     use kube::core::ObjectMeta;
-    use lattice_common::crd::{CloudProviderSpec, ResourceSpec, ResourceType, SecretRef};
+    use lattice_common::crd::{
+        CloudProviderSpec, ResourceParams, ResourceSpec, ResourceType, SecretParams, SecretRef,
+    };
     use lattice_common::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE};
 
     // =========================================================================
@@ -288,9 +290,6 @@ mod tests {
     }
 
     fn sample_eso_provider(name: &str, provider_type: CloudProviderType) -> CloudProvider {
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!("vault-prod"));
-
         CloudProvider::new(
             name,
             CloudProviderSpec {
@@ -300,7 +299,10 @@ mod tests {
                 credentials: Some(ResourceSpec {
                     type_: ResourceType::Secret,
                     id: Some("infrastructure/aws/prod".to_string()),
-                    params: Some(params),
+                    params: ResourceParams::Secret(SecretParams {
+                        provider: "vault-prod".to_string(),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 credential_data: None,
@@ -337,9 +339,6 @@ mod tests {
 
     #[tokio::test]
     async fn mutual_exclusion_validation() {
-        let mut params = BTreeMap::new();
-        params.insert("provider".to_string(), serde_json::json!("vault"));
-
         let cp = CloudProvider::new(
             "test",
             CloudProviderSpec {
@@ -352,7 +351,10 @@ mod tests {
                 credentials: Some(ResourceSpec {
                     type_: ResourceType::Secret,
                     id: Some("path".to_string()),
-                    params: Some(params),
+                    params: ResourceParams::Secret(SecretParams {
+                        provider: "vault".to_string(),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 credential_data: None,
@@ -397,7 +399,7 @@ mod tests {
         let cp = sample_eso_provider("aws-test", CloudProviderType::AWS);
 
         let resource = cp.spec.credentials.as_ref().unwrap();
-        let params = resource.secret_params().unwrap().unwrap();
+        let params = resource.params.as_secret().unwrap();
         let remote_key = resource.secret_remote_key().unwrap();
         let secret_name = format!("{}-credentials", cp.name_any());
 
@@ -420,13 +422,6 @@ mod tests {
 
     #[tokio::test]
     async fn templated_mode_builds_external_secret() {
-        let mut params_map = BTreeMap::new();
-        params_map.insert("provider".to_string(), serde_json::json!("vault-prod"));
-        params_map.insert(
-            "keys".to_string(),
-            serde_json::json!(["username", "password", "auth_url"]),
-        );
-
         let mut credential_data = BTreeMap::new();
         credential_data.insert(
             "clouds.yaml".to_string(),
@@ -442,7 +437,15 @@ mod tests {
                 credentials: Some(ResourceSpec {
                     type_: ResourceType::Secret,
                     id: Some("infrastructure/openstack/creds".to_string()),
-                    params: Some(params_map),
+                    params: ResourceParams::Secret(SecretParams {
+                        provider: "vault-prod".to_string(),
+                        keys: Some(vec![
+                            "username".to_string(),
+                            "password".to_string(),
+                            "auth_url".to_string(),
+                        ]),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 credential_data: Some(credential_data.clone()),
@@ -454,7 +457,7 @@ mod tests {
         );
 
         let resource = cp.spec.credentials.as_ref().unwrap();
-        let params = resource.secret_params().unwrap().unwrap();
+        let params = resource.params.as_secret().unwrap();
         let remote_key = resource.secret_remote_key().unwrap();
         let secret_name = format!("{}-credentials", cp.name_any());
 

@@ -148,10 +148,9 @@ impl VolumeCompiler {
             // Generate PVC for owned volumes (has size)
             if resource_spec.is_volume_owner() {
                 let params = resource_spec
-                    .volume_params()
-                    .map_err(|e| {
-                        CompilationError::volume(format!("resource '{}': {}", resource_name, e))
-                    })?
+                    .params
+                    .as_volume()
+                    .cloned()
                     .unwrap_or_default();
                 let pvc = Self::compile_pvc(&pvc_name, namespace, &params, owner_references);
                 output.pvcs.push(pvc);
@@ -310,7 +309,9 @@ impl VolumeCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{ContainerSpec, ResourceSpec, ResourceType, WorkloadSpec};
+    use lattice_common::crd::{
+        ContainerSpec, ResourceParams, ResourceSpec, ResourceType, WorkloadSpec,
+    };
     use lattice_common::template::TemplateString;
 
     fn make_spec_with_volumes(
@@ -322,22 +323,16 @@ mod tests {
 
         // Add owned volumes
         for (name, id, size, access_mode) in owned {
-            let mut params = BTreeMap::new();
-            params.insert("size".to_string(), serde_json::json!(size));
-            if let Some(mode) = access_mode {
-                let mode_str = match mode {
-                    VolumeAccessMode::ReadWriteOnce => "ReadWriteOnce",
-                    VolumeAccessMode::ReadWriteMany => "ReadWriteMany",
-                    VolumeAccessMode::ReadOnlyMany => "ReadOnlyMany",
-                };
-                params.insert("accessMode".to_string(), serde_json::json!(mode_str));
-            }
             resources.insert(
                 name.to_string(),
                 ResourceSpec {
                     type_: ResourceType::Volume,
                     id: id.map(|s: &str| s.to_string()),
-                    params: Some(params),
+                    params: ResourceParams::Volume(VolumeParams {
+                        size: Some(size.to_string()),
+                        access_mode,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
             );
@@ -350,6 +345,7 @@ mod tests {
                 ResourceSpec {
                     type_: ResourceType::Volume,
                     id: Some(id.to_string()),
+                    params: ResourceParams::Volume(VolumeParams::default()),
                     ..Default::default()
                 },
             );
@@ -439,8 +435,8 @@ mod tests {
 
         // Add storage class to volume config via params
         if let Some(resource) = spec.resources.get_mut("config") {
-            if let Some(params) = resource.params.as_mut() {
-                params.insert("storageClass".to_string(), serde_json::json!("local-path"));
+            if let ResourceParams::Volume(ref mut vp) = resource.params {
+                vp.storage_class = Some("local-path".to_string());
             }
         }
 

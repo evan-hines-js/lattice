@@ -27,8 +27,8 @@ use std::collections::BTreeMap;
 use lattice_common::crd::workload::container::VolumeMount;
 use lattice_common::crd::{
     ContainerSpec, DependencyDirection, JobTaskSpec, LatticeJob, LatticeJobSpec, ModelSourceSpec,
-    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RestartPolicy, RuntimeSpec,
-    WorkloadSpec,
+    ResourceParams, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
+    RestartPolicy, RuntimeSpec, SecretParams, VolumeParams, WorkloadSpec,
 };
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::template::TemplateString;
@@ -188,20 +188,19 @@ fn compile_lattice_job(
     // forwarded from the LatticeJob (which point to LatticeModel for GC).
     // The volume id enables cross-workload sharing: serving pods declare
     // the same id as a reference and get pod affinity for co-location.
-    let mut volume_params: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    volume_params.insert("size".to_string(), serde_json::json!(source.cache_size));
-    if let Some(ref sc) = source.storage_class {
-        volume_params.insert("storageClass".to_string(), serde_json::json!(sc));
-    }
-    if let Some(ref am) = source.access_mode {
-        volume_params.insert("accessMode".to_string(), serde_json::json!(am));
-    }
     resources.insert(
         VOLUME_NAME.to_string(),
         ResourceSpec {
             type_: ResourceType::Volume,
             id: Some(volume_id.to_string()),
-            params: Some(volume_params),
+            params: ResourceParams::Volume(VolumeParams {
+                size: Some(source.cache_size.clone()),
+                storage_class: source.storage_class.clone(),
+                access_mode: source.access_mode.as_deref().and_then(|am| {
+                    serde_json::from_value(serde_json::json!(am)).ok()
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     );
@@ -221,15 +220,15 @@ fn compile_lattice_job(
     // Token secret via lattice-local ESO provider (if configured)
     let mut env_from = Vec::new();
     if let Some(ref token_secret) = source.token_secret {
-        let mut secret_params: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        secret_params.insert("provider".to_string(), serde_json::json!("lattice-local"));
-
         resources.insert(
             "token".to_string(),
             ResourceSpec {
                 type_: ResourceType::Secret,
                 id: Some(token_secret.name.clone()),
-                params: Some(secret_params),
+                params: ResourceParams::Secret(SecretParams {
+                    provider: "lattice-local".to_string(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
