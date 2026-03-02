@@ -5,6 +5,22 @@
 
 use crate::CompiledPodTemplate;
 
+/// Inject labels into a pod template's metadata.
+///
+/// Used by job and model compilers to add group-level labels (e.g.
+/// `lattice.dev/training-job`, `istio.io/dataplane-mode: none`) after
+/// the initial pod template has been serialized to JSON.
+pub fn inject_pod_labels(template: &mut serde_json::Value, labels: &[(&str, &str)]) {
+    let labels_obj = template
+        .pointer_mut("/metadata/labels")
+        .and_then(|v| v.as_object_mut());
+    if let Some(obj) = labels_obj {
+        for (key, value) in labels {
+            obj.insert(key.to_string(), serde_json::json!(value));
+        }
+    }
+}
+
 /// Convert a `CompiledPodTemplate` into a JSON value for batch/serving workload templates.
 ///
 /// Produces a pod template spec structure as JSON, avoiding dependency on the service

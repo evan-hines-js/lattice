@@ -18,16 +18,17 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    CheckpointSpec, DependencyDirection, JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig,
-    PortSpec, ProviderType, ResourceSpec, ResourceType, ServicePortsSpec, TrainingConfig,
-    TrainingFramework, VolumeMount, WorkloadSpec,
+    CheckpointSpec, JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, PortSpec, ProviderType,
+    ResourceSpec, ResourceType, ServicePortsSpec, TrainingConfig, TrainingFramework, VolumeMount,
+    WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
 use lattice_common::template::TemplateString;
+use lattice_common::LABEL_TRAINING_JOB;
 use lattice_volcano::{VCCronJob, VCJob};
-use lattice_workload::{CompiledConfig, WorkloadCompiler};
+use lattice_workload::{inject_pod_labels, CompiledConfig, WorkloadCompiler};
 
 use crate::error::JobError;
 
@@ -109,7 +110,11 @@ pub async fn compile_job(
     // Register each task in the service graph so WorkloadCompiler finds them
     // and creates LatticeMeshMembers (same path as LatticeService).
     for (task_name, task_spec) in &tasks {
-        graph.put_workload(namespace, &format!("{}-{}", name, task_name), &task_spec.workload);
+        graph.put_workload(
+            namespace,
+            &format!("{}-{}", name, task_name),
+            &task_spec.workload,
+        );
     }
 
     // Forward the LatticeJob's ownerReferences to VolumeCompiler for PVC GC.
@@ -175,25 +180,29 @@ pub async fn compile_job(
         tracing_policies.extend(policies);
     }
 
-    // Training: allow intra-task peer traffic (e.g. worker-0 ↔ worker-1).
-    // Cross-task traffic (master ↔ worker) is handled by the bilateral
-    // dependencies injected in prepare_training_tasks.
+    // Training: opt out of ambient mesh and use group-level selector for peer traffic.
+    // All pods in the gang share the same `lattice.dev/training-job` label, so one
+    // CiliumNetworkPolicy covers the entire gang with direct L4 peer rules.
     if job.spec.training.is_some() {
         for mm in &mut mesh_members {
             mm.spec.allow_peer_traffic = true;
+            mm.spec.ambient = false;
+            mm.spec.target = lattice_common::crd::MeshMemberTarget::Selector(
+                [(LABEL_TRAINING_JOB.to_string(), name.to_string())]
+                    .into_iter()
+                    .collect(),
+            );
         }
-    }
 
-    // Training: label PVCs with training-job name for identification
-    if job.spec.training.is_some() {
         for pvc in &mut config.pvcs {
             pvc.metadata
                 .labels
-                .insert("lattice.dev/training-job".to_string(), name.to_string());
+                .insert(LABEL_TRAINING_JOB.to_string(), name.to_string());
         }
     }
 
-    // Training: inject per-pod RANK via init container + emptyDir.
+    // Training: inject per-pod RANK via init container + emptyDir, and
+    // add pod labels for mesh opt-out and peer group identification.
     // Volcano's VC_TASK_INDEX is per-task-group (not globally unique), so
     // multi-task jobs need an offset: RANK = rank_offset + VC_TASK_INDEX.
     // Tasks are iterated in BTreeMap order (alphabetical), accumulating
@@ -203,6 +212,13 @@ pub async fn compile_job(
         for (task_name, task_spec) in &tasks {
             if let Some(template) = pod_templates.get_mut(task_name) {
                 inject_rank_env(template, cumulative_offset);
+                inject_pod_labels(
+                    template,
+                    &[
+                        (LABEL_TRAINING_JOB, name),
+                        ("istio.io/dataplane-mode", "none"),
+                    ],
+                );
             }
             cumulative_offset += task_spec.replicas;
         }
@@ -277,12 +293,6 @@ fn prepare_training_tasks(
         // Without a service port, no mesh member is generated and the cluster-wide
         // default-deny blocks inter-pod traffic on port 29500.
         inject_training_service_port(&mut task.workload);
-
-        // Inject mutual dependencies between all tasks in the gang.
-        // Each task declares every sibling as both inbound (allowed caller) and
-        // outbound (dependency), creating bilateral mesh agreements so the
-        // AuthorizationPolicy allows cross-task traffic (e.g. worker → master).
-        inject_gang_dependencies(&mut task.workload, job_name, task_name, tasks);
 
         let gpu_count = gpu_param(&task.workload, |p| Some(p.count));
         inject_framework_env(
@@ -407,49 +417,17 @@ fn inject_nccl_env(workload: &mut WorkloadSpec, nccl: Option<&NcclConfig>) {
 /// which in turn generates CiliumNetworkPolicy rules. Without this, the
 /// cluster-wide default-deny blocks inter-pod training traffic.
 fn inject_training_service_port(workload: &mut WorkloadSpec) {
-    let service = workload.service.get_or_insert_with(ServicePortsSpec::default);
-    service.ports.entry("master".to_string()).or_insert(PortSpec {
-        port: DEFAULT_MASTER_PORT,
-        target_port: None,
-        protocol: None,
-    });
-}
-
-/// Inject bilateral mesh dependencies between all tasks in a training gang.
-///
-/// For each sibling task, adds an inbound resource (allowed caller) and an
-/// outbound resource (dependency). This creates bilateral agreements in the
-/// service graph so Istio AuthorizationPolicies allow cross-task traffic.
-fn inject_gang_dependencies(
-    workload: &mut WorkloadSpec,
-    job_name: &str,
-    task_name: &str,
-    all_tasks: &BTreeMap<String, JobTaskSpec>,
-) {
-    for sibling_name in all_tasks.keys() {
-        if sibling_name == task_name {
-            continue;
-        }
-        let full_sibling_name = format!("{}-{}", job_name, sibling_name);
-
-        // Inbound: allow sibling to call us
-        let inbound_key = format!("{}-inbound", full_sibling_name);
-        workload.resources.entry(inbound_key).or_insert(ResourceSpec {
-            type_: ResourceType::Service,
-            direction: DependencyDirection::Inbound,
-            id: Some(full_sibling_name.clone()),
-            ..Default::default()
+    let service = workload
+        .service
+        .get_or_insert_with(ServicePortsSpec::default);
+    service
+        .ports
+        .entry("master".to_string())
+        .or_insert(PortSpec {
+            port: DEFAULT_MASTER_PORT,
+            target_port: None,
+            protocol: None,
         });
-
-        // Outbound: we call sibling
-        let outbound_key = format!("{}-outbound", full_sibling_name);
-        workload.resources.entry(outbound_key).or_insert(ResourceSpec {
-            type_: ResourceType::Service,
-            direction: DependencyDirection::Outbound,
-            id: Some(full_sibling_name.clone()),
-            ..Default::default()
-        });
-    }
 }
 
 /// Inject env vars into all containers (does not overwrite existing values).
@@ -1031,50 +1009,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn gang_dependencies_injected_between_tasks() {
-        let mut tasks = BTreeMap::new();
-        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
-        tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
-
-        let training = TrainingConfig {
-            framework: TrainingFramework::PyTorch,
-            coordinator_task: "master".to_string(),
-            checkpoint: None,
-            nccl: None,
-        };
-
-        let prepared = prepare_training_tasks("my-job", &tasks, &training).unwrap();
-
-        // Master should have outbound+inbound resources for worker
-        let master_res = &prepared["master"].workload.resources;
-        assert!(
-            master_res.values().any(|r| r.direction == DependencyDirection::Outbound
-                && r.id.as_deref() == Some("my-job-worker")),
-            "master should have outbound dep on my-job-worker"
-        );
-        assert!(
-            master_res.values().any(|r| r.direction == DependencyDirection::Inbound
-                && r.id.as_deref() == Some("my-job-worker")),
-            "master should allow inbound from my-job-worker"
-        );
-
-        // Worker should have outbound+inbound resources for master
-        let worker_res = &prepared["worker"].workload.resources;
-        assert!(
-            worker_res.values().any(|r| r.direction == DependencyDirection::Outbound
-                && r.id.as_deref() == Some("my-job-master")),
-            "worker should have outbound dep on my-job-master"
-        );
-        assert!(
-            worker_res.values().any(|r| r.direction == DependencyDirection::Inbound
-                && r.id.as_deref() == Some("my-job-master")),
-            "worker should allow inbound from my-job-master"
-        );
-    }
-
     #[tokio::test]
-    async fn training_job_bilateral_mesh_agreement() {
+    async fn training_job_opts_out_of_ambient() {
         let mut tasks = BTreeMap::new();
         tasks.insert("master".to_string(), make_training_task("train:latest", 1));
         tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
@@ -1091,7 +1027,7 @@ mod tests {
         };
         let mut job = LatticeJob::new("my-train", spec);
         job.metadata.namespace = Some("default".to_string());
-        job.metadata.uid = Some("uid-bilateral".to_string());
+        job.metadata.uid = Some("uid-ambient".to_string());
 
         let graph = ServiceGraph::new();
         let cedar = permit_all_cedar();
@@ -1100,26 +1036,80 @@ mod tests {
             .await
             .unwrap();
 
-        // Graph should have bilateral edges between master and worker
-        let master_inbound = graph.get_active_inbound_edges("default", "my-train-master");
-        let worker_inbound = graph.get_active_inbound_edges("default", "my-train-worker");
-
-        assert!(
-            master_inbound.iter().any(|e| e.caller_name == "my-train-worker"),
-            "master should have inbound edge from worker, got: {:?}",
-            master_inbound.iter().map(|e| &e.caller_name).collect::<Vec<_>>()
-        );
-        assert!(
-            worker_inbound.iter().any(|e| e.caller_name == "my-train-master"),
-            "worker should have inbound edge from master, got: {:?}",
-            worker_inbound.iter().map(|e| &e.caller_name).collect::<Vec<_>>()
-        );
-
-        // Mesh members should have allowed_callers for sibling tasks
         assert!(
             compiled.mesh_members.len() >= 2,
             "expected at least 2 mesh members"
         );
+
+        for mm in &compiled.mesh_members {
+            assert!(
+                !mm.spec.ambient,
+                "training mesh members should opt out of ambient"
+            );
+            assert!(
+                mm.spec.allow_peer_traffic,
+                "training mesh members should allow peer traffic"
+            );
+
+            // Selector should use group-level training-job label, not per-task name
+            let selector_labels = mm.spec.target_labels();
+            assert_eq!(
+                selector_labels.get(LABEL_TRAINING_JOB),
+                Some(&"my-train".to_string()),
+                "selector should use training-job group label"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn training_pod_templates_have_mesh_opt_out_labels() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("master".to_string(), make_training_task("train:latest", 1));
+        tasks.insert("worker".to_string(), make_training_task("train:latest", 2));
+
+        let spec = LatticeJobSpec {
+            training: Some(TrainingConfig {
+                framework: TrainingFramework::PyTorch,
+                coordinator_task: "master".to_string(),
+                checkpoint: None,
+                nccl: None,
+            }),
+            tasks,
+            ..Default::default()
+        };
+        let mut job = LatticeJob::new("my-train", spec);
+        job.metadata.namespace = Some("default".to_string());
+        job.metadata.uid = Some("uid-labels".to_string());
+
+        let graph = ServiceGraph::new();
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+            .await
+            .unwrap();
+
+        let vcjob = match &compiled.workload {
+            VolcanoWorkload::Job(v) => v,
+            VolcanoWorkload::CronJob(_) => panic!("expected VCJob"),
+        };
+
+        for task in &vcjob.spec.tasks {
+            let labels = task.template.pointer("/metadata/labels").unwrap();
+            assert_eq!(
+                labels
+                    .get("istio.io/dataplane-mode")
+                    .and_then(|v| v.as_str()),
+                Some("none"),
+                "task {} should have dataplane-mode: none",
+                task.name
+            );
+            assert_eq!(
+                labels.get(LABEL_TRAINING_JOB).and_then(|v| v.as_str()),
+                Some("my-train"),
+                "task {} should have training-job label",
+                task.name
+            );
+        }
     }
 
     #[tokio::test]
@@ -1158,7 +1148,9 @@ mod tests {
         assert!(vcjob.spec.plugins.contains_key("svc"));
         let svc_args = &vcjob.spec.plugins["svc"];
         assert!(
-            svc_args.iter().any(|a| a.contains("publish-not-ready-addresses")),
+            svc_args
+                .iter()
+                .any(|a| a.contains("publish-not-ready-addresses")),
             "svc plugin must enable publishNotReadyAddresses for training pods"
         );
     }
@@ -1402,10 +1394,9 @@ mod tests {
         // Volume mounts on main container
         let vm = main["volumeMounts"].as_array().unwrap();
         assert!(vm.iter().any(|v| v["name"] == "lattice-env"));
-        assert!(
-            vm.iter()
-                .any(|v| v["name"] == "lattice-tmp" && v["mountPath"] == "/tmp")
-        );
+        assert!(vm
+            .iter()
+            .any(|v| v["name"] == "lattice-tmp" && v["mountPath"] == "/tmp"));
     }
 
     #[test]

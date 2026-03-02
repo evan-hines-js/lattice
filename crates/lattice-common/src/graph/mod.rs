@@ -94,6 +94,9 @@ pub struct ServiceNode {
     pub egress_rules: Vec<EgressRule>,
     /// Override SA name for SPIFFE principal (None = use node name)
     pub service_account: Option<String>,
+    /// Whether this member participates in Istio ambient mesh (L7 enforcement).
+    /// When `false`, only Cilium L4 policies are generated.
+    pub ambient: bool,
 }
 
 impl ServiceNode {
@@ -163,6 +166,7 @@ impl ServiceNode {
             allow_peer_traffic: false,
             egress_rules: vec![],
             service_account: None,
+            ambient: true,
         }
     }
 
@@ -235,6 +239,7 @@ impl ServiceNode {
             allow_peer_traffic: spec.allow_peer_traffic,
             egress_rules: spec.egress.clone(),
             service_account: spec.service_account.clone(),
+            ambient: spec.ambient,
         }
     }
 
@@ -255,6 +260,7 @@ impl ServiceNode {
             allow_peer_traffic: false,
             egress_rules: vec![],
             service_account: None,
+            ambient: true,
         }
     }
 
@@ -546,6 +552,7 @@ impl ServiceGraph {
                     node.allow_peer_traffic =
                         node.allow_peer_traffic || existing.allow_peer_traffic;
                     node.depends_all = node.depends_all || existing.depends_all;
+                    node.ambient = existing.ambient;
                 }
             }
         }
@@ -1514,6 +1521,7 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
+            ambient: true,
         }
     }
 
@@ -1645,6 +1653,7 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
+            ambient: true,
         };
 
         graph.put_mesh_member("default", "kube-api-access", &spec);
@@ -2013,6 +2022,7 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: Some("custom-sa".to_string()),
+            ambient: true,
         };
         graph.put_mesh_member("ns", "frontend", &mm_spec);
 
@@ -2076,6 +2086,7 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
+            ambient: true,
         };
         graph.put_mesh_member("ns", "frontend", &mm_spec);
 

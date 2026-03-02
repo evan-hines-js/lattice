@@ -325,6 +325,7 @@ mod tests {
                     ingress: None,
                     service_account: None,
                     depends_all: false,
+                    ambient: true,
                 },
                 status: None,
             }),

@@ -251,4 +251,150 @@ impl<'a> PolicyCompiler<'a> {
             },
         )
     }
+
+    /// Compile a CiliumNetworkPolicy for an out-of-ambient member.
+    ///
+    /// These pods have `istio.io/dataplane-mode: none` — no ztunnel, no HBONE.
+    /// All traffic is direct L4. No `fromEntities: [cluster]` — only specific
+    /// label-based callers and peer group members are allowed.
+    pub(super) fn compile_direct_cilium_policy(
+        &self,
+        service: &ServiceNode,
+        namespace: &str,
+    ) -> CiliumNetworkPolicy {
+        let endpoint_labels = service.cilium_match_labels();
+        let mut ingress_rules = Vec::new();
+
+        // Peer traffic: pods matching our own selector can reach us on any port
+        if service.allow_peer_traffic {
+            ingress_rules.push(CiliumIngressRule {
+                from_endpoints: vec![EndpointSelector::from_labels(endpoint_labels.clone())],
+                ..Default::default()
+            });
+        }
+
+        // Infrastructure callers: label-based ingress with port restrictions.
+        // These are callers in allowed_callers that don't exist in the service graph
+        // (e.g. kthena-router, vmagent).
+        let inbound_edges = self
+            .graph
+            .get_active_inbound_edges(namespace, &service.name);
+        for (caller_ns, caller_name) in &service.allowed_callers {
+            if self.graph.get_service(caller_ns, caller_name).is_some() {
+                continue; // Handled by bilateral agreement edges below
+            }
+            let mut labels = BTreeMap::new();
+            labels.insert(CILIUM_LABEL_NAMESPACE.to_string(), caller_ns.clone());
+            labels.insert(
+                format!("k8s:{}", lattice_common::LABEL_NAME),
+                caller_name.clone(),
+            );
+            // Restrict to declared service ports
+            let port_numbers: Vec<u16> = service.ports.values().map(|pm| pm.target_port).collect();
+            ingress_rules.push(CiliumIngressRule {
+                from_endpoints: vec![EndpointSelector::from_labels(labels)],
+                to_ports: build_tcp_port_rules(&port_numbers),
+                ..Default::default()
+            });
+        }
+
+        // Bilateral agreement callers: label-based ingress with port restrictions
+        for edge in &inbound_edges {
+            let caller = match self
+                .graph
+                .get_service(&edge.caller_namespace, &edge.caller_name)
+            {
+                Some(c) => c,
+                None => continue,
+            };
+            let mut labels = caller.cilium_match_labels();
+            if edge.caller_namespace != namespace {
+                labels.insert(
+                    CILIUM_LABEL_NAMESPACE.to_string(),
+                    edge.caller_namespace.clone(),
+                );
+            }
+            let port_numbers: Vec<u16> = service.ports.values().map(|pm| pm.target_port).collect();
+            ingress_rules.push(CiliumIngressRule {
+                from_endpoints: vec![EndpointSelector::from_labels(labels)],
+                to_ports: build_tcp_port_rules(&port_numbers),
+                ..Default::default()
+            });
+        }
+
+        // Implicit vmagent ingress: if the service has a "metrics" port, allow
+        // vmagent to scrape it (same convention as ServiceNode::allows)
+        if let Some(metrics_pm) = service.ports.get("metrics") {
+            let mut vmagent_labels = BTreeMap::new();
+            vmagent_labels.insert(
+                CILIUM_LABEL_NAMESPACE.to_string(),
+                lattice_common::MONITORING_NAMESPACE.to_string(),
+            );
+            vmagent_labels.insert(
+                format!("k8s:{}", lattice_common::LABEL_NAME),
+                lattice_common::VMAGENT_NODE_NAME.to_string(),
+            );
+            ingress_rules.push(CiliumIngressRule {
+                from_endpoints: vec![EndpointSelector::from_labels(vmagent_labels)],
+                to_ports: build_tcp_port_rules(&[metrics_pm.target_port]),
+                ..Default::default()
+            });
+        }
+
+        // Egress: DNS + peer traffic + non-mesh egress rules
+        let mut egress_rules = Vec::new();
+        egress_rules.push(dns_egress_rule(None));
+
+        // Peer egress: match our own selector (same pods we allow inbound from)
+        if service.allow_peer_traffic {
+            egress_rules.push(CiliumEgressRule {
+                to_endpoints: vec![EndpointSelector::from_labels(endpoint_labels.clone())],
+                ..Default::default()
+            });
+        }
+
+        // Non-mesh egress rules (entity, CIDR, FQDN)
+        for rule in &service.egress_rules {
+            let to_ports = build_tcp_port_rules(&rule.ports);
+            match &rule.target {
+                EgressTarget::Entity(entity) => {
+                    egress_rules.push(CiliumEgressRule {
+                        to_entities: vec![entity.clone()],
+                        to_ports,
+                        ..Default::default()
+                    });
+                }
+                EgressTarget::Cidr(cidr) => {
+                    egress_rules.push(CiliumEgressRule {
+                        to_cidr: vec![cidr.clone()],
+                        to_ports,
+                        ..Default::default()
+                    });
+                }
+                EgressTarget::Fqdn(fqdn) => {
+                    egress_rules.push(CiliumEgressRule {
+                        to_fqdns: vec![FqdnSelector {
+                            match_name: Some(fqdn.clone()),
+                            match_pattern: None,
+                        }],
+                        to_ports,
+                        ..Default::default()
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        CiliumNetworkPolicy::new(
+            ObjectMeta::new(
+                derived_name("cnp-mesh-", &[namespace, &service.name]),
+                namespace,
+            ),
+            CiliumNetworkPolicySpec {
+                endpoint_selector: EndpointSelector::from_labels(endpoint_labels),
+                ingress: ingress_rules,
+                egress: egress_rules,
+            },
+        )
+    }
 }

@@ -320,6 +320,12 @@ pub const LABEL_MANAGED_BY_LATTICE: &str = "lattice";
 /// Label prefix for shared volume co-location (e.g., lattice.io/vol-media-storage)
 pub const LABEL_VOLUME_PREFIX: &str = "lattice.io/vol-";
 
+// Peer group labels (used as pod labels AND Cilium selectors for direct L4 peer traffic)
+/// Label identifying all pods in a training gang
+pub const LABEL_TRAINING_JOB: &str = "lattice.dev/training-job";
+/// Label identifying all pods in a model serving group
+pub const LABEL_MODEL: &str = "lattice.dev/model";
+
 // Cilium label selectors (use k8s: prefix for Kubernetes labels)
 /// Cilium selector for app name label
 pub const CILIUM_LABEL_NAME: &str = "k8s:app.kubernetes.io/name";

@@ -33,4 +33,4 @@ pub use compiler::WorkloadCompiler;
 pub use error::CompilationError;
 pub use pipeline::pod_template::CompiledPodTemplate;
 pub use pipeline::secrets::SecretRef;
-pub use pod_template_json::pod_template_to_json;
+pub use pod_template_json::{inject_pod_labels, pod_template_to_json};

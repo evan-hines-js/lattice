@@ -16,7 +16,9 @@ use lattice_common::crd::{
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
-use lattice_common::{KTHENA_AUTOSCALER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_NAME};
+use lattice_common::{
+    KTHENA_AUTOSCALER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_MODEL, LABEL_NAME,
+};
 use lattice_volcano::routing_compiler::{PD_ROLE_DECODE, PD_ROLE_PREFILL};
 use lattice_volcano::{CompiledAutoscaling, CompiledRouting, ModelServing, RoleTemplates};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
@@ -257,6 +259,15 @@ pub async fn compile_model(
         }
     }
 
+    // Inject model group label and ambient mesh opt-out into all pod templates
+    let model_labels: &[(&str, &str)] = &[(LABEL_MODEL, name), ("istio.io/dataplane-mode", "none")];
+    for templates in role_templates.values_mut() {
+        lattice_workload::inject_pod_labels(&mut templates.entry_template, model_labels);
+        if let Some(ref mut worker) = templates.worker_template {
+            lattice_workload::inject_pod_labels(worker, model_labels);
+        }
+    }
+
     // Build ModelServing from aggregated role templates.
     // The role suffix ensures the resource name changes when the role set changes,
     // avoiding PodGroup name collisions with still-Terminating old resources.
@@ -290,6 +301,19 @@ pub async fn compile_model(
     // to reach model pods for metrics scraping.
     if autoscaling.is_some() {
         ensure_autoscaling_mesh_members(name, &model.spec.roles, &mut mesh_members);
+    }
+
+    // Model serving: opt out of ambient mesh. All model pods share the
+    // `lattice.dev/model` group label for Cilium L4 peer traffic rules.
+    // Infrastructure callers (router, autoscaler) are handled by
+    // compile_direct_cilium_policy via label-based ingress.
+    for mm in &mut mesh_members {
+        mm.spec.ambient = false;
+        mm.spec.target = lattice_common::crd::MeshMemberTarget::Selector(
+            [(LABEL_MODEL.to_string(), name.to_string())]
+                .into_iter()
+                .collect(),
+        );
     }
 
     Ok(CompiledModel {
@@ -451,6 +475,7 @@ fn ensure_infra_caller_on_mesh_member(
                 depends_all: false,
                 ingress: None,
                 service_account: None,
+                ambient: true,
             },
         );
         mesh_members.push(mm);

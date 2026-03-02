@@ -107,6 +107,15 @@ impl<'a> PolicyCompiler<'a> {
             return GeneratedPolicies::default();
         }
 
+        // Out-of-ambient: Cilium L4 only, no Istio resources
+        if !service_node.ambient {
+            let mut output = GeneratedPolicies::default();
+            output
+                .cilium_policies
+                .push(self.compile_direct_cilium_policy(&service_node, namespace));
+            return output;
+        }
+
         let mut output = GeneratedPolicies::default();
 
         let inbound_edges = self.graph.get_active_inbound_edges(namespace, name);
@@ -588,6 +597,7 @@ pub(crate) mod tests {
             ingress: None,
             service_account: None,
             depends_all: false,
+            ambient: true,
         }
     }
 
@@ -901,6 +911,7 @@ pub(crate) mod tests {
             ingress: None,
             service_account: None,
             depends_all: false,
+            ambient: true,
         };
         graph.put_mesh_member(ns, "api", &spec);
 
@@ -971,6 +982,7 @@ pub(crate) mod tests {
             ingress: None,
             service_account: None,
             depends_all: false,
+            ambient: true,
         };
         graph.put_mesh_member(ns, "svc", &spec);
 
@@ -1016,6 +1028,7 @@ pub(crate) mod tests {
             ingress: None,
             service_account: None,
             depends_all: false,
+            ambient: true,
         };
         graph.put_mesh_member(ns, "svc", &spec);
 
@@ -1055,9 +1068,11 @@ pub(crate) mod tests {
 
         // HBONE ingress for peer traffic delivery
         let hbone_ingress = cnp.spec.ingress.iter().find(|r| {
-            r.to_ports
-                .iter()
-                .any(|pr| pr.ports.iter().any(|p| p.port == mesh::HBONE_PORT.to_string()))
+            r.to_ports.iter().any(|pr| {
+                pr.ports
+                    .iter()
+                    .any(|p| p.port == mesh::HBONE_PORT.to_string())
+            })
         });
         assert!(
             hbone_ingress.is_some(),
@@ -1066,13 +1081,434 @@ pub(crate) mod tests {
 
         // HBONE egress for peer traffic delivery
         let hbone_egress = cnp.spec.egress.iter().find(|e| {
-            e.to_ports
-                .iter()
-                .any(|pr| pr.ports.iter().any(|p| p.port == mesh::HBONE_PORT.to_string()))
+            e.to_ports.iter().any(|pr| {
+                pr.ports
+                    .iter()
+                    .any(|p| p.port == mesh::HBONE_PORT.to_string())
+            })
         });
         assert!(
             hbone_egress.is_some(),
             "allow_peer_traffic should generate HBONE egress"
         );
+    }
+
+    // =========================================================================
+    // Out-of-ambient (direct L4) policy generation
+    // =========================================================================
+
+    #[test]
+    fn out_of_ambient_produces_only_cilium_policy() {
+        let graph = ServiceGraph::new();
+        let ns = "training-ns";
+
+        let labels =
+            BTreeMap::from([("lattice.dev/training-job".to_string(), "my-job".to_string())]);
+        let mut spec = make_mesh_member_spec(
+            labels,
+            vec![("master", 29500, lattice_common::crd::PeerAuth::Strict)],
+            vec![],
+            vec![],
+        );
+        spec.ambient = false;
+        spec.allow_peer_traffic = true;
+        graph.put_mesh_member(ns, "worker", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let output = compiler.compile("worker", ns);
+
+        assert_eq!(output.cilium_policies.len(), 1, "should have one CNP");
+        assert!(
+            output.authorization_policies.is_empty(),
+            "out-of-ambient should have no AuthorizationPolicy"
+        );
+        assert!(
+            output.peer_authentications.is_empty(),
+            "out-of-ambient should have no PeerAuthentication"
+        );
+        assert!(
+            output.service_entries.is_empty(),
+            "out-of-ambient should have no ServiceEntry"
+        );
+    }
+
+    #[test]
+    fn out_of_ambient_has_no_hbone_rules() {
+        let graph = ServiceGraph::new();
+        let ns = "training-ns";
+
+        let labels =
+            BTreeMap::from([("lattice.dev/training-job".to_string(), "my-job".to_string())]);
+        let mut spec = make_mesh_member_spec(
+            labels,
+            vec![("master", 29500, lattice_common::crd::PeerAuth::Strict)],
+            vec![],
+            vec![],
+        );
+        spec.ambient = false;
+        spec.allow_peer_traffic = true;
+        graph.put_mesh_member(ns, "worker", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("worker", ns).cilium_policies[0];
+
+        let hbone_port = mesh::HBONE_PORT.to_string();
+
+        let ingress_has_hbone = cnp.spec.ingress.iter().any(|r| {
+            r.to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port))
+        });
+        assert!(
+            !ingress_has_hbone,
+            "out-of-ambient ingress should have no HBONE"
+        );
+
+        let egress_has_hbone = cnp.spec.egress.iter().any(|e| {
+            e.to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port))
+        });
+        assert!(
+            !egress_has_hbone,
+            "out-of-ambient egress should have no HBONE"
+        );
+    }
+
+    #[test]
+    fn out_of_ambient_peer_traffic_uses_label_selector() {
+        let graph = ServiceGraph::new();
+        let ns = "training-ns";
+
+        let labels =
+            BTreeMap::from([("lattice.dev/training-job".to_string(), "my-job".to_string())]);
+        let mut spec = make_mesh_member_spec(
+            labels,
+            vec![("master", 29500, lattice_common::crd::PeerAuth::Strict)],
+            vec![],
+            vec![],
+        );
+        spec.ambient = false;
+        spec.allow_peer_traffic = true;
+        graph.put_mesh_member(ns, "worker", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("worker", ns).cilium_policies[0];
+
+        // Endpoint selector matches the group label
+        assert_eq!(
+            cnp.spec.endpoint_selector.match_labels["k8s:lattice.dev/training-job"],
+            "my-job"
+        );
+
+        // Peer ingress: fromEndpoints matching same selector, no toPorts (any port)
+        let peer_ingress = cnp
+            .spec
+            .ingress
+            .iter()
+            .find(|r| {
+                r.from_endpoints.iter().any(|ep| {
+                    ep.match_labels
+                        .get("k8s:lattice.dev/training-job")
+                        .map_or(false, |v| v == "my-job")
+                })
+            })
+            .expect("should have peer ingress rule");
+        assert!(
+            peer_ingress.to_ports.is_empty(),
+            "peer ingress should allow any port"
+        );
+
+        // Peer egress: toEndpoints matching same selector, no toPorts (any port)
+        let peer_egress = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| {
+                e.to_endpoints.iter().any(|ep| {
+                    ep.match_labels
+                        .get("k8s:lattice.dev/training-job")
+                        .map_or(false, |v| v == "my-job")
+                })
+            })
+            .expect("should have peer egress rule");
+        assert!(
+            peer_egress.to_ports.is_empty(),
+            "peer egress should allow any port"
+        );
+    }
+
+    #[test]
+    fn out_of_ambient_always_has_dns_egress() {
+        let graph = ServiceGraph::new();
+        let ns = "training-ns";
+
+        let labels =
+            BTreeMap::from([("lattice.dev/training-job".to_string(), "my-job".to_string())]);
+        let mut spec = make_mesh_member_spec(labels, vec![], vec![], vec![]);
+        spec.ambient = false;
+        graph.put_mesh_member(ns, "worker", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("worker", ns).cilium_policies[0];
+
+        let has_dns = cnp.spec.egress.iter().any(|e| {
+            e.to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == "53"))
+        });
+        assert!(has_dns, "out-of-ambient should always have DNS egress");
+    }
+
+    #[test]
+    fn out_of_ambient_infrastructure_caller_ingress() {
+        use lattice_common::crd::{CallerRef, PeerAuth};
+
+        let graph = ServiceGraph::new();
+        let ns = "model-ns";
+
+        let labels = BTreeMap::from([("lattice.dev/model".to_string(), "my-model".to_string())]);
+        let mut spec = make_mesh_member_spec(
+            labels,
+            vec![("http", 8000, PeerAuth::Strict)],
+            vec![],
+            vec![],
+        );
+        spec.ambient = false;
+        // Add an infrastructure caller that's NOT in the graph (e.g. kthena-router)
+        spec.allowed_callers = vec![CallerRef {
+            name: "kthena-router".to_string(),
+            namespace: Some("kthena-ns".to_string()),
+        }];
+        graph.put_mesh_member(ns, "serving", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("serving", ns).cilium_policies[0];
+
+        // Should have an ingress rule with the caller's labels and port restriction
+        let infra_rule = cnp
+            .spec
+            .ingress
+            .iter()
+            .find(|r| {
+                r.from_endpoints.iter().any(|ep| {
+                    ep.match_labels
+                        .get(&format!("k8s:{}", lattice_common::LABEL_NAME))
+                        .map_or(false, |v| v == "kthena-router")
+                })
+            })
+            .expect("should have infrastructure caller ingress rule");
+
+        // Cross-namespace: should include namespace label
+        assert!(
+            infra_rule.from_endpoints[0]
+                .match_labels
+                .get(lattice_common::CILIUM_LABEL_NAMESPACE)
+                .map_or(false, |v| v == "kthena-ns"),
+            "cross-namespace caller should include namespace label"
+        );
+
+        // Port-restricted to declared ports
+        assert!(
+            infra_rule
+                .to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == "8000")),
+            "infrastructure caller should be port-restricted"
+        );
+    }
+
+    #[test]
+    fn out_of_ambient_bilateral_caller_ingress() {
+        use lattice_common::crd::PeerAuth;
+
+        let graph = ServiceGraph::new();
+        let ns = "model-ns";
+
+        // Model serving node (out of ambient)
+        let labels = BTreeMap::from([("lattice.dev/model".to_string(), "my-model".to_string())]);
+        let mut spec = make_mesh_member_spec(
+            labels,
+            vec![("http", 8000, PeerAuth::Strict)],
+            vec!["gateway"],
+            vec![],
+        );
+        spec.ambient = false;
+        graph.put_mesh_member(ns, "serving", &spec);
+
+        // Gateway (in mesh, has outbound dep on serving)
+        let gateway_spec = make_service_spec(vec!["serving"], vec![]);
+        graph.put_service(ns, "gateway", &gateway_spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("serving", ns).cilium_policies[0];
+
+        // Should have an ingress rule from the gateway's labels
+        let bilateral_rule = cnp
+            .spec
+            .ingress
+            .iter()
+            .find(|r| {
+                r.from_endpoints.iter().any(|ep| {
+                    ep.match_labels
+                        .get(&format!("k8s:{}", lattice_common::LABEL_NAME))
+                        .map_or(false, |v| v == "gateway")
+                })
+            })
+            .expect("should have bilateral agreement ingress rule");
+
+        // Port-restricted
+        assert!(
+            bilateral_rule
+                .to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == "8000")),
+            "bilateral caller should be port-restricted"
+        );
+    }
+
+    #[test]
+    fn out_of_ambient_vmagent_ingress_on_metrics_port() {
+        let graph = ServiceGraph::new();
+        let ns = "training-ns";
+
+        let labels =
+            BTreeMap::from([("lattice.dev/training-job".to_string(), "my-job".to_string())]);
+        let mut spec = make_mesh_member_spec(
+            labels,
+            vec![
+                ("master", 29500, lattice_common::crd::PeerAuth::Strict),
+                ("metrics", 9090, lattice_common::crd::PeerAuth::Strict),
+            ],
+            vec![],
+            vec![],
+        );
+        spec.ambient = false;
+        spec.allow_peer_traffic = true;
+        graph.put_mesh_member(ns, "worker", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("worker", ns).cilium_policies[0];
+
+        // Should have vmagent ingress on metrics port only
+        let vmagent_rule = cnp
+            .spec
+            .ingress
+            .iter()
+            .find(|r| {
+                r.from_endpoints.iter().any(|ep| {
+                    ep.match_labels
+                        .get(&format!("k8s:{}", lattice_common::LABEL_NAME))
+                        .map_or(false, |v| v == lattice_common::VMAGENT_NODE_NAME)
+                })
+            })
+            .expect("should have vmagent ingress rule for metrics port");
+
+        assert!(
+            vmagent_rule
+                .to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == "9090")),
+            "vmagent should be restricted to metrics port"
+        );
+
+        // Should NOT allow vmagent on the master port
+        assert!(
+            !vmagent_rule
+                .to_ports
+                .iter()
+                .any(|pr| pr.ports.iter().any(|p| p.port == "29500")),
+            "vmagent should not access non-metrics ports"
+        );
+    }
+
+    #[test]
+    fn out_of_ambient_no_peer_traffic_means_no_peer_rules() {
+        let graph = ServiceGraph::new();
+        let ns = "job-ns";
+
+        let labels = BTreeMap::from([("lattice.dev/name".to_string(), "etl-job".to_string())]);
+        let mut spec = make_mesh_member_spec(
+            labels,
+            vec![("http", 8080, lattice_common::crd::PeerAuth::Strict)],
+            vec![],
+            vec![],
+        );
+        spec.ambient = false;
+        // allow_peer_traffic is false by default
+        graph.put_mesh_member(ns, "etl-job", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("etl-job", ns).cilium_policies[0];
+
+        // No peer ingress
+        assert!(
+            cnp.spec.ingress.is_empty(),
+            "no peer traffic should mean no ingress rules"
+        );
+
+        // Only DNS egress (no peer egress)
+        assert_eq!(
+            cnp.spec.egress.len(),
+            1,
+            "should have only DNS egress when no peer traffic"
+        );
+        assert!(cnp.spec.egress[0]
+            .to_ports
+            .iter()
+            .any(|pr| pr.ports.iter().any(|p| p.port == "53")));
+    }
+
+    #[test]
+    fn out_of_ambient_egress_rules_propagate() {
+        use lattice_common::crd::EgressRule;
+
+        let graph = ServiceGraph::new();
+        let ns = "training-ns";
+
+        let labels =
+            BTreeMap::from([("lattice.dev/training-job".to_string(), "my-job".to_string())]);
+        let mut spec = make_mesh_member_spec(labels, vec![], vec![], vec![]);
+        spec.ambient = false;
+        spec.egress = vec![
+            EgressRule {
+                target: EgressTarget::Cidr("10.0.0.0/8".to_string()),
+                ports: vec![443],
+            },
+            EgressRule {
+                target: EgressTarget::Entity("world".to_string()),
+                ports: vec![80],
+            },
+        ];
+        graph.put_mesh_member(ns, "worker", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let cnp = &compiler.compile("worker", ns).cilium_policies[0];
+
+        // CIDR egress
+        let cidr_rule = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| !e.to_cidr.is_empty())
+            .expect("should have CIDR egress rule");
+        assert_eq!(cidr_rule.to_cidr[0], "10.0.0.0/8");
+        assert!(cidr_rule
+            .to_ports
+            .iter()
+            .any(|pr| pr.ports.iter().any(|p| p.port == "443")));
+
+        // Entity egress
+        let entity_rule = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| !e.to_entities.is_empty())
+            .expect("should have entity egress rule");
+        assert_eq!(entity_rule.to_entities[0], "world");
+        assert!(entity_rule
+            .to_ports
+            .iter()
+            .any(|pr| pr.ports.iter().any(|p| p.port == "80")));
     }
 }

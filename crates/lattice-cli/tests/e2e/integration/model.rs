@@ -48,8 +48,7 @@ async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
 
     ensure_fresh_namespace(kubeconfig, MODEL_NAMESPACE).await?;
 
-    let mut model: lattice_common::crd::LatticeModel =
-        load_fixture_config("model-serving.yaml")?;
+    let mut model: lattice_common::crd::LatticeModel = load_fixture_config("model-serving.yaml")?;
     inject_pd_connectivity_sidecars(&mut model);
 
     let yaml = serde_json::to_string(&model)
@@ -1128,9 +1127,10 @@ async fn test_model_serving_has_download_injection(kubeconfig: &str) -> Result<(
     Ok(())
 }
 
-/// Verify LatticeMeshMember resources include Kthena router and autoscaler as allowed callers
+/// Verify LatticeMeshMember resources include Kthena router and autoscaler as allowed callers,
+/// opt out of ambient mesh, and use group-level selectors.
 async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
-    info!("[Model] Verifying mesh members allow Kthena router and autoscaler traffic...");
+    info!("[Model] Verifying mesh members: ambient opt-out, group selector, Kthena callers...");
 
     let output = run_kubectl(&[
         "--kubeconfig",
@@ -1172,6 +1172,29 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
     for item in &role_items {
         let mm_name = item["metadata"]["name"].as_str().unwrap_or("unknown");
 
+        // Verify ambient: false (model serving opts out of Istio ambient)
+        let ambient = item["spec"]["ambient"].as_bool().unwrap_or(true);
+        if ambient {
+            return Err(format!(
+                "LatticeMeshMember '{}' should have ambient=false (model serving opts out)",
+                mm_name
+            ));
+        }
+
+        // Verify group-level selector uses lattice.dev/model label
+        let target = &item["spec"]["target"];
+        let selector = target["selector"].as_object().ok_or(format!(
+            "LatticeMeshMember '{}' target should have a selector",
+            mm_name
+        ))?;
+        let model_label = selector.get("lattice.dev/model").and_then(|v| v.as_str());
+        if model_label != Some(MODEL_NAME) {
+            return Err(format!(
+                "LatticeMeshMember '{}' selector should have lattice.dev/model={}, got: {:?}",
+                mm_name, MODEL_NAME, model_label
+            ));
+        }
+
         // Check that the Kthena router is in allowed_callers
         let callers = item["spec"]["allowedCallers"].as_array().unwrap_or(&empty);
         let has_router = callers.iter().any(|c| {
@@ -1205,7 +1228,7 @@ async fn test_model_mesh_members(kubeconfig: &str) -> Result<(), String> {
         }
 
         info!(
-            "[Model] MeshMember '{}': Kthena router allowed, inference port present, peer traffic enabled",
+            "[Model] MeshMember '{}': ambient=false, group selector, router allowed, inference port, peer traffic",
             mm_name
         );
     }
@@ -1275,8 +1298,7 @@ async fn test_pd_cross_role_connectivity(kubeconfig: &str) -> Result<(), String>
         let mut failures = Vec::new();
 
         for (role, expected_pattern) in &directions {
-            let label_selector =
-                format!("app.kubernetes.io/name={}-{}", MODEL_NAME, role);
+            let label_selector = format!("app.kubernetes.io/name={}-{}", MODEL_NAME, role);
             let logs = run_kubectl(&[
                 "--kubeconfig",
                 kubeconfig,

@@ -67,6 +67,17 @@ pub struct LatticeMeshMemberSpec {
     /// Defaults to the LMM resource name if omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account: Option<String>,
+
+    /// Whether this member participates in the Istio ambient mesh (L7 enforcement).
+    /// When `false`, pods get `istio.io/dataplane-mode: none` and only Cilium L4
+    /// policies are generated (no AuthorizationPolicy, PeerAuthentication, or ServiceEntry).
+    /// Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub ambient: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Target workloads for a mesh member
@@ -363,6 +374,7 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
+            ambient: true,
         }
     }
 
