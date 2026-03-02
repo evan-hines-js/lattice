@@ -500,6 +500,20 @@ async fn cleanup_removed_roles(
                 warn!(name = %role_key, error = %e, "CRD discovery failed during orphan cleanup");
             }
         }
+
+        // Delete orphaned peer-discovery Service
+        let svc_ar = ApiResource::erase::<k8s_openapi::api::core::v1::Service>(&());
+        if let Err(e) = lattice_common::kube_utils::delete_resource_if_exists(
+            client,
+            namespace,
+            &svc_ar,
+            role_key,
+            "Service",
+        )
+        .await
+        {
+            warn!(name = %role_key, error = %e, "failed to delete orphaned peer Service");
+        }
     }
 }
 
@@ -629,6 +643,13 @@ async fn apply_layers(
         &compiled.tracing_policies,
         |tp| &tp.metadata.name,
     )?;
+    let svc_ar = ApiResource::erase::<k8s_openapi::api::core::v1::Service>(&());
+    for svc in &compiled.peer_services {
+        let svc_name = svc["metadata"]["name"]
+            .as_str()
+            .unwrap_or("unknown-peer-svc");
+        layer1.push("Service", svc_name, svc, &svc_ar)?;
+    }
 
     layer1.run("layer-1-infrastructure").await?;
 

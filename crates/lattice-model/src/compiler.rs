@@ -55,6 +55,8 @@ pub struct CompiledModel {
     pub download: Option<CompiledDownload>,
     /// Auto-injected topology from kv_connector (for status reporting, never mutates spec)
     pub auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
+    /// Peer-discovery K8s Services for P/D roles (stable DNS for nixl KV cache transfer)
+    pub peer_services: Vec<serde_json::Value>,
 }
 
 /// Compile a LatticeModel into Kubernetes resources.
@@ -307,6 +309,37 @@ pub async fn compile_model(
         &mut mesh_members,
     )?;
 
+    // Create peer-discovery Services for P/D roles when kv_connector disaggregation
+    // is active. These provide stable DNS names (e.g., llm-serving-prefill) for
+    // nixl KV cache transfer between prefill and decode pods.
+    let peer_services = {
+        let has_pd = model
+            .spec
+            .routing
+            .as_ref()
+            .map(|r| {
+                r.kv_connector.is_some()
+                    && lattice_volcano::routing_compiler::has_pd_roles(&model.spec.roles)
+            })
+            .unwrap_or(false);
+
+        if has_pd {
+            let inference_port = model
+                .spec
+                .routing
+                .as_ref()
+                .and_then(|r| r.port)
+                .ok_or(ModelError::MissingInferencePort)?;
+
+            [PD_ROLE_PREFILL, PD_ROLE_DECODE]
+                .iter()
+                .map(|role| compile_peer_service(name, role, namespace, inference_port))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    };
+
     // Model serving: opt out of ambient mesh. All model pods share the
     // `lattice.dev/model` group label for Cilium L4 peer traffic rules.
     // Infrastructure callers (router, autoscaler) are handled by
@@ -329,6 +362,40 @@ pub async fn compile_model(
         autoscaling,
         download,
         auto_topology,
+        peer_services,
+    })
+}
+
+/// Compile a peer-discovery ClusterIP Service for a P/D role.
+///
+/// Creates a Service with a predictable name (`{model_name}-{role_name}`) that
+/// pods can use for DNS-based peer discovery during nixl KV cache transfer.
+/// The selector uses `LABEL_NAME` to match pods labeled by `PodTemplateCompiler`.
+fn compile_peer_service(
+    model_name: &str,
+    role_name: &str,
+    namespace: &str,
+    inference_port: u16,
+) -> serde_json::Value {
+    let service_name = format!("{}-{}", model_name, role_name);
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": service_name,
+            "namespace": namespace
+        },
+        "spec": {
+            "selector": {
+                lattice_common::LABEL_NAME: service_name
+            },
+            "ports": [{
+                "name": "inference",
+                "port": inference_port,
+                "targetPort": inference_port,
+                "protocol": "TCP"
+            }]
+        }
     })
 }
 
@@ -1302,5 +1369,116 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(ModelError::MissingInferencePort)));
+    }
+
+    #[tokio::test]
+    async fn peer_services_created_for_pd_roles() {
+        let mut roles = BTreeMap::new();
+        roles.insert("prefill".to_string(), make_role("prefill:latest", 1));
+        roles.insert("decode".to_string(), make_role("decode:latest", 4));
+
+        let mut routing = basic_routing();
+        routing.kv_connector = Some(KvConnector {
+            type_: KvConnectorType::Nixl,
+        });
+
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(routing),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        register_model_roles(&model, &graph);
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            compiled.peer_services.len(),
+            2,
+            "should create one peer service per P/D role"
+        );
+
+        for (role, expected_name) in [
+            ("prefill", "test-model-prefill"),
+            ("decode", "test-model-decode"),
+        ] {
+            let svc = compiled
+                .peer_services
+                .iter()
+                .find(|s| s["metadata"]["name"].as_str() == Some(expected_name))
+                .unwrap_or_else(|| panic!("peer service for {} should exist", role));
+
+            assert_eq!(
+                svc["metadata"]["namespace"].as_str(),
+                Some("default"),
+                "{} service should be in the model namespace",
+                role
+            );
+
+            let selector = &svc["spec"]["selector"];
+            assert_eq!(
+                selector[lattice_common::LABEL_NAME].as_str(),
+                Some(expected_name),
+                "{} selector should match LABEL_NAME",
+                role
+            );
+
+            let ports = svc["spec"]["ports"].as_array().expect("ports should exist");
+            assert_eq!(ports.len(), 1);
+            assert_eq!(ports[0]["name"], "inference");
+            assert_eq!(ports[0]["port"], 8000);
+            assert_eq!(ports[0]["targetPort"], 8000);
+        }
+    }
+
+    #[tokio::test]
+    async fn no_peer_services_without_kv_connector() {
+        let mut roles = BTreeMap::new();
+        roles.insert("prefill".to_string(), make_role("prefill:latest", 1));
+        roles.insert("decode".to_string(), make_role("decode:latest", 4));
+
+        // Routing without kv_connector
+        let spec = LatticeModelSpec {
+            roles,
+            routing: Some(basic_routing()),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-456".to_string());
+
+        let graph = ServiceGraph::new();
+        register_model_roles(&model, &graph);
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            compiled.peer_services.is_empty(),
+            "no peer services without kv_connector"
+        );
     }
 }
