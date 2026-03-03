@@ -17,9 +17,14 @@ use lattice_common::crd::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderStatus, ParsedEndpoint,
 };
 use lattice_common::{
-    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
-    REQUEUE_SUCCESS_SECS,
+    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_SUCCESS_SECS,
 };
+
+/// Shorter retry interval for OIDC validation failures. The global REQUEUE_ERROR_SECS (60s) is
+/// too slow here — validation typically fails on the first attempt because the egress mesh policy
+/// hasn't propagated yet (takes ~5-15s). A 15s retry gives ~18 attempts within the 300s test
+/// timeout instead of ~4.
+const OIDC_REQUEUE_ERROR_SECS: u64 = 15;
 
 /// OIDC discovery document (subset of fields we need)
 #[derive(Debug, serde::Deserialize)]
@@ -43,6 +48,9 @@ pub async fn reconcile(
     let client = &ctx.client;
 
     info!(oidc_provider = %name, "Reconciling OIDCProvider");
+
+    // Ensure egress policies BEFORE validation so the operator can reach the external issuer
+    ensure_oidc_egress_lmm(client, &provider).await?;
 
     let new_status = validate_provider(&provider).await;
 
@@ -75,13 +83,10 @@ pub async fn reconcile(
     .await
     .map_err(|e| ReconcileError::kube("failed to update OIDCProvider status", e))?;
 
-    // Ensure egress policies so the operator can reach the external issuer
-    ensure_oidc_egress_lmm(client, &provider).await?;
-
     let requeue = if new_status.phase == OIDCProviderPhase::Ready {
         REQUEUE_SUCCESS_SECS
     } else {
-        REQUEUE_ERROR_SECS
+        OIDC_REQUEUE_ERROR_SECS
     };
 
     info!(
@@ -247,7 +252,7 @@ mod tests {
     #[test]
     fn requeue_constants() {
         assert_eq!(REQUEUE_SUCCESS_SECS, 300);
-        assert_eq!(REQUEUE_ERROR_SECS, 60);
+        assert_eq!(OIDC_REQUEUE_ERROR_SECS, 15);
     }
 
     #[test]
