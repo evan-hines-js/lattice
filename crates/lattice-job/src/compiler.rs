@@ -553,7 +553,10 @@ fn inject_rank_env(template: &mut serde_json::Value, rank_offset: u32) {
                 "command".to_string(),
                 serde_json::json!(["/bin/sh", "-c", ". /lattice-env/rank.sh; exec \"$@\"", "sh"]),
             );
-            obj.insert("args".to_string(), serde_json::to_value(&new_args).expect("Vec<String> serializes to JSON"));
+            obj.insert(
+                "args".to_string(),
+                serde_json::to_value(&new_args).expect("Vec<String> serializes to JSON"),
+            );
 
             // Add volume mounts for lattice-env and writable /tmp
             let volume_mounts = obj
@@ -1199,7 +1202,10 @@ mod tests {
             "gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: ResourceParams::Gpu(GpuParams { count: gpu_count, ..Default::default() }),
+                params: ResourceParams::Gpu(GpuParams {
+                    count: gpu_count,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );

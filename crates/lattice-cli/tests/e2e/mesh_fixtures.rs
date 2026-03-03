@@ -495,3 +495,132 @@ pub fn create_public_api() -> LatticeService {
         nginx_container(),
     )
 }
+
+// =============================================================================
+// Third-Party Container Builders (reused across real-world scenario tests)
+// =============================================================================
+
+/// PostgreSQL container with emptyDir mounts for writable paths under read-only rootfs.
+///
+/// Postgres needs `/var/run/postgresql` for the Unix socket, `/var/lib/postgresql/data`
+/// for the data directory, and `/tmp` for scratch. All are emptyDir mounts since
+/// our secure default is read-only rootfs. The caller provides database name, user,
+/// and password which are injected as env vars.
+pub fn postgres_container(db_name: &str, user: &str, password: &str) -> ContainerSpec {
+    use super::helpers::test_image;
+    use lattice_common::template::TemplateString;
+
+    let mut volumes = BTreeMap::new();
+    volumes.insert("/var/run/postgresql".to_string(), emptydir(None, None));
+    volumes.insert("/var/lib/postgresql/data".to_string(), emptydir(None, None));
+    volumes.insert("/tmp".to_string(), emptydir(None, None));
+
+    let mut variables = BTreeMap::new();
+    variables.insert("POSTGRES_DB".to_string(), TemplateString::new(db_name));
+    variables.insert("POSTGRES_USER".to_string(), TemplateString::new(user));
+    variables.insert(
+        "POSTGRES_PASSWORD".to_string(),
+        TemplateString::new(password),
+    );
+    // Allow the data directory on emptyDir (non-root ownership handled by initdb)
+    variables.insert(
+        "PGDATA".to_string(),
+        TemplateString::new("/var/lib/postgresql/data/pgdata"),
+    );
+
+    ContainerSpec {
+        image: test_image("docker.io/library/postgres:alpine"),
+        variables,
+        volumes,
+        resources: Some(ResourceRequirements {
+            requests: Some(ResourceQuantity {
+                cpu: Some("100m".to_string()),
+                memory: Some("128Mi".to_string()),
+            }),
+            limits: Some(ResourceQuantity {
+                cpu: Some("500m".to_string()),
+                memory: Some("256Mi".to_string()),
+            }),
+        }),
+        security: Some(SecurityContext {
+            run_as_user: Some(0), // postgres requires root to initialize
+            // postgres entrypoint needs chown/fowner for data dir, setuid/setgid for
+            // gosu/su-exec to drop privileges after init
+            capabilities: vec![
+                "CHOWN".to_string(),
+                "DAC_OVERRIDE".to_string(),
+                "FOWNER".to_string(),
+                "SETUID".to_string(),
+                "SETGID".to_string(),
+            ],
+            apparmor_profile: Some("Unconfined".to_string()),
+            allowed_binaries: vec!["*".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Redis container with emptyDir for `/data` and `/tmp`.
+///
+/// Redis writes its dump file to `/data` and uses `/tmp` for scratch.
+/// Both must be emptyDir mounts under read-only rootfs.
+pub fn redis_container() -> ContainerSpec {
+    use super::helpers::test_image;
+
+    let mut volumes = BTreeMap::new();
+    volumes.insert("/data".to_string(), emptydir(None, None));
+    volumes.insert("/tmp".to_string(), emptydir(None, None));
+
+    ContainerSpec {
+        image: test_image("docker.io/library/redis:alpine"),
+        command: Some(vec!["/usr/local/bin/redis-server".to_string()]),
+        args: Some(vec!["--protected-mode".to_string(), "no".to_string()]),
+        volumes,
+        resources: Some(ResourceRequirements {
+            requests: Some(ResourceQuantity {
+                cpu: Some("50m".to_string()),
+                memory: Some("64Mi".to_string()),
+            }),
+            limits: Some(ResourceQuantity {
+                cpu: Some("200m".to_string()),
+                memory: Some("128Mi".to_string()),
+            }),
+        }),
+        security: Some(SecurityContext {
+            run_as_user: Some(999), // redis user in redis:alpine image
+            apparmor_profile: Some("Unconfined".to_string()),
+            allowed_binaries: vec!["*".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Service port spec for PostgreSQL (port 5432).
+pub fn postgres_port() -> ServicePortsSpec {
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "postgres".to_string(),
+        PortSpec {
+            port: 5432,
+            target_port: Some(5432),
+            protocol: None,
+        },
+    );
+    ServicePortsSpec { ports }
+}
+
+/// Service port spec for Redis (port 6379).
+pub fn redis_port() -> ServicePortsSpec {
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "redis".to_string(),
+        PortSpec {
+            port: 6379,
+            target_port: Some(6379),
+            protocol: None,
+        },
+    );
+    ServicePortsSpec { ports }
+}

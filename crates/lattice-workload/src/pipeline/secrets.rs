@@ -167,15 +167,12 @@ impl SecretsCompiler {
         }
 
         for (resource_name, resource_spec) in secret_resources {
-            let params = resource_spec
-                .params
-                .as_secret()
-                .ok_or_else(|| {
-                    CompilationError::secret(format!(
-                        "secret resource '{}': missing params",
-                        resource_name
-                    ))
-                })?;
+            let params = resource_spec.params.as_secret().ok_or_else(|| {
+                CompilationError::secret(format!(
+                    "secret resource '{}': missing params",
+                    resource_name
+                ))
+            })?;
 
             // The `id` field is the remote key/path in the external secret store
             let remote_key = resource_spec

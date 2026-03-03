@@ -705,7 +705,10 @@ workload:
             .get("config")
             .expect("config should exist");
         assert!(config.is_volume_owner());
-        let config_params = config.params.as_volume().expect("should have volume params");
+        let config_params = config
+            .params
+            .as_volume()
+            .expect("should have volume params");
         assert_eq!(config_params.size, Some("10Gi".to_string()));
         assert_eq!(config_params.storage_class, Some("local-path".to_string()));
 
@@ -829,7 +832,10 @@ workload:
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let result: Result<LatticeServiceSpec, _> = serde_json::from_value(value);
-        assert!(result.is_err(), "gpu count=0 should fail at deserialization");
+        assert!(
+            result.is_err(),
+            "gpu count=0 should fail at deserialization"
+        );
         assert!(
             result.unwrap_err().to_string().contains("count"),
             "error should mention count"
@@ -1312,7 +1318,10 @@ workload:
             .get("my-gpu")
             .expect("should have gpu resource");
         assert!(gpu_resource.type_.is_gpu());
-        let gpu = gpu_resource.params.as_gpu().expect("should have gpu params");
+        let gpu = gpu_resource
+            .params
+            .as_gpu()
+            .expect("should have gpu params");
         assert_eq!(gpu.count, 1);
         assert_eq!(gpu.memory, Some("8Gi".to_string()));
         assert_eq!(gpu.compute, Some(20));

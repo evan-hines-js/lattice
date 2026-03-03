@@ -640,7 +640,10 @@ mod tests {
         let secret_resource = &task.workload.resources["token"];
         assert_eq!(secret_resource.type_, ResourceType::Secret);
         assert_eq!(secret_resource.id.as_deref(), Some("hf-credentials"));
-        let params = secret_resource.params.as_secret().expect("should be Secret");
+        let params = secret_resource
+            .params
+            .as_secret()
+            .expect("should be Secret");
         assert_eq!(params.provider, "lattice-local");
 
         // Container env_from references the secret resource

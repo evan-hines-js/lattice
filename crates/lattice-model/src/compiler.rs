@@ -124,8 +124,7 @@ pub async fn compile_model(
 
     let mut compiled = compile_roles(name, &roles, &ctx).await?;
 
-    let download =
-        compile_download_phase(model, name, namespace, &mut compiled.role_templates)?;
+    let download = compile_download_phase(model, name, namespace, &mut compiled.role_templates)?;
 
     inject_model_labels(name, &mut compiled.role_templates);
 

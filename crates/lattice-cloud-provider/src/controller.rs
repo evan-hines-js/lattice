@@ -126,14 +126,11 @@ async fn reconcile_credentials(client: &Client, cp: &CloudProvider) -> Result<()
         provider_type => {
             if let Some(ref resource) = cp.spec.credentials {
                 // ESO mode: create ExternalSecret
-                let params = resource
-                    .params
-                    .as_secret()
-                    .ok_or_else(|| {
-                        ReconcileError::Validation(
-                            "credentials must have type: secret with params.provider".into(),
-                        )
-                    })?;
+                let params = resource.params.as_secret().ok_or_else(|| {
+                    ReconcileError::Validation(
+                        "credentials must have type: secret with params.provider".into(),
+                    )
+                })?;
 
                 let remote_key = resource.secret_remote_key().ok_or_else(|| {
                     ReconcileError::Validation(

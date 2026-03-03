@@ -130,12 +130,19 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
 
     // Load and deploy services from YAML fixtures
     let api: Api<LatticeService> = Api::namespaced(client, NAMESPACE);
-    for filename in ["jellyfin.yaml", "nzbget.yaml", "sonarr.yaml", "plex.yaml"] {
-        let service = load_service_config(filename)?;
-        let name = service.metadata.name.as_deref().unwrap_or(filename);
-        info!("Deploying {}...", name);
-        create_with_retry(&api, &service, name).await?;
-    }
+    let services: Vec<_> = ["jellyfin.yaml", "nzbget.yaml", "sonarr.yaml", "plex.yaml"]
+        .iter()
+        .map(|f| load_service_config(f))
+        .collect::<Result<_, _>>()?;
+    let futs: Vec<_> = services
+        .iter()
+        .map(|svc| {
+            let name = svc.metadata.name.as_deref().unwrap_or("unknown");
+            info!("Deploying {}...", name);
+            create_with_retry(&api, svc, name)
+        })
+        .collect();
+    futures::future::try_join_all(futs).await?;
 
     Ok(())
 }

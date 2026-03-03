@@ -24,7 +24,17 @@ use super::providers::InfraProvider;
 
 /// Maximum number of integration tests that can run concurrently.
 /// Prevents resource exhaustion on single-worker-node clusters.
-const MAX_CONCURRENT_TESTS: usize = 5;
+/// Override with LATTICE_TEST_CONCURRENCY env var (0 = unlimited).
+fn max_concurrent_tests() -> usize {
+    match std::env::var("LATTICE_TEST_CONCURRENCY") {
+        Ok(val) => match val.parse::<usize>() {
+            Ok(0) => usize::MAX,
+            Ok(n) => n,
+            Err(_) => usize::MAX,
+        },
+        Err(_) => usize::MAX,
+    }
+}
 
 static SEMAPHORE_COUNTER: Mutex<usize> = Mutex::new(0);
 static SEMAPHORE_CONDVAR: Condvar = Condvar::new();
@@ -44,7 +54,7 @@ impl Drop for TestPermit {
 /// Block until a test execution slot is available, then return an RAII permit.
 pub fn acquire_test_permit() -> TestPermit {
     let mut count = SEMAPHORE_COUNTER.lock().unwrap();
-    while *count >= MAX_CONCURRENT_TESTS {
+    while *count >= max_concurrent_tests() {
         count = SEMAPHORE_CONDVAR.wait(count).unwrap();
     }
     *count += 1;

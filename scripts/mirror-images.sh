@@ -23,6 +23,10 @@ IMAGES=(
   "docker.io/library/busybox:latest                   busybox:latest"
   "docker.io/bitnami/kubectl:latest                   kubectl:latest"
 
+  # Real-world scenario test fixtures
+  "docker.io/library/postgres:alpine                  postgres:alpine"
+  "docker.io/library/redis:alpine                     redis:alpine"
+
   # Media server fixtures
   "docker.io/jellyfin/jellyfin:latest                 jellyfin:latest"
   "docker.io/plexinc/pms-docker:latest                pms-docker:latest"

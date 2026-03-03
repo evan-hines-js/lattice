@@ -157,13 +157,17 @@ async fn deploy_backend_services(kubeconfig: &str) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig).await?;
     let api: Api<LatticeService> = Api::namespaced(client, GATEWAY_TEST_NAMESPACE);
 
-    let services = vec![create_backend_a(), create_backend_b(), create_backend_tls()];
+    let services = [create_backend_a(), create_backend_b(), create_backend_tls()];
 
-    for svc in &services {
-        let name = svc.metadata.name.as_deref().unwrap_or("unknown");
-        info!("[Gateway] Deploying {}...", name);
-        create_with_retry(&api, svc, name).await?;
-    }
+    let futs: Vec<_> = services
+        .iter()
+        .map(|svc| {
+            let name = svc.metadata.name.as_deref().unwrap_or("unknown");
+            info!("[Gateway] Deploying {}...", name);
+            create_with_retry(&api, svc, name)
+        })
+        .collect();
+    futures::future::try_join_all(futs).await?;
 
     // Wait for all services to reach Ready
     wait_for_services_ready(kubeconfig, GATEWAY_TEST_NAMESPACE, NUM_BACKEND_SERVICES).await?;

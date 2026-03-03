@@ -219,15 +219,12 @@ impl ResourceProvisioner for ExternalServiceProvisioner {
         }
 
         // Get typed external service params
-        let params = resource
-            .params
-            .as_external_service()
-            .ok_or_else(|| {
-                TemplateError::Undefined(format!(
-                    "resource '{}' is not an external-service type",
-                    resource_name
-                ))
-            })?;
+        let params = resource.params.as_external_service().ok_or_else(|| {
+            TemplateError::Undefined(format!(
+                "resource '{}' is not an external-service type",
+                resource_name
+            ))
+        })?;
 
         // Parse endpoints and find the primary one ("default" key, or first)
         let parsed = params.parsed_endpoints();
@@ -648,7 +645,10 @@ mod tests {
             class: None,
             metadata: None,
             params: ResourceParams::ExternalService(ExternalServiceParams {
-                endpoints: BTreeMap::from([("api".to_string(), "https://api.stripe.com".to_string())]),
+                endpoints: BTreeMap::from([(
+                    "api".to_string(),
+                    "https://api.stripe.com".to_string(),
+                )]),
                 ..Default::default()
             }),
             namespace: None,

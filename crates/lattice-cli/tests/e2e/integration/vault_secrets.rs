@@ -477,10 +477,15 @@ async fn run_vault_route_tests_inner(kubeconfig: &str, namespace: &str) -> Resul
     // Deploy all services
     let client = client_from_kubeconfig(kubeconfig).await?;
     let api: Api<LatticeService> = Api::namespaced(client, namespace);
-    for svc in [&svc1, &svc2, &svc3, &svc4, &svc5, &svc6] {
-        let name = svc.metadata.name.as_deref().unwrap();
-        create_with_retry(&api, svc, name).await?;
-    }
+    let all_svcs = [&svc1, &svc2, &svc3, &svc4, &svc5, &svc6];
+    let create_futs: Vec<_> = all_svcs
+        .iter()
+        .map(|svc| {
+            let name = svc.metadata.name.as_deref().unwrap();
+            create_with_retry(&api, svc, name)
+        })
+        .collect();
+    futures::future::try_join_all(create_futs).await?;
 
     // Wait for all to reach Ready in parallel
     let timeout = DEFAULT_TIMEOUT;
@@ -501,13 +506,15 @@ async fn run_vault_route_tests_inner(kubeconfig: &str, namespace: &str) -> Resul
         result?;
     }
 
-    // Verify each route (fast — pods are already running)
-    verify_route1(kubeconfig, namespace).await?;
-    verify_route2(kubeconfig, namespace).await?;
-    verify_route3(kubeconfig, namespace).await?;
-    verify_route4(kubeconfig, namespace).await?;
-    verify_route5(kubeconfig, namespace).await?;
-    verify_combined(kubeconfig, namespace).await?;
+    // Verify all routes concurrently (pods are already running)
+    tokio::try_join!(
+        verify_route1(kubeconfig, namespace),
+        verify_route2(kubeconfig, namespace),
+        verify_route3(kubeconfig, namespace),
+        verify_route4(kubeconfig, namespace),
+        verify_route5(kubeconfig, namespace),
+        verify_combined(kubeconfig, namespace),
+    )?;
 
     Ok(())
 }

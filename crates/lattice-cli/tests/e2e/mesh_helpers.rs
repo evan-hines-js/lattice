@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
+use futures::future::join_all;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -302,29 +303,36 @@ pub async fn wait_for_cycles(
                 return Ok(false);
             }
 
+            // Fetch all pod logs concurrently
+            let log_futs: Vec<_> = pods
+                .iter()
+                .map(|pod| async move {
+                    match run_kubectl(&[
+                        "--kubeconfig",
+                        kubeconfig_path,
+                        "logs",
+                        "-n",
+                        namespace,
+                        pod,
+                        "--tail",
+                        "2000",
+                    ])
+                    .await
+                    {
+                        Ok(output) => output,
+                        Err(e) => {
+                            warn!("[{}] Failed to get logs for pod {}: {}", label, pod, e);
+                            String::new()
+                        }
+                    }
+                })
+                .collect();
+            let all_logs = join_all(log_futs).await;
+
             let mut all_pods_ready = true;
             let mut min_cycles_found = usize::MAX;
 
-            for pod in &pods {
-                let logs = match run_kubectl(&[
-                    "--kubeconfig",
-                    kubeconfig_path,
-                    "logs",
-                    "-n",
-                    namespace,
-                    pod,
-                    "--tail",
-                    "2000",
-                ])
-                .await
-                {
-                    Ok(output) => output,
-                    Err(e) => {
-                        warn!("[{}] Failed to get logs for pod {}: {}", label, pod, e);
-                        String::new()
-                    }
-                };
-
+            for logs in &all_logs {
                 let cycle_count = logs.matches(CYCLE_END_MARKER).count();
                 min_cycles_found = min_cycles_found.min(cycle_count);
 
@@ -523,7 +531,10 @@ where
                 if start.elapsed() >= timeout {
                     break;
                 }
-                info!("[{}] Verification failed, retrying in 8s...", label);
+                info!(
+                    "[{}] Verification failed: {} — retrying in 8s...",
+                    label, last_err
+                );
                 sleep(Duration::from_secs(8)).await;
             }
         }
@@ -700,22 +711,30 @@ pub async fn wait_for_edges_denied(
         let mut all_denied = true;
         let mut pending = Vec::new();
 
-        for edge in edges {
-            let logs = run_kubectl(&[
-                "--kubeconfig",
-                kubeconfig_path,
-                "logs",
-                "-n",
-                namespace,
-                "-l",
-                &format!("{}={}", lattice_common::LABEL_NAME, edge.source),
-                "--tail",
-                "200",
-            ])
-            .await
-            .unwrap_or_default();
+        // Fetch all edge logs concurrently
+        let log_futs: Vec<_> = edges
+            .iter()
+            .map(|edge| async move {
+                let logs = run_kubectl(&[
+                    "--kubeconfig",
+                    kubeconfig_path,
+                    "logs",
+                    "-n",
+                    namespace,
+                    "-l",
+                    &format!("{}={}", lattice_common::LABEL_NAME, edge.source),
+                    "--tail",
+                    "200",
+                ])
+                .await
+                .unwrap_or_default();
+                (edge, logs)
+            })
+            .collect();
+        let results = join_all(log_futs).await;
 
-            match parse_traffic_result(&logs, &edge.allowed_pattern, &edge.blocked_pattern) {
+        for (edge, logs) in &results {
+            match parse_traffic_result(logs, &edge.allowed_pattern, &edge.blocked_pattern) {
                 Some(false) => {
                     // Most recent result is BLOCKED — edge is denied
                 }
@@ -783,25 +802,34 @@ pub async fn check_no_incorrectly_allowed(
     ])
     .await?;
 
-    for pod in pods_output.lines() {
-        let pod = pod.trim();
-        if pod.is_empty() {
-            continue;
-        }
+    let pods: Vec<&str> = pods_output
+        .lines()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect();
 
-        let logs = run_kubectl(&[
-            "--kubeconfig",
-            kubeconfig_path,
-            "logs",
-            "-n",
-            namespace,
-            pod,
-            "--tail",
-            "500",
-        ])
-        .await
-        .unwrap_or_default();
+    // Fetch all pod logs concurrently
+    let log_futs: Vec<_> = pods
+        .iter()
+        .map(|pod| async move {
+            let logs = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig_path,
+                "logs",
+                "-n",
+                namespace,
+                pod,
+                "--tail",
+                "500",
+            ])
+            .await
+            .unwrap_or_default();
+            (*pod, logs)
+        })
+        .collect();
+    let results = join_all(log_futs).await;
 
+    for (pod, logs) in &results {
         for line in logs.lines() {
             if line.contains("ALLOWED(UNEXPECTED)") || line.contains("ALLOWED (UNEXPECTED") {
                 violations.push(format!("{}: {}", pod, line.trim()));

@@ -394,13 +394,15 @@ impl<'de> Deserialize<'de> for ResourceSpec {
             },
             Some(value) => match &raw.type_ {
                 ResourceType::Volume => {
-                    let p: VolumeParams = serde_json::from_value(value)
-                        .map_err(|e| serde::de::Error::custom(format!("invalid volume params: {e}")))?;
+                    let p: VolumeParams = serde_json::from_value(value).map_err(|e| {
+                        serde::de::Error::custom(format!("invalid volume params: {e}"))
+                    })?;
                     ResourceParams::Volume(p)
                 }
                 ResourceType::Secret => {
-                    let p: SecretParams = serde_json::from_value(value)
-                        .map_err(|e| serde::de::Error::custom(format!("invalid secret params: {e}")))?;
+                    let p: SecretParams = serde_json::from_value(value).map_err(|e| {
+                        serde::de::Error::custom(format!("invalid secret params: {e}"))
+                    })?;
                     if p.provider.is_empty() {
                         return Err(serde::de::Error::custom(
                             "secret resource requires 'provider' in params",
@@ -437,8 +439,9 @@ impl<'de> Deserialize<'de> for ResourceSpec {
                     ResourceParams::Secret(p)
                 }
                 ResourceType::ExternalService => {
-                    let p: ExternalServiceParams = serde_json::from_value(value)
-                        .map_err(|e| serde::de::Error::custom(format!("invalid external service params: {e}")))?;
+                    let p: ExternalServiceParams = serde_json::from_value(value).map_err(|e| {
+                        serde::de::Error::custom(format!("invalid external service params: {e}"))
+                    })?;
                     if p.endpoints.is_empty() {
                         return Err(serde::de::Error::custom(
                             "external service resource requires at least one endpoint in params",
@@ -455,15 +458,18 @@ impl<'de> Deserialize<'de> for ResourceSpec {
                     ResourceParams::ExternalService(p)
                 }
                 ResourceType::Gpu => {
-                    let p: GpuParams = serde_json::from_value(value)
-                        .map_err(|e| serde::de::Error::custom(format!("invalid gpu params: {e}")))?;
+                    let p: GpuParams = serde_json::from_value(value).map_err(|e| {
+                        serde::de::Error::custom(format!("invalid gpu params: {e}"))
+                    })?;
                     p.validate().map_err(serde::de::Error::custom)?;
                     ResourceParams::Gpu(p)
                 }
                 ResourceType::Service => ResourceParams::None,
                 ResourceType::Custom(_) => {
                     let map: BTreeMap<String, serde_json::Value> = serde_json::from_value(value)
-                        .map_err(|e| serde::de::Error::custom(format!("invalid custom params: {e}")))?;
+                        .map_err(|e| {
+                            serde::de::Error::custom(format!("invalid custom params: {e}"))
+                        })?;
                     ResourceParams::Custom(map)
                 }
             },

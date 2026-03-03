@@ -61,7 +61,12 @@ pub async fn reconcile(
             && current_status.message == new_status.message
         {
             debug!(oidc_provider = %name, "Status unchanged, skipping update");
-            return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
+            let requeue = if new_status.phase == OIDCProviderPhase::Ready {
+                REQUEUE_SUCCESS_SECS
+            } else {
+                OIDC_REQUEUE_ERROR_SECS
+            };
+            return Ok(Action::requeue(Duration::from_secs(requeue)));
         }
     }
 

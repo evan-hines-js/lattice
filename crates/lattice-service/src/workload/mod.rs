@@ -1135,7 +1135,10 @@ mod tests {
             "my-gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: ResourceParams::Gpu(GpuParams { count: 1, ..Default::default() }),
+                params: ResourceParams::Gpu(GpuParams {
+                    count: 1,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
@@ -1157,7 +1160,10 @@ mod tests {
             "my-gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: ResourceParams::Gpu(GpuParams { count: 1, ..Default::default() }),
+                params: ResourceParams::Gpu(GpuParams {
+                    count: 1,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
@@ -1179,7 +1185,10 @@ mod tests {
             "my-gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: ResourceParams::Gpu(GpuParams { count: 1, ..Default::default() }),
+                params: ResourceParams::Gpu(GpuParams {
+                    count: 1,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
@@ -1209,7 +1218,10 @@ mod tests {
             "my-gpu".to_string(),
             ResourceSpec {
                 type_: ResourceType::Gpu,
-                params: ResourceParams::Gpu(GpuParams { count: 1, ..Default::default() }),
+                params: ResourceParams::Gpu(GpuParams {
+                    count: 1,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );

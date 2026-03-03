@@ -300,9 +300,7 @@ pub async fn wait_for_service_phase(
                         ns, svc_name, current_phase
                     );
                     let phase_ok = current_phase == expected_phase;
-                    let msg_ok = expected_msg
-                        .as_deref()
-                        .map_or(true, |msg| raw.contains(msg));
+                    let msg_ok = expected_msg.as_deref().is_none_or(|msg| raw.contains(msg));
                     Ok(phase_ok && msg_ok)
                 }
                 Err(_) => Ok(false),
