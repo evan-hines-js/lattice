@@ -10,23 +10,6 @@ mod model_serving_compiler;
 pub mod routing_compiler;
 mod types;
 
-#[cfg(test)]
-mod test_utils {
-    pub fn test_pod_template(image: &str) -> serde_json::Value {
-        serde_json::json!({
-            "metadata": {
-                "labels": {"app": "test"}
-            },
-            "spec": {
-                "containers": [{
-                    "name": "main",
-                    "image": image
-                }]
-            }
-        })
-    }
-}
-
 pub use autoscaling_compiler::{compile_model_autoscaling, CompiledAutoscaling};
 pub use compiler::{compile_vccronjob, compile_vcjob};
 pub use model_serving_compiler::{compile_model_serving, ModelServingCompilation, RoleTemplates};
@@ -45,3 +28,20 @@ pub use types::{
     VCCronJobTemplate, VCJob, VCJobSpec, VCJobTask, VCJobTaskPolicy, VolcanoMetadata, WorkloadPort,
     WorkloadSelector, PODGROUP_ANNOTATION,
 };
+
+#[cfg(test)]
+mod test_utils {
+    pub fn test_pod_template(image: &str) -> serde_json::Value {
+        serde_json::json!({
+            "metadata": {
+                "labels": {"app": "test"}
+            },
+            "spec": {
+                "containers": [{
+                    "name": "main",
+                    "image": image
+                }]
+            }
+        })
+    }
+}

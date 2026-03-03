@@ -553,7 +553,7 @@ fn inject_rank_env(template: &mut serde_json::Value, rank_offset: u32) {
                 "command".to_string(),
                 serde_json::json!(["/bin/sh", "-c", ". /lattice-env/rank.sh; exec \"$@\"", "sh"]),
             );
-            obj.insert("args".to_string(), serde_json::to_value(&new_args).unwrap());
+            obj.insert("args".to_string(), serde_json::to_value(&new_args).expect("Vec<String> serializes to JSON"));
 
             // Add volume mounts for lattice-env and writable /tmp
             let volume_mounts = obj
@@ -583,7 +583,7 @@ fn gpu_param<T>(
         .resources
         .values()
         .filter(|r| r.type_.is_gpu())
-        .find_map(|r| r.params.as_gpu().and_then(|p| f(p)))
+        .find_map(|r| r.params.as_gpu().and_then(&f))
 }
 
 /// NCCL defaults per GPU model.

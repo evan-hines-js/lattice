@@ -1154,7 +1154,7 @@ pub(crate) mod tests {
                 e.to_endpoints.iter().any(|ep| {
                     ep.match_labels
                         .get("k8s:lattice.dev/model")
-                        .map_or(false, |v| v == "my-model")
+                        .is_some_and(|v| v == "my-model")
                 })
             })
             .expect("should have direct egress rule for non-ambient callee");
@@ -1203,7 +1203,7 @@ pub(crate) mod tests {
             e.to_endpoints.iter().any(|ep| {
                 ep.match_labels
                     .get(&format!("k8s:{}", lattice_common::LABEL_NAME))
-                    .map_or(false, |v| v == "api")
+                    .is_some_and(|v| v == "api")
             })
         });
         assert!(
@@ -1270,7 +1270,7 @@ pub(crate) mod tests {
                 e.to_endpoints.iter().any(|ep| {
                     ep.match_labels
                         .get("k8s:lattice.dev/model")
-                        .map_or(false, |v| v == "gpt")
+                        .is_some_and(|v| v == "gpt")
                 })
             })
             .expect("should have direct egress for non-ambient callee");
@@ -1334,7 +1334,7 @@ pub(crate) mod tests {
                 e.to_endpoints.iter().any(|ep| {
                     ep.match_labels
                         .get("k8s:lattice.dev/model")
-                        .map_or(false, |v| v == "llama")
+                        .is_some_and(|v| v == "llama")
                 })
             })
             .expect("should have direct egress for cross-namespace non-ambient callee");
@@ -1344,7 +1344,7 @@ pub(crate) mod tests {
             direct_egress.to_endpoints[0]
                 .match_labels
                 .get(lattice_common::CILIUM_LABEL_NAMESPACE)
-                .map_or(false, |v| v == "model-ns"),
+                .is_some_and(|v| v == "model-ns"),
             "cross-namespace egress should include namespace label"
         );
 
@@ -1475,7 +1475,7 @@ pub(crate) mod tests {
                 r.from_endpoints.iter().any(|ep| {
                     ep.match_labels
                         .get("k8s:lattice.dev/training-job")
-                        .map_or(false, |v| v == "my-job")
+                        .is_some_and(|v| v == "my-job")
                 })
             })
             .expect("should have peer ingress rule");
@@ -1493,7 +1493,7 @@ pub(crate) mod tests {
                 e.to_endpoints.iter().any(|ep| {
                     ep.match_labels
                         .get("k8s:lattice.dev/training-job")
-                        .map_or(false, |v| v == "my-job")
+                        .is_some_and(|v| v == "my-job")
                 })
             })
             .expect("should have peer egress rule");
@@ -1568,7 +1568,7 @@ pub(crate) mod tests {
                 r.from_endpoints.iter().any(|ep| {
                     ep.match_labels
                         .get("k8s:app.kubernetes.io/name")
-                        .map_or(false, |v| v == "kthena-router")
+                        .is_some_and(|v| v == "kthena-router")
                 })
             })
             .expect("should have bilateral agreement ingress rule for kthena-router");
@@ -1578,7 +1578,7 @@ pub(crate) mod tests {
             router_rule.from_endpoints[0]
                 .match_labels
                 .get(lattice_common::CILIUM_LABEL_NAMESPACE)
-                .map_or(false, |v| v == "kthena-system"),
+                .is_some_and(|v| v == "kthena-system"),
             "cross-namespace caller should include namespace label"
         );
 
@@ -1626,7 +1626,7 @@ pub(crate) mod tests {
                 r.from_endpoints.iter().any(|ep| {
                     ep.match_labels
                         .get(&format!("k8s:{}", lattice_common::LABEL_NAME))
-                        .map_or(false, |v| v == "gateway")
+                        .is_some_and(|v| v == "gateway")
                 })
             })
             .expect("should have bilateral agreement ingress rule");

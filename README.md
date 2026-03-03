@@ -4,13 +4,9 @@
 
 <h3 align="center">Self-managing Kubernetes clusters with zero-trust networking</h3>
 
-<p align="center">
-  <a href="https://lattice-docs.vercel.app/docs">
-    <img src="https://img.shields.io/badge/docs-lattice-blue?style=for-the-badge&logo=gitbook&logoColor=white" alt="Documentation"/>
-  </a>
-</p>
-
 ---
+
+> **Sandbox project** — Lattice is a distributed systems sandbox for exploring self-managing Kubernetes clusters. It is not production-ready and is not offered as a product. Use it to learn, experiment, and prototype.
 
 Lattice is a Kubernetes operator for multi-cluster lifecycle management. It provisions clusters via Cluster API, pivots them to be fully self-managing, and compiles a single **LatticeService** CRD into all the resources a service needs — with default-deny networking, Cedar policy authorization, and secret management built in.
 
@@ -22,7 +18,7 @@ Lattice is a Kubernetes operator for multi-cluster lifecycle management. It prov
 - **Cedar policies** — default-deny authorization for proxy access, secrets, and security overrides
 - **Outbound-only architecture** — child clusters never accept inbound connections
 
-See the [documentation](https://lattice-docs.vercel.app/docs) for details, or browse the [examples/](examples/) directory to get started.
+Browse the [examples/](examples/) directory to get started.
 
 ---
 

@@ -24,6 +24,31 @@ use lattice_workload::{CompiledConfig, WorkloadCompiler};
 use crate::download::{self, CompiledDownload};
 use crate::error::ModelError;
 
+fn entry_workload_name(model_name: &str, role_name: &str) -> String {
+    format!("{}-{}", model_name, role_name)
+}
+
+fn worker_workload_name(model_name: &str, role_name: &str) -> String {
+    format!("{}-{}-worker", model_name, role_name)
+}
+
+fn kthena_caller(service_account: &str) -> CallerRef {
+    CallerRef {
+        name: service_account.to_string(),
+        namespace: Some(KTHENA_NAMESPACE.to_string()),
+    }
+}
+
+/// Check whether routing uses P/D disaggregation (kv_connector with prefill/decode roles).
+fn has_pd_disaggregation(
+    routing: Option<&lattice_common::crd::ModelRoutingSpec>,
+    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+) -> bool {
+    routing
+        .map(|r| r.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(roles))
+        .unwrap_or(false)
+}
+
 /// Compute a stable suffix from the role key set for the ModelServing name.
 ///
 /// Uses `derived_name` (FIPS SHA-256) with an empty prefix, returning an 8-char
@@ -229,6 +254,31 @@ async fn compile_workload(
     Ok((template, compiled.config, compiled.mesh_member, policies))
 }
 
+/// When worker_runtime falls back to entry_runtime, imagePullSecrets may
+/// reference secret resources only declared in entry_workload. Returns a
+/// modified clone with those resources propagated, or None if no changes needed.
+fn prepare_worker_workload(
+    worker_workload: &lattice_common::crd::WorkloadSpec,
+    entry_workload: &lattice_common::crd::WorkloadSpec,
+    worker_runtime: &lattice_common::crd::RuntimeSpec,
+    has_explicit_worker_runtime: bool,
+) -> Option<lattice_common::crd::WorkloadSpec> {
+    if has_explicit_worker_runtime {
+        return None;
+    }
+    let mut cloned = worker_workload.clone();
+    for secret_name in &worker_runtime.image_pull_secrets {
+        if !cloned.resources.contains_key(secret_name) {
+            if let Some(resource) = entry_workload.resources.get(secret_name) {
+                cloned
+                    .resources
+                    .insert(secret_name.clone(), resource.clone());
+            }
+        }
+    }
+    Some(cloned)
+}
+
 /// Aggregated output from compiling all roles.
 struct CompiledRoles {
     role_templates: BTreeMap<String, RoleTemplates>,
@@ -258,11 +308,9 @@ async fn compile_roles(
                 message: e.to_string(),
             })?;
 
-        let entry_full_name = format!("{}-{}", name, role_name);
-
         let (entry_json, entry_config, entry_mm, entry_policies) = compile_workload(
             ctx,
-            &entry_full_name,
+            &entry_workload_name(name, role_name),
             &role_spec.entry_workload,
             &role_spec.entry_runtime,
             role_name,
@@ -273,53 +321,37 @@ async fn compile_roles(
         result.mesh_members.extend(entry_mm);
         result.tracing_policies.extend(entry_policies);
 
-        // Compile worker workload (if present)
-        let worker_json = if let Some(ref worker_workload) = role_spec.worker_workload {
-            let worker_runtime = role_spec
-                .worker_runtime
-                .as_ref()
-                .unwrap_or(&role_spec.entry_runtime);
-            let worker_name = format!("{}-{}-worker", name, role_name);
+        let worker_json = match role_spec.worker_workload {
+            Some(ref worker_workload) => {
+                let worker_runtime = role_spec
+                    .worker_runtime
+                    .as_ref()
+                    .unwrap_or(&role_spec.entry_runtime);
 
-            // When worker_runtime falls back to entry_runtime, imagePullSecrets
-            // may reference secret resources only declared in entry_workload.
-            // Propagate those missing resources so the worker compilation can
-            // resolve them.
-            let effective_worker_workload;
-            let workload_ref = if role_spec.worker_runtime.is_none() {
-                let mut cloned = worker_workload.clone();
-                for secret_name in &worker_runtime.image_pull_secrets {
-                    if !cloned.resources.contains_key(secret_name) {
-                        if let Some(resource) = role_spec.entry_workload.resources.get(secret_name)
-                        {
-                            cloned
-                                .resources
-                                .insert(secret_name.clone(), resource.clone());
-                        }
-                    }
-                }
-                effective_worker_workload = cloned;
-                &effective_worker_workload
-            } else {
-                worker_workload
-            };
+                let effective = prepare_worker_workload(
+                    worker_workload,
+                    &role_spec.entry_workload,
+                    worker_runtime,
+                    role_spec.worker_runtime.is_some(),
+                );
+                let workload_ref = effective.as_ref().unwrap_or(worker_workload);
 
-            let (worker_template, worker_config, worker_mm, worker_policies) = compile_workload(
-                ctx,
-                &worker_name,
-                workload_ref,
-                worker_runtime,
-                &format!("{}-worker", role_name),
-            )
-            .await?;
+                let (template, config, mm, policies) = compile_workload(
+                    ctx,
+                    &worker_workload_name(name, role_name),
+                    workload_ref,
+                    worker_runtime,
+                    &format!("{}-worker", role_name),
+                )
+                .await?;
 
-            result.config.merge(worker_config);
-            result.mesh_members.extend(worker_mm);
-            result.tracing_policies.extend(worker_policies);
+                result.config.merge(config);
+                result.mesh_members.extend(mm);
+                result.tracing_policies.extend(policies);
 
-            Some(worker_template)
-        } else {
-            None
+                Some(template)
+            }
+            None => None,
         };
 
         result.role_templates.insert(
@@ -429,15 +461,11 @@ fn compile_peer_services(
     roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
     routing: Option<&lattice_common::crd::ModelRoutingSpec>,
 ) -> Result<Vec<serde_json::Value>, ModelError> {
-    let has_pd = routing
-        .map(|r| r.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(roles))
-        .unwrap_or(false);
-
-    if !has_pd {
+    if !has_pd_disaggregation(routing, roles) {
         return Ok(Vec::new());
     }
 
-    let routing_spec = routing.unwrap();
+    let routing_spec = routing.expect("routing checked by has_pd_disaggregation");
     let inference_port = routing_spec.port.ok_or(ModelError::MissingInferencePort)?;
     let side_channel_port = routing_spec
         .kv_connector
@@ -537,31 +565,19 @@ fn augment_kthena_callers(
     has_autoscaling: bool,
     mesh_members: &mut [LatticeMeshMember],
 ) -> Result<(), ModelError> {
-    let router_caller = routing.map(|_| CallerRef {
-        name: KTHENA_ROUTER_SA.to_string(),
-        namespace: Some(KTHENA_NAMESPACE.to_string()),
-    });
+    let router_caller = routing.map(|_| kthena_caller(KTHENA_ROUTER_SA));
 
     let inference_port = routing
         .map(|r| r.port.ok_or(ModelError::MissingInferencePort))
         .transpose()?;
 
-    let has_pd = routing
-        .map(|r| r.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(roles))
-        .unwrap_or(false);
+    let has_pd = has_pd_disaggregation(routing, roles);
 
-    let autoscaler_caller = if has_autoscaling {
-        Some(CallerRef {
-            name: KTHENA_AUTOSCALER_SA.to_string(),
-            namespace: Some(KTHENA_NAMESPACE.to_string()),
-        })
-    } else {
-        None
-    };
+    let autoscaler_caller = has_autoscaling.then(|| kthena_caller(KTHENA_AUTOSCALER_SA));
 
     for (role_name, role_spec) in roles {
-        let entry_name = format!("{}-{}", model_name, role_name);
-        let worker_name = format!("{}-{}-worker", model_name, role_name);
+        let entry_name = entry_workload_name(model_name, role_name);
+        let worker_name = worker_workload_name(model_name, role_name);
 
         let needs_peer_traffic =
             has_pd && (role_name == PD_ROLE_PREFILL || role_name == PD_ROLE_DECODE);
