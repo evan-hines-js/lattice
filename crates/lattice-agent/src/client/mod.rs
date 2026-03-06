@@ -801,6 +801,8 @@ mod tests {
                 timestamp: Some(timestamp),
                 uptime_seconds: 3600,
                 health: None,
+                spec_hash: vec![],
+                status_hash: vec![],
             })),
         };
 

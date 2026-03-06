@@ -812,6 +812,15 @@ pub enum ClusterPhase {
     Failed,
 }
 
+impl ClusterPhase {
+    /// Returns true for phases that precede a completed pivot (Pending,
+    /// Provisioning, Pivoting). Used to detect illegal phase regression on
+    /// clusters where `pivot_complete` is already true.
+    pub fn is_pre_pivot(self) -> bool {
+        matches!(self, Self::Pending | Self::Provisioning | Self::Pivoting)
+    }
+}
+
 impl std::fmt::Display for ClusterPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

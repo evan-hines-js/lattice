@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    CallerRef, EgressRule, EgressTarget, IngressSpec, LatticeMeshMember, LatticeMeshMemberSpec,
+    EgressRule, EgressTarget, IngressSpec, LatticeMeshMember, LatticeMeshMemberSpec,
     MeshMemberPort, MeshMemberTarget, PeerAuth, ProviderType, RuntimeSpec, WorkloadSpec,
 };
 use lattice_common::graph::ServiceGraph;
@@ -471,60 +471,34 @@ impl<'a> WorkloadCompiler<'a> {
         );
 
         // Build LatticeMeshMember CR for mesh policy delegation.
-        let service_node = graph.get_service(self.namespace, self.name);
-        let mut allowed_callers: Vec<CallerRef> = service_node
-            .as_ref()
-            .map(|n| {
-                n.allowed_callers
-                    .iter()
-                    .map(|(ns, name)| CallerRef {
-                        name: name.clone(),
-                        namespace: if ns == self.namespace {
-                            None
-                        } else {
-                            Some(ns.clone())
-                        },
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Sort for deterministic SSA output (HashSet iteration order is unstable)
-        allowed_callers.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+        //
+        // Read allowed_callers and dependencies directly from the WorkloadSpec
+        // (the authoritative source) instead of the shared ServiceGraph. The graph
+        // can have stale data when the MeshMember controller's crash-recovery
+        // `put_mesh_member` races with the LatticeService controller's `put_service`.
+        let caller_refs = self.workload.allowed_callers(self.namespace);
+        let allows_all = caller_refs.iter().any(|r| r.name == "*");
 
-        if service_node.as_ref().is_some_and(|n| n.allows_all) {
-            allowed_callers = vec![CallerRef {
-                name: "*".to_string(),
-                namespace: None,
-            }];
-        }
+        let mut allowed_callers: Vec<lattice_common::crd::ServiceRef> = if allows_all {
+            vec![lattice_common::crd::ServiceRef::local("*")]
+        } else {
+            caller_refs
+        };
+        // Sort for deterministic SSA output
+        allowed_callers.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
 
         // When the service has ingress routes, the namespace's shared gateway proxy
         // needs to reach the backend. The gateway is registered in the graph by the
         // MeshMember controller (via IngressCompiler), so this forms a bilateral
         // agreement: the gateway has depends_all, this service allows it.
         if self.ingress.as_ref().is_some_and(|i| !i.routes.is_empty()) {
-            allowed_callers.push(CallerRef {
-                name: mesh::ingress_gateway_sa_name(self.namespace),
-                namespace: None,
-            });
+            allowed_callers.push(lattice_common::crd::ServiceRef::local(
+                mesh::ingress_gateway_sa_name(self.namespace),
+            ));
         }
 
-        let mut dependencies: Vec<lattice_common::crd::ServiceRef> = service_node
-            .as_ref()
-            .map(|n| {
-                n.dependencies
-                    .iter()
-                    .map(|(ns, name)| lattice_common::crd::ServiceRef {
-                        name: name.clone(),
-                        namespace: if ns == self.namespace {
-                            None
-                        } else {
-                            Some(ns.clone())
-                        },
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut dependencies: Vec<lattice_common::crd::ServiceRef> =
+            self.workload.internal_dependencies(self.namespace);
         // Sort for deterministic SSA output
         dependencies.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
 

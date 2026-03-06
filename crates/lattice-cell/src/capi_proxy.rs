@@ -224,7 +224,7 @@ async fn proxy_handler(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("application/json")
                 .to_string(),
-            target_cluster: cluster_name.to_string(),
+            target_path: cluster_name.to_string(),
             source_user: "system:capi-proxy".to_string(),
             source_groups: vec!["system:masters".to_string()],
         },

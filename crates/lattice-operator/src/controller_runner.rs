@@ -504,7 +504,7 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
         let job_name = item.metadata.name.as_deref().unwrap_or_default();
         for (task_name, task_spec) in &item.spec.tasks {
             let task_full_name = format!("{}-{}", job_name, task_name);
-            graph.put_workload(ns, &task_full_name, &task_spec.workload);
+            graph.put_workload(ns, &task_full_name, &task_spec.workload, &[]);
         }
     })
     .await;
@@ -512,9 +512,12 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
     warmup_list::<LatticeModel>(client, "LatticeModels", |item| {
         let ns = item.metadata.namespace.as_deref().unwrap_or_default();
         let model_name = item.metadata.name.as_deref().unwrap_or_default();
+        let has_autoscaling = item.spec.roles.values().any(|r| r.autoscaling.is_some());
+        let callers =
+            lattice_model::compiler::model_callers(item.spec.routing.as_ref(), has_autoscaling);
         for (role_name, role_spec) in &item.spec.roles {
             let role_full_name = format!("{}-{}", model_name, role_name);
-            graph.put_workload(ns, &role_full_name, &role_spec.entry_workload);
+            graph.put_workload(ns, &role_full_name, &role_spec.entry_workload, &callers);
         }
     })
     .await;

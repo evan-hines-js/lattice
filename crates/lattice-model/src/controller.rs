@@ -89,15 +89,17 @@ pub async fn reconcile(
     // Validate the model spec (all roles)
     model.spec.validate()?;
 
-    // Snapshot role keys BEFORE refreshing the graph. register_graph
-    // overwrites the graph with the NEW spec's roles, so capturing
-    // after would lose the diff needed to detect removed roles.
-    let pre_register_role_keys = current_graph_role_keys(&ctx.graph, &name, namespace);
+    // Read previously applied role keys from persisted status (no TOCTOU).
+    // On first reconcile applied_roles is None — fall back to spec keys
+    // (no cleanup needed on first apply).
+    let pre_applied_roles: std::collections::BTreeSet<String> = model
+        .status
+        .as_ref()
+        .and_then(|s| s.applied_roles.as_ref())
+        .map(|roles| roles.iter().cloned().collect())
+        .unwrap_or_else(|| spec_role_keys(&name, &model.spec.roles));
 
     // Always ensure roles are in the graph (crash recovery).
-    // After a controller restart the in-memory graph is empty, so
-    // current_graph_role_keys() would return nothing and removed roles
-    // would go undetected during spec-change cleanup.
     register_graph(&model, &ctx.graph, namespace);
 
     let generation = model.metadata.generation.unwrap_or(0);
@@ -148,20 +150,25 @@ pub async fn reconcile(
             register_graph(&model, &ctx.graph, namespace);
 
             if let Err(e) = apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await {
-                cleanup_graph(&model, &ctx.graph, namespace);
                 let msg = format!("Apply failed (will retry): {}", e);
                 // Stay in Pending — apply errors are transient (webhook not ready,
                 // API server hiccup). error_policy requeues after 30s.
+                // Don't cleanup the graph: the roles are valid (compilation succeeded),
+                // and register_graph will re-register them on the next reconcile anyway.
                 let _ = StatusUpdate::new(ModelServingPhase::Pending)
                     .message(&msg)
                     .apply(&ctx.client, &model, namespace)
                     .await;
                 return Err(e);
             }
+            let role_keys: Vec<String> = spec_role_keys(&name, &model.spec.roles)
+                .into_iter()
+                .collect();
             StatusUpdate::new(ModelServingPhase::Loading)
                 .message("Resources applied, waiting for model serving readiness")
                 .observed_generation(generation)
                 .auto_topology(compiled.auto_topology)
+                .applied_roles(role_keys)
                 .apply(&ctx.client, &model, namespace)
                 .await?;
             Ok(Action::requeue(REQUEUE_LOADING))
@@ -220,9 +227,7 @@ pub async fn reconcile(
                 // Spec changed — re-compile and re-apply
                 info!(model = %name, observed = ?observed, current = generation, "spec changed, re-applying");
 
-                // Use the pre-register snapshot captured before register_graph
-                // overwrote the graph with the new spec's roles.
-                let old_role_keys = pre_register_role_keys.clone();
+                let old_role_keys = pre_applied_roles.clone();
                 let new_role_keys = spec_role_keys(&name, &model.spec.roles);
 
                 let compiled = match compile_model(
@@ -280,12 +285,22 @@ pub async fn reconcile(
                 // SSA-patch the Terminating resource or create a PodGroup
                 // name collision, leaving decode pods stuck in Pending.
                 //
-                // On the next reconcile, register_graph (above) has already
-                // updated the graph so old_role_keys == new_role_keys, the
-                // delete is skipped, and apply_compiled_model creates a
-                // clean new ModelServing.
+                // The status update below persists the new applied_roles so
+                // the next reconcile sees old == new, skips the delete, and
+                // falls through to apply_compiled_model for a clean recreate.
                 if old_role_keys != new_role_keys {
                     delete_model_serving(&ctx.client, &ctx.registry, &name, namespace).await?;
+                    // Persist the new role keys so the next reconcile sees
+                    // old == new and falls through to apply. Keep the OLD
+                    // observed_generation so spec_changed_since_compilation
+                    // still triggers the recompile path.
+                    let role_keys: Vec<String> = new_role_keys.into_iter().collect();
+                    let mut s =
+                        StatusUpdate::new(ModelServingPhase::Serving).applied_roles(role_keys);
+                    if let Some(gen) = observed {
+                        s = s.observed_generation(gen);
+                    }
+                    let _ = s.apply(&ctx.client, &model, namespace).await;
                     info!(model = %name, "deleted ModelServing for role change, requeuing for clean recreate");
                     return Ok(Action::requeue(REQUEUE_LOADING));
                 }
@@ -305,10 +320,12 @@ pub async fn reconcile(
                 }
                 // Transition to Loading so the next reconcile checks
                 // ModelServing readiness after the rolling update.
+                let role_keys: Vec<String> = new_role_keys.into_iter().collect();
                 StatusUpdate::new(ModelServingPhase::Loading)
                     .message("Spec changed, reloading")
                     .observed_generation(generation)
                     .auto_topology(compiled.auto_topology)
+                    .applied_roles(role_keys)
                     .apply(&ctx.client, &model, namespace)
                     .await?;
                 return Ok(Action::requeue(REQUEUE_LOADING));
@@ -358,11 +375,14 @@ pub async fn reconcile(
 /// Register all model roles in the service graph for bilateral agreements
 fn register_graph(model: &LatticeModel, graph: &ServiceGraph, namespace: &str) {
     let name = model.metadata.name.as_deref().unwrap_or_default();
+    let has_autoscaling = model.spec.roles.values().any(|r| r.autoscaling.is_some());
+    let callers = crate::compiler::model_callers(model.spec.routing.as_ref(), has_autoscaling);
     for (role_name, role_spec) in &model.spec.roles {
         graph.put_workload(
             namespace,
             &format!("{}-{}", name, role_name),
             &role_spec.entry_workload,
+            &callers,
         );
     }
 }
@@ -383,27 +403,6 @@ fn spec_role_keys(
     roles
         .keys()
         .map(|r| format!("{}-{}", model_name, r))
-        .collect()
-}
-
-/// Compute the set of role graph keys currently in the graph for a model.
-///
-/// Enumerates both Local services and MeshMembers in the namespace and filters
-/// by the model name prefix. The MeshMember controller may overwrite a role's
-/// graph node type from Local to MeshMember between reconciles, so checking
-/// only Local nodes would miss roles and prevent orphan cleanup.
-fn current_graph_role_keys(
-    graph: &ServiceGraph,
-    model_name: &str,
-    namespace: &str,
-) -> std::collections::BTreeSet<String> {
-    let prefix = format!("{}-", model_name);
-    graph
-        .list_services(namespace)
-        .into_iter()
-        .chain(graph.list_mesh_members(namespace))
-        .filter(|node| node.name.starts_with(&prefix))
-        .map(|node| node.name)
         .collect()
 }
 
@@ -780,6 +779,7 @@ struct StatusUpdate<'a> {
     observed_generation: Option<i64>,
     conditions: Option<Vec<ModelCondition>>,
     auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
+    applied_roles: Option<Vec<String>>,
 }
 
 impl<'a> StatusUpdate<'a> {
@@ -790,6 +790,7 @@ impl<'a> StatusUpdate<'a> {
             observed_generation: None,
             conditions: None,
             auto_topology: None,
+            applied_roles: None,
         }
     }
 
@@ -810,6 +811,11 @@ impl<'a> StatusUpdate<'a> {
 
     fn auto_topology(mut self, topo: Option<lattice_common::crd::WorkloadNetworkTopology>) -> Self {
         self.auto_topology = topo;
+        self
+    }
+
+    fn applied_roles(mut self, roles: Vec<String>) -> Self {
+        self.applied_roles = Some(roles);
         self
     }
 
@@ -834,16 +840,20 @@ impl<'a> StatusUpdate<'a> {
         }
 
         let name = model.name_any();
-        // Preserve auto_topology from existing status unless explicitly overridden
+        // Preserve auto_topology and applied_roles from existing status unless explicitly overridden
         let auto_topology = self
             .auto_topology
             .or_else(|| model.status.as_ref().and_then(|s| s.auto_topology.clone()));
+        let applied_roles = self
+            .applied_roles
+            .or_else(|| model.status.as_ref().and_then(|s| s.applied_roles.clone()));
         let status = LatticeModelStatus {
             phase: self.phase,
             message: self.message.map(|m| m.to_string()),
             observed_generation: self.observed_generation,
             conditions: self.conditions,
             auto_topology,
+            applied_roles,
         };
         lattice_common::kube_utils::patch_resource_status::<LatticeModel>(
             client,
@@ -871,6 +881,7 @@ mod tests {
             observed_generation,
             conditions: None,
             auto_topology: None,
+            applied_roles: None,
         }
     }
 
@@ -988,81 +999,17 @@ mod tests {
         assert!(keys.contains("llm-serving-decode"));
     }
 
-    #[test]
-    fn current_graph_role_keys_finds_matching_entries() {
-        let graph = ServiceGraph::new();
-
-        // Register two roles for model "llm-serving"
-        graph.put_workload("ns", "llm-serving-prefill", &make_minimal_workload());
-        graph.put_workload("ns", "llm-serving-decode", &make_minimal_workload());
-
-        // Register an unrelated service
-        graph.put_workload("ns", "other-service", &make_minimal_workload());
-
-        let keys = current_graph_role_keys(&graph, "llm-serving", "ns");
-        assert_eq!(keys.len(), 2);
-        assert!(keys.contains("llm-serving-prefill"));
-        assert!(keys.contains("llm-serving-decode"));
-        assert!(!keys.contains("other-service"));
-    }
-
-    /// The MeshMember controller may overwrite a role's graph node type from
-    /// Local to MeshMember between reconciles. current_graph_role_keys must
-    /// still find the role so cleanup_removed_roles can detect it.
-    #[test]
-    fn current_graph_role_keys_finds_mesh_member_nodes() {
-        use lattice_common::crd::{
-            LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
-        };
-
-        let graph = ServiceGraph::new();
-
-        // Model controller registers prefill as Local workload
-        graph.put_workload("ns", "llm-serving-decode", &make_minimal_workload());
-
-        // MeshMember controller overwrites prefill to MeshMember type
-        let mm_spec = LatticeMeshMemberSpec {
-            target: MeshMemberTarget::Selector(std::collections::BTreeMap::from([(
-                "app".to_string(),
-                "llm-serving-prefill".to_string(),
-            )])),
-            ports: vec![MeshMemberPort {
-                port: 8080,
-                name: "http".to_string(),
-                service_port: None,
-                peer_auth: PeerAuth::default(),
-            }],
-            allowed_callers: vec![],
-            dependencies: vec![],
-            egress: vec![],
-            allow_peer_traffic: false,
-            depends_all: false,
-            ingress: None,
-            service_account: None,
-            ambient: true,
-        };
-        graph.put_mesh_member("ns", "llm-serving-prefill", &mm_spec);
-
-        let keys = current_graph_role_keys(&graph, "llm-serving", "ns");
-        assert_eq!(keys.len(), 2);
-        assert!(keys.contains("llm-serving-prefill"));
-        assert!(keys.contains("llm-serving-decode"));
-    }
-
     /// When a model spec changes from {prefill, decode} to {decode}, the old
-    /// "prefill" graph node must be identified for cleanup. This test verifies
-    /// that spec_role_keys + current_graph_role_keys correctly identify removed roles.
+    /// "prefill" role must be identified for cleanup via status-persisted applied_roles.
     #[test]
-    fn removed_role_detected_via_set_difference() {
+    fn removed_role_detected_via_status_diff() {
         use std::collections::BTreeMap;
 
-        let graph = ServiceGraph::new();
-
-        // Old spec had both roles
-        graph.put_workload("ns", "llm-decode", &make_minimal_workload());
-        graph.put_workload("ns", "llm-prefill", &make_minimal_workload());
-
-        let old_keys = current_graph_role_keys(&graph, "llm", "ns");
+        // Simulate status.applied_roles from previous reconcile
+        let old_keys: std::collections::BTreeSet<String> = ["llm-decode", "llm-prefill"]
+            .into_iter()
+            .map(String::from)
+            .collect();
 
         // New spec only has "decode"
         let new_roles = BTreeMap::from([("decode".to_string(), make_role())]);
@@ -1073,17 +1020,14 @@ mod tests {
         assert_eq!(*removed[0], "llm-prefill");
     }
 
-    /// Verify that register_graph + cleanup correctly handles role addition.
     /// Adding a role should NOT trigger cleanup of existing roles.
     #[test]
     fn adding_role_does_not_remove_existing() {
         use std::collections::BTreeMap;
 
-        let graph = ServiceGraph::new();
-
-        // Old spec had one role
-        graph.put_workload("ns", "llm-decode", &make_minimal_workload());
-        let old_keys = current_graph_role_keys(&graph, "llm", "ns");
+        // Simulate status.applied_roles from previous reconcile
+        let old_keys: std::collections::BTreeSet<String> =
+            ["llm-decode"].into_iter().map(String::from).collect();
 
         // New spec adds a role
         let new_roles = BTreeMap::from([
@@ -1096,6 +1040,28 @@ mod tests {
         assert!(
             removed.is_empty(),
             "adding a role should not identify any removals"
+        );
+    }
+
+    /// On first reconcile (no status), applied_roles falls back to spec_role_keys,
+    /// so no cleanup is triggered.
+    #[test]
+    fn first_reconcile_no_status_skips_cleanup() {
+        use std::collections::BTreeMap;
+
+        let roles = BTreeMap::from([
+            ("decode".to_string(), make_role()),
+            ("prefill".to_string(), make_role()),
+        ]);
+
+        // Simulate: status.applied_roles is None → fall back to spec_role_keys
+        let old_keys = spec_role_keys("llm", &roles);
+        let new_keys = spec_role_keys("llm", &roles);
+
+        let removed: Vec<&String> = old_keys.difference(&new_keys).collect();
+        assert!(
+            removed.is_empty(),
+            "first reconcile should not trigger cleanup"
         );
     }
 }

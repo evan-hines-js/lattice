@@ -101,6 +101,17 @@ pub enum InfraProviderType {
     Docker,
 }
 
+impl std::fmt::Display for InfraProviderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AWS => write!(f, "AWS"),
+            Self::Proxmox => write!(f, "Proxmox"),
+            Self::OpenStack => write!(f, "OpenStack"),
+            Self::Docker => write!(f, "Docker"),
+        }
+    }
+}
+
 /// AWS-specific provider configuration
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]

@@ -14,6 +14,7 @@ mod istio_ambient;
 
 use lattice_common::crd::EgressTarget;
 use lattice_common::graph::ServiceGraph;
+use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::cilium::CiliumNetworkPolicy;
 use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
 use lattice_common::policy::service_entry::ServiceEntry;
@@ -61,6 +62,21 @@ impl GeneratedPolicies {
             peer_authentications: self.peer_authentications.clone(),
         }
     }
+
+    /// Stamp owner references onto all AuthorizationPolicy and PeerAuthentication
+    /// resources for crash-safe GC. ServiceEntries are excluded (shared across members).
+    /// CiliumNetworkPolicy is excluded (1:1 per service, no orphan risk).
+    pub fn stamp_owner_refs(&mut self, refs: &[OwnerReference]) {
+        if refs.is_empty() {
+            return;
+        }
+        for ap in &mut self.authorization_policies {
+            ap.metadata.owner_references = refs.to_vec();
+        }
+        for pa in &mut self.peer_authentications {
+            pa.metadata.owner_references = refs.to_vec();
+        }
+    }
 }
 
 // =============================================================================
@@ -78,6 +94,7 @@ impl GeneratedPolicies {
 pub struct PolicyCompiler<'a> {
     graph: &'a ServiceGraph,
     cluster_name: String,
+    owner_refs: Vec<OwnerReference>,
 }
 
 impl<'a> PolicyCompiler<'a> {
@@ -86,10 +103,17 @@ impl<'a> PolicyCompiler<'a> {
     /// # Arguments
     /// * `graph` - The service graph for bilateral agreement checks
     /// * `cluster_name` - Cluster name used in trust domain (lattice.{cluster}.local)
-    pub fn new(graph: &'a ServiceGraph, cluster_name: impl Into<String>) -> Self {
+    /// * `owner_refs` - Owner references stamped onto generated AuthorizationPolicy
+    ///   and PeerAuthentication resources for crash-safe GC
+    pub fn new(
+        graph: &'a ServiceGraph,
+        cluster_name: impl Into<String>,
+        owner_refs: Vec<OwnerReference>,
+    ) -> Self {
         Self {
             graph,
             cluster_name: cluster_name.into(),
+            owner_refs,
         }
     }
 
@@ -107,7 +131,7 @@ impl<'a> PolicyCompiler<'a> {
             return GeneratedPolicies::default();
         }
 
-        // Out-of-ambient: Cilium L4 only, no Istio resources
+        // Out-of-ambient: Cilium L4 only, no Istio resources (no owner refs needed — no AP/PA)
         if !service_node.ambient {
             let mut output = GeneratedPolicies::default();
             output
@@ -145,6 +169,9 @@ impl<'a> PolicyCompiler<'a> {
         // External egress: ServiceEntry + AuthorizationPolicy + waypoint
         // Handles inline external endpoints and FQDN egress rules.
         self.compile_egress(&service_node, namespace, &mut output);
+
+        // Stamp owner references for crash-safe K8s GC
+        output.stamp_owner_refs(&self.owner_refs);
 
         output
     }
@@ -262,6 +289,65 @@ pub(crate) mod tests {
         }
     }
 
+    fn test_owner_refs() -> Vec<super::OwnerReference> {
+        vec![super::OwnerReference {
+            api_version: "lattice.dev/v1alpha1".to_string(),
+            kind: "LatticeMeshMember".to_string(),
+            name: "api".to_string(),
+            uid: "test-uid-123".to_string(),
+            controller: Some(true),
+            block_owner_deletion: Some(true),
+        }]
+    }
+
+    #[test]
+    fn owner_refs_stamped_on_auth_and_peer_auth() {
+        let graph = ServiceGraph::new();
+        let ns = "test-ns";
+
+        graph.put_service(ns, "api", &make_service_spec(vec![], vec!["gateway"]));
+        graph.put_service(ns, "gateway", &make_service_spec(vec!["api"], vec![]));
+
+        let refs = test_owner_refs();
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", refs.clone());
+        let output = compiler.compile("api", ns);
+
+        for ap in &output.authorization_policies {
+            assert_eq!(
+                ap.metadata.owner_references, refs,
+                "AuthorizationPolicy missing ownerRefs"
+            );
+        }
+        for pa in &output.peer_authentications {
+            assert_eq!(
+                pa.metadata.owner_references, refs,
+                "PeerAuthentication missing ownerRefs"
+            );
+        }
+        for se in &output.service_entries {
+            assert!(
+                se.metadata.owner_references.is_empty(),
+                "ServiceEntry should NOT have ownerRefs"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_refs_empty_when_none_provided() {
+        let graph = ServiceGraph::new();
+        let ns = "test-ns";
+
+        graph.put_service(ns, "api", &make_service_spec(vec![], vec!["gateway"]));
+        graph.put_service(ns, "gateway", &make_service_spec(vec!["api"], vec![]));
+
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
+        let output = compiler.compile("api", ns);
+
+        for ap in &output.authorization_policies {
+            assert!(ap.metadata.owner_references.is_empty());
+        }
+    }
+
     #[test]
     fn bilateral_agreement_generates_policy() {
         let graph = ServiceGraph::new();
@@ -273,7 +359,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
         let output = compiler.compile("api", "prod-ns");
 
         assert!(!output.authorization_policies.is_empty());
@@ -299,7 +385,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec![], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
         let output = compiler.compile("api", "prod-ns");
 
         assert!(output.authorization_policies.is_empty());
@@ -308,7 +394,7 @@ pub(crate) mod tests {
     #[test]
     fn no_policies_when_not_in_graph() {
         let graph = ServiceGraph::new();
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("nonexistent", "default");
         assert!(output.is_empty());
     }
@@ -324,7 +410,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "my-cluster");
+        let compiler = PolicyCompiler::new(&graph, "my-cluster", vec![]);
         let output = compiler.compile("api", "prod-ns");
 
         let principals = &output.authorization_policies[0].spec.rules[0].from[0]
@@ -345,7 +431,7 @@ pub(crate) mod tests {
         let spec = make_service_spec(vec![], vec![]);
         graph.put_service(ns, "my-app", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("my-app", ns);
 
         assert_eq!(output.cilium_policies.len(), 1);
@@ -376,7 +462,7 @@ pub(crate) mod tests {
         }];
         graph.put_mesh_member(ns, "api", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
         let output = compiler.compile("api", ns);
 
         assert_eq!(output.service_entries.len(), 1);
@@ -406,7 +492,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
         let output = compiler.compile("api", ns);
 
         assert_eq!(output.cilium_policies.len(), 1);
@@ -453,7 +539,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
         let output = compiler.compile("api", ns);
 
         assert!(!output.authorization_policies.is_empty());
@@ -475,7 +561,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
 
         // Check api (has inbound callers, no outbound)
         let api_cnp = &compiler.compile("api", ns).cilium_policies[0];
@@ -536,7 +622,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
         let output = compiler.compile("api", ns);
 
         let cnp = &output.cilium_policies[0];
@@ -571,7 +657,7 @@ pub(crate) mod tests {
         callers: Vec<&str>,
         deps: Vec<&str>,
     ) -> lattice_common::crd::LatticeMeshMemberSpec {
-        use lattice_common::crd::{CallerRef, MeshMemberPort, MeshMemberTarget, ServiceRef};
+        use lattice_common::crd::{MeshMemberPort, MeshMemberTarget, ServiceRef};
 
         lattice_common::crd::LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(labels),
@@ -584,13 +670,7 @@ pub(crate) mod tests {
                     peer_auth,
                 })
                 .collect(),
-            allowed_callers: callers
-                .into_iter()
-                .map(|c| CallerRef {
-                    name: c.to_string(),
-                    namespace: None,
-                })
-                .collect(),
+            allowed_callers: callers.into_iter().map(ServiceRef::local).collect(),
             dependencies: deps.into_iter().map(ServiceRef::local).collect(),
             egress: vec![],
             allow_peer_traffic: false,
@@ -623,7 +703,7 @@ pub(crate) mod tests {
         let api_spec = make_service_spec(vec!["webhook-handler"], vec![]);
         graph.put_service(ns, "api", &api_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("webhook-handler", ns);
 
         // Should have PeerAuthentication with permissive override on port 9443
@@ -676,7 +756,7 @@ pub(crate) mod tests {
         );
         graph.put_mesh_member(ns, "admission-webhook", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("admission-webhook", ns);
 
         // PeerAuthentication: port 9443 is PERMISSIVE (both Webhook and Permissive need this)
@@ -713,7 +793,7 @@ pub(crate) mod tests {
         );
         graph.put_mesh_member(ns, "admission-webhook", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("admission-webhook", ns);
 
         let cnp = &output.cilium_policies[0];
@@ -765,7 +845,7 @@ pub(crate) mod tests {
         );
         graph.put_mesh_member(ns, "metrics-svc", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("metrics-svc", ns);
 
         let cnp = &output.cilium_policies[0];
@@ -806,7 +886,7 @@ pub(crate) mod tests {
         );
         graph.put_mesh_member(ns, "mixed-svc", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("mixed-svc", ns);
 
         // PeerAuthentication should have PERMISSIVE on both 9090 and 9443
@@ -862,7 +942,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("api", ns);
 
         assert!(
@@ -915,7 +995,7 @@ pub(crate) mod tests {
         };
         graph.put_mesh_member(ns, "api", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "prod-cluster");
+        let compiler = PolicyCompiler::new(&graph, "prod-cluster", vec![]);
         let output = compiler.compile("api", ns);
 
         // Should have a ServiceEntry for api.stripe.com
@@ -986,7 +1066,7 @@ pub(crate) mod tests {
         };
         graph.put_mesh_member(ns, "svc", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("svc", ns);
 
         let fqdn_authz = output
@@ -1032,7 +1112,7 @@ pub(crate) mod tests {
         };
         graph.put_mesh_member(ns, "svc", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("svc", ns);
 
         // Cilium policy should have FQDN egress rule
@@ -1061,7 +1141,7 @@ pub(crate) mod tests {
         spec.allow_peer_traffic = true;
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("worker", ns);
 
         let cnp = &output.cilium_policies[0];
@@ -1129,7 +1209,7 @@ pub(crate) mod tests {
         serving_spec.ambient = false;
         graph.put_mesh_member(ns, "serving", &serving_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("kthena-router", ns).cilium_policies[0];
 
         let hbone_port = mesh::HBONE_PORT.to_string();
@@ -1181,7 +1261,7 @@ pub(crate) mod tests {
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
         graph.put_service(ns, "api", &api_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("gateway", ns).cilium_policies[0];
 
         let hbone_port = mesh::HBONE_PORT.to_string();
@@ -1245,7 +1325,7 @@ pub(crate) mod tests {
         serving_spec.ambient = false;
         graph.put_mesh_member(ns, "serving", &serving_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("router", ns).cilium_policies[0];
 
         let hbone_port = mesh::HBONE_PORT.to_string();
@@ -1286,7 +1366,7 @@ pub(crate) mod tests {
 
     #[test]
     fn cross_namespace_non_ambient_callee_includes_namespace_label() {
-        use lattice_common::crd::{CallerRef, PeerAuth};
+        use lattice_common::crd::{PeerAuth, ServiceRef};
 
         let graph = ServiceGraph::new();
 
@@ -1314,13 +1394,10 @@ pub(crate) mod tests {
             vec![],
         );
         serving_spec.ambient = false;
-        serving_spec.allowed_callers = vec![CallerRef {
-            name: "kthena-router".to_string(),
-            namespace: Some("kthena-system".to_string()),
-        }];
+        serving_spec.allowed_callers = vec![ServiceRef::new("kthena-system", "kthena-router")];
         graph.put_mesh_member("model-ns", "serving", &serving_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler
             .compile("kthena-router", "kthena-system")
             .cilium_policies[0];
@@ -1379,7 +1456,7 @@ pub(crate) mod tests {
         spec.allow_peer_traffic = true;
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let output = compiler.compile("worker", ns);
 
         assert_eq!(output.cilium_policies.len(), 1, "should have one CNP");
@@ -1414,7 +1491,7 @@ pub(crate) mod tests {
         spec.allow_peer_traffic = true;
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
         let hbone_port = mesh::HBONE_PORT.to_string();
@@ -1457,7 +1534,7 @@ pub(crate) mod tests {
         spec.allow_peer_traffic = true;
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
         // Endpoint selector matches the group label
@@ -1514,7 +1591,7 @@ pub(crate) mod tests {
         spec.ambient = false;
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
         let has_dns = cnp.spec.egress.iter().any(|e| {
@@ -1527,7 +1604,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_bilateral_caller_cross_namespace() {
-        use lattice_common::crd::{CallerRef, PeerAuth};
+        use lattice_common::crd::{PeerAuth, ServiceRef};
 
         let graph = ServiceGraph::new();
         let ns = "model-ns";
@@ -1541,10 +1618,7 @@ pub(crate) mod tests {
         );
         spec.ambient = false;
         // Add kthena-router as an allowed caller
-        spec.allowed_callers = vec![CallerRef {
-            name: "kthena-router".to_string(),
-            namespace: Some("kthena-system".to_string()),
-        }];
+        spec.allowed_callers = vec![ServiceRef::new("kthena-system", "kthena-router")];
         graph.put_mesh_member(ns, "serving", &spec);
 
         // kthena-router must exist in graph (bilateral agreement requires graph node)
@@ -1556,7 +1630,7 @@ pub(crate) mod tests {
         router_spec.depends_all = true;
         graph.put_mesh_member("kthena-system", "kthena-router", &router_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("serving", ns).cilium_policies[0];
 
         // Should have an ingress rule with the caller's labels and port restriction
@@ -1614,7 +1688,7 @@ pub(crate) mod tests {
         let gateway_spec = make_service_spec(vec!["serving"], vec![]);
         graph.put_service(ns, "gateway", &gateway_spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("serving", ns).cilium_policies[0];
 
         // Should have an ingress rule from the gateway's labels
@@ -1677,7 +1751,7 @@ pub(crate) mod tests {
             &vmagent_spec,
         );
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
         // vmagent should appear via bilateral agreement (depends_all + auto-injected allowed_caller)
@@ -1718,7 +1792,7 @@ pub(crate) mod tests {
         // allow_peer_traffic is false by default
         graph.put_mesh_member(ns, "etl-job", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("etl-job", ns).cilium_policies[0];
 
         // No peer ingress
@@ -1762,7 +1836,7 @@ pub(crate) mod tests {
         ];
         graph.put_mesh_member(ns, "worker", &spec);
 
-        let compiler = PolicyCompiler::new(&graph, "test-cluster");
+        let compiler = PolicyCompiler::new(&graph, "test-cluster", vec![]);
         let cnp = &compiler.compile("worker", ns).cilium_policies[0];
 
         // CIDR egress

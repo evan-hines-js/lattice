@@ -107,6 +107,7 @@ pub async fn compile_job(
             namespace,
             &format!("{}-{}", name, task_name),
             &task_spec.workload,
+            &[],
         );
     }
 

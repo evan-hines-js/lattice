@@ -30,27 +30,30 @@ pub mod watch;
 
 /// Trait for forwarding K8s API requests to child clusters.
 ///
-/// When an agent receives a K8s request with a target_cluster that differs
-/// from its local cluster name, it uses this forwarder to route the request
-/// to the correct child cluster via its own parent_servers.
+/// When an agent receives a K8s request whose target_path has remaining hops
+/// after stripping the local segment, it uses this forwarder to route the
+/// request to the next child cluster.
 #[async_trait::async_trait]
 pub trait K8sRequestForwarder: Send + Sync {
-    /// Forward a K8s request to a target cluster in this agent's subtree.
+    /// Forward a K8s request along the routing path.
+    ///
+    /// `target_path` is the remaining routing path after stripping the local hop
+    /// (e.g. "grandchild-c" if the original path was "child-b/grandchild-c" and
+    /// this agent is child-b).
     ///
     /// Returns the K8s response, or an error response if:
-    /// - The cluster is not in this agent's subtree (404)
+    /// - The first-hop cluster is not in this agent's subtree (404)
     /// - The cluster's agent is not connected (502)
     /// - The request times out (504)
-    async fn forward(&self, target_cluster: &str, request: KubernetesRequest)
-        -> KubernetesResponse;
+    async fn forward(&self, target_path: &str, request: KubernetesRequest) -> KubernetesResponse;
 
-    /// Forward a watch/follow request to a target cluster with streaming response.
+    /// Forward a watch/follow request along the routing path with streaming response.
     ///
     /// Returns a receiver that yields multiple KubernetesResponse messages
     /// as watch events arrive. The stream ends when stream_end=true is received.
     async fn forward_watch(
         &self,
-        target_cluster: &str,
+        target_path: &str,
         request: KubernetesRequest,
     ) -> Result<tokio::sync::mpsc::Receiver<KubernetesResponse>, String>;
 }
@@ -76,19 +79,21 @@ pub struct ForwardedExecSession {
 
 /// Trait for forwarding exec requests to child clusters.
 ///
-/// When an agent receives an exec request with a target_cluster that differs
-/// from its local cluster name, it uses this forwarder to start a session
-/// on the child cluster via its own parent_servers.
+/// When an agent receives an exec request whose target_path has remaining hops
+/// after stripping the local segment, it uses this forwarder to start a session
+/// on the next child cluster.
 #[async_trait::async_trait]
 pub trait ExecRequestForwarder: Send + Sync {
-    /// Start an exec session on a target cluster in this agent's subtree.
+    /// Start an exec session along the routing path.
+    ///
+    /// `target_path` is the remaining routing path after stripping the local hop.
     ///
     /// Returns a session handle for bidirectional communication, or an error if:
-    /// - The cluster is not in this agent's subtree
+    /// - The first-hop cluster is not in this agent's subtree
     /// - The cluster's agent is not connected
     async fn forward_exec(
         &self,
-        target_cluster: &str,
+        target_path: &str,
         request: ExecRequest,
     ) -> Result<ForwardedExecSession, String>;
 }
@@ -168,14 +173,11 @@ pub fn build_grpc_error_response(
 }
 
 /// Build a 404 response for a cluster not found in the subtree.
-pub fn build_cluster_not_found_response(
-    target_cluster: &str,
-    request_id: &str,
-) -> KubernetesResponse {
+pub fn build_cluster_not_found_response(target_path: &str, request_id: &str) -> KubernetesResponse {
     build_k8s_status_response(
         request_id,
         404,
-        &format!("cluster '{}' not found in subtree", target_cluster),
+        &format!("cluster '{}' not found in subtree", target_path),
     )
 }
 

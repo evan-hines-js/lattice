@@ -41,8 +41,8 @@ pub struct K8sRequestParams {
     pub content_type: String,
     /// Accept header - desired response format
     pub accept: String,
-    /// Target cluster - the final destination cluster
-    pub target_cluster: String,
+    /// Routing path for hierarchical proxy (e.g. "child-b/grandchild-c")
+    pub target_path: String,
     /// Source user identity (preserved through routing chain for Cedar)
     pub source_user: String,
     /// Source user groups (preserved through routing chain for Cedar)
@@ -127,7 +127,7 @@ async fn send_request(
             DEFAULT_TIMEOUT.as_millis() as u32
         },
         cancel: false,
-        target_cluster: params.target_cluster,
+        target_path: params.target_path,
         source_user: params.source_user,
         source_groups: params.source_groups,
         traceparent: String::new(),

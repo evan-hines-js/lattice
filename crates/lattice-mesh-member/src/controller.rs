@@ -19,10 +19,11 @@ use tracing::{debug, info, instrument, warn};
 
 use lattice_cedar::{MeshWildcardRequest, PolicyEngine, WildcardDirection};
 use lattice_common::crd::{
-    AppliedResourceRef, Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberStatus,
-    MeshMemberPhase, MeshMemberScope, MeshMemberTarget,
+    AppliedResourceRef, Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberSpec,
+    LatticeMeshMemberStatus, MeshMemberPhase, MeshMemberScope, MeshMemberTarget,
 };
 use lattice_common::graph::{compute_edge_hash, ServiceGraph};
+use lattice_common::kube_utils::OwnerReference;
 use lattice_common::mesh;
 use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry, ReconcileError};
@@ -210,11 +211,19 @@ pub async fn reconcile(
     // The ingress compiler produces a graph registration for the gateway proxy
     // (managed by Istio) so bilateral agreement edges form before policy compilation.
     if let Some(ingress_spec) = &member.spec.ingress {
-        if let Ok(ingress) =
-            IngressCompiler::compile(&name, namespace, ingress_spec, &member.spec.ports)
-        {
-            if let Some(reg) = &ingress.gateway_graph_registration {
-                ctx.graph.put_mesh_member(namespace, &reg.name, &reg.spec);
+        match IngressCompiler::compile(&name, namespace, ingress_spec, &member.spec.ports) {
+            Ok(ingress) => {
+                if let Some(reg) = &ingress.gateway_graph_registration {
+                    ctx.graph.put_mesh_member(namespace, &reg.name, &reg.spec);
+                }
+            }
+            Err(e) => {
+                warn!(
+                    namespace,
+                    name = name.as_str(),
+                    error = %e,
+                    "ingress compilation failed"
+                );
             }
         }
     }
@@ -236,7 +245,7 @@ pub async fn reconcile(
     }
 
     // Cedar-gate wildcard inbound/outbound
-    if let Some(denied) = check_cedar_wildcards(&name, namespace, &ctx).await {
+    if let Some(denied) = check_cedar_wildcards(&name, namespace, &member.spec, &ctx).await {
         warn!(msg = %denied);
         patch_status_with_hash(
             &ctx.client,
@@ -300,6 +309,10 @@ pub async fn reconcile(
 
 /// Check Cedar wildcard authorization for allows_all/depends_all.
 ///
+/// Reads wildcard flags directly from the LatticeMeshMember spec (the
+/// authoritative source) instead of the shared graph, which may contain
+/// stale data from a concurrent controller.
+///
 /// Uses the effective service account name (SPIFFE identity) as the Cedar principal,
 /// not the LatticeMeshMember resource name.
 ///
@@ -308,14 +321,15 @@ pub async fn reconcile(
 async fn check_cedar_wildcards(
     name: &str,
     namespace: &str,
+    spec: &LatticeMeshMemberSpec,
     ctx: &MeshMemberContext,
 ) -> Option<String> {
-    let node = ctx.graph.get_service(namespace, name)?;
+    let allows_all = spec.allowed_callers.iter().any(|c| c.name == "*");
     let checks = [
-        (node.allows_all, WildcardDirection::Inbound),
-        (node.depends_all, WildcardDirection::Outbound),
+        (allows_all, WildcardDirection::Inbound),
+        (spec.depends_all, WildcardDirection::Outbound),
     ];
-    let sa_name = node.sa_name().to_string();
+    let sa_name = spec.service_account.as_deref().unwrap_or(name);
     for (active, direction) in checks {
         if !active {
             continue;
@@ -323,7 +337,7 @@ async fn check_cedar_wildcards(
         let allowed = match &ctx.cedar {
             Some(cedar) => {
                 let req = MeshWildcardRequest {
-                    service_name: sa_name.clone(),
+                    service_name: sa_name.to_string(),
                     namespace: namespace.to_string(),
                     direction,
                 };
@@ -355,7 +369,24 @@ async fn do_reconcile(
 ) -> Result<(bool, HashSet<AppliedResourceRef>), ReconcileError> {
     ensure_namespace_ambient(&ctx.client, namespace, member.spec.ambient).await?;
 
-    let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name).compile(name, namespace);
+    // Build ownerReference for crash-safe GC of generated policies.
+    // If the MeshMember is deleted, K8s GC cascades to AuthorizationPolicy/PeerAuthentication.
+    let uid = member.uid().ok_or_else(|| {
+        ReconcileError::Validation(
+            "LatticeMeshMember missing UID — cannot set ownerReference".into(),
+        )
+    })?;
+    let owner_refs = vec![OwnerReference {
+        api_version: "lattice.dev/v1alpha1".to_string(),
+        kind: "LatticeMeshMember".to_string(),
+        name: name.to_string(),
+        uid,
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    }];
+
+    let policies = PolicyCompiler::new(&ctx.graph, &ctx.cluster_name, owner_refs.clone())
+        .compile(name, namespace);
 
     let ingress = member
         .spec
@@ -365,7 +396,14 @@ async fn do_reconcile(
             IngressCompiler::compile(name, namespace, ingress_spec, &member.spec.ports)
         })
         .transpose()
-        .map_err(|e| ReconcileError::Validation(format!("ingress compilation: {e}")))?;
+        .map_err(|e| ReconcileError::Validation(format!("ingress compilation: {e}")))?
+        .map(|mut compiled| {
+            // Stamp owner refs on ingress auth policy for crash-safe GC
+            if let Some(ref mut ap) = compiled.gateway_auth_policy {
+                ap.metadata.owner_references = owner_refs.clone();
+            }
+            compiled
+        });
 
     let waypoint = if !policies.service_entries.is_empty() {
         Some(WaypointCompiler::compile(namespace))
@@ -1074,7 +1112,7 @@ mod tests {
         graph.put_service(ns, "gateway", &make_service_spec(vec!["api"], vec![]));
 
         let policies =
-            crate::policy::PolicyCompiler::new(&graph, "test-cluster").compile("api", ns);
+            crate::policy::PolicyCompiler::new(&graph, "test-cluster", vec![]).compile("api", ns);
 
         let refs = collect_resource_refs(&policies);
 

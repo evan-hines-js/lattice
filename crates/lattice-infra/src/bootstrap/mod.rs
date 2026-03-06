@@ -31,10 +31,9 @@ use kube::ResourceExt;
 use tracing::debug;
 
 use lattice_common::crd::{
-    BackupsConfig, BootstrapProvider, CallerRef, CedarPolicy, CedarPolicySpec, EgressRule,
-    EgressTarget, InfraComponentStatus, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec,
-    MeshMemberPort, MeshMemberTarget, MonitoringConfig, NetworkTopologyConfig, PeerAuth,
-    ProviderType,
+    BackupsConfig, BootstrapProvider, CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget,
+    InfraComponentStatus, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort,
+    MeshMemberTarget, MonitoringConfig, NetworkTopologyConfig, PeerAuth, ProviderType, ServiceRef,
 };
 use lattice_common::{
     DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT,
@@ -634,10 +633,7 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
                     peer_auth: PeerAuth::Strict,
                 },
             ],
-            allowed_callers: vec![CallerRef {
-                name: "external-secrets".to_string(),
-                namespace: Some("external-secrets".to_string()),
-            }],
+            allowed_callers: vec![ServiceRef::new("external-secrets", "external-secrets")],
             dependencies: vec![],
             egress: vec![kube_apiserver_egress()],
             allow_peer_traffic: false,

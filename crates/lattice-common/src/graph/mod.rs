@@ -14,7 +14,7 @@ use dashmap::{DashMap, DashSet};
 use tracing::warn;
 
 use crate::crd::{
-    EgressRule, LatticeMeshMemberSpec, LatticeServiceSpec, MeshMemberTarget, PeerAuth,
+    EgressRule, LatticeMeshMemberSpec, LatticeServiceSpec, MeshMemberTarget, PeerAuth, ServiceRef,
     VolumeParams, WorkloadSpec,
 };
 
@@ -98,6 +98,28 @@ pub struct ServiceNode {
     pub ambient: bool,
 }
 
+/// Resolve a list of caller/service references into a (allows_all, callers) pair.
+///
+/// Filters out the wildcard entry ("*") from the callers set — it only drives
+/// the `allows_all` flag. Non-wildcard entries (infrastructure identities like
+/// gateway proxy SAs) are kept even when allows_all is true.
+fn resolve_callers<'a>(
+    refs: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    default_namespace: &str,
+) -> (bool, HashSet<QualifiedName>) {
+    let mut allows_all = false;
+    let mut callers = HashSet::new();
+    for (name, ns) in refs {
+        if name == "*" {
+            allows_all = true;
+            continue;
+        }
+        let resolved_ns = ns.unwrap_or(default_namespace).to_string();
+        callers.insert((resolved_ns, name.to_string()));
+    }
+    (allows_all, callers)
+}
+
 impl ServiceNode {
     /// Create a new local service node from a LatticeService spec
     pub fn from_service_spec(namespace: &str, name: &str, spec: &LatticeServiceSpec) -> Self {
@@ -107,22 +129,12 @@ impl ServiceNode {
     /// Create a node from a raw WorkloadSpec (shared by LatticeService and LatticeJob tasks)
     pub fn from_workload_spec(namespace: &str, name: &str, workload: &WorkloadSpec) -> Self {
         let caller_refs = workload.allowed_callers(namespace);
-        let allows_all = caller_refs.iter().any(|r| r.name == "*");
-
-        let mut allowed_callers: HashSet<QualifiedName> = if allows_all {
-            // Keep non-wildcard CallerRefs — these are infrastructure identities
-            // (e.g. gateway proxy SA) that need explicit L7 authorization.
+        let (allows_all, mut allowed_callers) = resolve_callers(
             caller_refs
-                .into_iter()
-                .filter(|r| r.name != "*")
-                .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
-                .collect()
-        } else {
-            caller_refs
-                .into_iter()
-                .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
-                .collect()
-        };
+                .iter()
+                .map(|r| (r.name.as_str(), r.namespace.as_deref())),
+            namespace,
+        );
 
         // Only include internal service dependencies as graph edges.
         // External-service egress is handled via LatticeMeshMember egress rules.
@@ -185,22 +197,12 @@ impl ServiceNode {
         name: &str,
         spec: &LatticeMeshMemberSpec,
     ) -> Self {
-        let allows_all = spec.allowed_callers.iter().any(|c| c.name == "*");
-
-        let mut allowed_callers: HashSet<QualifiedName> = if allows_all {
-            // Keep non-wildcard CallerRefs — these are infrastructure identities
-            // (e.g. gateway proxy SA) that need explicit L7 authorization.
+        let (allows_all, mut allowed_callers) = resolve_callers(
             spec.allowed_callers
                 .iter()
-                .filter(|c| c.name != "*")
-                .map(|c| (c.resolve_namespace(namespace).to_string(), c.name.clone()))
-                .collect()
-        } else {
-            spec.allowed_callers
-                .iter()
-                .map(|c| (c.resolve_namespace(namespace).to_string(), c.name.clone()))
-                .collect()
-        };
+                .map(|c| (c.name.as_str(), c.namespace.as_deref())),
+            namespace,
+        );
 
         let dependencies: Vec<QualifiedName> = spec
             .dependencies
@@ -346,6 +348,96 @@ impl ServiceNode {
     }
 }
 
+/// Typed node update that declares which controller is authoritative.
+/// Used by `put_node` to determine field preservation during merge.
+enum NodeUpdate {
+    /// Local service controller (LatticeService, LatticeModel, LatticeJob).
+    /// Authoritative on: allowed_callers, allows_all, dependencies, image, ports.
+    Service(ServiceNode),
+    /// MeshMember controller. Authoritative on: egress_rules, selector,
+    /// target_namespace, allow_peer_traffic, depends_all, ambient,
+    /// service_account, ports, type_.
+    MeshMember(ServiceNode),
+}
+
+impl NodeUpdate {
+    fn key(&self) -> QualifiedName {
+        let node = self.inner();
+        (node.namespace.clone(), node.name.clone())
+    }
+
+    fn inner(&self) -> &ServiceNode {
+        match self {
+            Self::Service(n) | Self::MeshMember(n) => n,
+        }
+    }
+
+    fn into_inner(self) -> ServiceNode {
+        match self {
+            Self::Service(n) | Self::MeshMember(n) => n,
+        }
+    }
+
+    /// Merge this update with an existing node (if any), respecting field ownership.
+    fn into_merged(self, existing: Option<&ServiceNode>) -> ServiceNode {
+        let existing = match existing {
+            Some(e) => e,
+            None => return self.into_inner(),
+        };
+
+        match self {
+            Self::Service(node) => Self::preserve_mesh_member_fields(node, existing),
+            Self::MeshMember(node) => Self::preserve_local_fields(node, existing),
+        }
+    }
+
+    /// When a Local node replaces a MeshMember, preserve MeshMember-owned fields.
+    fn preserve_mesh_member_fields(mut node: ServiceNode, existing: &ServiceNode) -> ServiceNode {
+        if existing.type_ != ServiceType::MeshMember {
+            return node;
+        }
+
+        if node.egress_rules.is_empty() {
+            node.egress_rules = existing.egress_rules.clone();
+        }
+        if node.ports.is_empty() {
+            node.ports = existing.ports.clone();
+        }
+        if node.selector.is_none() {
+            node.selector = existing.selector.clone();
+        }
+        if node.target_namespace.is_none() {
+            node.target_namespace = existing.target_namespace.clone();
+        }
+        if node.service_account.is_none() {
+            node.service_account = existing.service_account.clone();
+        }
+        node.allow_peer_traffic = existing.allow_peer_traffic;
+        node.depends_all = existing.depends_all;
+        node.ambient = existing.ambient;
+        node.type_ = existing.type_.clone();
+
+        node
+    }
+
+    /// When a MeshMember node replaces a Local, preserve Local-owned fields.
+    fn preserve_local_fields(mut node: ServiceNode, existing: &ServiceNode) -> ServiceNode {
+        if existing.type_ == ServiceType::MeshMember {
+            return node;
+        }
+
+        if node.allowed_callers.is_empty() && !node.allows_all {
+            node.allowed_callers = existing.allowed_callers.clone();
+            node.allows_all = existing.allows_all;
+        }
+        if node.dependencies.is_empty() {
+            node.dependencies = existing.dependencies.clone();
+        }
+
+        node
+    }
+}
+
 /// An active edge in the service graph (bilateral agreement exists)
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveEdge {
@@ -359,8 +451,17 @@ pub struct ActiveEdge {
     pub callee_name: String,
 }
 
-/// Build a stable, sorted string representation of active edges for hashing.
-fn edge_fingerprint(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
+/// Compute a stable hash of active edges plus policy epochs.
+///
+/// Sorts edges by namespace/name so the hash is stable regardless of graph
+/// iteration order, appends policy and cedar epoch suffixes, then feeds the
+/// result through `deterministic_hash`. The cedar epoch ensures that policy changes
+/// trigger re-reconciliation even when graph topology is unchanged.
+pub fn compute_edge_hash(
+    inbound: &[ActiveEdge],
+    outbound: &[ActiveEdge],
+    cedar_epoch: u64,
+) -> String {
     use std::fmt::Write;
 
     let mut sorted_in: Vec<_> = inbound
@@ -382,22 +483,6 @@ fn edge_fingerprint(inbound: &[ActiveEdge], outbound: &[ActiveEdge]) -> String {
     for (ns, name) in &sorted_out {
         let _ = write!(input, "out:{ns}/{name}->");
     }
-    input
-}
-
-/// Compute a stable hash of active edges plus policy epochs.
-///
-/// Sorts edges by namespace/name so the hash is stable regardless of graph
-/// iteration order, appends policy and cedar epoch suffixes, then feeds the
-/// result through `deterministic_hash`. The cedar epoch ensures that policy changes
-/// trigger re-reconciliation even when graph topology is unchanged.
-pub fn compute_edge_hash(
-    inbound: &[ActiveEdge],
-    outbound: &[ActiveEdge],
-    cedar_epoch: u64,
-) -> String {
-    use std::fmt::Write;
-    let mut input = edge_fingerprint(inbound, outbound);
     let _ = write!(input, "cedar:{cedar_epoch}");
     crate::deterministic_hash(&input)
 }
@@ -468,76 +553,51 @@ impl ServiceGraph {
     /// Insert or update a local service in the graph
     pub fn put_service(&self, namespace: &str, name: &str, spec: &LatticeServiceSpec) {
         let node = ServiceNode::from_service_spec(namespace, name, spec);
-        self.put_node(node);
+        self.put_node(NodeUpdate::Service(node));
         self.update_volume_owners(namespace, name, &spec.workload);
     }
 
     /// Insert or update a workload in the graph (used by model/job controllers).
     ///
-    /// The model controller doesn't know about callers, so if an existing
-    /// MeshMember node has `allowed_callers`/`allows_all`, carry them forward.
-    /// This differs from `put_service` where the LS spec is authoritative —
-    /// empty callers there means "remove all callers."
-    pub fn put_workload(&self, namespace: &str, name: &str, workload: &WorkloadSpec) {
+    /// Uses the same authoritative semantics as `put_service`: the caller list
+    /// from the WorkloadSpec plus `extra_callers` is the source of truth.
+    /// Model controllers pass infrastructure callers (kthena-router, etc.) via
+    /// `extra_callers`; jobs pass `&[]`.
+    pub fn put_workload(
+        &self,
+        namespace: &str,
+        name: &str,
+        workload: &WorkloadSpec,
+        extra_callers: &[ServiceRef],
+    ) {
         let mut node = ServiceNode::from_workload_spec(namespace, name, workload);
-        let key = (namespace.to_string(), name.to_string());
-        if let Some(existing) = self.vertices.get(&key) {
-            if existing.type_ == ServiceType::MeshMember {
-                if node.allowed_callers.is_empty() {
-                    node.allowed_callers = existing.allowed_callers.clone();
-                }
-                node.allows_all = node.allows_all || existing.allows_all;
-            }
+        for caller in extra_callers {
+            let ns = caller.resolve_namespace(namespace).to_string();
+            node.allowed_callers.insert((ns, caller.name.clone()));
         }
-        self.put_node(node);
+        self.put_node(NodeUpdate::Service(node));
         self.update_volume_owners(namespace, name, workload);
     }
 
     /// Insert or update a mesh member in the graph
     pub fn put_mesh_member(&self, namespace: &str, name: &str, spec: &LatticeMeshMemberSpec) {
         let node = ServiceNode::from_mesh_member_spec(namespace, name, spec);
-        self.put_node(node);
+        self.put_node(NodeUpdate::MeshMember(node));
     }
 
     /// Internal: Insert a node and update all edge indices.
     ///
-    /// When replacing an existing node, MeshMember-owned fields (egress_rules,
-    /// selector, target_namespace, allow_peer_traffic, depends_all, service_account,
-    /// ports) are preserved if the incoming node doesn't set them. This prevents
-    /// the service controller's `put_service` from clobbering data written by
-    /// `put_mesh_member`.
-    fn put_node(&self, mut node: ServiceNode) {
-        let key = (node.namespace.clone(), node.name.clone());
+    /// The `NodeUpdate` variant determines which fields are preserved from
+    /// any existing node. See `NodeUpdate::into_merged` for the merge rules.
+    fn put_node(&self, update: NodeUpdate) {
+        let key = update.key();
 
-        // Preserve MeshMember-owned fields when a non-MeshMember node replaces
-        // an existing MeshMember node. The service controller creates Local nodes
-        // with empty egress_rules/ports; the MeshMember controller sets these.
-        if node.type_ != ServiceType::MeshMember {
-            if let Some(existing) = self.vertices.get(&key) {
-                if existing.type_ == ServiceType::MeshMember {
-                    if node.egress_rules.is_empty() {
-                        node.egress_rules = existing.egress_rules.clone();
-                    }
-                    if node.ports.is_empty() {
-                        node.ports = existing.ports.clone();
-                    }
-                    if node.selector.is_none() {
-                        node.selector = existing.selector.clone();
-                    }
-                    if node.target_namespace.is_none() {
-                        node.target_namespace = existing.target_namespace.clone();
-                    }
-                    if node.service_account.is_none() {
-                        node.service_account = existing.service_account.clone();
-                    }
-                    node.allow_peer_traffic =
-                        node.allow_peer_traffic || existing.allow_peer_traffic;
-                    node.depends_all = node.depends_all || existing.depends_all;
-                    node.ambient = existing.ambient;
-                    node.type_ = existing.type_.clone();
-                }
-            }
-        }
+        // Merge with existing node, respecting field ownership per variant.
+        // The block scope ensures the DashMap read-lock is dropped before insert.
+        let node = {
+            let existing = self.vertices.get(&key);
+            update.into_merged(existing.as_deref())
+        };
 
         // Snapshot old outbound targets before removing edges
         let old_targets: HashSet<QualifiedName> = self
@@ -945,16 +1005,6 @@ impl ServiceGraph {
     /// triggers when any service in the graph changes.
     pub fn depends_all_services(&self) -> Vec<QualifiedName> {
         self.depends_all_nodes.iter().map(|e| e.clone()).collect()
-    }
-
-    /// Clear all data from the graph
-    pub fn clear(&self) {
-        self.vertices.clear();
-        self.edges_out.clear();
-        self.edges_in.clear();
-        self.ns_index.clear();
-        self.depends_all_nodes.clear();
-        self.volume_owners.clear();
     }
 }
 
@@ -1412,7 +1462,7 @@ mod tests {
         callers: Vec<&str>,
         deps: Vec<&str>,
     ) -> LatticeMeshMemberSpec {
-        use crate::crd::{CallerRef, MeshMemberPort, PeerAuth, ServiceRef};
+        use crate::crd::{MeshMemberPort, PeerAuth, ServiceRef};
 
         LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(labels),
@@ -1425,13 +1475,7 @@ mod tests {
                     peer_auth: PeerAuth::Strict,
                 })
                 .collect(),
-            allowed_callers: callers
-                .into_iter()
-                .map(|c| CallerRef {
-                    name: c.to_string(),
-                    namespace: None,
-                })
-                .collect(),
+            allowed_callers: callers.into_iter().map(|c| ServiceRef::local(c)).collect(),
             dependencies: deps
                 .into_iter()
                 .map(|d| ServiceRef {
@@ -2018,10 +2062,12 @@ mod tests {
         assert_eq!(node.type_, ServiceType::MeshMember);
     }
 
-    /// Regression: model controller's put_workload must not wipe
-    /// allowed_callers set by mesh member controller's put_mesh_member.
+    /// put_workload is authoritative on callers: extra_callers are set, empty
+    /// extra_callers means "no callers" (same as put_service).
     #[test]
-    fn test_put_workload_preserves_allowed_callers() {
+    fn test_put_workload_extra_callers_are_authoritative() {
+        use crate::crd::ServiceRef;
+
         let graph = ServiceGraph::new();
 
         // Mesh member controller sets allowed_callers
@@ -2030,14 +2076,16 @@ mod tests {
             make_mesh_member_spec(labels, vec![("inference", 8000)], vec!["router"], vec![]);
         graph.put_mesh_member("ns", "serving-prefill", &mm_spec);
 
-        // Model controller overwrites with put_workload (no callers)
+        // Model controller overwrites with put_workload passing explicit callers
         let svc_spec = make_service_spec(vec![], vec![]);
-        graph.put_workload("ns", "serving-prefill", &svc_spec.workload);
+        let callers = vec![ServiceRef::new("kthena-system", "kthena-router")];
+        graph.put_workload("ns", "serving-prefill", &svc_spec.workload, &callers);
 
         let node = graph.get_service("ns", "serving-prefill").unwrap();
         assert!(
-            !node.allowed_callers.is_empty(),
-            "put_workload must preserve allowed_callers from MeshMember"
+            node.allowed_callers
+                .contains(&("kthena-system".to_string(), "kthena-router".to_string())),
+            "extra_callers should be set on the node"
         );
     }
 
@@ -2065,9 +2113,9 @@ mod tests {
         );
     }
 
-    /// Regression: allows_all must survive put_workload overwrite.
+    /// put_workload with empty extra_callers clears callers (authoritative).
     #[test]
-    fn test_put_workload_preserves_allows_all() {
+    fn test_put_workload_empty_callers_clears() {
         let graph = ServiceGraph::new();
 
         // Mesh member with wildcard callers
@@ -2075,14 +2123,14 @@ mod tests {
         let mm_spec = make_mesh_member_spec(labels, vec![("http", 80)], vec!["*"], vec![]);
         graph.put_mesh_member("ns", "api", &mm_spec);
 
-        // Model controller overwrites with put_workload
+        // Model controller overwrites with put_workload (no extra callers)
         let svc_spec = make_service_spec(vec![], vec![]);
-        graph.put_workload("ns", "api", &svc_spec.workload);
+        graph.put_workload("ns", "api", &svc_spec.workload, &[]);
 
         let node = graph.get_service("ns", "api").unwrap();
         assert!(
-            node.allows_all,
-            "allows_all must survive put_workload overwrite"
+            !node.allows_all,
+            "put_workload with empty callers must not preserve allows_all"
         );
     }
 }

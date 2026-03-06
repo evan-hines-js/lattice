@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    derived_name, CallerRef, EgressRule, EgressTarget, LatticeMeshMember, LatticeModel,
-    MeshMemberPort, ModelSourceSpec, PeerAuth, PortSpec, ProviderType,
+    derived_name, EgressRule, EgressTarget, LatticeMeshMember, LatticeModel, MeshMemberPort,
+    ModelRoutingSpec, ModelSourceSpec, PeerAuth, PortSpec, ProviderType, ServiceRef,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
@@ -38,11 +38,21 @@ fn worker_workload_name(model_name: &str, role_name: &str) -> String {
     format!("{}-{}-worker", model_name, role_name)
 }
 
-fn kthena_caller(service_account: &str) -> CallerRef {
-    CallerRef {
-        name: service_account.to_string(),
-        namespace: Some(KTHENA_NAMESPACE.to_string()),
+fn kthena_caller(service_account: &str) -> ServiceRef {
+    ServiceRef::new(KTHENA_NAMESPACE, service_account)
+}
+
+/// Compute infrastructure callers for model roles (kthena-router, kthena-autoscaler).
+/// Same callers that `augment_kthena_callers` adds to compiled MeshMembers.
+pub fn model_callers(routing: Option<&ModelRoutingSpec>, has_autoscaling: bool) -> Vec<ServiceRef> {
+    let mut callers = Vec::new();
+    if routing.is_some() {
+        callers.push(kthena_caller(KTHENA_ROUTER_SA));
     }
+    if has_autoscaling {
+        callers.push(kthena_caller(KTHENA_AUTOSCALER_SA));
+    }
+    callers
 }
 
 /// Check whether routing uses P/D disaggregation (kv_connector with prefill/decode roles).
@@ -826,7 +836,7 @@ fn augment_kthena_callers(
 fn augment_mesh_member(
     mesh_members: &mut [LatticeMeshMember],
     name: &str,
-    caller: &CallerRef,
+    caller: &ServiceRef,
     port: Option<(u16, &str)>,
     allow_peer_traffic: bool,
 ) {
@@ -931,6 +941,7 @@ mod tests {
                 namespace,
                 &format!("{}-{}", name, role_name),
                 &role_spec.entry_workload,
+                &[],
             );
         }
     }

@@ -155,6 +155,25 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
         .map(|s| s.phase)
         .unwrap_or(ClusterPhase::Pending);
 
+    // Phase regression guard: once pivot_complete is true, a non-self cluster
+    // (i.e. a child viewed from the parent) must never regress to a pre-pivot
+    // phase. This prevents Flux or other external agents from accidentally
+    // re-triggering provisioning on the parent side.
+    let pivot_complete = cluster
+        .status
+        .as_ref()
+        .map(|s| s.pivot_complete)
+        .unwrap_or(false);
+    if pivot_complete && !is_self && current_phase.is_pre_pivot() {
+        warn!(
+            cluster = %name,
+            current_phase = ?current_phase,
+            "phase regressed on pivoted cluster, forcing back to Pivoted"
+        );
+        update_status(&cluster, &ctx, ClusterPhase::Pivoted, None, false).await?;
+        return Ok(Action::requeue(Duration::from_secs(60)));
+    }
+
     debug!(?current_phase, is_self, "current cluster phase");
 
     // State machine: dispatch to phase handlers
@@ -758,6 +777,29 @@ mod tests {
             assert_eq!(capture.last_phase(), Some(ClusterPhase::Failed));
             // Wait for user to fix the spec
             assert_eq!(action, Action::await_change());
+        }
+
+        // ===== Phase Regression Guard Tests =====
+
+        /// Story: A non-self cluster with pivot_complete=true must never regress
+        /// to a pre-pivot phase. This prevents Flux or other external agents from
+        /// accidentally re-triggering provisioning on the parent side.
+        #[tokio::test]
+        async fn pivoted_cluster_rejects_phase_regression() {
+            let mut cluster = cluster_with_phase("pivoted-child", ClusterPhase::Pending);
+            // Simulate Flux resetting phase to Pending while pivot_complete is true
+            cluster.status.as_mut().unwrap().pivot_complete = true;
+            let cluster = Arc::new(cluster);
+            let (ctx, capture) = mock_context_with_status_capture();
+
+            let action = reconcile(cluster, ctx)
+                .await
+                .expect("reconcile should succeed");
+
+            // Should force back to Pivoted, not start provisioning
+            assert!(capture.was_updated(), "status should be updated");
+            assert_eq!(capture.last_phase(), Some(ClusterPhase::Pivoted));
+            assert_eq!(action, Action::requeue(Duration::from_secs(60)));
         }
 
         // ===== Error Propagation Tests =====

@@ -73,11 +73,11 @@ mod tests {
     }
 
     #[test]
-    fn denies_empty_ports_and_deps() {
+    fn allows_empty_ports_and_deps() {
         let json = serde_json::json!({
             "apiVersion": "lattice.dev/v1alpha1",
             "kind": "LatticeMeshMember",
-            "metadata": { "name": "bad-member", "namespace": "default" },
+            "metadata": { "name": "empty-member", "namespace": "default" },
             "spec": {
                 "target": {
                     "selector": { "app": "test" }
@@ -92,8 +92,8 @@ mod tests {
         let request = make_admission_request("lattice.dev", "v1alpha1", "latticemeshmembers", json);
         let response = validator.validate(&request);
         assert!(
-            !response.allowed,
-            "mesh member with no ports, deps, or egress should be denied"
+            response.allowed,
+            "empty mesh member should be allowed so all workloads participate in the graph"
         );
     }
 

@@ -10,7 +10,6 @@ use tracing::{debug, warn};
 
 use crate::{Error, Result};
 
-pub mod get;
 pub mod install;
 pub mod kind_utils;
 pub mod login;
@@ -19,7 +18,6 @@ pub mod port_forward;
 pub mod proxy;
 pub mod token;
 pub mod uninstall;
-pub mod use_cluster;
 
 /// Extension trait to convert errors with Display to CLI Error::CommandFailed.
 ///

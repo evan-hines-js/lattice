@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use lattice_common::crd::{
-    CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
-    PeerAuth, ServiceRef,
+    LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
+    ServiceRef,
 };
 
 use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
@@ -110,10 +110,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                     name: "grpc".to_string(),
                     peer_auth: PeerAuth::Strict,
                 }],
-                allowed_callers: vec![CallerRef {
-                    name: "keda-metrics-apiserver".to_string(),
-                    namespace: Some(KEDA_NAMESPACE.to_string()),
-                }],
+                allowed_callers: vec![ServiceRef::new(KEDA_NAMESPACE, "keda-metrics-apiserver")],
                 dependencies: vec![ServiceRef::new(
                     MONITORING_NAMESPACE,
                     VM_READ_TARGET_LMM_NAME,

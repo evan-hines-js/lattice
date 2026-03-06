@@ -14,6 +14,7 @@ use lattice_cell::{
     start_exec_session, tunnel_request_streaming, ExecRequestParams, K8sRequestParams,
     SharedAgentRegistry, SharedSubtreeRegistry, TunnelError, RECONNECT_TIMEOUT,
 };
+use lattice_common::routing::split_first_hop;
 use lattice_proto::{ExecRequest, KubernetesRequest, KubernetesResponse};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -48,19 +49,15 @@ impl SubtreeForwarder {
 
     /// Resolve the route to a target cluster, waiting for agent connection if needed.
     ///
+    /// `first_hop` is the direct child cluster name (first segment of the target path).
     /// Checks the subtree registry for routing info, then waits up to 30 seconds
     /// for the agent to be connected (handles clusters still provisioning).
-    async fn resolve_route(&self, target_cluster: &str) -> Result<ResolvedRoute, (u32, String)> {
+    async fn resolve_route(&self, first_hop: &str) -> Result<ResolvedRoute, (u32, String)> {
         let route_info = self
             .subtree_registry
-            .get_route(target_cluster)
+            .get_route(first_hop)
             .await
-            .ok_or_else(|| {
-                (
-                    404,
-                    format!("cluster '{}' not found in subtree", target_cluster),
-                )
-            })?;
+            .ok_or_else(|| (404, format!("cluster '{}' not found in subtree", first_hop)))?;
 
         let agent_id = route_info
             .agent_id
@@ -90,7 +87,7 @@ impl SubtreeForwarder {
     }
 
     /// Build K8sRequestParams from a KubernetesRequest (takes ownership)
-    fn build_params(target_cluster: &str, request: KubernetesRequest) -> K8sRequestParams {
+    fn build_params(target_path: &str, request: KubernetesRequest) -> K8sRequestParams {
         K8sRequestParams {
             method: request.verb,
             path: request.path,
@@ -98,7 +95,7 @@ impl SubtreeForwarder {
             body: request.body,
             content_type: request.content_type,
             accept: request.accept,
-            target_cluster: target_cluster.to_string(),
+            target_path: target_path.to_string(),
             source_user: request.source_user,
             source_groups: request.source_groups,
         }
@@ -107,33 +104,31 @@ impl SubtreeForwarder {
 
 #[async_trait::async_trait]
 impl K8sRequestForwarder for SubtreeForwarder {
-    async fn forward(
-        &self,
-        target_cluster: &str,
-        request: KubernetesRequest,
-    ) -> KubernetesResponse {
+    async fn forward(&self, target_path: &str, request: KubernetesRequest) -> KubernetesResponse {
         let request_id = request.request_id.clone();
+        let (first_hop, _) = split_first_hop(target_path);
 
-        let route = match self.resolve_route(target_cluster).await {
+        let route = match self.resolve_route(first_hop).await {
             Ok(r) => r,
             Err((status, msg)) => {
-                warn!(target = %target_cluster, request_id = %request_id, msg, "Route resolution failed");
+                warn!(target_path = %target_path, request_id = %request_id, msg, "Route resolution failed");
                 return build_k8s_status_response(&request_id, status, &msg);
             }
         };
 
         debug!(
-            target = %target_cluster,
+            target_path = %target_path,
+            first_hop = %first_hop,
             agent_id = %route.agent_id,
             request_id = %request_id,
             "Forwarding request to child cluster"
         );
 
-        let params = Self::build_params(target_cluster, request);
+        let params = Self::build_params(target_path, request);
 
         let mut rx = match tunnel_request_streaming(
             &self.agent_registry,
-            target_cluster,
+            first_hop,
             route.command_tx,
             params,
         )
@@ -154,37 +149,34 @@ impl K8sRequestForwarder for SubtreeForwarder {
 
     async fn forward_watch(
         &self,
-        target_cluster: &str,
+        target_path: &str,
         request: KubernetesRequest,
     ) -> Result<mpsc::Receiver<KubernetesResponse>, String> {
         let request_id = &request.request_id;
+        let (first_hop, _) = split_first_hop(target_path);
 
-        let route = match self.resolve_route(target_cluster).await {
+        let route = match self.resolve_route(first_hop).await {
             Ok(r) => r,
             Err((_, msg)) => {
-                warn!(target = %target_cluster, request_id = %request_id, msg, "Route resolution failed");
+                warn!(target_path = %target_path, request_id = %request_id, msg, "Route resolution failed");
                 return Err(msg);
             }
         };
 
         debug!(
-            target = %target_cluster,
+            target_path = %target_path,
+            first_hop = %first_hop,
             agent_id = %route.agent_id,
             request_id = %request_id,
             "Forwarding watch request to child cluster"
         );
 
-        let params = Self::build_params(target_cluster, request);
+        let params = Self::build_params(target_path, request);
 
-        tunnel_request_streaming(
-            &self.agent_registry,
-            target_cluster,
-            route.command_tx,
-            params,
-        )
-        .await
-        .map(|(_request_id, rx)| rx)
-        .map_err(|e| format!("tunnel error: {:?}", e))
+        tunnel_request_streaming(&self.agent_registry, first_hop, route.command_tx, params)
+            .await
+            .map(|(_request_id, rx)| rx)
+            .map_err(|e| format!("tunnel error: {:?}", e))
     }
 }
 
@@ -192,18 +184,20 @@ impl K8sRequestForwarder for SubtreeForwarder {
 impl ExecRequestForwarder for SubtreeForwarder {
     async fn forward_exec(
         &self,
-        target_cluster: &str,
+        target_path: &str,
         request: ExecRequest,
     ) -> Result<ForwardedExecSession, String> {
         let request_id = request.request_id.clone();
+        let (first_hop, _) = split_first_hop(target_path);
 
-        let route = match self.resolve_route(target_cluster).await {
+        let route = match self.resolve_route(first_hop).await {
             Ok(r) => r,
             Err((_, msg)) => return Err(msg),
         };
 
         debug!(
-            target = %target_cluster,
+            target_path = %target_path,
+            first_hop = %first_hop,
             agent_id = %route.agent_id,
             request_id = %request_id,
             "Forwarding exec request to child cluster"
@@ -212,14 +206,14 @@ impl ExecRequestForwarder for SubtreeForwarder {
         let exec_params = ExecRequestParams {
             path: request.path,
             query: request.query,
-            target_cluster: target_cluster.to_string(),
+            target_path: target_path.to_string(),
             source_user: request.source_user,
             source_groups: request.source_groups,
         };
 
         let (session, data_rx) = start_exec_session(
             &self.agent_registry,
-            target_cluster,
+            first_hop,
             route.command_tx,
             exec_params,
         )

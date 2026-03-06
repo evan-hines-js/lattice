@@ -20,8 +20,8 @@ pub struct ExecRequestParams {
     pub path: String,
     /// Query string (command=sh&stdin=true&stdout=true&tty=true)
     pub query: String,
-    /// Target cluster - the final destination cluster
-    pub target_cluster: String,
+    /// Routing path for hierarchical proxy (e.g. "child-b/grandchild-c")
+    pub target_path: String,
     /// Source user identity (preserved through routing chain for Cedar)
     pub source_user: String,
     /// Source user groups (preserved through routing chain for Cedar)
@@ -160,7 +160,7 @@ pub async fn start_exec_session(
         request_id: request_id.clone(),
         path: params.path,
         query: params.query,
-        target_cluster: params.target_cluster,
+        target_path: params.target_path,
         source_user: params.source_user,
         source_groups: params.source_groups,
     };
@@ -219,7 +219,7 @@ mod tests {
         let params = ExecRequestParams {
             path: "/api/v1/namespaces/default/pods/nginx/exec".to_string(),
             query: "command=sh&stdin=true&stdout=true&tty=true".to_string(),
-            target_cluster: "child-cluster".to_string(),
+            target_path: "child-cluster".to_string(),
             source_user: "admin".to_string(),
             source_groups: vec!["system:masters".to_string()],
         };
@@ -252,7 +252,7 @@ mod tests {
         let params = ExecRequestParams {
             path: "/api/v1/namespaces/default/pods/nginx/exec".to_string(),
             query: "command=sh&stdin=true&stdout=true".to_string(),
-            target_cluster: "test".to_string(),
+            target_path: "test".to_string(),
             source_user: "user".to_string(),
             source_groups: vec![],
         };
@@ -287,7 +287,7 @@ mod tests {
         let params = ExecRequestParams {
             path: "/api/v1/namespaces/default/pods/nginx/exec".to_string(),
             query: "command=sh&tty=true".to_string(),
-            target_cluster: "test".to_string(),
+            target_path: "test".to_string(),
             source_user: "user".to_string(),
             source_groups: vec![],
         };
@@ -321,7 +321,7 @@ mod tests {
         let params = ExecRequestParams {
             path: "/api/v1/namespaces/default/pods/nginx/exec".to_string(),
             query: "command=cat".to_string(),
-            target_cluster: "test".to_string(),
+            target_path: "test".to_string(),
             source_user: "user".to_string(),
             source_groups: vec![],
         };

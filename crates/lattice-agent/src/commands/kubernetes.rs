@@ -1,5 +1,6 @@
 //! Kubernetes API request command handler.
 
+use lattice_common::routing::split_first_hop;
 use lattice_proto::{agent_message::Payload, AgentMessage, KubernetesRequest, KubernetesResponse};
 use tracing::{debug, error};
 
@@ -12,15 +13,21 @@ use crate::{
 use super::CommandContext;
 
 /// Handle a Kubernetes API request from the cell.
+///
+/// Uses hop-by-hop routing: strips the first segment of `target_path`, and if
+/// the remaining path is empty, executes locally; otherwise forwards to the
+/// next child agent.
 pub async fn handle(req: &KubernetesRequest, ctx: &CommandContext) {
-    let target = &req.target_cluster;
-    let is_local = target == &ctx.cluster_name;
+    let target_path = &req.target_path;
+    let (first_hop, remaining) = split_first_hop(target_path);
+    let is_local = first_hop == ctx.cluster_name && remaining.is_empty();
 
     debug!(
         request_id = %req.request_id,
         verb = %req.verb,
         path = %req.path,
-        target_cluster = %target,
+        target_path = %target_path,
+        first_hop = %first_hop,
         is_local = is_local,
         "Received K8s API proxy request"
     );
@@ -30,6 +37,17 @@ pub async fn handle(req: &KubernetesRequest, ctx: &CommandContext) {
         handle_cancel(req, ctx).await;
         return;
     }
+
+    // Compute the forward path before cloning req (avoids lifetime issues in spawn)
+    let forward_path = if !is_local {
+        if first_hop == ctx.cluster_name && !remaining.is_empty() {
+            remaining.to_string()
+        } else {
+            target_path.clone()
+        }
+    } else {
+        String::new()
+    };
 
     let request_id = req.request_id.clone();
     let cluster_name = ctx.cluster_name.clone();
@@ -43,7 +61,8 @@ pub async fn handle(req: &KubernetesRequest, ctx: &CommandContext) {
         let response = if is_local {
             execute_local_request(&req, &cluster_name, &message_tx, registry, provider).await
         } else {
-            execute_forwarded_request(&req, &cluster_name, &message_tx, forwarder).await
+            execute_forwarded_request(&req, &forward_path, &cluster_name, &message_tx, forwarder)
+                .await
         };
 
         // Non-watch requests return a response to send
@@ -126,35 +145,41 @@ async fn execute_local_request(
 
 /// Execute a forwarded request to a child cluster.
 ///
+/// `forward_path` is the remaining routing path after stripping our hop.
+///
 /// Returns None for watch requests (they handle their own responses),
 /// or Some(response) for regular requests.
 async fn execute_forwarded_request(
     req: &KubernetesRequest,
+    forward_path: &str,
     cluster_name: &str,
     message_tx: &tokio::sync::mpsc::Sender<AgentMessage>,
     forwarder: Option<crate::SharedK8sForwarder>,
 ) -> Option<KubernetesResponse> {
-    let target = &req.target_cluster;
     let request_id = &req.request_id;
 
     let Some(f) = forwarder else {
         debug!(
             request_id = %request_id,
-            target = %target,
+            forward_path = %forward_path,
             "No forwarder configured, returning 404"
         );
-        return Some(build_cluster_not_found_response(target, request_id));
+        return Some(build_cluster_not_found_response(forward_path, request_id));
     };
 
     // Use streaming forwarder for watch requests
     if is_watch_request(req) {
         debug!(
             request_id = %request_id,
-            target = %target,
+            forward_path = %forward_path,
             "Forwarding watch request to child cluster"
         );
 
-        match f.forward_watch(target, req.clone()).await {
+        // Build a request with the updated target_path for the next hop
+        let mut forwarded_req = req.clone();
+        forwarded_req.target_path = forward_path.to_string();
+
+        match f.forward_watch(forward_path, forwarded_req).await {
             Ok(mut rx) => {
                 while let Some(mut response) = rx.recv().await {
                     // Rewrite request_id to match the original command_id
@@ -187,9 +212,13 @@ async fn execute_forwarded_request(
 
     debug!(
         request_id = %request_id,
-        target = %target,
+        forward_path = %forward_path,
         "Forwarding request to child cluster"
     );
 
-    Some(f.forward(target, req.clone()).await)
+    // Build a request with the updated target_path for the next hop
+    let mut forwarded_req = req.clone();
+    forwarded_req.target_path = forward_path.to_string();
+
+    Some(f.forward(forward_path, forwarded_req).await)
 }

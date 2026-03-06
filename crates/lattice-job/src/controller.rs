@@ -149,15 +149,23 @@ async fn reconcile_pending(
         // failed — the VCJob runs to completion while the LatticeJob status still
         // lacks SUBMITTED_MESSAGE. Re-applying to a Completed VCJob triggers
         // Volcano's immutable-field webhook rejection, creating an infinite retry loop.
-        let vcjob_exists = check_vcjob_status(&ctx.client, &job.name_any(), namespace, &volcano_api)
-            .await
-            .is_some();
+        let vcjob_exists =
+            check_vcjob_status(&ctx.client, &job.name_any(), namespace, &volcano_api)
+                .await
+                .is_some();
         if vcjob_exists {
             info!(job = %job.name_any(), "VCJob already exists, skipping re-submission");
             let mut status = current_status(job);
             status.message = Some(SUBMITTED_MESSAGE.to_string());
             status.observed_generation = Some(generation);
-            patch_status(&ctx.client, &job.name_any(), namespace, &status, job.status.as_ref()).await?;
+            patch_status(
+                &ctx.client,
+                &job.name_any(),
+                namespace,
+                &status,
+                job.status.as_ref(),
+            )
+            .await?;
         } else {
             submit_job(job, ctx, namespace, generation, is_cron, &volcano_api).await?;
         }

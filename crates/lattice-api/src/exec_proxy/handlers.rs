@@ -224,7 +224,7 @@ async fn handle_remote_exec(
     let exec_request = ExecTunnelRequest {
         path,
         query,
-        target_cluster: cluster_name.clone(),
+        target_path: cluster_name.clone(),
         source_user: identity.username.clone(),
         source_groups: identity.groups.clone(),
     };

@@ -40,8 +40,8 @@ pub struct K8sTunnelRequest {
     pub content_type: String,
     /// Accept header
     pub accept: String,
-    /// Target cluster name
-    pub target_cluster: String,
+    /// Routing path for hierarchical proxy (e.g. "child-b/grandchild-c")
+    pub target_path: String,
     /// Source user identity
     pub source_user: String,
     /// Source user groups
@@ -54,8 +54,8 @@ pub struct ExecTunnelRequest {
     pub path: String,
     /// Query string (command=sh&stdin=true&stdout=true&tty=true)
     pub query: String,
-    /// Target cluster name
-    pub target_cluster: String,
+    /// Routing path for hierarchical proxy (e.g. "child-b/grandchild-c")
+    pub target_path: String,
     /// Source user identity
     pub source_user: String,
     /// Source user groups

@@ -360,11 +360,10 @@ message KubernetesRequest {
   // Agent will stop the watch and send stream_end response
   bool cancel = 8;
 
-  // Target cluster for hierarchical routing
-  // The receiving agent compares this to its own cluster name:
-  // - If equal: execute request locally using operator's SA
-  // - If different: forward to target cluster via its subtree
-  string target_cluster = 9;
+  // Routing path for hierarchical proxy (e.g. "child-b/grandchild-c")
+  // Each hop strips the first segment and either executes locally (if empty
+  // remaining) or forwards the tail to the next child agent.
+  string target_path = 9;
 
   // Source identity - preserved through the entire routing chain for Cedar checks
   // Each hop can authorize based on who originally made the request
@@ -578,8 +577,8 @@ message ExecRequest {
   string path = 2;
   // Query string: command=sh&stdin=true&stdout=true&tty=true
   string query = 3;
-  // Target cluster for hierarchical routing
-  string target_cluster = 4;
+  // Routing path for hierarchical proxy (e.g. "child-b/grandchild-c")
+  string target_path = 4;
   // Source identity (preserved through routing chain for Cedar)
   string source_user = 5;
   repeated string source_groups = 6;

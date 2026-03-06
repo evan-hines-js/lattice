@@ -19,6 +19,7 @@ pub mod policy;
 pub mod protocol;
 pub mod resources;
 pub mod retry;
+pub mod routing;
 pub mod status_check;
 pub mod system_namespaces;
 pub mod telemetry;
@@ -310,6 +311,9 @@ pub const KTHENA_CONTROLLER_MANAGER_SA: &str = "kthena-controller-manager";
 pub const CELL_SERVICE_NAME: &str = "lattice-cell";
 /// Name of the Lattice operator deployment and service account
 pub const OPERATOR_NAME: &str = "lattice-operator";
+
+/// Binary name of the Lattice CLI (used in exec credential plugins, kubeconfig generation, etc.)
+pub const CLI_BIN_NAME: &str = "lattice";
 
 /// Label key for provider identification on secrets
 pub const PROVIDER_LABEL: &str = "lattice.dev/provider";

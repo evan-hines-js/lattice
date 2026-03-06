@@ -15,7 +15,7 @@ use crate::auth::authenticate_and_authorize;
 use crate::error::Error;
 use crate::exec_proxy::handlers::{handle_exec_websocket, has_websocket_upgrade_headers};
 use crate::k8s_forwarder::route_to_cluster;
-use crate::routing::strip_cluster_prefix;
+use crate::routing::{parse_cluster_path, strip_cluster_prefix};
 use crate::server::AppState;
 use lattice_cedar::ClusterAttributes;
 use lattice_common::crd::validate_dns_label;
@@ -105,9 +105,15 @@ pub(crate) async fn proxy_handler(
         ));
     }
 
+    // Parse nested /clusters/{name}/clusters/{name}/... path to extract the
+    // full routing target path and the remaining K8s API path.
+    let (target_path, _k8s_path) = parse_cluster_path(path)
+        .ok_or_else(|| Error::ClusterNotFound("missing cluster path".to_string()))?;
+
+    // Authorize against the first hop cluster (the direct child)
     let identity = authorize_request(&state, cluster_name, request.headers()).await?;
 
-    route_to_cluster(&state, cluster_name, &identity, request).await
+    route_to_cluster(&state, &target_path, &identity, request).await
 }
 
 /// Handle exec/attach/portforward requests with WebSocket upgrade

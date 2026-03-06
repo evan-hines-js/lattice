@@ -621,6 +621,11 @@ pub struct LatticeModelStatus {
     /// Written to status only — never mutates the spec.
     #[serde(default)]
     pub auto_topology: Option<WorkloadNetworkTopology>,
+
+    /// Role graph keys (e.g. "llm-serving-prefill") successfully applied.
+    /// Used for orphan cleanup when roles are removed from the spec.
+    #[serde(default)]
+    pub applied_roles: Option<Vec<String>>,
 }
 
 /// A condition on a LatticeModel (mirrored from ModelServing status)

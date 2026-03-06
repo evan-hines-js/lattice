@@ -31,8 +31,9 @@ use tracing::debug;
 use crate::auth::UserIdentity;
 use crate::backend::{K8sTunnelRequest, ProxyError};
 use crate::error::Error;
-use crate::routing::strip_cluster_prefix;
+use crate::routing::{parse_cluster_path, strip_cluster_prefix};
 use crate::server::AppState;
+use lattice_common::routing::split_first_hop;
 use lattice_proto::is_watch_query;
 
 /// Default timeout for local K8s API requests (30 seconds)
@@ -291,25 +292,29 @@ impl ForwarderDeps {
 // Public API
 // ============================================================================
 
-/// Route a request to the target cluster
+/// Route a request to the target cluster via path-based routing.
+///
+/// `target_path` is a `/`-separated chain of cluster names (e.g. "child-b/grandchild-c").
+/// The first segment determines the direct child to route through; the full path is
+/// forwarded so each hop can peel its prefix.
 ///
 /// Authorization is handled by Cedar before this function is called.
 /// The proxy's service account is used for K8s API calls with user impersonation
 /// to preserve identity for K8s RBAC and audit logs.
 pub async fn route_to_cluster(
     state: &AppState,
-    cluster_name: &str,
+    target_path: &str,
     identity: &UserIdentity,
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     let deps = ForwarderDeps::new().await?;
-    route_to_cluster_with_deps(state, cluster_name, identity, request, &deps).await
+    route_to_cluster_with_deps(state, target_path, identity, request, &deps).await
 }
 
 /// Route a request to the target cluster with injected dependencies (for testing)
 pub async fn route_to_cluster_with_deps(
     state: &AppState,
-    cluster_name: &str,
+    target_path: &str,
     identity: &UserIdentity,
     request: Request<Body>,
     deps: &ForwarderDeps,
@@ -317,21 +322,32 @@ pub async fn route_to_cluster_with_deps(
     // SECURITY: Strip any user-supplied impersonation headers
     let request = strip_impersonation_headers(request);
 
-    // Check if this is the local cluster
-    if cluster_name == state.cluster_name {
-        debug!(cluster = %cluster_name, "Routing to local K8s API");
-        return forward_to_k8s_api(&state.k8s_api_url, cluster_name, identity, request, deps).await;
+    let (first_hop, remaining) = split_first_hop(target_path);
+
+    // If the first hop is us and there's no remaining path, execute locally
+    if first_hop == state.cluster_name && remaining.is_empty() {
+        debug!(cluster = %first_hop, "Routing to local K8s API");
+        return forward_to_k8s_api(&state.k8s_api_url, first_hop, identity, request, deps).await;
     }
 
-    // Check if the cluster is in our backend
+    // Check if the first hop is us (but there's more hops) or a direct child
+    let lookup_name = if first_hop == state.cluster_name {
+        // We are an intermediate node; the next hop is the real target
+        let (next_hop, _) = split_first_hop(remaining);
+        next_hop
+    } else {
+        first_hop
+    };
+
+    // Check if the first hop cluster is in our backend
     let route_info = state
         .backend
-        .get_route(cluster_name)
+        .get_route(lookup_name)
         .await
-        .ok_or_else(|| Error::ClusterNotFound(cluster_name.to_string()))?;
+        .ok_or_else(|| Error::ClusterNotFound(lookup_name.to_string()))?;
 
-    if route_info.is_self {
-        return forward_to_k8s_api(&state.k8s_api_url, cluster_name, identity, request, deps).await;
+    if route_info.is_self && remaining.is_empty() {
+        return forward_to_k8s_api(&state.k8s_api_url, first_hop, identity, request, deps).await;
     }
 
     // Get the agent to route through
@@ -340,12 +356,13 @@ pub async fn route_to_cluster_with_deps(
         .ok_or_else(|| Error::Internal("Route info missing agent_id".into()))?;
 
     debug!(
-        cluster = %cluster_name,
+        target_path = %target_path,
+        first_hop = %first_hop,
         agent_id = %agent_id,
         "Routing to child cluster via gRPC tunnel"
     );
 
-    route_to_child_cluster(state, cluster_name, &agent_id, identity, request).await
+    route_to_child_cluster(state, target_path, &agent_id, identity, request).await
 }
 
 // ============================================================================
@@ -417,16 +434,24 @@ async fn forward_to_k8s_api(
 // ============================================================================
 
 /// Route request to child cluster via backend tunnel
+///
+/// `target_path` is the full routing path (e.g. "child-b/grandchild-c").
+/// The K8s API path is extracted by stripping all `/clusters/{name}` prefixes from the URL.
 async fn route_to_child_cluster(
     state: &AppState,
-    cluster_name: &str,
+    target_path: &str,
     agent_id: &str,
     identity: &UserIdentity,
     request: Request<Body>,
 ) -> Result<Response<Body>, Error> {
     let method = request.method().to_string();
     let uri = request.uri().clone();
-    let path = strip_cluster_prefix(uri.path(), cluster_name).to_string();
+
+    // Extract the K8s API path by parsing nested cluster prefixes
+    let k8s_path = parse_cluster_path(uri.path())
+        .map(|(_, k8s)| k8s)
+        .unwrap_or_else(|| uri.path().to_string());
+
     let query = uri.query().unwrap_or("").to_string();
     let content_type = request
         .headers()
@@ -451,12 +476,12 @@ async fn route_to_child_cluster(
             agent_id,
             K8sTunnelRequest {
                 method,
-                path,
+                path: k8s_path,
                 query,
                 body: body.to_vec(),
                 content_type,
                 accept,
-                target_cluster: cluster_name.to_string(),
+                target_path: target_path.to_string(),
                 source_user: identity.username.clone(),
                 source_groups: identity.groups.clone(),
             },

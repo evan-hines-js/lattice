@@ -574,8 +574,9 @@ mod tests {
         assert!(output.workloads.deployment.is_some());
         assert!(output.workloads.service_account.is_some());
 
-        // No MeshMember when service is not in the graph
-        assert!(output.mesh_member.is_none());
+        // Every workload gets a MeshMember (at minimum for DNS CNP),
+        // even without a graph entry
+        assert!(output.mesh_member.is_some());
     }
 
     // =========================================================================

@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use lattice_common::crd::{
-    CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
+    LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
+    ServiceRef,
 };
 use lattice_common::{
     KTHENA_AUTOSCALER_SA, KTHENA_CONTROLLER_MANAGER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA,
@@ -68,10 +69,7 @@ pub fn generate_kthena_mesh_members() -> Vec<LatticeMeshMember> {
                         peer_auth: PeerAuth::Webhook,
                     },
                 ],
-                allowed_callers: vec![CallerRef {
-                    name: "*".to_string(),
-                    namespace: None,
-                }],
+                allowed_callers: vec![ServiceRef::local("*")],
                 dependencies: vec![],
                 egress: vec![kube_apiserver_egress()],
                 allow_peer_traffic: false,

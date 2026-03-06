@@ -239,7 +239,7 @@ fn build_kubeconfig(
             UserConfig {
                 exec: Some(ExecConfig {
                     api_version: "client.authentication.k8s.io/v1beta1".into(),
-                    command: "lattice".into(),
+                    command: lattice_common::CLI_BIN_NAME.into(),
                     args: vec![
                         "token".into(),
                         format!("--kubeconfig={}", kubeconfig_path),
@@ -374,7 +374,7 @@ mod tests {
 
         // Verify exec config uses lattice token command
         let exec = config.users[0].user.exec.as_ref().unwrap();
-        assert_eq!(exec.command, "lattice");
+        assert_eq!(exec.command, lattice_common::CLI_BIN_NAME);
         assert!(exec.args.contains(&"token".to_string()));
         assert!(exec.args.iter().any(|a| a.contains("/path/to/kubeconfig")));
         assert!(exec.args.iter().any(|a| a.contains("my-namespace")));

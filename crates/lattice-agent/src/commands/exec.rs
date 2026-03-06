@@ -1,5 +1,6 @@
 //! Exec command handlers (ExecRequest, ExecStdin, ExecResize, ExecCancel).
 
+use lattice_common::routing::split_first_hop;
 use lattice_proto::{
     agent_message::Payload, AgentMessage, ExecCancel, ExecData, ExecRequest, ExecResize,
 };
@@ -10,14 +11,20 @@ use lattice_proto::stream_id;
 use super::{CommandContext, StoredExecSession};
 
 /// Handle an exec request from the cell.
+///
+/// Uses hop-by-hop routing: strips the first segment of `target_path`, and if
+/// the remaining path is empty, executes locally; otherwise forwards to the
+/// next child agent.
 pub async fn handle_exec_request(req: &ExecRequest, ctx: &CommandContext) {
-    let target = &req.target_cluster;
-    let is_local = target == &ctx.cluster_name;
+    let target_path = &req.target_path;
+    let (first_hop, remaining) = split_first_hop(target_path);
+    let is_local = first_hop == ctx.cluster_name && remaining.is_empty();
 
     debug!(
         request_id = %req.request_id,
         path = %req.path,
-        target_cluster = %target,
+        target_path = %target_path,
+        first_hop = %first_hop,
         is_local,
         "Received exec request"
     );
@@ -25,7 +32,13 @@ pub async fn handle_exec_request(req: &ExecRequest, ctx: &CommandContext) {
     if is_local {
         handle_local_exec(req, ctx).await;
     } else {
-        handle_forwarded_exec(req, ctx).await;
+        // Forward with the remaining path (strip our hop)
+        let forward_path = if first_hop == ctx.cluster_name && !remaining.is_empty() {
+            remaining.to_string()
+        } else {
+            target_path.clone()
+        };
+        handle_forwarded_exec(req, &forward_path, ctx).await;
     }
 }
 
@@ -57,26 +70,29 @@ async fn handle_local_exec(req: &ExecRequest, ctx: &CommandContext) {
 }
 
 /// Handle a forwarded exec request to a child cluster.
-async fn handle_forwarded_exec(req: &ExecRequest, ctx: &CommandContext) {
-    let target = req.target_cluster.clone();
+///
+/// `forward_path` is the remaining routing path after stripping our hop.
+async fn handle_forwarded_exec(req: &ExecRequest, forward_path: &str, ctx: &CommandContext) {
     let request_id = req.request_id.clone();
 
     match &ctx.exec_forwarder {
         Some(f) => {
             debug!(
                 request_id = %request_id,
-                target = %target,
+                forward_path = %forward_path,
                 "Forwarding exec request to child cluster"
             );
 
             let f = f.clone();
-            let req = req.clone();
+            let mut req = req.clone();
+            req.target_path = forward_path.to_string();
             let cluster_name = ctx.cluster_name.clone();
             let message_tx = ctx.message_tx.clone();
             let sessions = ctx.forwarded_exec_sessions.clone();
+            let forward_path = forward_path.to_string();
 
             tokio::spawn(async move {
-                match f.forward_exec(&target, req).await {
+                match f.forward_exec(&forward_path, req).await {
                     Ok(session) => {
                         let mut data_rx = session.data_rx;
                         let request_id = session.request_id.clone();
@@ -116,7 +132,7 @@ async fn handle_forwarded_exec(req: &ExecRequest, ctx: &CommandContext) {
                     Err(e) => {
                         error!(
                             request_id = %request_id,
-                            target = %target,
+                            forward_path = %forward_path,
                             error = %e,
                             "Failed to forward exec request"
                         );
@@ -134,14 +150,14 @@ async fn handle_forwarded_exec(req: &ExecRequest, ctx: &CommandContext) {
         None => {
             debug!(
                 request_id = %request_id,
-                target = %target,
+                forward_path = %forward_path,
                 "No exec forwarder configured, returning error"
             );
             send_exec_error(
                 &ctx.message_tx,
                 &ctx.cluster_name,
                 &request_id,
-                &format!("cluster '{}' not found in subtree", target),
+                &format!("cluster '{}' not found in subtree", forward_path),
             )
             .await;
         }

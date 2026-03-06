@@ -46,7 +46,7 @@ pub use job::{
     VolcanoPolicyAction, VolcanoPolicyEvent,
 };
 pub use mesh_member::{
-    derived_name, AppliedResourceRef, CallerRef, EgressRule, EgressTarget, LatticeMeshMember,
+    derived_name, AppliedResourceRef, EgressRule, EgressTarget, LatticeMeshMember,
     LatticeMeshMemberSpec, LatticeMeshMemberStatus, MeshMemberPhase, MeshMemberPort,
     MeshMemberScope, MeshMemberTarget, PeerAuth,
 };

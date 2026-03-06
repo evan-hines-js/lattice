@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use lattice_common::crd::{
-    CallerRef, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
-    PeerAuth, ServiceRef,
+    LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
+    ServiceRef,
 };
 use lattice_common::{MONITORING_NAMESPACE, VMAGENT_SA_NAME};
 
@@ -138,15 +138,9 @@ fn vm_instance_labels(component: &str) -> BTreeMap<String, String> {
 pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
     let mut members = Vec::new();
 
-    let vmagent_caller = CallerRef {
-        name: "vmagent".to_string(),
-        namespace: Some(MONITORING_NAMESPACE.to_string()),
-    };
+    let vmagent_caller = ServiceRef::new(MONITORING_NAMESPACE, "vmagent");
 
-    let keda_caller = CallerRef {
-        name: "keda-operator".to_string(),
-        namespace: Some(KEDA_NAMESPACE.to_string()),
-    };
+    let keda_caller = ServiceRef::new(KEDA_NAMESPACE, "keda-operator");
 
     if ha {
         // HA mode: separate write (vminsert) and read (vmselect) targets

@@ -41,7 +41,7 @@ pub struct LatticeMeshMemberSpec {
 
     /// Services allowed to call this member (bilateral agreement inbound side)
     #[serde(default)]
-    pub allowed_callers: Vec<CallerRef>,
+    pub allowed_callers: Vec<ServiceRef>,
 
     /// Services this member depends on (bilateral agreement outbound side)
     #[serde(default)]
@@ -121,23 +121,6 @@ pub enum PeerAuth {
     Permissive,
     /// Allow plaintext from kube-apiserver only (admission webhooks)
     Webhook,
-}
-
-/// A service allowed to call this mesh member
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
-pub struct CallerRef {
-    /// Service name (or "*" for wildcard)
-    pub name: String,
-    /// Namespace (defaults to same namespace if omitted)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
-}
-
-impl CallerRef {
-    /// Resolve namespace using a default
-    pub fn resolve_namespace<'a>(&'a self, default_namespace: &'a str) -> &'a str {
-        self.namespace.as_deref().unwrap_or(default_namespace)
-    }
 }
 
 /// Non-mesh egress rule
@@ -376,11 +359,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_empty_ports_and_deps_fails() {
+    fn validate_empty_ports_and_deps_valid() {
         let mut spec = valid_spec();
         spec.ports.clear();
         spec.dependencies.clear();
-        assert!(spec.validate().is_err());
+        assert!(spec.validate().is_ok());
     }
 
     #[test]
@@ -404,12 +387,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_empty_everything_fails() {
+    fn validate_empty_everything_valid() {
         let mut spec = valid_spec();
         spec.ports.clear();
         spec.dependencies.clear();
         spec.egress.clear();
-        assert!(spec.validate().is_err());
+        assert!(spec.validate().is_ok());
     }
 
     #[test]

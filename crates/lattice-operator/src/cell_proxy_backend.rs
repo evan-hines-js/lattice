@@ -67,7 +67,7 @@ impl ProxyBackend for CellProxyBackend {
             body: request.body,
             content_type: request.content_type,
             accept: request.accept,
-            target_cluster: request.target_cluster,
+            target_path: request.target_path,
             source_user: request.source_user,
             source_groups: request.source_groups,
         };
@@ -96,7 +96,7 @@ impl ProxyBackend for CellProxyBackend {
         let params = ExecRequestParams {
             path: request.path,
             query: request.query,
-            target_cluster: request.target_cluster,
+            target_path: request.target_path,
             source_user: request.source_user,
             source_groups: request.source_groups,
         };
