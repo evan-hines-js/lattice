@@ -150,11 +150,12 @@ pub trait KubeClient: Send + Sync {
     /// Re-enables scheduling on a node that was previously cordoned.
     async fn uncordon_node(&self, name: &str) -> Result<(), Error>;
 
-    /// Check if any pending pods with priority > 0 request GPU resources.
+    /// Return the largest single-container GPU request among pending pods
+    /// with priority > 0. Returns 0 if no such pods exist.
     ///
     /// Used by the GPU cordon budget logic to decide whether to selectively
-    /// uncordon a node when pending high-priority GPU pods need capacity.
-    async fn has_pending_gpu_pods(&self) -> Result<bool, Error>;
+    /// uncordon a node — only nodes with at least this many GPUs would help.
+    async fn max_pending_gpu_request(&self) -> Result<u32, Error>;
 
     /// List all nodes in the cluster.
     ///
@@ -526,7 +527,7 @@ impl KubeClient for KubeClientImpl {
         Ok(())
     }
 
-    async fn has_pending_gpu_pods(&self) -> Result<bool, Error> {
+    async fn max_pending_gpu_request(&self) -> Result<u32, Error> {
         use k8s_openapi::api::core::v1::Pod;
         use kube::api::ListParams;
         use lattice_common::resources::GPU_RESOURCE;
@@ -535,31 +536,19 @@ impl KubeClient for KubeClientImpl {
         let lp = ListParams::default().fields("status.phase=Pending");
         let pods = pod_api.list(&lp).await?;
 
-        let found = pods.items.iter().any(|pod| {
-            let priority = pod
-                .spec
-                .as_ref()
-                .and_then(|s| s.priority)
-                .unwrap_or(0);
-            if priority <= 0 {
-                return false;
+        let max_req = pods.items.iter().filter_map(|pod| {
+            let spec = pod.spec.as_ref()?;
+            if spec.priority.unwrap_or(0) <= 0 {
+                return None;
             }
-            pod.spec
-                .as_ref()
-                .map(|spec| {
-                    spec.containers.iter().any(|c| {
-                        c.resources
-                            .as_ref()
-                            .and_then(|r| r.requests.as_ref())
-                            .and_then(|req| req.get(GPU_RESOURCE))
-                            .map(|q| lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0) > 0)
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        });
+            spec.containers.iter().filter_map(|c| {
+                let q = c.resources.as_ref()?.requests.as_ref()?.get(GPU_RESOURCE)?;
+                let count = lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0);
+                if count > 0 { Some(count as u32) } else { None }
+            }).max()
+        }).max().unwrap_or(0);
 
-        Ok(found)
+        Ok(max_req)
     }
 
     async fn list_nodes(&self) -> Result<Vec<k8s_openapi::api::core::v1::Node>, Error> {

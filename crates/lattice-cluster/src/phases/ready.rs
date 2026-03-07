@@ -488,13 +488,14 @@ async fn reconcile_gpu_health(
             None => continue,
         };
 
-        let has_gpu_capacity = node
+        let gpu_count = node
             .status
             .as_ref()
             .and_then(|s| s.allocatable.as_ref())
             .and_then(|a| a.get(GPU_RESOURCE))
-            .map(|q| lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0) > 0)
-            .unwrap_or(false);
+            .map(|q| lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0).max(0) as u32)
+            .unwrap_or(0);
+        let has_gpu_capacity = gpu_count > 0;
 
         let annotations = node.metadata.annotations.as_ref();
         let has_gpu_annotations = annotations
@@ -529,6 +530,7 @@ async fn reconcile_gpu_health(
             action,
             anomaly_score,
             is_cordoned,
+            gpu_count,
         });
     }
 
@@ -536,11 +538,11 @@ async fn reconcile_gpu_health(
         return Ok(());
     }
 
-    // Check for pending pods with GPU requests (priority > 0)
-    let has_pending_gpu_pods = ctx.kube.has_pending_gpu_pods().await.unwrap_or(false);
+    // Find the largest pending GPU request (0 if none)
+    let max_pending_gpu_request = ctx.kube.max_pending_gpu_request().await.unwrap_or(0);
 
     // Build the cordon plan with threshold enforcement
-    let plan = build_gpu_cordon_plan(&gpu_node_states, has_pending_gpu_pods);
+    let plan = build_gpu_cordon_plan(&gpu_node_states, max_pending_gpu_request);
 
     if plan.threshold_hit {
         warn!(

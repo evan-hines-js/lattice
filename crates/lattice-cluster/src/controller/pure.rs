@@ -189,6 +189,11 @@ pub fn determine_gpu_action(
 /// Beyond this threshold, the cluster risks scheduling starvation.
 pub const MAX_CORDON_FRACTION: f64 = 0.5;
 
+/// Compare two anomaly scores. Panics in debug builds on NaN/Inf.
+fn cmp_anomaly_score(a: f32, b: f32) -> std::cmp::Ordering {
+    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+}
+
 /// Represents a GPU node's cordon eligibility state.
 #[derive(Debug, Clone)]
 pub struct GpuNodeState {
@@ -196,6 +201,8 @@ pub struct GpuNodeState {
     pub action: GpuAction,
     pub anomaly_score: f32,
     pub is_cordoned: bool,
+    /// Allocatable GPU count on this node.
+    pub gpu_count: u32,
 }
 
 /// Cluster-level GPU cordon plan after applying the cordon threshold.
@@ -203,7 +210,7 @@ pub struct GpuNodeState {
 pub struct GpuCordonPlan {
     /// Nodes to cordon (may be fewer than requested if threshold exceeded).
     pub to_cordon: Vec<String>,
-    /// Nodes to selectively uncordon (lowest confidence, when pending pods exist).
+    /// Nodes to selectively uncordon (lowest confidence with enough GPUs for pending work).
     pub to_uncordon: Vec<String>,
     /// Whether the cordon threshold was hit.
     pub threshold_hit: bool,
@@ -213,13 +220,14 @@ pub struct GpuCordonPlan {
 ///
 /// Cordons are subject to the threshold: if >50% of GPU nodes are already cordoned,
 /// new cordons are suppressed. If pending GPU pods exist and we're at the threshold,
-/// we selectively uncordon the lowest-confidence node (lowest anomaly score).
+/// we selectively uncordon the lowest-confidence node whose GPU count can satisfy
+/// the largest pending request.
 ///
 /// Nodes that have recovered (action == NoOp but still cordoned) are automatically
 /// uncordoned.
 pub fn build_gpu_cordon_plan(
     nodes: &[GpuNodeState],
-    has_pending_gpu_pods: bool,
+    max_pending_gpu_request: u32,
 ) -> GpuCordonPlan {
     let total_gpu_nodes = nodes.len();
     if total_gpu_nodes == 0 {
@@ -240,11 +248,7 @@ pub fn build_gpu_cordon_plan(
         .collect();
 
     // Sort by anomaly score descending — cordon highest-confidence problems first
-    debug_assert!(
-        cordon_candidates.iter().all(|n| n.anomaly_score.is_finite()),
-        "NaN/Inf anomaly scores should be rejected upstream"
-    );
-    cordon_candidates.sort_by(|a, b| b.anomaly_score.partial_cmp(&a.anomaly_score).unwrap_or(std::cmp::Ordering::Equal));
+    cordon_candidates.sort_by(|a, b| cmp_anomaly_score(b.anomaly_score, a.anomaly_score));
 
     let budget = max_cordoned.saturating_sub(already_cordoned);
     let threshold_hit = cordon_candidates.len() > budget;
@@ -263,18 +267,16 @@ pub fn build_gpu_cordon_plan(
         .collect();
 
     // Selective uncordon: if at threshold AND pending GPU pods exist,
-    // uncordon the lowest-confidence warning node (closest to normal).
-    if has_pending_gpu_pods && already_cordoned + to_cordon.len() >= max_cordoned {
+    // uncordon the lowest-confidence warning node that has enough GPUs
+    // to actually satisfy the largest pending request.
+    if max_pending_gpu_request > 0 && already_cordoned + to_cordon.len() >= max_cordoned {
         let mut uncordon_candidates: Vec<&GpuNodeState> = nodes
             .iter()
             .filter(|n| n.is_cordoned && n.action == GpuAction::Cordon)
             .filter(|n| !to_uncordon.contains(&n.node_name))
+            .filter(|n| n.gpu_count >= max_pending_gpu_request)
             .collect();
-        debug_assert!(
-            uncordon_candidates.iter().all(|n| n.anomaly_score.is_finite()),
-            "NaN/Inf anomaly scores should be rejected upstream"
-        );
-        uncordon_candidates.sort_by(|a, b| a.anomaly_score.partial_cmp(&b.anomaly_score).unwrap_or(std::cmp::Ordering::Equal));
+        uncordon_candidates.sort_by(|a, b| cmp_anomaly_score(a.anomaly_score, b.anomaly_score));
 
         if let Some(best) = uncordon_candidates.first() {
             to_uncordon.push(best.node_name.clone());
@@ -628,17 +630,22 @@ mod tests {
     // --- build_gpu_cordon_plan tests ---
 
     fn gpu_node(name: &str, action: GpuAction, score: f32, cordoned: bool) -> GpuNodeState {
+        gpu_node_with_gpus(name, action, score, cordoned, 8)
+    }
+
+    fn gpu_node_with_gpus(name: &str, action: GpuAction, score: f32, cordoned: bool, gpu_count: u32) -> GpuNodeState {
         GpuNodeState {
             node_name: name.to_string(),
             action,
             anomaly_score: score,
             is_cordoned: cordoned,
+            gpu_count,
         }
     }
 
     #[test]
     fn cordon_plan_empty_nodes() {
-        let plan = build_gpu_cordon_plan(&[], false);
+        let plan = build_gpu_cordon_plan(&[], 0);
         assert!(plan.to_cordon.is_empty());
         assert!(plan.to_uncordon.is_empty());
         assert!(!plan.threshold_hit);
@@ -650,7 +657,7 @@ mod tests {
             gpu_node("n1", GpuAction::NoOp, 0.1, false),
             gpu_node("n2", GpuAction::NoOp, 0.2, false),
         ];
-        let plan = build_gpu_cordon_plan(&nodes, false);
+        let plan = build_gpu_cordon_plan(&nodes, 0);
         assert!(plan.to_cordon.is_empty());
     }
 
@@ -660,7 +667,7 @@ mod tests {
             gpu_node("n1", GpuAction::Cordon, 0.6, false),
             gpu_node("n2", GpuAction::NoOp, 0.1, false),
         ];
-        let plan = build_gpu_cordon_plan(&nodes, false);
+        let plan = build_gpu_cordon_plan(&nodes, 0);
         assert_eq!(plan.to_cordon, vec!["n1"]);
         assert!(!plan.threshold_hit);
     }
@@ -674,7 +681,7 @@ mod tests {
             gpu_node("n3", GpuAction::NoOp, 0.1, false),
             gpu_node("n4", GpuAction::NoOp, 0.1, false),
         ];
-        let plan = build_gpu_cordon_plan(&nodes, false);
+        let plan = build_gpu_cordon_plan(&nodes, 0);
         assert_eq!(plan.to_cordon.len(), 2);
     }
 
@@ -687,7 +694,7 @@ mod tests {
             gpu_node("n3", GpuAction::Cordon, 0.6, false), // wants cordon
             gpu_node("n4", GpuAction::NoOp, 0.1, false),
         ];
-        let plan = build_gpu_cordon_plan(&nodes, false);
+        let plan = build_gpu_cordon_plan(&nodes, 0);
         // max_cordoned = ceil(4 * 0.5) = 2, already 2 cordoned, budget = 0
         assert!(plan.to_cordon.is_empty());
         assert!(plan.threshold_hit);
@@ -702,7 +709,7 @@ mod tests {
             gpu_node("n3", GpuAction::NoOp, 0.1, false),
             gpu_node("n4", GpuAction::NoOp, 0.1, false),
         ];
-        let plan = build_gpu_cordon_plan(&nodes, false);
+        let plan = build_gpu_cordon_plan(&nodes, 0);
         assert_eq!(plan.to_cordon.len(), 2);
         // Highest score first
         assert_eq!(plan.to_cordon[0], "n2");
@@ -719,7 +726,7 @@ mod tests {
             gpu_node("n3", GpuAction::NoOp, 0.1, false),
             gpu_node("n4", GpuAction::NoOp, 0.1, false),
         ];
-        let plan = build_gpu_cordon_plan(&nodes, true);
+        let plan = build_gpu_cordon_plan(&nodes, 1);
         // Should uncordon n1 (lowest anomaly score)
         assert_eq!(plan.to_uncordon, vec!["n1"]);
     }
@@ -732,7 +739,7 @@ mod tests {
             gpu_node("n3", GpuAction::NoOp, 0.1, false),
             gpu_node("n4", GpuAction::NoOp, 0.1, false),
         ];
-        let plan = build_gpu_cordon_plan(&nodes, false);
+        let plan = build_gpu_cordon_plan(&nodes, 0);
         assert!(plan.to_uncordon.is_empty());
     }
 
@@ -744,7 +751,7 @@ mod tests {
             gpu_node("n1", GpuAction::NoOp, 0.1, true), // recovered, still cordoned
             gpu_node("n2", GpuAction::NoOp, 0.1, false),
         ];
-        let plan = build_gpu_cordon_plan(&nodes, false);
+        let plan = build_gpu_cordon_plan(&nodes, 0);
         assert_eq!(plan.to_uncordon, vec!["n1"]);
     }
 
@@ -757,8 +764,37 @@ mod tests {
             gpu_node("n3", GpuAction::NoOp, 0.1, false),
             gpu_node("n4", GpuAction::NoOp, 0.1, false),
         ];
-        let plan = build_gpu_cordon_plan(&nodes, false);
+        let plan = build_gpu_cordon_plan(&nodes, 0);
         // Budget: max=2, already cordoned=1 (n1), budget=1
         assert_eq!(plan.to_cordon, vec!["n2"]);
+    }
+
+    #[test]
+    fn cordon_plan_skips_node_too_small_for_pending_request() {
+        // Pending pod needs 4 GPUs. n1 has only 1 GPU — uncordoning it won't help.
+        // n2 has 8 GPUs and a lower score, so it should be uncordoned.
+        let nodes = vec![
+            gpu_node_with_gpus("n1", GpuAction::Cordon, 0.5, true, 1),
+            gpu_node_with_gpus("n2", GpuAction::Cordon, 0.55, true, 8),
+            gpu_node_with_gpus("n3", GpuAction::NoOp, 0.1, false, 8),
+            gpu_node_with_gpus("n4", GpuAction::NoOp, 0.1, false, 8),
+        ];
+        let plan = build_gpu_cordon_plan(&nodes, 4);
+        // n1 filtered out (only 1 GPU < 4 needed), n2 is the only candidate
+        assert_eq!(plan.to_uncordon, vec!["n2"]);
+    }
+
+    #[test]
+    fn cordon_plan_no_uncordon_when_no_node_fits() {
+        // Pending pod needs 8 GPUs but all cordoned nodes have only 2
+        let nodes = vec![
+            gpu_node_with_gpus("n1", GpuAction::Cordon, 0.5, true, 2),
+            gpu_node_with_gpus("n2", GpuAction::Cordon, 0.6, true, 2),
+            gpu_node_with_gpus("n3", GpuAction::NoOp, 0.1, false, 8),
+            gpu_node_with_gpus("n4", GpuAction::NoOp, 0.1, false, 8),
+        ];
+        let plan = build_gpu_cordon_plan(&nodes, 8);
+        // No cordoned node can fit the request
+        assert!(plan.to_uncordon.is_empty());
     }
 }
