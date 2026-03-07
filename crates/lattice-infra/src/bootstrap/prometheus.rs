@@ -9,7 +9,7 @@ use lattice_common::crd::{
     LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
     ServiceRef,
 };
-use lattice_common::{MONITORING_NAMESPACE, VMAGENT_SA_NAME};
+use lattice_common::{LATTICE_SYSTEM_NAMESPACE, MONITORING_NAMESPACE, VMAGENT_SA_NAME};
 
 use super::keda::{KEDA_NAMESPACE, VM_READ_TARGET_LMM_NAME};
 use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
@@ -139,8 +139,8 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
     let mut members = Vec::new();
 
     let vmagent_caller = ServiceRef::new(MONITORING_NAMESPACE, "vmagent");
-
     let keda_caller = ServiceRef::new(KEDA_NAMESPACE, "keda-operator");
+    let operator_caller = ServiceRef::new(LATTICE_SYSTEM_NAMESPACE, "lattice-operator");
 
     if ha {
         // HA mode: separate write (vminsert) and read (vmselect) targets
@@ -177,7 +177,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                     name: "read".to_string(),
                     peer_auth: PeerAuth::Strict,
                 }],
-                allowed_callers: vec![keda_caller],
+                allowed_callers: vec![keda_caller, operator_caller],
                 dependencies: vec![],
                 egress: vec![],
                 allow_peer_traffic: false,
@@ -200,7 +200,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                     name: "http".to_string(),
                     peer_auth: PeerAuth::Strict,
                 }],
-                allowed_callers: vec![vmagent_caller, keda_caller],
+                allowed_callers: vec![vmagent_caller, keda_caller, operator_caller],
                 dependencies: vec![],
                 egress: vec![],
                 allow_peer_traffic: false,
@@ -365,7 +365,7 @@ mod tests {
         );
         assert_eq!(single.spec.ports[0].port, VMSINGLE_PORT);
         assert_eq!(single.spec.ports[0].peer_auth, PeerAuth::Strict);
-        assert_eq!(single.spec.allowed_callers.len(), 2); // vmagent + keda
+        assert_eq!(single.spec.allowed_callers.len(), 3); // vmagent + keda + vm-operator
         assert!(single.spec.validate().is_ok());
 
         // vmagent

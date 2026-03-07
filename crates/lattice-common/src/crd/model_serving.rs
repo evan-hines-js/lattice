@@ -9,6 +9,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::observability::{MetricsSnapshot, ObservabilitySpec};
 use super::workload::cost::CostEstimate;
 use super::workload::scaling::AutoscalingMetric;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
@@ -553,6 +554,10 @@ pub struct LatticeModelSpec {
     /// When absent but kv_connector is present, topology is auto-injected (soft mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topology: Option<WorkloadNetworkTopology>,
+
+    /// Observability configuration (metrics mappings, port overrides).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability: Option<ObservabilitySpec>,
 }
 
 impl LatticeModelSpec {
@@ -591,6 +596,7 @@ impl Default for LatticeModelSpec {
             roles: BTreeMap::new(),
             routing: None,
             topology: None,
+            observability: None,
         }
     }
 }
@@ -631,6 +637,14 @@ pub struct LatticeModelStatus {
     /// Estimated cost based on resource requests and current rates
     #[serde(default)]
     pub cost: Option<CostEstimate>,
+
+    /// Scraped metrics snapshot from VictoriaMetrics
+    #[serde(default)]
+    pub metrics: Option<MetricsSnapshot>,
+
+    /// Inference endpoint URL (from KthenaModelRoute status)
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// A condition on a LatticeModel (mirrored from ModelServing status)

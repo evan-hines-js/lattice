@@ -123,7 +123,26 @@ fn resolve_callers<'a>(
 impl ServiceNode {
     /// Create a new local service node from a LatticeService spec
     pub fn from_service_spec(namespace: &str, name: &str, spec: &LatticeServiceSpec) -> Self {
-        Self::from_workload_spec(namespace, name, &spec.workload)
+        let mut node = Self::from_workload_spec(namespace, name, &spec.workload);
+
+        // If an explicit metrics port override is set and differs from "metrics",
+        // inject vmagent as an allowed caller for that port too (from_workload_spec
+        // already handles the default "metrics" port name).
+        if let Some(explicit_port) = spec
+            .observability
+            .as_ref()
+            .and_then(|o| o.metrics.as_ref())
+            .and_then(|m| m.port.as_deref())
+        {
+            if explicit_port != "metrics" && node.ports.contains_key(explicit_port) {
+                node.allowed_callers.insert((
+                    MONITORING_NAMESPACE.to_string(),
+                    VMAGENT_NODE_NAME.to_string(),
+                ));
+            }
+        }
+
+        node
     }
 
     /// Create a node from a raw WorkloadSpec (shared by LatticeService and LatticeJob tasks)

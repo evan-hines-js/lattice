@@ -17,14 +17,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use kube::api::{Api, DynamicObject, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{error, info, warn};
 
+#[cfg(test)]
+use mockall::automock;
+
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{JobPhase, LatticeJob, LatticeJobStatus, ProviderType};
+use lattice_common::crd::{
+    JobPhase, LatticeJob, LatticeJobStatus, MetricsScraper, MetricsSnapshot, ProviderType,
+};
+use lattice_common::events::EventPublisher;
 use lattice_cost::CostProvider;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
@@ -44,38 +51,316 @@ const PENDING_TIMEOUT: Duration = Duration::from_secs(300);
 /// Message set when the job has been submitted but VCJob isn't running yet
 const SUBMITTED_MESSAGE: &str = "Job submitted to Volcano";
 
+// =============================================================================
+// Trait for dependency injection and testability
+// =============================================================================
+
+/// Trait abstracting Kubernetes client operations for LatticeJob
+#[cfg_attr(test, automock)]
+#[async_trait]
+pub trait JobKubeClient: Send + Sync {
+    /// Patch the status of a LatticeJob
+    async fn patch_job_status(
+        &self,
+        name: &str,
+        namespace: &str,
+        status: &LatticeJobStatus,
+    ) -> Result<(), JobError>;
+
+    /// Apply compiled job resources in layers
+    async fn apply_compiled_job(
+        &self,
+        name: &str,
+        namespace: &str,
+        compiled: &CompiledJob,
+        volcano_api: &ApiResource,
+    ) -> Result<(), JobError>;
+
+    /// Check VCJob status and return the phase (if the VCJob exists)
+    async fn check_vcjob_status(
+        &self,
+        name: &str,
+        namespace: &str,
+        volcano_api: &ApiResource,
+    ) -> Option<VCJobPhase>;
+
+    /// Resolve a Volcano CRD by kind
+    async fn resolve_volcano_crd(
+        &self,
+        kind: CrdKind,
+    ) -> Result<Option<ApiResource>, JobError>;
+
+    /// Check VCCronJob status and return (active_count, last_schedule_time)
+    async fn check_cron_status(
+        &self,
+        name: &str,
+        namespace: &str,
+        cron_api: &ApiResource,
+    ) -> Option<(usize, String)>;
+}
+
+/// Real Kubernetes client implementation
+pub struct JobKubeClientImpl {
+    client: Client,
+    registry: Arc<CrdRegistry>,
+}
+
+impl JobKubeClientImpl {
+    /// Create a new JobKubeClientImpl wrapping the given client and CRD registry
+    pub fn new(client: Client, registry: Arc<CrdRegistry>) -> Self {
+        Self { client, registry }
+    }
+}
+
+#[async_trait]
+impl JobKubeClient for JobKubeClientImpl {
+    async fn patch_job_status(
+        &self,
+        name: &str,
+        namespace: &str,
+        status: &LatticeJobStatus,
+    ) -> Result<(), JobError> {
+        lattice_common::kube_utils::patch_resource_status::<LatticeJob>(
+            &self.client,
+            name,
+            namespace,
+            status,
+            FIELD_MANAGER,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn apply_compiled_job(
+        &self,
+        _name: &str,
+        namespace: &str,
+        compiled: &CompiledJob,
+        volcano_api: &ApiResource,
+    ) -> Result<(), JobError> {
+        apply_layers(&self.client, namespace, compiled, &self.registry, volcano_api).await
+    }
+
+    async fn check_vcjob_status(
+        &self,
+        name: &str,
+        namespace: &str,
+        volcano_api: &ApiResource,
+    ) -> Option<VCJobPhase> {
+        check_vcjob_status_impl(&self.client, name, namespace, volcano_api).await
+    }
+
+    async fn resolve_volcano_crd(
+        &self,
+        kind: CrdKind,
+    ) -> Result<Option<ApiResource>, JobError> {
+        Ok(self.registry.resolve(kind).await?)
+    }
+
+    async fn check_cron_status(
+        &self,
+        name: &str,
+        namespace: &str,
+        cron_api: &ApiResource,
+    ) -> Option<(usize, String)> {
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), namespace, cron_api);
+        match api.get(name).await {
+            Ok(obj) => {
+                let active = obj
+                    .data
+                    .get("status")
+                    .and_then(|s| s.get("active"))
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let last_schedule = obj
+                    .data
+                    .get("status")
+                    .and_then(|s| s.get("lastScheduleTime"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("never")
+                    .to_string();
+                Some((active, last_schedule))
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                warn!(job = %name, "VCCronJob not found — may have been deleted externally");
+                None
+            }
+            Err(e) => {
+                warn!(job = %name, error = %e, "failed to check VCCronJob status");
+                None
+            }
+        }
+    }
+}
+
+// =============================================================================
+// VCJob phase (public for trait return type)
+// =============================================================================
+
+/// Phase of a Volcano VCJob, derived from its status
+pub enum VCJobPhase {
+    /// VCJob is pending (queued, scheduling)
+    Pending,
+    /// VCJob is running
+    Running,
+    /// VCJob completed successfully
+    Completed,
+    /// VCJob failed (or timed out in Pending)
+    Failed,
+}
+
+// =============================================================================
+// Context
+// =============================================================================
+
 /// Shared context for the LatticeJob controller
 pub struct JobContext {
-    pub client: Client,
+    pub kube: Arc<dyn JobKubeClient>,
     pub graph: Arc<ServiceGraph>,
     pub cluster_name: String,
     pub provider_type: ProviderType,
     pub cedar: Arc<PolicyEngine>,
-    pub registry: Arc<CrdRegistry>,
+    pub events: Arc<dyn EventPublisher>,
+    pub metrics_scraper: Arc<dyn MetricsScraper>,
     /// Cost provider for estimating workload costs (None = cost estimation disabled)
     pub cost_provider: Option<Arc<dyn CostProvider>>,
 }
 
 impl JobContext {
+    /// Create a new JobContext with the given dependencies
     pub fn new(
-        client: Client,
+        kube: Arc<dyn JobKubeClient>,
         graph: Arc<ServiceGraph>,
         cluster_name: String,
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
-        registry: Arc<CrdRegistry>,
+        events: Arc<dyn EventPublisher>,
+        metrics_scraper: Arc<dyn MetricsScraper>,
     ) -> Self {
         Self {
-            client,
+            kube,
             graph,
             cluster_name,
             provider_type,
             cedar,
-            registry,
+            events,
+            metrics_scraper,
+            cost_provider: None,
+        }
+    }
+
+    /// Create a context for testing with mock clients.
+    ///
+    /// Uses a permit-all Cedar PolicyEngine so compilation doesn't fail on
+    /// security overrides in unit tests.
+    #[cfg(test)]
+    pub fn for_testing(kube: Arc<dyn JobKubeClient>) -> Self {
+        Self {
+            kube,
+            graph: Arc::new(ServiceGraph::new()),
+            cluster_name: "test-cluster".to_string(),
+            provider_type: ProviderType::Docker,
+            cedar: Arc::new(
+                PolicyEngine::with_policies("permit(principal, action, resource);")
+                    .expect("permit-all policy should parse"),
+            ),
+            events: Arc::new(lattice_common::NoopEventPublisher),
+            metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
             cost_provider: None,
         }
     }
 }
+
+// =============================================================================
+// Status builder (fluent pattern matching Model controller)
+// =============================================================================
+
+/// Status update builder — avoids clone-and-mutate and makes optional fields explicit.
+struct StatusUpdate<'a> {
+    phase: JobPhase,
+    message: Option<&'a str>,
+    observed_generation: Option<i64>,
+    start_time: Option<String>,
+    completion_time: Option<String>,
+    metrics: Option<MetricsSnapshot>,
+}
+
+impl<'a> StatusUpdate<'a> {
+    fn new(phase: JobPhase) -> Self {
+        Self {
+            phase,
+            message: None,
+            observed_generation: None,
+            start_time: None,
+            completion_time: None,
+            metrics: None,
+        }
+    }
+
+    fn message(mut self, msg: &'a str) -> Self {
+        self.message = Some(msg);
+        self
+    }
+
+    fn observed_generation(mut self, gen: i64) -> Self {
+        self.observed_generation = Some(gen);
+        self
+    }
+
+    fn start_time(mut self, t: String) -> Self {
+        self.start_time = Some(t);
+        self
+    }
+
+    fn completion_time(mut self, t: String) -> Self {
+        self.completion_time = Some(t);
+        self
+    }
+
+    fn metrics(mut self, snapshot: Option<MetricsSnapshot>) -> Self {
+        self.metrics = snapshot;
+        self
+    }
+
+    async fn apply(
+        self,
+        kube: &dyn JobKubeClient,
+        job: &LatticeJob,
+        namespace: &str,
+    ) -> Result<(), JobError> {
+        let name = job.name_any();
+        // Preserve fields from existing status unless explicitly overridden
+        let start_time = self
+            .start_time
+            .or_else(|| job.status.as_ref().and_then(|s| s.start_time.clone()));
+        let completion_time = self
+            .completion_time
+            .or_else(|| job.status.as_ref().and_then(|s| s.completion_time.clone()));
+        let metrics = self
+            .metrics
+            .or_else(|| job.status.as_ref().and_then(|s| s.metrics.clone()));
+        let status = LatticeJobStatus {
+            phase: self.phase,
+            message: self.message.map(|m| m.to_string()),
+            observed_generation: self.observed_generation,
+            start_time,
+            completion_time,
+            metrics,
+        };
+        // Skip redundant writes
+        if job.status.as_ref() == Some(&status) {
+            return Ok(());
+        }
+        kube.patch_job_status(&name, namespace, &status).await?;
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Reconcile
+// =============================================================================
 
 /// Reconcile a LatticeJob resource
 pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Action, JobError> {
@@ -117,23 +402,17 @@ async fn reconcile_pending(
     } else {
         CrdKind::VolcanoJob
     };
-    let volcano_api = match ctx.registry.resolve(crd_kind).await? {
+    let volcano_api = match ctx.kube.resolve_volcano_crd(crd_kind).await? {
         Some(ar) => ar,
         None => {
             let msg = format!(
                 "Volcano CRD {} not found — install Volcano or remove the job",
                 crd_kind.kind_str()
             );
-            let mut status = current_status(job);
-            status.message = Some(msg);
-            let _ = patch_status(
-                &ctx.client,
-                &job.name_any(),
-                namespace,
-                &status,
-                job.status.as_ref(),
-            )
-            .await;
+            let _ = StatusUpdate::new(JobPhase::Pending)
+                .message(&msg)
+                .apply(ctx.kube.as_ref(), job, namespace)
+                .await;
             return Err(JobError::VolcanoCrdMissing {
                 kind: crd_kind.kind_str(),
             });
@@ -149,27 +428,18 @@ async fn reconcile_pending(
 
     if !already_submitted {
         // Guard against re-submitting a VCJob that already exists on the cluster.
-        // This can happen if apply_layers succeeded but the subsequent status patch
-        // failed — the VCJob runs to completion while the LatticeJob status still
-        // lacks SUBMITTED_MESSAGE. Re-applying to a Completed VCJob triggers
-        // Volcano's immutable-field webhook rejection, creating an infinite retry loop.
-        let vcjob_exists =
-            check_vcjob_status(&ctx.client, &job.name_any(), namespace, &volcano_api)
-                .await
-                .is_some();
+        let vcjob_exists = ctx
+            .kube
+            .check_vcjob_status(&job.name_any(), namespace, &volcano_api)
+            .await
+            .is_some();
         if vcjob_exists {
             info!(job = %job.name_any(), "VCJob already exists, skipping re-submission");
-            let mut status = current_status(job);
-            status.message = Some(SUBMITTED_MESSAGE.to_string());
-            status.observed_generation = Some(generation);
-            patch_status(
-                &ctx.client,
-                &job.name_any(),
-                namespace,
-                &status,
-                job.status.as_ref(),
-            )
-            .await?;
+            StatusUpdate::new(JobPhase::Pending)
+                .message(SUBMITTED_MESSAGE)
+                .observed_generation(generation)
+                .apply(ctx.kube.as_ref(), job, namespace)
+                .await?;
         } else {
             submit_job(job, ctx, namespace, generation, is_cron, &volcano_api).await?;
         }
@@ -177,26 +447,29 @@ async fn reconcile_pending(
 
     // Cron jobs go straight to Running — they're perpetual and don't have a "pending" VCJob phase
     if is_cron {
-        let name = job.name_any();
-        let mut status = current_status(job);
-        status.phase = JobPhase::Running;
-        status.message = Some("Cron job active".to_string());
-        status.observed_generation = Some(generation);
-        patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await?;
+        StatusUpdate::new(JobPhase::Running)
+            .message("Cron job active")
+            .observed_generation(generation)
+            .apply(ctx.kube.as_ref(), job, namespace)
+            .await?;
         return Ok(Action::requeue(REQUEUE_RUNNING));
     }
 
     // Check VCJob phase — only transition to Running when VCJob is truly running.
     // Short jobs may complete before we see Running, so handle all terminal phases here too.
     let name = job.name_any();
-    match check_vcjob_status(&ctx.client, &name, namespace, &volcano_api).await {
+    match ctx
+        .kube
+        .check_vcjob_status(&name, namespace, &volcano_api)
+        .await
+    {
         Some(VCJobPhase::Running) => {
             info!(job = %name, "VCJob running");
-            let mut status = current_status(job);
-            status.phase = JobPhase::Running;
-            status.message = Some("Job running".to_string());
-            status.observed_generation = Some(generation);
-            patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await?;
+            StatusUpdate::new(JobPhase::Running)
+                .message("Job running")
+                .observed_generation(generation)
+                .apply(ctx.kube.as_ref(), job, namespace)
+                .await?;
             Ok(Action::requeue(REQUEUE_RUNNING))
         }
         Some(VCJobPhase::Completed) => {
@@ -228,56 +501,49 @@ async fn submit_job(
     {
         Ok(c) => c,
         Err(e) => {
-            let name = job.name_any();
             if e.is_retryable() {
-                let mut status = current_status(job);
-                status.message = Some(format!("Compile failed (will retry): {}", e));
-                let _ =
-                    patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await;
+                let msg = format!("Compile failed (will retry): {}", e);
+                let _ = StatusUpdate::new(JobPhase::Pending)
+                    .message(&msg)
+                    .apply(ctx.kube.as_ref(), job, namespace)
+                    .await;
             } else {
                 cleanup_graph(job, &ctx.graph, namespace);
-                let mut status = current_status(job);
-                status.phase = JobPhase::Failed;
-                status.message = Some(format!("Failed to compile job: {}", e));
-                status.observed_generation = Some(generation);
-                let _ =
-                    patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await;
+                let msg = format!("Failed to compile job: {}", e);
+                let _ = StatusUpdate::new(JobPhase::Failed)
+                    .message(&msg)
+                    .observed_generation(generation)
+                    .apply(ctx.kube.as_ref(), job, namespace)
+                    .await;
             }
             return Err(e);
         }
     };
 
     let name = job.name_any();
-    if let Err(e) = apply_layers(
-        &ctx.client,
-        namespace,
-        &compiled,
-        &ctx.registry,
-        volcano_api,
-    )
-    .await
+    if let Err(e) = ctx
+        .kube
+        .apply_compiled_job(&name, namespace, &compiled, volcano_api)
+        .await
     {
         cleanup_graph(job, &ctx.graph, namespace);
-        let mut status = current_status(job);
-        status.message = Some(format!("Apply failed (will retry): {}", e));
-        let _ = patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await;
+        let msg = format!("Apply failed (will retry): {}", e);
+        let _ = StatusUpdate::new(JobPhase::Pending)
+            .message(&msg)
+            .apply(ctx.kube.as_ref(), job, namespace)
+            .await;
         return Err(e);
     }
 
     info!(job = %name, cron = is_cron, "submitted job to Volcano");
 
-    let mut status = current_status(job);
-    status.message = Some(SUBMITTED_MESSAGE.to_string());
-    status.observed_generation = Some(generation);
+    let mut s = StatusUpdate::new(JobPhase::Pending)
+        .message(SUBMITTED_MESSAGE)
+        .observed_generation(generation);
     if job.spec.training.is_some() {
-        status.start_time = Some(chrono::Utc::now().to_rfc3339());
+        s = s.start_time(chrono::Utc::now().to_rfc3339());
     }
-    let job_spec = &job.spec;
-    status.cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates, ts| {
-        lattice_cost::estimate_job_cost(job_spec, rates, ts)
-    })
-    .await;
-    patch_status(&ctx.client, &name, namespace, &status, job.status.as_ref()).await?;
+    s.apply(ctx.kube.as_ref(), job, namespace).await?;
     Ok(())
 }
 
@@ -302,7 +568,7 @@ async fn reconcile_running(
         return reconcile_running_cron(job, ctx, name, namespace, generation).await;
     }
 
-    let volcano_api = match ctx.registry.resolve(CrdKind::VolcanoJob).await? {
+    let volcano_api = match ctx.kube.resolve_volcano_crd(CrdKind::VolcanoJob).await? {
         Some(ar) => ar,
         None => {
             warn!(job = %name, "cannot check VCJob status: Volcano CRD not discovered");
@@ -310,12 +576,34 @@ async fn reconcile_running(
         }
     };
 
-    match check_vcjob_status(&ctx.client, name, namespace, &volcano_api).await {
+    match ctx
+        .kube
+        .check_vcjob_status(name, namespace, &volcano_api)
+        .await
+    {
         Some(VCJobPhase::Completed) => {
             handle_job_succeeded(job, ctx, name, namespace, generation).await
         }
-        Some(VCJobPhase::Failed) => handle_job_failure(job, ctx, name, namespace, generation).await,
-        _ => Ok(Action::requeue(REQUEUE_RUNNING)),
+        Some(VCJobPhase::Failed) => {
+            handle_job_failure(job, ctx, name, namespace, generation).await
+        }
+        _ => {
+            // Scrape metrics while the job is running
+            let snapshot = lattice_common::crd::scrape_if_configured(
+                ctx.metrics_scraper.as_ref(),
+                job.spec.observability.as_ref(),
+                namespace,
+                name,
+            )
+            .await;
+            if snapshot.is_some() {
+                StatusUpdate::new(JobPhase::Running)
+                    .metrics(snapshot)
+                    .apply(ctx.kube.as_ref(), job, namespace)
+                    .await?;
+            }
+            Ok(Action::requeue(REQUEUE_RUNNING))
+        }
     }
 }
 
@@ -326,7 +614,7 @@ async fn reconcile_running_cron(
     namespace: &str,
     generation: i64,
 ) -> Result<Action, JobError> {
-    let cron_api = match ctx.registry.resolve(CrdKind::VolcanoCronJob).await? {
+    let cron_api = match ctx.kube.resolve_volcano_crd(CrdKind::VolcanoCronJob).await? {
         Some(ar) => ar,
         None => {
             warn!(job = %name, "cannot check VCCronJob status: Volcano CronJob CRD not discovered");
@@ -334,38 +622,20 @@ async fn reconcile_running_cron(
         }
     };
 
-    let api: Api<DynamicObject> = Api::namespaced_with(ctx.client.clone(), namespace, &cron_api);
-    match api.get(name).await {
-        Ok(obj) => {
-            let active = obj
-                .data
-                .get("status")
-                .and_then(|s| s.get("active"))
-                .and_then(|a| a.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            let last_schedule = obj
-                .data
-                .get("status")
-                .and_then(|s| s.get("lastScheduleTime"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("never");
-
-            let mut status = current_status(job);
-            status.message = Some(format!(
-                "Cron active: {} job(s), last scheduled: {}",
-                active, last_schedule
-            ));
-            status.observed_generation = Some(generation);
-            let _ = patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await;
-        }
-        Err(kube::Error::Api(ae)) if ae.code == 404 => {
-            warn!(job = %name, "VCCronJob not found — may have been deleted externally");
-        }
-        Err(e) => {
-            warn!(job = %name, error = %e, "failed to check VCCronJob status");
-        }
+    if let Some((active, last_schedule)) =
+        ctx.kube.check_cron_status(name, namespace, &cron_api).await
+    {
+        let msg = format!(
+            "Cron active: {} job(s), last scheduled: {}",
+            active, last_schedule
+        );
+        let _ = StatusUpdate::new(JobPhase::Running)
+            .message(&msg)
+            .observed_generation(generation)
+            .apply(ctx.kube.as_ref(), job, namespace)
+            .await;
     }
+
     Ok(Action::requeue(REQUEUE_RUNNING))
 }
 
@@ -379,12 +649,30 @@ async fn handle_job_failure(
 ) -> Result<Action, JobError> {
     error!(job = %name, "VCJob failed (Volcano exhausted retries)");
     cleanup_graph(job, &ctx.graph, namespace);
-    let mut status = current_status(job);
-    status.phase = JobPhase::Failed;
-    status.message = Some("Job failed".to_string());
-    status.observed_generation = Some(generation);
-    status.completion_time = Some(chrono::Utc::now().to_rfc3339());
-    patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
+    StatusUpdate::new(JobPhase::Failed)
+        .message("Job failed")
+        .observed_generation(generation)
+        .completion_time(chrono::Utc::now().to_rfc3339())
+        .apply(ctx.kube.as_ref(), job, namespace)
+        .await?;
+    Ok(Action::await_change())
+}
+
+async fn handle_job_succeeded(
+    job: &LatticeJob,
+    ctx: &JobContext,
+    name: &str,
+    namespace: &str,
+    generation: i64,
+) -> Result<Action, JobError> {
+    info!(job = %name, "job succeeded");
+    cleanup_graph(job, &ctx.graph, namespace);
+    StatusUpdate::new(JobPhase::Succeeded)
+        .message("All tasks completed successfully")
+        .observed_generation(generation)
+        .completion_time(chrono::Utc::now().to_rfc3339())
+        .apply(ctx.kube.as_ref(), job, namespace)
+        .await?;
     Ok(Action::await_change())
 }
 
@@ -400,7 +688,7 @@ fn cleanup_graph(job: &LatticeJob, graph: &ServiceGraph, namespace: &str) {
 }
 
 // =============================================================================
-// Resource application
+// Resource application (private — only used by JobKubeClientImpl)
 // =============================================================================
 
 async fn apply_layers(
@@ -499,17 +787,10 @@ async fn apply_layers(
 }
 
 // =============================================================================
-// VCJob status
+// VCJob status check (private — only used by JobKubeClientImpl)
 // =============================================================================
 
-enum VCJobPhase {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-}
-
-async fn check_vcjob_status(
+async fn check_vcjob_status_impl(
     client: &Client,
     name: &str,
     namespace: &str,
@@ -576,50 +857,155 @@ async fn check_vcjob_status(
     }
 }
 
-async fn handle_job_succeeded(
-    job: &LatticeJob,
-    ctx: &JobContext,
-    name: &str,
-    namespace: &str,
-    generation: i64,
-) -> Result<Action, JobError> {
-    info!(job = %name, "job succeeded");
-    cleanup_graph(job, &ctx.graph, namespace);
-    let mut status = current_status(job);
-    status.phase = JobPhase::Succeeded;
-    status.message = Some("All tasks completed successfully".to_string());
-    status.observed_generation = Some(generation);
-    status.completion_time = Some(chrono::Utc::now().to_rfc3339());
-    patch_status(&ctx.client, name, namespace, &status, job.status.as_ref()).await?;
-    Ok(Action::await_change())
-}
-
 // =============================================================================
-// Status helpers
+// Tests
 // =============================================================================
 
-fn current_status(job: &LatticeJob) -> LatticeJobStatus {
-    job.status.clone().unwrap_or_default()
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use lattice_common::crd::{ContainerSpec, JobTaskSpec, LatticeJobSpec};
+    use std::collections::BTreeMap;
 
-/// Patch the job status, skipping the write if nothing changed.
-async fn patch_status(
-    client: &Client,
-    name: &str,
-    namespace: &str,
-    new_status: &LatticeJobStatus,
-    current: Option<&LatticeJobStatus>,
-) -> Result<(), JobError> {
-    if current == Some(new_status) {
-        return Ok(());
+    fn make_minimal_job(name: &str) -> LatticeJob {
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "worker".to_string(),
+            JobTaskSpec {
+                replicas: None,
+                workload: lattice_common::crd::workload::spec::WorkloadSpec {
+                    containers: BTreeMap::from([(
+                        "main".to_string(),
+                        ContainerSpec {
+                            image: "test:latest".to_string(),
+                            ..Default::default()
+                        },
+                    )]),
+                    ..Default::default()
+                },
+                runtime: Default::default(),
+                restart_policy: None,
+                policies: None,
+            },
+        );
+        LatticeJob {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("test-ns".to_string()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: LatticeJobSpec {
+                tasks,
+                ..Default::default()
+            },
+            status: None,
+        }
     }
-    lattice_common::kube_utils::patch_resource_status::<LatticeJob>(
-        client,
-        name,
-        namespace,
-        new_status,
-        FIELD_MANAGER,
-    )
-    .await?;
-    Ok(())
+
+    /// Pending job with successful compile+apply transitions to Pending(submitted) then checks VCJob
+    #[tokio::test]
+    async fn pending_submits_job() {
+        let job = Arc::new(make_minimal_job("my-job"));
+
+        let mut mock = MockJobKubeClient::new();
+        let volcano_api =
+            ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&()); // dummy
+        let va = volcano_api.clone();
+        mock.expect_resolve_volcano_crd()
+            .returning(move |_| Ok(Some(va.clone())));
+        mock.expect_apply_compiled_job()
+            .returning(|_, _, _, _| Ok(()));
+        mock.expect_patch_job_status()
+            .returning(|_, _, _| Ok(()));
+        mock.expect_check_vcjob_status()
+            .returning(|_, _, _| None);
+
+        let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
+
+        let action = reconcile(job, ctx)
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(action, Action::requeue(REQUEUE_RUNNING));
+    }
+
+    /// Running job with completed VCJob transitions to Succeeded
+    #[tokio::test]
+    async fn running_transitions_to_succeeded() {
+        let mut job = make_minimal_job("my-job");
+        job.status = Some(LatticeJobStatus {
+            phase: JobPhase::Running,
+            observed_generation: Some(1),
+            ..Default::default()
+        });
+        let job = Arc::new(job);
+
+        let mut mock = MockJobKubeClient::new();
+        let volcano_api = ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&());
+        let va = volcano_api.clone();
+        mock.expect_resolve_volcano_crd()
+            .returning(move |_| Ok(Some(va.clone())));
+        mock.expect_check_vcjob_status()
+            .returning(|_, _, _| Some(VCJobPhase::Completed));
+        mock.expect_patch_job_status()
+            .withf(|_, _, status| status.phase == JobPhase::Succeeded)
+            .returning(|_, _, _| Ok(()));
+
+        let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
+
+        let action = reconcile(job, ctx)
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(action, Action::await_change());
+    }
+
+    /// Running job with failed VCJob transitions to Failed
+    #[tokio::test]
+    async fn running_transitions_to_failed() {
+        let mut job = make_minimal_job("my-job");
+        job.status = Some(LatticeJobStatus {
+            phase: JobPhase::Running,
+            observed_generation: Some(1),
+            ..Default::default()
+        });
+        let job = Arc::new(job);
+
+        let mut mock = MockJobKubeClient::new();
+        let volcano_api = ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&());
+        let va = volcano_api.clone();
+        mock.expect_resolve_volcano_crd()
+            .returning(move |_| Ok(Some(va.clone())));
+        mock.expect_check_vcjob_status()
+            .returning(|_, _, _| Some(VCJobPhase::Failed));
+        mock.expect_patch_job_status()
+            .withf(|_, _, status| status.phase == JobPhase::Failed)
+            .returning(|_, _, _| Ok(()));
+
+        let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
+
+        let action = reconcile(job, ctx)
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(action, Action::await_change());
+    }
+
+    /// Succeeded/Failed jobs just await_change
+    #[tokio::test]
+    async fn terminal_phase_awaits_change() {
+        let mut job = make_minimal_job("my-job");
+        job.status = Some(LatticeJobStatus {
+            phase: JobPhase::Succeeded,
+            ..Default::default()
+        });
+        let job = Arc::new(job);
+
+        let mock = MockJobKubeClient::new();
+        let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
+
+        let action = reconcile(job, ctx)
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(action, Action::await_change());
+    }
 }

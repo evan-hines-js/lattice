@@ -23,6 +23,7 @@ use super::workload::cost::CostEstimate;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::observability::{MetricsSnapshot, ObservabilitySpec};
 use super::types::Condition;
 use super::workload::backup::ServiceBackupSpec;
 use super::workload::deploy::DeploySpec;
@@ -112,6 +113,10 @@ pub struct LatticeServiceSpec {
     /// When set, pods are scheduled via Volcano with a PodGroup for co-placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topology: Option<WorkloadNetworkTopology>,
+
+    /// Observability configuration (metrics mappings, port overrides).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability: Option<ObservabilitySpec>,
 }
 
 fn default_replicas() -> u32 {
@@ -129,6 +134,7 @@ impl Default for LatticeServiceSpec {
             deploy: DeploySpec::default(),
             ingress: None,
             topology: None,
+            observability: None,
         }
     }
 }
@@ -196,6 +202,10 @@ pub struct LatticeServiceStatus {
     /// Estimated cost based on resource requests and current rates
     #[serde(default)]
     pub cost: Option<CostEstimate>,
+
+    /// Scraped metrics snapshot from VictoriaMetrics
+    #[serde(default)]
+    pub metrics: Option<MetricsSnapshot>,
 }
 
 impl LatticeServiceStatus {

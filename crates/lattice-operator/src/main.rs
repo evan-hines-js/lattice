@@ -51,6 +51,7 @@ use lattice_operator::startup::{
 };
 
 mod controller_runner;
+mod metrics;
 
 #[derive(Parser, Debug)]
 #[command(name = "lattice", version, about, long_about = None)]
@@ -357,6 +358,8 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         lattice_cost::ConfigMapCostProvider::new(client.clone()),
     ));
 
+    let metrics_scraper = Arc::new(metrics::MetricsScraper::new(monitoring.ha));
+
     let (mut controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
         cluster_name.clone(),
@@ -377,6 +380,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
             cedar.clone(),
             graph,
             registry.clone(),
+            metrics_scraper.clone(),
             cost_provider.clone(),
         )
         .await,
@@ -390,6 +394,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
             cedar.clone(),
             graph_for_models,
             registry,
+            metrics_scraper,
             cost_provider,
         )
         .await,
@@ -504,6 +509,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
         lattice_cost::ConfigMapCostProvider::new(client.clone()),
     ));
+    let metrics_scraper = Arc::new(metrics::MetricsScraper::new(monitoring.ha));
     let (service_controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
         cluster_name.clone(),
@@ -525,6 +531,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
             cedar.clone(),
             graph,
             registry.clone(),
+            metrics_scraper.clone(),
             cost_provider.clone(),
         )
         .await,
@@ -538,6 +545,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
             cedar.clone(),
             graph_for_models,
             registry,
+            metrics_scraper,
             cost_provider,
         )
         .await,

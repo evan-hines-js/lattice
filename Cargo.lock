@@ -2540,6 +2540,7 @@ dependencies = [
 name = "lattice-job"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "aws-lc-rs",
  "chrono",
  "futures",
@@ -2552,6 +2553,7 @@ dependencies = [
  "lattice-tetragon",
  "lattice-volcano",
  "lattice-workload",
+ "mockall",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2580,6 +2582,7 @@ dependencies = [
 name = "lattice-model"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "aws-lc-rs",
  "chrono",
  "futures",
@@ -2592,6 +2595,7 @@ dependencies = [
  "lattice-tetragon",
  "lattice-volcano",
  "lattice-workload",
+ "mockall",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

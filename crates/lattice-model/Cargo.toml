@@ -40,6 +40,7 @@ tracing = { workspace = true }
 
 # Async utilities
 futures = { workspace = true }
+async-trait = { workspace = true }
 
 # Time
 chrono = { workspace = true }
@@ -47,3 +48,4 @@ chrono = { workspace = true }
 [dev-dependencies]
 tokio-test = { workspace = true }
 serde_json = { workspace = true }
+mockall = { workspace = true }

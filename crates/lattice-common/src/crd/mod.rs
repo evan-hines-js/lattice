@@ -11,6 +11,7 @@ mod infra_provider;
 mod job;
 mod mesh_member;
 mod model_serving;
+mod observability;
 mod oidc_provider;
 mod providers;
 mod restore;
@@ -57,6 +58,10 @@ pub use model_serving::{
     ModelRoutingSpec, ModelScaleDownBehavior, ModelScaleUpBehavior, ModelServingPhase,
     ModelSourceSpec, RateLimit, RateLimitUnit, RecoveryPolicy, RetryPolicy, SecretKeySelector,
     TargetModel, TrafficPolicy, DEFAULT_KV_SIDE_CHANNEL_PORT,
+};
+pub use observability::{
+    scrape_if_configured, MetricsConfig, MetricsScraper, MetricsSnapshot, NoopMetricsScraper,
+    ObservabilitySpec,
 };
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,

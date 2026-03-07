@@ -634,7 +634,7 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
                 },
             ],
             allowed_callers: vec![ServiceRef::new("external-secrets", "external-secrets")],
-            dependencies: vec![],
+            dependencies: vec![ServiceRef::new(MONITORING_NAMESPACE, "vm-read-target")],
             egress: vec![kube_apiserver_egress()],
             allow_peer_traffic: false,
             depends_all: false,

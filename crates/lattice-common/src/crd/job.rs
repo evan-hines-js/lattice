@@ -15,6 +15,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::observability::{MetricsSnapshot, ObservabilitySpec};
 use super::workload::cost::CostEstimate;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 use super::workload::topology::WorkloadNetworkTopology;
@@ -313,6 +314,10 @@ pub struct LatticeJobSpec {
     /// and headless Service for pod DNS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training: Option<TrainingConfig>,
+
+    /// Observability configuration (metrics mappings, port overrides).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability: Option<ObservabilitySpec>,
 }
 
 impl Default for LatticeJobSpec {
@@ -334,6 +339,7 @@ impl Default for LatticeJobSpec {
             defaults: None,
             tasks: BTreeMap::new(),
             training: None,
+            observability: None,
         }
     }
 }
@@ -455,6 +461,10 @@ pub struct LatticeJobStatus {
     /// Estimated cost based on resource requests and current rates
     #[serde(default)]
     pub cost: Option<CostEstimate>,
+
+    /// Scraped metrics snapshot from VictoriaMetrics
+    #[serde(default)]
+    pub metrics: Option<MetricsSnapshot>,
 }
 
 // =============================================================================
@@ -735,6 +745,7 @@ mod tests {
             start_time: Some("2026-02-28T00:00:00Z".to_string()),
             completion_time: None,
             cost: None,
+            metrics: None,
         };
         assert_eq!(status.phase, JobPhase::Running);
         assert!(status.start_time.is_some());

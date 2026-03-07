@@ -135,16 +135,14 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         namespace: &str,
         status: &LatticeServiceStatus,
     ) -> Result<(), Error> {
-        let api: Api<LatticeService> = Api::namespaced(self.client.clone(), namespace);
-        let status_patch = serde_json::json!({ "status": status });
-
-        api.patch_status(
+        lattice_common::kube_utils::patch_resource_status::<LatticeService>(
+            &self.client,
             name,
-            &PatchParams::apply(FIELD_MANAGER),
-            &Patch::Merge(&status_patch),
+            namespace,
+            status,
+            FIELD_MANAGER,
         )
         .await?;
-
         Ok(())
     }
 
@@ -971,6 +969,7 @@ pub fn cleanup_service(service: &LatticeService, ctx: &ServiceContext) {
 // =============================================================================
 
 /// Status update configuration for LatticeService
+/// Status update builder — fluent pattern matching Model/Job controllers.
 struct ServiceStatusUpdate<'a> {
     phase: ServicePhase,
     message: &'a str,
@@ -983,30 +982,39 @@ struct ServiceStatusUpdate<'a> {
 }
 
 impl<'a> ServiceStatusUpdate<'a> {
-    fn compiling() -> Self {
+    fn new(phase: ServicePhase) -> Self {
         Self {
-            phase: ServicePhase::Compiling,
-            message: "Compiling service dependencies",
-            condition_type: "Compiling",
-            condition_status: ConditionStatus::True,
-            reason: "DependencyCheck",
+            phase,
+            message: "",
+            condition_type: "",
+            condition_status: ConditionStatus::Unknown,
+            reason: "",
             set_compiled_at: false,
             observed_generation: None,
             cost: None,
         }
     }
 
-    fn ready(generation: Option<i64>) -> Self {
-        Self {
-            phase: ServicePhase::Ready,
-            message: "Service is operational",
-            condition_type: "Ready",
-            condition_status: ConditionStatus::True,
-            reason: "ServiceReady",
-            set_compiled_at: true,
-            observed_generation: generation,
-            cost: None,
-        }
+    fn message(mut self, msg: &'a str) -> Self {
+        self.message = msg;
+        self
+    }
+
+    fn condition(mut self, type_: &'a str, status: ConditionStatus, reason: &'a str) -> Self {
+        self.condition_type = type_;
+        self.condition_status = status;
+        self.reason = reason;
+        self
+    }
+
+    fn compiled_at_now(mut self) -> Self {
+        self.set_compiled_at = true;
+        self
+    }
+
+    fn observed_generation(mut self, gen: Option<i64>) -> Self {
+        self.observed_generation = gen;
+        self
     }
 
     fn with_cost(mut self, cost: Option<CostEstimate>) -> Self {
@@ -1014,17 +1022,28 @@ impl<'a> ServiceStatusUpdate<'a> {
         self
     }
 
+    /// Convenience: Compiling phase
+    fn compiling() -> Self {
+        Self::new(ServicePhase::Compiling)
+            .message("Compiling service dependencies")
+            .condition("Compiling", ConditionStatus::True, "DependencyCheck")
+    }
+
+    /// Convenience: Ready phase
+    fn ready(generation: Option<i64>) -> Self {
+        Self::new(ServicePhase::Ready)
+            .message("Service is operational")
+            .condition("Ready", ConditionStatus::True, "ServiceReady")
+            .compiled_at_now()
+            .observed_generation(generation)
+    }
+
+    /// Convenience: Failed phase
     fn failed(message: &'a str, generation: Option<i64>) -> Self {
-        Self {
-            phase: ServicePhase::Failed,
-            message,
-            condition_type: "Ready",
-            condition_status: ConditionStatus::False,
-            reason: "ValidationFailed",
-            set_compiled_at: false,
-            observed_generation: generation,
-            cost: None,
-        }
+        Self::new(ServicePhase::Failed)
+            .message(message)
+            .condition("Ready", ConditionStatus::False, "ValidationFailed")
+            .observed_generation(generation)
     }
 }
 

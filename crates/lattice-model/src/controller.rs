@@ -15,20 +15,26 @@
 //! serving container starts. On model spec change, the init container args change →
 //! Kthena rolling update → zero downtime model updates.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use kube::api::{Api, DeleteParams, DynamicObject, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{error, info, warn};
 
+#[cfg(test)]
+use mockall::automock;
+
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    CostEstimate, LatticeModel, LatticeModelStatus, ModelCondition,
-    ModelServingPhase, ProviderType,
+    CostEstimate, LatticeModel, LatticeModelStatus, MetricsScraper, MetricsSnapshot,
+    ModelCondition, ModelServingPhase, ProviderType,
 };
+use lattice_common::events::EventPublisher;
 use lattice_cost::CostProvider;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
@@ -46,34 +52,225 @@ const REQUEUE_LOADING: Duration = Duration::from_secs(15);
 const REQUEUE_SERVING: Duration = Duration::from_secs(60);
 /// Requeue interval for fast retry after spec change in Failed state
 const REQUEUE_RETRY: Duration = Duration::from_secs(5);
+// =============================================================================
+// Trait for dependency injection and testability
+// =============================================================================
+
+/// Trait abstracting Kubernetes client operations for LatticeModel
+#[cfg_attr(test, automock)]
+#[async_trait]
+pub trait ModelKubeClient: Send + Sync {
+    /// Patch the status of a LatticeModel
+    async fn patch_model_status(
+        &self,
+        name: &str,
+        namespace: &str,
+        status: &LatticeModelStatus,
+    ) -> Result<(), ModelError>;
+
+    /// Apply compiled model resources in layers
+    async fn apply_compiled_model(
+        &self,
+        name: &str,
+        namespace: &str,
+        compiled: &CompiledModel,
+    ) -> Result<(), ModelError>;
+
+    /// Check ModelServing status and return derived state + conditions
+    async fn check_model_serving_status(
+        &self,
+        serving_name: &str,
+        namespace: &str,
+    ) -> (ModelServingState, Option<Vec<ModelCondition>>);
+
+    /// Read conditions from a ModelServing resource
+    async fn read_model_serving_conditions(
+        &self,
+        serving_name: &str,
+        namespace: &str,
+    ) -> Option<Vec<ModelCondition>>;
+
+    /// Delete all ModelServing resources owned by a model
+    async fn delete_model_serving(
+        &self,
+        model_name: &str,
+        namespace: &str,
+    ) -> Result<(), ModelError>;
+
+    /// Clean up graph nodes and K8s resources for roles removed from the spec
+    async fn cleanup_removed_roles(
+        &self,
+        model_name: &str,
+        namespace: &str,
+        old_keys: &BTreeSet<String>,
+        new_keys: &BTreeSet<String>,
+    );
+}
+
+/// Real Kubernetes client implementation
+pub struct ModelKubeClientImpl {
+    client: Client,
+    registry: Arc<CrdRegistry>,
+}
+
+impl ModelKubeClientImpl {
+    /// Create a new ModelKubeClientImpl wrapping the given client and CRD registry
+    pub fn new(client: Client, registry: Arc<CrdRegistry>) -> Self {
+        Self { client, registry }
+    }
+}
+
+#[async_trait]
+impl ModelKubeClient for ModelKubeClientImpl {
+    async fn patch_model_status(
+        &self,
+        name: &str,
+        namespace: &str,
+        status: &LatticeModelStatus,
+    ) -> Result<(), ModelError> {
+        lattice_common::kube_utils::patch_resource_status::<LatticeModel>(
+            &self.client,
+            name,
+            namespace,
+            status,
+            FIELD_MANAGER,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn apply_compiled_model(
+        &self,
+        _name: &str,
+        namespace: &str,
+        compiled: &CompiledModel,
+    ) -> Result<(), ModelError> {
+        let params = PatchParams::apply(FIELD_MANAGER).force();
+
+        lattice_common::kube_utils::ensure_namespace(
+            &self.client,
+            namespace,
+            None,
+            FIELD_MANAGER,
+        )
+        .await?;
+
+        let ms_api = self
+            .registry
+            .resolve(CrdKind::ModelServing)
+            .await?
+            .ok_or(ModelError::KthenaCrdMissing)?;
+
+        apply_layers(
+            &self.client,
+            namespace,
+            compiled,
+            &self.registry,
+            &ms_api,
+            &params,
+        )
+        .await
+    }
+
+    async fn check_model_serving_status(
+        &self,
+        serving_name: &str,
+        namespace: &str,
+    ) -> (ModelServingState, Option<Vec<ModelCondition>>) {
+        let conditions =
+            self.read_model_serving_conditions(serving_name, namespace).await;
+        let state = derive_model_serving_state(conditions.as_deref());
+        (state, conditions)
+    }
+
+    async fn read_model_serving_conditions(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Option<Vec<ModelCondition>> {
+        read_model_serving_conditions_impl(&self.client, name, namespace, &self.registry).await
+    }
+
+    async fn delete_model_serving(
+        &self,
+        model_name: &str,
+        namespace: &str,
+    ) -> Result<(), ModelError> {
+        delete_model_serving_impl(&self.client, &self.registry, model_name, namespace).await
+    }
+
+    async fn cleanup_removed_roles(
+        &self,
+        model_name: &str,
+        namespace: &str,
+        old_keys: &BTreeSet<String>,
+        new_keys: &BTreeSet<String>,
+    ) {
+        cleanup_removed_roles_impl(
+            &self.client,
+            &self.registry,
+            model_name,
+            namespace,
+            old_keys,
+            new_keys,
+        )
+        .await;
+    }
+}
+
 /// Shared context for the LatticeModel controller
 pub struct ModelContext {
-    pub client: Client,
+    pub kube: Arc<dyn ModelKubeClient>,
     pub graph: Arc<ServiceGraph>,
     pub cluster_name: String,
     pub provider_type: ProviderType,
     pub cedar: Arc<PolicyEngine>,
-    pub registry: Arc<CrdRegistry>,
+    pub events: Arc<dyn EventPublisher>,
+    pub metrics_scraper: Arc<dyn MetricsScraper>,
     /// Cost provider for estimating workload costs (None = cost estimation disabled)
     pub cost_provider: Option<Arc<dyn CostProvider>>,
 }
 
 impl ModelContext {
+    /// Create a new ModelContext with the given dependencies
     pub fn new(
-        client: Client,
+        kube: Arc<dyn ModelKubeClient>,
         graph: Arc<ServiceGraph>,
         cluster_name: String,
         provider_type: ProviderType,
         cedar: Arc<PolicyEngine>,
-        registry: Arc<CrdRegistry>,
+        events: Arc<dyn EventPublisher>,
+        metrics_scraper: Arc<dyn MetricsScraper>,
     ) -> Self {
         Self {
-            client,
+            kube,
             graph,
             cluster_name,
             provider_type,
             cedar,
-            registry,
+            events,
+            metrics_scraper,
+            cost_provider: None,
+        }
+    }
+
+    /// Create a context for testing with mock clients.
+    ///
+    /// Uses a permit-all Cedar PolicyEngine so compilation doesn't fail on
+    /// security overrides in unit tests.
+    #[cfg(test)]
+    pub fn for_testing(kube: Arc<dyn ModelKubeClient>) -> Self {
+        Self {
+            kube,
+            graph: Arc::new(ServiceGraph::new()),
+            cluster_name: "test-cluster".to_string(),
+            provider_type: ProviderType::Docker,
+            cedar: Arc::new(
+                PolicyEngine::with_policies("permit(principal, action, resource);")
+                    .expect("permit-all policy should parse"),
+            ),
+            events: Arc::new(lattice_common::NoopEventPublisher),
+            metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
             cost_provider: None,
         }
     }
@@ -143,7 +340,7 @@ pub async fn reconcile(
                         let msg = format!("Compile failed (will retry): {}", e);
                         let _ = StatusUpdate::new(ModelServingPhase::Pending, &cost)
                             .message(&msg)
-                            .apply(&ctx.client, &model, namespace)
+                            .apply(ctx.kube.as_ref(), &model, namespace)
                             .await;
                     } else {
                         // Permanent — go to Failed
@@ -152,7 +349,7 @@ pub async fn reconcile(
                         let _ = StatusUpdate::new(ModelServingPhase::Failed, &cost)
                             .message(&msg)
                             .observed_generation(generation)
-                            .apply(&ctx.client, &model, namespace)
+                            .apply(ctx.kube.as_ref(), &model, namespace)
                             .await;
                     }
                     return Err(e);
@@ -161,7 +358,7 @@ pub async fn reconcile(
 
             register_graph(&model, &ctx.graph, namespace);
 
-            if let Err(e) = apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await {
+            if let Err(e) = ctx.kube.apply_compiled_model(&name, namespace, &compiled).await {
                 let msg = format!("Apply failed (will retry): {}", e);
                 // Stay in Pending — apply errors are transient (webhook not ready,
                 // API server hiccup). error_policy requeues after 30s.
@@ -169,7 +366,7 @@ pub async fn reconcile(
                 // and register_graph will re-register them on the next reconcile anyway.
                 let _ = StatusUpdate::new(ModelServingPhase::Pending, &cost)
                     .message(&msg)
-                    .apply(&ctx.client, &model, namespace)
+                    .apply(ctx.kube.as_ref(), &model, namespace)
                     .await;
                 return Err(e);
             }
@@ -181,7 +378,7 @@ pub async fn reconcile(
                 .observed_generation(generation)
                 .auto_topology(compiled.auto_topology)
                 .applied_roles(role_keys)
-                .apply(&ctx.client, &model, namespace)
+                .apply(ctx.kube.as_ref(), &model, namespace)
                 .await?;
             Ok(Action::requeue(REQUEUE_LOADING))
         }
@@ -194,7 +391,7 @@ pub async fn reconcile(
                 info!(model = %name, "spec changed during Loading, recompiling");
                 StatusUpdate::new(ModelServingPhase::Pending, &cost)
                     .message("Spec changed, recompiling")
-                    .apply(&ctx.client, &model, namespace)
+                    .apply(ctx.kube.as_ref(), &model, namespace)
                     .await?;
                 return Ok(Action::requeue(REQUEUE_RETRY));
             }
@@ -203,8 +400,7 @@ pub async fn reconcile(
             // until model download completes.
 
             let (state, conditions) =
-                check_model_serving_status(&ctx.client, &serving_name, namespace, &ctx.registry)
-                    .await;
+                ctx.kube.check_model_serving_status(&serving_name, namespace).await;
 
             match state {
                 ModelServingState::Available => {
@@ -215,7 +411,7 @@ pub async fn reconcile(
                     if let Some(c) = conditions {
                         s = s.conditions(c);
                     }
-                    s.apply(&ctx.client, &model, namespace).await?;
+                    s.apply(ctx.kube.as_ref(), &model, namespace).await?;
                     Ok(Action::requeue(REQUEUE_SERVING))
                 }
                 ModelServingState::Failed => {
@@ -227,7 +423,7 @@ pub async fn reconcile(
                     if let Some(c) = conditions {
                         s = s.conditions(c);
                     }
-                    s.apply(&ctx.client, &model, namespace).await?;
+                    s.apply(ctx.kube.as_ref(), &model, namespace).await?;
                     Ok(Action::await_change())
                 }
                 ModelServingState::Progressing => Ok(Action::requeue(REQUEUE_LOADING)),
@@ -261,7 +457,7 @@ pub async fn reconcile(
                             if let Some(gen) = observed {
                                 s = s.observed_generation(gen);
                             }
-                            let _ = s.apply(&ctx.client, &model, namespace).await;
+                            let _ = s.apply(ctx.kube.as_ref(), &model, namespace).await;
                         } else {
                             // Permanent — go to Failed
                             cleanup_graph(&model, &ctx.graph, namespace);
@@ -269,7 +465,7 @@ pub async fn reconcile(
                             let _ = StatusUpdate::new(ModelServingPhase::Failed, &cost)
                                 .message(&msg)
                                 .observed_generation(generation)
-                                .apply(&ctx.client, &model, namespace)
+                                .apply(ctx.kube.as_ref(), &model, namespace)
                                 .await;
                         }
                         return Err(e);
@@ -278,16 +474,14 @@ pub async fn reconcile(
                 register_graph(&model, &ctx.graph, namespace);
 
                 // Clean up graph nodes and K8s resources for removed roles
-                cleanup_removed_roles(
-                    &ctx.client,
-                    &ctx.graph,
-                    &ctx.registry,
-                    &name,
-                    namespace,
-                    &old_role_keys,
-                    &new_role_keys,
-                )
-                .await;
+                ctx.kube
+                    .cleanup_removed_roles(&name, namespace, &old_role_keys, &new_role_keys)
+                    .await;
+                // Also clean graph nodes for removed roles
+                let removed: Vec<&String> = old_role_keys.difference(&new_role_keys).collect();
+                for role_key in &removed {
+                    ctx.graph.delete_service(namespace, role_key);
+                }
 
                 // When roles are added or removed, the gang policy's
                 // minRoleReplicas key set changes. Volcano marks that field
@@ -301,7 +495,7 @@ pub async fn reconcile(
                 // the next reconcile sees old == new, skips the delete, and
                 // falls through to apply_compiled_model for a clean recreate.
                 if old_role_keys != new_role_keys {
-                    delete_model_serving(&ctx.client, &ctx.registry, &name, namespace).await?;
+                    ctx.kube.delete_model_serving(&name, namespace).await?;
                     // Persist the new role keys so the next reconcile sees
                     // old == new and falls through to apply. Keep the OLD
                     // observed_generation so spec_changed_since_compilation
@@ -312,12 +506,12 @@ pub async fn reconcile(
                     if let Some(gen) = observed {
                         s = s.observed_generation(gen);
                     }
-                    let _ = s.apply(&ctx.client, &model, namespace).await;
+                    let _ = s.apply(ctx.kube.as_ref(), &model, namespace).await;
                     info!(model = %name, "deleted ModelServing for role change, requeuing for clean recreate");
                     return Ok(Action::requeue(REQUEUE_LOADING));
                 }
 
-                if let Err(e) = apply_compiled_model(&ctx.client, namespace, &compiled, &ctx).await
+                if let Err(e) = ctx.kube.apply_compiled_model(&name, namespace, &compiled).await
                 {
                     // Apply errors are transient — stay in Serving, let
                     // error_policy retry. Keep the old observed_generation so
@@ -327,7 +521,7 @@ pub async fn reconcile(
                     if let Some(gen) = observed {
                         s = s.observed_generation(gen);
                     }
-                    let _ = s.apply(&ctx.client, &model, namespace).await;
+                    let _ = s.apply(ctx.kube.as_ref(), &model, namespace).await;
                     return Err(e);
                 }
                 // Transition to Loading so the next reconcile checks
@@ -338,31 +532,33 @@ pub async fn reconcile(
                     .observed_generation(generation)
                     .auto_topology(compiled.auto_topology)
                     .applied_roles(role_keys)
-                    .apply(&ctx.client, &model, namespace)
+                    .apply(ctx.kube.as_ref(), &model, namespace)
                     .await?;
                 return Ok(Action::requeue(REQUEUE_LOADING));
             }
 
-            // No spec change — monitor health via ModelServing conditions
+            // No spec change — monitor health and scrape metrics
             let message = "Model is serving inference requests";
-            if status_check::is_status_unchanged(
-                model.status.as_ref(),
-                &ModelServingPhase::Serving,
-                Some(message),
-                Some(generation),
-            ) {
-                return Ok(Action::requeue(REQUEUE_SERVING));
-            }
             let conditions =
-                read_model_serving_conditions(&ctx.client, &serving_name, namespace, &ctx.registry)
-                    .await;
+                ctx.kube.read_model_serving_conditions(&serving_name, namespace).await;
+
+            // Scrape metrics if mappings are defined
+            let snapshot = lattice_common::crd::scrape_if_configured(
+                ctx.metrics_scraper.as_ref(),
+                model.spec.observability.as_ref(),
+                namespace,
+                &name,
+            )
+            .await;
+
             let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost)
                 .message(message)
-                .observed_generation(generation);
+                .observed_generation(generation)
+                .metrics(snapshot);
             if let Some(c) = conditions {
                 s = s.conditions(c);
             }
-            s.apply(&ctx.client, &model, namespace).await?;
+            s.apply(ctx.kube.as_ref(), &model, namespace).await?;
             Ok(Action::requeue(REQUEUE_SERVING))
         }
         ModelServingPhase::Failed => {
@@ -374,7 +570,7 @@ pub async fn reconcile(
                 info!(model = %name, observed = ?observed, current = generation, "spec changed while Failed, retrying");
                 StatusUpdate::new(ModelServingPhase::Pending, &cost)
                     .message("Retrying after spec change")
-                    .apply(&ctx.client, &model, namespace)
+                    .apply(ctx.kube.as_ref(), &model, namespace)
                     .await?;
                 return Ok(Action::requeue(REQUEUE_RETRY));
             }
@@ -418,19 +614,14 @@ fn spec_role_keys(
         .collect()
 }
 
-/// Clean up graph nodes and K8s resources for roles that were removed from the spec.
-///
-/// When a model spec changes from e.g. {prefill, decode} to {decode}, the old
-/// "prefill" graph node persists (affecting bilateral agreements) and the old
-/// LatticeMeshMember resource persists (keeping stale policies).
-async fn cleanup_removed_roles(
+/// Clean up K8s resources for roles that were removed from the spec.
+async fn cleanup_removed_roles_impl(
     client: &Client,
-    graph: &ServiceGraph,
     registry: &CrdRegistry,
     model_name: &str,
     namespace: &str,
-    old_role_names: &std::collections::BTreeSet<String>,
-    new_role_names: &std::collections::BTreeSet<String>,
+    old_role_names: &BTreeSet<String>,
+    new_role_names: &BTreeSet<String>,
 ) {
     let removed: Vec<&String> = old_role_names.difference(new_role_names).collect();
     if removed.is_empty() {
@@ -440,9 +631,6 @@ async fn cleanup_removed_roles(
     info!(model = %model_name, removed = ?removed, "cleaning up removed role resources");
 
     for role_key in &removed {
-        // Remove from service graph
-        graph.delete_service(namespace, role_key);
-
         // Delete orphaned LatticeMeshMember
         match registry.resolve(CrdKind::MeshMember).await {
             Ok(Some(mm_ar)) => {
@@ -485,7 +673,7 @@ async fn cleanup_removed_roles(
 /// Volcano marks `gangPolicy.minRoleReplicas` as immutable. When the role set
 /// changes (roles added or removed), an SSA update would get a 422. Deleting
 /// first lets the re-apply create a fresh resource with the new suffix.
-async fn delete_model_serving(
+async fn delete_model_serving_impl(
     client: &Client,
     registry: &CrdRegistry,
     model_name: &str,
@@ -509,26 +697,6 @@ async fn delete_model_serving(
         }
     }
     Ok(())
-}
-
-/// Apply compiled model resources in layers using ApplyBatch
-async fn apply_compiled_model(
-    client: &Client,
-    namespace: &str,
-    compiled: &CompiledModel,
-    ctx: &ModelContext,
-) -> Result<(), ModelError> {
-    let params = PatchParams::apply(FIELD_MANAGER).force();
-
-    lattice_common::kube_utils::ensure_namespace(client, namespace, None, FIELD_MANAGER).await?;
-
-    let ms_api = ctx
-        .registry
-        .resolve(CrdKind::ModelServing)
-        .await?
-        .ok_or(ModelError::KthenaCrdMissing)?;
-
-    apply_layers(client, namespace, compiled, &ctx.registry, &ms_api, &params).await
 }
 
 async fn apply_layers(
@@ -679,14 +847,18 @@ async fn apply_layers(
     Ok(())
 }
 
-enum ModelServingState {
+/// High-level state derived from ModelServing conditions
+pub enum ModelServingState {
+    /// ModelServing is available and serving requests
     Available,
+    /// ModelServing has failed
     Failed,
+    /// ModelServing is still progressing
     Progressing,
 }
 
 /// Read conditions from a ModelServing resource and convert to ModelCondition structs.
-async fn read_model_serving_conditions(
+async fn read_model_serving_conditions_impl(
     client: &Client,
     name: &str,
     namespace: &str,
@@ -763,17 +935,6 @@ fn derive_model_serving_state(conditions: Option<&[ModelCondition]>) -> ModelSer
     ModelServingState::Progressing
 }
 
-async fn check_model_serving_status(
-    client: &Client,
-    name: &str,
-    namespace: &str,
-    registry: &CrdRegistry,
-) -> (ModelServingState, Option<Vec<ModelCondition>>) {
-    let conditions = read_model_serving_conditions(client, name, namespace, registry).await;
-    let state = derive_model_serving_state(conditions.as_deref());
-    (state, conditions)
-}
-
 /// Check if the spec changed since the last compilation.
 ///
 /// Returns `true` if `observed_generation` (set when resources were last compiled)
@@ -793,6 +954,8 @@ struct StatusUpdate<'a> {
     auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
     applied_roles: Option<Vec<String>>,
     cost: Option<CostEstimate>,
+    metrics: Option<MetricsSnapshot>,
+    endpoint: Option<String>,
 }
 
 impl<'a> StatusUpdate<'a> {
@@ -805,6 +968,8 @@ impl<'a> StatusUpdate<'a> {
             auto_topology: None,
             applied_roles: None,
             cost: cost.clone(),
+            metrics: None,
+            endpoint: None,
         }
     }
 
@@ -833,16 +998,23 @@ impl<'a> StatusUpdate<'a> {
         self
     }
 
+    fn metrics(mut self, snapshot: Option<MetricsSnapshot>) -> Self {
+        self.metrics = snapshot;
+        self
+    }
+
     async fn apply(
         self,
-        client: &Client,
+        kube: &dyn ModelKubeClient,
         model: &LatticeModel,
         namespace: &str,
     ) -> Result<(), ModelError> {
-        // Skip redundant writes when not updating conditions or auto_topology.
-        // Condition updates (from ModelServing health checks) always write through.
+        // Skip redundant writes when not updating conditions, auto_topology, or metrics.
+        // Condition/metrics updates always write through.
         if self.conditions.is_none()
             && self.auto_topology.is_none()
+            && self.metrics.is_none()
+            && self.endpoint.is_none()
             && status_check::is_status_unchanged(
                 model.status.as_ref(),
                 &self.phase,
@@ -854,7 +1026,7 @@ impl<'a> StatusUpdate<'a> {
         }
 
         let name = model.name_any();
-        // Preserve auto_topology and applied_roles from existing status unless explicitly overridden
+        // Preserve fields from existing status unless explicitly overridden
         let auto_topology = self
             .auto_topology
             .or_else(|| model.status.as_ref().and_then(|s| s.auto_topology.clone()));
@@ -862,6 +1034,12 @@ impl<'a> StatusUpdate<'a> {
             .applied_roles
             .or_else(|| model.status.as_ref().and_then(|s| s.applied_roles.clone()));
         let cost = self.cost;
+        let metrics = self
+            .metrics
+            .or_else(|| model.status.as_ref().and_then(|s| s.metrics.clone()));
+        let endpoint = self
+            .endpoint
+            .or_else(|| model.status.as_ref().and_then(|s| s.endpoint.clone()));
         let status = LatticeModelStatus {
             phase: self.phase,
             message: self.message.map(|m| m.to_string()),
@@ -870,15 +1048,10 @@ impl<'a> StatusUpdate<'a> {
             auto_topology,
             applied_roles,
             cost,
+            metrics,
+            endpoint,
         };
-        lattice_common::kube_utils::patch_resource_status::<LatticeModel>(
-            client,
-            &name,
-            namespace,
-            &status,
-            FIELD_MANAGER,
-        )
-        .await?;
+        kube.patch_model_status(&name, namespace, &status).await?;
         Ok(())
     }
 }
@@ -886,6 +1059,187 @@ impl<'a> StatusUpdate<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use lattice_common::crd::ModelRoleSpec;
+    use std::collections::BTreeMap;
+
+    // =========================================================================
+    // Test Fixtures
+    // =========================================================================
+
+    fn make_minimal_model(name: &str) -> LatticeModel {
+        LatticeModel {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("test-ns".to_string()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            spec: lattice_common::crd::LatticeModelSpec {
+                roles: BTreeMap::from([("serving".to_string(), make_role())]),
+                ..Default::default()
+            },
+            status: None,
+        }
+    }
+
+    // =========================================================================
+    // Reconcile Story Tests
+    // =========================================================================
+
+    /// Pending model compiles, applies, and transitions to Loading
+    #[tokio::test]
+    async fn pending_transitions_to_loading() {
+        let model = Arc::new(make_minimal_model("my-model"));
+
+        let mut mock = MockModelKubeClient::new();
+        mock.expect_patch_model_status()
+            .returning(|_, _, _| Ok(()));
+        mock.expect_apply_compiled_model()
+            .returning(|_, _, _| Ok(()));
+
+        let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
+
+        let action = reconcile(model, ctx)
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(action, Action::requeue(REQUEUE_LOADING));
+    }
+
+    /// Loading with Available ModelServing transitions to Serving
+    #[tokio::test]
+    async fn loading_transitions_to_serving_when_available() {
+        let mut model = make_minimal_model("my-model");
+        model.status = Some(LatticeModelStatus {
+            phase: ModelServingPhase::Loading,
+            observed_generation: Some(1),
+            applied_roles: Some(vec!["my-model-serving".to_string()]),
+            ..Default::default()
+        });
+        let model = Arc::new(model);
+
+        let mut mock = MockModelKubeClient::new();
+        mock.expect_check_model_serving_status()
+            .returning(|_, _| (ModelServingState::Available, None));
+        mock.expect_patch_model_status()
+            .returning(|_, _, _| Ok(()));
+
+        let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
+
+        let action = reconcile(model, ctx)
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(action, Action::requeue(REQUEUE_SERVING));
+    }
+
+    /// Loading with Failed ModelServing transitions to Failed
+    #[tokio::test]
+    async fn loading_transitions_to_failed_when_model_serving_fails() {
+        let mut model = make_minimal_model("my-model");
+        model.status = Some(LatticeModelStatus {
+            phase: ModelServingPhase::Loading,
+            observed_generation: Some(1),
+            applied_roles: Some(vec!["my-model-serving".to_string()]),
+            ..Default::default()
+        });
+        let model = Arc::new(model);
+
+        let mut mock = MockModelKubeClient::new();
+        mock.expect_check_model_serving_status()
+            .returning(|_, _| (ModelServingState::Failed, None));
+        mock.expect_patch_model_status()
+            .returning(|_, _, _| Ok(()));
+
+        let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
+
+        let action = reconcile(model, ctx)
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(action, Action::await_change());
+    }
+
+    /// Serving with no spec change requeues for health monitoring
+    #[tokio::test]
+    async fn serving_steady_state_requeues() {
+        let mut model = make_minimal_model("my-model");
+        model.status = Some(LatticeModelStatus {
+            phase: ModelServingPhase::Serving,
+            observed_generation: Some(1),
+            applied_roles: Some(vec!["my-model-serving".to_string()]),
+            ..Default::default()
+        });
+        let model = Arc::new(model);
+
+        let mut mock = MockModelKubeClient::new();
+        mock.expect_read_model_serving_conditions()
+            .returning(|_, _| None);
+        mock.expect_patch_model_status()
+            .returning(|_, _, _| Ok(()));
+
+        let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
+
+        let action = reconcile(model, ctx)
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(action, Action::requeue(REQUEUE_SERVING));
+    }
+
+    /// Serving with spec change triggers recompile → Loading
+    #[tokio::test]
+    async fn serving_spec_change_triggers_recompile() {
+        let mut model = make_minimal_model("my-model");
+        model.metadata.generation = Some(2);
+        model.status = Some(LatticeModelStatus {
+            phase: ModelServingPhase::Serving,
+            observed_generation: Some(1),
+            applied_roles: Some(vec!["my-model-serving".to_string()]),
+            ..Default::default()
+        });
+        let model = Arc::new(model);
+
+        let mut mock = MockModelKubeClient::new();
+        mock.expect_apply_compiled_model()
+            .returning(|_, _, _| Ok(()));
+        mock.expect_cleanup_removed_roles()
+            .returning(|_, _, _, _| ());
+        mock.expect_patch_model_status()
+            .returning(|_, _, _| Ok(()));
+
+        let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
+
+        let action = reconcile(model, ctx)
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(action, Action::requeue(REQUEUE_LOADING));
+    }
+
+    /// Failed with spec change goes back to Pending for retry
+    #[tokio::test]
+    async fn failed_spec_change_retries() {
+        let mut model = make_minimal_model("my-model");
+        model.metadata.generation = Some(2);
+        model.status = Some(LatticeModelStatus {
+            phase: ModelServingPhase::Failed,
+            observed_generation: Some(1),
+            ..Default::default()
+        });
+        let model = Arc::new(model);
+
+        let mut mock = MockModelKubeClient::new();
+        mock.expect_patch_model_status()
+            .returning(|_, _, _| Ok(()));
+
+        let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
+
+        let action = reconcile(model, ctx)
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(action, Action::requeue(REQUEUE_RETRY));
+    }
+
+    // =========================================================================
+    // Status helper tests
+    // =========================================================================
 
     fn make_status(
         phase: ModelServingPhase,
@@ -899,6 +1253,8 @@ mod tests {
             auto_topology: None,
             applied_roles: None,
             cost: None,
+            metrics: None,
+            endpoint: None,
         }
     }
 

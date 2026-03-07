@@ -244,17 +244,27 @@ pub async fn build_job_controllers(
     cedar: Arc<PolicyEngine>,
     graph: Arc<lattice_common::graph::ServiceGraph>,
     registry: Arc<CrdRegistry>,
+    metrics_scraper: Arc<crate::metrics::MetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
-    let mut job_ctx = lattice_job::controller::JobContext::new(
+    let kube_client = Arc::new(lattice_job::controller::JobKubeClientImpl::new(
         client.clone(),
+        registry,
+    ));
+    let events = Arc::new(lattice_common::KubeEventPublisher::new(
+        client.clone(),
+        "lattice-job-controller",
+    ));
+    let mut job_ctx = lattice_job::controller::JobContext::new(
+        kube_client,
         graph,
         cluster_name,
         provider_type,
         cedar,
-        registry,
+        events,
+        metrics_scraper,
     );
     job_ctx.cost_provider = cost_provider;
     let ctx = Arc::new(job_ctx);
@@ -283,17 +293,27 @@ pub async fn build_model_controllers(
     cedar: Arc<PolicyEngine>,
     graph: Arc<lattice_common::graph::ServiceGraph>,
     registry: Arc<CrdRegistry>,
+    metrics_scraper: Arc<crate::metrics::MetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
-    let mut model_ctx = lattice_model::controller::ModelContext::new(
+    let kube_client = Arc::new(lattice_model::controller::ModelKubeClientImpl::new(
         client.clone(),
+        registry,
+    ));
+    let events = Arc::new(lattice_common::KubeEventPublisher::new(
+        client.clone(),
+        "lattice-model-controller",
+    ));
+    let mut model_ctx = lattice_model::controller::ModelContext::new(
+        kube_client,
         graph,
         cluster_name,
         provider_type,
         cedar,
-        registry,
+        events,
+        metrics_scraper,
     );
     model_ctx.cost_provider = cost_provider;
     let ctx = Arc::new(model_ctx);

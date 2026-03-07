@@ -55,22 +55,51 @@ impl CompilerPhase for VMServiceScrapePhase {
             return Ok(());
         }
 
-        // Only generate a scrape config for services that explicitly declare
-        // a port named "metrics". Many services expose HTTP/gRPC ports where
-        // they don't serve Prometheus metrics. Requiring an explicit "metrics"
-        // port is opt-in: zero config for those who add it, zero noise for
-        // those who don't.
-        let has_metrics_port = ctx
+        // Resolve which port to scrape:
+        // 1. If observability.metrics.port is set → use that name, error if missing
+        // 2. Else if port named "metrics" exists → use it (default behavior)
+        // 3. Else if observability.metrics.mappings is non-empty → compile error
+        // 4. Else → no-op
+        let obs_metrics = ctx
+            .service
+            .spec
+            .observability
+            .as_ref()
+            .and_then(|o| o.metrics.as_ref());
+
+        let service_ports = ctx
             .service
             .spec
             .workload
             .service
-            .as_ref()
-            .and_then(|svc| svc.ports.get("metrics"))
-            .is_some();
-        if !has_metrics_port {
+            .as_ref();
+
+        let metrics_port_name = if let Some(explicit) = obs_metrics.and_then(|m| m.port.as_deref()) {
+            // Explicit port override — must exist in service.ports
+            let exists = service_ports
+                .and_then(|svc| svc.ports.get(explicit))
+                .is_some();
+            if !exists {
+                return Err(format!(
+                    "observability.metrics.port '{}' not found in service.ports",
+                    explicit
+                ));
+            }
+            explicit.to_string()
+        } else if service_ports.and_then(|svc| svc.ports.get("metrics")).is_some() {
+            // Default port named "metrics"
+            "metrics".to_string()
+        } else if obs_metrics.map(|m| m.has_mappings()).unwrap_or(false) {
+            // Mappings defined but no metrics port to scrape
+            return Err(
+                "observability.metrics.mappings defined but no 'metrics' port in service.ports \
+                 (add a port named 'metrics' or set observability.metrics.port)"
+                    .to_string(),
+            );
+        } else {
+            // No metrics port, no mappings → no-op
             return Ok(());
-        }
+        };
 
         let ar = self
             .resolve_api_resource()
@@ -102,7 +131,7 @@ impl CompilerPhase for VMServiceScrapePhase {
                     }
                 },
                 "endpoints": [{
-                    "port": "metrics",
+                    "port": metrics_port_name,
                     "path": "/metrics",
                     "interval": "30s"
                 }]

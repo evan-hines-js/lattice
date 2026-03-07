@@ -145,6 +145,26 @@ pub mod reasons {
     pub const SECURITY_OVERRIDE_DENIED: &str = "SecurityOverrideDenied";
     /// Volume access denied (owner consent or Cedar policy)
     pub const VOLUME_ACCESS_DENIED: &str = "VolumeAccessDenied";
+
+    // Model lifecycle events
+    /// Model compilation started, loading artifacts
+    pub const MODEL_LOADING: &str = "ModelLoading";
+    /// Model serving endpoint is available
+    pub const MODEL_SERVING: &str = "ModelServing";
+    /// Model failed to load or serve
+    pub const MODEL_FAILED: &str = "ModelFailed";
+    /// Model spec changed, triggering recompile
+    pub const MODEL_SPEC_CHANGED: &str = "ModelSpecChanged";
+
+    // Job lifecycle events
+    /// Job submitted to Volcano scheduler
+    pub const JOB_SUBMITTED: &str = "JobSubmitted";
+    /// Job is actively running
+    pub const JOB_RUNNING: &str = "JobRunning";
+    /// Job completed successfully
+    pub const JOB_SUCCEEDED: &str = "JobSucceeded";
+    /// Job failed
+    pub const JOB_FAILED: &str = "JobFailed";
 }
 
 /// Well-known event action strings.
@@ -183,6 +203,10 @@ mod tests {
         assert_eq!(reasons::PROVISIONING_STARTED, "ProvisioningStarted");
         assert_eq!(reasons::CLUSTER_READY, "ClusterReady");
         assert_eq!(reasons::COMPILATION_SUCCESS, "CompilationSuccess");
+        assert_eq!(reasons::MODEL_LOADING, "ModelLoading");
+        assert_eq!(reasons::MODEL_SERVING, "ModelServing");
+        assert_eq!(reasons::JOB_SUBMITTED, "JobSubmitted");
+        assert_eq!(reasons::JOB_SUCCEEDED, "JobSucceeded");
     }
 
     #[test]
