@@ -227,14 +227,15 @@ pub struct GpuCordonPlan {
 /// Build a cluster-level GPU cordon plan respecting the maximum cordon threshold.
 ///
 /// Drains only proceed for confirmed GPU loss (GPUs went to 0) after the drain
-/// delay has elapsed — `determine_gpu_action` handles this timing. The caller
-/// in `reconcile_gpu_health` additionally checks that other GPU capacity exists
-/// in the cluster before executing drains.
+/// delay has elapsed — `determine_gpu_action` handles this timing.
 ///
 /// Cordons are subject to the threshold: if >50% of GPU nodes are already cordoned,
 /// new cordons are suppressed. If pods with priority > 0 are pending and we're at
 /// the threshold, we selectively uncordon the lowest-confidence nodes (lowest
 /// anomaly score among cordoned nodes).
+///
+/// Nodes that have recovered (action == NoOp but still cordoned) are automatically
+/// uncordoned.
 pub fn build_gpu_cordon_plan(
     nodes: &[GpuNodeState],
     has_pending_gpu_pods: bool,
@@ -283,22 +284,27 @@ pub fn build_gpu_cordon_plan(
         .map(|n| n.node_name.clone())
         .collect();
 
+    // Recovery uncordon: nodes that are cordoned but have recovered (NoOp action)
+    // should be uncordoned. The GPU monitor sets health back to "normal" on
+    // recovery, which makes determine_gpu_action return NoOp.
+    let mut to_uncordon: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.is_cordoned && n.action == GpuAction::NoOp)
+        .filter(|n| !to_drain.contains(&n.node_name))
+        .map(|n| n.node_name.clone())
+        .collect();
+
     // Selective uncordon: if at threshold AND pending GPU pods exist,
-    // uncordon the lowest-confidence warning nodes (closest to normal).
-    // Only uncordon nodes that were cordoned by us (have gpu-health=warning),
-    // not nodes manually cordoned for other reasons.
-    let mut to_uncordon = Vec::new();
+    // also uncordon the lowest-confidence warning nodes (closest to normal).
     if has_pending_gpu_pods && cordoned_after_drains + to_cordon.len() >= max_cordoned {
-        // Find cordoned warning nodes sorted by anomaly score ascending (lowest first)
         let mut uncordon_candidates: Vec<&GpuNodeState> = nodes
             .iter()
             .filter(|n| n.is_cordoned && n.action == GpuAction::Cordon)
             .filter(|n| !to_drain.contains(&n.node_name))
+            .filter(|n| !to_uncordon.contains(&n.node_name))
             .collect();
         uncordon_candidates.sort_by(|a, b| a.anomaly_score.partial_cmp(&b.anomaly_score).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Uncordon enough to get below threshold, but only nodes with priority > 0
-        // pods waiting (for now, uncordon at most 1 per reconcile to be conservative)
         if let Some(best) = uncordon_candidates.first() {
             to_uncordon.push(best.node_name.clone());
         }
@@ -787,6 +793,18 @@ mod tests {
         ];
         let plan = build_gpu_cordon_plan(&nodes, false);
         assert!(plan.to_uncordon.is_empty());
+    }
+
+    #[test]
+    fn cordon_plan_recovery_uncordons_noop_nodes() {
+        // n1 was cordoned for a warning, but has since recovered (NoOp).
+        // It should be uncordoned automatically.
+        let nodes = vec![
+            gpu_node("n1", GpuAction::NoOp, 0.1, true), // recovered, still cordoned
+            gpu_node("n2", GpuAction::NoOp, 0.1, false),
+        ];
+        let plan = build_gpu_cordon_plan(&nodes, false);
+        assert_eq!(plan.to_uncordon, vec!["n1"]);
     }
 
     #[test]

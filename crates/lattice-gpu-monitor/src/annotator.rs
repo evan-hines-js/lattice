@@ -71,19 +71,23 @@ impl NodeAnnotator {
 
         // Track when GPU loss was first detected so the operator can enforce
         // a drain delay (don't drain on transient failures).
-        if loss_detected && self.last_loss != Some(true) {
+        let remove_loss_at = if loss_detected && self.last_loss != Some(true) {
             // Loss just started — stamp the detection time
             annotations.insert(ANNOTATION_GPU_LOSS_AT.to_string(), now);
-        } else if !loss_detected && self.last_loss == Some(true) {
-            // Loss resolved — clear the detection time (empty string = remove)
-            annotations.insert(ANNOTATION_GPU_LOSS_AT.to_string(), String::new());
-        }
+            false
+        } else {
+            // Loss resolved — remove the detection timestamp via null in merge patch
+            !loss_detected && self.last_loss == Some(true)
+        };
 
-        let patch = serde_json::json!({
+        let mut patch = serde_json::json!({
             "metadata": {
                 "annotations": annotations
             }
         });
+        if remove_loss_at {
+            patch["metadata"]["annotations"][ANNOTATION_GPU_LOSS_AT] = serde_json::Value::Null;
+        }
 
         let node_api: Api<Node> = Api::all(self.client.clone());
         node_api

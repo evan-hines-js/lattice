@@ -92,23 +92,33 @@ impl GpuLossChecker {
             .as_ref()
             .and_then(|s| s.allocatable.as_ref())
             .and_then(|a| a.get(GPU_RESOURCE))
-            .map(|q| parse_quantity_int(Some(q)) as u32)
-            .unwrap_or(0);
+            .map(|q| parse_quantity_int(Some(q)) as u32);
 
         debug!(
             node = %self.node_name,
-            allocatable,
+            allocatable = ?allocatable,
             known_gpu_count = ?self.known_gpu_count,
             "GPU loss check"
         );
 
-        // Hard loss: allocatable dropped to 0 — all GPUs are gone
-        if allocatable == 0 {
-            let previously_known = self.known_gpu_count.unwrap_or(0);
-            return Ok(GpuLossStatus::Detected { previously_known });
+        match allocatable {
+            // GPU resource field missing entirely — device plugin not registered
+            // or node has no GPU capacity annotation. This is NOT a loss event;
+            // don't false-positive on nodes that temporarily lose their plugin.
+            None => Ok(GpuLossStatus::Normal { allocatable: 0 }),
+            // Hard loss: allocatable dropped to 0 — all GPUs are gone.
+            // Only report as Detected if we previously saw GPUs (known_gpu_count > 0),
+            // otherwise this node never had GPUs from our perspective.
+            Some(0) => {
+                let previously_known = self.known_gpu_count.unwrap_or(0);
+                if previously_known > 0 {
+                    Ok(GpuLossStatus::Detected { previously_known })
+                } else {
+                    Ok(GpuLossStatus::Normal { allocatable: 0 })
+                }
+            }
+            Some(count) => Ok(GpuLossStatus::Normal { allocatable: count }),
         }
-
-        Ok(GpuLossStatus::Normal { allocatable })
     }
 }
 
