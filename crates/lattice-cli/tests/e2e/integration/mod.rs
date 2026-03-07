@@ -43,6 +43,7 @@ pub mod mesh;
 pub mod mesh_onboarding;
 pub mod model;
 pub mod multi_hop;
+pub mod observability;
 pub mod oidc;
 pub mod pivot;
 pub mod proxy;
