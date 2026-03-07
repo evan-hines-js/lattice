@@ -523,7 +523,7 @@ async fn reconcile_gpu_health(
             action,
             anomaly_score,
             is_cordoned,
-            has_gpu_requests: has_gpus,
+            has_gpu_capacity: has_gpus,
         });
     }
 
@@ -532,7 +532,7 @@ async fn reconcile_gpu_health(
     }
 
     // Check for pending pods with GPU requests (priority > 0)
-    let has_pending_gpu_pods = check_pending_gpu_pods(ctx).await;
+    let has_pending_gpu_pods = ctx.kube.has_pending_gpu_pods().await.unwrap_or(false);
 
     // Build the cordon plan with threshold enforcement
     let plan = build_gpu_cordon_plan(&gpu_node_states, has_pending_gpu_pods);
@@ -546,7 +546,7 @@ async fn reconcile_gpu_health(
     // Execute uncordons first (relieve pressure before adding more)
     for node_name in &plan.to_uncordon {
         info!(node = %node_name, "selectively uncordoning GPU node (lowest confidence, pending pods)");
-        if let Err(e) = uncordon_node(ctx, node_name).await {
+        if let Err(e) = ctx.kube.uncordon_node(node_name).await {
             warn!(node = %node_name, error = %e, "failed to uncordon node");
         }
         ctx.events
@@ -616,75 +616,6 @@ async fn reconcile_gpu_health(
 }
 
 /// Check if there are pending pods requesting GPU resources with priority > 0.
-async fn check_pending_gpu_pods(ctx: &Context) -> bool {
-    use k8s_openapi::api::core::v1::Pod;
-    use kube::api::{Api, ListParams};
-    use lattice_common::resources::GPU_RESOURCE;
-
-    let Some(ref client) = ctx.client else {
-        return false;
-    };
-
-    let pod_api: Api<Pod> = Api::all(client.clone());
-    let lp = ListParams::default().fields("status.phase=Pending");
-    let pods = match pod_api.list(&lp).await {
-        Ok(list) => list.items,
-        Err(e) => {
-            warn!(error = %e, "failed to list pending pods for GPU check");
-            return false;
-        }
-    };
-
-    pods.iter().any(|pod| {
-        let priority = pod
-            .spec
-            .as_ref()
-            .and_then(|s| s.priority)
-            .unwrap_or(0);
-        if priority <= 0 {
-            return false;
-        }
-        pod.spec
-            .as_ref()
-            .map(|spec| {
-                spec.containers.iter().any(|c| {
-                    c.resources
-                        .as_ref()
-                        .and_then(|r| r.requests.as_ref())
-                        .and_then(|req| req.get(GPU_RESOURCE))
-                        .map(|q| lattice_common::resources::parse_quantity_int(Some(q)) > 0)
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false)
-    })
-}
-
-/// Uncordon a node (set spec.unschedulable = false).
-async fn uncordon_node(ctx: &Context, name: &str) -> Result<(), Error> {
-    use k8s_openapi::api::core::v1::Node;
-    use kube::api::{Api, Patch, PatchParams};
-
-    let Some(ref client) = ctx.client else {
-        return Ok(());
-    };
-
-    let node_api: Api<Node> = Api::all(client.clone());
-    let patch = serde_json::json!({
-        "spec": {
-            "unschedulable": false
-        }
-    });
-    node_api
-        .patch(
-            name,
-            &PatchParams::apply("lattice-cluster-controller"),
-            &Patch::Merge(&patch),
-        )
-        .await?;
-    info!(node = %name, "uncordoned node");
-    Ok(())
-}
 
 /// Update cluster status with node counts, worker pool information, and children health.
 async fn update_node_status(

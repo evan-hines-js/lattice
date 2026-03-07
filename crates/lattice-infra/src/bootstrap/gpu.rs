@@ -93,10 +93,7 @@ rules:
   verbs: ["get", "list", "patch"]
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["get", "list"]
-- apiGroups: [""]
-  resources: ["pods/eviction"]
-  verbs: ["create"]"#
+  verbs: ["get", "list"]"#
         .to_string();
 
     let cluster_role_binding = r#"apiVersion: rbac.authorization.k8s.io/v1

@@ -151,6 +151,17 @@ pub trait KubeClient: Send + Sync {
     /// owned by DaemonSets (mirror pods, monitoring, etc.).
     async fn drain_node(&self, name: &str) -> Result<(), Error>;
 
+    /// Uncordon a node (set spec.unschedulable = false).
+    ///
+    /// Re-enables scheduling on a node that was previously cordoned.
+    async fn uncordon_node(&self, name: &str) -> Result<(), Error>;
+
+    /// Check if any pending pods with priority > 0 request GPU resources.
+    ///
+    /// Used by the GPU cordon budget logic to decide whether to selectively
+    /// uncordon a node when pending high-priority GPU pods need capacity.
+    async fn has_pending_gpu_pods(&self) -> Result<bool, Error>;
+
     /// List all nodes in the cluster.
     ///
     /// Used by the Ready phase to check GPU annotations on all nodes.
@@ -588,6 +599,58 @@ impl KubeClient for KubeClientImpl {
 
         info!(node = %name, "drained node (GPU pods evicted)");
         Ok(())
+    }
+
+    async fn uncordon_node(&self, name: &str) -> Result<(), Error> {
+        use k8s_openapi::api::core::v1::Node;
+
+        let node_api: Api<Node> = Api::all(self.client.clone());
+        let patch = serde_json::json!({
+            "spec": {
+                "unschedulable": false
+            }
+        });
+        node_api
+            .patch(name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+            .await?;
+        info!(node = %name, "uncordoned node");
+        Ok(())
+    }
+
+    async fn has_pending_gpu_pods(&self) -> Result<bool, Error> {
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::ListParams;
+        use lattice_common::resources::GPU_RESOURCE;
+
+        let pod_api: Api<Pod> = Api::all(self.client.clone());
+        let lp = ListParams::default().fields("status.phase=Pending");
+        let pods = pod_api.list(&lp).await?;
+
+        let found = pods.items.iter().any(|pod| {
+            let priority = pod
+                .spec
+                .as_ref()
+                .and_then(|s| s.priority)
+                .unwrap_or(0);
+            if priority <= 0 {
+                return false;
+            }
+            pod.spec
+                .as_ref()
+                .map(|spec| {
+                    spec.containers.iter().any(|c| {
+                        c.resources
+                            .as_ref()
+                            .and_then(|r| r.requests.as_ref())
+                            .and_then(|req| req.get(GPU_RESOURCE))
+                            .map(|q| lattice_common::resources::parse_quantity_int(Some(q)) > 0)
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+
+        Ok(found)
     }
 
     async fn list_nodes(&self) -> Result<Vec<k8s_openapi::api::core::v1::Node>, Error> {

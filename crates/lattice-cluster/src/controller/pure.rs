@@ -208,7 +208,7 @@ pub struct GpuNodeState {
     pub action: GpuAction,
     pub anomaly_score: f32,
     pub is_cordoned: bool,
-    pub has_gpu_requests: bool,
+    pub has_gpu_capacity: bool,
 }
 
 /// Cluster-level GPU cordon plan after applying the cordon threshold.
@@ -685,7 +685,7 @@ mod tests {
             action,
             anomaly_score: score,
             is_cordoned: cordoned,
-            has_gpu_requests: true,
+            has_gpu_capacity: true,
         }
     }
 
