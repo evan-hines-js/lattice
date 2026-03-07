@@ -109,7 +109,7 @@ impl lattice_common::crd::MetricsScraper for MetricsScraper {
         workload_name: &str,
     ) -> MetricsSnapshot {
         let selectors = format!(
-            r#"namespace="{namespace}", pod=~"{workload_name}-.*""#
+            r#"namespace="{namespace}", pod=~"{workload_name}-[a-z0-9].*""#
         );
         let mut values = BTreeMap::new();
         for (key, promql_template) in mappings {
@@ -177,18 +177,18 @@ mod tests {
     #[test]
     fn selector_substitution() {
         let template = "avg(training_loss{$SELECTORS})";
-        let selectors = r#"namespace="training", pod=~"llama-finetune-.*""#;
+        let selectors = r#"namespace="training", pod=~"llama-finetune-[a-z0-9].*""#;
         let result = template.replace("$SELECTORS", selectors);
         assert_eq!(
             result,
-            r#"avg(training_loss{namespace="training", pod=~"llama-finetune-.*"})"#
+            r#"avg(training_loss{namespace="training", pod=~"llama-finetune-[a-z0-9].*"})"#
         );
     }
 
     #[test]
     fn no_selectors_template_unchanged() {
         let template = "up{job=\"vllm\"}";
-        let selectors = r#"namespace="default", pod=~"svc-.*""#;
+        let selectors = r#"namespace="default", pod=~"svc-[a-z0-9].*""#;
         let result = template.replace("$SELECTORS", selectors);
         // No $SELECTORS placeholder → template unchanged
         assert_eq!(result, template);

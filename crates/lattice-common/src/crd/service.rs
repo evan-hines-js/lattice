@@ -242,6 +242,12 @@ impl LatticeServiceStatus {
         self.cost = cost;
         self
     }
+
+    /// Set the scraped metrics snapshot
+    pub fn metrics(mut self, metrics: Option<MetricsSnapshot>) -> Self {
+        self.metrics = metrics;
+        self
+    }
 }
 
 // =============================================================================

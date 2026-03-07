@@ -34,7 +34,8 @@ use lattice_common::NoopEventPublisher;
 use crate::compiler::{ApplyLayer, CompiledService, CompilerPhase, ServiceCompiler};
 use crate::crd::{
     Condition, ConditionStatus, CostEstimate, LatticeService, LatticeServiceSpec,
-    LatticeServiceStatus, MonitoringConfig, ProviderType, ServicePhase,
+    LatticeServiceStatus, MetricsScraper, MetricsSnapshot, MonitoringConfig, ProviderType,
+    ServicePhase,
 };
 use crate::graph::ServiceGraph;
 use crate::Error;
@@ -536,6 +537,8 @@ pub struct ServiceContext {
     pub monitoring: MonitoringConfig,
     /// Extension phases that run after core compilation
     pub extension_phases: Vec<Arc<dyn CompilerPhase>>,
+    /// Metrics scraper for querying VictoriaMetrics
+    pub metrics_scraper: Arc<dyn MetricsScraper>,
     /// Cost provider for estimating workload costs (None = cost estimation disabled)
     pub cost_provider: Option<Arc<dyn CostProvider>>,
 }
@@ -550,6 +553,7 @@ impl ServiceContext {
         cedar: Arc<PolicyEngine>,
         events: Arc<dyn EventPublisher>,
         monitoring: MonitoringConfig,
+        metrics_scraper: Arc<dyn MetricsScraper>,
     ) -> Self {
         Self {
             kube,
@@ -560,6 +564,7 @@ impl ServiceContext {
             events,
             monitoring,
             extension_phases: Vec::new(),
+            metrics_scraper,
             cost_provider: None,
         }
     }
@@ -579,6 +584,7 @@ impl ServiceContext {
             events: Arc::new(NoopEventPublisher),
             monitoring: MonitoringConfig::default(),
             extension_phases: Vec::new(),
+            metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
             cost_provider: None,
         }
     }
@@ -876,8 +882,18 @@ async fn compile_and_apply(
         lattice_cost::estimate_service_cost(spec, rates, ts)
     })
     .await;
+
+    let snapshot = lattice_common::crd::scrape_if_configured(
+        ctx.metrics_scraper.as_ref(),
+        spec.observability.as_ref(),
+        namespace,
+        name,
+    )
+    .await;
+
     ServiceStatusUpdate::ready(service.metadata.generation)
         .with_cost(cost)
+        .with_metrics(snapshot)
         .apply(ctx.kube.as_ref(), service)
         .await?;
     record_inputs_hash(ctx, name, namespace, inputs_hash).await;
@@ -930,6 +946,7 @@ struct ServiceStatusUpdate<'a> {
     reason: &'a str,
     observed_generation: Option<i64>,
     cost: Option<CostEstimate>,
+    metrics: Option<MetricsSnapshot>,
 }
 
 impl<'a> ServiceStatusUpdate<'a> {
@@ -942,6 +959,7 @@ impl<'a> ServiceStatusUpdate<'a> {
             reason: "",
             observed_generation: None,
             cost: None,
+            metrics: None,
         }
     }
 
@@ -964,6 +982,11 @@ impl<'a> ServiceStatusUpdate<'a> {
 
     fn with_cost(mut self, cost: Option<CostEstimate>) -> Self {
         self.cost = cost;
+        self
+    }
+
+    fn with_metrics(mut self, metrics: Option<MetricsSnapshot>) -> Self {
+        self.metrics = metrics;
         self
     }
 
@@ -1004,7 +1027,8 @@ impl<'a> ServiceStatusUpdate<'a> {
                 self.message,
             ))
             .observed_generation(self.observed_generation)
-            .cost(self.cost);
+            .cost(self.cost)
+            .metrics(self.metrics);
 
         if service.status.as_ref() == Some(&status) {
             return Ok(());
@@ -1367,6 +1391,7 @@ mod tests {
             Arc::clone(&cedar),
             Arc::new(NoopEventPublisher),
             MonitoringConfig::default(),
+            Arc::new(lattice_common::crd::NoopMetricsScraper),
         );
         let ctx2 = ServiceContext::new(
             mock_kube2,
@@ -1376,6 +1401,7 @@ mod tests {
             Arc::clone(&cedar),
             Arc::new(NoopEventPublisher),
             MonitoringConfig::default(),
+            Arc::new(lattice_common::crd::NoopMetricsScraper),
         );
 
         // Add service via ctx1

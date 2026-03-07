@@ -367,6 +367,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         cedar.clone(),
         registry.clone(),
         monitoring,
+        metrics_scraper.clone(),
         cost_provider.clone(),
     )
     .await;
@@ -517,6 +518,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
         cedar.clone(),
         registry.clone(),
         monitoring,
+        metrics_scraper.clone(),
         cost_provider.clone(),
     )
     .await;

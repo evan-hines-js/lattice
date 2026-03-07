@@ -83,6 +83,7 @@ pub async fn build_service_controllers(
     cedar: Arc<PolicyEngine>,
     registry: Arc<CrdRegistry>,
     monitoring: MonitoringConfig,
+    metrics_scraper: Arc<crate::metrics::MetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> (
     Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
@@ -107,6 +108,7 @@ pub async fn build_service_controllers(
         cedar.clone(),
         svc_events,
         monitoring,
+        metrics_scraper,
     );
     service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(registry.clone()))];
     service_ctx.cost_provider = cost_provider.clone();
