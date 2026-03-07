@@ -165,6 +165,12 @@ pub mod reasons {
     pub const JOB_SUCCEEDED: &str = "JobSucceeded";
     /// Job failed
     pub const JOB_FAILED: &str = "JobFailed";
+
+    // GPU health events
+    /// GPU anomaly warning detected on a node
+    pub const GPU_HEALTH_WARNING: &str = "GpuHealthWarning";
+    /// GPU failure or loss detected on a node
+    pub const GPU_HEALTH_CRITICAL: &str = "GpuHealthCritical";
 }
 
 /// Well-known event action strings.
@@ -185,6 +191,10 @@ pub mod actions {
     pub const UPGRADE: &str = "Upgrade";
     /// Compiling service resources
     pub const COMPILE: &str = "Compile";
+    /// Cordoning a node
+    pub const CORDON: &str = "Cordon";
+    /// Draining a node
+    pub const DRAIN: &str = "Drain";
 }
 
 #[cfg(test)]
