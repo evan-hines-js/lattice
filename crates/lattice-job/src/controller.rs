@@ -29,7 +29,8 @@ use mockall::automock;
 
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
-    JobPhase, LatticeJob, LatticeJobStatus, MetricsScraper, MetricsSnapshot, ProviderType,
+    CostEstimate, JobPhase, LatticeJob, LatticeJobStatus, MetricsScraper, MetricsSnapshot,
+    ProviderType,
 };
 use kube::runtime::events::EventType;
 use lattice_common::events::{actions, reasons, EventPublisher};
@@ -201,6 +202,7 @@ impl JobKubeClient for JobKubeClientImpl {
 // =============================================================================
 
 /// Phase of a Volcano VCJob, derived from its status
+#[non_exhaustive]
 pub enum VCJobPhase {
     /// VCJob is pending (queued, scheduling)
     Pending,
@@ -285,6 +287,7 @@ struct StatusUpdate<'a> {
     observed_generation: Option<i64>,
     start_time: Option<String>,
     completion_time: Option<String>,
+    cost: Option<CostEstimate>,
     metrics: Option<MetricsSnapshot>,
 }
 
@@ -296,8 +299,14 @@ impl<'a> StatusUpdate<'a> {
             observed_generation: None,
             start_time: None,
             completion_time: None,
+            cost: None,
             metrics: None,
         }
+    }
+
+    fn cost(mut self, cost: &Option<CostEstimate>) -> Self {
+        self.cost = cost.clone();
+        self
     }
 
     fn message(mut self, msg: &'a str) -> Self {
@@ -348,6 +357,7 @@ impl<'a> StatusUpdate<'a> {
             observed_generation: self.observed_generation,
             start_time,
             completion_time,
+            cost: self.cost,
             metrics,
         };
         // Skip redundant writes
@@ -378,6 +388,14 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
     }
 
     let generation = job.metadata.generation.unwrap_or(0);
+
+    // Compute cost once per reconcile — always fresh, no stale preservation.
+    let job_spec = &job.spec;
+    let cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates, ts| {
+        lattice_cost::estimate_job_cost(job_spec, rates, ts)
+    })
+    .await;
+
     let phase = job
         .status
         .as_ref()
@@ -385,8 +403,10 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
         .unwrap_or(JobPhase::Pending);
 
     match phase {
-        JobPhase::Pending => reconcile_pending(&job, &ctx, namespace, generation).await,
-        JobPhase::Running => reconcile_running(&job, &ctx, &name, namespace, generation).await,
+        JobPhase::Pending => reconcile_pending(&job, &ctx, namespace, generation, &cost).await,
+        JobPhase::Running => {
+            reconcile_running(&job, &ctx, &name, namespace, generation, &cost).await
+        }
         _ => Ok(Action::await_change()),
     }
 }
@@ -396,6 +416,7 @@ async fn reconcile_pending(
     ctx: &JobContext,
     namespace: &str,
     generation: i64,
+    cost: &Option<CostEstimate>,
 ) -> Result<Action, JobError> {
     let is_cron = job.spec.is_cron();
     let crd_kind = if is_cron {
@@ -439,10 +460,11 @@ async fn reconcile_pending(
             StatusUpdate::new(JobPhase::Pending)
                 .message(SUBMITTED_MESSAGE)
                 .observed_generation(generation)
+                .cost(cost)
                 .apply(ctx.kube.as_ref(), job, namespace)
                 .await?;
         } else {
-            submit_job(job, ctx, namespace, generation, is_cron, &volcano_api).await?;
+            submit_job(job, ctx, namespace, generation, is_cron, &volcano_api, cost).await?;
         }
     }
 
@@ -451,6 +473,7 @@ async fn reconcile_pending(
         StatusUpdate::new(JobPhase::Running)
             .message("Cron job active")
             .observed_generation(generation)
+            .cost(cost)
             .apply(ctx.kube.as_ref(), job, namespace)
             .await?;
         return Ok(Action::requeue(REQUEUE_RUNNING));
@@ -469,15 +492,16 @@ async fn reconcile_pending(
             StatusUpdate::new(JobPhase::Running)
                 .message("Job running")
                 .observed_generation(generation)
+                .cost(cost)
                 .apply(ctx.kube.as_ref(), job, namespace)
                 .await?;
             Ok(Action::requeue(REQUEUE_RUNNING))
         }
         Some(VCJobPhase::Completed) => {
-            handle_job_succeeded(job, ctx, &name, namespace, generation).await
+            handle_job_succeeded(job, ctx, &name, namespace, generation, cost).await
         }
         Some(VCJobPhase::Failed) => {
-            handle_job_failure(job, ctx, &name, namespace, generation).await
+            handle_job_failure(job, ctx, &name, namespace, generation, cost).await
         }
         Some(VCJobPhase::Pending) | None => Ok(Action::requeue(REQUEUE_RUNNING)),
     }
@@ -490,6 +514,7 @@ async fn submit_job(
     generation: i64,
     is_cron: bool,
     volcano_api: &ApiResource,
+    cost: &Option<CostEstimate>,
 ) -> Result<(), JobError> {
     let compiled = match compile_job(
         job,
@@ -558,7 +583,8 @@ async fn submit_job(
 
     let mut s = StatusUpdate::new(JobPhase::Pending)
         .message(SUBMITTED_MESSAGE)
-        .observed_generation(generation);
+        .observed_generation(generation)
+        .cost(cost);
     if job.spec.training.is_some() {
         s = s.start_time(chrono::Utc::now().to_rfc3339());
     }
@@ -572,6 +598,7 @@ async fn reconcile_running(
     name: &str,
     namespace: &str,
     generation: i64,
+    cost: &Option<CostEstimate>,
 ) -> Result<Action, JobError> {
     let observed = job.status.as_ref().and_then(|s| s.observed_generation);
     if observed.is_some() && observed != Some(generation) {
@@ -601,10 +628,10 @@ async fn reconcile_running(
         .await
     {
         Some(VCJobPhase::Completed) => {
-            handle_job_succeeded(job, ctx, name, namespace, generation).await
+            handle_job_succeeded(job, ctx, name, namespace, generation, cost).await
         }
         Some(VCJobPhase::Failed) => {
-            handle_job_failure(job, ctx, name, namespace, generation).await
+            handle_job_failure(job, ctx, name, namespace, generation, cost).await
         }
         _ => {
             // Scrape metrics while the job is running
@@ -617,6 +644,7 @@ async fn reconcile_running(
             .await;
             if snapshot.is_some() {
                 StatusUpdate::new(JobPhase::Running)
+                    .cost(cost)
                     .metrics(snapshot)
                     .apply(ctx.kube.as_ref(), job, namespace)
                     .await?;
@@ -665,6 +693,7 @@ async fn handle_job_failure(
     name: &str,
     namespace: &str,
     generation: i64,
+    cost: &Option<CostEstimate>,
 ) -> Result<Action, JobError> {
     error!(job = %name, "VCJob failed (Volcano exhausted retries)");
     ctx.events
@@ -681,6 +710,7 @@ async fn handle_job_failure(
         .message("Job failed")
         .observed_generation(generation)
         .completion_time(chrono::Utc::now().to_rfc3339())
+        .cost(cost)
         .apply(ctx.kube.as_ref(), job, namespace)
         .await?;
     Ok(Action::await_change())
@@ -692,6 +722,7 @@ async fn handle_job_succeeded(
     name: &str,
     namespace: &str,
     generation: i64,
+    cost: &Option<CostEstimate>,
 ) -> Result<Action, JobError> {
     info!(job = %name, "job succeeded");
     ctx.events
@@ -708,6 +739,7 @@ async fn handle_job_succeeded(
         .message("All tasks completed successfully")
         .observed_generation(generation)
         .completion_time(chrono::Utc::now().to_rfc3339())
+        .cost(cost)
         .apply(ctx.kube.as_ref(), job, namespace)
         .await?;
     Ok(Action::await_change())

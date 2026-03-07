@@ -30,22 +30,26 @@ pub struct MetricsScraper {
     base_url: String,
 }
 
+/// Error type for scraper construction failures.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to build HTTPS client: {0}")]
+pub struct ScraperBuildError(#[from] reqwest::Error);
+
 impl MetricsScraper {
     /// Create a new scraper pointing at the cluster's VictoriaMetrics instance.
-    pub fn new(ha: bool) -> Self {
+    pub fn new(ha: bool) -> Result<Self, ScraperBuildError> {
         let base_url = format!(
             "{}:{}{}",
             query_url(ha),
             query_port(ha),
             query_path(ha),
         );
-        Self {
+        Ok(Self {
             client: reqwest::Client::builder()
                 .use_rustls_tls()
-                .build()
-                .expect("failed to build HTTPS client"),
+                .build()?,
             base_url,
-        }
+        })
     }
 
     /// Execute a single PromQL instant query against VM and extract a scalar.
@@ -60,11 +64,13 @@ impl MetricsScraper {
 
         let body: serde_json::Value = resp.json().await?;
 
-        let status = body["status"].as_str().unwrap_or("");
+        let status = body["status"]
+            .as_str()
+            .ok_or_else(|| MetricsError::VmStatus("response missing 'status' field".to_string()))?;
         if status != "success" {
             let error_msg = body["error"]
                 .as_str()
-                .unwrap_or("unknown error")
+                .ok_or_else(|| MetricsError::VmStatus(format!("status={status}, no error message")))?
                 .to_string();
             return Err(MetricsError::VmStatus(error_msg));
         }
@@ -194,11 +200,11 @@ mod tests {
 
     #[test]
     fn scraper_url_construction() {
-        let scraper = MetricsScraper::new(false);
+        let scraper = MetricsScraper::new(false).unwrap();
         assert!(scraper.base_url.contains("vmsingle"));
         assert!(scraper.base_url.contains("/prometheus"));
 
-        let scraper_ha = MetricsScraper::new(true);
+        let scraper_ha = MetricsScraper::new(true).unwrap();
         assert!(scraper_ha.base_url.contains("vmselect"));
         assert!(scraper_ha.base_url.contains("/select/0/prometheus"));
     }
