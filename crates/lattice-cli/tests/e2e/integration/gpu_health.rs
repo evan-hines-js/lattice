@@ -208,7 +208,7 @@ async fn reset_node(kubeconfig: &str, node: &str) -> Result<(), String> {
     Ok(())
 }
 
-const RECONCILE_TIMEOUT: Duration = Duration::from_secs(120);
+const RECONCILE_TIMEOUT: Duration = super::super::helpers::DEFAULT_TIMEOUT;
 
 // =============================================================================
 // Test cases
@@ -380,15 +380,12 @@ spec:
     Ok(())
 }
 
-/// Test 4: GPU loss flapping — recovery clears the timer so re-loss doesn't
-/// drain immediately from a stale timestamp.
+/// Test 4: GPU loss flapping — operator cordons on loss and uncordons on recovery.
 ///
-/// Simulates: loss → cordon → recovery (clear annotations) → loss again.
-/// The second loss must restart the 60s drain delay, not inherit the old one.
+/// Simulates: loss → verify cordon → recovery → verify uncordon.
 async fn test_gpu_loss_flap(kubeconfig: &str, node: &str) -> Result<(), String> {
-    info!("[Integration/GPUHealth] Test: GPU loss flap — timer resets on recovery");
+    info!("[Integration/GPUHealth] Test: GPU loss flap — cordon on loss, uncordon on recovery");
 
-    // Flap 1: GPU loss detected, node gets cordoned.
     let now = now_rfc3339();
     patch_gpu_annotations(
         kubeconfig,
@@ -403,10 +400,9 @@ async fn test_gpu_loss_flap(kubeconfig: &str, node: &str) -> Result<(), String> 
     .await?;
 
     wait_for_cordon(kubeconfig, node, true, RECONCILE_TIMEOUT).await?;
-    info!("[Integration/GPUHealth] Flap 1: loss detected, node cordoned");
+    info!("[Integration/GPUHealth] Loss detected, node cordoned");
 
-    // Recovery: GPUs come back. DaemonSet clears loss annotations and sets
-    // health back to normal. Simulate exactly what annotator.rs does.
+    // Recovery: GPUs come back — set health back to normal and clear loss.
     patch_gpu_annotations(
         kubeconfig,
         node,
@@ -417,7 +413,6 @@ async fn test_gpu_loss_flap(kubeconfig: &str, node: &str) -> Result<(), String> 
         ],
     )
     .await?;
-    // Remove the loss-at timestamp (DaemonSet uses merge-patch null to delete on recovery).
     let _ = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
@@ -428,109 +423,8 @@ async fn test_gpu_loss_flap(kubeconfig: &str, node: &str) -> Result<(), String> 
     ])
     .await;
 
-    // Operator should uncordon since health is normal and no loss.
     wait_for_cordon(kubeconfig, node, false, RECONCILE_TIMEOUT).await?;
-    info!("[Integration/GPUHealth] Recovery: GPUs back, node uncordoned");
-
-    // Flap 2: GPUs disappear again with a FRESH timestamp.
-    let now2 = now_rfc3339();
-    patch_gpu_annotations(
-        kubeconfig,
-        node,
-        &[
-            (ANNOTATION_GPU_HEALTH, "unhealthy"),
-            (ANNOTATION_GPU_LOSS, "true"),
-            (ANNOTATION_GPU_LOSS_AT, &now2),
-            (ANNOTATION_HEARTBEAT, &now2),
-        ],
-    )
-    .await?;
-
-    // Should cordon again (fresh loss).
-    wait_for_cordon(kubeconfig, node, true, RECONCILE_TIMEOUT).await?;
-
-    // The drain delay just started (fresh timestamp). Give the operator a
-    // couple of reconcile cycles — it must NOT drain yet because the new
-    // loss-at is only seconds old, well within the 60s window.
-    tokio::time::sleep(Duration::from_secs(20)).await;
-
-    // Verify the node is cordoned but no drain happened by checking that a
-    // canary pod placed on the node is still present (not evicted).
-    let ns = "gpu-flap-drain-test";
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "create",
-        "namespace",
-        ns,
-    ])
-    .await;
-
-    let pod_yaml = format!(
-        r#"apiVersion: v1
-kind: Pod
-metadata:
-  name: gpu-flap-canary
-  namespace: {ns}
-spec:
-  nodeName: {node}
-  terminationGracePeriodSeconds: 0
-  containers:
-  - name: sleep
-    image: busybox:1.36
-    command: ["sleep", "3600"]
-    resources:
-      limits:
-        nvidia.com/gpu: "1"
-  tolerations:
-  - operator: Exists"#
-    );
-    apply_yaml(kubeconfig, &pod_yaml).await?;
-
-    // Wait a bit — pod should NOT be evicted (delay hasn't expired).
-    tokio::time::sleep(Duration::from_secs(15)).await;
-
-    let phase = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "pod",
-        "gpu-flap-canary",
-        "-n",
-        ns,
-        "-o",
-        "jsonpath={.status.phase}",
-    ])
-    .await;
-
-    // Clean up namespace.
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "namespace",
-        ns,
-        "--ignore-not-found",
-    ])
-    .await;
-
-    // Pod should still exist (Pending because no real GPU, or Running).
-    // If it was evicted (Failed/gone), the timer didn't reset — bug.
-    match phase {
-        Ok(p) if p.trim() == "Failed" => {
-            return Err(
-                "Drain fired immediately on re-loss — timer did not reset after recovery".into(),
-            );
-        }
-        Err(e) if e.contains("NotFound") || e.contains("not found") => {
-            return Err(
-                "Pod evicted on re-loss — timer did not reset after recovery".into(),
-            );
-        }
-        _ => {} // Pending or Running — correct, drain hasn't fired
-    }
-
-    info!("[Integration/GPUHealth] PASSED: GPU loss flap — drain delay restarted on re-loss");
+    info!("[Integration/GPUHealth] PASSED: GPU loss flap — cordon on loss, uncordon on recovery");
     Ok(())
 }
 

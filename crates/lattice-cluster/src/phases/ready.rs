@@ -206,6 +206,13 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
         Ok(VersionStatus::UpToDate) => {}
     }
 
+    // Check GPU health annotations on all nodes and cordon/drain as needed.
+    // This runs before worker pool reconciliation because it is safety-critical:
+    // CAPI errors must not block GPU health responses.
+    if let Err(e) = reconcile_gpu_health(cluster, ctx).await {
+        warn!(error = %e, "failed to reconcile GPU health, will retry");
+    }
+
     // Reconcile worker pools and collect status
     let (total_desired, pool_statuses) =
         reconcile_worker_pools(cluster, ctx, &name, &capi_namespace).await?;
@@ -219,11 +226,6 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
             pool_resources: vec![],
         }
     });
-
-    // Check GPU health annotations on all nodes and cordon/drain as needed
-    if let Err(e) = reconcile_gpu_health(cluster, ctx).await {
-        warn!(error = %e, "failed to reconcile GPU health, will retry");
-    }
 
     // Collect children health from agent registry (parent clusters only)
     let children_health = if let Some(ref parent_servers) = ctx.parent_servers {
