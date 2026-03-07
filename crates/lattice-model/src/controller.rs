@@ -594,10 +594,14 @@ pub async fn reconcile(
             )
             .await;
 
+            // Reuse existing metrics if unchanged to avoid spurious status writes
+            let existing_metrics = model.status.as_ref().and_then(|s| s.metrics.clone());
+            let metrics = if snapshot == existing_metrics { existing_metrics } else { snapshot };
+
             let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost)
                 .message(message)
                 .observed_generation(generation)
-                .metrics(snapshot);
+                .metrics(metrics);
             if let Some(c) = conditions {
                 s = s.conditions(c);
             }

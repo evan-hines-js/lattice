@@ -891,9 +891,14 @@ async fn compile_and_apply(
     )
     .await;
 
+    // Reuse existing metrics if the new snapshot matches, so the status
+    // equality guard can skip the API write on unchanged requeues.
+    let existing_metrics = service.status.as_ref().and_then(|s| s.metrics.clone());
+    let metrics = if snapshot == existing_metrics { existing_metrics } else { snapshot };
+
     ServiceStatusUpdate::ready(service.metadata.generation)
         .with_cost(cost)
-        .with_metrics(snapshot)
+        .with_metrics(metrics)
         .apply(ctx.kube.as_ref(), service)
         .await?;
     record_inputs_hash(ctx, name, namespace, inputs_hash).await;

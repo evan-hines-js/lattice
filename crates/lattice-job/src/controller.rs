@@ -642,7 +642,9 @@ async fn reconcile_running(
                 name,
             )
             .await;
-            if snapshot.is_some() {
+            // Only write status when metrics actually changed
+            let existing_metrics = job.status.as_ref().and_then(|s| s.metrics.clone());
+            if snapshot.is_some() && snapshot != existing_metrics {
                 StatusUpdate::new(JobPhase::Running)
                     .cost(cost)
                     .metrics(snapshot)

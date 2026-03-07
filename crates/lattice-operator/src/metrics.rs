@@ -4,11 +4,15 @@
 //! scalar snapshots for writing to CRD status.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use lattice_common::crd::MetricsSnapshot;
 use lattice_infra::bootstrap::prometheus::{query_path, query_port, query_url};
 use tracing::warn;
+
+/// Timeout for individual HTTP requests to VictoriaMetrics.
+const SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Error type for individual metric query failures.
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +50,8 @@ impl MetricsScraper {
         Ok(Self {
             client: reqwest::Client::builder()
                 .use_rustls_tls()
+                .timeout(SCRAPE_TIMEOUT)
+                .connect_timeout(Duration::from_secs(2))
                 .build()?,
             base_url,
         })
@@ -109,7 +115,7 @@ impl lattice_common::crd::MetricsScraper for MetricsScraper {
         workload_name: &str,
     ) -> MetricsSnapshot {
         let selectors = format!(
-            r#"namespace="{namespace}", pod=~"{workload_name}-[a-z0-9].*""#
+            r#"namespace="{namespace}", pod=~"{workload_name}-.+""#
         );
         let mut values = BTreeMap::new();
         for (key, promql_template) in mappings {
@@ -177,18 +183,18 @@ mod tests {
     #[test]
     fn selector_substitution() {
         let template = "avg(training_loss{$SELECTORS})";
-        let selectors = r#"namespace="training", pod=~"llama-finetune-[a-z0-9].*""#;
+        let selectors = r#"namespace="training", pod=~"llama-finetune-.+""#;
         let result = template.replace("$SELECTORS", selectors);
         assert_eq!(
             result,
-            r#"avg(training_loss{namespace="training", pod=~"llama-finetune-[a-z0-9].*"})"#
+            r#"avg(training_loss{namespace="training", pod=~"llama-finetune-.+"})"#
         );
     }
 
     #[test]
     fn no_selectors_template_unchanged() {
         let template = "up{job=\"vllm\"}";
-        let selectors = r#"namespace="default", pod=~"svc-[a-z0-9].*""#;
+        let selectors = r#"namespace="default", pod=~"svc-.+""#;
         let result = template.replace("$SELECTORS", selectors);
         // No $SELECTORS placeholder → template unchanged
         assert_eq!(result, template);

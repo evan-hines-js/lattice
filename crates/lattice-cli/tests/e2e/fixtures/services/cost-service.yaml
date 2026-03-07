@@ -8,7 +8,7 @@ spec:
     containers:
       main:
         image: busybox:latest
-        command: ["sleep", "3600"]
+        command: ["/bin/sleep", "3600"]
         resources:
           requests:
             cpu: "500m"
