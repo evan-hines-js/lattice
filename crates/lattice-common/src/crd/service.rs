@@ -16,7 +16,6 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
 use kube::CustomResource;
 
 use super::workload::cost::CostEstimate;
@@ -187,10 +186,6 @@ pub struct LatticeServiceStatus {
     #[serde(default)]
     pub conditions: Vec<Condition>,
 
-    /// Last time manifests were compiled
-    #[serde(default)]
-    pub last_compiled_at: Option<DateTime<Utc>>,
-
     /// Observed generation for optimistic concurrency
     #[serde(default)]
     pub observed_generation: Option<i64>,
@@ -233,12 +228,6 @@ impl LatticeServiceStatus {
     pub fn condition(mut self, condition: Condition) -> Self {
         self.conditions.retain(|c| c.type_ != condition.type_);
         self.conditions.push(condition);
-        self
-    }
-
-    /// Set the last compiled timestamp
-    pub fn compiled_at(mut self, time: DateTime<Utc>) -> Self {
-        self.last_compiled_at = Some(time);
         self
     }
 
@@ -332,13 +321,11 @@ mod tests {
         let status = LatticeServiceStatus::default()
             .phase(ServicePhase::Ready)
             .message("Service is operational")
-            .condition(condition)
-            .compiled_at(Utc::now());
+            .condition(condition);
 
         assert_eq!(status.phase, ServicePhase::Ready);
         assert_eq!(status.message.as_deref(), Some("Service is operational"));
         assert_eq!(status.conditions.len(), 1);
-        assert!(status.last_compiled_at.is_some());
     }
 
     // =========================================================================

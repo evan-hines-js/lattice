@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use kube::api::{Api, DeleteParams, DynamicObject, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
-use kube::{Client, ResourceExt};
+use kube::{Client, Resource, ResourceExt};
 use tracing::{error, info, warn};
 
 #[cfg(test)]
@@ -34,11 +34,11 @@ use lattice_common::crd::{
     CostEstimate, LatticeModel, LatticeModelStatus, MetricsScraper, MetricsSnapshot,
     ModelCondition, ModelServingPhase, ProviderType,
 };
-use lattice_common::events::EventPublisher;
+use kube::runtime::events::EventType;
+use lattice_common::events::{actions, reasons, EventPublisher};
 use lattice_cost::CostProvider;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
-use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry, Retryable};
 
 use crate::compiler::{compile_model, role_key_suffix, CompiledModel};
@@ -336,16 +336,23 @@ pub async fn reconcile(
                 Ok(c) => c,
                 Err(e) => {
                     if e.is_retryable() {
-                        // Transient — stay in Pending so error_policy retries
                         let msg = format!("Compile failed (will retry): {}", e);
                         let _ = StatusUpdate::new(ModelServingPhase::Pending, &cost)
                             .message(&msg)
                             .apply(ctx.kube.as_ref(), &model, namespace)
                             .await;
                     } else {
-                        // Permanent — go to Failed
                         cleanup_graph(&model, &ctx.graph, namespace);
                         let msg = format!("Failed to compile: {}", e);
+                        ctx.events
+                            .publish(
+                                &model.object_ref(&()),
+                                EventType::Warning,
+                                reasons::MODEL_FAILED,
+                                actions::COMPILE,
+                                Some(msg.clone()),
+                            )
+                            .await;
                         let _ = StatusUpdate::new(ModelServingPhase::Failed, &cost)
                             .message(&msg)
                             .observed_generation(generation)
@@ -370,6 +377,15 @@ pub async fn reconcile(
                     .await;
                 return Err(e);
             }
+            ctx.events
+                .publish(
+                    &model.object_ref(&()),
+                    EventType::Normal,
+                    reasons::MODEL_LOADING,
+                    actions::RECONCILE,
+                    Some("Resources applied, waiting for model serving readiness".to_string()),
+                )
+                .await;
             let role_keys: Vec<String> = spec_role_keys(&name, &model.spec.roles)
                 .into_iter()
                 .collect();
@@ -405,6 +421,15 @@ pub async fn reconcile(
             match state {
                 ModelServingState::Available => {
                     info!(model = %name, "model serving is available");
+                    ctx.events
+                        .publish(
+                            &model.object_ref(&()),
+                            EventType::Normal,
+                            reasons::MODEL_SERVING,
+                            actions::RECONCILE,
+                            Some("Model is serving inference requests".to_string()),
+                        )
+                        .await;
                     let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost)
                         .message("Model is serving inference requests")
                         .observed_generation(generation);
@@ -416,6 +441,15 @@ pub async fn reconcile(
                 }
                 ModelServingState::Failed => {
                     error!(model = %name, "model serving failed");
+                    ctx.events
+                        .publish(
+                            &model.object_ref(&()),
+                            EventType::Warning,
+                            reasons::MODEL_FAILED,
+                            actions::RECONCILE,
+                            Some("ModelServing failed".to_string()),
+                        )
+                        .await;
                     cleanup_graph(&model, &ctx.graph, namespace);
                     let mut s = StatusUpdate::new(ModelServingPhase::Failed, &cost)
                         .message("ModelServing failed")
@@ -434,6 +468,15 @@ pub async fn reconcile(
             if observed != Some(generation) {
                 // Spec changed — re-compile and re-apply
                 info!(model = %name, observed = ?observed, current = generation, "spec changed, re-applying");
+                ctx.events
+                    .publish(
+                        &model.object_ref(&()),
+                        EventType::Normal,
+                        reasons::MODEL_SPEC_CHANGED,
+                        actions::RECONCILE,
+                        Some("Spec changed, recompiling".to_string()),
+                    )
+                    .await;
 
                 let old_role_keys = pre_applied_roles.clone();
                 let new_role_keys = spec_role_keys(&name, &model.spec.roles);
@@ -955,7 +998,6 @@ struct StatusUpdate<'a> {
     applied_roles: Option<Vec<String>>,
     cost: Option<CostEstimate>,
     metrics: Option<MetricsSnapshot>,
-    endpoint: Option<String>,
 }
 
 impl<'a> StatusUpdate<'a> {
@@ -969,7 +1011,6 @@ impl<'a> StatusUpdate<'a> {
             applied_roles: None,
             cost: cost.clone(),
             metrics: None,
-            endpoint: None,
         }
     }
 
@@ -1009,22 +1050,6 @@ impl<'a> StatusUpdate<'a> {
         model: &LatticeModel,
         namespace: &str,
     ) -> Result<(), ModelError> {
-        // Skip redundant writes when not updating conditions, auto_topology, or metrics.
-        // Condition/metrics updates always write through.
-        if self.conditions.is_none()
-            && self.auto_topology.is_none()
-            && self.metrics.is_none()
-            && self.endpoint.is_none()
-            && status_check::is_status_unchanged(
-                model.status.as_ref(),
-                &self.phase,
-                self.message,
-                self.observed_generation,
-            )
-        {
-            return Ok(());
-        }
-
         let name = model.name_any();
         // Preserve fields from existing status unless explicitly overridden
         let auto_topology = self
@@ -1037,9 +1062,6 @@ impl<'a> StatusUpdate<'a> {
         let metrics = self
             .metrics
             .or_else(|| model.status.as_ref().and_then(|s| s.metrics.clone()));
-        let endpoint = self
-            .endpoint
-            .or_else(|| model.status.as_ref().and_then(|s| s.endpoint.clone()));
         let status = LatticeModelStatus {
             phase: self.phase,
             message: self.message.map(|m| m.to_string()),
@@ -1049,8 +1071,10 @@ impl<'a> StatusUpdate<'a> {
             applied_roles,
             cost,
             metrics,
-            endpoint,
         };
+        if model.status.as_ref() == Some(&status) {
+            return Ok(());
+        }
         kube.patch_model_status(&name, namespace, &status).await?;
         Ok(())
     }
@@ -1254,7 +1278,6 @@ mod tests {
             applied_roles: None,
             cost: None,
             metrics: None,
-            endpoint: None,
         }
     }
 

@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use kube::api::{Api, Patch, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
@@ -22,13 +21,13 @@ use tracing::{debug, error, info, instrument, warn};
 #[cfg(test)]
 use mockall::automock;
 
+use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry};
 
 use lattice_cedar::PolicyEngine;
 use lattice_cost::CostProvider;
 use lattice_common::events::{actions, reasons, EventPublisher};
-use lattice_common::KubeEventPublisher;
 #[cfg(test)]
 use lattice_common::NoopEventPublisher;
 
@@ -425,8 +424,6 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
     }
 }
 
-use lattice_common::kube_utils::ApplyBatch;
-
 /// Extension trait for `ApplyBatch` to support service-specific `DynamicResource`.
 trait ApplyBatchExt {
     fn push_dynamic(&mut self, ext: &crate::compiler::DynamicResource) -> Result<(), Error>;
@@ -514,10 +511,6 @@ impl ServiceKubeClientImpl {
 }
 
 // =============================================================================
-// PVC node conflict detection
-// =============================================================================
-
-// =============================================================================
 // Controller context
 // =============================================================================
 
@@ -561,32 +554,6 @@ impl ServiceContext {
         Self {
             kube,
             graph,
-            cluster_name: cluster_name.into(),
-            provider_type,
-            cedar,
-            events,
-            monitoring,
-            extension_phases: Vec::new(),
-            cost_provider: None,
-        }
-    }
-
-    /// Create a new ServiceContext from a Kubernetes client with a CRD registry
-    ///
-    /// This creates a new ServiceGraph and default-deny PolicyEngine.
-    /// For shared state, create dependencies externally and use the constructor.
-    pub fn from_client(
-        client: Client,
-        cluster_name: impl Into<String>,
-        provider_type: ProviderType,
-        cedar: Arc<PolicyEngine>,
-        registry: Arc<CrdRegistry>,
-        monitoring: MonitoringConfig,
-    ) -> Self {
-        let events = Arc::new(KubeEventPublisher::new(client.clone(), FIELD_MANAGER));
-        Self {
-            kube: Arc::new(ServiceKubeClientImpl::new(client, registry)),
-            graph: Arc::new(ServiceGraph::new()),
             cluster_name: cluster_name.into(),
             provider_type,
             cedar,
@@ -677,12 +644,9 @@ pub async fn reconcile(
     // Validate the full service spec (workload, runtime, autoscaling, backup)
     if let Err(e) = service.spec.validate() {
         warn!(error = %e, "service validation failed");
-        update_service_status(
-            &service,
-            &ctx,
-            ServiceStatusUpdate::failed(&e.to_string(), service.metadata.generation),
-        )
-        .await?;
+        ServiceStatusUpdate::failed(&e.to_string(), service.metadata.generation)
+            .apply(ctx.kube.as_ref(), &service)
+            .await?;
         // Don't requeue for validation errors - they require spec changes
         return Ok(Action::await_change());
     }
@@ -701,15 +665,9 @@ pub async fn reconcile(
         Some(ns) => ns,
         None => {
             error!("LatticeService is missing namespace - this is a cluster-scoped resource that needs migration");
-            update_service_status(
-                &service,
-                &ctx,
-                ServiceStatusUpdate::failed(
-                    "Resource missing namespace",
-                    service.metadata.generation,
-                ),
-            )
-            .await?;
+            ServiceStatusUpdate::failed("Resource missing namespace", service.metadata.generation)
+                .apply(ctx.kube.as_ref(), &service)
+                .await?;
             return Ok(Action::await_change());
         }
     };
@@ -720,7 +678,9 @@ pub async fn reconcile(
 
     // Pending → transition to Compiling and requeue immediately
     if current_phase == ServicePhase::Pending {
-        update_service_status(&service, &ctx, ServiceStatusUpdate::compiling()).await?;
+        ServiceStatusUpdate::compiling()
+            .apply(ctx.kube.as_ref(), &service)
+            .await?;
         return Ok(Action::requeue(REQUEUE_PENDING));
     }
 
@@ -807,8 +767,7 @@ async fn compile_and_apply(
         Err(e) => {
             let msg = e.to_string();
 
-            // Skip redundant events when status hasn't changed (status update
-            // itself is guarded by update_service_status's idempotency check).
+            // Skip redundant events when status hasn't changed.
             if !status_check::is_status_unchanged(
                 service.status.as_ref(),
                 &ServicePhase::Failed,
@@ -842,12 +801,9 @@ async fn compile_and_apply(
                 debug!(error = %msg, "compilation still failing");
             }
 
-            update_service_status(
-                service,
-                ctx,
-                ServiceStatusUpdate::failed(&msg, service.metadata.generation),
-            )
-            .await?;
+            ServiceStatusUpdate::failed(&msg, service.metadata.generation)
+                .apply(ctx.kube.as_ref(), service)
+                .await?;
             record_inputs_hash(ctx, name, namespace, inputs_hash).await;
             return Ok(Action::requeue(Duration::from_secs(30)));
         }
@@ -884,12 +840,9 @@ async fn compile_and_apply(
         } else {
             debug!(error = %msg, "apply still failing");
         }
-        update_service_status(
-            service,
-            ctx,
-            ServiceStatusUpdate::failed(&msg, service.metadata.generation),
-        )
-        .await?;
+        ServiceStatusUpdate::failed(&msg, service.metadata.generation)
+            .apply(ctx.kube.as_ref(), service)
+            .await?;
         // Don't record the inputs hash for apply failures — these are often
         // transient (broken webhook, API server blip, network timeout) and
         // should retry on the next requeue even if inputs are unchanged.
@@ -912,7 +865,9 @@ async fn compile_and_apply(
     // Don't mark Ready until the MeshMember controller has fully reconciled
     if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
         debug!("mesh member not yet ready, staying in Compiling");
-        update_service_status(service, ctx, ServiceStatusUpdate::compiling()).await?;
+        ServiceStatusUpdate::compiling()
+            .apply(ctx.kube.as_ref(), service)
+            .await?;
         return Ok(Action::requeue(REQUEUE_PENDING));
     }
 
@@ -921,12 +876,10 @@ async fn compile_and_apply(
         lattice_cost::estimate_service_cost(spec, rates, ts)
     })
     .await;
-    update_service_status(
-        service,
-        ctx,
-        ServiceStatusUpdate::ready(service.metadata.generation).with_cost(cost),
-    )
-    .await?;
+    ServiceStatusUpdate::ready(service.metadata.generation)
+        .with_cost(cost)
+        .apply(ctx.kube.as_ref(), service)
+        .await?;
     record_inputs_hash(ctx, name, namespace, inputs_hash).await;
     Ok(Action::requeue(REQUEUE_READY))
 }
@@ -968,15 +921,13 @@ pub fn cleanup_service(service: &LatticeService, ctx: &ServiceContext) {
 // Status update helpers
 // =============================================================================
 
-/// Status update configuration for LatticeService
-/// Status update builder — fluent pattern matching Model/Job controllers.
+/// Status update builder — matches Model/Job pattern.
 struct ServiceStatusUpdate<'a> {
     phase: ServicePhase,
     message: &'a str,
     condition_type: &'a str,
     condition_status: ConditionStatus,
     reason: &'a str,
-    set_compiled_at: bool,
     observed_generation: Option<i64>,
     cost: Option<CostEstimate>,
 }
@@ -989,7 +940,6 @@ impl<'a> ServiceStatusUpdate<'a> {
             condition_type: "",
             condition_status: ConditionStatus::Unknown,
             reason: "",
-            set_compiled_at: false,
             observed_generation: None,
             cost: None,
         }
@@ -1004,11 +954,6 @@ impl<'a> ServiceStatusUpdate<'a> {
         self.condition_type = type_;
         self.condition_status = status;
         self.reason = reason;
-        self
-    }
-
-    fn compiled_at_now(mut self) -> Self {
-        self.set_compiled_at = true;
         self
     }
 
@@ -1034,7 +979,6 @@ impl<'a> ServiceStatusUpdate<'a> {
         Self::new(ServicePhase::Ready)
             .message("Service is operational")
             .condition("Ready", ConditionStatus::True, "ServiceReady")
-            .compiled_at_now()
             .observed_generation(generation)
     }
 
@@ -1045,50 +989,31 @@ impl<'a> ServiceStatusUpdate<'a> {
             .condition("Ready", ConditionStatus::False, "ValidationFailed")
             .observed_generation(generation)
     }
-}
 
-/// Update LatticeService status with the given configuration.
-///
-/// Skips the patch if phase and message already match the current status,
-/// preventing a self-triggering reconcile storm.
-async fn update_service_status(
-    service: &LatticeService,
-    ctx: &ServiceContext,
-    update: ServiceStatusUpdate<'_>,
-) -> Result<(), Error> {
-    // Check if status already matches — avoid update loop
-    if status_check::is_status_unchanged(
-        service.status.as_ref(),
-        &update.phase,
-        Some(update.message),
-        update.observed_generation,
-    ) {
-        debug!("status unchanged, skipping update");
-        return Ok(());
+    async fn apply(
+        self,
+        kube: &dyn ServiceKubeClient,
+        service: &LatticeService,
+    ) -> Result<(), Error> {
+        let status = LatticeServiceStatus::with_phase(self.phase)
+            .message(self.message)
+            .condition(Condition::new(
+                self.condition_type,
+                self.condition_status,
+                self.reason,
+                self.message,
+            ))
+            .observed_generation(self.observed_generation)
+            .cost(self.cost);
+
+        if service.status.as_ref() == Some(&status) {
+            return Ok(());
+        }
+
+        let name = service.name_any();
+        let namespace = service.namespace().unwrap_or_default();
+        kube.patch_service_status(&name, &namespace, &status).await
     }
-
-    let name = service.name_any();
-    let namespace = service.namespace().unwrap_or_default();
-
-    let mut status = LatticeServiceStatus::with_phase(update.phase)
-        .message(update.message)
-        .condition(Condition::new(
-            update.condition_type,
-            update.condition_status,
-            update.reason,
-            update.message,
-        ))
-        .observed_generation(update.observed_generation);
-
-    if update.set_compiled_at {
-        status = status.compiled_at(Utc::now());
-    }
-
-    status = status.cost(update.cost);
-
-    ctx.kube
-        .patch_service_status(&name, &namespace, &status)
-        .await
 }
 
 // =============================================================================

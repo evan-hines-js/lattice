@@ -641,10 +641,6 @@ pub struct LatticeModelStatus {
     /// Scraped metrics snapshot from VictoriaMetrics
     #[serde(default)]
     pub metrics: Option<MetricsSnapshot>,
-
-    /// Inference endpoint URL (from KthenaModelRoute status)
-    #[serde(default)]
-    pub endpoint: Option<String>,
 }
 
 /// A condition on a LatticeModel (mirrored from ModelServing status)

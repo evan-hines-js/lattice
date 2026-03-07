@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use kube::api::{Api, DynamicObject, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
-use kube::{Client, ResourceExt};
+use kube::{Client, Resource, ResourceExt};
 use tracing::{error, info, warn};
 
 #[cfg(test)]
@@ -31,7 +31,8 @@ use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
     JobPhase, LatticeJob, LatticeJobStatus, MetricsScraper, MetricsSnapshot, ProviderType,
 };
-use lattice_common::events::EventPublisher;
+use kube::runtime::events::EventType;
+use lattice_common::events::{actions, reasons, EventPublisher};
 use lattice_cost::CostProvider;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
@@ -510,6 +511,15 @@ async fn submit_job(
             } else {
                 cleanup_graph(job, &ctx.graph, namespace);
                 let msg = format!("Failed to compile job: {}", e);
+                ctx.events
+                    .publish(
+                        &job.object_ref(&()),
+                        EventType::Warning,
+                        reasons::JOB_FAILED,
+                        actions::COMPILE,
+                        Some(msg.clone()),
+                    )
+                    .await;
                 let _ = StatusUpdate::new(JobPhase::Failed)
                     .message(&msg)
                     .observed_generation(generation)
@@ -536,6 +546,15 @@ async fn submit_job(
     }
 
     info!(job = %name, cron = is_cron, "submitted job to Volcano");
+    ctx.events
+        .publish(
+            &job.object_ref(&()),
+            EventType::Normal,
+            reasons::JOB_SUBMITTED,
+            actions::RECONCILE,
+            Some(format!("Job submitted to Volcano (cron={})", is_cron)),
+        )
+        .await;
 
     let mut s = StatusUpdate::new(JobPhase::Pending)
         .message(SUBMITTED_MESSAGE)
@@ -648,6 +667,15 @@ async fn handle_job_failure(
     generation: i64,
 ) -> Result<Action, JobError> {
     error!(job = %name, "VCJob failed (Volcano exhausted retries)");
+    ctx.events
+        .publish(
+            &job.object_ref(&()),
+            EventType::Warning,
+            reasons::JOB_FAILED,
+            actions::RECONCILE,
+            Some("Job failed (Volcano exhausted retries)".to_string()),
+        )
+        .await;
     cleanup_graph(job, &ctx.graph, namespace);
     StatusUpdate::new(JobPhase::Failed)
         .message("Job failed")
@@ -666,6 +694,15 @@ async fn handle_job_succeeded(
     generation: i64,
 ) -> Result<Action, JobError> {
     info!(job = %name, "job succeeded");
+    ctx.events
+        .publish(
+            &job.object_ref(&()),
+            EventType::Normal,
+            reasons::JOB_SUCCEEDED,
+            actions::RECONCILE,
+            Some("All tasks completed successfully".to_string()),
+        )
+        .await;
     cleanup_graph(job, &ctx.graph, namespace);
     StatusUpdate::new(JobPhase::Succeeded)
         .message("All tasks completed successfully")

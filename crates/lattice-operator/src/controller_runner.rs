@@ -90,12 +90,22 @@ pub async fn build_service_controllers(
 ) {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
     let cedar_for_mm = cedar.clone();
-    let mut service_ctx = ServiceContext::from_client(
+
+    let svc_kube_client = Arc::new(lattice_service::controller::ServiceKubeClientImpl::new(
         client.clone(),
+        registry.clone(),
+    ));
+    let svc_events = Arc::new(lattice_common::KubeEventPublisher::new(
+        client.clone(),
+        "lattice-service-controller",
+    ));
+    let mut service_ctx = ServiceContext::new(
+        svc_kube_client,
+        Arc::new(lattice_common::graph::ServiceGraph::new()),
         cluster_name,
         provider_type,
         cedar.clone(),
-        registry.clone(),
+        svc_events,
         monitoring,
     );
     service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(registry.clone()))];
