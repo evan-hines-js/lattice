@@ -34,7 +34,7 @@ pub struct LoginArgs {
 
 /// Run the login command.
 pub async fn run(args: LoginArgs) -> Result<()> {
-    let kubeconfig_json = fetch_kubeconfig(&args.server, &args.token, args.insecure).await?;
+    let kubeconfig_json = fetch_kubeconfig(&args.server, &args.token, args.insecure, Some("sa")).await?;
 
     let cluster_names = extract_cluster_names(&kubeconfig_json)?;
 

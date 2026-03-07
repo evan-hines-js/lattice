@@ -18,7 +18,7 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 ///
 /// Retries on transient errors (5xx, connection failures) with exponential
 /// backoff. Fails immediately on 4xx errors (auth/permission problems).
-pub(crate) async fn fetch_kubeconfig(server: &str, token: &str, insecure: bool) -> Result<String> {
+pub(crate) async fn fetch_kubeconfig(server: &str, token: &str, insecure: bool, format: Option<&str>) -> Result<String> {
     let client = if insecure {
         reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -28,7 +28,10 @@ pub(crate) async fn fetch_kubeconfig(server: &str, token: &str, insecure: bool) 
         reqwest::Client::new()
     };
 
-    let url = format!("{}/kubeconfig", server.trim_end_matches('/'));
+    let mut url = format!("{}/kubeconfig", server.trim_end_matches('/'));
+    if let Some(fmt) = format {
+        url = format!("{}?format={}", url, fmt);
+    }
     let mut backoff = INITIAL_BACKOFF;
 
     for attempt in 1..=MAX_RETRIES {

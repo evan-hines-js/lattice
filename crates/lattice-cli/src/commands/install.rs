@@ -1051,14 +1051,29 @@ impl Installer {
         )
         .await?;
 
-        // Move CAPI resources from bootstrap to management cluster
+        // Move CAPI resources from bootstrap to management cluster.
+        // Retry because CAPI webhooks on the management cluster may not be
+        // serving yet immediately after the controllers start.
         info!("Moving CAPI resources from bootstrap to management cluster...");
-        lattice_move::local_move(
-            &bootstrap_kubeconfig,
-            &mgmt_kubeconfig,
-            &namespace,
-            self.cluster_name(),
-        )
+        let retry_config = lattice_common::retry::RetryConfig {
+            max_attempts: 6,
+            initial_delay: Duration::from_secs(5),
+            max_delay: Duration::from_secs(30),
+            backoff_multiplier: 2.0,
+        };
+        let bs_kc = bootstrap_kubeconfig.clone();
+        let mgmt_kc = mgmt_kubeconfig.clone();
+        let ns = namespace.clone();
+        let cluster = self.cluster_name().to_string();
+        lattice_common::retry::retry_with_backoff(&retry_config, "capi_move", || {
+            let bs_kc = bs_kc.clone();
+            let mgmt_kc = mgmt_kc.clone();
+            let ns = ns.clone();
+            let cluster = cluster.clone();
+            async move {
+                lattice_move::local_move(&bs_kc, &mgmt_kc, &ns, &cluster).await
+            }
+        })
         .await
         .map(|_| ())
         .cmd_err()
@@ -1271,7 +1286,7 @@ impl Installer {
         };
 
         let kubeconfig_json =
-            super::proxy::fetch_kubeconfig(&server, token, true).await?;
+            super::proxy::fetch_kubeconfig(&server, token, true, Some("sa")).await?;
 
         Ok((server, pf, kubeconfig_json))
     }
