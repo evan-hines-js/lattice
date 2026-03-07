@@ -523,7 +523,6 @@ async fn reconcile_gpu_health(
             action,
             anomaly_score,
             is_cordoned,
-            has_gpu_capacity: has_gpus,
         });
     }
 

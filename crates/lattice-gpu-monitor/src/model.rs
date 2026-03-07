@@ -85,7 +85,17 @@ pub async fn detect_gpu_architecture(
         .as_ref()
         .and_then(|l| l.get(GPU_TYPE_LABEL))
         .cloned()
-        .unwrap_or_else(|| "unknown".to_string());
+        .ok_or_else(|| {
+            kube::Error::Api(kube::error::ErrorResponse {
+                status: "Failure".into(),
+                message: format!(
+                    "node {} missing label {}, cannot determine GPU architecture",
+                    node_name, GPU_TYPE_LABEL
+                ),
+                reason: "NotFound".into(),
+                code: 404,
+            })
+        })?;
 
     Ok(gpu_type)
 }

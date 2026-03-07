@@ -634,20 +634,19 @@ async fn reconcile_running(
             handle_job_failure(job, ctx, name, namespace, generation, cost).await
         }
         _ => {
-            // Scrape metrics while the job is running
-            let snapshot = lattice_common::crd::scrape_if_configured(
+            let existing_metrics = job.status.as_ref().and_then(|s| s.metrics.as_ref());
+            let metrics = lattice_common::crd::scrape_metrics(
                 ctx.metrics_scraper.as_ref(),
                 job.spec.observability.as_ref(),
                 namespace,
                 name,
+                existing_metrics,
             )
             .await;
-            // Only write status when metrics actually changed
-            let existing_metrics = job.status.as_ref().and_then(|s| s.metrics.clone());
-            if snapshot.is_some() && snapshot != existing_metrics {
+            if metrics.as_ref() != existing_metrics {
                 StatusUpdate::new(JobPhase::Running)
                     .cost(cost)
-                    .metrics(snapshot)
+                    .metrics(metrics)
                     .apply(ctx.kube.as_ref(), job, namespace)
                     .await?;
             }

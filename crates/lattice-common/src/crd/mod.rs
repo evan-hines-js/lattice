@@ -60,7 +60,7 @@ pub use model_serving::{
     TargetModel, TrafficPolicy, DEFAULT_KV_SIDE_CHANNEL_PORT,
 };
 pub use observability::{
-    scrape_if_configured, MetricsConfig, MetricsScraper, MetricsSnapshot, NoopMetricsScraper,
+    scrape_metrics, MetricsConfig, MetricsScraper, MetricsSnapshot, NoopMetricsScraper,
     ObservabilitySpec,
 };
 pub use oidc_provider::{

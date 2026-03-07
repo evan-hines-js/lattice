@@ -93,25 +93,33 @@ impl MetricsScraper for NoopMetricsScraper {
     }
 }
 
-/// Scrape metrics if the workload has observability mappings configured.
+/// Scrape metrics and resolve against existing status.
 ///
-/// Returns `None` if no mappings are defined (callers should preserve existing
-/// status metrics). Shared by all workload controllers.
-pub async fn scrape_if_configured(
+/// Returns the metrics snapshot to use in the next status write:
+/// - `None` if no mappings are configured (preserves existing status)
+/// - The existing snapshot if scrape returned identical values (avoids spurious writes)
+/// - The new snapshot if values changed
+///
+/// Shared by all workload controllers — this is the single scrape entry point.
+pub async fn scrape_metrics(
     scraper: &dyn MetricsScraper,
     observability: Option<&ObservabilitySpec>,
     namespace: &str,
     workload_name: &str,
+    existing: Option<&MetricsSnapshot>,
 ) -> Option<MetricsSnapshot> {
     let metrics_config = observability?.metrics.as_ref()?;
     if !metrics_config.has_mappings() {
         return None;
     }
-    Some(
-        scraper
-            .scrape(&metrics_config.mappings, namespace, workload_name)
-            .await,
-    )
+    let snapshot = scraper
+        .scrape(&metrics_config.mappings, namespace, workload_name)
+        .await;
+    if Some(&snapshot) == existing {
+        existing.cloned()
+    } else {
+        Some(snapshot)
+    }
 }
 
 #[cfg(test)]

@@ -698,8 +698,11 @@ pub async fn reconcile(
 
     // Skip reconcile when spec and external inputs are unchanged (Ready only).
     // Compiling and Failed services always re-enter the compile path.
+    // Metrics are still scraped on every cycle so values populate even when
+    // VictoriaMetrics hasn't ingested data at the initial Ready transition.
     if is_reconcile_current(&service, &inputs_hash) {
         debug!("generation and inputs unchanged, skipping reconcile");
+        scrape_and_patch_metrics(&service, &ctx).await;
         return Ok(Action::requeue(REQUEUE_READY));
     }
 
@@ -883,18 +886,15 @@ async fn compile_and_apply(
     })
     .await;
 
-    let snapshot = lattice_common::crd::scrape_if_configured(
+    let existing_metrics = service.status.as_ref().and_then(|s| s.metrics.as_ref());
+    let metrics = lattice_common::crd::scrape_metrics(
         ctx.metrics_scraper.as_ref(),
         spec.observability.as_ref(),
         namespace,
         name,
+        existing_metrics,
     )
     .await;
-
-    // Reuse existing metrics if the new snapshot matches, so the status
-    // equality guard can skip the API write on unchanged requeues.
-    let existing_metrics = service.status.as_ref().and_then(|s| s.metrics.clone());
-    let metrics = if snapshot == existing_metrics { existing_metrics } else { snapshot };
 
     ServiceStatusUpdate::ready(service.metadata.generation)
         .with_cost(cost)
@@ -903,6 +903,44 @@ async fn compile_and_apply(
         .await?;
     record_inputs_hash(ctx, name, namespace, inputs_hash).await;
     Ok(Action::requeue(REQUEUE_READY))
+}
+
+/// Best-effort metrics scrape on steady-state requeues.
+///
+/// Called when the reconcile guard skips the full compile path so that
+/// metrics still populate even when VictoriaMetrics hadn't ingested data
+/// at the initial Ready transition.
+async fn scrape_and_patch_metrics(service: &LatticeService, ctx: &ServiceContext) {
+    let name = service.name_any();
+    let namespace = match service.namespace() {
+        Some(ns) => ns,
+        None => return,
+    };
+
+    let existing = service.status.as_ref().and_then(|s| s.metrics.as_ref());
+    let metrics = lattice_common::crd::scrape_metrics(
+        ctx.metrics_scraper.as_ref(),
+        service.spec.observability.as_ref(),
+        &namespace,
+        &name,
+        existing,
+    )
+    .await;
+
+    // scrape_metrics returns existing unchanged or None when nothing to do.
+    if metrics.as_ref() == existing {
+        return;
+    }
+
+    let mut status = service.status.clone().unwrap_or_default();
+    status.metrics = metrics;
+    if let Err(e) = ctx
+        .kube
+        .patch_service_status(&name, &namespace, &status)
+        .await
+    {
+        warn!(error = %e, "failed to patch metrics on steady-state requeue");
+    }
 }
 
 /// Best-effort store of the inputs hash annotation.

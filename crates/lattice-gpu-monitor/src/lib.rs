@@ -70,7 +70,8 @@ impl GpuMonitorPipeline {
     /// Lazily initializes the trainer on the first sample with GPUs.
     /// Returns the current health status (always Normal during warmup).
     pub fn process_sample(&mut self, sample: &NodeSample) -> HealthStatus {
-        let device = Default::default();
+        // NdArray is the only backend used; its default device is CPU.
+        let device: burn::backend::ndarray::NdArrayDevice = Default::default();
 
         // Lazily initialize trainer once we know the GPU count
         if self.trainer.is_none() && !sample.gpus.is_empty() {

@@ -586,18 +586,15 @@ pub async fn reconcile(
             let conditions =
                 ctx.kube.read_model_serving_conditions(&serving_name, namespace).await;
 
-            // Scrape metrics if mappings are defined
-            let snapshot = lattice_common::crd::scrape_if_configured(
+            let existing_metrics = model.status.as_ref().and_then(|s| s.metrics.as_ref());
+            let metrics = lattice_common::crd::scrape_metrics(
                 ctx.metrics_scraper.as_ref(),
                 model.spec.observability.as_ref(),
                 namespace,
                 &name,
+                existing_metrics,
             )
             .await;
-
-            // Reuse existing metrics if unchanged to avoid spurious status writes
-            let existing_metrics = model.status.as_ref().and_then(|s| s.metrics.clone());
-            let metrics = if snapshot == existing_metrics { existing_metrics } else { snapshot };
 
             let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost)
                 .message(message)

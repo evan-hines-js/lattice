@@ -209,7 +209,6 @@ pub struct GpuNodeState {
     pub action: GpuAction,
     pub anomaly_score: f32,
     pub is_cordoned: bool,
-    pub has_gpu_capacity: bool,
 }
 
 /// Cluster-level GPU cordon plan after applying the cordon threshold.
@@ -275,6 +274,10 @@ pub fn build_gpu_cordon_plan(
         .collect();
 
     // Sort by anomaly score descending — cordon highest-confidence problems first
+    debug_assert!(
+        cordon_candidates.iter().all(|n| n.anomaly_score.is_finite()),
+        "NaN/Inf anomaly scores should be rejected upstream"
+    );
     cordon_candidates.sort_by(|a, b| b.anomaly_score.partial_cmp(&a.anomaly_score).unwrap_or(std::cmp::Ordering::Equal));
 
     let budget = max_cordoned.saturating_sub(cordoned_after_drains);
@@ -304,6 +307,10 @@ pub fn build_gpu_cordon_plan(
             .filter(|n| !to_drain.contains(&n.node_name))
             .filter(|n| !to_uncordon.contains(&n.node_name))
             .collect();
+        debug_assert!(
+            uncordon_candidates.iter().all(|n| n.anomaly_score.is_finite()),
+            "NaN/Inf anomaly scores should be rejected upstream"
+        );
         uncordon_candidates.sort_by(|a, b| a.anomaly_score.partial_cmp(&b.anomaly_score).unwrap_or(std::cmp::Ordering::Equal));
 
         if let Some(best) = uncordon_candidates.first() {
@@ -692,7 +699,6 @@ mod tests {
             action,
             anomaly_score: score,
             is_cordoned: cordoned,
-            has_gpu_capacity: true,
         }
     }
 
