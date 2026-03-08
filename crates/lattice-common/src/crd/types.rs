@@ -6,7 +6,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
+use super::cluster::MonitoringConfig;
 use super::providers::{AwsConfig, DockerConfig, OpenStackConfig, ProxmoxConfig};
+
+// =============================================================================
+// Cluster Config
+// =============================================================================
+
+/// Cluster-level configuration shared across controllers.
+#[derive(Clone)]
+pub struct ClusterConfig {
+    /// Cluster name used in trust domain (lattice.{cluster}.local)
+    pub cluster_name: String,
+    /// Provider type for topology-aware scheduling
+    pub provider_type: ProviderType,
+    /// Monitoring configuration
+    pub monitoring: MonitoringConfig,
+}
 
 // =============================================================================
 // Provider Types

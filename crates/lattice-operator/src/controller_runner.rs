@@ -26,8 +26,8 @@ use lattice_cell::parent::ParentServers;
 use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
-    BackupStore, CedarPolicy, InfraProvider, LatticeCluster, LatticeClusterBackup, LatticeJob,
-    LatticeMeshMember, LatticeModel, LatticeRestore, LatticeService, MonitoringConfig,
+    BackupStore, CedarPolicy, ClusterConfig, InfraProvider, LatticeCluster, LatticeClusterBackup,
+    LatticeJob, LatticeMeshMember, LatticeModel, LatticeRestore, LatticeService, MonitoringConfig,
     OIDCProvider, ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
@@ -78,11 +78,9 @@ pub fn build_cluster_controllers(
 /// Returns the controller futures and the shared ServiceGraph (for use by job controllers).
 pub async fn build_service_controllers(
     client: Client,
-    cluster_name: String,
-    provider_type: ProviderType,
+    cluster: ClusterConfig,
     cedar: Arc<PolicyEngine>,
     registry: Arc<CrdRegistry>,
-    monitoring: MonitoringConfig,
     metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> (
@@ -103,11 +101,9 @@ pub async fn build_service_controllers(
     let mut service_ctx = ServiceContext::new(
         svc_kube_client,
         Arc::new(lattice_common::graph::ServiceGraph::new()),
-        cluster_name,
-        provider_type,
+        cluster,
         cedar.clone(),
         svc_events,
-        monitoring,
         metrics_scraper,
     );
     service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(registry.clone()))];
@@ -251,8 +247,7 @@ pub async fn build_service_controllers(
 /// Build job controller futures (LatticeJob)
 pub async fn build_job_controllers(
     client: Client,
-    cluster_name: String,
-    provider_type: ProviderType,
+    cluster: ClusterConfig,
     cedar: Arc<PolicyEngine>,
     graph: Arc<lattice_common::graph::ServiceGraph>,
     registry: Arc<CrdRegistry>,
@@ -272,8 +267,8 @@ pub async fn build_job_controllers(
     let mut job_ctx = lattice_job::controller::JobContext::new(
         kube_client,
         graph,
-        cluster_name,
-        provider_type,
+        cluster.cluster_name,
+        cluster.provider_type,
         cedar,
         events,
         metrics_scraper,
@@ -300,8 +295,7 @@ pub async fn build_job_controllers(
 /// Build model controller futures (LatticeModel)
 pub async fn build_model_controllers(
     client: Client,
-    cluster_name: String,
-    provider_type: ProviderType,
+    cluster: ClusterConfig,
     cedar: Arc<PolicyEngine>,
     graph: Arc<lattice_common::graph::ServiceGraph>,
     registry: Arc<CrdRegistry>,
@@ -321,8 +315,8 @@ pub async fn build_model_controllers(
     let mut model_ctx = lattice_model::controller::ModelContext::new(
         kube_client,
         graph,
-        cluster_name,
-        provider_type,
+        cluster.cluster_name,
+        cluster.provider_type,
         cedar,
         events,
         metrics_scraper,
@@ -589,6 +583,170 @@ where
         }
         Err(e) => tracing::warn!(error = %e, "Failed to list {} for graph warmup", label),
     }
+}
+
+/// Interval between graph audit cycles.
+const GRAPH_AUDIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Spawn a background task that periodically removes orphaned graph nodes.
+///
+/// An orphan is a non-Unknown node in the graph whose backing CRD no longer
+/// exists on the API server. This catches missed delete events that the
+/// event-driven controllers can't self-heal from.
+pub fn spawn_graph_auditor(
+    client: Client,
+    graph: Arc<lattice_common::graph::ServiceGraph>,
+    token: tokio_util::sync::CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(GRAPH_AUDIT_INTERVAL);
+        // First tick fires immediately — skip it so we don't audit right after warmup.
+        interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => break,
+                _ = interval.tick() => {
+                    if let Err(e) = audit_graph_orphans(&client, &graph).await {
+                        tracing::warn!(error = %e, "graph audit failed");
+                    }
+                }
+            }
+        }
+        tracing::info!("graph auditor stopped");
+    });
+}
+
+/// Compare the graph against the API server and fix divergence in both
+/// directions: remove orphaned nodes and re-add missing ones.
+async fn audit_graph_orphans(
+    client: &Client,
+    graph: &lattice_common::graph::ServiceGraph,
+) -> Result<(), kube::Error> {
+    let services = Api::<LatticeService>::all(client.clone())
+        .list(&kube::api::ListParams::default())
+        .await?;
+    let mesh_members = Api::<LatticeMeshMember>::all(client.clone())
+        .list(&kube::api::ListParams::default())
+        .await?;
+    let jobs = Api::<LatticeJob>::all(client.clone())
+        .list(&kube::api::ListParams::default())
+        .await?;
+    let models = Api::<LatticeModel>::all(client.clone())
+        .list(&kube::api::ListParams::default())
+        .await?;
+
+    // Build set of all CRD-backed names per namespace
+    let mut crd_names: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+
+    for svc in &services.items {
+        let ns = svc.metadata.namespace.as_deref().unwrap_or_default();
+        let name = svc.metadata.name.as_deref().unwrap_or_default();
+        crd_names
+            .entry(ns.to_string())
+            .or_default()
+            .insert(name.to_string());
+    }
+    for mm in &mesh_members.items {
+        let ns = mm.metadata.namespace.as_deref().unwrap_or_default();
+        let name = mm.metadata.name.as_deref().unwrap_or_default();
+        crd_names
+            .entry(ns.to_string())
+            .or_default()
+            .insert(name.to_string());
+    }
+    for job in &jobs.items {
+        let ns = job.metadata.namespace.as_deref().unwrap_or_default();
+        let job_name = job.metadata.name.as_deref().unwrap_or_default();
+        for task_name in job.spec.tasks.keys() {
+            crd_names
+                .entry(ns.to_string())
+                .or_default()
+                .insert(format!("{}-{}", job_name, task_name));
+        }
+    }
+    for model in &models.items {
+        let ns = model.metadata.namespace.as_deref().unwrap_or_default();
+        let model_name = model.metadata.name.as_deref().unwrap_or_default();
+        for role_name in model.spec.roles.keys() {
+            crd_names
+                .entry(ns.to_string())
+                .or_default()
+                .insert(format!("{}-{}", model_name, role_name));
+        }
+    }
+
+    // Remove orphaned graph nodes (exist in graph, no backing CRD)
+    let mut removed = 0u64;
+    for ns in graph.list_namespaces() {
+        let known = crd_names.get(&ns);
+        for name in graph.all_names_in_namespace(&ns) {
+            if let Some(node) = graph.get_service(&ns, &name) {
+                if node.type_.is_unknown() {
+                    continue;
+                }
+            }
+            let is_orphan = match known {
+                Some(set) => !set.contains(&name),
+                None => true,
+            };
+            if is_orphan {
+                tracing::info!(namespace = %ns, name = %name, "removing orphaned graph node");
+                graph.delete_service(&ns, &name);
+                removed += 1;
+            }
+        }
+    }
+
+    // Re-add missing nodes (exist as CRD, missing from graph)
+    let mut added = 0u64;
+    for svc in &services.items {
+        let ns = svc.metadata.namespace.as_deref().unwrap_or_default();
+        let name = svc.metadata.name.as_deref().unwrap_or_default();
+        if graph.get_service(ns, name).is_none() {
+            graph.put_service(ns, name, &svc.spec);
+            added += 1;
+        }
+    }
+    for mm in &mesh_members.items {
+        let ns = mm.metadata.namespace.as_deref().unwrap_or_default();
+        let name = mm.metadata.name.as_deref().unwrap_or_default();
+        if graph.get_service(ns, name).is_none() {
+            graph.put_mesh_member(ns, name, &mm.spec);
+            added += 1;
+        }
+    }
+    for job in &jobs.items {
+        let ns = job.metadata.namespace.as_deref().unwrap_or_default();
+        let job_name = job.metadata.name.as_deref().unwrap_or_default();
+        for (task_name, task_spec) in &job.spec.tasks {
+            let full_name = format!("{}-{}", job_name, task_name);
+            if graph.get_service(ns, &full_name).is_none() {
+                graph.put_workload(ns, &full_name, &task_spec.workload, &[]);
+                added += 1;
+            }
+        }
+    }
+    for model in &models.items {
+        let ns = model.metadata.namespace.as_deref().unwrap_or_default();
+        let model_name = model.metadata.name.as_deref().unwrap_or_default();
+        let has_autoscaling = model.spec.roles.values().any(|r| r.autoscaling.is_some());
+        let callers =
+            lattice_model::compiler::model_callers(model.spec.routing.as_ref(), has_autoscaling);
+        for (role_name, role_spec) in &model.spec.roles {
+            let full_name = format!("{}-{}", model_name, role_name);
+            if graph.get_service(ns, &full_name).is_none() {
+                graph.put_workload(ns, &full_name, &role_spec.entry_workload, &callers);
+                added += 1;
+            }
+        }
+    }
+
+    if removed > 0 || added > 0 {
+        tracing::info!(removed, added, "graph audit complete");
+    }
+    Ok(())
 }
 
 /// Collect ObjectRefs for every service in the graph (used to trigger re-reconciliation of all services).

@@ -962,6 +962,14 @@ impl ServiceGraph {
             .collect()
     }
 
+    /// Get all node names in a namespace (all types, including Unknown).
+    pub fn all_names_in_namespace(&self, namespace: &str) -> HashSet<String> {
+        self.ns_index
+            .get(namespace)
+            .map(|index| index.clone())
+            .unwrap_or_default()
+    }
+
     /// Get count of services in a namespace
     pub fn service_count(&self, namespace: &str) -> usize {
         self.ns_index

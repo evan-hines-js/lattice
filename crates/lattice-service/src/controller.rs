@@ -33,7 +33,7 @@ use lattice_common::NoopEventPublisher;
 
 use crate::compiler::{ApplyLayer, CompiledService, CompilerPhase, ServiceCompiler};
 use crate::crd::{
-    Condition, ConditionStatus, CostEstimate, LatticeService, LatticeServiceSpec,
+    ClusterConfig, Condition, ConditionStatus, CostEstimate, LatticeService, LatticeServiceSpec,
     LatticeServiceStatus, MetricsScraper, MetricsSnapshot, MonitoringConfig, ProviderType,
     ServicePhase,
 };
@@ -548,21 +548,19 @@ impl ServiceContext {
     pub fn new(
         kube: Arc<dyn ServiceKubeClient>,
         graph: Arc<ServiceGraph>,
-        cluster_name: impl Into<String>,
-        provider_type: ProviderType,
+        cluster: ClusterConfig,
         cedar: Arc<PolicyEngine>,
         events: Arc<dyn EventPublisher>,
-        monitoring: MonitoringConfig,
         metrics_scraper: Arc<dyn MetricsScraper>,
     ) -> Self {
         Self {
             kube,
             graph,
-            cluster_name: cluster_name.into(),
-            provider_type,
+            cluster_name: cluster.cluster_name,
+            provider_type: cluster.provider_type,
             cedar,
             events,
-            monitoring,
+            monitoring: cluster.monitoring,
             extension_phases: Vec::new(),
             metrics_scraper,
             cost_provider: None,
@@ -1429,24 +1427,25 @@ mod tests {
         let shared_graph = Arc::new(ServiceGraph::new());
         let cedar = Arc::new(PolicyEngine::new());
 
+        let cluster = ClusterConfig {
+            cluster_name: "test-cluster".into(),
+            provider_type: ProviderType::Docker,
+            monitoring: MonitoringConfig::default(),
+        };
         let ctx1 = ServiceContext::new(
             mock_kube1,
             Arc::clone(&shared_graph),
-            "test-cluster",
-            ProviderType::Docker,
+            cluster.clone(),
             Arc::clone(&cedar),
             Arc::new(NoopEventPublisher),
-            MonitoringConfig::default(),
             Arc::new(lattice_common::crd::NoopMetricsScraper),
         );
         let ctx2 = ServiceContext::new(
             mock_kube2,
             Arc::clone(&shared_graph),
-            "test-cluster",
-            ProviderType::Docker,
+            cluster,
             Arc::clone(&cedar),
             Arc::new(NoopEventPublisher),
-            MonitoringConfig::default(),
             Arc::new(lattice_common::crd::NoopMetricsScraper),
         );
 

@@ -33,8 +33,7 @@ use lattice_capi::installer::{CapiInstaller, NativeInstaller};
 use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::{ParentConfig, ParentServers};
-use lattice_common::crd::LatticeCluster;
-use lattice_common::crd::{LatticeService, OIDCProvider};
+use lattice_common::crd::{ClusterConfig, LatticeCluster, LatticeService, OIDCProvider};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::telemetry::{init_telemetry, TelemetryConfig};
 use lattice_common::CrdRegistry;
@@ -94,6 +93,7 @@ struct SliceHandle {
     controllers: Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     agent_token: Option<tokio_util::sync::CancellationToken>,
+    graph_auditor_token: Option<tokio_util::sync::CancellationToken>,
     auth_proxy_handle: Option<tokio::task::JoinHandle<()>>,
     infra_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
@@ -224,6 +224,7 @@ async fn run_controller(mode: ControllerMode, prom_registry: Option<prometheus::
         controllers,
         parent_servers,
         agent_token,
+        graph_auditor_token,
         auth_proxy_handle,
         infra_handle,
     } = handle;
@@ -280,6 +281,9 @@ async fn run_controller(mode: ControllerMode, prom_registry: Option<prometheus::
     if let Some(token) = agent_token {
         token.cancel();
     }
+    if let Some(token) = graph_auditor_token {
+        token.cancel();
+    }
     if let Some(handle) = auth_proxy_handle {
         handle.abort();
     }
@@ -333,6 +337,7 @@ async fn run_cluster_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
         controllers,
         parent_servers: Some(parent_servers),
         agent_token: Some(agent_token),
+        graph_auditor_token: None,
         auth_proxy_handle,
         infra_handle: Some(infra_handle),
     })
@@ -353,34 +358,34 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
 
     let cedar = load_cedar_engine(client).await;
 
-    let cluster_name = std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into());
-    let provider_type = controller_runner::resolve_provider_type_from_env();
-    let monitoring = controller_runner::resolve_monitoring_from_env();
+    let cluster = ClusterConfig {
+        cluster_name: std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into()),
+        provider_type: controller_runner::resolve_provider_type_from_env(),
+        monitoring: controller_runner::resolve_monitoring_from_env(),
+    };
     let registry = Arc::new(CrdRegistry::new(client.clone()).await);
     let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
         lattice_cost::ConfigMapCostProvider::new(client.clone()),
     ));
 
-    let metrics_scraper = Arc::new(metrics::VmMetricsScraper::new(monitoring.ha)?);
+    let metrics_scraper = Arc::new(metrics::VmMetricsScraper::new(cluster.monitoring.ha)?);
 
     let (mut controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
-        cluster_name.clone(),
-        provider_type,
+        cluster.clone(),
         cedar.clone(),
         registry.clone(),
-        monitoring,
         metrics_scraper.clone(),
         cost_provider.clone(),
     )
     .await;
 
     let graph_for_models = graph.clone();
+    let graph_for_auditor = graph.clone();
     controllers.extend(
         controller_runner::build_job_controllers(
             client.clone(),
-            cluster_name.clone(),
-            provider_type,
+            cluster.clone(),
             cedar.clone(),
             graph,
             registry.clone(),
@@ -393,8 +398,7 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
     controllers.extend(
         controller_runner::build_model_controllers(
             client.clone(),
-            cluster_name,
-            provider_type,
+            cluster,
             cedar.clone(),
             graph_for_models,
             registry,
@@ -411,10 +415,14 @@ async fn run_service_slice(client: &kube::Client) -> anyhow::Result<SliceHandle>
 
     spawn_webhook_infrastructure(client.clone());
 
+    let auditor_token = tokio_util::sync::CancellationToken::new();
+    controller_runner::spawn_graph_auditor(client.clone(), graph_for_auditor, auditor_token.clone());
+
     Ok(SliceHandle {
         controllers,
         parent_servers: None,
         agent_token: None,
+        graph_auditor_token: Some(auditor_token),
         auth_proxy_handle: None,
         infra_handle: Some(infra_handle),
     })
@@ -506,21 +514,21 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     );
 
     // Service controllers need provider type + monitoring from the LatticeCluster CRD
-    let provider_type = controller_runner::resolve_provider_type_from_cluster(client).await;
-    let monitoring = controller_runner::resolve_monitoring_from_cluster(client).await;
-    let cluster_name = self_cluster_name.unwrap_or_else(|| "default".to_string());
+    let cluster = ClusterConfig {
+        cluster_name: self_cluster_name.unwrap_or_else(|| "default".to_string()),
+        provider_type: controller_runner::resolve_provider_type_from_cluster(client).await,
+        monitoring: controller_runner::resolve_monitoring_from_cluster(client).await,
+    };
     let registry = Arc::new(CrdRegistry::new(client.clone()).await);
     let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
         lattice_cost::ConfigMapCostProvider::new(client.clone()),
     ));
-    let metrics_scraper = Arc::new(metrics::VmMetricsScraper::new(monitoring.ha)?);
+    let metrics_scraper = Arc::new(metrics::VmMetricsScraper::new(cluster.monitoring.ha)?);
     let (service_controllers, graph) = controller_runner::build_service_controllers(
         client.clone(),
-        cluster_name.clone(),
-        provider_type,
+        cluster.clone(),
         cedar.clone(),
         registry.clone(),
-        monitoring,
         metrics_scraper.clone(),
         cost_provider.clone(),
     )
@@ -528,11 +536,11 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     controllers.extend(service_controllers);
 
     let graph_for_models = graph.clone();
+    let graph_for_auditor = graph.clone();
     controllers.extend(
         controller_runner::build_job_controllers(
             client.clone(),
-            cluster_name.clone(),
-            provider_type,
+            cluster.clone(),
             cedar.clone(),
             graph,
             registry.clone(),
@@ -545,8 +553,7 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
     controllers.extend(
         controller_runner::build_model_controllers(
             client.clone(),
-            cluster_name,
-            provider_type,
+            cluster,
             cedar.clone(),
             graph_for_models,
             registry,
@@ -563,10 +570,14 @@ async fn run_all_slices(client: &kube::Client) -> anyhow::Result<SliceHandle> {
 
     spawn_webhook_infrastructure(client.clone());
 
+    let auditor_token = tokio_util::sync::CancellationToken::new();
+    controller_runner::spawn_graph_auditor(client.clone(), graph_for_auditor, auditor_token.clone());
+
     Ok(SliceHandle {
         controllers,
         parent_servers: Some(parent_servers),
         agent_token: Some(agent_token),
+        graph_auditor_token: Some(auditor_token),
         auth_proxy_handle,
         infra_handle: Some(infra_handle),
     })
