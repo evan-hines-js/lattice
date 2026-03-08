@@ -20,7 +20,8 @@ use tracing::info;
 
 use super::super::helpers::{
     apply_yaml, delete_namespace, ensure_fresh_namespace, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, VELERO_NAMESPACE,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, with_diagnostics,
+    DiagnosticContext, VELERO_NAMESPACE,
 };
 
 const BACKUP_NAMESPACE: &str = "lattice-system";
@@ -41,13 +42,14 @@ pub async fn run_backup_tests(kubeconfig: &str) -> Result<(), String> {
     info!("Backup/Restore Integration Tests");
     info!("========================================\n");
 
-    setup_backup_infrastructure(kubeconfig).await?;
-
-    run_backup_test_sequence(kubeconfig).await?;
-
-    cleanup_backup_tests(kubeconfig).await;
-
-    Ok(())
+    let diag = DiagnosticContext::new(kubeconfig, BACKUP_NAMESPACE);
+    with_diagnostics(&diag, "Backup", || async {
+        setup_backup_infrastructure(kubeconfig).await?;
+        run_backup_test_sequence(kubeconfig).await?;
+        cleanup_backup_tests(kubeconfig).await;
+        Ok(())
+    })
+    .await
 }
 
 async fn run_backup_test_sequence(kubeconfig: &str) -> Result<(), String> {

@@ -39,7 +39,7 @@ use super::super::helpers::{
     apply_apparmor_override_policy, apply_cedar_policy_crd, create_service_with_security_overrides,
     delete_cedar_policies_by_label, delete_namespace, deploy_and_wait_for_phase,
     ensure_fresh_namespace, wait_for_no_cedar_policies_with_label, wait_for_service_phase,
-    TestHarness, DEFAULT_TIMEOUT,
+    with_diagnostics, DiagnosticContext, TestHarness, DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -385,40 +385,44 @@ pub async fn run_cedar_security_tests(kubeconfig: &str) -> Result<(), String> {
         kubeconfig
     );
 
-    // Clean up any leftover policies from previous runs and wait for deletion
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
-    wait_for_no_cedar_policies_with_label(kubeconfig, &format!("lattice.dev/test={}", TEST_LABEL))
+    let diag = DiagnosticContext::new(kubeconfig, NS_DEFAULT_DENY);
+    with_diagnostics(&diag, "Cedar Security", || async {
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
+            .await;
+        wait_for_no_cedar_policies_with_label(
+            kubeconfig,
+            &format!("lattice.dev/test={}", TEST_LABEL),
+        )
         .await?;
 
-    // Docker KIND clusters don't have AppArmor — permit the Unconfined override.
-    // Uses "e2e" label so the cedar-security cleanup (which deletes by "cedar-security"
-    // label) doesn't remove it.
-    apply_apparmor_override_policy(kubeconfig).await?;
+        apply_apparmor_override_policy(kubeconfig).await?;
 
-    // Run all tests concurrently — each uses its own namespace
-    let harness = TestHarness::new("Cedar Security");
-    tokio::join!(
-        harness.run("Default deny", || test_default_deny(kubeconfig)),
-        harness.run("Permit capability", || test_permit_capability(kubeconfig)),
-        harness.run("Forbid overrides permit", || test_forbid_overrides_permit(
-            kubeconfig
-        )),
-        harness.run("Namespace isolation", || test_namespace_isolation(
-            kubeconfig
-        )),
-        harness.run("Policy lifecycle", || test_policy_lifecycle(kubeconfig)),
-        harness.run("No overrides no policy", || test_no_overrides_no_policy(
-            kubeconfig
-        )),
-        harness.run("Run as root", || test_run_as_root(kubeconfig)),
-    );
+        let harness = TestHarness::new("Cedar Security");
+        tokio::join!(
+            harness.run("Default deny", || test_default_deny(kubeconfig)),
+            harness.run("Permit capability", || test_permit_capability(kubeconfig)),
+            harness.run("Forbid overrides permit", || test_forbid_overrides_permit(
+                kubeconfig
+            )),
+            harness.run("Namespace isolation", || test_namespace_isolation(
+                kubeconfig
+            )),
+            harness.run("Policy lifecycle", || test_policy_lifecycle(kubeconfig)),
+            harness.run("No overrides no policy", || test_no_overrides_no_policy(
+                kubeconfig
+            )),
+            harness.run("Run as root", || test_run_as_root(kubeconfig)),
+        );
 
-    harness.finish()?;
+        harness.finish()?;
 
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
+            .await;
 
-    info!("[CedarSecurity] All Cedar security override tests passed!");
-    Ok(())
+        info!("[CedarSecurity] All Cedar security override tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 // =============================================================================

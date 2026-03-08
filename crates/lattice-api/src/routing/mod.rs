@@ -5,4 +5,4 @@
 
 mod path;
 
-pub use path::{parse_cluster_path, split_first_hop, strip_cluster_prefix};
+pub use path::{parse_cluster_path, strip_cluster_prefix};

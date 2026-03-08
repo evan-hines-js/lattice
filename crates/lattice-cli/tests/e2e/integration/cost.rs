@@ -18,7 +18,7 @@ use tracing::info;
 
 use super::super::helpers::{
     apply_yaml, delete_namespace, ensure_fresh_namespace, run_kubectl, wait_for_condition,
-    wait_for_resource_phase, DEFAULT_TIMEOUT,
+    wait_for_resource_phase, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 
 const COST_NAMESPACE: &str = "cost-test";
@@ -303,16 +303,20 @@ async fn test_cost_without_configmap(kubeconfig: &str) -> Result<(), String> {
 pub async fn run_cost_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Cost] Running cost estimation integration tests on {kubeconfig}");
 
-    ensure_rates_configmap(kubeconfig).await?;
+    let diag = DiagnosticContext::new(kubeconfig, COST_NAMESPACE);
+    with_diagnostics(&diag, "Cost", || async {
+        ensure_rates_configmap(kubeconfig).await?;
 
-    test_service_cost_populated(kubeconfig).await?;
-    test_service_cost_arithmetic(kubeconfig).await?;
-    test_cost_without_configmap(kubeconfig).await?;
+        test_service_cost_populated(kubeconfig).await?;
+        test_service_cost_arithmetic(kubeconfig).await?;
+        test_cost_without_configmap(kubeconfig).await?;
 
-    delete_namespace(kubeconfig, COST_NAMESPACE).await;
+        delete_namespace(kubeconfig, COST_NAMESPACE).await;
 
-    info!("[Cost] All cost integration tests passed!");
-    Ok(())
+        info!("[Cost] All cost integration tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]

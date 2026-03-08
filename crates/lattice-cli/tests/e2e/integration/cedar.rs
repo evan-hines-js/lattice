@@ -29,7 +29,8 @@ use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     apply_cedar_policy_crd, apply_yaml, cedar_policy_exists, delete_cedar_policies_by_label,
     delete_namespace, get_child_cluster_name, get_or_create_proxy, get_sa_token,
-    http_get_with_retry, proxy_service_exists, run_kubectl, wait_for_condition, TestHarness,
+    http_get_with_retry, proxy_service_exists, run_kubectl, wait_for_condition, with_diagnostics,
+    DiagnosticContext, TestHarness,
 };
 
 // =============================================================================
@@ -386,35 +387,37 @@ pub async fn run_cedar_hierarchy_tests(
         return Ok(());
     }
 
-    remove_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
+    let diag = DiagnosticContext::new(&ctx.mgmt_kubeconfig, LATTICE_SYSTEM_NAMESPACE);
+    with_diagnostics(&diag, "Cedar Hierarchy", || async {
+        remove_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
 
-    let proxy_url = ctx.mgmt_proxy_url.as_deref();
-    let kubeconfig = &ctx.mgmt_kubeconfig;
+        let proxy_url = ctx.mgmt_proxy_url.as_deref();
+        let kubeconfig = &ctx.mgmt_kubeconfig;
 
-    let harness = TestHarness::new("Cedar");
-    tokio::join!(
-        harness.run("Proxy test", || run_cedar_proxy_test(
-            kubeconfig,
-            child_cluster_name,
-            proxy_url
-        )),
-        harness.run("Group test", || run_cedar_group_test(
-            kubeconfig,
-            child_cluster_name,
-            proxy_url
-        )),
-    );
+        let harness = TestHarness::new("Cedar");
+        tokio::join!(
+            harness.run("Proxy test", || run_cedar_proxy_test(
+                kubeconfig,
+                child_cluster_name,
+                proxy_url
+            )),
+            harness.run("Group test", || run_cedar_group_test(
+                kubeconfig,
+                child_cluster_name,
+                proxy_url
+            )),
+        );
 
-    // Safety net: clean up any leftover policies on failure
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
+            .await;
+        apply_e2e_default_policy(kubeconfig).await?;
 
-    // Restore default policy for subsequent tests (mesh, secrets, etc.)
-    apply_e2e_default_policy(kubeconfig).await?;
+        harness.finish()?;
 
-    harness.finish()?;
-
-    info!("[Integration/Cedar] All Cedar hierarchy tests passed!");
-    Ok(())
+        info!("[Integration/Cedar] All Cedar hierarchy tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 // =============================================================================

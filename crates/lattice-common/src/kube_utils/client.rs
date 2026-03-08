@@ -13,6 +13,19 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default read timeout for kube clients
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Apply timeouts and build a kube Client from a Config.
+fn build_client(
+    mut config: Config,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<Client, Error> {
+    config.connect_timeout = Some(connect_timeout);
+    config.read_timeout = Some(read_timeout);
+    Client::try_from(config).map_err(|e| {
+        Error::internal_with_context("create_client", format!("failed to create client: {}", e))
+    })
+}
+
 /// Create a kube client from optional kubeconfig path.
 ///
 /// Pass `None` for timeouts to use defaults (5s connect, 30s read).
@@ -31,39 +44,24 @@ pub async fn create_client(
                     format!("failed to read kubeconfig: {}", e),
                 )
             })?;
-            let mut config =
-                Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
-                    .await
-                    .map_err(|e| {
-                        Error::internal_with_context(
-                            "create_client",
-                            format!("failed to load kubeconfig: {}", e),
-                        )
-                    })?;
-            config.connect_timeout = Some(connect_timeout);
-            config.read_timeout = Some(read_timeout);
-            Client::try_from(config).map_err(|e| {
-                Error::internal_with_context(
-                    "create_client",
-                    format!("failed to create client: {}", e),
-                )
-            })
+            let config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+                .await
+                .map_err(|e| {
+                    Error::internal_with_context(
+                        "create_client",
+                        format!("failed to load kubeconfig: {}", e),
+                    )
+                })?;
+            build_client(config, connect_timeout, read_timeout)
         }
         None => {
-            let mut config = Config::infer().await.map_err(|e| {
+            let config = Config::infer().await.map_err(|e| {
                 Error::internal_with_context(
                     "create_client",
                     format!("failed to infer config: {}", e),
                 )
             })?;
-            config.connect_timeout = Some(connect_timeout);
-            config.read_timeout = Some(read_timeout);
-            Client::try_from(config).map_err(|e| {
-                Error::internal_with_context(
-                    "create_client",
-                    format!("failed to create client: {}", e),
-                )
-            })
+            build_client(config, connect_timeout, read_timeout)
         }
     }
 }

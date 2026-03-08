@@ -19,7 +19,8 @@ use tracing::info;
 
 use super::super::helpers::{
     apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_resource_phase, DEFAULT_TIMEOUT,
+    setup_regcreds_infrastructure, wait_for_resource_phase, with_diagnostics, DiagnosticContext,
+    DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -175,16 +176,19 @@ pub async fn run_pytorch_training_tests(kubeconfig: &str) -> Result<(), String> 
     info!("PyTorch Distributed Training Tests");
     info!("========================================\n");
 
-    setup_regcreds_infrastructure(kubeconfig).await?;
+    let diag = DiagnosticContext::new(kubeconfig, PYTORCH_NAMESPACE);
+    with_diagnostics(&diag, "PyTorch Training", || async {
+        setup_regcreds_infrastructure(kubeconfig).await?;
+        test_pytorch_distributed_training(kubeconfig).await?;
 
-    test_pytorch_distributed_training(kubeconfig).await?;
+        info!("\n========================================");
+        info!("PyTorch Distributed Training Tests: PASSED");
+        info!("========================================\n");
 
-    info!("\n========================================");
-    info!("PyTorch Distributed Training Tests: PASSED");
-    info!("========================================\n");
-
-    delete_namespace(kubeconfig, PYTORCH_NAMESPACE).await;
-    Ok(())
+        delete_namespace(kubeconfig, PYTORCH_NAMESPACE).await;
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]

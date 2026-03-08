@@ -29,8 +29,8 @@ use super::super::helpers::{
     apply_cedar_policy_crd, delete_cedar_policies_by_label, delete_namespace,
     deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_no_cedar_policies_with_label,
-    wait_for_pod_running, TestHarness, BUSYBOX_IMAGE, DEFAULT_TIMEOUT, NGINX_IMAGE,
-    REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    wait_for_pod_running, with_diagnostics, DiagnosticContext, TestHarness, BUSYBOX_IMAGE,
+    DEFAULT_TIMEOUT, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 
 const NS_DEFAULT: &str = "tetragon-t1";
@@ -1056,44 +1056,51 @@ async fn test_missing_entrypoint_killed(kubeconfig: &str) -> Result<(), String> 
 pub async fn run_tetragon_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Tetragon] Running runtime enforcement tests on {kubeconfig}");
 
-    setup_regcreds_infrastructure(kubeconfig).await?;
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
-    wait_for_no_cedar_policies_with_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
+    let diag = DiagnosticContext::new(kubeconfig, NS_DEFAULT);
+    with_diagnostics(&diag, "Tetragon", || async {
+        setup_regcreds_infrastructure(kubeconfig).await?;
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
+        wait_for_no_cedar_policies_with_label(
+            kubeconfig,
+            &format!("lattice.dev/test={TEST_LABEL}"),
+        )
         .await?;
 
-    let harness = TestHarness::new("Tetragon");
-    tokio::join!(
-        harness.run("Default security", || test_default_security(kubeconfig)),
-        harness.run("Probe shell exemption", || test_probe_shell_exemption(
-            kubeconfig
-        )),
-        harness.run("Cmd shell exemption", || test_cmd_shell_exemption(
-            kubeconfig
-        )),
-        harness.run("Sidecar shell exemption", || test_sidecar_shell_exemption(
-            kubeconfig
-        )),
-        harness.run("Enforcement", || test_enforcement(kubeconfig)),
-        harness.run("Allowed binaries", || test_allowed_binaries(kubeconfig)),
-        harness.run("Allowed binaries cedar deny", || {
-            test_allowed_binaries_cedar_deny(kubeconfig)
-        }),
-        harness.run("Wildcard allowed binaries", || {
-            test_wildcard_allowed_binaries(kubeconfig)
-        }),
-        harness.run("Implicit wildcard", || test_implicit_wildcard(kubeconfig)),
-        harness.run("Implicit wildcard cedar deny", || {
-            test_implicit_wildcard_cedar_deny(kubeconfig)
-        }),
-        harness.run("Missing entrypoint killed", || {
-            test_missing_entrypoint_killed(kubeconfig)
-        }),
-    );
-    harness.finish()?;
+        let harness = TestHarness::new("Tetragon");
+        tokio::join!(
+            harness.run("Default security", || test_default_security(kubeconfig)),
+            harness.run("Probe shell exemption", || test_probe_shell_exemption(
+                kubeconfig
+            )),
+            harness.run("Cmd shell exemption", || test_cmd_shell_exemption(
+                kubeconfig
+            )),
+            harness.run("Sidecar shell exemption", || test_sidecar_shell_exemption(
+                kubeconfig
+            )),
+            harness.run("Enforcement", || test_enforcement(kubeconfig)),
+            harness.run("Allowed binaries", || test_allowed_binaries(kubeconfig)),
+            harness.run("Allowed binaries cedar deny", || {
+                test_allowed_binaries_cedar_deny(kubeconfig)
+            }),
+            harness.run("Wildcard allowed binaries", || {
+                test_wildcard_allowed_binaries(kubeconfig)
+            }),
+            harness.run("Implicit wildcard", || test_implicit_wildcard(kubeconfig)),
+            harness.run("Implicit wildcard cedar deny", || {
+                test_implicit_wildcard_cedar_deny(kubeconfig)
+            }),
+            harness.run("Missing entrypoint killed", || {
+                test_missing_entrypoint_killed(kubeconfig)
+            }),
+        );
+        harness.finish()?;
 
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
-    info!("[Tetragon] All runtime enforcement tests passed!");
-    Ok(())
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
+        info!("[Tetragon] All runtime enforcement tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 // =============================================================================

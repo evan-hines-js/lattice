@@ -214,11 +214,10 @@ impl DiagnosticContext {
     }
 }
 
-/// Run an async test body with automatic diagnostic dump on panic.
+/// Run an async test body with automatic diagnostic dump on failure.
 ///
-/// Wraps the future in `catch_unwind`. If the future panics, dumps diagnostics
-/// via the provided context before re-raising the panic. This ensures we capture
-/// cluster state even when test code panics (e.g., `.unwrap()` or `assert!`).
+/// Dumps diagnostics on both `Err` returns and panics, so callers don't need
+/// to wire up separate dump logic for each failure mode.
 pub async fn with_diagnostics<F, Fut>(
     ctx: &DiagnosticContext,
     label: &str,
@@ -230,7 +229,13 @@ where
 {
     let result = AssertUnwindSafe(f()).catch_unwind().await;
     match result {
-        Ok(ok) => ok,
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            warn!("[{}] FAILED: {}", label, e);
+            let path = ctx.dump(label).await;
+            warn!("[{}] Diagnostic dump (error): {}", label, path);
+            Err(e)
+        }
         Err(panic_payload) => {
             warn!(
                 "[{}] PANIC caught: {}",

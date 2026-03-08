@@ -291,7 +291,7 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let kc = kubeconfig_path.to_string();
     let diag = DiagnosticContext::new(kubeconfig_path, TEST_SERVICES_NAMESPACE);
     with_diagnostics(&diag, "Fixed Mesh", || async {
-        retry_verification("Fixed Mesh", Some(&diag), || verify_traffic_patterns(&kc)).await
+        retry_verification("Fixed Mesh", || verify_traffic_patterns(&kc)).await
     })
     .await?;
 

@@ -466,7 +466,10 @@ pub async fn reconcile(
                         s = s.conditions(c);
                     }
                     s.apply(ctx.kube.as_ref(), &model, namespace).await?;
-                    Ok(Action::await_change())
+                    // Always requeue as a safety net — watch events can be missed during pod restarts.
+                    Ok(Action::requeue(Duration::from_secs(
+                        lattice_common::REQUEUE_SUCCESS_SECS,
+                    )))
                 }
                 ModelServingState::Progressing => Ok(Action::requeue(REQUEUE_LOADING)),
             }
@@ -635,7 +638,10 @@ pub async fn reconcile(
             }
             Ok(Action::requeue(Duration::from_secs(30)))
         }
-        _ => Ok(Action::await_change()),
+        // Safety net requeue for any unmatched phase — watch events can be missed during pod restarts.
+        _ => Ok(Action::requeue(Duration::from_secs(
+            lattice_common::REQUEUE_SUCCESS_SECS,
+        ))),
     }
 }
 
@@ -1100,7 +1106,6 @@ impl<'a> StatusUpdate<'a> {
 mod tests {
     use super::*;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_common::crd::ModelRoleSpec;
     use std::collections::BTreeMap;
 
     // =========================================================================
@@ -1192,7 +1197,10 @@ mod tests {
         let action = reconcile(model, ctx)
             .await
             .expect("reconcile should succeed");
-        assert_eq!(action, Action::await_change());
+        assert_eq!(
+            action,
+            Action::requeue(Duration::from_secs(lattice_common::REQUEUE_SUCCESS_SECS))
+        );
     }
 
     /// Serving with no spec change requeues for health monitoring

@@ -383,7 +383,11 @@ impl<'de> Deserialize<'de> for ResourceSpec {
         let params = match raw.params {
             None => match &raw.type_ {
                 ResourceType::Volume => ResourceParams::Volume(VolumeParams::default()),
-                ResourceType::Gpu => ResourceParams::Gpu(GpuParams::default()),
+                ResourceType::Gpu => {
+                    return Err(serde::de::Error::custom(
+                        "gpu resource requires 'params' with 'count'",
+                    ));
+                }
                 ResourceType::Secret => {
                     return Err(serde::de::Error::custom(
                         "secret resource requires 'params' with 'provider'",
@@ -1112,11 +1116,17 @@ mod tests {
 
     #[test]
     fn test_gpu_params_defaults_without_params() {
-        // Deserialize a GPU resource with no params — should get default GpuParams
+        // GPU resource without params should fail deserialization (count is required)
         let json = serde_json::json!({"type": "gpu"});
-        let resource: ResourceSpec = serde_json::from_value(json).unwrap();
-        let gpu = resource.params.as_gpu().unwrap();
-        assert_eq!(gpu.count, 0);
+        let result = serde_json::from_value::<ResourceSpec>(json);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("gpu resource requires 'params'"),
+            "error should mention missing params"
+        );
     }
 
     #[test]

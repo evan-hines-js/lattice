@@ -21,7 +21,7 @@ use tracing::info;
 use super::super::helpers::{
     build_busybox_service, delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace,
     run_kubectl, service_pod_selector, setup_regcreds_infrastructure, wait_for_pod_running,
-    BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
+    with_diagnostics, DiagnosticContext, BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
 };
 
 const TOPOLOGY_NS: &str = "topology-test";
@@ -528,18 +528,17 @@ async fn test_pod_node_placement(kubeconfig: &str) -> Result<(), String> {
 pub async fn run_topology_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Topology] Running topology integration tests on {kubeconfig}");
 
-    // Infrastructure checks (no namespace needed)
-    test_node_topology_labels(kubeconfig).await?;
-    test_topology_discovery_configmap(kubeconfig).await?;
+    let diag = DiagnosticContext::new(kubeconfig, TOPOLOGY_NS);
+    with_diagnostics(&diag, "Topology", || async {
+        test_node_topology_labels(kubeconfig).await?;
+        test_topology_discovery_configmap(kubeconfig).await?;
 
-    // Service deployment tests
-    setup_regcreds_infrastructure(kubeconfig).await?;
-
-    run_topology_test_sequence(kubeconfig).await?;
-
-    delete_namespace(kubeconfig, TOPOLOGY_NS).await;
-
-    Ok(())
+        setup_regcreds_infrastructure(kubeconfig).await?;
+        run_topology_test_sequence(kubeconfig).await?;
+        delete_namespace(kubeconfig, TOPOLOGY_NS).await;
+        Ok(())
+    })
+    .await
 }
 
 async fn run_topology_test_sequence(kubeconfig: &str) -> Result<(), String> {

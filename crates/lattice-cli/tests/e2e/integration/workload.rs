@@ -22,8 +22,8 @@ use tracing::info;
 use super::super::helpers::{
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace, run_kubectl,
     service_pod_selector, setup_regcreds_infrastructure, verify_pod_env_var,
-    verify_pod_file_content, wait_for_condition, wait_for_pod_running, BUSYBOX_IMAGE,
-    DEFAULT_TIMEOUT,
+    verify_pod_file_content, wait_for_condition, wait_for_pod_running, with_diagnostics,
+    DiagnosticContext, BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
 };
 
 const WORKLOAD_NS: &str = "workload-test";
@@ -382,13 +382,14 @@ async fn test_file_under_volume_mount(kubeconfig: &str) -> Result<(), String> {
 pub async fn run_workload_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Workload] Running workload feature integration tests on {kubeconfig}");
 
-    setup_regcreds_infrastructure(kubeconfig).await?;
-
-    run_workload_test_sequence(kubeconfig).await?;
-
-    delete_namespace(kubeconfig, WORKLOAD_NS).await;
-
-    Ok(())
+    let diag = DiagnosticContext::new(kubeconfig, WORKLOAD_NS);
+    with_diagnostics(&diag, "Workload", || async {
+        setup_regcreds_infrastructure(kubeconfig).await?;
+        run_workload_test_sequence(kubeconfig).await?;
+        delete_namespace(kubeconfig, WORKLOAD_NS).await;
+        Ok(())
+    })
+    .await
 }
 
 async fn run_workload_test_sequence(kubeconfig: &str) -> Result<(), String> {

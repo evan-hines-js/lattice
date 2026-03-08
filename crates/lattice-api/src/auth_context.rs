@@ -170,6 +170,7 @@ fn extract_client_ip(req: &Request<Body>) -> String {
         }
     }
 
+    tracing::debug!("No X-Forwarded-For or X-Real-IP header, client IP unknown");
     "unknown".to_string()
 }
 

@@ -163,8 +163,10 @@ async fn run_controller(
 
     // Get pod identity from Downward API env vars (set in deployment manifest)
     let pod_name = std::env::var("POD_NAME").unwrap_or_else(|_| {
-        // Fallback for local development
-        format!("lattice-operator-{}", uuid::Uuid::new_v4())
+        // Fallback for local development — log so misconfigured deployments are visible
+        let name = format!("lattice-operator-{}", uuid::Uuid::new_v4());
+        tracing::warn!(pod_name = %name, "POD_NAME not set (expected from Downward API), using generated name");
+        name
     });
 
     // Debug mode: expose /debug/graph endpoint when LATTICE_DEBUG=true
@@ -373,7 +375,10 @@ async fn run_service_slice(
     let cedar = load_cedar_engine(client).await;
 
     let cluster = ClusterConfig {
-        cluster_name: std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| "default".into()),
+        cluster_name: std::env::var("LATTICE_CLUSTER_NAME").unwrap_or_else(|_| {
+            tracing::warn!("LATTICE_CLUSTER_NAME not set, defaulting to 'default'");
+            "default".into()
+        }),
         provider_type: controller_runner::resolve_provider_type_from_env(),
         monitoring: controller_runner::resolve_monitoring_from_env(),
     };

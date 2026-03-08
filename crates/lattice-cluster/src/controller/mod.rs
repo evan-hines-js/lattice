@@ -145,8 +145,11 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
         )
         .await?;
         timer.error("permanent");
-        // Don't requeue for validation errors - they require spec changes
-        return Ok(Action::await_change());
+        // Validation errors require spec changes, but always requeue as a
+        // safety net — watch events can be missed during pod restarts.
+        return Ok(Action::requeue(Duration::from_secs(
+            lattice_common::REQUEUE_SUCCESS_SECS,
+        )));
     }
 
     // Get current status, defaulting to Pending if not set
@@ -219,9 +222,12 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
             Ok(Action::requeue(Duration::from_secs(5)))
         }
         ClusterPhase::Failed => {
-            // Failed state requires manual intervention
+            // Failed state requires manual intervention, but always requeue as a
+            // safety net — watch events can be missed during pod restarts.
             warn!("cluster is in Failed state, awaiting spec change");
-            Ok(Action::await_change())
+            Ok(Action::requeue(Duration::from_secs(
+                lattice_common::REQUEUE_SUCCESS_SECS,
+            )))
         }
     };
 
@@ -249,15 +255,12 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     result
 }
 
-/// Maximum backoff delay for retryable errors (5 minutes)
-const MAX_ERROR_BACKOFF: Duration = Duration::from_secs(300);
-
-/// Error policy for the controller
+/// Error policy for the cluster controller.
 ///
-/// This function is called when reconciliation fails. It determines
-/// the requeue strategy:
-/// - Retryable errors: exponential backoff (5s, 10s, 20s, ... capped at 5m)
-/// - Non-retryable errors: await spec change, don't retry
+/// Uses exponential backoff with per-resource error counting:
+/// - Retryable errors: 5s, 10s, 20s, ... capped at REQUEUE_SUCCESS_SECS
+/// - Non-retryable errors: requeue at REQUEUE_SUCCESS_SECS as a safety net
+///   (watch events can be missed during pod restarts)
 pub fn error_policy(cluster: Arc<LatticeCluster>, error: &Error, ctx: Arc<Context>) -> Action {
     let cluster_name = cluster.name_any();
 
@@ -267,7 +270,7 @@ pub fn error_policy(cluster: Arc<LatticeCluster>, error: &Error, ctx: Arc<Contex
             .entry(cluster_name.clone())
             .and_modify(|c| *c = c.saturating_add(1))
             .or_insert(1);
-        let backoff_secs = (5u64 << (*count - 1).min(6)).min(MAX_ERROR_BACKOFF.as_secs());
+        let backoff_secs = (5u64 << (*count - 1).min(6)).min(lattice_common::REQUEUE_SUCCESS_SECS);
 
         error!(
             ?error,
@@ -284,7 +287,7 @@ pub fn error_policy(cluster: Arc<LatticeCluster>, error: &Error, ctx: Arc<Contex
             "reconciliation failed (permanent)"
         );
         ctx.error_counts.remove(&cluster_name);
-        Action::await_change()
+        Action::requeue(Duration::from_secs(lattice_common::REQUEUE_SUCCESS_SECS))
     }
 }
 
@@ -760,8 +763,11 @@ mod tests {
                 .await
                 .expect("reconcile should succeed");
 
-            // Wait for spec changes, don't retry on timer
-            assert_eq!(action, Action::await_change());
+            // Safety net requeue for failed clusters
+            assert_eq!(
+                action,
+                Action::requeue(Duration::from_secs(lattice_common::REQUEUE_SUCCESS_SECS))
+            );
         }
 
         /// Story: Invalid cluster specs (like zero control plane nodes) should
@@ -778,8 +784,11 @@ mod tests {
             // Verify transition to Failed phase
             assert!(capture.was_updated(), "status should be updated");
             assert_eq!(capture.last_phase(), Some(ClusterPhase::Failed));
-            // Wait for user to fix the spec
-            assert_eq!(action, Action::await_change());
+            // Safety net requeue for invalid spec
+            assert_eq!(
+                action,
+                Action::requeue(Duration::from_secs(lattice_common::REQUEUE_SUCCESS_SECS))
+            );
         }
 
         // ===== Phase Regression Guard Tests =====
@@ -877,15 +886,11 @@ mod tests {
 
         use rstest::rstest;
 
-        fn mock_context_no_updates() -> Arc<Context> {
-            let mock = MockKubeClient::new();
-            let capi_mock = MockCAPIClient::new();
-            let mut installer = MockCapiInstaller::new();
-            installer.expect_ensure().returning(|_| Ok(()));
+        fn mock_context_fresh() -> Arc<Context> {
             Arc::new(Context::for_testing(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                Arc::new(installer),
+                Arc::new(MockKubeClient::new()),
+                Arc::new(MockCAPIClient::new()),
+                Arc::new(MockCapiInstaller::new()),
             ))
         }
 
@@ -893,16 +898,50 @@ mod tests {
         #[case::provider_error(Error::provider("test error".to_string()), true)]
         #[case::validation_error(Error::validation("invalid spec".to_string()), false)]
         #[case::pivot_error(Error::pivot("pivot failed".to_string()), true)]
-        fn test_error_policy_requeue_behavior(#[case] error: Error, #[case] retryable: bool) {
+        #[case::capi_error(Error::capi_installation("capi error".to_string()), true)]
+        #[case::serialization_error(Error::serialization("serialization error".to_string()), false)]
+        fn requeue_behavior(#[case] error: Error, #[case] retryable: bool) {
             let cluster = Arc::new(sample_cluster("test-cluster"));
-            let ctx = mock_context_no_updates();
+            let ctx = mock_context_fresh();
 
             let action = error_policy(cluster, &error, ctx);
 
             if retryable {
+                // First retryable error uses initial backoff of 5s
                 assert_eq!(action, Action::requeue(Duration::from_secs(5)));
             } else {
-                assert_eq!(action, Action::await_change());
+                assert_eq!(
+                    action,
+                    Action::requeue(Duration::from_secs(lattice_common::REQUEUE_SUCCESS_SECS))
+                );
+            }
+        }
+
+        #[test]
+        fn works_for_all_phases() {
+            let phases = vec![
+                ClusterPhase::Pending,
+                ClusterPhase::Provisioning,
+                ClusterPhase::Pivoting,
+                ClusterPhase::Pivoted,
+                ClusterPhase::Ready,
+                ClusterPhase::Deleting,
+                ClusterPhase::Unpivoting,
+                ClusterPhase::Failed,
+            ];
+
+            for phase in phases {
+                let ctx = mock_context_fresh();
+                let cluster = Arc::new(cluster_with_phase("test", phase));
+                let error = Error::provider("test error".to_string());
+                let action = error_policy(cluster, &error, ctx);
+
+                assert_eq!(
+                    action,
+                    Action::requeue(Duration::from_secs(5)),
+                    "phase {:?} should trigger requeue on first error",
+                    phase
+                );
             }
         }
     }
@@ -1377,91 +1416,6 @@ mod tests {
             assert_eq!(condition.status, ConditionStatus::False);
             assert_eq!(condition.reason, "ValidationFailed");
             assert_eq!(condition.message, error_msg);
-        }
-    }
-
-    /// Error Policy Behavior Tests
-    ///
-    /// These tests verify that the error policy correctly handles different
-    /// types of errors and returns appropriate requeue actions.
-    mod error_policy_behavior {
-        use super::*;
-
-        fn mock_context_minimal() -> Arc<Context> {
-            Arc::new(Context::for_testing(
-                Arc::new(MockKubeClient::new()),
-                Arc::new(MockCAPIClient::new()),
-                Arc::new(MockCapiInstaller::new()),
-            ))
-        }
-
-        /// Story: Retryable errors requeue with exponential backoff,
-        /// non-retryable errors await change.
-        #[test]
-        fn retryable_errors_requeue_nonretryable_await() {
-            let cluster = Arc::new(sample_cluster("error-cluster"));
-
-            // Retryable errors should requeue
-            let retryable = vec![
-                Error::provider("provider error".to_string()),
-                Error::pivot("pivot error".to_string()),
-                Error::capi_installation("capi error".to_string()),
-            ];
-            for error in retryable {
-                let ctx = mock_context_minimal(); // Fresh context per error
-                let action = error_policy(cluster.clone(), &error, ctx);
-                assert_ne!(
-                    action,
-                    Action::await_change(),
-                    "retryable error {:?} should requeue",
-                    error
-                );
-            }
-
-            // Non-retryable errors should await change
-            let non_retryable = vec![
-                Error::validation("validation error".to_string()),
-                Error::serialization("serialization error".to_string()),
-            ];
-            for error in non_retryable {
-                let ctx = mock_context_minimal();
-                let action = error_policy(cluster.clone(), &error, ctx);
-                assert_eq!(
-                    action,
-                    Action::await_change(),
-                    "non-retryable error {:?} should await change",
-                    error
-                );
-            }
-        }
-
-        /// Story: Error policy should work correctly with clusters in any phase.
-        #[test]
-        fn error_policy_works_for_all_phases() {
-            let phases = vec![
-                ClusterPhase::Pending,
-                ClusterPhase::Provisioning,
-                ClusterPhase::Pivoting,
-                ClusterPhase::Pivoted,
-                ClusterPhase::Ready,
-                ClusterPhase::Deleting,
-                ClusterPhase::Unpivoting,
-                ClusterPhase::Failed,
-            ];
-
-            for phase in phases {
-                let ctx = mock_context_minimal(); // Fresh context per phase
-                let cluster = Arc::new(cluster_with_phase("test", phase));
-                let error = Error::provider("test error".to_string());
-                let action = error_policy(cluster, &error, ctx);
-
-                assert_eq!(
-                    action,
-                    Action::requeue(Duration::from_secs(5)),
-                    "phase {:?} should trigger requeue on first error",
-                    phase
-                );
-            }
         }
     }
 }

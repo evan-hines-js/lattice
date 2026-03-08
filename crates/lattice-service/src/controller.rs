@@ -651,8 +651,11 @@ pub async fn reconcile(
         ServiceStatusUpdate::failed(&e.to_string(), service.metadata.generation)
             .apply(ctx.kube.as_ref(), &service)
             .await?;
-        // Don't requeue for validation errors - they require spec changes
-        return Ok(Action::await_change());
+        // Validation errors require spec changes, but always requeue as a
+        // safety net — watch events can be missed during pod restarts.
+        return Ok(Action::requeue(Duration::from_secs(
+            lattice_common::REQUEUE_SUCCESS_SECS,
+        )));
     }
 
     // Get current status, defaulting to Pending if not set
@@ -672,7 +675,9 @@ pub async fn reconcile(
             ServiceStatusUpdate::failed("Resource missing namespace", service.metadata.generation)
                 .apply(ctx.kube.as_ref(), &service)
                 .await?;
-            return Ok(Action::await_change());
+            return Ok(Action::requeue(Duration::from_secs(
+                lattice_common::REQUEUE_SUCCESS_SECS,
+            )));
         }
     };
 
@@ -1315,8 +1320,11 @@ mod tests {
             .await
             .expect("reconcile should succeed");
 
-        // Should await change (no requeue)
-        assert_eq!(action, Action::await_change());
+        // Should requeue with long backoff (safety net for missed watch events)
+        assert_eq!(
+            action,
+            Action::requeue(Duration::from_secs(lattice_common::REQUEUE_SUCCESS_SECS))
+        );
     }
 
     // =========================================================================

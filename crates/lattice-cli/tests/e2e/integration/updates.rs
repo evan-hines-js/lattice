@@ -37,7 +37,8 @@ use super::super::helpers::{
     delete_cedar_policies_by_label, delete_namespace, deploy_and_wait_for_phase,
     ensure_fresh_namespace, load_fixture_config, resolve_model_serving_name, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
-    wait_for_service_phase, TestHarness, BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
+    wait_for_service_phase, with_diagnostics, DiagnosticContext, TestHarness, BUSYBOX_IMAGE,
+    DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -1562,20 +1563,23 @@ pub async fn run_job_update_tests(
 pub async fn run_update_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Updates] Running CRD update integration tests on {kubeconfig}");
 
-    setup_regcreds_infrastructure(kubeconfig).await?;
+    let diag = DiagnosticContext::new(kubeconfig, NS_READY_UPDATE);
+    with_diagnostics(&diag, "Updates", || async {
+        setup_regcreds_infrastructure(kubeconfig).await?;
 
-    // All suites use independent namespaces, run concurrently
-    let (svc_result, model_result, job_result) = tokio::join!(
-        run_service_update_tests(kubeconfig),
-        run_model_update_tests(kubeconfig),
-        run_job_update_tests(kubeconfig, NS_JOB_FAILED_STABLE, NS_JOB_COMPILE_FAIL),
-    );
-    svc_result?;
-    model_result?;
-    job_result?;
+        let (svc_result, model_result, job_result) = tokio::join!(
+            run_service_update_tests(kubeconfig),
+            run_model_update_tests(kubeconfig),
+            run_job_update_tests(kubeconfig, NS_JOB_FAILED_STABLE, NS_JOB_COMPILE_FAIL),
+        );
+        svc_result?;
+        model_result?;
+        job_result?;
 
-    info!("[Updates] All CRD update integration tests passed!");
-    Ok(())
+        info!("[Updates] All CRD update integration tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 // =============================================================================

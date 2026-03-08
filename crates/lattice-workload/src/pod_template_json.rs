@@ -43,20 +43,14 @@ pub fn pod_template_to_json(
     if !pt.init_containers.is_empty() {
         spec_obj.insert(
             "initContainers".to_string(),
-            serde_json::to_value(&pt.init_containers).unwrap_or_default(),
+            serde_json::to_value(&pt.init_containers)?,
         );
     }
     if !pt.volumes.is_empty() {
-        spec_obj.insert(
-            "volumes".to_string(),
-            serde_json::to_value(&pt.volumes).unwrap_or_default(),
-        );
+        spec_obj.insert("volumes".to_string(), serde_json::to_value(&pt.volumes)?);
     }
     if let Some(ref sc) = pt.security_context {
-        spec_obj.insert(
-            "securityContext".to_string(),
-            serde_json::to_value(sc).unwrap_or_default(),
-        );
+        spec_obj.insert("securityContext".to_string(), serde_json::to_value(sc)?);
     }
     if let Some(hn) = pt.host_network {
         spec_obj.insert("hostNetwork".to_string(), serde_json::Value::Bool(hn));
@@ -70,19 +64,16 @@ pub fn pod_template_to_json(
     if !pt.topology_spread_constraints.is_empty() {
         spec_obj.insert(
             "topologySpreadConstraints".to_string(),
-            serde_json::to_value(&pt.topology_spread_constraints).unwrap_or_default(),
+            serde_json::to_value(&pt.topology_spread_constraints)?,
         );
     }
     if let Some(ref ns) = pt.node_selector {
-        spec_obj.insert(
-            "nodeSelector".to_string(),
-            serde_json::to_value(ns).unwrap_or_default(),
-        );
+        spec_obj.insert("nodeSelector".to_string(), serde_json::to_value(ns)?);
     }
     if !pt.tolerations.is_empty() {
         spec_obj.insert(
             "tolerations".to_string(),
-            serde_json::to_value(&pt.tolerations).unwrap_or_default(),
+            serde_json::to_value(&pt.tolerations)?,
         );
     }
     if let Some(ref rcn) = pt.runtime_class_name {
@@ -94,20 +85,17 @@ pub fn pod_template_to_json(
     if !pt.scheduling_gates.is_empty() {
         spec_obj.insert(
             "schedulingGates".to_string(),
-            serde_json::to_value(&pt.scheduling_gates).unwrap_or_default(),
+            serde_json::to_value(&pt.scheduling_gates)?,
         );
     }
     if !pt.image_pull_secrets.is_empty() {
         spec_obj.insert(
             "imagePullSecrets".to_string(),
-            serde_json::to_value(&pt.image_pull_secrets).unwrap_or_default(),
+            serde_json::to_value(&pt.image_pull_secrets)?,
         );
     }
     if let Some(ref affinity) = pt.affinity {
-        spec_obj.insert(
-            "affinity".to_string(),
-            serde_json::to_value(affinity).unwrap_or_default(),
-        );
+        spec_obj.insert("affinity".to_string(), serde_json::to_value(affinity)?);
     }
 
     Ok(serde_json::json!({

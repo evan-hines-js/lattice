@@ -28,7 +28,7 @@ use tracing::info;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     get_or_create_proxy, get_sa_token, get_workload2_cluster_name, get_workload_cluster_name,
-    http_get_with_retry, run_kubectl, truncate, DEFAULT_TIMEOUT,
+    http_get_with_retry, run_kubectl, truncate, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::cedar::{apply_e2e_default_policy, delete_cedar_policy, E2E_DEFAULT_POLICY_NAME};
 
@@ -276,30 +276,30 @@ pub async fn run_proxy_tests(
         );
     }
 
-    // Apply default E2E policy to allow proxy access
-    apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
+    let diag = DiagnosticContext::new(
+        &ctx.mgmt_kubeconfig,
+        lattice_common::LATTICE_SYSTEM_NAMESPACE,
+    );
+    with_diagnostics(&diag, "Proxy", || async {
+        apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
 
-    // Use existing proxy URL from context if available
-    let mgmt_proxy_url = ctx.mgmt_proxy_url.as_deref();
+        let mgmt_proxy_url = ctx.mgmt_proxy_url.as_deref();
+        wait_for_agent_ready(&ctx.mgmt_kubeconfig, workload_cluster_name).await?;
+        test_proxy_access_to_child(&ctx.mgmt_kubeconfig, workload_cluster_name, mgmt_proxy_url)
+            .await?;
 
-    // Wait for child agent
-    wait_for_agent_ready(&ctx.mgmt_kubeconfig, workload_cluster_name).await?;
-
-    // Test direct child access through proxy
-    test_proxy_access_to_child(&ctx.mgmt_kubeconfig, workload_cluster_name, mgmt_proxy_url).await?;
-
-    // Wait for grandchild agent and test hierarchical access (if workload2 exists)
-    if let Some(w2_name) = workload2_cluster_name {
-        if ctx.has_workload() {
-            wait_for_agent_ready(ctx.workload_kubeconfig.as_deref().unwrap(), w2_name).await?;
-
-            // Test grandchild access through hierarchy
-            test_proxy_access_to_grandchild(&ctx.mgmt_kubeconfig, w2_name, mgmt_proxy_url).await?;
+        if let Some(w2_name) = workload2_cluster_name {
+            if ctx.has_workload() {
+                wait_for_agent_ready(ctx.workload_kubeconfig.as_deref().unwrap(), w2_name).await?;
+                test_proxy_access_to_grandchild(&ctx.mgmt_kubeconfig, w2_name, mgmt_proxy_url)
+                    .await?;
+            }
         }
-    }
 
-    info!("[Integration/Proxy] Proxy tests complete");
-    Ok(())
+        info!("[Integration/Proxy] Proxy tests complete");
+        Ok(())
+    })
+    .await
 }
 
 // ============================================================================

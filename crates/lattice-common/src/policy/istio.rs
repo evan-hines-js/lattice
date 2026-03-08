@@ -41,14 +41,9 @@ impl HasApiResource for AuthorizationPolicy {
     const KIND: &'static str = "AuthorizationPolicy";
 }
 
-impl AuthorizationPolicy {
-    fn api_version() -> String {
-        <Self as HasApiResource>::API_VERSION.to_string()
-    }
-    fn kind() -> String {
-        <Self as HasApiResource>::KIND.to_string()
-    }
+crate::impl_api_resource_defaults!(AuthorizationPolicy);
 
+impl AuthorizationPolicy {
     /// Create a new AuthorizationPolicy
     pub fn new(metadata: ObjectMeta, spec: AuthorizationPolicySpec) -> Self {
         Self {
@@ -236,14 +231,9 @@ impl HasApiResource for PeerAuthentication {
     const KIND: &'static str = "PeerAuthentication";
 }
 
-impl PeerAuthentication {
-    fn api_version() -> String {
-        <Self as HasApiResource>::API_VERSION.to_string()
-    }
-    fn kind() -> String {
-        <Self as HasApiResource>::KIND.to_string()
-    }
+crate::impl_api_resource_defaults!(PeerAuthentication);
 
+impl PeerAuthentication {
     /// Create a new PeerAuthentication
     pub fn new(metadata: ObjectMeta, spec: PeerAuthenticationSpec) -> Self {
         Self {

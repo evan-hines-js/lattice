@@ -67,9 +67,10 @@ fn compile_hook_annotations(
             hook.container.clone(),
         );
 
-        // Velero expects command as JSON array
+        // Velero expects command as JSON array — serialization of Vec<String> cannot fail,
+        // but propagate rather than silently defaulting if it ever does
         let command_json =
-            serde_json::to_string(&hook.command).unwrap_or_else(|_| "[]".to_string());
+            serde_json::to_string(&hook.command).expect("Vec<String> serialization is infallible");
         annotations.insert(format!("{}/command{}", prefix, suffix), command_json);
 
         if let Some(timeout) = &hook.timeout {

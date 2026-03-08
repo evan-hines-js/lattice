@@ -505,13 +505,8 @@ pub async fn wait_for_services_ready(
 /// Retry a verification function every 8s for up to DEFAULT_TIMEOUT.
 ///
 /// Used by both fixed and random mesh tests to handle slow policy propagation.
-/// When `diag` is `Some`, captures a diagnostic dump on timeout before
-/// returning the error.
-pub async fn retry_verification<F, Fut>(
-    label: &str,
-    diag: Option<&super::helpers::DiagnosticContext>,
-    verify: F,
-) -> Result<(), String>
+/// Diagnostic dumps are handled by the caller via `with_diagnostics`.
+pub async fn retry_verification<F, Fut>(label: &str, verify: F) -> Result<(), String>
 where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<(), String>>,
@@ -546,21 +541,13 @@ where
         }
     }
 
-    let err_msg = format!(
+    Err(format!(
         "[{}] Timed out after {} attempts ({:.0}s): {}",
         label,
         attempt,
         start.elapsed().as_secs_f64(),
         last_err
-    );
-
-    if let Some(ctx) = diag {
-        warn!("[{}] {}", label, err_msg);
-        let path = ctx.dump(label).await;
-        warn!("[{}] Diagnostic dump: {}", label, path);
-    }
-
-    Err(err_msg)
+    ))
 }
 
 /// Verify traffic patterns from generator logs against expected ALLOWED/BLOCKED results.

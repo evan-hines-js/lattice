@@ -167,7 +167,7 @@ where
         .meta()
         .name
         .clone()
-        .unwrap_or_else(|| "<unnamed>".to_string());
+        .ok_or_else(|| ResourceError::Internal("resource has no metadata.name".to_string()))?;
     lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
 
     serialize_resource_core(&clean, &resource_name)
@@ -183,7 +183,9 @@ where
     T: serde::Serialize + Clone + Resource<DynamicType = ()>,
 {
     let mut clean = resource.clone();
-    let original_name = clean.meta().name.clone().unwrap_or_default();
+    let original_name = clean.meta().name.clone().ok_or_else(|| {
+        ResourceError::Internal("inherited resource has no metadata.name".to_string())
+    })?;
 
     // Prefix name with origin cluster: "global-root--admin-access"
     let prefixed_name = format!("{}--{}", cluster_name, original_name);

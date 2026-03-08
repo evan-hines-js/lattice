@@ -442,7 +442,7 @@ pub async fn run_celery_queue_tests(kubeconfig: &str) -> Result<(), String> {
     let kc = kubeconfig.to_string();
     let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
     with_diagnostics(&diag, "Celery", || async {
-        retry_verification("Celery", Some(&diag), || verify_traffic_logs(&kc)).await
+        retry_verification("Celery", || verify_traffic_logs(&kc)).await
     })
     .await?;
 

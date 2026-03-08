@@ -419,7 +419,7 @@ pub async fn run_ecommerce_tests(kubeconfig: &str) -> Result<(), String> {
     let kc = kubeconfig.to_string();
     let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
     with_diagnostics(&diag, "Ecommerce", || async {
-        retry_verification("Ecommerce", Some(&diag), || verify_traffic_logs(&kc)).await
+        retry_verification("Ecommerce", || verify_traffic_logs(&kc)).await
     })
     .await?;
 

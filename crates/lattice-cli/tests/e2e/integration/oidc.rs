@@ -26,7 +26,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_yaml, get_or_create_proxy, http_get_with_retry, proxy_service_exists, run_kubectl,
-    wait_for_condition, DEFAULT_TIMEOUT,
+    wait_for_condition, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::cedar::{apply_cedar_policy_allow_group, apply_e2e_default_policy};
 
@@ -341,15 +341,16 @@ pub async fn run_oidc_hierarchy_tests(
         return Ok(());
     }
 
-    let proxy_url = ctx.mgmt_proxy_url.as_deref();
+    let diag = DiagnosticContext::new(&ctx.mgmt_kubeconfig, LATTICE_SYSTEM_NAMESPACE);
+    with_diagnostics(&diag, "OIDC Hierarchy", || async {
+        let proxy_url = ctx.mgmt_proxy_url.as_deref();
+        run_oidc_auth_test(&ctx.mgmt_kubeconfig, child_cluster_name, proxy_url).await?;
+        apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
 
-    run_oidc_auth_test(&ctx.mgmt_kubeconfig, child_cluster_name, proxy_url).await?;
-
-    // Restore the default E2E policy after tests complete
-    apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
-
-    info!("[Integration/OIDC] All OIDC hierarchy tests passed!");
-    Ok(())
+        info!("[Integration/OIDC] All OIDC hierarchy tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 // =============================================================================

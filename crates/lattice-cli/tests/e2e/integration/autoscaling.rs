@@ -30,8 +30,8 @@ use lattice_common::crd::{
 
 use super::super::helpers::{
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace, run_kubectl,
-    service_pod_selector, setup_regcreds_infrastructure, wait_for_condition, BUSYBOX_IMAGE,
-    DEFAULT_TIMEOUT,
+    service_pod_selector, setup_regcreds_infrastructure, wait_for_condition, with_diagnostics,
+    DiagnosticContext, BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
 };
 use super::super::mesh_fixtures::build_lattice_service;
 
@@ -210,10 +210,14 @@ fn build_metrics_server_service() -> lattice_common::crd::LatticeService {
 ///
 /// Runs the CPU-based test and the Prometheus-based test sequentially.
 pub async fn run_autoscaling_tests(kubeconfig: &str) -> Result<(), String> {
-    run_cpu_autoscaling_test(kubeconfig).await?;
-    run_prometheus_autoscaling_test(kubeconfig).await?;
-    info!("[Integration/Autoscaling] All autoscaling tests passed!");
-    Ok(())
+    let diag = DiagnosticContext::new(kubeconfig, AUTOSCALING_NAMESPACE);
+    with_diagnostics(&diag, "Autoscaling", || async {
+        run_cpu_autoscaling_test(kubeconfig).await?;
+        run_prometheus_autoscaling_test(kubeconfig).await?;
+        info!("[Integration/Autoscaling] All autoscaling tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 /// CPU-based autoscaling test:

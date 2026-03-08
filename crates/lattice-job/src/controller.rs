@@ -408,7 +408,10 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
         JobPhase::Running => {
             reconcile_running(&job, &ctx, &name, namespace, generation, &cost).await
         }
-        _ => Ok(Action::await_change()),
+        // Terminal/unknown phases: safety net requeue — watch events can be missed during pod restarts.
+        _ => Ok(Action::requeue(Duration::from_secs(
+            lattice_common::REQUEUE_SUCCESS_SECS,
+        ))),
     }
 }
 
@@ -719,7 +722,10 @@ async fn handle_job_failure(
         .cost(cost)
         .apply(ctx.kube.as_ref(), job, namespace)
         .await?;
-    Ok(Action::await_change())
+    // Safety net requeue — watch events can be missed during pod restarts.
+    Ok(Action::requeue(Duration::from_secs(
+        lattice_common::REQUEUE_SUCCESS_SECS,
+    )))
 }
 
 async fn handle_job_succeeded(
@@ -748,7 +754,10 @@ async fn handle_job_succeeded(
         .cost(cost)
         .apply(ctx.kube.as_ref(), job, namespace)
         .await?;
-    Ok(Action::await_change())
+    // Safety net requeue — watch events can be missed during pod restarts.
+    Ok(Action::requeue(Duration::from_secs(
+        lattice_common::REQUEUE_SUCCESS_SECS,
+    )))
 }
 
 // =============================================================================
@@ -1025,7 +1034,10 @@ mod tests {
         let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
 
         let action = reconcile(job, ctx).await.expect("reconcile should succeed");
-        assert_eq!(action, Action::await_change());
+        assert_eq!(
+            action,
+            Action::requeue(Duration::from_secs(lattice_common::REQUEUE_SUCCESS_SECS))
+        );
     }
 
     /// Running job with failed VCJob transitions to Failed
@@ -1053,10 +1065,13 @@ mod tests {
         let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
 
         let action = reconcile(job, ctx).await.expect("reconcile should succeed");
-        assert_eq!(action, Action::await_change());
+        assert_eq!(
+            action,
+            Action::requeue(Duration::from_secs(lattice_common::REQUEUE_SUCCESS_SECS))
+        );
     }
 
-    /// Succeeded/Failed jobs just await_change
+    /// Succeeded/Failed jobs use safety net requeue
     #[tokio::test]
     async fn terminal_phase_awaits_change() {
         let mut job = make_minimal_job("my-job");
@@ -1070,6 +1085,9 @@ mod tests {
         let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
 
         let action = reconcile(job, ctx).await.expect("reconcile should succeed");
-        assert_eq!(action, Action::await_change());
+        assert_eq!(
+            action,
+            Action::requeue(Duration::from_secs(lattice_common::REQUEUE_SUCCESS_SECS))
+        );
     }
 }

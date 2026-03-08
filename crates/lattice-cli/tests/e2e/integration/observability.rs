@@ -24,7 +24,8 @@ use lattice_common::crd::{
 
 use super::super::helpers::{
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition, BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
+    setup_regcreds_infrastructure, wait_for_condition, with_diagnostics, DiagnosticContext,
+    BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
 };
 use super::super::mesh_fixtures::build_lattice_service;
 
@@ -148,35 +149,35 @@ fn build_observability_service() -> lattice_common::crd::LatticeService {
 pub async fn run_observability_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Integration/Observability] Starting observability tests");
 
-    ensure_fresh_namespace(kubeconfig, OBSERVABILITY_NAMESPACE).await?;
-    setup_regcreds_infrastructure(kubeconfig).await?;
+    let diag = DiagnosticContext::new(kubeconfig, OBSERVABILITY_NAMESPACE);
+    with_diagnostics(&diag, "Observability", || async {
+        ensure_fresh_namespace(kubeconfig, OBSERVABILITY_NAMESPACE).await?;
+        setup_regcreds_infrastructure(kubeconfig).await?;
 
-    let svc = build_observability_service();
+        let svc = build_observability_service();
 
-    // Deploy the service and wait for Ready
-    info!(
-        "[Integration/Observability] Deploying {} with metrics port and observability mappings",
-        METRICS_SVC_NAME
-    );
-    deploy_and_wait_for_phase(
-        kubeconfig,
-        OBSERVABILITY_NAMESPACE,
-        svc,
-        "Ready",
-        None,
-        DEPLOY_TIMEOUT,
-    )
-    .await?;
+        info!(
+            "[Integration/Observability] Deploying {} with metrics port and observability mappings",
+            METRICS_SVC_NAME
+        );
+        deploy_and_wait_for_phase(
+            kubeconfig,
+            OBSERVABILITY_NAMESPACE,
+            svc,
+            "Ready",
+            None,
+            DEPLOY_TIMEOUT,
+        )
+        .await?;
 
-    // Verify VMServiceScrape was created with the correct port
-    verify_vm_service_scrape(kubeconfig).await?;
+        verify_vm_service_scrape(kubeconfig).await?;
+        verify_status_metrics(kubeconfig).await?;
 
-    // Wait for the controller to scrape VictoriaMetrics and write status.metrics
-    verify_status_metrics(kubeconfig).await?;
-
-    info!("[Integration/Observability] All observability tests passed");
-    delete_namespace(kubeconfig, OBSERVABILITY_NAMESPACE).await;
-    Ok(())
+        info!("[Integration/Observability] All observability tests passed");
+        delete_namespace(kubeconfig, OBSERVABILITY_NAMESPACE).await;
+        Ok(())
+    })
+    .await
 }
 
 /// Verify the VMServiceScrape was created for the observability service.

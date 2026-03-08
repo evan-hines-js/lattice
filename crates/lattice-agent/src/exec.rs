@@ -197,7 +197,7 @@ pub async fn execute_exec(
 
     let path = req.path.clone();
     let Some((namespace, pod_name, subresource)) = parse_exec_path(&path) else {
-        send_error(&message_tx, &cluster_name, &request_id, "Invalid exec path").await;
+        send_exec_error(&message_tx, &cluster_name, &request_id, "Invalid exec path").await;
         return;
     };
 
@@ -238,7 +238,7 @@ pub async fn execute_exec(
             .await
             .map_err(|e| format!("attach failed: {}", e)),
         _ => {
-            send_error(
+            send_exec_error(
                 &message_tx,
                 &cluster_name,
                 &request_id,
@@ -253,7 +253,7 @@ pub async fn execute_exec(
     let mut attached = match result {
         Ok(a) => a,
         Err(e) => {
-            send_error(&message_tx, &cluster_name, &request_id, &e).await;
+            send_exec_error(&message_tx, &cluster_name, &request_id, &e).await;
             registry.unregister(&request_id);
             return;
         }
@@ -379,7 +379,8 @@ pub async fn execute_exec(
     info!(request_id = %request_id, "Exec session ended");
 }
 
-async fn send_error(
+/// Send an exec error response over the agent message channel.
+pub(crate) async fn send_exec_error(
     tx: &mpsc::Sender<AgentMessage>,
     cluster_name: &str,
     request_id: &str,
@@ -419,7 +420,7 @@ async fn execute_portforward(
     let ports = parse_portforward_ports(&req.query);
 
     if ports.is_empty() {
-        send_error(
+        send_exec_error(
             &message_tx,
             &cluster_name,
             &request_id,
@@ -447,7 +448,7 @@ async fn execute_portforward(
     let mut pf = match pods.portforward(pod_name, &[port]).await {
         Ok(pf) => pf,
         Err(e) => {
-            send_error(
+            send_exec_error(
                 &message_tx,
                 &cluster_name,
                 &request_id,
@@ -463,7 +464,7 @@ async fn execute_portforward(
     let stream = match pf.take_stream(port) {
         Some(s) => s,
         None => {
-            send_error(
+            send_exec_error(
                 &message_tx,
                 &cluster_name,
                 &request_id,

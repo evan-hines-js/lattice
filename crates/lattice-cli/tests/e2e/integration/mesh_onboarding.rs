@@ -421,7 +421,7 @@ pub async fn run_mesh_onboarding_tests(kubeconfig: &str) -> Result<(), String> {
     let kc = kubeconfig.to_string();
     let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
     with_diagnostics(&diag, "MeshOnboard", || async {
-        retry_verification("MeshOnboard", Some(&diag), || verify_traffic_logs(&kc)).await
+        retry_verification("MeshOnboard", || verify_traffic_logs(&kc)).await
     })
     .await?;
 

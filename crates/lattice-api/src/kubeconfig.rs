@@ -247,6 +247,8 @@ fn build_kubeconfig(
         }
     };
 
+    // Safe: kubeconfig_handler returns Forbidden before calling this if clusters is empty.
+    // Empty string is only reachable in unit tests for the empty-clusters edge case.
     let current_context = clusters.first().cloned().unwrap_or_default();
 
     Kubeconfig {

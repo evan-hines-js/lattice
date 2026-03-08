@@ -17,7 +17,8 @@ use tracing::info;
 
 use super::super::helpers::{
     apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, with_diagnostics,
+    DiagnosticContext, DEFAULT_TIMEOUT,
 };
 
 const JOB_NAMESPACE: &str = "batch";
@@ -418,14 +419,14 @@ async fn test_vccronjob_created(kubeconfig: &str) -> Result<(), String> {
 pub async fn run_job_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Job] Running LatticeJob integration tests on {kubeconfig}");
 
-    // GHCR registry credentials + Cedar policies (includes AppArmor override)
-    setup_regcreds_infrastructure(kubeconfig).await?;
-
-    run_job_test_sequence(kubeconfig).await?;
-
-    delete_namespace(kubeconfig, JOB_NAMESPACE).await;
-
-    Ok(())
+    let diag = DiagnosticContext::new(kubeconfig, JOB_NAMESPACE);
+    with_diagnostics(&diag, "Job", || async {
+        setup_regcreds_infrastructure(kubeconfig).await?;
+        run_job_test_sequence(kubeconfig).await?;
+        delete_namespace(kubeconfig, JOB_NAMESPACE).await;
+        Ok(())
+    })
+    .await
 }
 
 async fn run_job_test_sequence(kubeconfig: &str) -> Result<(), String> {

@@ -29,7 +29,7 @@ use super::super::gateway_helpers::{
 use super::super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, ensure_test_cluster_issuer, patch_with_retry, run_kubectl,
-    setup_regcreds_infrastructure, CedarPolicySpec,
+    setup_regcreds_infrastructure, with_diagnostics, CedarPolicySpec, DiagnosticContext,
 };
 use super::super::mesh_helpers::{retry_verification, wait_for_services_ready};
 
@@ -53,13 +53,14 @@ pub async fn run_gateway_tests(kubeconfig: &str) -> Result<(), String> {
     info!("Gateway API Integration Tests");
     info!("========================================\n");
 
-    setup_gateway_infrastructure(kubeconfig).await?;
-
-    run_gateway_test_sequence(kubeconfig).await?;
-
-    delete_namespace(kubeconfig, GATEWAY_TEST_NAMESPACE).await;
-
-    Ok(())
+    let diag = DiagnosticContext::new(kubeconfig, GATEWAY_TEST_NAMESPACE);
+    with_diagnostics(&diag, "Gateway", || async {
+        setup_gateway_infrastructure(kubeconfig).await?;
+        run_gateway_test_sequence(kubeconfig).await?;
+        delete_namespace(kubeconfig, GATEWAY_TEST_NAMESPACE).await;
+        Ok(())
+    })
+    .await
 }
 
 async fn run_gateway_test_sequence(kubeconfig: &str) -> Result<(), String> {
@@ -67,13 +68,10 @@ async fn run_gateway_test_sequence(kubeconfig: &str) -> Result<(), String> {
     verify_gateway_resources(kubeconfig).await?;
 
     let kc = kubeconfig.to_string();
-    retry_verification("Gateway traffic", None, || verify_traffic_flow(&kc)).await?;
+    retry_verification("Gateway traffic", || verify_traffic_flow(&kc)).await?;
 
     let kc = kubeconfig.to_string();
-    retry_verification("Gateway orphan cleanup", None, || {
-        verify_orphan_cleanup(&kc)
-    })
-    .await?;
+    retry_verification("Gateway orphan cleanup", || verify_orphan_cleanup(&kc)).await?;
 
     info!("\n========================================");
     info!("Gateway API Integration Tests: PASSED");

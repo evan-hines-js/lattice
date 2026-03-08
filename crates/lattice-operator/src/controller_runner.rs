@@ -516,43 +516,62 @@ fn affected_neighbors(
     affected
 }
 
+/// Extract namespace and name from K8s metadata, logging a warning and returning
+/// None if either is missing (which would indicate a broken API server response).
+fn resource_identity(meta: &kube::api::ObjectMeta, kind: &str) -> Option<(String, String)> {
+    let ns = meta.namespace.as_deref();
+    let name = meta.name.as_deref();
+    match (ns, name) {
+        (Some(ns), Some(name)) => Some((ns.to_string(), name.to_string())),
+        _ => {
+            tracing::warn!(
+                kind,
+                namespace = ?ns,
+                name = ?name,
+                "Skipping resource with missing metadata"
+            );
+            None
+        }
+    }
+}
+
 /// Pre-populate the ServiceGraph with all existing resources so that
 /// reconciliation after an operator restart doesn't demote Ready services
 /// to Compiling while waiting for dependency information to trickle in.
 async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGraph) {
     warmup_list::<LatticeService>(client, "LatticeServices", |item| {
-        let ns = item.metadata.namespace.as_deref().unwrap_or_default();
-        let name = item.metadata.name.as_deref().unwrap_or_default();
-        graph.put_service(ns, name, &item.spec);
+        if let Some((ns, name)) = resource_identity(&item.metadata, "LatticeService") {
+            graph.put_service(&ns, &name, &item.spec);
+        }
     })
     .await;
 
     warmup_list::<LatticeMeshMember>(client, "LatticeMeshMembers", |item| {
-        let ns = item.metadata.namespace.as_deref().unwrap_or_default();
-        let name = item.metadata.name.as_deref().unwrap_or_default();
-        graph.put_mesh_member(ns, name, &item.spec);
+        if let Some((ns, name)) = resource_identity(&item.metadata, "LatticeMeshMember") {
+            graph.put_mesh_member(&ns, &name, &item.spec);
+        }
     })
     .await;
 
     warmup_list::<LatticeJob>(client, "LatticeJobs", |item| {
-        let ns = item.metadata.namespace.as_deref().unwrap_or_default();
-        let job_name = item.metadata.name.as_deref().unwrap_or_default();
-        for (task_name, task_spec) in &item.spec.tasks {
-            let task_full_name = format!("{}-{}", job_name, task_name);
-            graph.put_workload(ns, &task_full_name, &task_spec.workload, &[]);
+        if let Some((ns, job_name)) = resource_identity(&item.metadata, "LatticeJob") {
+            for (task_name, task_spec) in &item.spec.tasks {
+                let task_full_name = format!("{}-{}", job_name, task_name);
+                graph.put_workload(&ns, &task_full_name, &task_spec.workload, &[]);
+            }
         }
     })
     .await;
 
     warmup_list::<LatticeModel>(client, "LatticeModels", |item| {
-        let ns = item.metadata.namespace.as_deref().unwrap_or_default();
-        let model_name = item.metadata.name.as_deref().unwrap_or_default();
-        let has_autoscaling = item.spec.roles.values().any(|r| r.autoscaling.is_some());
-        let callers =
-            lattice_model::compiler::model_callers(item.spec.routing.as_ref(), has_autoscaling);
-        for (role_name, role_spec) in &item.spec.roles {
-            let role_full_name = format!("{}-{}", model_name, role_name);
-            graph.put_workload(ns, &role_full_name, &role_spec.entry_workload, &callers);
+        if let Some((ns, model_name)) = resource_identity(&item.metadata, "LatticeModel") {
+            let has_autoscaling = item.spec.roles.values().any(|r| r.autoscaling.is_some());
+            let callers =
+                lattice_model::compiler::model_callers(item.spec.routing.as_ref(), has_autoscaling);
+            for (role_name, role_spec) in &item.spec.roles {
+                let role_full_name = format!("{}-{}", model_name, role_name);
+                graph.put_workload(&ns, &role_full_name, &role_spec.entry_workload, &callers);
+            }
         }
     })
     .await;
@@ -641,39 +660,33 @@ async fn audit_graph_orphans(
         std::collections::HashMap::new();
 
     for svc in &services.items {
-        let ns = svc.metadata.namespace.as_deref().unwrap_or_default();
-        let name = svc.metadata.name.as_deref().unwrap_or_default();
-        crd_names
-            .entry(ns.to_string())
-            .or_default()
-            .insert(name.to_string());
+        if let Some((ns, name)) = resource_identity(&svc.metadata, "LatticeService") {
+            crd_names.entry(ns).or_default().insert(name);
+        }
     }
     for mm in &mesh_members.items {
-        let ns = mm.metadata.namespace.as_deref().unwrap_or_default();
-        let name = mm.metadata.name.as_deref().unwrap_or_default();
-        crd_names
-            .entry(ns.to_string())
-            .or_default()
-            .insert(name.to_string());
+        if let Some((ns, name)) = resource_identity(&mm.metadata, "LatticeMeshMember") {
+            crd_names.entry(ns).or_default().insert(name);
+        }
     }
     for job in &jobs.items {
-        let ns = job.metadata.namespace.as_deref().unwrap_or_default();
-        let job_name = job.metadata.name.as_deref().unwrap_or_default();
-        for task_name in job.spec.tasks.keys() {
-            crd_names
-                .entry(ns.to_string())
-                .or_default()
-                .insert(format!("{}-{}", job_name, task_name));
+        if let Some((ns, job_name)) = resource_identity(&job.metadata, "LatticeJob") {
+            for task_name in job.spec.tasks.keys() {
+                crd_names
+                    .entry(ns.clone())
+                    .or_default()
+                    .insert(format!("{}-{}", job_name, task_name));
+            }
         }
     }
     for model in &models.items {
-        let ns = model.metadata.namespace.as_deref().unwrap_or_default();
-        let model_name = model.metadata.name.as_deref().unwrap_or_default();
-        for role_name in model.spec.roles.keys() {
-            crd_names
-                .entry(ns.to_string())
-                .or_default()
-                .insert(format!("{}-{}", model_name, role_name));
+        if let Some((ns, model_name)) = resource_identity(&model.metadata, "LatticeModel") {
+            for role_name in model.spec.roles.keys() {
+                crd_names
+                    .entry(ns.clone())
+                    .or_default()
+                    .insert(format!("{}-{}", model_name, role_name));
+            }
         }
     }
 
@@ -702,43 +715,45 @@ async fn audit_graph_orphans(
     // Re-add missing nodes (exist as CRD, missing from graph)
     let mut added = 0u64;
     for svc in &services.items {
-        let ns = svc.metadata.namespace.as_deref().unwrap_or_default();
-        let name = svc.metadata.name.as_deref().unwrap_or_default();
-        if graph.get_service(ns, name).is_none() {
-            graph.put_service(ns, name, &svc.spec);
-            added += 1;
-        }
-    }
-    for mm in &mesh_members.items {
-        let ns = mm.metadata.namespace.as_deref().unwrap_or_default();
-        let name = mm.metadata.name.as_deref().unwrap_or_default();
-        if graph.get_service(ns, name).is_none() {
-            graph.put_mesh_member(ns, name, &mm.spec);
-            added += 1;
-        }
-    }
-    for job in &jobs.items {
-        let ns = job.metadata.namespace.as_deref().unwrap_or_default();
-        let job_name = job.metadata.name.as_deref().unwrap_or_default();
-        for (task_name, task_spec) in &job.spec.tasks {
-            let full_name = format!("{}-{}", job_name, task_name);
-            if graph.get_service(ns, &full_name).is_none() {
-                graph.put_workload(ns, &full_name, &task_spec.workload, &[]);
+        if let Some((ns, name)) = resource_identity(&svc.metadata, "LatticeService") {
+            if graph.get_service(&ns, &name).is_none() {
+                graph.put_service(&ns, &name, &svc.spec);
                 added += 1;
             }
         }
     }
-    for model in &models.items {
-        let ns = model.metadata.namespace.as_deref().unwrap_or_default();
-        let model_name = model.metadata.name.as_deref().unwrap_or_default();
-        let has_autoscaling = model.spec.roles.values().any(|r| r.autoscaling.is_some());
-        let callers =
-            lattice_model::compiler::model_callers(model.spec.routing.as_ref(), has_autoscaling);
-        for (role_name, role_spec) in &model.spec.roles {
-            let full_name = format!("{}-{}", model_name, role_name);
-            if graph.get_service(ns, &full_name).is_none() {
-                graph.put_workload(ns, &full_name, &role_spec.entry_workload, &callers);
+    for mm in &mesh_members.items {
+        if let Some((ns, name)) = resource_identity(&mm.metadata, "LatticeMeshMember") {
+            if graph.get_service(&ns, &name).is_none() {
+                graph.put_mesh_member(&ns, &name, &mm.spec);
                 added += 1;
+            }
+        }
+    }
+    for job in &jobs.items {
+        if let Some((ns, job_name)) = resource_identity(&job.metadata, "LatticeJob") {
+            for (task_name, task_spec) in &job.spec.tasks {
+                let full_name = format!("{}-{}", job_name, task_name);
+                if graph.get_service(&ns, &full_name).is_none() {
+                    graph.put_workload(&ns, &full_name, &task_spec.workload, &[]);
+                    added += 1;
+                }
+            }
+        }
+    }
+    for model in &models.items {
+        if let Some((ns, model_name)) = resource_identity(&model.metadata, "LatticeModel") {
+            let has_autoscaling = model.spec.roles.values().any(|r| r.autoscaling.is_some());
+            let callers = lattice_model::compiler::model_callers(
+                model.spec.routing.as_ref(),
+                has_autoscaling,
+            );
+            for (role_name, role_spec) in &model.spec.roles {
+                let full_name = format!("{}-{}", model_name, role_name);
+                if graph.get_service(&ns, &full_name).is_none() {
+                    graph.put_workload(&ns, &full_name, &role_spec.entry_workload, &callers);
+                    added += 1;
+                }
             }
         }
     }

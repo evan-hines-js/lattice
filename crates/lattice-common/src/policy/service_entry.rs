@@ -28,14 +28,9 @@ impl HasApiResource for ServiceEntry {
     const KIND: &'static str = "ServiceEntry";
 }
 
-impl ServiceEntry {
-    fn api_version() -> String {
-        <Self as HasApiResource>::API_VERSION.to_string()
-    }
-    fn kind() -> String {
-        <Self as HasApiResource>::KIND.to_string()
-    }
+crate::impl_api_resource_defaults!(ServiceEntry);
 
+impl ServiceEntry {
     /// Create a new ServiceEntry
     pub fn new(metadata: ObjectMeta, spec: ServiceEntrySpec) -> Self {
         Self {

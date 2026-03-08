@@ -315,9 +315,13 @@ impl AgentClient {
         let k8s_version = if let Some(client) = self.create_client_logged("version check").await {
             match client.apiserver_version().await {
                 Ok(info) => format!("v{}.{}", info.major, info.minor),
-                Err(_) => "unknown".to_string(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to get K8s API server version");
+                    "unknown".to_string()
+                }
             }
         } else {
+            tracing::warn!("K8s client unavailable, cannot determine API server version");
             "unknown".to_string()
         };
 

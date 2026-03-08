@@ -18,7 +18,9 @@ use tracing::info;
 use lattice_common::{capi_namespace, kubeconfig_secret_name};
 
 use super::super::context::{InfraContext, TestSession};
-use super::super::helpers::{get_workload_cluster_name, run_kubectl};
+use super::super::helpers::{
+    get_workload_cluster_name, run_kubectl, with_diagnostics, DiagnosticContext,
+};
 
 // ============================================================================
 // Core Test Functions
@@ -218,30 +220,33 @@ pub async fn run_kubeconfig_verification(
     workload_cluster_name: &str,
     workload2_cluster_name: Option<&str>,
 ) -> Result<(), String> {
-    // Verify workload kubeconfig is patched
-    verify_kubeconfig_patched(
+    let diag = DiagnosticContext::new(
         &ctx.mgmt_kubeconfig,
-        workload_cluster_name,
-        ctx.workload_kubeconfig.as_deref(),
-    )
-    .await?;
+        lattice_common::LATTICE_SYSTEM_NAMESPACE,
+    );
+    with_diagnostics(&diag, "Kubeconfig Verification", || async {
+        verify_kubeconfig_patched(
+            &ctx.mgmt_kubeconfig,
+            workload_cluster_name,
+            ctx.workload_kubeconfig.as_deref(),
+        )
+        .await?;
 
-    // Verify workload2 kubeconfig is patched (if exists)
-    if let Some(w2_name) = workload2_cluster_name {
-        if ctx.has_workload() {
-            verify_kubeconfig_patched(
-                ctx.workload_kubeconfig.as_deref().unwrap(),
-                w2_name,
-                ctx.workload2_kubeconfig.as_deref(),
-            )
-            .await?;
+        if let Some(w2_name) = workload2_cluster_name {
+            if ctx.has_workload() {
+                verify_kubeconfig_patched(
+                    ctx.workload_kubeconfig.as_deref().unwrap(),
+                    w2_name,
+                    ctx.workload2_kubeconfig.as_deref(),
+                )
+                .await?;
+            }
         }
-    }
 
-    // Verify Cedar policies
-    verify_cedar_policies_loaded(&ctx.mgmt_kubeconfig).await?;
-
-    Ok(())
+        verify_cedar_policies_loaded(&ctx.mgmt_kubeconfig).await?;
+        Ok(())
+    })
+    .await
 }
 
 // ============================================================================

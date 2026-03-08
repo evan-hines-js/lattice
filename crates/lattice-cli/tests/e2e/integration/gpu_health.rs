@@ -23,7 +23,7 @@ use lattice_common::gpu::{
     ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_HEARTBEAT, HEARTBEAT_STALENESS_SECS,
 };
 
-use super::super::helpers::{run_kubectl, wait_for_condition};
+use super::super::helpers::{run_kubectl, wait_for_condition, with_diagnostics, DiagnosticContext};
 
 // =============================================================================
 // Helpers
@@ -335,48 +335,48 @@ pub async fn run_gpu_health_tests(kubeconfig: &str) -> Result<(), String> {
     info!("GPU Health Monitoring Tests");
     info!("========================================\n");
 
-    let node = match get_first_worker_node(kubeconfig).await? {
-        Some(n) => n,
-        None => {
-            info!("[Integration/GPUHealth] No worker nodes found — skipping GPU health tests");
-            return Ok(());
+    let diag = DiagnosticContext::new(kubeconfig, lattice_common::LATTICE_SYSTEM_NAMESPACE);
+    with_diagnostics(&diag, "GPU Health", || async {
+        let node = match get_first_worker_node(kubeconfig).await? {
+            Some(n) => n,
+            None => {
+                info!(
+                    "[Integration/GPUHealth] No worker nodes found — skipping GPU health tests"
+                );
+                return Ok(());
+            }
+        };
+        info!("[Integration/GPUHealth] Using worker node: {node}");
+
+        reset_node(kubeconfig, &node).await?;
+        add_fake_gpu_capacity(kubeconfig, &node).await?;
+
+        let result = async {
+            test_normal_no_cordon(kubeconfig, &node).await?;
+
+            reset_node(kubeconfig, &node).await?;
+            test_unhealthy_triggers_cordon(kubeconfig, &node).await?;
+
+            reset_node(kubeconfig, &node).await?;
+            test_gpu_loss_flap(kubeconfig, &node).await?;
+
+            reset_node(kubeconfig, &node).await?;
+            test_stale_heartbeat_ignored(kubeconfig, &node).await
         }
-    };
-    info!("[Integration/GPUHealth] Using worker node: {node}");
-
-    // Ensure clean state before starting.
-    reset_node(kubeconfig, &node).await?;
-
-    // Add fake GPU capacity so the operator recognises this as a GPU node.
-    add_fake_gpu_capacity(kubeconfig, &node).await?;
-
-    // Run each test case sequentially, cleaning up between them.
-    // On failure, clean up and return the error.
-    let result = async {
-        test_normal_no_cordon(kubeconfig, &node).await?;
+        .await;
 
         reset_node(kubeconfig, &node).await?;
-        test_unhealthy_triggers_cordon(kubeconfig, &node).await?;
+        remove_fake_gpu_capacity(kubeconfig, &node).await?;
 
-        reset_node(kubeconfig, &node).await?;
-        test_gpu_loss_flap(kubeconfig, &node).await?;
+        result?;
 
-        reset_node(kubeconfig, &node).await?;
-        test_stale_heartbeat_ignored(kubeconfig, &node).await
-    }
-    .await;
+        info!("\n========================================");
+        info!("GPU Health Monitoring Tests: PASSED");
+        info!("========================================\n");
 
-    // Always clean up, even on failure.
-    reset_node(kubeconfig, &node).await?;
-    remove_fake_gpu_capacity(kubeconfig, &node).await?;
-
-    result?;
-
-    info!("\n========================================");
-    info!("GPU Health Monitoring Tests: PASSED");
-    info!("========================================\n");
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 // =============================================================================

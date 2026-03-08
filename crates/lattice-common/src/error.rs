@@ -76,9 +76,14 @@ impl ControllerContext {
 
 /// Default error policy for controllers.
 ///
-/// Retryable errors: log warning and requeue after 30 seconds.
-/// Non-retryable errors: log warning and await spec change.
-/// Generic over error and context type so any controller can use it.
+/// Retryable errors: requeue after 30 seconds.
+/// Non-retryable errors: requeue after 5 minutes as a safety net.
+///
+/// We never use `Action::await_change()` because watch events can be missed
+/// during pod restarts (e.g. chaos testing, OOM kills). A resource stuck in
+/// `await_change` with no requeue timer and a missed watch event would never
+/// be reconciled again. The 5-minute fallback ensures all resources are
+/// eventually re-examined even in the worst case.
 pub fn default_error_policy<T: ResourceExt, E: Retryable + std::fmt::Display, C>(
     resource: Arc<T>,
     error: &E,
@@ -94,7 +99,7 @@ pub fn default_error_policy<T: ResourceExt, E: Retryable + std::fmt::Display, C>
     if retryable {
         Action::requeue(Duration::from_secs(30))
     } else {
-        Action::await_change()
+        Action::requeue(Duration::from_secs(crate::REQUEUE_SUCCESS_SECS))
     }
 }
 
@@ -803,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn default_error_policy_non_retryable_awaits_change() {
+    fn default_error_policy_non_retryable_requeues_with_backoff() {
         use k8s_openapi::api::core::v1::ConfigMap;
 
         let resource = Arc::new(ConfigMap {
@@ -817,6 +822,9 @@ mod tests {
         let err = ReconcileError::Validation("bad spec".into());
 
         let action = default_error_policy(resource, &err, ctx);
-        assert_eq!(action, Action::await_change());
+        assert_eq!(
+            action,
+            Action::requeue(Duration::from_secs(crate::REQUEUE_SUCCESS_SECS))
+        );
     }
 }

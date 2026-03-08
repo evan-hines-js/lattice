@@ -334,7 +334,7 @@ pub async fn run_webapp_postgres_tests(kubeconfig: &str) -> Result<(), String> {
     let kc = kubeconfig.to_string();
     let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
     with_diagnostics(&diag, "WebApp+PG", || async {
-        retry_verification("WebApp+PG", Some(&diag), || verify_traffic_logs(&kc)).await
+        retry_verification("WebApp+PG", || verify_traffic_logs(&kc)).await
     })
     .await?;
 

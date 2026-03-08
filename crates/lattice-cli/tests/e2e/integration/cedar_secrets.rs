@@ -37,7 +37,7 @@ use super::super::helpers::{
     apply_cedar_policy_crd, create_service_with_secrets, delete_cedar_policies_by_label,
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace,
     setup_regcreds_infrastructure, wait_for_no_cedar_policies_with_label, wait_for_service_phase,
-    TestHarness, DEFAULT_TIMEOUT,
+    with_diagnostics, DiagnosticContext, TestHarness, DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -390,39 +390,45 @@ pub async fn run_cedar_secret_tests(kubeconfig: &str) -> Result<(), String> {
         kubeconfig
     );
 
-    // Set up regcreds infrastructure — all services now include ghcr-creds
-    setup_regcreds_infrastructure(kubeconfig).await?;
+    let diag = DiagnosticContext::new(kubeconfig, NS_DEFAULT_DENY);
+    with_diagnostics(&diag, "Cedar Secrets", || async {
+        setup_regcreds_infrastructure(kubeconfig).await?;
 
-    // Clean up any leftover policies from previous runs and wait for deletion
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
-    wait_for_no_cedar_policies_with_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
+            .await;
+        wait_for_no_cedar_policies_with_label(
+            kubeconfig,
+            &format!("lattice.dev/test={TEST_LABEL}"),
+        )
         .await?;
 
-    // Run all tests concurrently — each uses its own namespace
-    let harness = TestHarness::new("Cedar Secrets");
-    tokio::join!(
-        harness.run("Default deny", || test_default_deny(kubeconfig)),
-        harness.run("Permit specific path", || test_permit_specific_path(
-            kubeconfig
-        )),
-        harness.run("Forbid overrides permit", || test_forbid_overrides_permit(
-            kubeconfig
-        )),
-        harness.run("Namespace isolation", || test_namespace_isolation(
-            kubeconfig
-        )),
-        harness.run("Policy lifecycle", || test_policy_lifecycle(kubeconfig)),
-        harness.run("Provider scoped access", || test_provider_scoped_access(
-            kubeconfig
-        )),
-    );
+        let harness = TestHarness::new("Cedar Secrets");
+        tokio::join!(
+            harness.run("Default deny", || test_default_deny(kubeconfig)),
+            harness.run("Permit specific path", || test_permit_specific_path(
+                kubeconfig
+            )),
+            harness.run("Forbid overrides permit", || test_forbid_overrides_permit(
+                kubeconfig
+            )),
+            harness.run("Namespace isolation", || test_namespace_isolation(
+                kubeconfig
+            )),
+            harness.run("Policy lifecycle", || test_policy_lifecycle(kubeconfig)),
+            harness.run("Provider scoped access", || test_provider_scoped_access(
+                kubeconfig
+            )),
+        );
 
-    harness.finish()?;
+        harness.finish()?;
 
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
+            .await;
 
-    info!("[CedarSecrets] All Cedar secret authorization tests passed!");
-    Ok(())
+        info!("[CedarSecrets] All Cedar secret authorization tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 // =============================================================================

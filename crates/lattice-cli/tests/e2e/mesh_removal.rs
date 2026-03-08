@@ -217,7 +217,7 @@ async fn verify_baseline(kubeconfig: &str) -> Result<(), String> {
     let kc = kubeconfig.to_string();
     let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
     with_diagnostics(&diag, "Mesh Removal Baseline", || async {
-        retry_verification("Mesh Removal Baseline", Some(&diag), || {
+        retry_verification("Mesh Removal Baseline", || {
             let kc = kc.clone();
             let edges = edges.clone();
             async move {

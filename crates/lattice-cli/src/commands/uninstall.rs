@@ -192,7 +192,7 @@ impl Uninstaller {
                     match api.get(&name).await {
                         Ok(_) => Ok(true),                                        // Still exists
                         Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false), // Deleted
-                        Err(_) => Err("unknown".to_string()), // Treat as deleted
+                        Err(e) => Err(format!("failed to check LatticeCluster: {}", e)),
                     }
                 }
             },
@@ -260,7 +260,7 @@ impl Uninstaller {
                     match api.get("lattice-cell").await {
                         Ok(_) => Ok(true),                                        // Still exists
                         Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false), // Deleted
-                        Err(_) => Err("unknown".to_string()), // Treat as deleted
+                        Err(e) => Err(format!("failed to check lattice-cell service: {}", e)),
                     }
                 }
             },
@@ -372,7 +372,7 @@ impl Uninstaller {
         let port = endpoint
             .get("port")
             .and_then(|p| p.as_i64())
-            .unwrap_or(6443);
+            .ok_or_else(|| Error::command_failed("controlPlaneEndpoint has no port"))?;
 
         Ok(format!("https://{}:{}", host, port))
     }

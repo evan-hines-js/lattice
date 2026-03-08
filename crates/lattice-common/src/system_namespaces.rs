@@ -10,6 +10,9 @@
 //! keda) are NOT listed here — their pods get explicit CiliumNetworkPolicies
 //! and PeerAuthentication resources from the MeshMember controller.
 
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 use crate::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
 
 /// Core Kubernetes namespaces
@@ -60,10 +63,22 @@ pub fn all() -> Vec<&'static str> {
     namespaces
 }
 
+/// Pre-computed set for O(1) system namespace lookups.
+static SYSTEM_NAMESPACE_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    CORE.iter()
+        .chain(LATTICE.iter())
+        .chain(CNI.iter())
+        .chain(MESH.iter())
+        .chain(CERT.iter())
+        .chain(CAPI.iter())
+        .copied()
+        .collect()
+});
+
 /// Check if a namespace is a system namespace that should be excluded from
 /// default-deny policies.
 pub fn is_system_namespace(namespace: &str) -> bool {
-    all().contains(&namespace)
+    SYSTEM_NAMESPACE_SET.contains(namespace)
 }
 
 #[cfg(test)]

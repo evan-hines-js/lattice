@@ -70,8 +70,10 @@ pub async fn reconcile(
         RestorePhase::InProgress => Ok(Action::requeue(Duration::from_secs(
             REQUEUE_IN_PROGRESS_SECS,
         ))),
-        RestorePhase::Completed | RestorePhase::Failed => Ok(Action::await_change()),
-        _ => Ok(Action::await_change()),
+        // Terminal/unknown phases: safety net requeue — watch events can be missed during pod restarts.
+        _ => Ok(Action::requeue(Duration::from_secs(
+            lattice_common::REQUEUE_SUCCESS_SECS,
+        ))),
     }
 }
 

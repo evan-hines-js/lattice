@@ -266,8 +266,13 @@ pub fn build_http_response(response: &KubernetesResponse) -> Result<Response<Bod
         return Err(TunnelError::AgentError(response.error.clone()));
     }
 
-    let status = StatusCode::from_u16(response.status_code as u16)
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status = StatusCode::from_u16(response.status_code as u16).unwrap_or_else(|_| {
+        tracing::warn!(
+            status_code = response.status_code,
+            "Invalid HTTP status code from agent, using 500"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    });
 
     let content_type = if response.content_type.is_empty() {
         "application/json"

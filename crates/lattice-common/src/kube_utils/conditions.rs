@@ -39,23 +39,21 @@ pub trait HasConditionFields {
     fn status_field(&self) -> &str;
 }
 
-impl HasConditionFields for k8s_openapi::api::core::v1::NodeCondition {
-    fn type_field(&self) -> &str {
-        &self.type_
-    }
-    fn status_field(&self) -> &str {
-        &self.status
-    }
+macro_rules! impl_has_condition_fields {
+    ($type:ty) => {
+        impl HasConditionFields for $type {
+            fn type_field(&self) -> &str {
+                &self.type_
+            }
+            fn status_field(&self) -> &str {
+                &self.status
+            }
+        }
+    };
 }
 
-impl HasConditionFields for k8s_openapi::api::apps::v1::DeploymentCondition {
-    fn type_field(&self) -> &str {
-        &self.type_
-    }
-    fn status_field(&self) -> &str {
-        &self.status
-    }
-}
+impl_has_condition_fields!(k8s_openapi::api::core::v1::NodeCondition);
+impl_has_condition_fields!(k8s_openapi::api::apps::v1::DeploymentCondition);
 
 #[cfg(test)]
 mod tests {

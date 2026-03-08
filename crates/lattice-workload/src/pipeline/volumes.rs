@@ -152,7 +152,7 @@ impl VolumeCompiler {
                     .as_volume()
                     .cloned()
                     .unwrap_or_default();
-                let pvc = Self::compile_pvc(&pvc_name, namespace, &params, owner_references);
+                let pvc = Self::compile_pvc(&pvc_name, namespace, &params, owner_references)?;
                 output.pvcs.push(pvc);
             }
 
@@ -196,30 +196,35 @@ impl VolumeCompiler {
         namespace: &str,
         params: &lattice_common::crd::VolumeParams,
         owner_references: &[OwnerReference],
-    ) -> PersistentVolumeClaim {
+    ) -> Result<PersistentVolumeClaim, CompilationError> {
         let access_mode = match params.access_mode {
             Some(VolumeAccessMode::ReadWriteMany) => "ReadWriteMany",
             Some(VolumeAccessMode::ReadOnlyMany) => "ReadOnlyMany",
             Some(VolumeAccessMode::ReadWriteOnce) | None => "ReadWriteOnce",
         };
 
+        let storage = params.size.clone().ok_or_else(|| {
+            CompilationError::volume(format!(
+                "volume '{}' is an owner but has no size specified",
+                name
+            ))
+        })?;
+
         let metadata =
             ObjectMeta::new(name, namespace).with_owner_references(owner_references.to_vec());
 
-        PersistentVolumeClaim {
+        Ok(PersistentVolumeClaim {
             api_version: "v1".to_string(),
             kind: "PersistentVolumeClaim".to_string(),
             metadata,
             spec: PvcSpec {
                 access_modes: vec![access_mode.to_string()],
                 resources: PvcResources {
-                    requests: PvcStorage {
-                        storage: params.size.clone().unwrap_or_else(|| "1Gi".to_string()),
-                    },
+                    requests: PvcStorage { storage },
                 },
                 storage_class_name: params.storage_class.clone(),
             },
-        }
+        })
     }
 
     /// Resolve volume mounts from a container's volume declarations

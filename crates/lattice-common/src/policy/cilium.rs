@@ -31,14 +31,9 @@ impl HasApiResource for CiliumNetworkPolicy {
     const KIND: &'static str = "CiliumNetworkPolicy";
 }
 
-impl CiliumNetworkPolicy {
-    fn api_version() -> String {
-        <Self as HasApiResource>::API_VERSION.to_string()
-    }
-    fn kind() -> String {
-        <Self as HasApiResource>::KIND.to_string()
-    }
+crate::impl_api_resource_defaults!(CiliumNetworkPolicy);
 
+impl CiliumNetworkPolicy {
     /// Create a new CiliumNetworkPolicy
     pub fn new(metadata: ObjectMeta, spec: CiliumNetworkPolicySpec) -> Self {
         Self {
@@ -178,14 +173,9 @@ impl HasApiResource for CiliumClusterwideNetworkPolicy {
     const KIND: &'static str = "CiliumClusterwideNetworkPolicy";
 }
 
-impl CiliumClusterwideNetworkPolicy {
-    fn api_version() -> String {
-        <Self as HasApiResource>::API_VERSION.to_string()
-    }
-    fn kind() -> String {
-        <Self as HasApiResource>::KIND.to_string()
-    }
+crate::impl_api_resource_defaults!(CiliumClusterwideNetworkPolicy);
 
+impl CiliumClusterwideNetworkPolicy {
     /// Create a new CiliumClusterwideNetworkPolicy
     pub fn new(metadata: ClusterwideMetadata, spec: CiliumClusterwideSpec) -> Self {
         Self {

@@ -37,8 +37,8 @@ use super::super::helpers::{
     delete_namespace, ensure_fresh_namespace, seed_all_vault_test_secrets, service_pod_selector,
     setup_regcreds_infrastructure, setup_vault_infrastructure, vault_tests_enabled,
     verify_pod_env_var, verify_pod_file_content, verify_pod_image_pull_secrets,
-    verify_synced_secret_keys, wait_for_service_phase, with_run_as_root, BUSYBOX_IMAGE,
-    DEFAULT_TIMEOUT, VAULT_STORE_NAME,
+    verify_synced_secret_keys, wait_for_service_phase, with_diagnostics, with_run_as_root,
+    DiagnosticContext, BUSYBOX_IMAGE, DEFAULT_TIMEOUT, VAULT_STORE_NAME,
 };
 use super::secrets::verify_external_secret;
 
@@ -369,50 +369,49 @@ pub async fn run_vault_secrets_tests(kubeconfig: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    // Set up local provider + regcreds (needed for services that use lattice-local for ghcr-creds)
-    setup_regcreds_infrastructure(kubeconfig).await?;
+    let diag = DiagnosticContext::new(kubeconfig, VAULT_TEST_NAMESPACE);
+    with_diagnostics(&diag, "Vault Secrets", || async {
+        setup_regcreds_infrastructure(kubeconfig).await?;
+        setup_vault_infrastructure(kubeconfig).await?;
+        seed_all_vault_test_secrets().await?;
 
-    // Set up Vault infrastructure (SecretProvider CRD + token secret)
-    setup_vault_infrastructure(kubeconfig).await?;
+        apply_cedar_secret_policy_for_service(
+            kubeconfig,
+            "permit-vault-route-secrets",
+            TEST_LABEL,
+            VAULT_TEST_NAMESPACE,
+            &[
+                "vault-db-creds",
+                "vault-api-key",
+                "vault-database-config",
+                "vault-regcreds",
+            ],
+        )
+        .await?;
 
-    // Seed all test secrets into Vault
-    seed_all_vault_test_secrets().await?;
+        // busybox runs as root
+        for svc in [
+            "vr1-pure-env",
+            "vr2-mixed-env",
+            "vr3-file-mount",
+            "vr4-pull-secrets",
+            "vr5-data-from",
+            "vault-routes-combined",
+        ] {
+            apply_run_as_root_override_policy(kubeconfig, VAULT_TEST_NAMESPACE, svc).await?;
+        }
 
-    // Cedar policies: permit test namespace to access Vault secret paths
-    apply_cedar_secret_policy_for_service(
-        kubeconfig,
-        "permit-vault-route-secrets",
-        TEST_LABEL,
-        VAULT_TEST_NAMESPACE,
-        &[
-            "vault-db-creds",
-            "vault-api-key",
-            "vault-database-config",
-            "vault-regcreds",
-        ],
-    )
-    .await?;
+        run_vault_route_tests_inner(kubeconfig, VAULT_TEST_NAMESPACE).await?;
 
-    // busybox runs as root
-    for svc in [
-        "vr1-pure-env",
-        "vr2-mixed-env",
-        "vr3-file-mount",
-        "vr4-pull-secrets",
-        "vr5-data-from",
-        "vault-routes-combined",
-    ] {
-        apply_run_as_root_override_policy(kubeconfig, VAULT_TEST_NAMESPACE, svc).await?;
-    }
+        delete_namespace(kubeconfig, VAULT_TEST_NAMESPACE).await;
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
+            .await;
+        cleanup_vault_infrastructure(kubeconfig).await;
 
-    run_vault_route_tests_inner(kubeconfig, VAULT_TEST_NAMESPACE).await?;
-
-    delete_namespace(kubeconfig, VAULT_TEST_NAMESPACE).await;
-    delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
-    cleanup_vault_infrastructure(kubeconfig).await;
-
-    info!("[Vault/Secrets] All Vault secrets tests passed!");
-    Ok(())
+        info!("[Vault/Secrets] All Vault secrets tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 async fn run_vault_route_tests_inner(kubeconfig: &str, namespace: &str) -> Result<(), String> {

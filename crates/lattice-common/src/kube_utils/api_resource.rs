@@ -64,6 +64,22 @@ pub trait HasApiResource {
     }
 }
 
+/// Generate the boilerplate `fn api_version()` and `fn kind()` serde default methods
+/// required by types with `#[serde(default = "Type::api_version")]` attributes.
+#[macro_export]
+macro_rules! impl_api_resource_defaults {
+    ($type:ty) => {
+        impl $type {
+            fn api_version() -> String {
+                <Self as $crate::kube_utils::HasApiResource>::API_VERSION.to_string()
+            }
+            fn kind() -> String {
+                <Self as $crate::kube_utils::HasApiResource>::KIND.to_string()
+            }
+        }
+    };
+}
+
 /// Discover the API version for a resource group/kind.
 ///
 /// Uses Kubernetes API discovery to find the resource. Searches all versions within
@@ -190,11 +206,12 @@ pub fn build_api_resource(api_version: &str, kind: &str) -> ApiResource {
 /// assert_eq!(version, "v1");
 /// ```
 pub fn parse_api_version(api_version: &str) -> (String, String) {
-    if api_version.contains('/') {
-        let parts: Vec<&str> = api_version.split('/').collect();
-        (parts[0].to_string(), parts[1].to_string())
-    } else {
-        (String::new(), api_version.to_string())
+    match api_version.find('/') {
+        Some(pos) => (
+            api_version[..pos].to_string(),
+            api_version[pos + 1..].to_string(),
+        ),
+        None => (String::new(), api_version.to_string()),
     }
 }
 

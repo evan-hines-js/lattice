@@ -200,7 +200,10 @@ pub async fn reconcile(
             "",
         )
         .await?;
-        return Ok(Action::await_change());
+        // Always requeue as a safety net — watch events can be missed during pod restarts.
+        return Ok(Action::requeue(Duration::from_secs(
+            lattice_common::REQUEUE_SUCCESS_SECS,
+        )));
     }
 
     // Update graph (idempotent — crash recovery)

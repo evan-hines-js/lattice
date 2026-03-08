@@ -701,10 +701,7 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
     let kc = kubeconfig_path.to_string();
     let diag = DiagnosticContext::new(kubeconfig_path, NAMESPACE);
     with_diagnostics(&diag, "Media Server", || async {
-        retry_verification("Media Server", Some(&diag), || {
-            verify_bilateral_agreements(&kc)
-        })
-        .await
+        retry_verification("Media Server", || verify_bilateral_agreements(&kc)).await
     })
     .await?;
 

@@ -22,7 +22,8 @@ use super::super::helpers::{
     apply_yaml, build_busybox_service, delete_namespace, deploy_and_wait_for_phase,
     ensure_fresh_namespace, load_fixture_config, resolve_model_serving_name, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, TestHarness,
-    CURL_IMAGE, CYCLE_END_MARKER, CYCLE_START_MARKER, DEFAULT_TIMEOUT,
+    with_diagnostics, DiagnosticContext, CURL_IMAGE, CYCLE_END_MARKER, CYCLE_START_MARKER,
+    DEFAULT_TIMEOUT,
 };
 use super::super::mesh_helpers::parse_traffic_result;
 
@@ -1402,16 +1403,16 @@ async fn test_download_lifecycle(kubeconfig: &str) -> Result<(), String> {
 pub async fn run_model_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Model] Running LatticeModel integration tests on {kubeconfig}");
 
-    // GHCR registry credentials + Cedar policies (includes AppArmor override)
-    setup_regcreds_infrastructure(kubeconfig).await?;
-
-    run_model_test_sequence(kubeconfig).await?;
-
-    cleanup_inference_tester(kubeconfig).await;
-    delete_namespace(kubeconfig, INFERENCE_TESTER_NAMESPACE).await;
-    delete_namespace(kubeconfig, MODEL_NAMESPACE).await;
-
-    Ok(())
+    let diag = DiagnosticContext::new(kubeconfig, MODEL_NAMESPACE);
+    with_diagnostics(&diag, "Model", || async {
+        setup_regcreds_infrastructure(kubeconfig).await?;
+        run_model_test_sequence(kubeconfig).await?;
+        cleanup_inference_tester(kubeconfig).await;
+        delete_namespace(kubeconfig, INFERENCE_TESTER_NAMESPACE).await;
+        delete_namespace(kubeconfig, MODEL_NAMESPACE).await;
+        Ok(())
+    })
+    .await
 }
 
 async fn run_model_test_sequence(kubeconfig: &str) -> Result<(), String> {

@@ -17,6 +17,7 @@ use tracing::info;
 
 use super::super::helpers::{
     apply_apparmor_override_policy, apply_yaml, ensure_namespace, run_kubectl, wait_for_condition,
+    with_diagnostics, DiagnosticContext,
 };
 
 const WEBHOOK_TEST_NS: &str = "webhook-test";
@@ -604,33 +605,32 @@ async fn cleanup(kubeconfig: &str) {
 pub async fn run_webhook_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Webhook] Running admission webhook integration tests on {kubeconfig}");
 
-    wait_for_webhook_ready(kubeconfig).await?;
-    ensure_namespace(kubeconfig, WEBHOOK_TEST_NS).await?;
+    let diag = DiagnosticContext::new(kubeconfig, WEBHOOK_TEST_NS);
+    with_diagnostics(&diag, "Webhook", || async {
+        wait_for_webhook_ready(kubeconfig).await?;
+        ensure_namespace(kubeconfig, WEBHOOK_TEST_NS).await?;
 
-    // KIND clusters don't have AppArmor — permit the Unconfined override
-    apply_apparmor_override_policy(kubeconfig).await?;
+        apply_apparmor_override_policy(kubeconfig).await?;
 
-    // Valid resources should be accepted
-    test_valid_service_accepted(kubeconfig).await?;
-    test_valid_model_accepted(kubeconfig).await?;
-    test_valid_mesh_member_accepted(kubeconfig).await?;
+        test_valid_service_accepted(kubeconfig).await?;
+        test_valid_model_accepted(kubeconfig).await?;
+        test_valid_mesh_member_accepted(kubeconfig).await?;
 
-    // Invalid resources should be rejected by the webhook
-    test_invalid_service_rejected(kubeconfig).await?;
-    test_invalid_model_rejected(kubeconfig).await?;
-    test_empty_mesh_member_accepted(kubeconfig).await?;
+        test_invalid_service_rejected(kubeconfig).await?;
+        test_invalid_model_rejected(kubeconfig).await?;
+        test_empty_mesh_member_accepted(kubeconfig).await?;
 
-    // LatticeCluster EndpointsSpec validation (CREATE rejection — no clusters created)
-    test_cluster_duplicate_ports_rejected(kubeconfig).await?;
-    test_cluster_invalid_service_type_rejected(kubeconfig).await?;
+        test_cluster_duplicate_ports_rejected(kubeconfig).await?;
+        test_cluster_invalid_service_type_rejected(kubeconfig).await?;
 
-    // LatticeCluster parent_config immutability (uses existing workload cluster)
-    test_parent_config_immutability(kubeconfig).await?;
+        test_parent_config_immutability(kubeconfig).await?;
 
-    cleanup(kubeconfig).await;
+        cleanup(kubeconfig).await;
 
-    info!("[Webhook] All admission webhook integration tests passed!");
-    Ok(())
+        info!("[Webhook] All admission webhook integration tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]

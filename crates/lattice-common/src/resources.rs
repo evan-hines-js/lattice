@@ -81,39 +81,33 @@ pub fn parse_cpu_millis(quantity: Option<&Quantity>) -> Result<i64, QuantityPars
     }
 }
 
+/// Suffixes for memory quantity parsing, checked in order (longest first to
+/// avoid `"Gi"` matching before `"G"`).
+const MEMORY_SUFFIXES: &[(&str, i64)] = &[
+    ("Ti", 1024 * 1024 * 1024 * 1024),
+    ("Gi", 1024 * 1024 * 1024),
+    ("Mi", 1024 * 1024),
+    ("Ki", 1024),
+    ("T", 1_000_000_000_000),
+    ("G", 1_000_000_000),
+    ("M", 1_000_000),
+    ("k", 1_000),
+];
+
 /// Parse a memory quantity string to bytes.
 ///
 /// Handles binary suffixes (`Ki`, `Mi`, `Gi`, `Ti`), decimal suffixes
 /// (`k`, `M`, `G`, `T`), and plain byte values.
 pub fn parse_memory_bytes_str(s: &str) -> Result<i64, QuantityParseError> {
     let err = || QuantityParseError(s.to_string());
-    let parse = |v: &str| v.parse::<i64>().map_err(|_| err());
 
-    if let Some(v) = s.strip_suffix("Ki") {
-        return Ok(parse(v)? * 1024);
+    for (suffix, multiplier) in MEMORY_SUFFIXES {
+        if let Some(v) = s.strip_suffix(suffix) {
+            return Ok(v.parse::<i64>().map_err(|_| err())? * multiplier);
+        }
     }
-    if let Some(v) = s.strip_suffix("Mi") {
-        return Ok(parse(v)? * 1024 * 1024);
-    }
-    if let Some(v) = s.strip_suffix("Gi") {
-        return Ok(parse(v)? * 1024 * 1024 * 1024);
-    }
-    if let Some(v) = s.strip_suffix("Ti") {
-        return Ok(parse(v)? * 1024 * 1024 * 1024 * 1024);
-    }
-    if let Some(v) = s.strip_suffix('G') {
-        return Ok(parse(v)? * 1_000_000_000);
-    }
-    if let Some(v) = s.strip_suffix('M') {
-        return Ok(parse(v)? * 1_000_000);
-    }
-    if let Some(v) = s.strip_suffix('k') {
-        return Ok(parse(v)? * 1_000);
-    }
-    if let Some(v) = s.strip_suffix('T') {
-        return Ok(parse(v)? * 1_000_000_000_000);
-    }
-    parse(s)
+
+    s.parse::<i64>().map_err(|_| err())
 }
 
 /// Parse a Kubernetes memory `Quantity` to bytes.

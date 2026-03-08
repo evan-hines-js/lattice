@@ -80,9 +80,6 @@ pub fn parse_cluster_path(url_path: &str) -> Option<(String, String)> {
     Some((target_path, k8s_path))
 }
 
-// Re-export from lattice_common for convenience
-pub use lattice_common::routing::split_first_hop;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,13 +178,14 @@ mod tests {
     // split_first_hop tests are in lattice_common::routing
 
     #[test]
-    fn test_split_first_hop_reexport() {
-        // Verify the re-export works
+    fn test_split_first_hop_via_common() {
+        use lattice_common::routing::split_first_hop;
         assert_eq!(split_first_hop("a/b"), ("a", "b"));
     }
 
     #[test]
     fn test_split_first_hop_empty() {
+        use lattice_common::routing::split_first_hop;
         assert_eq!(split_first_hop(""), ("", ""));
     }
 }

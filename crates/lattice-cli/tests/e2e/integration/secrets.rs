@@ -40,7 +40,7 @@ use super::super::helpers::{
     ensure_fresh_namespace, run_kubectl, seed_all_local_test_secrets, seed_local_secret,
     service_pod_selector, setup_regcreds_infrastructure, verify_pod_env_var,
     verify_pod_file_content, verify_pod_image_pull_secrets, verify_synced_secret_keys,
-    wait_for_service_phase, with_run_as_root, DEFAULT_TIMEOUT,
+    wait_for_service_phase, with_diagnostics, with_run_as_root, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -192,38 +192,36 @@ pub async fn verify_external_secret(
 pub async fn run_secrets_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Secrets] Running secrets integration tests...");
 
-    // Set up local provider + regcreds (needed for ghcr-creds on every service)
-    setup_regcreds_infrastructure(kubeconfig).await?;
+    let diag = DiagnosticContext::new(kubeconfig, BASIC_TEST_NAMESPACE);
+    with_diagnostics(&diag, "Secrets", || async {
+        setup_regcreds_infrastructure(kubeconfig).await?;
 
-    // Seed the basic test secret (uses a distinct source secret name to avoid
-    // collisions with route tests that seed "local-db-creds" with different values)
-    let mut test_data = std::collections::BTreeMap::new();
-    test_data.insert("username".to_string(), "admin".to_string());
-    test_data.insert("password".to_string(), "local-secret-123".to_string());
-    seed_local_secret(kubeconfig, "local-basic-db-creds", &test_data).await?;
+        let mut test_data = std::collections::BTreeMap::new();
+        test_data.insert("username".to_string(), "admin".to_string());
+        test_data.insert("password".to_string(), "local-secret-123".to_string());
+        seed_local_secret(kubeconfig, "local-basic-db-creds", &test_data).await?;
 
-    // Fine-grained: permit basic test namespace to access local-basic-db-creds only
-    apply_cedar_secret_policy_for_service(
-        kubeconfig,
-        "permit-basic-secrets",
-        "local-secrets",
-        BASIC_TEST_NAMESPACE,
-        &["local-basic-db-creds"],
-    )
-    .await?;
+        apply_cedar_secret_policy_for_service(
+            kubeconfig,
+            "permit-basic-secrets",
+            "local-secrets",
+            BASIC_TEST_NAMESPACE,
+            &["local-basic-db-creds"],
+        )
+        .await?;
 
-    // busybox runs as root
-    apply_run_as_root_override_policy(kubeconfig, BASIC_TEST_NAMESPACE, "local-api").await?;
+        apply_run_as_root_override_policy(kubeconfig, BASIC_TEST_NAMESPACE, "local-api").await?;
 
-    run_basic_secret_test(kubeconfig).await?;
-    delete_namespace(kubeconfig, BASIC_TEST_NAMESPACE).await;
-    delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=local-secrets").await;
+        run_basic_secret_test(kubeconfig).await?;
+        delete_namespace(kubeconfig, BASIC_TEST_NAMESPACE).await;
+        delete_cedar_policies_by_label(kubeconfig, "lattice.dev/test=local-secrets").await;
 
-    // Run the comprehensive 5-route tests (manages its own Cedar policies)
-    run_secrets_route_tests(kubeconfig, ROUTES_TEST_NAMESPACE).await?;
+        run_secrets_route_tests(kubeconfig, ROUTES_TEST_NAMESPACE).await?;
 
-    info!("[Secrets] All secrets tests passed!");
-    Ok(())
+        info!("[Secrets] All secrets tests passed!");
+        Ok(())
+    })
+    .await
 }
 
 /// Test local secrets with explicit keys (CRD-level verification)

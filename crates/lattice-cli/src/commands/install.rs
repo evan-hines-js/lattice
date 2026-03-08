@@ -218,7 +218,7 @@ impl Installer {
     }
 
     fn bootstrap_kubeconfig_path(&self) -> PathBuf {
-        PathBuf::from(format!("/tmp/{}-kubeconfig", self.bootstrap_cluster_name()))
+        std::env::temp_dir().join(format!("{}-kubeconfig", self.bootstrap_cluster_name()))
     }
 
     /// Returns the path where the management cluster kubeconfig is stored
@@ -441,7 +441,8 @@ impl Installer {
     }
 
     async fn create_management_cluster_crd(&self, client: &Client) -> Result<()> {
-        let cluster_name = self.cluster.metadata.name.as_deref().unwrap_or("unknown");
+        // Constructor validates metadata.name exists, so this is safe
+        let cluster_name = self.cluster_name();
         info!(
             "Applying LatticeCluster '{}' (provider: {})",
             cluster_name,

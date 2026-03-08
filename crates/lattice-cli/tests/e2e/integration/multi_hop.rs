@@ -40,7 +40,8 @@ use tracing::info;
 
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
-    delete_namespace, ensure_fresh_namespace, run_kubectl, truncate, BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
+    delete_namespace, ensure_fresh_namespace, run_kubectl, truncate, with_diagnostics,
+    DiagnosticContext, BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
 };
 
 // ============================================================================
@@ -90,15 +91,14 @@ pub async fn run_multi_hop_proxy_tests(ctx: &InfraContext) -> Result<(), String>
         "[Integration/MultiHop] Running multi-hop proxy tests through: mgmt -> workload -> workload2"
     );
 
-    // Setup namespace (delete + recreate for clean slate on re-runs)
-    ensure_fresh_namespace(kubeconfig, MULTI_HOP_NAMESPACE).await?;
-
-    // Run tests in sequence (each depends on previous)
-    run_test_sequence(kubeconfig).await?;
-
-    delete_namespace(kubeconfig, MULTI_HOP_NAMESPACE).await;
-
-    Ok(())
+    let diag = DiagnosticContext::new(kubeconfig, MULTI_HOP_NAMESPACE);
+    with_diagnostics(&diag, "Multi-Hop Proxy", || async {
+        ensure_fresh_namespace(kubeconfig, MULTI_HOP_NAMESPACE).await?;
+        run_test_sequence(kubeconfig).await?;
+        delete_namespace(kubeconfig, MULTI_HOP_NAMESPACE).await;
+        Ok(())
+    })
+    .await
 }
 
 /// Run the test sequence after namespace setup.

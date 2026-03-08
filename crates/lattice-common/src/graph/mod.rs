@@ -1605,7 +1605,7 @@ mod tests {
                     peer_auth: PeerAuth::Strict,
                 })
                 .collect(),
-            allowed_callers: callers.into_iter().map(|c| ServiceRef::local(c)).collect(),
+            allowed_callers: callers.into_iter().map(ServiceRef::local).collect(),
             dependencies: deps
                 .into_iter()
                 .map(|d| ServiceRef {

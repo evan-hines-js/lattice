@@ -6,7 +6,7 @@ use lattice_proto::{
 };
 use tracing::{debug, error};
 
-use lattice_proto::stream_id;
+use crate::exec::send_exec_error;
 
 use super::{CommandContext, StoredExecSession};
 
@@ -222,24 +222,4 @@ pub async fn handle_exec_cancel(cancel: &ExecCancel, ctx: &CommandContext) {
     if let Some(session) = ctx.forwarded_exec_sessions.remove(request_id).await {
         session.cancel_token.cancel();
     }
-}
-
-/// Send an exec error response.
-async fn send_exec_error(
-    tx: &tokio::sync::mpsc::Sender<AgentMessage>,
-    cluster_name: &str,
-    request_id: &str,
-    error: &str,
-) {
-    let response = lattice_proto::ExecData {
-        request_id: request_id.to_string(),
-        stream_id: stream_id::ERROR,
-        data: error.as_bytes().to_vec(),
-        stream_end: true,
-    };
-    let msg = AgentMessage {
-        cluster_name: cluster_name.to_string(),
-        payload: Some(Payload::ExecData(response)),
-    };
-    let _ = tx.send(msg).await;
 }

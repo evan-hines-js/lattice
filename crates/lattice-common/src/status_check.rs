@@ -48,122 +48,34 @@ pub fn is_status_unchanged<S: StatusFields>(
         .unwrap_or(false)
 }
 
-impl StatusFields for InfraProviderStatus {
-    type Phase = InfraProviderPhase;
-    fn phase(&self) -> &Self::Phase {
-        &self.phase
-    }
-    fn message(&self) -> Option<&str> {
-        self.message.as_deref()
-    }
-    fn observed_generation(&self) -> Option<i64> {
-        self.observed_generation
-    }
+/// Implement `StatusFields` for a CRD status type that has `phase`, `message`,
+/// and `observed_generation` fields following the standard Lattice convention.
+macro_rules! impl_status_fields {
+    ($status_type:ty, $phase_type:ty) => {
+        impl StatusFields for $status_type {
+            type Phase = $phase_type;
+            fn phase(&self) -> &Self::Phase {
+                &self.phase
+            }
+            fn message(&self) -> Option<&str> {
+                self.message.as_deref()
+            }
+            fn observed_generation(&self) -> Option<i64> {
+                self.observed_generation
+            }
+        }
+    };
 }
 
-impl StatusFields for LatticeServiceStatus {
-    type Phase = ServicePhase;
-    fn phase(&self) -> &Self::Phase {
-        &self.phase
-    }
-    fn message(&self) -> Option<&str> {
-        self.message.as_deref()
-    }
-    fn observed_generation(&self) -> Option<i64> {
-        self.observed_generation
-    }
-}
-
-impl StatusFields for LatticeMeshMemberStatus {
-    type Phase = MeshMemberPhase;
-    fn phase(&self) -> &Self::Phase {
-        &self.phase
-    }
-    fn message(&self) -> Option<&str> {
-        self.message.as_deref()
-    }
-    fn observed_generation(&self) -> Option<i64> {
-        self.observed_generation
-    }
-}
-
-impl StatusFields for SecretProviderStatus {
-    type Phase = SecretProviderPhase;
-    fn phase(&self) -> &Self::Phase {
-        &self.phase
-    }
-    fn message(&self) -> Option<&str> {
-        self.message.as_deref()
-    }
-    fn observed_generation(&self) -> Option<i64> {
-        self.observed_generation
-    }
-}
-
-impl StatusFields for LatticeJobStatus {
-    type Phase = JobPhase;
-    fn phase(&self) -> &Self::Phase {
-        &self.phase
-    }
-    fn message(&self) -> Option<&str> {
-        self.message.as_deref()
-    }
-    fn observed_generation(&self) -> Option<i64> {
-        self.observed_generation
-    }
-}
-
-impl StatusFields for LatticeModelStatus {
-    type Phase = ModelServingPhase;
-    fn phase(&self) -> &Self::Phase {
-        &self.phase
-    }
-    fn message(&self) -> Option<&str> {
-        self.message.as_deref()
-    }
-    fn observed_generation(&self) -> Option<i64> {
-        self.observed_generation
-    }
-}
-
-impl StatusFields for BackupStoreStatus {
-    type Phase = BackupStorePhase;
-    fn phase(&self) -> &Self::Phase {
-        &self.phase
-    }
-    fn message(&self) -> Option<&str> {
-        self.message.as_deref()
-    }
-    fn observed_generation(&self) -> Option<i64> {
-        self.observed_generation
-    }
-}
-
-impl StatusFields for LatticeClusterBackupStatus {
-    type Phase = ClusterBackupPhase;
-    fn phase(&self) -> &Self::Phase {
-        &self.phase
-    }
-    fn message(&self) -> Option<&str> {
-        self.message.as_deref()
-    }
-    fn observed_generation(&self) -> Option<i64> {
-        self.observed_generation
-    }
-}
-
-impl StatusFields for LatticeRestoreStatus {
-    type Phase = RestorePhase;
-    fn phase(&self) -> &Self::Phase {
-        &self.phase
-    }
-    fn message(&self) -> Option<&str> {
-        self.message.as_deref()
-    }
-    fn observed_generation(&self) -> Option<i64> {
-        self.observed_generation
-    }
-}
+impl_status_fields!(InfraProviderStatus, InfraProviderPhase);
+impl_status_fields!(LatticeServiceStatus, ServicePhase);
+impl_status_fields!(LatticeMeshMemberStatus, MeshMemberPhase);
+impl_status_fields!(SecretProviderStatus, SecretProviderPhase);
+impl_status_fields!(LatticeJobStatus, JobPhase);
+impl_status_fields!(LatticeModelStatus, ModelServingPhase);
+impl_status_fields!(BackupStoreStatus, BackupStorePhase);
+impl_status_fields!(LatticeClusterBackupStatus, ClusterBackupPhase);
+impl_status_fields!(LatticeRestoreStatus, RestorePhase);
 
 #[cfg(test)]
 mod tests {

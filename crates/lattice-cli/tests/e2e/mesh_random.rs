@@ -774,10 +774,7 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
         mesh.service_names(),
     );
     with_diagnostics(&diag, "Random Mesh", || async {
-        retry_verification("Random Mesh", Some(&diag), || {
-            verify_random_mesh_traffic(&mesh, &kc)
-        })
-        .await
+        retry_verification("Random Mesh", || verify_random_mesh_traffic(&mesh, &kc)).await
     })
     .await?;
 
