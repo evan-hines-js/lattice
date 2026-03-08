@@ -618,21 +618,20 @@ impl ServiceGraph {
             update.into_merged(existing.as_deref())
         };
 
-        // Snapshot old outbound targets before removing edges
-        let old_targets: HashSet<QualifiedName> = self
-            .edges_out
-            .get(&key)
-            .map(|v| v.iter().cloned().collect())
-            .unwrap_or_default();
-
-        // Remove old edges if service existed
-        self.remove_edges(&node.namespace, &node.name);
-
         // Clone dependencies before moving node
         let dependencies = node.dependencies.clone();
         let namespace = node.namespace.clone();
         let name = node.name.clone();
         let depends_all = node.depends_all;
+        let source_key = (namespace.clone(), name.clone());
+
+        // Snapshot old outbound targets for diff-based update
+        let old_targets: HashSet<QualifiedName> = self
+            .edges_out
+            .get(&key)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default();
+        let new_targets: HashSet<QualifiedName> = dependencies.iter().cloned().collect();
 
         // Store the node
         self.vertices.insert(key.clone(), node);
@@ -644,34 +643,42 @@ impl ServiceGraph {
             self.depends_all_nodes.remove(&key);
         }
 
-        // Update outgoing edges
-        if !dependencies.is_empty() {
-            self.edges_out.insert(key.clone(), dependencies.clone());
+        // Diff-based edge update: only touch edges that actually changed.
+        // No remove-then-readd, so concurrent readers never see a stale empty state.
+        let removed = old_targets.difference(&new_targets);
+        let added = new_targets.difference(&old_targets);
 
-            // Update incoming edges for each dependency
-            for (dep_ns, dep_name) in &dependencies {
-                let dep_key = (dep_ns.clone(), dep_name.clone());
-                let source_key = (namespace.clone(), name.clone());
-
-                self.edges_in
-                    .entry(dep_key.clone())
-                    .and_modify(|edges| {
-                        if !edges.contains(&source_key) {
-                            edges.push(source_key.clone());
-                        }
-                    })
-                    .or_insert_with(|| vec![source_key]);
-
-                // Create unknown stub if dependency doesn't exist
-                if !self.vertices.contains_key(&dep_key) {
-                    self.vertices
-                        .insert(dep_key, ServiceNode::unknown(dep_ns, dep_name));
-                }
+        for target in removed {
+            if let Some(mut in_edges) = self.edges_in.get_mut(target) {
+                in_edges.retain(|e| e != &source_key);
             }
         }
 
-        // Compute edge diff (symmetric difference of old vs new outbound targets)
-        let new_targets: HashSet<QualifiedName> = dependencies.iter().cloned().collect();
+        for target in added {
+            self.edges_in
+                .entry(target.clone())
+                .and_modify(|edges| {
+                    if !edges.contains(&source_key) {
+                        edges.push(source_key.clone());
+                    }
+                })
+                .or_insert_with(|| vec![source_key.clone()]);
+
+            // Create unknown stub if dependency doesn't exist
+            if !self.vertices.contains_key(target) {
+                self.vertices
+                    .insert(target.clone(), ServiceNode::unknown(&target.0, &target.1));
+            }
+        }
+
+        // Update edges_out in one shot
+        if new_targets.is_empty() {
+            self.edges_out.remove(&key);
+        } else {
+            self.edges_out.insert(key.clone(), dependencies);
+        }
+
+        // Compute edge diff for watcher triggering
         let diff: HashSet<QualifiedName> = old_targets
             .symmetric_difference(&new_targets)
             .cloned()
