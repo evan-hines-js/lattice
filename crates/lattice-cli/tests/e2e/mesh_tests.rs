@@ -20,7 +20,7 @@ use lattice_common::crd::LatticeService;
 use super::helpers::{
     apply_mesh_wildcard_inbound_policy, client_from_kubeconfig, create_with_retry,
     delete_namespace, ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure,
-    DiagnosticContext, DEFAULT_TIMEOUT,
+    with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::mesh_fixtures::{
     create_api_gateway, create_api_orders, create_api_users, create_cache, create_db_orders,
@@ -290,7 +290,10 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
 
     let kc = kubeconfig_path.to_string();
     let diag = DiagnosticContext::new(kubeconfig_path, TEST_SERVICES_NAMESPACE);
-    retry_verification("Fixed Mesh", Some(diag), || verify_traffic_patterns(&kc)).await?;
+    with_diagnostics(&diag, "Fixed Mesh", || async {
+        retry_verification("Fixed Mesh", Some(&diag), || verify_traffic_patterns(&kc)).await
+    })
+    .await?;
 
     delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await;
     Ok(())

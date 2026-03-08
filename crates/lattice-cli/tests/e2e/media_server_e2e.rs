@@ -15,8 +15,8 @@ use lattice_common::crd::LatticeService;
 use super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, ensure_fresh_namespace,
     ensure_test_cluster_issuer, load_service_config, run_kubectl, setup_regcreds_infrastructure,
-    wait_for_condition, wait_for_service_phase, CedarPolicySpec, DiagnosticContext,
-    DEFAULT_TIMEOUT,
+    wait_for_condition, wait_for_service_phase, with_diagnostics, CedarPolicySpec,
+    DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::mesh_helpers::retry_verification;
 
@@ -700,8 +700,11 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
 
     let kc = kubeconfig_path.to_string();
     let diag = DiagnosticContext::new(kubeconfig_path, NAMESPACE);
-    retry_verification("Media Server", Some(diag), || {
-        verify_bilateral_agreements(&kc)
+    with_diagnostics(&diag, "Media Server", || async {
+        retry_verification("Media Server", Some(&diag), || {
+            verify_bilateral_agreements(&kc)
+        })
+        .await
     })
     .await?;
 

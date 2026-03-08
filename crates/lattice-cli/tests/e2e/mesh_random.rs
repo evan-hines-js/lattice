@@ -19,8 +19,8 @@ use lattice_common::crd::{LatticeService, ParsedEndpoint};
 
 use super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
-    ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, CedarPolicySpec,
-    DiagnosticContext,
+    ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, with_diagnostics,
+    CedarPolicySpec, DiagnosticContext,
 };
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,
@@ -773,8 +773,11 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
         RANDOM_MESH_NAMESPACE,
         mesh.service_names(),
     );
-    retry_verification("Random Mesh", Some(diag), || {
-        verify_random_mesh_traffic(&mesh, &kc)
+    with_diagnostics(&diag, "Random Mesh", || async {
+        retry_verification("Random Mesh", Some(&diag), || {
+            verify_random_mesh_traffic(&mesh, &kc)
+        })
+        .await
     })
     .await?;
 

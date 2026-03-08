@@ -10,6 +10,8 @@ use futures::FutureExt;
 use tokio::time::Instant;
 use tracing::info;
 
+use super::diagnostics::panic_message;
+
 pub struct TestResult {
     pub name: String,
     pub passed: bool,
@@ -40,16 +42,7 @@ impl TestHarness {
         let (passed, error) = match result {
             Ok(Ok(())) => (true, None),
             Ok(Err(e)) => (false, Some(e)),
-            Err(panic) => {
-                let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                (false, Some(format!("PANIC: {msg}")))
-            }
+            Err(panic) => (false, Some(format!("PANIC: {}", panic_message(&*panic)))),
         };
         self.results.lock().unwrap().push(TestResult {
             name: name.to_string(),

@@ -509,7 +509,7 @@ pub async fn wait_for_services_ready(
 /// returning the error.
 pub async fn retry_verification<F, Fut>(
     label: &str,
-    diag: Option<super::helpers::DiagnosticContext>,
+    diag: Option<&super::helpers::DiagnosticContext>,
     verify: F,
 ) -> Result<(), String>
 where

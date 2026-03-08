@@ -44,11 +44,10 @@ use kube::api::Api;
 use lattice_common::crd::{LatticeService, ResourceSpec};
 use tracing::info;
 
-use super::super::helpers::DiagnosticContext;
 use super::super::helpers::{
     apply_yaml, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, test_image,
-    wait_for_condition, DEFAULT_TIMEOUT,
+    wait_for_condition, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::super::mesh_fixtures::{
     build_lattice_service, curl_container, inbound_allow, nginx_container, outbound_dep,
@@ -421,7 +420,10 @@ pub async fn run_mesh_onboarding_tests(kubeconfig: &str) -> Result<(), String> {
 
     let kc = kubeconfig.to_string();
     let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
-    retry_verification("MeshOnboard", Some(diag), || verify_traffic_logs(&kc)).await?;
+    with_diagnostics(&diag, "MeshOnboard", || async {
+        retry_verification("MeshOnboard", Some(&diag), || verify_traffic_logs(&kc)).await
+    })
+    .await?;
 
     info!("\n========================================");
     info!("Third-Party Mesh Onboarding: PASSED");

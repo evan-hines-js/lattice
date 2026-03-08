@@ -23,7 +23,7 @@ use lattice_common::crd::{LatticeService, ParsedEndpoint, ResourceSpec};
 use super::helpers::{
     apply_cedar_policies_batch, apply_mesh_wildcard_inbound_policy, client_from_kubeconfig,
     create_with_retry, delete_namespace, ensure_fresh_namespace, setup_regcreds_infrastructure,
-    CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT,
+    with_diagnostics, CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,
@@ -216,44 +216,48 @@ async fn verify_baseline(kubeconfig: &str) -> Result<(), String> {
     // We reuse retry_verification with a custom check.
     let kc = kubeconfig.to_string();
     let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
-    retry_verification("Mesh Removal Baseline", Some(diag), || {
-        let kc = kc.clone();
-        let edges = edges.clone();
-        async move {
-            use super::helpers::run_kubectl;
-            use super::mesh_helpers::parse_traffic_result;
+    with_diagnostics(&diag, "Mesh Removal Baseline", || async {
+        retry_verification("Mesh Removal Baseline", Some(&diag), || {
+            let kc = kc.clone();
+            let edges = edges.clone();
+            async move {
+                use super::helpers::run_kubectl;
+                use super::mesh_helpers::parse_traffic_result;
 
-            let logs = run_kubectl(&[
-                "--kubeconfig",
-                &kc,
-                "logs",
-                "-n",
-                NAMESPACE,
-                "-l",
-                &format!("{}=rm-client", lattice_common::LABEL_NAME),
-                "--tail",
-                "500",
-            ])
-            .await
-            .unwrap_or_default();
+                let logs = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "logs",
+                    "-n",
+                    NAMESPACE,
+                    "-l",
+                    &format!("{}=rm-client", lattice_common::LABEL_NAME),
+                    "--tail",
+                    "500",
+                ])
+                .await
+                .unwrap_or_default();
 
-            let mut failures = Vec::new();
-            for edge in &edges {
-                match parse_traffic_result(&logs, &edge.allowed_pattern, &edge.blocked_pattern) {
-                    Some(true) => {} // ALLOWED — good
-                    Some(false) => {
-                        failures.push(format!("{}: still BLOCKED", edge.allowed_pattern))
+                let mut failures = Vec::new();
+                for edge in &edges {
+                    match parse_traffic_result(&logs, &edge.allowed_pattern, &edge.blocked_pattern)
+                    {
+                        Some(true) => {} // ALLOWED — good
+                        Some(false) => {
+                            failures.push(format!("{}: still BLOCKED", edge.allowed_pattern))
+                        }
+                        None => failures.push(format!("{}: no result yet", edge.allowed_pattern)),
                     }
-                    None => failures.push(format!("{}: no result yet", edge.allowed_pattern)),
+                }
+
+                if failures.is_empty() {
+                    Ok(())
+                } else {
+                    Err(format!("Baseline not ready: {}", failures.join("; ")))
                 }
             }
-
-            if failures.is_empty() {
-                Ok(())
-            } else {
-                Err(format!("Baseline not ready: {}", failures.join("; ")))
-            }
-        }
+        })
+        .await
     })
     .await?;
 

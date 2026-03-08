@@ -34,11 +34,10 @@ use lattice_common::crd::{
 use lattice_common::template::TemplateString;
 use tracing::info;
 
-use super::super::helpers::DiagnosticContext;
 use super::super::helpers::{
     client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
-    run_kubectl, setup_regcreds_infrastructure, wait_for_condition, DEFAULT_TIMEOUT,
-    REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    run_kubectl, setup_regcreds_infrastructure, wait_for_condition, with_diagnostics,
+    DiagnosticContext, DEFAULT_TIMEOUT, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 use super::super::mesh_fixtures::{
     build_lattice_service, curl_container, inbound_allow, outbound_dep, redis_container, redis_port,
@@ -442,7 +441,10 @@ pub async fn run_celery_queue_tests(kubeconfig: &str) -> Result<(), String> {
 
     let kc = kubeconfig.to_string();
     let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
-    retry_verification("Celery", Some(diag), || verify_traffic_logs(&kc)).await?;
+    with_diagnostics(&diag, "Celery", || async {
+        retry_verification("Celery", Some(&diag), || verify_traffic_logs(&kc)).await
+    })
+    .await?;
 
     info!("\n========================================");
     info!("Celery Task Queue: PASSED");

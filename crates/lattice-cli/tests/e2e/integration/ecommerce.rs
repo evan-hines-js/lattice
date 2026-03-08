@@ -35,11 +35,11 @@ use lattice_common::crd::{
 };
 use tracing::info;
 
-use super::super::helpers::DiagnosticContext;
 use super::super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
-    CedarPolicySpec, DEFAULT_TIMEOUT, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    with_diagnostics, CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT, REGCREDS_PROVIDER,
+    REGCREDS_REMOTE_KEY,
 };
 use super::super::mesh_fixtures::{
     build_lattice_service, curl_container, inbound_allow, inbound_allow_all, nginx_container,
@@ -418,7 +418,10 @@ pub async fn run_ecommerce_tests(kubeconfig: &str) -> Result<(), String> {
 
     let kc = kubeconfig.to_string();
     let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
-    retry_verification("Ecommerce", Some(diag), || verify_traffic_logs(&kc)).await?;
+    with_diagnostics(&diag, "Ecommerce", || async {
+        retry_verification("Ecommerce", Some(&diag), || verify_traffic_logs(&kc)).await
+    })
+    .await?;
 
     info!("\n========================================");
     info!("E-Commerce Microservices: PASSED");

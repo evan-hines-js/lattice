@@ -34,7 +34,8 @@ use tracing::info;
 use super::super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
-    CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    with_diagnostics, CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT, REGCREDS_PROVIDER,
+    REGCREDS_REMOTE_KEY,
 };
 use super::super::mesh_fixtures::{
     curl_container, inbound_allow, nginx_container, outbound_dep, postgres_container, postgres_port,
@@ -332,7 +333,10 @@ pub async fn run_webapp_postgres_tests(kubeconfig: &str) -> Result<(), String> {
 
     let kc = kubeconfig.to_string();
     let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
-    retry_verification("WebApp+PG", Some(diag), || verify_traffic_logs(&kc)).await?;
+    with_diagnostics(&diag, "WebApp+PG", || async {
+        retry_verification("WebApp+PG", Some(&diag), || verify_traffic_logs(&kc)).await
+    })
+    .await?;
 
     info!("\n========================================");
     info!("Web App + PostgreSQL: PASSED");
