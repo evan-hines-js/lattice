@@ -48,8 +48,7 @@ impl CostProvider for ConfigMapCostProvider {
             }
         }
 
-        let cm_api: Api<ConfigMap> =
-            Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let cm_api: Api<ConfigMap> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         let cm = cm_api
             .get(CONFIGMAP_NAME)
@@ -66,8 +65,8 @@ impl CostProvider for ConfigMapCostProvider {
                 ))
             })?;
 
-        let rates: CostRates = serde_yaml::from_str(yaml_str)
-            .map_err(|e| CostError::InvalidFormat(e.to_string()))?;
+        let rates: CostRates =
+            serde_yaml::from_str(yaml_str).map_err(|e| CostError::InvalidFormat(e.to_string()))?;
 
         let _ = self.cache.send(Some((rates.clone(), Instant::now())));
         Ok(rates)

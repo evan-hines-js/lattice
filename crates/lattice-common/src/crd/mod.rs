@@ -92,6 +92,7 @@ pub use workload::container::{
     has_unknown_binary_entrypoint, ContainerSpec, ExecProbe, FileMount, HttpGetProbe, HttpHeader,
     Probe, SecurityContext, SidecarSpec, VolumeMount,
 };
+pub use workload::cost::{CostBreakdown, CostEstimate};
 pub use workload::deploy::{CanarySpec, DeploySpec, DeployStrategy};
 pub use workload::ingress::{
     CertIssuerRef, GrpcMethodMatch, HeaderMatch, HeaderMatchType, IngressSpec, IngressTls,
@@ -105,7 +106,6 @@ pub use workload::resources::{
 };
 pub use workload::scaling::{AutoscalingMetric, AutoscalingSpec};
 pub use workload::spec::{RuntimeSpec, WorkloadSpec};
-pub use workload::cost::{CostBreakdown, CostEstimate};
 pub use workload::topology::{TopologyMode, WorkloadNetworkTopology};
 
 // =============================================================================

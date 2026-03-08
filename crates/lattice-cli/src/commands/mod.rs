@@ -265,4 +265,3 @@ pub async fn ensure_capi_providers(provider: lattice_common::crd::ProviderType) 
     let config = CapiProviderConfig::new(provider).cmd_err()?;
     NativeInstaller::new().ensure(&config).await.cmd_err()
 }
-

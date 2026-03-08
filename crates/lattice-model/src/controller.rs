@@ -29,17 +29,17 @@ use tracing::{error, info, warn};
 #[cfg(test)]
 use mockall::automock;
 
+use kube::runtime::events::EventType;
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
     CostEstimate, LatticeModel, LatticeModelStatus, MetricsScraper, MetricsSnapshot,
     ModelCondition, ModelServingPhase, ProviderType,
 };
-use kube::runtime::events::EventType;
 use lattice_common::events::{actions, reasons, EventPublisher};
-use lattice_cost::CostProvider;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry, Retryable};
+use lattice_cost::CostProvider;
 
 use crate::compiler::{compile_model, role_key_suffix, CompiledModel};
 use crate::error::ModelError;
@@ -148,13 +148,8 @@ impl ModelKubeClient for ModelKubeClientImpl {
     ) -> Result<(), ModelError> {
         let params = PatchParams::apply(FIELD_MANAGER).force();
 
-        lattice_common::kube_utils::ensure_namespace(
-            &self.client,
-            namespace,
-            None,
-            FIELD_MANAGER,
-        )
-        .await?;
+        lattice_common::kube_utils::ensure_namespace(&self.client, namespace, None, FIELD_MANAGER)
+            .await?;
 
         let ms_api = self
             .registry
@@ -178,8 +173,9 @@ impl ModelKubeClient for ModelKubeClientImpl {
         serving_name: &str,
         namespace: &str,
     ) -> (ModelServingState, Option<Vec<ModelCondition>>) {
-        let conditions =
-            self.read_model_serving_conditions(serving_name, namespace).await;
+        let conditions = self
+            .read_model_serving_conditions(serving_name, namespace)
+            .await;
         let state = derive_model_serving_state(conditions.as_deref());
         (state, conditions)
     }
@@ -371,7 +367,11 @@ pub async fn reconcile(
 
             register_graph(&model, &ctx.graph, namespace);
 
-            if let Err(e) = ctx.kube.apply_compiled_model(&name, namespace, &compiled).await {
+            if let Err(e) = ctx
+                .kube
+                .apply_compiled_model(&name, namespace, &compiled)
+                .await
+            {
                 let msg = format!("Apply failed (will retry): {}", e);
                 // Stay in Pending — apply errors are transient (webhook not ready,
                 // API server hiccup). error_policy requeues after 30s.
@@ -421,8 +421,10 @@ pub async fn reconcile(
             // No download job gating — init containers naturally block pod startup
             // until model download completes.
 
-            let (state, conditions) =
-                ctx.kube.check_model_serving_status(&serving_name, namespace).await;
+            let (state, conditions) = ctx
+                .kube
+                .check_model_serving_status(&serving_name, namespace)
+                .await;
 
             match state {
                 ModelServingState::Available => {
@@ -502,7 +504,8 @@ pub async fn reconcile(
                         if e.is_retryable() {
                             // Transient — stay in Serving, let error_policy retry
                             let msg = format!("Recompile failed (will retry): {}", e);
-                            let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost).message(&msg);
+                            let mut s =
+                                StatusUpdate::new(ModelServingPhase::Serving, &cost).message(&msg);
                             if let Some(gen) = observed {
                                 s = s.observed_generation(gen);
                             }
@@ -524,7 +527,13 @@ pub async fn reconcile(
 
                 // Clean up K8s resources and graph nodes for removed roles
                 ctx.kube
-                    .cleanup_removed_roles(&name, namespace, &old_role_keys, &new_role_keys, &ctx.graph)
+                    .cleanup_removed_roles(
+                        &name,
+                        namespace,
+                        &old_role_keys,
+                        &new_role_keys,
+                        &ctx.graph,
+                    )
                     .await;
 
                 // When roles are added or removed, the gang policy's
@@ -545,8 +554,8 @@ pub async fn reconcile(
                     // observed_generation so spec_changed_since_compilation
                     // still triggers the recompile path.
                     let role_keys: Vec<String> = new_role_keys.into_iter().collect();
-                    let mut s =
-                        StatusUpdate::new(ModelServingPhase::Serving, &cost).applied_roles(role_keys);
+                    let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost)
+                        .applied_roles(role_keys);
                     if let Some(gen) = observed {
                         s = s.observed_generation(gen);
                     }
@@ -555,7 +564,10 @@ pub async fn reconcile(
                     return Ok(Action::requeue(REQUEUE_LOADING));
                 }
 
-                if let Err(e) = ctx.kube.apply_compiled_model(&name, namespace, &compiled).await
+                if let Err(e) = ctx
+                    .kube
+                    .apply_compiled_model(&name, namespace, &compiled)
+                    .await
                 {
                     // Apply errors are transient — stay in Serving, let
                     // error_policy retry. Keep the old observed_generation so
@@ -583,8 +595,10 @@ pub async fn reconcile(
 
             // No spec change — monitor health and scrape metrics
             let message = "Model is serving inference requests";
-            let conditions =
-                ctx.kube.read_model_serving_conditions(&serving_name, namespace).await;
+            let conditions = ctx
+                .kube
+                .read_model_serving_conditions(&serving_name, namespace)
+                .await;
 
             let existing_metrics = model.status.as_ref().and_then(|s| s.metrics.as_ref());
             let metrics = lattice_common::crd::scrape_metrics(
@@ -1119,8 +1133,7 @@ mod tests {
         let model = Arc::new(make_minimal_model("my-model"));
 
         let mut mock = MockModelKubeClient::new();
-        mock.expect_patch_model_status()
-            .returning(|_, _, _| Ok(()));
+        mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
         mock.expect_apply_compiled_model()
             .returning(|_, _, _| Ok(()));
 
@@ -1147,8 +1160,7 @@ mod tests {
         let mut mock = MockModelKubeClient::new();
         mock.expect_check_model_serving_status()
             .returning(|_, _| (ModelServingState::Available, None));
-        mock.expect_patch_model_status()
-            .returning(|_, _, _| Ok(()));
+        mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
 
         let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
 
@@ -1173,8 +1185,7 @@ mod tests {
         let mut mock = MockModelKubeClient::new();
         mock.expect_check_model_serving_status()
             .returning(|_, _| (ModelServingState::Failed, None));
-        mock.expect_patch_model_status()
-            .returning(|_, _, _| Ok(()));
+        mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
 
         let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
 
@@ -1199,8 +1210,7 @@ mod tests {
         let mut mock = MockModelKubeClient::new();
         mock.expect_read_model_serving_conditions()
             .returning(|_, _| None);
-        mock.expect_patch_model_status()
-            .returning(|_, _, _| Ok(()));
+        mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
 
         let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
 
@@ -1228,8 +1238,7 @@ mod tests {
             .returning(|_, _, _| Ok(()));
         mock.expect_cleanup_removed_roles()
             .returning(|_, _, _, _, _| ());
-        mock.expect_patch_model_status()
-            .returning(|_, _, _| Ok(()));
+        mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
 
         let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
 
@@ -1252,8 +1261,7 @@ mod tests {
         let model = Arc::new(model);
 
         let mut mock = MockModelKubeClient::new();
-        mock.expect_patch_model_status()
-            .returning(|_, _, _| Ok(()));
+        mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
 
         let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));
 

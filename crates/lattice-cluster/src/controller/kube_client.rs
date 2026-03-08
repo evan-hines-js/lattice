@@ -505,7 +505,11 @@ impl KubeClient for KubeClientImpl {
             }
         });
         node_api
-            .patch(name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+            .patch(
+                name,
+                &PatchParams::apply(FIELD_MANAGER),
+                &Patch::Merge(&patch),
+            )
             .await?;
         info!(node = %name, "cordoned node");
         Ok(())
@@ -521,7 +525,11 @@ impl KubeClient for KubeClientImpl {
             }
         });
         node_api
-            .patch(name, &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+            .patch(
+                name,
+                &PatchParams::apply(FIELD_MANAGER),
+                &Patch::Merge(&patch),
+            )
             .await?;
         info!(node = %name, "uncordoned node");
         Ok(())
@@ -536,17 +544,30 @@ impl KubeClient for KubeClientImpl {
         let lp = ListParams::default().fields("status.phase=Pending");
         let pods = pod_api.list(&lp).await?;
 
-        let max_req = pods.items.iter().filter_map(|pod| {
-            let spec = pod.spec.as_ref()?;
-            if spec.priority.unwrap_or(0) <= 0 {
-                return None;
-            }
-            spec.containers.iter().filter_map(|c| {
-                let q = c.resources.as_ref()?.requests.as_ref()?.get(GPU_RESOURCE)?;
-                let count = lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0);
-                if count > 0 { Some(count as u32) } else { None }
-            }).max()
-        }).max().unwrap_or(0);
+        let max_req = pods
+            .items
+            .iter()
+            .filter_map(|pod| {
+                let spec = pod.spec.as_ref()?;
+                if spec.priority.unwrap_or(0) <= 0 {
+                    return None;
+                }
+                spec.containers
+                    .iter()
+                    .filter_map(|c| {
+                        let q = c.resources.as_ref()?.requests.as_ref()?.get(GPU_RESOURCE)?;
+                        let count =
+                            lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0);
+                        if count > 0 {
+                            Some(count as u32)
+                        } else {
+                            None
+                        }
+                    })
+                    .max()
+            })
+            .max()
+            .unwrap_or(0);
 
         Ok(max_req)
     }

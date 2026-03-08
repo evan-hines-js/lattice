@@ -34,6 +34,7 @@ use lattice_common::crd::{
 use lattice_common::template::TemplateString;
 use tracing::info;
 
+use super::super::helpers::DiagnosticContext;
 use super::super::helpers::{
     client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
     run_kubectl, setup_regcreds_infrastructure, wait_for_condition, DEFAULT_TIMEOUT,
@@ -43,7 +44,7 @@ use super::super::mesh_fixtures::{
     build_lattice_service, curl_container, inbound_allow, outbound_dep, redis_container, redis_port,
 };
 use super::super::mesh_helpers::{
-    parse_traffic_result, retry_verification, wait_for_services_ready, DiagnosticContext, TestTarget,
+    retry_verification, verify_traffic_expectations, wait_for_services_ready, TestTarget,
 };
 
 const NAMESPACE: &str = "celery-queue-test";
@@ -396,8 +397,6 @@ async fn verify_env_vars(kubeconfig: &str) -> Result<(), String> {
 }
 
 async fn verify_traffic_logs(kubeconfig: &str) -> Result<(), String> {
-    info!("[Celery] Verifying traffic patterns from logs...");
-
     let generators: &[(&str, &[(&str, bool)])] = &[
         (
             "web-api",
@@ -424,65 +423,7 @@ async fn verify_traffic_logs(kubeconfig: &str) -> Result<(), String> {
             ],
         ),
     ];
-
-    let mut failures: Vec<String> = Vec::new();
-    let mut total = 0;
-
-    for (generator, expectations) in generators {
-        let logs = run_kubectl(&[
-            "--kubeconfig",
-            kubeconfig,
-            "logs",
-            "-n",
-            NAMESPACE,
-            "-l",
-            &format!("{}={}", lattice_common::LABEL_NAME, generator),
-            "--tail",
-            "200",
-        ])
-        .await?;
-
-        for (target, expected_allowed) in *expectations {
-            total += 1;
-            let expected_str = if *expected_allowed {
-                "ALLOWED"
-            } else {
-                "BLOCKED"
-            };
-            let allowed_pattern = format!("{}: ALLOWED", target);
-            let blocked_pattern = format!("{}: BLOCKED", target);
-
-            let actual_str = match parse_traffic_result(&logs, &allowed_pattern, &blocked_pattern) {
-                Some(true) => "ALLOWED",
-                Some(false) => "BLOCKED",
-                None => "UNKNOWN",
-            };
-
-            if actual_str != expected_str {
-                failures.push(format!(
-                    "{}->{}: got {}, expected {}",
-                    generator, target, actual_str, expected_str
-                ));
-            } else {
-                info!(
-                    "[Celery]   {} -> {}: {} (OK)",
-                    generator, target, actual_str
-                );
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        return Err(format!(
-            "[Celery] {} of {} checks failed: {}",
-            failures.len(),
-            total,
-            failures.join("; ")
-        ));
-    }
-
-    info!("[Celery] All {} traffic checks passed!", total);
-    Ok(())
+    verify_traffic_expectations(kubeconfig, NAMESPACE, "Celery", generators).await
 }
 
 // =============================================================================
@@ -500,13 +441,8 @@ pub async fn run_celery_queue_tests(kubeconfig: &str) -> Result<(), String> {
     verify_env_vars(kubeconfig).await?;
 
     let kc = kubeconfig.to_string();
-    let svc_names: Vec<String> = Vec::new();
-    let diag = DiagnosticContext {
-        kubeconfig,
-        namespace: NAMESPACE,
-        service_names: &svc_names,
-    };
-    retry_verification("Celery", Some(&diag), || verify_traffic_logs(&kc)).await?;
+    let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
+    retry_verification("Celery", Some(diag), || verify_traffic_logs(&kc)).await?;
 
     info!("\n========================================");
     info!("Celery Task Queue: PASSED");

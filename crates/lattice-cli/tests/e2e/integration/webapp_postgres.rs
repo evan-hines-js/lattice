@@ -34,13 +34,13 @@ use tracing::info;
 use super::super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
-    CedarPolicySpec, DEFAULT_TIMEOUT, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 use super::super::mesh_fixtures::{
     curl_container, inbound_allow, nginx_container, outbound_dep, postgres_container, postgres_port,
 };
 use super::super::mesh_helpers::{
-    parse_traffic_result, retry_verification, wait_for_services_ready, DiagnosticContext, TestTarget,
+    retry_verification, verify_traffic_expectations, wait_for_services_ready, TestTarget,
 };
 
 const NAMESPACE: &str = "webapp-postgres-test";
@@ -309,71 +309,11 @@ async fn verify_env_vars(kubeconfig: &str) -> Result<(), String> {
 }
 
 async fn verify_traffic_logs(kubeconfig: &str) -> Result<(), String> {
-    info!("[WebApp+PG] Verifying traffic patterns from logs...");
-
     let generators: &[(&str, &[(&str, bool)])] = &[(
         "nginx-frontend",
         &[("app-server", true), ("postgres", false)],
     )];
-
-    let mut failures: Vec<String> = Vec::new();
-    let mut total = 0;
-
-    for (generator, expectations) in generators {
-        let logs = run_kubectl(&[
-            "--kubeconfig",
-            kubeconfig,
-            "logs",
-            "-n",
-            NAMESPACE,
-            "-l",
-            &format!("{}={}", lattice_common::LABEL_NAME, generator),
-            "--tail",
-            "200",
-        ])
-        .await?;
-
-        for (target, expected_allowed) in *expectations {
-            total += 1;
-            let expected_str = if *expected_allowed {
-                "ALLOWED"
-            } else {
-                "BLOCKED"
-            };
-            let allowed_pattern = format!("{}: ALLOWED", target);
-            let blocked_pattern = format!("{}: BLOCKED", target);
-
-            let actual_str = match parse_traffic_result(&logs, &allowed_pattern, &blocked_pattern) {
-                Some(true) => "ALLOWED",
-                Some(false) => "BLOCKED",
-                None => "UNKNOWN",
-            };
-
-            if actual_str != expected_str {
-                failures.push(format!(
-                    "{}->{}: got {}, expected {}",
-                    generator, target, actual_str, expected_str
-                ));
-            } else {
-                info!(
-                    "[WebApp+PG]   {} -> {}: {} (OK)",
-                    generator, target, actual_str
-                );
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        return Err(format!(
-            "[WebApp+PG] {} of {} checks failed: {}",
-            failures.len(),
-            total,
-            failures.join("; ")
-        ));
-    }
-
-    info!("[WebApp+PG] All {} traffic checks passed!", total);
-    Ok(())
+    verify_traffic_expectations(kubeconfig, NAMESPACE, "WebApp+PG", generators).await
 }
 
 // =============================================================================
@@ -391,13 +331,8 @@ pub async fn run_webapp_postgres_tests(kubeconfig: &str) -> Result<(), String> {
     verify_env_vars(kubeconfig).await?;
 
     let kc = kubeconfig.to_string();
-    let svc_names: Vec<String> = Vec::new();
-    let diag = DiagnosticContext {
-        kubeconfig,
-        namespace: NAMESPACE,
-        service_names: &svc_names,
-    };
-    retry_verification("WebApp+PG", Some(&diag), || verify_traffic_logs(&kc)).await?;
+    let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
+    retry_verification("WebApp+PG", Some(diag), || verify_traffic_logs(&kc)).await?;
 
     info!("\n========================================");
     info!("Web App + PostgreSQL: PASSED");

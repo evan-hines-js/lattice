@@ -147,9 +147,8 @@ mod tests {
 
         let normal_input = Tensor::<TestBackend, 1>::from_floats(normal.as_slice(), &device)
             .reshape([1, seq_len, input_dim]);
-        let anomalous_input =
-            Tensor::<TestBackend, 1>::from_floats(anomalous.as_slice(), &device)
-                .reshape([1, seq_len, input_dim]);
+        let anomalous_input = Tensor::<TestBackend, 1>::from_floats(anomalous.as_slice(), &device)
+            .reshape([1, seq_len, input_dim]);
 
         let normal_score = model.score(normal_input);
         let anomalous_score = model.score(anomalous_input);

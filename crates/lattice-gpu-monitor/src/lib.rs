@@ -90,7 +90,8 @@ impl GpuMonitorPipeline {
 
         // Run training + scoring when window is full
         if self.window.is_full() {
-            if let (Some(ref mut t), Some(flat)) = (&mut self.trainer, self.window.as_contiguous()) {
+            if let (Some(ref mut t), Some(flat)) = (&mut self.trainer, self.window.as_contiguous())
+            {
                 if let Some(raw_score) = t.step(flat.as_slice(), &device) {
                     self.scorer.update(raw_score);
                 }
@@ -234,6 +235,10 @@ mod tests {
         // The window is now full, but we're still in warmup (need WARMUP_WINDOWS
         // scrapes). The scorer should stay at 0.0 (no scores fed to it yet).
         let status = pipeline.process_sample(&make_sample(1, 50.0));
-        assert_eq!(status.score(), 0.0, "scorer should not receive scores during warmup");
+        assert_eq!(
+            status.score(),
+            0.0,
+            "scorer should not receive scores during warmup"
+        );
     }
 }

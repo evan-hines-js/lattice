@@ -246,7 +246,11 @@ mod tests {
     #[test]
     fn gpu_monitor_daemonset_generated() {
         let manifests = generate_gpu_monitor_daemonset("ghcr.io/test/lattice:latest");
-        assert_eq!(manifests.len(), 4, "should have SA + ClusterRole + CRB + DaemonSet");
+        assert_eq!(
+            manifests.len(),
+            4,
+            "should have SA + ClusterRole + CRB + DaemonSet"
+        );
         assert!(manifests[0].contains("ServiceAccount"));
         assert!(manifests[1].contains("ClusterRole"));
         assert!(manifests[2].contains("ClusterRoleBinding"));
@@ -260,10 +264,7 @@ mod tests {
     fn gpu_monitor_mesh_member_generated() {
         let member = generate_gpu_monitor_mesh_member();
         assert_eq!(member.metadata.name.as_deref(), Some("lattice-gpu-monitor"));
-        assert_eq!(
-            member.metadata.namespace.as_deref(),
-            Some("lattice-system")
-        );
+        assert_eq!(member.metadata.namespace.as_deref(), Some("lattice-system"));
         assert!(member.spec.ambient);
         assert!(member.spec.ports.is_empty(), "gpu-monitor is egress-only");
     }

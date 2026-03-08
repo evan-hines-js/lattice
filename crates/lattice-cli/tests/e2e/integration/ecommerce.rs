@@ -35,6 +35,7 @@ use lattice_common::crd::{
 };
 use tracing::info;
 
+use super::super::helpers::DiagnosticContext;
 use super::super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
@@ -45,8 +46,8 @@ use super::super::mesh_fixtures::{
     outbound_dep, postgres_container, postgres_port,
 };
 use super::super::mesh_helpers::{
-    generate_test_script, parse_traffic_result, retry_verification, wait_for_services_ready,
-    DiagnosticContext, TestTarget,
+    generate_test_script, retry_verification, verify_traffic_expectations, wait_for_services_ready,
+    TestTarget,
 };
 
 const NAMESPACE: &str = "ecommerce-test";
@@ -378,8 +379,6 @@ async fn verify_databases_ready(kubeconfig: &str) -> Result<(), String> {
 }
 
 async fn verify_traffic_logs(kubeconfig: &str) -> Result<(), String> {
-    info!("[Ecommerce] Verifying traffic patterns from logs...");
-
     let generators: &[(&str, &[(&str, bool)])] = &[
         (
             "api-gateway",
@@ -401,65 +400,7 @@ async fn verify_traffic_logs(kubeconfig: &str) -> Result<(), String> {
             ],
         ),
     ];
-
-    let mut failures: Vec<String> = Vec::new();
-    let mut total = 0;
-
-    for (generator, expectations) in generators {
-        let logs = run_kubectl(&[
-            "--kubeconfig",
-            kubeconfig,
-            "logs",
-            "-n",
-            NAMESPACE,
-            "-l",
-            &format!("{}={}", lattice_common::LABEL_NAME, generator),
-            "--tail",
-            "200",
-        ])
-        .await?;
-
-        for (target, expected_allowed) in *expectations {
-            total += 1;
-            let expected_str = if *expected_allowed {
-                "ALLOWED"
-            } else {
-                "BLOCKED"
-            };
-            let allowed_pattern = format!("{}: ALLOWED", target);
-            let blocked_pattern = format!("{}: BLOCKED", target);
-
-            let actual_str = match parse_traffic_result(&logs, &allowed_pattern, &blocked_pattern) {
-                Some(true) => "ALLOWED",
-                Some(false) => "BLOCKED",
-                None => "UNKNOWN",
-            };
-
-            if actual_str != expected_str {
-                failures.push(format!(
-                    "{}->{}: got {}, expected {}",
-                    generator, target, actual_str, expected_str
-                ));
-            } else {
-                info!(
-                    "[Ecommerce]   {} -> {}: {} (OK)",
-                    generator, target, actual_str
-                );
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        return Err(format!(
-            "[Ecommerce] {} of {} checks failed: {}",
-            failures.len(),
-            total,
-            failures.join("; ")
-        ));
-    }
-
-    info!("[Ecommerce] All {} traffic checks passed!", total);
-    Ok(())
+    verify_traffic_expectations(kubeconfig, NAMESPACE, "Ecommerce", generators).await
 }
 
 // =============================================================================
@@ -476,13 +417,8 @@ pub async fn run_ecommerce_tests(kubeconfig: &str) -> Result<(), String> {
     verify_databases_ready(kubeconfig).await?;
 
     let kc = kubeconfig.to_string();
-    let svc_names: Vec<String> = Vec::new();
-    let diag = DiagnosticContext {
-        kubeconfig,
-        namespace: NAMESPACE,
-        service_names: &svc_names,
-    };
-    retry_verification("Ecommerce", Some(&diag), || verify_traffic_logs(&kc)).await?;
+    let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
+    retry_verification("Ecommerce", Some(diag), || verify_traffic_logs(&kc)).await?;
 
     info!("\n========================================");
     info!("E-Commerce Microservices: PASSED");

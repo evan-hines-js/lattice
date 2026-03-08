@@ -20,11 +20,10 @@ use chrono::Utc;
 use tracing::info;
 
 use lattice_common::gpu::{
-    ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_HEARTBEAT,
-    HEARTBEAT_STALENESS_SECS,
+    ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_HEARTBEAT, HEARTBEAT_STALENESS_SECS,
 };
 
-use super::super::helpers::{apply_yaml, run_kubectl, wait_for_condition};
+use super::super::helpers::{run_kubectl, wait_for_condition};
 
 // =============================================================================
 // Helpers
@@ -317,7 +316,9 @@ async fn test_stale_heartbeat_ignored(kubeconfig: &str, node: &str) -> Result<()
 
     let cordoned = is_node_cordoned(kubeconfig, node).await?;
     if cordoned {
-        return Err("Node was cordoned despite stale heartbeat — operator should ignore stale data".into());
+        return Err(
+            "Node was cordoned despite stale heartbeat — operator should ignore stale data".into(),
+        );
     }
 
     info!("[Integration/GPUHealth] PASSED: stale heartbeat → node stayed schedulable");

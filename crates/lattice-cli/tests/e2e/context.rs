@@ -241,6 +241,9 @@ impl StandaloneKubeconfig {
             (kc, Some(session))
         };
 
+        // Enable /debug/graph endpoint (idempotent — skips rollout if already set)
+        super::helpers::ensure_lattice_debug_enabled(&kubeconfig).await?;
+
         let chaos = if Self::chaos_enabled() {
             use super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
             use std::sync::Arc;
@@ -327,6 +330,11 @@ where
 
     let run_inner = async {
         let result = setup::setup_mgmt_and_workload(&setup::SetupConfig::default()).await?;
+        // Enable /debug/graph on both clusters before any services are deployed
+        super::helpers::ensure_lattice_debug_enabled(&result.ctx.mgmt_kubeconfig).await?;
+        if let Some(ref wk) = result.ctx.workload_kubeconfig {
+            super::helpers::ensure_lattice_debug_enabled(wk).await?;
+        }
         let ctx = result.ctx.clone();
         test_fn(ctx).await?;
         teardown_mgmt_cluster(&result.ctx.mgmt_kubeconfig, MGMT_CLUSTER_NAME).await

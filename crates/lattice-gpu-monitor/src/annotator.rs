@@ -10,12 +10,11 @@ use kube::api::{Api, Patch, PatchParams};
 use thiserror::Error;
 use tracing::{debug, info};
 
-use lattice_common::gpu::{
-    ANNOTATION_ANOMALY_SCORE, ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS,
-    ANNOTATION_HEARTBEAT,
-};
 use crate::gpu_loss::GpuLossStatus;
 use crate::scorer::HealthStatus;
+use lattice_common::gpu::{
+    ANNOTATION_ANOMALY_SCORE, ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_HEARTBEAT,
+};
 
 #[derive(Debug, Error)]
 pub enum AnnotatorError {
@@ -63,10 +62,7 @@ impl NodeAnnotator {
             format!("{:.4}", health.score()),
         );
         annotations.insert(ANNOTATION_GPU_HEALTH.to_string(), health_str.clone());
-        annotations.insert(
-            ANNOTATION_GPU_LOSS.to_string(),
-            loss_detected.to_string(),
-        );
+        annotations.insert(ANNOTATION_GPU_LOSS.to_string(), loss_detected.to_string());
         annotations.insert(ANNOTATION_HEARTBEAT.to_string(), now.clone());
 
         let patch = serde_json::json!({

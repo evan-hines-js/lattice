@@ -26,10 +26,10 @@ use lattice_common::status_check;
 use lattice_common::{CrdKind, CrdRegistry};
 
 use lattice_cedar::PolicyEngine;
-use lattice_cost::CostProvider;
 use lattice_common::events::{actions, reasons, EventPublisher};
 #[cfg(test)]
 use lattice_common::NoopEventPublisher;
+use lattice_cost::CostProvider;
 
 use crate::compiler::{ApplyLayer, CompiledService, CompilerPhase, ServiceCompiler};
 use crate::crd::{

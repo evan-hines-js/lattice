@@ -18,7 +18,12 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 ///
 /// Retries on transient errors (5xx, connection failures) with exponential
 /// backoff. Fails immediately on 4xx errors (auth/permission problems).
-pub(crate) async fn fetch_kubeconfig(server: &str, token: &str, insecure: bool, format: Option<&str>) -> Result<String> {
+pub(crate) async fn fetch_kubeconfig(
+    server: &str,
+    token: &str,
+    insecure: bool,
+    format: Option<&str>,
+) -> Result<String> {
     let client = if insecure {
         reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -65,12 +70,9 @@ pub(crate) async fn fetch_kubeconfig(server: &str, token: &str, insecure: bool, 
 
         let status = response.status();
         if status.is_success() {
-            let body = response
-                .text()
-                .await
-                .map_err(|e| {
-                    Error::command_failed(format!("failed to read response body: {}", e))
-                })?;
+            let body = response.text().await.map_err(|e| {
+                Error::command_failed(format!("failed to read response body: {}", e))
+            })?;
 
             serde_json::from_str::<serde_json::Value>(&body).map_err(|e| {
                 Error::command_failed(format!("proxy returned invalid JSON: {}", e))

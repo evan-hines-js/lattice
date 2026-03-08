@@ -131,8 +131,14 @@ mod tests {
         let spec = ObservabilitySpec {
             metrics: Some(MetricsConfig {
                 mappings: BTreeMap::from([
-                    ("loss".to_string(), "avg(training_loss{$SELECTORS})".to_string()),
-                    ("throughput".to_string(), "sum(rate(samples_total{$SELECTORS}[1m]))".to_string()),
+                    (
+                        "loss".to_string(),
+                        "avg(training_loss{$SELECTORS})".to_string(),
+                    ),
+                    (
+                        "throughput".to_string(),
+                        "sum(rate(samples_total{$SELECTORS}[1m]))".to_string(),
+                    ),
                 ]),
                 port: Some("prom".to_string()),
             }),
@@ -189,7 +195,10 @@ mod tests {
             }
         }"#;
         let spec: ObservabilitySpec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.metrics.as_ref().unwrap().port.as_deref(), Some("custom-metrics"));
+        assert_eq!(
+            spec.metrics.as_ref().unwrap().port.as_deref(),
+            Some("custom-metrics")
+        );
         assert_eq!(spec.metrics.as_ref().unwrap().mappings.len(), 1);
     }
 }

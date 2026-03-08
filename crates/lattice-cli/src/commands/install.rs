@@ -1070,9 +1070,7 @@ impl Installer {
             let mgmt_kc = mgmt_kc.clone();
             let ns = ns.clone();
             let cluster = cluster.clone();
-            async move {
-                lattice_move::local_move(&bs_kc, &mgmt_kc, &ns, &cluster).await
-            }
+            async move { lattice_move::local_move(&bs_kc, &mgmt_kc, &ns, &cluster).await }
         })
         .await
         .map(|_| ())
@@ -1101,7 +1099,9 @@ impl Installer {
         sa_api
             .create(&PostParams::default(), &sa)
             .await
-            .map_err(|e| Error::command_failed(format!("failed to create lattice-admin SA: {}", e)))?;
+            .map_err(|e| {
+                Error::command_failed(format!("failed to create lattice-admin SA: {}", e))
+            })?;
         info!("Created lattice-admin ServiceAccount");
 
         // Create Secret-based long-lived SA token
@@ -1127,7 +1127,10 @@ impl Installer {
             .create(&PostParams::default(), &token_secret)
             .await
             .map_err(|e| {
-                Error::command_failed(format!("failed to create lattice-admin-token Secret: {}", e))
+                Error::command_failed(format!(
+                    "failed to create lattice-admin-token Secret: {}",
+                    e
+                ))
             })?;
         info!("Created lattice-admin-token Secret");
 
@@ -1144,8 +1147,9 @@ impl Installer {
                 "policies": "permit(\n  principal == Lattice::User::\"system:serviceaccount:lattice-system:lattice-admin\",\n  action,\n  resource\n);\n"
             }
         });
-        let cedar_json = serde_json::to_string(&cedar_policy_yaml)
-            .map_err(|e| Error::command_failed(format!("failed to serialize CedarPolicy: {}", e)))?;
+        let cedar_json = serde_json::to_string(&cedar_policy_yaml).map_err(|e| {
+            Error::command_failed(format!("failed to serialize CedarPolicy: {}", e))
+        })?;
         kube_utils::apply_manifests(&mgmt_client, &[&cedar_json], &Default::default())
             .await
             .cmd_err()?;
@@ -1164,8 +1168,7 @@ impl Installer {
                         Ok(secret) => {
                             if let Some(data) = &secret.data {
                                 if let Some(token_bytes) = data.get("token") {
-                                    let token =
-                                        String::from_utf8_lossy(&token_bytes.0).to_string();
+                                    let token = String::from_utf8_lossy(&token_bytes.0).to_string();
                                     if !token.is_empty() {
                                         return Ok(Some(token));
                                     }
@@ -1187,8 +1190,9 @@ impl Installer {
 
         // Discover proxy endpoint and fetch kubeconfig
         let proxy_endpoint = self.discover_proxy_for_install(&mgmt_client).await?;
-        let (_server, _pf, kubeconfig_json) =
-            self.fetch_proxy_kubeconfig(&proxy_endpoint, &admin_token).await?;
+        let (_server, _pf, kubeconfig_json) = self
+            .fetch_proxy_kubeconfig(&proxy_endpoint, &admin_token)
+            .await?;
 
         // Save kubeconfig
         let kc_path = crate::config::save_kubeconfig(&kubeconfig_json)?;
@@ -1223,8 +1227,7 @@ impl Installer {
         use kube::Api;
         use lattice_common::{CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT};
 
-        let services: Api<Service> =
-            Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let services: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         // Wait for the cell service to get a LoadBalancer address
         let endpoint = wait_with_timeout(
@@ -1244,7 +1247,9 @@ impl Installer {
                                 .and_then(|entry| entry.hostname.or(entry.ip));
 
                             match host {
-                                Some(h) => Ok(Some(format!("https://{}:{}", h, DEFAULT_AUTH_PROXY_PORT))),
+                                Some(h) => {
+                                    Ok(Some(format!("https://{}:{}", h, DEFAULT_AUTH_PROXY_PORT)))
+                                }
                                 None => Ok(None),
                             }
                         }

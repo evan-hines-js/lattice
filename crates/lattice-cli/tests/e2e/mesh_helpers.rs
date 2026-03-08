@@ -502,13 +502,6 @@ pub async fn wait_for_services_ready(
 // Verification
 // =============================================================================
 
-/// Context for capturing diagnostic dumps on test failure.
-pub struct DiagnosticContext<'a> {
-    pub kubeconfig: &'a str,
-    pub namespace: &'a str,
-    pub service_names: &'a [String],
-}
-
 /// Retry a verification function every 8s for up to DEFAULT_TIMEOUT.
 ///
 /// Used by both fixed and random mesh tests to handle slow policy propagation.
@@ -516,7 +509,7 @@ pub struct DiagnosticContext<'a> {
 /// returning the error.
 pub async fn retry_verification<F, Fut>(
     label: &str,
-    diag: Option<&DiagnosticContext<'_>>,
+    diag: Option<super::helpers::DiagnosticContext>,
     verify: F,
 ) -> Result<(), String>
 where
@@ -563,20 +556,85 @@ where
 
     if let Some(ctx) = diag {
         warn!("[{}] {}", label, err_msg);
-        let path = super::helpers::dump_failure_diagnostics(
-            ctx.kubeconfig,
-            ctx.namespace,
-            label,
-            ctx.service_names,
-        )
-        .await;
-        warn!(
-            "[{}] Diagnostic dump: {}",
-            label, path
-        );
+        let path = ctx.dump(label).await;
+        warn!("[{}] Diagnostic dump: {}", label, path);
     }
 
     Err(err_msg)
+}
+
+/// Verify traffic patterns from generator logs against expected ALLOWED/BLOCKED results.
+///
+/// This is the shared implementation used by all integration tests that check
+/// bilateral mesh agreements. Each generator's logs are fetched and compared
+/// against the expected outcomes.
+pub async fn verify_traffic_expectations(
+    kubeconfig: &str,
+    namespace: &str,
+    label: &str,
+    generators: &[(&str, &[(&str, bool)])],
+) -> Result<(), String> {
+    info!("[{}] Verifying traffic patterns from logs...", label);
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut total = 0;
+
+    for (generator, expectations) in generators {
+        let logs = run_kubectl(&[
+            "--kubeconfig",
+            kubeconfig,
+            "logs",
+            "-n",
+            namespace,
+            "-l",
+            &format!("{}={}", lattice_common::LABEL_NAME, generator),
+            "--tail",
+            "200",
+        ])
+        .await?;
+
+        for (target, expected_allowed) in *expectations {
+            total += 1;
+            let expected_str = if *expected_allowed {
+                "ALLOWED"
+            } else {
+                "BLOCKED"
+            };
+            let allowed_pattern = format!("{}: ALLOWED", target);
+            let blocked_pattern = format!("{}: BLOCKED", target);
+
+            let actual_str = match parse_traffic_result(&logs, &allowed_pattern, &blocked_pattern) {
+                Some(true) => "ALLOWED",
+                Some(false) => "BLOCKED",
+                None => "UNKNOWN",
+            };
+
+            if actual_str != expected_str {
+                failures.push(format!(
+                    "{}->{}: got {}, expected {}",
+                    generator, target, actual_str, expected_str
+                ));
+            } else {
+                info!(
+                    "[{}]   {} -> {}: {} (OK)",
+                    label, generator, target, actual_str
+                );
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        return Err(format!(
+            "[{}] {} of {} checks failed: {}",
+            label,
+            failures.len(),
+            total,
+            failures.join("; ")
+        ));
+    }
+
+    info!("[{}] All {} traffic checks passed!", label, total);
+    Ok(())
 }
 
 // =============================================================================

@@ -28,6 +28,19 @@ echo "=== Endurance test starting at $(date) ==="
 echo "=== Duration: ${DURATION_HOURS}h | Logs: ${LOG_DIR}/ | Chaos: ${LATTICE_ENABLE_CHAOS} ==="
 echo ""
 
+# Enable /debug/graph diagnostic endpoint on the operator.
+# Done once before the loop so the rollout completes before the first test run.
+KC="${LATTICE_KUBECONFIG:-${LATTICE_WORKLOAD_KUBECONFIG:-}}"
+if [ -n "$KC" ]; then
+    CURRENT=$(kubectl --kubeconfig="$KC" get deploy/lattice-operator -n lattice-system \
+        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LATTICE_DEBUG")].value}' 2>/dev/null || true)
+    if [ "$CURRENT" != "true" ]; then
+        echo "Setting LATTICE_DEBUG=true on operator (one-time rollout)..."
+        kubectl --kubeconfig="$KC" set env deployment/lattice-operator -n lattice-system LATTICE_DEBUG=true
+        kubectl --kubeconfig="$KC" rollout status deployment/lattice-operator -n lattice-system --timeout=120s
+    fi
+fi
+
 while true; do
     ELAPSED=$(( $(date +%s) - START_TIME ))
     if [ "$ELAPSED" -ge "$DURATION_SECS" ]; then

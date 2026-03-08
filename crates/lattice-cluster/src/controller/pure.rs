@@ -4,9 +4,7 @@
 //! unit tested without mocking Kubernetes or network connections.
 
 use lattice_common::crd::WorkerPoolSpec;
-use lattice_common::gpu::{
-    ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_HEARTBEAT,
-};
+use lattice_common::gpu::{ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_HEARTBEAT};
 
 /// Check if the cluster being reconciled is the cluster we're running on.
 ///
@@ -176,10 +174,7 @@ pub fn determine_gpu_action(
 
     // Health-based: both warning and unhealthy → cordon.
     // Cordoning prevents new work while letting current jobs checkpoint/finish.
-    match annotations
-        .get(ANNOTATION_GPU_HEALTH)
-        .map(|v| v.as_str())
-    {
+    match annotations.get(ANNOTATION_GPU_HEALTH).map(|v| v.as_str()) {
         Some("unhealthy") | Some("warning") => GpuAction::Cordon,
         _ => GpuAction::NoOp,
     }
@@ -609,9 +604,10 @@ mod tests {
 
     #[test]
     fn gpu_action_no_heartbeat_is_noop() {
-        let ann = std::collections::BTreeMap::from([
-            (ANNOTATION_GPU_HEALTH.to_string(), "unhealthy".to_string()),
-        ]);
+        let ann = std::collections::BTreeMap::from([(
+            ANNOTATION_GPU_HEALTH.to_string(),
+            "unhealthy".to_string(),
+        )]);
         assert_eq!(determine_gpu_action(&ann, 120), GpuAction::NoOp);
     }
 
@@ -633,7 +629,13 @@ mod tests {
         gpu_node_with_gpus(name, action, score, cordoned, 8)
     }
 
-    fn gpu_node_with_gpus(name: &str, action: GpuAction, score: f32, cordoned: bool, gpu_count: u32) -> GpuNodeState {
+    fn gpu_node_with_gpus(
+        name: &str,
+        action: GpuAction,
+        score: f32,
+        cordoned: bool,
+        gpu_count: u32,
+    ) -> GpuNodeState {
         GpuNodeState {
             node_name: name.to_string(),
             action,
@@ -689,8 +691,8 @@ mod tests {
     fn cordon_plan_threshold_suppresses_cordons() {
         // 4 GPU nodes, 2 already cordoned (50%). New cordon should be suppressed.
         let nodes = vec![
-            gpu_node("n1", GpuAction::NoOp, 0.1, true),  // already cordoned
-            gpu_node("n2", GpuAction::NoOp, 0.1, true),  // already cordoned
+            gpu_node("n1", GpuAction::NoOp, 0.1, true), // already cordoned
+            gpu_node("n2", GpuAction::NoOp, 0.1, true), // already cordoned
             gpu_node("n3", GpuAction::Cordon, 0.6, false), // wants cordon
             gpu_node("n4", GpuAction::NoOp, 0.1, false),
         ];
@@ -721,8 +723,8 @@ mod tests {
         // 4 nodes, 2 cordoned (at threshold), pending GPU pods exist
         // Should uncordon the lowest-confidence node
         let nodes = vec![
-            gpu_node("n1", GpuAction::Cordon, 0.5, true),  // cordoned, lower score
-            gpu_node("n2", GpuAction::Cordon, 0.7, true),  // cordoned, higher score
+            gpu_node("n1", GpuAction::Cordon, 0.5, true), // cordoned, lower score
+            gpu_node("n2", GpuAction::Cordon, 0.7, true), // cordoned, higher score
             gpu_node("n3", GpuAction::NoOp, 0.1, false),
             gpu_node("n4", GpuAction::NoOp, 0.1, false),
         ];

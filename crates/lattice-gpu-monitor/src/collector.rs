@@ -80,9 +80,7 @@ impl DcgmCollector {
     pub fn new(url: &str) -> Result<Self, CollectorError> {
         // DCGM exporter is always localhost HTTP — no TLS needed.
         // Build explicitly so we never accidentally pull in a non-FIPS TLS backend.
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .build()?;
+        let client = reqwest::Client::builder().no_proxy().build()?;
         Ok(Self {
             url: url.to_string(),
             client,
@@ -278,14 +276,8 @@ DCGM_FI_DEV_PCIE_REPLAY_COUNTER{gpu="0",UUID="GPU-abc",device="nvidia0"} 0
 
     #[test]
     fn extract_gpu_label_works() {
-        assert_eq!(
-            extract_gpu_label(r#"gpu="0",UUID="GPU-abc""#),
-            Some(0)
-        );
-        assert_eq!(
-            extract_gpu_label(r#"UUID="GPU-abc",gpu="3""#),
-            Some(3)
-        );
+        assert_eq!(extract_gpu_label(r#"gpu="0",UUID="GPU-abc""#), Some(0));
+        assert_eq!(extract_gpu_label(r#"UUID="GPU-abc",gpu="3""#), Some(3));
         assert_eq!(extract_gpu_label(r#"UUID="GPU-abc""#), None);
     }
 }

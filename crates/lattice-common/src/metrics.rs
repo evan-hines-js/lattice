@@ -127,7 +127,9 @@ pub static CEDAR_DECISIONS: Lazy<Counter<u64>> = Lazy::new(|| {
 pub static CEDAR_LOAD_FAILURES: Lazy<Counter<u64>> = Lazy::new(|| {
     METER
         .u64_counter("lattice_cedar_load_failures_total")
-        .with_description("Total failures loading Cedar policies from CRDs (fallback to default-deny)")
+        .with_description(
+            "Total failures loading Cedar policies from CRDs (fallback to default-deny)",
+        )
         .with_unit("{failures}")
         .build()
 });

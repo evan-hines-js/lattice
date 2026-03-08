@@ -12,6 +12,47 @@ use tracing::{info, warn};
 use super::docker::run_kubectl;
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
+/// Context for capturing diagnostic dumps on test failure.
+///
+/// Construct with `new()` (no service names) or `with_services()` to include
+/// per-service traffic generator logs in the dump.
+pub struct DiagnosticContext {
+    pub kubeconfig: String,
+    pub namespace: String,
+    pub service_names: Vec<String>,
+}
+
+impl DiagnosticContext {
+    /// Create a diagnostic context (no per-service traffic logs).
+    pub fn new(kubeconfig: &str, namespace: &str) -> Self {
+        Self {
+            kubeconfig: kubeconfig.to_string(),
+            namespace: namespace.to_string(),
+            service_names: Vec::new(),
+        }
+    }
+
+    /// Create a diagnostic context with per-service traffic generator log capture.
+    pub fn with_services(kubeconfig: &str, namespace: &str, service_names: Vec<String>) -> Self {
+        Self {
+            kubeconfig: kubeconfig.to_string(),
+            namespace: namespace.to_string(),
+            service_names,
+        }
+    }
+
+    /// Capture the diagnostic dump and return the file path.
+    pub async fn dump(&self, label: &str) -> String {
+        dump_failure_diagnostics(
+            &self.kubeconfig,
+            &self.namespace,
+            label,
+            &self.service_names,
+        )
+        .await
+    }
+}
+
 /// Dump cluster diagnostics to a file on disk AND stdout.
 ///
 /// Captures pod status, mesh policies, operator/ztunnel logs, the in-memory
@@ -38,7 +79,10 @@ pub async fn dump_failure_diagnostics(
         .as_secs();
     let path = format!("/tmp/lattice-diag-{}-{}.log", slug, ts);
 
-    info!("[Diagnostics] ====== FAILURE DIAGNOSTIC DUMP: {} ======", label);
+    info!(
+        "[Diagnostics] ====== FAILURE DIAGNOSTIC DUMP: {} ======",
+        label
+    );
     info!("[Diagnostics] Writing to {}", path);
 
     let mut file = match std::fs::OpenOptions::new()
@@ -67,14 +111,7 @@ pub async fn dump_failure_diagnostics(
         ),
         (
             "LatticeMeshMembers",
-            &[
-                "get",
-                "latticemeshmembers",
-                "-n",
-                namespace,
-                "-o",
-                "yaml",
-            ],
+            &["get", "latticemeshmembers", "-n", namespace, "-o", "yaml"],
         ),
         (
             "AuthorizationPolicies",
@@ -130,23 +167,14 @@ pub async fn dump_failure_diagnostics(
         ),
         (
             "Events",
-            &[
-                "get",
-                "events",
-                "-n",
-                namespace,
-                "--sort-by=.lastTimestamp",
-            ],
+            &["get", "events", "-n", namespace, "--sort-by=.lastTimestamp"],
         ),
     ];
 
     for (name, args) in sections {
         let mut full_args = vec!["--kubeconfig", kubeconfig];
         full_args.extend_from_slice(args);
-        emit_section(&mut file, name, async {
-            run_kubectl(&full_args).await
-        })
-        .await;
+        emit_section(&mut file, name, async { run_kubectl(&full_args).await }).await;
     }
 
     // Section 10: Per-service traffic generator logs
@@ -260,13 +288,10 @@ async fn fetch_operator_graph(kubeconfig: &str) -> Result<String, String> {
     ready?;
 
     let url = format!("http://127.0.0.1:{}/debug/graph", local_port);
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        reqwest::get(&url),
-    )
-    .await
-    .map_err(|_| "HTTP GET /debug/graph timed out".to_string())?
-    .map_err(|e| format!("HTTP GET /debug/graph: {e}"))?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), reqwest::get(&url))
+        .await
+        .map_err(|_| "HTTP GET /debug/graph timed out".to_string())?
+        .map_err(|e| format!("HTTP GET /debug/graph: {e}"))?;
 
     let body = result
         .text()

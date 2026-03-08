@@ -20,6 +20,7 @@ use lattice_common::crd::{LatticeService, ParsedEndpoint};
 use super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, CedarPolicySpec,
+    DiagnosticContext,
 };
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,
@@ -27,7 +28,7 @@ use super::mesh_fixtures::{
 };
 use super::mesh_helpers::{
     generate_test_script, parse_traffic_result, retry_verification, wait_for_pods_running,
-    wait_for_services_ready, DiagnosticContext, TestTarget,
+    wait_for_services_ready, TestTarget,
 };
 
 // =============================================================================
@@ -767,13 +768,12 @@ pub async fn run_random_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     .await?;
 
     let kc = kubeconfig_path.to_string();
-    let svc_names = mesh.service_names();
-    let diag = DiagnosticContext {
-        kubeconfig: kubeconfig_path,
-        namespace: RANDOM_MESH_NAMESPACE,
-        service_names: &svc_names,
-    };
-    retry_verification("Random Mesh", Some(&diag), || {
+    let diag = DiagnosticContext::with_services(
+        kubeconfig_path,
+        RANDOM_MESH_NAMESPACE,
+        mesh.service_names(),
+    );
+    retry_verification("Random Mesh", Some(diag), || {
         verify_random_mesh_traffic(&mesh, &kc)
     })
     .await?;

@@ -471,10 +471,7 @@ async fn create_missing_pool_resources(
 ///
 /// Draining is intentionally not automated — human operators should investigate
 /// and decide whether to drain after reviewing GPU metrics.
-async fn reconcile_gpu_health(
-    cluster: &LatticeCluster,
-    ctx: &Context,
-) -> Result<(), Error> {
+async fn reconcile_gpu_health(cluster: &LatticeCluster, ctx: &Context) -> Result<(), Error> {
     use lattice_common::resources::GPU_RESOURCE;
 
     let nodes = ctx.kube.list_nodes().await?;
@@ -493,7 +490,11 @@ async fn reconcile_gpu_health(
             .as_ref()
             .and_then(|s| s.allocatable.as_ref())
             .and_then(|a| a.get(GPU_RESOURCE))
-            .map(|q| lattice_common::resources::parse_quantity_int(Some(q)).unwrap_or(0).max(0) as u32)
+            .map(|q| {
+                lattice_common::resources::parse_quantity_int(Some(q))
+                    .unwrap_or(0)
+                    .max(0) as u32
+            })
             .unwrap_or(0);
         let has_gpu_capacity = gpu_count > 0;
 
@@ -511,10 +512,7 @@ async fn reconcile_gpu_health(
         let empty = std::collections::BTreeMap::new();
         let ann = annotations.unwrap_or(&empty);
 
-        let action = determine_gpu_action(
-            ann,
-            lattice_common::gpu::HEARTBEAT_STALENESS_SECS,
-        );
+        let action = determine_gpu_action(ann, lattice_common::gpu::HEARTBEAT_STALENESS_SECS);
         let anomaly_score = ann
             .get(lattice_common::gpu::ANNOTATION_ANOMALY_SCORE)
             .and_then(|v| v.parse::<f32>().ok())
@@ -545,9 +543,7 @@ async fn reconcile_gpu_health(
     let plan = build_gpu_cordon_plan(&gpu_node_states, max_pending_gpu_request);
 
     if plan.threshold_hit {
-        warn!(
-            "GPU cordon threshold hit (>50% of GPU nodes cordoned), suppressing new cordons"
-        );
+        warn!("GPU cordon threshold hit (>50% of GPU nodes cordoned), suppressing new cordons");
     }
 
     // Execute uncordons first (relieve pressure before adding more)

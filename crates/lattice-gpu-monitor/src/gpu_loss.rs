@@ -78,15 +78,12 @@ impl GpuLossChecker {
     /// Also incorporates ghost GPU detection from DCGM count tracking.
     pub async fn check(&self) -> Result<GpuLossStatus, GpuLossError> {
         let node_api: Api<Node> = Api::all(self.client.clone());
-        let node = node_api
-            .get(&self.node_name)
-            .await
-            .map_err(|e| match e {
-                kube::Error::Api(ref ae) if ae.code == 404 => {
-                    GpuLossError::NodeNotFound(self.node_name.clone())
-                }
-                other => GpuLossError::Kube(other),
-            })?;
+        let node = node_api.get(&self.node_name).await.map_err(|e| match e {
+            kube::Error::Api(ref ae) if ae.code == 404 => {
+                GpuLossError::NodeNotFound(self.node_name.clone())
+            }
+            other => GpuLossError::Kube(other),
+        })?;
 
         let allocatable = node
             .status
@@ -136,7 +133,9 @@ mod tests {
 
     #[test]
     fn detected_status_is_loss() {
-        let status = GpuLossStatus::Detected { previously_known: 8 };
+        let status = GpuLossStatus::Detected {
+            previously_known: 8,
+        };
         assert!(status.is_loss_detected());
     }
 

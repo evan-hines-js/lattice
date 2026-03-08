@@ -15,9 +15,10 @@ use lattice_common::crd::LatticeService;
 use super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, ensure_fresh_namespace,
     ensure_test_cluster_issuer, load_service_config, run_kubectl, setup_regcreds_infrastructure,
-    wait_for_condition, wait_for_service_phase, CedarPolicySpec, DEFAULT_TIMEOUT,
+    wait_for_condition, wait_for_service_phase, CedarPolicySpec, DiagnosticContext,
+    DEFAULT_TIMEOUT,
 };
-use super::mesh_helpers::{retry_verification, DiagnosticContext};
+use super::mesh_helpers::retry_verification;
 
 const NAMESPACE: &str = "media";
 
@@ -698,13 +699,8 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
     verify_unauthorized_volume_access_denied(kubeconfig_path).await?;
 
     let kc = kubeconfig_path.to_string();
-    let svc_names: Vec<String> = Vec::new();
-    let diag = DiagnosticContext {
-        kubeconfig: kubeconfig_path,
-        namespace: NAMESPACE,
-        service_names: &svc_names,
-    };
-    retry_verification("Media Server", Some(&diag), || {
+    let diag = DiagnosticContext::new(kubeconfig_path, NAMESPACE);
+    retry_verification("Media Server", Some(diag), || {
         verify_bilateral_agreements(&kc)
     })
     .await?;

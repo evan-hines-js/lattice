@@ -154,7 +154,10 @@ pub async fn run_observability_tests(kubeconfig: &str) -> Result<(), String> {
     let svc = build_observability_service();
 
     // Deploy the service and wait for Ready
-    info!("[Integration/Observability] Deploying {} with metrics port and observability mappings", METRICS_SVC_NAME);
+    info!(
+        "[Integration/Observability] Deploying {} with metrics port and observability mappings",
+        METRICS_SVC_NAME
+    );
     deploy_and_wait_for_phase(
         kubeconfig,
         OBSERVABILITY_NAMESPACE,

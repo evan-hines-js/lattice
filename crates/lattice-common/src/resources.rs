@@ -131,10 +131,10 @@ pub fn parse_memory_bytes(quantity: Option<&Quantity>) -> Result<i64, QuantityPa
 /// Returns `Ok(0)` for `None`.
 pub fn parse_quantity_int(quantity: Option<&Quantity>) -> Result<i64, QuantityParseError> {
     match quantity {
-        Some(q) => q
-            .0
-            .parse::<i64>()
-            .map_err(|_| QuantityParseError(q.0.clone())),
+        Some(q) => {
+            q.0.parse::<i64>()
+                .map_err(|_| QuantityParseError(q.0.clone()))
+        }
         None => Ok(0),
     }
 }
@@ -181,12 +181,21 @@ pub async fn gather_pool_resources(client: &kube::Client) -> Vec<PoolResourceSum
         // (all nodes in a pool have the same instance type)
         if let Some(allocatable) = node.status.as_ref().and_then(|s| s.allocatable.as_ref()) {
             if pool.node_cpu_millis == 0 {
-                pool.node_cpu_millis = parse_cpu_millis(allocatable.get("cpu"))
-                    .unwrap_or_else(|e| { warn!(error = %e, "failed to parse node CPU allocatable"); 0 });
+                pool.node_cpu_millis =
+                    parse_cpu_millis(allocatable.get("cpu")).unwrap_or_else(|e| {
+                        warn!(error = %e, "failed to parse node CPU allocatable");
+                        0
+                    });
                 pool.node_memory_bytes = parse_memory_bytes(allocatable.get("memory"))
-                    .unwrap_or_else(|e| { warn!(error = %e, "failed to parse node memory allocatable"); 0 });
+                    .unwrap_or_else(|e| {
+                        warn!(error = %e, "failed to parse node memory allocatable");
+                        0
+                    });
                 pool.node_gpu_count = parse_quantity_int(allocatable.get(GPU_RESOURCE))
-                    .unwrap_or_else(|e| { warn!(error = %e, "failed to parse node GPU allocatable"); 0 }) as u32;
+                    .unwrap_or_else(|e| {
+                        warn!(error = %e, "failed to parse node GPU allocatable");
+                        0
+                    }) as u32;
             }
         }
 
@@ -308,12 +317,21 @@ fn sum_container_requests(
             .as_ref()
             .and_then(|r| r.requests.as_ref())
         {
-            pool.allocated_cpu_millis += parse_cpu_millis(requests.get("cpu"))
-                .unwrap_or_else(|e| { warn!(error = %e, "failed to parse pod CPU request"); 0 });
+            pool.allocated_cpu_millis +=
+                parse_cpu_millis(requests.get("cpu")).unwrap_or_else(|e| {
+                    warn!(error = %e, "failed to parse pod CPU request");
+                    0
+                });
             pool.allocated_memory_bytes += parse_memory_bytes(requests.get("memory"))
-                .unwrap_or_else(|e| { warn!(error = %e, "failed to parse pod memory request"); 0 });
+                .unwrap_or_else(|e| {
+                    warn!(error = %e, "failed to parse pod memory request");
+                    0
+                });
             pool.allocated_gpu_count += parse_quantity_int(requests.get(GPU_RESOURCE))
-                .unwrap_or_else(|e| { warn!(error = %e, "failed to parse pod GPU request"); 0 }) as u32;
+                .unwrap_or_else(|e| {
+                    warn!(error = %e, "failed to parse pod GPU request");
+                    0
+                }) as u32;
         }
     }
 }
@@ -329,12 +347,18 @@ mod tests {
 
     #[test]
     fn cpu_millicores() {
-        assert_eq!(parse_cpu_millis(Some(&Quantity("500m".into()))).unwrap(), 500);
+        assert_eq!(
+            parse_cpu_millis(Some(&Quantity("500m".into()))).unwrap(),
+            500
+        );
     }
 
     #[test]
     fn cpu_fractional() {
-        assert_eq!(parse_cpu_millis(Some(&Quantity("1.5".into()))).unwrap(), 1500);
+        assert_eq!(
+            parse_cpu_millis(Some(&Quantity("1.5".into()))).unwrap(),
+            1500
+        );
     }
 
     #[test]

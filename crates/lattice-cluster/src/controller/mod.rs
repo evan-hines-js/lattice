@@ -17,8 +17,8 @@ pub use kube_client::{KubeClient, KubeClientImpl, NodeCounts};
 pub use pivot::{PivotOperations, PivotOperationsImpl};
 pub use pure::{
     autoscaling_warning, build_gpu_cordon_plan, determine_gpu_action, determine_pivot_action,
-    determine_scaling_action, is_self_cluster, GpuAction, GpuCordonPlan, GpuNodeState,
-    PivotAction, ScalingAction, MAX_CORDON_FRACTION,
+    determine_scaling_action, is_self_cluster, GpuAction, GpuCordonPlan, GpuNodeState, PivotAction,
+    ScalingAction, MAX_CORDON_FRACTION,
 };
 
 // Re-export pub(crate) items for sibling modules (phases, etc.)

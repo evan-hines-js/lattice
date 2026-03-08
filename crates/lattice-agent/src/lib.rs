@@ -276,10 +276,7 @@ mod tests {
         let body = String::from_utf8(resp.body).expect("should be valid UTF-8");
         let parsed: serde_json::Value =
             serde_json::from_str(&body).expect("body must be valid JSON even with special chars");
-        assert_eq!(
-            parsed["message"],
-            r#"error with "quotes" and \backslash"#
-        );
+        assert_eq!(parsed["message"], r#"error with "quotes" and \backslash"#);
     }
 
     #[test]

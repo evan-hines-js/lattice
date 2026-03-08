@@ -21,7 +21,11 @@ use lattice_common::DEFAULT_HEALTH_PORT;
 mod slice_runner;
 
 #[derive(Parser, Debug)]
-#[command(name = "lattice-daemonset", version, about = "Lattice DaemonSet node monitor")]
+#[command(
+    name = "lattice-daemonset",
+    version,
+    about = "Lattice DaemonSet node monitor"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

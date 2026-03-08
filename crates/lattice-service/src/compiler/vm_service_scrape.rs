@@ -67,14 +67,10 @@ impl CompilerPhase for VMServiceScrapePhase {
             .as_ref()
             .and_then(|o| o.metrics.as_ref());
 
-        let service_ports = ctx
-            .service
-            .spec
-            .workload
-            .service
-            .as_ref();
+        let service_ports = ctx.service.spec.workload.service.as_ref();
 
-        let metrics_port_name = if let Some(explicit) = obs_metrics.and_then(|m| m.port.as_deref()) {
+        let metrics_port_name = if let Some(explicit) = obs_metrics.and_then(|m| m.port.as_deref())
+        {
             // Explicit port override — must exist in service.ports
             let exists = service_ports
                 .and_then(|svc| svc.ports.get(explicit))
@@ -86,7 +82,10 @@ impl CompilerPhase for VMServiceScrapePhase {
                 ));
             }
             explicit.to_string()
-        } else if service_ports.and_then(|svc| svc.ports.get("metrics")).is_some() {
+        } else if service_ports
+            .and_then(|svc| svc.ports.get("metrics"))
+            .is_some()
+        {
             // Default port named "metrics"
             "metrics".to_string()
         } else if obs_metrics.map(|m| m.has_mappings()).unwrap_or(false) {

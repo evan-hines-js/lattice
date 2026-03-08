@@ -41,12 +41,7 @@ pub struct ScraperBuildError(#[from] reqwest::Error);
 impl VmMetricsScraper {
     /// Create a new scraper pointing at the cluster's VictoriaMetrics instance.
     pub fn new(ha: bool) -> Result<Self, ScraperBuildError> {
-        let base_url = format!(
-            "{}:{}{}",
-            query_url(ha),
-            query_port(ha),
-            query_path(ha),
-        );
+        let base_url = format!("{}:{}{}", query_url(ha), query_port(ha), query_path(ha),);
         Ok(Self {
             client: reqwest::Client::builder()
                 .use_rustls_tls()
@@ -75,7 +70,9 @@ impl VmMetricsScraper {
         if status != "success" {
             let error_msg = body["error"]
                 .as_str()
-                .ok_or_else(|| MetricsError::VmStatus(format!("status={status}, no error message")))?
+                .ok_or_else(|| {
+                    MetricsError::VmStatus(format!("status={status}, no error message"))
+                })?
                 .to_string();
             return Err(MetricsError::VmStatus(error_msg));
         }
@@ -114,9 +111,7 @@ impl lattice_common::crd::MetricsScraper for VmMetricsScraper {
         namespace: &str,
         workload_name: &str,
     ) -> MetricsSnapshot {
-        let selectors = format!(
-            r#"namespace="{namespace}", pod=~"{workload_name}-.+""#
-        );
+        let selectors = format!(r#"namespace="{namespace}", pod=~"{workload_name}-.+""#);
         let mut values = BTreeMap::new();
         for (key, promql_template) in mappings {
             let promql = promql_template.replace("$SELECTORS", &selectors);

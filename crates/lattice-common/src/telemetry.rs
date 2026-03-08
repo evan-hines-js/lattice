@@ -64,9 +64,7 @@ impl Default for TelemetryConfig {
 /// - Kubernetes resource detection
 ///
 /// Returns a Prometheus `Registry` that should be served on the `/metrics` HTTP endpoint.
-pub fn init_telemetry(
-    config: TelemetryConfig,
-) -> Result<prometheus::Registry, TelemetryError> {
+pub fn init_telemetry(config: TelemetryConfig) -> Result<prometheus::Registry, TelemetryError> {
     // Set W3C TraceContext as global propagator
     global::set_text_map_propagator(TraceContextPropagator::new());
 
@@ -93,11 +91,9 @@ pub fn init_telemetry(
             .build()
             .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
 
-        let otlp_reader = opentelemetry_sdk::metrics::PeriodicReader::builder(
-            otlp_exporter,
-            runtime::Tokio,
-        )
-        .build();
+        let otlp_reader =
+            opentelemetry_sdk::metrics::PeriodicReader::builder(otlp_exporter, runtime::Tokio)
+                .build();
         meter_builder = meter_builder.with_reader(otlp_reader);
 
         let provider = init_otlp_tracer(endpoint, resource)?;

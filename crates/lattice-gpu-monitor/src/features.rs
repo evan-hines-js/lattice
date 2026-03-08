@@ -7,7 +7,9 @@
 //! - 6 relative (deltas from node mean)
 
 use crate::collector::NodeSample;
-use crate::config::{DERIVED_FEATURES, FEATURES_PER_GPU, RAW_FEATURES, RELATIVE_FEATURES, THROTTLE_TEMP};
+use crate::config::{
+    DERIVED_FEATURES, FEATURES_PER_GPU, RAW_FEATURES, RELATIVE_FEATURES, THROTTLE_TEMP,
+};
 
 /// Features for a single GPU.
 #[derive(Debug, Clone)]
@@ -63,8 +65,7 @@ pub fn compute_features(sample: &NodeSample) -> NodeFeatures {
     let mean_temp: f32 = sample.gpus.iter().map(|g| g.gpu_temp).sum::<f32>() / gpu_count;
     let mean_power: f32 = sample.gpus.iter().map(|g| g.power_usage).sum::<f32>() / gpu_count;
     let mean_sm_util: f32 = sample.gpus.iter().map(|g| g.gpu_util).sum::<f32>() / gpu_count;
-    let mean_mem_util: f32 =
-        sample.gpus.iter().map(|g| g.mem_copy_util).sum::<f32>() / gpu_count;
+    let mean_mem_util: f32 = sample.gpus.iter().map(|g| g.mem_copy_util).sum::<f32>() / gpu_count;
     let mean_sm_clock: f32 = sample.gpus.iter().map(|g| g.sm_clock).sum::<f32>() / gpu_count;
     let mean_pcie_tx: f32 = sample.gpus.iter().map(|g| g.pcie_tx).sum::<f32>() / gpu_count;
 
@@ -76,17 +77,17 @@ pub fn compute_features(sample: &NodeSample) -> NodeFeatures {
             GpuFeatures {
                 raw: gpu.as_array(),
                 derived: [
-                    THROTTLE_TEMP - gpu.gpu_temp,  // thermal_margin
-                    gpu.ecc_sbe + gpu.ecc_dbe,     // ecc_total (combined ECC error count)
-                    gpu.fb_used / total_fb,         // memory_pressure
+                    THROTTLE_TEMP - gpu.gpu_temp, // thermal_margin
+                    gpu.ecc_sbe + gpu.ecc_dbe,    // ecc_total (combined ECC error count)
+                    gpu.fb_used / total_fb,       // memory_pressure
                 ],
                 relative: [
-                    gpu.gpu_temp - mean_temp,       // temp_delta
-                    gpu.power_usage - mean_power,   // power_delta
-                    gpu.gpu_util - mean_sm_util,    // sm_util_delta
+                    gpu.gpu_temp - mean_temp,          // temp_delta
+                    gpu.power_usage - mean_power,      // power_delta
+                    gpu.gpu_util - mean_sm_util,       // sm_util_delta
                     gpu.mem_copy_util - mean_mem_util, // mem_util_delta
-                    gpu.sm_clock - mean_sm_clock,   // clock_delta
-                    gpu.pcie_tx - mean_pcie_tx,     // pcie_delta
+                    gpu.sm_clock - mean_sm_clock,      // clock_delta
+                    gpu.pcie_tx - mean_pcie_tx,        // pcie_delta
                 ],
             }
         })

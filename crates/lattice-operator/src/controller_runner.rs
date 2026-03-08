@@ -31,9 +31,9 @@ use lattice_common::crd::{
     OIDCProvider, ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
+use lattice_cost::CostProvider;
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_secret_provider::controller as secrets_provider_ctrl;
-use lattice_cost::CostProvider;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{reconcile as service_reconcile, ServiceContext};
 

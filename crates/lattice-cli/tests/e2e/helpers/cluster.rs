@@ -493,11 +493,17 @@ pub async fn wait_for_operator_ready(
 pub async fn ensure_lattice_debug_enabled(kubeconfig: &str) -> Result<(), String> {
     // Check if already set to avoid unnecessary rollout
     let output = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "deployment/lattice-operator",
-        "-n", LATTICE_SYSTEM_NAMESPACE,
-        "-o", "jsonpath={.spec.template.spec.containers[0].env[?(@.name=='LATTICE_DEBUG')].value}",
-    ]).await.unwrap_or_default();
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "deployment/lattice-operator",
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
+        "-o",
+        "jsonpath={.spec.template.spec.containers[0].env[?(@.name=='LATTICE_DEBUG')].value}",
+    ])
+    .await
+    .unwrap_or_default();
 
     if output.trim() == "true" {
         info!("[Debug] LATTICE_DEBUG already enabled");
@@ -506,12 +512,16 @@ pub async fn ensure_lattice_debug_enabled(kubeconfig: &str) -> Result<(), String
 
     info!("[Debug] Setting LATTICE_DEBUG=true on operator deployment...");
     run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "set", "env",
+        "--kubeconfig",
+        kubeconfig,
+        "set",
+        "env",
         "deployment/lattice-operator",
-        "-n", LATTICE_SYSTEM_NAMESPACE,
+        "-n",
+        LATTICE_SYSTEM_NAMESPACE,
         "LATTICE_DEBUG=true",
-    ]).await?;
+    ])
+    .await?;
 
     wait_for_operator_ready("debug-env", kubeconfig, None).await
 }

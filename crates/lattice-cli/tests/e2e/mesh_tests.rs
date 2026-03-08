@@ -20,7 +20,7 @@ use lattice_common::crd::LatticeService;
 use super::helpers::{
     apply_mesh_wildcard_inbound_policy, client_from_kubeconfig, create_with_retry,
     delete_namespace, ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure,
-    DEFAULT_TIMEOUT,
+    DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::mesh_fixtures::{
     create_api_gateway, create_api_orders, create_api_users, create_cache, create_db_orders,
@@ -29,7 +29,7 @@ use super::mesh_fixtures::{
 };
 use super::mesh_helpers::{
     check_no_incorrectly_allowed, parse_traffic_result, retry_verification, wait_for_cycles,
-    wait_for_pods_running, wait_for_services_ready, DiagnosticContext,
+    wait_for_pods_running, wait_for_services_ready,
 };
 
 // =============================================================================
@@ -289,13 +289,8 @@ pub async fn run_mesh_test(kubeconfig_path: &str) -> Result<(), String> {
     let _handle = start_mesh_test(kubeconfig_path).await?;
 
     let kc = kubeconfig_path.to_string();
-    let svc_names: Vec<String> = Vec::new();
-    let diag = DiagnosticContext {
-        kubeconfig: kubeconfig_path,
-        namespace: TEST_SERVICES_NAMESPACE,
-        service_names: &svc_names,
-    };
-    retry_verification("Fixed Mesh", Some(&diag), || verify_traffic_patterns(&kc)).await?;
+    let diag = DiagnosticContext::new(kubeconfig_path, TEST_SERVICES_NAMESPACE);
+    retry_verification("Fixed Mesh", Some(diag), || verify_traffic_patterns(&kc)).await?;
 
     delete_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await;
     Ok(())

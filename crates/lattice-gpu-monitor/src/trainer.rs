@@ -82,11 +82,7 @@ impl OnlineTrainer {
     }
 
     /// Process one scrape window. Returns `Some(score)` after warmup, `None` during warmup.
-    pub fn step(
-        &mut self,
-        window_data: &[f32],
-        device: &NdDevice,
-    ) -> Option<f32> {
+    pub fn step(&mut self, window_data: &[f32], device: &NdDevice) -> Option<f32> {
         // Validate input — reject NaN/Inf entirely. Return None rather than
         // scoring corrupt data (a NaN score would poison the EMA scorer forever).
         if window_data.iter().any(|v| !v.is_finite()) {
@@ -123,12 +119,7 @@ impl OnlineTrainer {
     }
 
     /// Run a single training step on the given window data, plus replay samples.
-    fn train_step(
-        &mut self,
-        window_data: &[f32],
-        current_score: Option<f32>,
-        device: &NdDevice,
-    ) {
+    fn train_step(&mut self, window_data: &[f32], current_score: Option<f32>, device: &NdDevice) {
         let in_cold_start = self.cold_start_remaining > 0;
 
         // After warmup (and after cold-start grace), skip training on anomalous windows
@@ -188,31 +179,31 @@ impl OnlineTrainer {
     }
 
     /// Run forward + backward + optimizer step on a single window.
-    fn train_on_window(
-        &mut self,
-        data: &[f32],
-        device: &NdDevice,
-    ) {
-        let input = Tensor::<TrainBackend, 1>::from_floats(data, device)
-            .reshape([1, self.seq_len, self.input_dim]);
+    fn train_on_window(&mut self, data: &[f32], device: &NdDevice) {
+        let input = Tensor::<TrainBackend, 1>::from_floats(data, device).reshape([
+            1,
+            self.seq_len,
+            self.input_dim,
+        ]);
 
         let loss = self.model.forward_loss(input);
         let grads = loss.backward();
         let grads_params = GradientsParams::from_grads(grads, &self.model);
         // clone() required: Optimizer::step() takes ownership and returns a new model.
-        self.model = self.optim.step(self.current_lr, self.model.clone(), grads_params);
+        self.model = self
+            .optim
+            .step(self.current_lr, self.model.clone(), grads_params);
         self.step_count += 1;
     }
 
     /// Score a window using the cached inference model (no autodiff overhead).
-    fn cached_score(
-        &self,
-        window_data: &[f32],
-        device: &NdDevice,
-    ) -> Option<f32> {
+    fn cached_score(&self, window_data: &[f32], device: &NdDevice) -> Option<f32> {
         let inference = self.inference_model.as_ref()?;
-        let tensor = Tensor::<NdArray, 1>::from_floats(window_data, device)
-            .reshape([1, self.seq_len, self.input_dim]);
+        let tensor = Tensor::<NdArray, 1>::from_floats(window_data, device).reshape([
+            1,
+            self.seq_len,
+            self.input_dim,
+        ]);
         Some(inference.score(tensor))
     }
 
@@ -428,7 +419,10 @@ mod tests {
         // Load into a fresh trainer
         let mut trainer2 = OnlineTrainer::new(num_gpus, seq_len, &device);
         assert!(trainer2.load_checkpoint_from(dir.path(), &device));
-        assert_eq!(trainer2.cold_start_remaining, 0, "checkpoint load should not trigger cold-start");
+        assert_eq!(
+            trainer2.cold_start_remaining, 0,
+            "checkpoint load should not trigger cold-start"
+        );
 
         let score_after = trainer2.cached_score(&window, &device).unwrap();
 
@@ -461,7 +455,10 @@ mod tests {
         trainer.scrape_count = TRAIN_EVERY_N_SCRAPES - 1;
         let result = trainer.step(&bad_window, &device);
 
-        assert!(result.is_none(), "NaN input should return None, not a score");
+        assert!(
+            result.is_none(),
+            "NaN input should return None, not a score"
+        );
         assert_eq!(
             trainer.step_count(),
             step_before,

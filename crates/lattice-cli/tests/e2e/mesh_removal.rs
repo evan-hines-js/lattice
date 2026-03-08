@@ -23,7 +23,7 @@ use lattice_common::crd::{LatticeService, ParsedEndpoint, ResourceSpec};
 use super::helpers::{
     apply_cedar_policies_batch, apply_mesh_wildcard_inbound_policy, client_from_kubeconfig,
     create_with_retry, delete_namespace, ensure_fresh_namespace, setup_regcreds_infrastructure,
-    CedarPolicySpec, DEFAULT_TIMEOUT,
+    CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,
@@ -32,7 +32,7 @@ use super::mesh_fixtures::{
 use super::mesh_helpers::{
     delete_lattice_service, generate_test_script, remove_resources, retry_verification,
     verify_resource_absent, wait_for_edges_denied, wait_for_pods_running, wait_for_services_ready,
-    DiagnosticContext, RemovedEdge, TestTarget,
+    RemovedEdge, TestTarget,
 };
 
 // =============================================================================
@@ -215,13 +215,8 @@ async fn verify_baseline(kubeconfig: &str) -> Result<(), String> {
     // Invert the check: wait for all edges to show ALLOWED (not denied).
     // We reuse retry_verification with a custom check.
     let kc = kubeconfig.to_string();
-    let svc_names: Vec<String> = Vec::new();
-    let diag = DiagnosticContext {
-        kubeconfig,
-        namespace: NAMESPACE,
-        service_names: &svc_names,
-    };
-    retry_verification("Mesh Removal Baseline", Some(&diag), || {
+    let diag = DiagnosticContext::new(kubeconfig, NAMESPACE);
+    retry_verification("Mesh Removal Baseline", Some(diag), || {
         let kc = kc.clone();
         let edges = edges.clone();
         async move {

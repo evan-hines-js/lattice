@@ -152,7 +152,10 @@ fn init_telemetry_global() -> Option<prometheus::Registry> {
     }
 }
 
-async fn run_controller(mode: ControllerMode, prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> {
+async fn run_controller(
+    mode: ControllerMode,
+    prom_registry: Option<prometheus::Registry>,
+) -> anyhow::Result<()> {
     tracing::info!(?mode, "Starting...");
 
     // Create client with proper timeouts (5s connect, 30s read)
@@ -429,7 +432,11 @@ async fn run_service_slice(
     spawn_webhook_infrastructure(client.clone());
 
     let auditor_token = tokio_util::sync::CancellationToken::new();
-    controller_runner::spawn_graph_auditor(client.clone(), graph_for_auditor, auditor_token.clone());
+    controller_runner::spawn_graph_auditor(
+        client.clone(),
+        graph_for_auditor,
+        auditor_token.clone(),
+    );
 
     Ok(SliceHandle {
         controllers,
@@ -589,7 +596,11 @@ async fn run_all_slices(
     spawn_webhook_infrastructure(client.clone());
 
     let auditor_token = tokio_util::sync::CancellationToken::new();
-    controller_runner::spawn_graph_auditor(client.clone(), graph_for_auditor, auditor_token.clone());
+    controller_runner::spawn_graph_auditor(
+        client.clone(),
+        graph_for_auditor,
+        auditor_token.clone(),
+    );
 
     Ok(SliceHandle {
         controllers,

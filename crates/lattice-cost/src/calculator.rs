@@ -3,8 +3,7 @@
 //! Computes hourly cost from resource requests × rates for each workload type.
 
 use lattice_common::crd::{
-    CostBreakdown, CostEstimate, LatticeJobSpec, LatticeModelSpec, LatticeServiceSpec,
-    WorkloadSpec,
+    CostBreakdown, CostEstimate, LatticeJobSpec, LatticeModelSpec, LatticeServiceSpec, WorkloadSpec,
 };
 use lattice_common::resources::{parse_cpu_millis_str, parse_memory_bytes_str};
 
@@ -170,10 +169,7 @@ mod tests {
         CostRates {
             cpu: 0.031,
             memory: 0.004,
-            gpu: BTreeMap::from([
-                ("H100-SXM".to_string(), 3.50),
-                ("L4".to_string(), 0.81),
-            ]),
+            gpu: BTreeMap::from([("H100-SXM".to_string(), 3.50), ("L4".to_string(), 0.81)]),
         }
     }
 
@@ -364,10 +360,7 @@ mod tests {
                             "main".to_string(),
                             container_with_resources("2", "16Gi"),
                         )]),
-                        resources: BTreeMap::from([(
-                            "gpu".to_string(),
-                            gpu_resource("L4", 1),
-                        )]),
+                        resources: BTreeMap::from([("gpu".to_string(), gpu_resource("L4", 1))]),
                         ..Default::default()
                     }),
                     ..Default::default()

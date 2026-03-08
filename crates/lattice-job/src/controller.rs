@@ -27,17 +27,17 @@ use tracing::{error, info, warn};
 #[cfg(test)]
 use mockall::automock;
 
+use kube::runtime::events::EventType;
 use lattice_cedar::PolicyEngine;
 use lattice_common::crd::{
     CostEstimate, JobPhase, LatticeJob, LatticeJobStatus, MetricsScraper, MetricsSnapshot,
     ProviderType,
 };
-use kube::runtime::events::EventType;
 use lattice_common::events::{actions, reasons, EventPublisher};
-use lattice_cost::CostProvider;
 use lattice_common::graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry, Retryable};
+use lattice_cost::CostProvider;
 
 use crate::compiler::{compile_job, CompiledJob, VolcanoWorkload};
 use crate::error::JobError;
@@ -87,10 +87,7 @@ pub trait JobKubeClient: Send + Sync {
     ) -> Option<VCJobPhase>;
 
     /// Resolve a Volcano CRD by kind
-    async fn resolve_volcano_crd(
-        &self,
-        kind: CrdKind,
-    ) -> Result<Option<ApiResource>, JobError>;
+    async fn resolve_volcano_crd(&self, kind: CrdKind) -> Result<Option<ApiResource>, JobError>;
 
     /// Check VCCronJob status and return (active_count, last_schedule_time)
     async fn check_cron_status(
@@ -140,7 +137,14 @@ impl JobKubeClient for JobKubeClientImpl {
         compiled: &CompiledJob,
         volcano_api: &ApiResource,
     ) -> Result<(), JobError> {
-        apply_layers(&self.client, namespace, compiled, &self.registry, volcano_api).await
+        apply_layers(
+            &self.client,
+            namespace,
+            compiled,
+            &self.registry,
+            volcano_api,
+        )
+        .await
     }
 
     async fn check_vcjob_status(
@@ -152,10 +156,7 @@ impl JobKubeClient for JobKubeClientImpl {
         check_vcjob_status_impl(&self.client, name, namespace, volcano_api).await
     }
 
-    async fn resolve_volcano_crd(
-        &self,
-        kind: CrdKind,
-    ) -> Result<Option<ApiResource>, JobError> {
+    async fn resolve_volcano_crd(&self, kind: CrdKind) -> Result<Option<ApiResource>, JobError> {
         Ok(self.registry.resolve(kind).await?)
     }
 
@@ -662,7 +663,11 @@ async fn reconcile_running_cron(
     namespace: &str,
     generation: i64,
 ) -> Result<Action, JobError> {
-    let cron_api = match ctx.kube.resolve_volcano_crd(CrdKind::VolcanoCronJob).await? {
+    let cron_api = match ctx
+        .kube
+        .resolve_volcano_crd(CrdKind::VolcanoCronJob)
+        .await?
+    {
         Some(ar) => ar,
         None => {
             warn!(job = %name, "cannot check VCCronJob status: Volcano CronJob CRD not discovered");
@@ -980,23 +985,18 @@ mod tests {
         let job = Arc::new(make_minimal_job("my-job"));
 
         let mut mock = MockJobKubeClient::new();
-        let volcano_api =
-            ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&()); // dummy
+        let volcano_api = ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&()); // dummy
         let va = volcano_api.clone();
         mock.expect_resolve_volcano_crd()
             .returning(move |_| Ok(Some(va.clone())));
         mock.expect_apply_compiled_job()
             .returning(|_, _, _, _| Ok(()));
-        mock.expect_patch_job_status()
-            .returning(|_, _, _| Ok(()));
-        mock.expect_check_vcjob_status()
-            .returning(|_, _, _| None);
+        mock.expect_patch_job_status().returning(|_, _, _| Ok(()));
+        mock.expect_check_vcjob_status().returning(|_, _, _| None);
 
         let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
 
-        let action = reconcile(job, ctx)
-            .await
-            .expect("reconcile should succeed");
+        let action = reconcile(job, ctx).await.expect("reconcile should succeed");
         assert_eq!(action, Action::requeue(REQUEUE_RUNNING));
     }
 
@@ -1024,9 +1024,7 @@ mod tests {
 
         let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
 
-        let action = reconcile(job, ctx)
-            .await
-            .expect("reconcile should succeed");
+        let action = reconcile(job, ctx).await.expect("reconcile should succeed");
         assert_eq!(action, Action::await_change());
     }
 
@@ -1054,9 +1052,7 @@ mod tests {
 
         let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
 
-        let action = reconcile(job, ctx)
-            .await
-            .expect("reconcile should succeed");
+        let action = reconcile(job, ctx).await.expect("reconcile should succeed");
         assert_eq!(action, Action::await_change());
     }
 
@@ -1073,9 +1069,7 @@ mod tests {
         let mock = MockJobKubeClient::new();
         let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
 
-        let action = reconcile(job, ctx)
-            .await
-            .expect("reconcile should succeed");
+        let action = reconcile(job, ctx).await.expect("reconcile should succeed");
         assert_eq!(action, Action::await_change());
     }
 }
