@@ -9,10 +9,9 @@
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
-use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::TracerProvider;
-use opentelemetry_sdk::{runtime, Resource};
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::Resource;
 use thiserror::Error;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -84,19 +83,20 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<prometheus::Registry, T
 
     // Initialize OTLP tracer and metrics if endpoint is configured
     let otel_layer = if let Some(endpoint) = &config.otlp_endpoint {
-        // Add OTLP periodic reader alongside Prometheus reader
+        // Ensure the env var is set so the OTLP exporters pick it up
+        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
+
         let otlp_exporter = opentelemetry_otlp::MetricExporter::builder()
             .with_tonic()
-            .with_endpoint(endpoint)
             .build()
             .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
 
         let otlp_reader =
-            opentelemetry_sdk::metrics::PeriodicReader::builder(otlp_exporter, runtime::Tokio)
+            opentelemetry_sdk::metrics::PeriodicReader::builder(otlp_exporter)
                 .build();
         meter_builder = meter_builder.with_reader(otlp_reader);
 
-        let provider = init_otlp_tracer(endpoint, resource)?;
+        let provider = init_otlp_tracer(resource)?;
         let tracer = provider.tracer(config.service_name.clone());
         Some(tracing_opentelemetry::layer().with_tracer(tracer))
     } else {
@@ -133,7 +133,6 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<prometheus::Registry, T
 
 /// Build OpenTelemetry resource with service info and K8s detection
 fn build_resource(service_name: &str) -> Resource {
-    // Start with service name
     let mut attributes = vec![KeyValue::new(
         opentelemetry_semantic_conventions::resource::SERVICE_NAME,
         service_name.to_string(),
@@ -153,7 +152,6 @@ fn build_resource(service_name: &str) -> Resource {
         attributes.push(KeyValue::new("k8s.container.name", container_name));
     }
 
-    // Add version if available
     if let Some(version) = option_env!("CARGO_PKG_VERSION") {
         attributes.push(KeyValue::new(
             opentelemetry_semantic_conventions::resource::SERVICE_VERSION,
@@ -161,19 +159,18 @@ fn build_resource(service_name: &str) -> Resource {
         ));
     }
 
-    Resource::new(attributes)
+    Resource::builder().with_attributes(attributes).build()
 }
 
 /// Initialize OTLP tracer provider
-fn init_otlp_tracer(endpoint: &str, resource: Resource) -> Result<TracerProvider, TelemetryError> {
+fn init_otlp_tracer(resource: Resource) -> Result<SdkTracerProvider, TelemetryError> {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
-        .with_endpoint(endpoint)
         .build()
         .map_err(|e| TelemetryError::TracerInit(e.to_string()))?;
 
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, runtime::Tokio)
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
         .with_resource(resource)
         .build();
 
@@ -211,7 +208,6 @@ mod tests {
     #[test]
     fn test_build_resource() {
         let resource = build_resource("test-service");
-        // Resource should have at least the service name
         assert!(!resource.is_empty());
     }
 }
