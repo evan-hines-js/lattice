@@ -146,6 +146,10 @@ message Heartbeat {
   bytes spec_hash = 5;
   // SHA-256 hash of this cluster's LatticeCluster status (JSON-serialized)
   bytes status_hash = 6;
+  // Currently running Lattice operator image
+  string lattice_image = 7;
+  // Kubernetes version running on this cluster (e.g. "v1.32")
+  string kubernetes_version = 8;
 }
 
 // Cluster health information

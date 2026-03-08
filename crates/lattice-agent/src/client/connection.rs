@@ -208,6 +208,20 @@ impl AgentClient {
                 let (spec_hash, status_hash) =
                     compute_cluster_hashes(heartbeat_kube_provider.as_ref(), &cluster_name).await;
 
+                // Read current operator image from Deployment
+                let lattice_image = crate::health::get_operator_image(heartbeat_kube_provider.as_ref())
+                    .await
+                    .unwrap_or_default();
+
+                // Query live K8s version for parent visibility during upgrades
+                let kubernetes_version = match heartbeat_kube_provider.create().await {
+                    Ok(client) => match client.apiserver_version().await {
+                        Ok(info) => format!("v{}.{}", info.major, info.minor),
+                        Err(_) => String::new(),
+                    },
+                    Err(_) => String::new(),
+                };
+
                 let msg = AgentMessage {
                     cluster_name: cluster_name.clone(),
                     payload: Some(Payload::Heartbeat(Heartbeat {
@@ -217,6 +231,8 @@ impl AgentClient {
                         health,
                         spec_hash,
                         status_hash,
+                        lattice_image,
+                        kubernetes_version,
                     })),
                 };
 

@@ -807,6 +807,8 @@ mod tests {
                 health: None,
                 spec_hash: vec![],
                 status_hash: vec![],
+                lattice_image: String::new(),
+                kubernetes_version: String::new(),
             })),
         };
 

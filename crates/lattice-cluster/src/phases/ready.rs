@@ -21,6 +21,186 @@ use crate::controller::{
 };
 use crate::phases::{generate_capi_manifests, reconcile_infrastructure};
 
+/// Result of operator image reconciliation.
+enum OperatorImageAction {
+    /// Deployment image matches spec.latticeImage.
+    UpToDate,
+    /// Deployment image was patched; K8s will roll pods.
+    UpgradeInProgress,
+}
+
+/// Reconcile the operator's own Deployment image against `spec.latticeImage`.
+///
+/// Only runs on the self-cluster (the cluster we're running on). If the Deployment
+/// image doesn't match the desired image, patches the Deployment and returns
+/// `UpgradeInProgress` so the caller can requeue with a short interval.
+async fn reconcile_operator_image(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+    name: &str,
+) -> Result<OperatorImageAction, Error> {
+    let desired = &cluster.spec.lattice_image;
+
+    let current = ctx
+        .kube
+        .get_operator_deployment_image()
+        .await?
+        .ok_or_else(|| {
+            Error::internal("lattice-operator Deployment not found in lattice-system")
+        })?;
+
+    if current == *desired {
+        // Image matches — ensure status reflects it
+        let needs_status_update = cluster
+            .status
+            .as_ref()
+            .and_then(|s| s.lattice_image.as_deref())
+            != Some(desired);
+        if needs_status_update {
+            let mut status = cluster.status.clone().unwrap_or_default();
+            status.lattice_image = Some(desired.clone());
+            if let Err(e) = ctx.kube.patch_status(name, &status).await {
+                warn!(error = %e, "Failed to update status.latticeImage");
+            }
+        }
+        return Ok(OperatorImageAction::UpToDate);
+    }
+
+    info!(
+        cluster = %name,
+        current = %current,
+        desired = %desired,
+        "Operator image mismatch, patching Deployment"
+    );
+    ctx.kube.patch_operator_deployment_image(desired).await?;
+
+    ctx.events
+        .publish(
+            &cluster.object_ref(&()),
+            EventType::Normal,
+            reasons::VERSION_UPGRADE_STARTED,
+            actions::UPGRADE,
+            Some(format!(
+                "Upgrading operator image from {} to {}",
+                current, desired
+            )),
+        )
+        .await;
+
+    Ok(OperatorImageAction::UpgradeInProgress)
+}
+
+/// Cascade the parent's `spec.latticeImage` to children that don't match.
+///
+/// For each connected child whose `spec.latticeImage` differs, patches the child's
+/// LatticeCluster CRD via the K8s API proxy (for pivoted children).
+async fn cascade_upgrade_to_children(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+) {
+    if !cluster.spec.cascade_upgrade {
+        return;
+    }
+
+    let Some(ref parent_servers) = ctx.parent_servers else {
+        return;
+    };
+    if !parent_servers.is_running() {
+        return;
+    }
+
+    let desired_image = &cluster.spec.lattice_image;
+    let desired_k8s_version = &cluster.spec.provider.kubernetes.version;
+    let children_health = parent_servers.agent_registry().collect_children_health();
+
+    for child in &children_health {
+        // Skip children where both image and K8s version already match
+        let image_matches = child.lattice_image.as_deref() == Some(desired_image);
+        let version_matches = child
+            .kubernetes_version
+            .as_deref()
+            .is_some_and(|v| k8s_version_matches_spec(v, desired_k8s_version));
+
+        if image_matches && version_matches {
+            continue;
+        }
+
+        let patch_body = serde_json::json!({
+            "spec": {
+                "latticeImage": desired_image,
+                "provider": {
+                    "kubernetes": {
+                        "version": desired_k8s_version
+                    }
+                }
+            }
+        });
+        let body = serde_json::to_vec(&patch_body).unwrap_or_default();
+
+        let path = format!(
+            "/apis/lattice.dev/v1alpha1/latticeclusters/{}",
+            child.name
+        );
+
+        let request = lattice_proto::KubernetesRequest {
+            request_id: format!("cascade-upgrade-{}", child.name),
+            verb: "PATCH".to_string(),
+            path,
+            query: String::new(),
+            body,
+            content_type: "application/merge-patch+json".to_string(),
+            accept: String::new(),
+            timeout_ms: 10_000,
+            cancel: false,
+            target_path: child.name.clone(),
+            source_user: String::new(),
+            source_groups: vec![],
+            traceparent: String::new(),
+            tracestate: String::new(),
+        };
+
+        let cmd = lattice_proto::CellCommand {
+            command_id: request.request_id.clone(),
+            command: Some(
+                lattice_proto::cell_command::Command::KubernetesRequest(request),
+            ),
+        };
+
+        match parent_servers
+            .agent_registry()
+            .send_command(&child.name, cmd)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    child = %child.name,
+                    image = %desired_image,
+                    k8s_version = %desired_k8s_version,
+                    "Cascaded upgrade to child"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    child = %child.name,
+                    error = %e,
+                    "Failed to cascade upgrade to child"
+                );
+            }
+        }
+    }
+}
+
+/// Compare a live K8s version (e.g. "v1.32") against a spec version (e.g. "1.32.0").
+///
+/// Matches on major.minor only, since the live version from `apiserver_version()`
+/// typically omits the patch level.
+fn k8s_version_matches_spec(live: &str, spec: &str) -> bool {
+    let live_trimmed = live.strip_prefix('v').unwrap_or(live);
+    let spec_parts: Vec<&str> = spec.split('.').collect();
+    let live_parts: Vec<&str> = live_trimmed.split('.').collect();
+    live_parts.first() == spec_parts.first() && live_parts.get(1) == spec_parts.get(1)
+}
+
 /// Result of version reconciliation.
 enum VersionStatus {
     /// All CAPI resources match the desired version.
@@ -159,8 +339,27 @@ async fn reconcile_version(
 /// - Requeues with appropriate interval based on worker readiness
 pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Action, Error> {
     let name = cluster.name_any();
+    let is_self = crate::controller::is_self_cluster(&name, ctx.self_cluster_name.as_deref());
 
     debug!("cluster is ready, reconciling infrastructure and worker pools");
+
+    // Reconcile operator image (self-cluster only).
+    // If an upgrade is in progress, requeue quickly and skip the rest —
+    // a new pod will take over after the Deployment rolls.
+    if is_self {
+        match reconcile_operator_image(cluster, ctx, &name).await {
+            Ok(OperatorImageAction::UpgradeInProgress) => {
+                return Ok(Action::requeue(Duration::from_secs(10)));
+            }
+            Ok(OperatorImageAction::UpToDate) => {
+                // Cascade to children after self is up-to-date
+                cascade_upgrade_to_children(cluster, ctx).await;
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to reconcile operator image, will retry");
+            }
+        }
+    }
 
     // Reconcile infrastructure (Cilium policies, Istio, etc.)
     // Failures are non-blocking — worker pool scaling must proceed even if
@@ -662,5 +861,39 @@ async fn update_node_status(
 
     if let Err(e) = ctx.kube.patch_status(name, &updated_status).await {
         warn!(error = %e, "Failed to update node status");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn k8s_version_matches_same_major_minor() {
+        assert!(k8s_version_matches_spec("v1.32", "1.32.0"));
+        assert!(k8s_version_matches_spec("v1.32", "1.32.3"));
+        assert!(k8s_version_matches_spec("1.32", "1.32.0"));
+    }
+
+    #[test]
+    fn k8s_version_mismatch_different_minor() {
+        assert!(!k8s_version_matches_spec("v1.31", "1.32.0"));
+        assert!(!k8s_version_matches_spec("v1.33", "1.32.0"));
+    }
+
+    #[test]
+    fn k8s_version_mismatch_different_major() {
+        assert!(!k8s_version_matches_spec("v2.32", "1.32.0"));
+    }
+
+    #[test]
+    fn k8s_version_matches_with_patch_in_live() {
+        assert!(k8s_version_matches_spec("v1.32.1", "1.32.0"));
+        assert!(k8s_version_matches_spec("1.32.5", "1.32.0"));
+    }
+
+    #[test]
+    fn k8s_version_matches_no_patch_in_spec() {
+        assert!(k8s_version_matches_spec("v1.32", "1.32"));
     }
 }

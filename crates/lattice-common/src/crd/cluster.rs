@@ -68,7 +68,8 @@ impl Default for BackupsConfig {
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Provider","type":"string","jsonPath":".spec.provider.type"}"#,
     printcolumn = r#"{"name":"K8s","type":"string","jsonPath":".spec.provider.kubernetes.version"}"#,
-    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    printcolumn = r#"{"name":"Image","type":"string","jsonPath":".status.latticeImage","priority":1}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct LatticeClusterSpec {
@@ -120,6 +121,13 @@ pub struct LatticeClusterSpec {
     /// Use `upstream: "*"` as a catch-all for any registry (air-gapped environments).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_mirrors: Option<Vec<RegistryMirror>>,
+
+    /// Container image for the Lattice operator on this cluster.
+    pub lattice_image: String,
+
+    /// When true, this cluster pushes its latticeImage to children via K8s API proxy.
+    #[serde(default)]
+    pub cascade_upgrade: bool,
 }
 
 impl LatticeClusterSpec {
@@ -204,6 +212,14 @@ pub struct ChildClusterHealth {
     /// Per-worker-pool resource capacity (CPU, memory, GPU)
     #[serde(default)]
     pub pool_resources: Vec<PoolResourceSummary>,
+
+    /// Operator image running on this child cluster
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lattice_image: Option<String>,
+
+    /// Kubernetes version running on this child cluster (e.g. "v1.32")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubernetes_version: Option<String>,
 }
 
 /// Status for a worker pool
@@ -369,6 +385,10 @@ pub struct LatticeClusterStatus {
     /// Per-worker-pool resource capacity (CPU, memory, GPU)
     #[serde(default)]
     pub pool_resources: Vec<PoolResourceSummary>,
+
+    /// The operator image currently running on this cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lattice_image: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -505,6 +525,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+            cascade_upgrade: false,
         };
 
         assert!(spec.is_parent(), "Should be recognized as a parent");
@@ -528,6 +550,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+            cascade_upgrade: false,
         };
 
         assert!(!spec.is_parent(), "Leaf cluster cannot have children");
@@ -556,6 +580,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+            cascade_upgrade: false,
         };
 
         assert!(
@@ -581,6 +607,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+            cascade_upgrade: false,
         };
 
         assert!(
@@ -619,6 +647,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+            cascade_upgrade: false,
         };
 
         assert!(
@@ -644,6 +674,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+            cascade_upgrade: false,
         };
 
         assert!(
@@ -757,6 +789,7 @@ nodes:
 parentConfig:
   service:
     type: LoadBalancer
+latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("should parse YAML");
         let spec: LatticeClusterSpec =
@@ -802,6 +835,7 @@ nodes:
   workerPools:
     general:
       replicas: 3
+latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("should parse YAML");
         let spec: LatticeClusterSpec =
@@ -829,6 +863,8 @@ nodes:
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+            cascade_upgrade: false,
         };
 
         let json =
@@ -987,6 +1023,8 @@ nodes:
                 backups: BackupsConfig::default(),
                 network_topology: None,
                 registry_mirrors: None,
+                lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+                cascade_upgrade: false,
             },
             status: Some(LatticeClusterStatus::default().phase(ClusterPhase::Ready)),
         };

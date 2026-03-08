@@ -362,6 +362,8 @@ async fn process_agent_message(
                 "Heartbeat received"
             );
             registry.update_state(cluster_name, hb.state());
+            registry.update_lattice_image(cluster_name, hb.lattice_image.clone());
+            registry.update_kubernetes_version(cluster_name, hb.kubernetes_version.clone());
             if let Some(ref health) = hb.health {
                 debug!(
                     cluster = %cluster_name,
@@ -918,6 +920,8 @@ mod tests {
                 health: None,
                 spec_hash: vec![],
                 status_hash: vec![],
+                lattice_image: String::new(),
+                kubernetes_version: String::new(),
             })),
         }
     }

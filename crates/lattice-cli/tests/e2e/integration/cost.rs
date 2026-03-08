@@ -17,8 +17,9 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml, delete_namespace, ensure_fresh_namespace, run_kubectl, wait_for_condition,
-    wait_for_resource_phase, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
+    apply_apparmor_override_policy, apply_yaml, delete_namespace, ensure_fresh_namespace,
+    run_kubectl, wait_for_condition, wait_for_resource_phase, with_diagnostics, DiagnosticContext,
+    DEFAULT_TIMEOUT,
 };
 
 const COST_NAMESPACE: &str = "cost-test";
@@ -305,6 +306,7 @@ pub async fn run_cost_tests(kubeconfig: &str) -> Result<(), String> {
 
     let diag = DiagnosticContext::new(kubeconfig, COST_NAMESPACE);
     with_diagnostics(&diag, "Cost", || async {
+        apply_apparmor_override_policy(kubeconfig).await?;
         ensure_rates_configmap(kubeconfig).await?;
 
         test_service_cost_populated(kubeconfig).await?;

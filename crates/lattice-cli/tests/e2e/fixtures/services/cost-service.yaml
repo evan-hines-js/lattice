@@ -9,6 +9,8 @@ spec:
       main:
         image: busybox:latest
         command: ["/bin/sleep", "3600"]
+        security:
+          apparmorProfile: Unconfined
         resources:
           requests:
             cpu: "500m"

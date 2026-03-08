@@ -81,6 +81,8 @@ pub struct AgentConnection {
     pub spec_hash: Vec<u8>,
     /// SHA-256 hash of the child's LatticeCluster status (from last heartbeat)
     pub status_hash: Vec<u8>,
+    /// Operator image running on this child (from heartbeat)
+    pub lattice_image: Option<String>,
 }
 
 impl AgentConnection {
@@ -104,6 +106,7 @@ impl AgentConnection {
             last_heartbeat: None,
             spec_hash: vec![],
             status_hash: vec![],
+            lattice_image: None,
         }
     }
 
@@ -444,6 +447,24 @@ impl AgentRegistry {
         }
     }
 
+    /// Update the operator image reported by an agent heartbeat.
+    pub fn update_lattice_image(&self, cluster_name: &str, image: String) {
+        if !image.is_empty() {
+            if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+                agent.lattice_image = Some(image);
+            }
+        }
+    }
+
+    /// Update the Kubernetes version reported by an agent heartbeat.
+    pub fn update_kubernetes_version(&self, cluster_name: &str, version: String) {
+        if !version.is_empty() {
+            if let Some(mut agent) = self.agents.get_mut(cluster_name) {
+                agent.kubernetes_version = version;
+            }
+        }
+    }
+
     /// Update spec/status hashes from heartbeat and detect if a state sync is needed.
     ///
     /// Returns true if either hash changed (or this is the first heartbeat with hashes),
@@ -536,6 +557,12 @@ impl AgentRegistry {
                     agent_state: format!("{:?}", agent.state),
                     last_heartbeat,
                     pool_resources,
+                    lattice_image: agent.lattice_image.clone(),
+                    kubernetes_version: if agent.kubernetes_version.is_empty() {
+                        None
+                    } else {
+                        Some(agent.kubernetes_version.clone())
+                    },
                 }
             })
             .collect()
