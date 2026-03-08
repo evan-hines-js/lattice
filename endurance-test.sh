@@ -41,6 +41,33 @@ if [ -n "$KC" ]; then
     fi
 fi
 
+wait_for_terminating_namespaces() {
+    if [ -z "$KC" ]; then
+        return
+    fi
+    local waited=0
+    local max_wait=1800  # 30 minutes
+    while true; do
+        TERMINATING=$(kubectl --kubeconfig="$KC" get namespaces \
+            -o jsonpath='{range .items[?(@.status.phase=="Terminating")]}{.metadata.name}{" "}{end}' 2>/dev/null || true)
+        if [ -z "$TERMINATING" ]; then
+            if [ "$waited" -gt 0 ]; then
+                echo "    All terminating namespaces cleared (${waited}s)"
+            fi
+            return
+        fi
+        if [ "$waited" -ge "$max_wait" ]; then
+            echo "    WARNING: namespaces still terminating after ${max_wait}s: ${TERMINATING}"
+            return
+        fi
+        if [ "$((waited % 30))" -eq 0 ]; then
+            echo "    Waiting for terminating namespaces: ${TERMINATING}(${waited}s)"
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+}
+
 while true; do
     ELAPSED=$(( $(date +%s) - START_TIME ))
     if [ "$ELAPSED" -ge "$DURATION_SECS" ]; then
@@ -50,6 +77,8 @@ while true; do
     RUN=$((RUN + 1))
     REMAINING=$(( (DURATION_SECS - ELAPSED) / 60 ))
     LOG_FILE="${LOG_DIR}/run-$(printf '%04d' $RUN).log"
+
+    wait_for_terminating_namespaces
 
     echo "--- RUN ${RUN} | elapsed=$((ELAPSED/60))m remaining=${REMAINING}m | pass=${PASS} fail=${FAIL} ---"
 

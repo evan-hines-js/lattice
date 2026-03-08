@@ -1186,9 +1186,15 @@ pub async fn delete_namespace(kubeconfig_path: &str, namespace: &str) {
     .await;
 }
 
+/// Maximum time to wait for a namespace to finish terminating. Namespaces can
+/// take a long time to terminate (finalizers, stuck pods, etc.) so this is
+/// deliberately much longer than DEFAULT_TIMEOUT.
+const NS_DELETION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 /// Ensure a fresh namespace exists by deleting if present and waiting for full cleanup.
 ///
-/// This is important for re-running tests - stale resources cause conflicts.
+/// Namespace deletion uses a 30-minute timeout (separate from `DEFAULT_TIMEOUT`)
+/// so that a slow termination doesn't eat into the test's own budget.
 pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> Result<(), String> {
     // Check if namespace exists
     let ns_exists = run_kubectl(&[
@@ -1212,7 +1218,7 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
 
         wait_for_condition(
             &format!("namespace {} deletion", namespace),
-            DEFAULT_TIMEOUT,
+            NS_DELETION_TIMEOUT,
             Duration::from_secs(5),
             || async move {
                 let deleted = match run_kubectl(&[
