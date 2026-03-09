@@ -40,11 +40,15 @@ impl From<FetchError> for Error {
 ///
 /// Retries on transient errors (5xx, connection failures) with exponential
 /// backoff. Fails immediately on 4xx errors (auth/permission problems).
+///
+/// Use `max_attempts = 0` for infinite retries (e.g. during install when the
+/// operator may need time to become ready).
 pub(crate) async fn fetch_kubeconfig(
     server: &str,
     token: &str,
     insecure: bool,
     format: Option<&str>,
+    max_attempts: u32,
 ) -> Result<String> {
     let client = if insecure {
         reqwest::Client::builder()
@@ -61,9 +65,9 @@ pub(crate) async fn fetch_kubeconfig(
     }
 
     let retry_config = RetryConfig {
-        max_attempts: 5,
+        max_attempts,
         initial_delay: Duration::from_secs(2),
-        max_delay: Duration::from_secs(32),
+        max_delay: Duration::from_secs(30),
         backoff_multiplier: 2.0,
     };
 

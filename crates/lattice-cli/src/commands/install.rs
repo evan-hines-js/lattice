@@ -1304,7 +1304,7 @@ impl Installer {
         };
 
         let kubeconfig_json =
-            super::proxy::fetch_kubeconfig(&server, token, true, Some("sa")).await?;
+            super::proxy::fetch_kubeconfig(&server, token, true, Some("sa"), 0).await?;
 
         Ok((server, pf, kubeconfig_json))
     }
