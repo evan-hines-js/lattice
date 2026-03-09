@@ -85,15 +85,11 @@ pub async fn unpause_capi_cluster(
     set_capi_cluster_paused(kubeconfig, namespace, cluster_name, false).await
 }
 
-/// Check if cluster has InfrastructureReady=True condition
-async fn is_cluster_ready(
-    client: &kube::Client,
-    namespace: &str,
+/// Check if cluster has InfrastructureReady=True condition using a pre-discovered API handle
+async fn check_cluster_ready(
+    api: &Api<DynamicObject>,
     cluster_name: &str,
 ) -> Result<bool, CapiLifecycleError> {
-    let ar = cluster_api_resource(client).await?;
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
-
     match api.get(cluster_name).await {
         Ok(cluster) => {
             let is_ready = cluster
@@ -127,6 +123,8 @@ pub async fn wait_for_infrastructure_ready(
 ) -> Result<(), CapiLifecycleError> {
     use std::time::Instant;
 
+    let ar = cluster_api_resource(client).await?;
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
     let start = Instant::now();
 
     loop {
@@ -136,7 +134,7 @@ pub async fn wait_for_infrastructure_ready(
             ));
         }
 
-        match is_cluster_ready(client, namespace, cluster_name).await {
+        match check_cluster_ready(&api, cluster_name).await {
             Ok(true) => {
                 info!(cluster = %cluster_name, "Cluster infrastructure ready");
                 return Ok(());
@@ -192,12 +190,12 @@ pub async fn wait_for_cluster_deletion(
             ));
         }
 
-        match api.get(cluster_name).await {
-            Ok(_) => {
+        match api.get_opt(cluster_name).await {
+            Ok(Some(_)) => {
                 info!(cluster = %cluster_name, "Waiting for cluster deletion...");
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
-            Err(kube::Error::Api(e)) if e.code == 404 => {
+            Ok(None) => {
                 info!(cluster = %cluster_name, "Cluster deleted");
                 return Ok(());
             }

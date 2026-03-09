@@ -28,7 +28,7 @@ impl AgentClient {
                 .await?;
         let clusters: kube::Api<LatticeCluster> = kube::Api::all(client);
         let list = clusters
-            .list(&kube::api::ListParams::default())
+            .list(&kube::api::ListParams::default().limit(1))
             .await
             .ok()?;
 

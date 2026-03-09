@@ -473,33 +473,46 @@ impl ServiceKubeClientImpl {
         let timeout = IMAGE_PULL_SECRET_TIMEOUT;
         let poll_interval = IMAGE_PULL_SECRET_POLL_INTERVAL;
 
-        for secret_name in &secret_names {
-            let start = std::time::Instant::now();
-            loop {
+        let start = std::time::Instant::now();
+        let mut remaining: std::collections::HashSet<&str> =
+            secret_names.iter().copied().collect();
+
+        while !remaining.is_empty() {
+            if start.elapsed() >= timeout {
+                let missing: Vec<_> = remaining.into_iter().collect();
+                return Err(Error::internal_with_context(
+                    "wait_for_image_pull_secrets",
+                    format!(
+                        "timed out waiting for imagePullSecrets {:?} in namespace '{}'",
+                        missing, namespace
+                    ),
+                ));
+            }
+
+            // Check all remaining secrets in one pass
+            let mut still_missing = Vec::new();
+            for secret_name in &remaining {
                 match api.get_opt(secret_name).await? {
                     Some(_) => {
                         debug!(secret = %secret_name, "imagePullSecret exists");
-                        break;
                     }
                     None => {
-                        if start.elapsed() >= timeout {
-                            return Err(Error::internal_with_context(
-                                "wait_for_image_pull_secrets",
-                                format!(
-                                    "timed out waiting for imagePullSecret '{}' in namespace '{}'",
-                                    secret_name, namespace
-                                ),
-                            ));
-                        }
-                        debug!(
-                            secret = %secret_name,
-                            elapsed = ?start.elapsed(),
-                            "waiting for imagePullSecret to be synced by ESO"
-                        );
-                        tokio::time::sleep(poll_interval).await;
+                        still_missing.push(*secret_name);
                     }
                 }
             }
+
+            if still_missing.is_empty() {
+                break;
+            }
+
+            debug!(
+                missing = ?still_missing,
+                elapsed = ?start.elapsed(),
+                "waiting for imagePullSecrets to be synced by ESO"
+            );
+            remaining = still_missing.into_iter().collect();
+            tokio::time::sleep(poll_interval).await;
         }
 
         info!(

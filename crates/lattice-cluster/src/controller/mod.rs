@@ -333,7 +333,7 @@ mod tests {
             async fn is_cluster_stable(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
             async fn get_cp_version(&self, cluster_name: &str, namespace: &str, bootstrap: BootstrapProvider) -> Result<Option<String>, Error>;
             async fn update_cp_version(&self, cluster_name: &str, namespace: &str, bootstrap: BootstrapProvider, version: &str) -> Result<(), Error>;
-            async fn get_pool_version(&self, cluster_name: &str, pool_id: &str, namespace: &str) -> Result<Option<String>, Error>;
+            async fn get_all_pool_versions(&self, cluster_name: &str, namespace: &str) -> Result<std::collections::HashMap<String, String>, Error>;
             async fn update_pool_version(&self, cluster_name: &str, pool_id: &str, namespace: &str, version: &str) -> Result<(), Error>;
             fn kube_client(&self) -> Client;
         }
@@ -622,8 +622,8 @@ mod tests {
                 .expect_is_cluster_stable()
                 .returning(|_, _| Ok(true));
             capi_mock
-                .expect_get_pool_version()
-                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+                .expect_get_all_pool_versions()
+                .returning(|_, _| Ok(std::collections::HashMap::from([("default".to_string(), "v1.32.0".to_string())])));
             Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
@@ -921,8 +921,8 @@ mod tests {
                 .expect_is_cluster_stable()
                 .returning(|_, _| Ok(true));
             capi_mock
-                .expect_get_pool_version()
-                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+                .expect_get_all_pool_versions()
+                .returning(|_, _| Ok(std::collections::HashMap::from([("default".to_string(), "v1.32.0".to_string())])));
 
             let mut ctx = Context::for_testing(
                 Arc::new(mock),
@@ -1010,8 +1010,8 @@ mod tests {
                 .expect_is_cluster_stable()
                 .returning(|_, _| Ok(true));
             capi_mock
-                .expect_get_pool_version()
-                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+                .expect_get_all_pool_versions()
+                .returning(|_, _| Ok(std::collections::HashMap::from([("default".to_string(), "v1.32.0".to_string())])));
 
             let mut ctx = Context::for_testing(
                 Arc::new(mock),
@@ -1062,8 +1062,8 @@ mod tests {
                 .expect_is_cluster_stable()
                 .returning(|_, _| Ok(true));
             capi_mock
-                .expect_get_pool_version()
-                .returning(|_, _, _| Ok(Some("v1.32.0".to_string())));
+                .expect_get_all_pool_versions()
+                .returning(|_, _| Ok(std::collections::HashMap::from([("default".to_string(), "v1.32.0".to_string())])));
 
             let mut ctx = Context::for_testing(
                 Arc::new(mock),

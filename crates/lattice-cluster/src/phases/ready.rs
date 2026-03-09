@@ -272,15 +272,12 @@ async fn reconcile_version(
         return Ok(VersionStatus::UpgradeInProgress);
     }
 
-    // Stage 2: CP matches. Check worker pools.
+    // Stage 2: CP matches. Check all worker pool versions in one list call.
+    let pool_versions = ctx.capi.get_all_pool_versions(name, capi_namespace).await?;
+
     let mut pools_to_patch = Vec::new();
     for pool_id in cluster.spec.nodes.worker_pools.keys() {
-        let pool_version = ctx
-            .capi
-            .get_pool_version(name, pool_id, capi_namespace)
-            .await?;
-
-        if let Some(ref current_pool) = pool_version {
+        if let Some(current_pool) = pool_versions.get(pool_id) {
             if current_pool != &desired {
                 pools_to_patch.push((pool_id.clone(), current_pool.clone()));
             }

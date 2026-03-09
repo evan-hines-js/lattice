@@ -10,7 +10,7 @@ The `DeployStrategy::Canary` variant and `CanarySpec` fields (`interval`, `thres
 
 **What exists:**
 - `DeploySpec` / `CanarySpec` types in `crates/lattice-common/src/crd/workload/deploy.rs`
-- `CompilerPhase` trait designed to emit arbitrary `DynamicResource` entries (Flagger, Argo, etc.)
+- `CompilerPhase` trait designed to emit arbitrary `DynamicResource` entries
 - `VMServiceScrapePhase` as a working reference implementation of a compiler phase
 - Istio Ambient mode (ztunnel L4 + waypoint L7) — no sidecars
 - Gateway API (HTTPRoute, GRPCRoute, TCPRoute) for ingress
@@ -35,257 +35,302 @@ The `DeployStrategy::Canary` variant and `CanarySpec` fields (`interval`, `thres
 
 ## Option A: Flagger
 
-[Flagger](https://flagger.app/) is a CNCF project that automates canary, A/B, and blue-green deployments on Kubernetes.
+[Flagger](https://flagger.app/) is a CNCF project that automates canary, A/B, and blue-green deployments.
 
 ### How It Works
 
-Flagger watches a target Deployment. When it detects a change (image tag, config, etc.), it:
-1. Scales up a canary Deployment (`<name>-canary`)
-2. Creates/updates an HTTPRoute (or VirtualService) with weighted backends
-3. Queries a metrics provider (Prometheus/VictoriaMetrics) at each `interval`
-4. Increments traffic weight by `stepWeight` if metrics pass
-5. Rolls back if the error threshold is breached
-6. Promotes by swapping the stable Deployment to the new version
+Flagger watches a target Deployment. On spec change, it scales up a canary Deployment, creates/updates routing resources with weighted backends, queries metrics at each interval, and either promotes or rolls back.
 
-### Integration with Lattice
+### Why It Doesn't Fit
 
-**Compiler phase:** A new `FlaggerCanaryPhase` implementing `CompilerPhase` would:
-- Check `spec.deploy.strategy == Canary`
-- Emit a Flagger `Canary` CR as a `DynamicResource`
-- Map `CanarySpec` fields directly to Flagger's `spec.analysis`
+**Istio Ambient mode is broken.** [Flagger issue #1822](https://github.com/fluxcd/flagger/issues/1822) documents that when Flagger splits traffic at the ingress HTTPRoute to the canary Service, that traffic bypasses the Service-bound HTTPRoute at the canary's waypoint. Headers aren't injected, downstream routing breaks. Flagger was designed around sidecar-based Istio — it doesn't understand waypoint proxies.
 
-```yaml
-apiVersion: flagger.app/v1beta1
-kind: Canary
-metadata:
-  name: my-service
-spec:
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: my-service
-  service:
-    port: 8080
-    targetPort: 8080
-    gatewayRefs:                     # Gateway API integration
-      - name: mesh
-        namespace: istio-system
-        group: gateway.networking.k8s.io
-        kind: Gateway
-  analysis:
-    interval: 60s                    # from CanarySpec.interval
-    threshold: 5                     # from CanarySpec.threshold
-    maxWeight: 50                    # from CanarySpec.max_weight
-    stepWeight: 10                   # from CanarySpec.step_weight
-    metrics:
-      - name: request-success-rate
-        thresholdRange:
-          min: 99
-        interval: 1m
-      - name: request-duration
-        thresholdRange:
-          max: 500
-        interval: 1m
-    webhooks: []                     # Optional: conformance tests, load tests
-```
-
-**Mesh compatibility:** Flagger supports Istio Ambient mode via Gateway API since v1.37. It creates HTTPRoute resources with `backendRef` weights pointing at `<name>-primary` and `<name>-canary` Services. This works with waypoint proxies for L7 traffic management.
-
-**Metric provider:** Flagger supports Prometheus-compatible APIs. VictoriaMetrics exposes a Prometheus-compatible query endpoint, so no adapter is needed. Configure via Flagger's `--metrics-server` flag.
-
-### What We'd Need to Build
-
-- `FlaggerCanaryPhase` (CompilerPhase impl) — ~200 lines
-- Register Flagger `Canary` CRD kind in `crd_registry.rs`
-- Flagger Helm chart added to cluster bootstrap (lattice-infra)
-- Map `CanarySpec` fields to Flagger analysis config
-- Status propagation: watch Flagger Canary status → update LatticeService status
-
-### Pros
-
-- Mature, battle-tested (CNCF graduated project)
-- Native Gateway API + Istio Ambient support
-- Built-in metrics analysis (Prometheus/VictoriaMetrics compatible)
-- Handles the hard parts: replica management, traffic splitting, rollback
-- Webhook extensibility for conformance testing and load generation
-- Small integration surface — just emit the right CR
-
-### Cons
-
-- Another operator to deploy and maintain (Flagger controller)
-- Flagger creates its own `-primary` and `-canary` Services, which may conflict with our mesh policy generation (AuthorizationPolicy targets Service names)
-- Limited customization of the analysis pipeline
-- Flagger's Service-renaming behavior (`my-service` → `my-service-primary`) requires mesh policy awareness
-- CRD version coupling — Flagger CRD changes could break our emitted resources
-
-### Mesh Policy Concern (Critical)
-
-Flagger renames the original Service to `<name>-primary` and creates a new Service with the original name as a "virtual" router. This means:
-- `AuthorizationPolicy` rules targeting `my-service` would hit Flagger's virtual Service (correct for traffic flow)
-- `CiliumNetworkPolicy` pod selectors need to match both primary and canary pods
-- The `LatticeMeshMember` controller would need to be aware of Flagger's naming convention
-
-**Mitigation:** The mesh-member controller already generates policies based on pod labels, not Service names. If Flagger preserves the `app: my-service` label on both pod sets (which it does by default), existing L4 policies continue to work. L7 AuthorizationPolicies using Service targetRefs would need adjustment to target the Flagger virtual Service.
+Additionally:
+- Flagger renames Services (`my-service` → `my-service-primary`), which conflicts with our AuthorizationPolicy and LatticeMeshMember generation
+- Service renaming means the mesh-member controller needs special-case logic for Flagger's naming convention
+- We'd depend on upstream fixing Ambient support on their timeline, not ours
+- Another operator to deploy and maintain per cluster
 
 ---
 
 ## Option B: Argo Rollouts
 
-[Argo Rollouts](https://argoproj.github.io/rollouts/) is a Kubernetes controller for progressive delivery.
+[Argo Rollouts](https://argoproj.github.io/rollouts/) is a Kubernetes controller for progressive delivery that replaces Deployment with a `Rollout` CRD.
 
 ### How It Works
 
-Replaces the Deployment with a `Rollout` resource that natively supports canary and blue-green strategies. It manages ReplicaSets directly and integrates with traffic routers (Istio, Gateway API, etc.) for weighted splitting.
+Manages ReplicaSets directly and integrates with traffic routers for weighted splitting. Supports explicit step sequences (setWeight, pause, analysis).
 
-### Integration with Lattice
+### Why It Doesn't Fit
 
-Would require the `ServiceCompiler` to emit a `Rollout` instead of a `Deployment` when `strategy: canary`. This is a more invasive change than Flagger since Flagger wraps an existing Deployment.
+**Istio Ambient support is not implemented.** [Discussion #3897](https://github.com/argoproj/argo-rollouts/discussions/3897) asks for HTTPRoute support with Istio Ambient — no resolution. The existing Istio integration is built entirely on VirtualService and DestinationRule, which don't exist in Ambient mode. The Gateway API plugin exists but targets generic Gateway API implementations, not Istio Ambient's waypoint-specific routing model.
 
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Rollout
-metadata:
-  name: my-service
-spec:
-  replicas: 3
-  strategy:
-    canary:
-      steps:
-        - setWeight: 10
-        - pause: { duration: 60s }
-        - setWeight: 20
-        - pause: { duration: 60s }
-        - setWeight: 50
-        - pause: { duration: 60s }
-      trafficRouting:
-        plugins:
-          argoproj-labs/gatewayAPI:
-            httpRoute: my-service
-            namespace: default
-      analysis:
-        templates:
-          - templateName: success-rate
-        startingStep: 2
-        args:
-          - name: service-name
-            value: my-service
-```
-
-### What We'd Need to Build
-
-- Replace Deployment generation with Rollout when canary is selected — invasive change to `WorkloadCompiler`
-- Register Rollout CRD in `crd_registry.rs`
-- Argo Rollouts controller + Gateway API plugin deployed to cluster
-- `AnalysisTemplate` resources for metrics queries
-- Convert `CanarySpec` step-based config into Argo's explicit step list
-
-### Pros
-
-- Very flexible analysis and step definitions
-- First-class Gateway API support via plugin
-- Active community and development
-- Can define arbitrary step sequences (pause, setWeight, analysis)
-- No Service renaming — uses the original Service with injected routing
-
-### Cons
-
-- Replaces Deployment with Rollout CRD — much more invasive than Flagger
-- Everything that consumes Deployment objects (PDBs, HPA/KEDA ScaledObject, monitoring) needs to target Rollout instead
-- Gateway API support is via a separate plugin (not built-in)
-- Heavier footprint: controller + plugin + AnalysisTemplate CRDs
-- Step-based config doesn't map cleanly from our `stepWeight`/`maxWeight` model (need to generate explicit step lists)
+Additionally:
+- Replaces Deployment with Rollout CRD — invasive change that breaks KEDA ScaledObject, PDBs, and monitoring integrations
+- Requires deploying controller + separate Gateway API plugin per cluster
+- Step-based config doesn't map cleanly from our `stepWeight`/`maxWeight` model
+- Heavier operational footprint: controller + plugin + AnalysisTemplate CRDs
 
 ---
 
-## Option C: Build It Ourselves
+## Option C: Build It Ourselves (Recommended)
 
-Implement canary orchestration as a native Lattice controller.
+Implement canary orchestration as a native Lattice controller using Gateway API HTTPRoute for traffic splitting.
 
-### How It Would Work
+### Why This Is the Right Choice
 
-A new `CanaryController` watches LatticeServices with `strategy: canary`. On Deployment change:
+Neither Flagger nor Argo Rollouts has working Istio Ambient support. Both tools were designed for sidecar-based Istio (VirtualService/DestinationRule) or generic ingress controllers. Istio Ambient's waypoint proxy model is fundamentally different — traffic management happens via Service-attached HTTPRoutes evaluated by waypoint proxies, not sidecar-injected VirtualServices. We'd be waiting on upstream projects to support our exact stack, with no timeline.
 
-1. **Detect**: Deployment spec changed (image, env, configmap hash)
-2. **Create canary**: Scale a second Deployment (`<name>-canary`) with the new spec
-3. **Shift traffic**: Create/update HTTPRoute with weighted `backendRefs` pointing at stable and canary Services
-4. **Analyze**: Query VictoriaMetrics for error rate on canary pods
-5. **Progress or rollback**: Increment weight or revert based on metrics
-6. **Promote**: Update the primary Deployment, delete canary resources
+Meanwhile, we already have the building blocks:
+- Waypoint-aware HTTPRoute generation in the mesh-member controller
+- VictoriaMetrics for metrics
+- The `CompilerPhase` architecture for extending compilation
+- Deep understanding of our bilateral mesh agreement model
 
-### Architecture
+### How It Works
+
+A `CanaryController` watches LatticeServices with `strategy: canary`. The service reconciler detects spec changes (via the existing `lattice.dev/config-hash` annotation) and delegates to the canary controller for progressive rollout.
+
+#### Rollout Lifecycle
 
 ```
-LatticeService (strategy: canary)
-  │
-  ├── ServiceCompiler emits:
-  │   ├── Deployment (primary, pinned to current spec)
-  │   ├── Service (primary)
-  │   ├── Deployment (canary, new spec) — only during rollout
-  │   ├── Service (canary) — only during rollout
-  │   └── HTTPRoute with weighted backendRefs
-  │
-  └── CanaryController:
-      ├── Watches LatticeService + Deployment
-      ├── Detects spec drift → starts rollout
-      ├── Manages weight progression via HTTPRoute
-      ├── Queries VictoriaMetrics for analysis
-      └── Updates LatticeService status with canary state
+User updates LatticeService spec (image, env, config)
+    │
+    ▼
+ServiceReconciler detects spec drift (config-hash changed)
+    │
+    ├── strategy: rolling → normal Deployment update (existing behavior)
+    │
+    └── strategy: canary → CanaryController takes over
+        │
+        ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  Phase: Initializing                                │
+    │  - Create <name>-canary Deployment (new spec)       │
+    │  - Create <name>-canary Service                     │
+    │  - Wait for canary pods Ready                       │
+    └──────────────────────┬──────────────────────────────┘
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  Phase: Progressing                                 │
+    │  - Create/update HTTPRoute with weighted backendRefs│
+    │  - Wait interval                                    │
+    │  - Query VictoriaMetrics for canary error rate      │
+    │  - If error rate < threshold → increment weight     │
+    │  - If error rate >= threshold → goto Rollback       │
+    │  - If weight >= maxWeight → goto Promoting          │
+    │  - Loop                                             │
+    └──────────┬───────────────────────┬──────────────────┘
+               ▼                       ▼
+    ┌────────────────────┐  ┌────────────────────────────┐
+    │  Phase: Promoting  │  │  Phase: RollingBack        │
+    │  - Update primary  │  │  - Delete canary Deployment│
+    │    Deployment spec  │  │  - Delete canary Service   │
+    │  - Shift weight to │  │  - Delete HTTPRoute        │
+    │    100% primary     │  │  - Update status           │
+    │  - Delete canary   │  │    (rollback reason)       │
+    │  - Delete HTTPRoute│  └────────────────────────────┘
+    │  - Update status   │
+    └────────────────────┘
 ```
 
-### Traffic Splitting with Gateway API + Istio Ambient
+#### Traffic Splitting via Gateway API + Waypoint
 
-Istio Ambient's waypoint proxy respects Gateway API HTTPRoute weights natively:
+Istio Ambient's waypoint proxy natively evaluates Gateway API HTTPRoute weights for east-west (service-to-service) traffic. This is the key architectural advantage — we use the same mechanism the mesh already provides:
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: my-service
+  name: my-service-canary-route
+  namespace: prod
 spec:
   parentRefs:
-    - kind: Service
-      name: my-service
+    - group: ""
+      kind: Service
+      name: my-service        # Attach to the original Service
       port: 8080
   rules:
     - backendRefs:
-        - name: my-service-primary
+        - name: my-service           # Stable pods
           port: 8080
           weight: 90
-        - name: my-service-canary
+        - name: my-service-canary    # Canary pods
           port: 8080
           weight: 10
 ```
 
-This works because in Ambient mode, any Service-to-Service traffic that passes through a waypoint evaluates HTTPRoute rules. No VirtualService or DestinationRule needed.
+When any service in the mesh calls `my-service:8080`, the waypoint evaluates this HTTPRoute and splits traffic accordingly. No VirtualService, no DestinationRule, no sidecar — just Gateway API resources that waypoints already understand.
 
-### What We'd Need to Build
+#### Mesh Policy Integration
 
-- **CanaryController** (~800-1200 lines): reconcile loop managing rollout state machine
-- **Rollout state machine**: Pending → Progressing → Paused → Promoting → Completed / RolledBack
-- **Metrics client**: VictoriaMetrics query client for success rate / latency analysis
-- **HTTPRoute generation**: Weighted backend refs, integrated into compiler or controller
-- **Canary Deployment generation**: Clone primary Deployment with new spec
-- **Status subresource**: `LatticeServiceStatus.canary` field with weight, phase, last analysis
-- **CRD update**: Add canary status fields to LatticeService
+This is where building our own pays off. The canary controller is mesh-aware from the start:
 
-### Pros
+**L4 (CiliumNetworkPolicy):** Both primary and canary pods share the same `app: my-service` label. Existing CiliumNetworkPolicy selectors match both pod sets automatically. No policy changes needed during canary rollout.
 
-- Full control over behavior — no external CRD coupling
-- No Service renaming — we control the naming convention
-- Native integration with bilateral mesh agreements
-- Canary-aware mesh policies from the start
-- No additional operators to deploy
-- Status directly on LatticeService (no cross-resource status propagation)
-- Can leverage existing VictoriaMetrics integration
-- Simpler operational model (one operator, not two)
+**L7 (AuthorizationPolicy):** The LatticeMeshMember controller already generates AuthorizationPolicies based on bilateral agreements. Since the canary Service targets the same workload identity (same ServiceAccount), ztunnel and waypoint RBAC decisions are identical for primary and canary pods. The SPIFFE identity `spiffe://lattice.cluster.local/ns/prod/sa/my-service` covers both.
 
-### Cons
+**Bilateral agreements:** No changes. A canary rollout doesn't alter the service's dependency graph — it's still the same service, just with two pod sets.
 
-- Significant engineering effort (state machine, metrics analysis, edge cases)
-- Must handle all failure modes ourselves (controller crash during rollout, partial state)
-- Must implement analysis that Flagger/Argo get for free
-- Testing complexity — canary rollouts have many edge cases
-- Risk of bugs in traffic shifting logic that are already solved in mature tools
+#### Metrics Analysis
+
+Query VictoriaMetrics (Prometheus-compatible) for canary health:
+
+```promql
+# Success rate for canary pods (via Istio standard metrics)
+sum(rate(istio_requests_total{
+  destination_service_name="my-service-canary",
+  response_code!~"5.*"
+}[1m]))
+/
+sum(rate(istio_requests_total{
+  destination_service_name="my-service-canary"
+}[1m]))
+```
+
+Istio Ambient emits `istio_requests_total` from waypoint proxies, with `destination_service_name` distinguishing primary from canary. This gives us per-pod-set error rates without any custom instrumentation.
+
+The analysis loop runs every `interval` (from `CanarySpec`). If the success rate drops below `(100 - threshold)%` for any check, the canary is rolled back. If it passes for enough iterations to reach `maxWeight`, promotion begins.
+
+### CRD Changes
+
+Add canary status to `LatticeServiceStatus`:
+
+```rust
+/// Canary rollout status
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CanaryStatus {
+    /// Current canary phase
+    pub phase: CanaryPhase,
+    /// Current traffic weight on canary (0-100)
+    pub weight: u32,
+    /// Last analysis timestamp
+    pub last_analysis: Option<String>,
+    /// Last measured success rate (0.0-1.0)
+    pub last_success_rate: Option<f64>,
+    /// Message (promotion reason, rollback reason, etc.)
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CanaryPhase {
+    Initializing,
+    Progressing,
+    Promoting,
+    Completed,
+    RollingBack,
+    RolledBack,
+    Failed,
+}
+```
+
+### Controller Implementation
+
+The `CanaryController` is a standard kube-rs controller:
+
+```rust
+struct CanaryController {
+    client: Client,
+    metrics_url: String,  // VictoriaMetrics endpoint
+}
+
+async fn reconcile(
+    service: Arc<LatticeService>,
+    ctx: Arc<CanaryController>,
+) -> Result<Action> {
+    let spec = &service.spec;
+    if spec.deploy.strategy != DeployStrategy::Canary {
+        return Ok(Action::await_change());
+    }
+
+    let canary_config = spec.deploy.canary.as_ref()
+        .ok_or(CanaryError::MissingConfig)?;
+
+    let status = service.status.as_ref()
+        .and_then(|s| s.canary.as_ref());
+
+    match status.map(|s| &s.phase) {
+        None | Some(CanaryPhase::Completed) | Some(CanaryPhase::RolledBack) => {
+            // Check for spec drift → start new rollout
+            if detect_spec_drift(&service, &ctx.client).await? {
+                initialize_canary(&service, canary_config, &ctx).await?;
+            }
+            Ok(Action::requeue(Duration::from_secs(30)))
+        }
+        Some(CanaryPhase::Initializing) => {
+            // Wait for canary pods ready, then start progressing
+            if canary_pods_ready(&service, &ctx.client).await? {
+                update_phase(&service, CanaryPhase::Progressing, &ctx).await?;
+                set_canary_weight(&service, canary_config.step_weight.unwrap_or(10), &ctx).await?;
+            }
+            Ok(Action::requeue(Duration::from_secs(10)))
+        }
+        Some(CanaryPhase::Progressing) => {
+            let current_weight = status.unwrap().weight;
+            let success_rate = query_canary_metrics(&service, &ctx).await?;
+
+            if success_rate < (100 - canary_config.threshold.unwrap_or(5)) as f64 / 100.0 {
+                rollback_canary(&service, &ctx).await?;
+            } else {
+                let step = canary_config.step_weight.unwrap_or(10);
+                let max = canary_config.max_weight.unwrap_or(50);
+                let new_weight = (current_weight + step).min(100);
+                if new_weight >= max {
+                    promote_canary(&service, &ctx).await?;
+                } else {
+                    set_canary_weight(&service, new_weight, &ctx).await?;
+                }
+            }
+            let interval = parse_duration(&canary_config.interval.clone()
+                .unwrap_or_else(|| "60s".to_string()))?;
+            Ok(Action::requeue(interval))
+        }
+        Some(CanaryPhase::Promoting) => {
+            finalize_promotion(&service, &ctx).await?;
+            Ok(Action::requeue(Duration::from_secs(10)))
+        }
+        Some(CanaryPhase::RollingBack) => {
+            finalize_rollback(&service, &ctx).await?;
+            Ok(Action::requeue(Duration::from_secs(10)))
+        }
+        Some(CanaryPhase::Failed) => {
+            Ok(Action::await_change())  // Manual intervention needed
+        }
+    }
+}
+```
+
+### Crash Recovery
+
+The controller is idempotent. If it crashes mid-rollout:
+- On restart, it reads the `CanaryStatus` from the LatticeService status subresource
+- The phase tells it exactly where to resume
+- Each phase's operations are idempotent (create-or-update Deployment, create-or-update HTTPRoute)
+- No in-memory state — everything is persisted in Kubernetes resources
+
+### What We Build
+
+| Component | Estimated Size | Crate |
+|---|---|---|
+| `CanaryController` reconcile loop | ~400 lines | `lattice-service` |
+| `CanaryStatus` / `CanaryPhase` types | ~60 lines | `lattice-common` |
+| HTTPRoute generation for weighted split | ~100 lines | `lattice-service` |
+| Canary Deployment/Service creation | ~150 lines | `lattice-service` |
+| VictoriaMetrics query client | ~100 lines | `lattice-service` |
+| Spec drift detection | ~50 lines | `lattice-service` |
+| Unit tests | ~400 lines | `lattice-service` |
+| Integration test (canary lifecycle) | ~300 lines | e2e tests |
+| **Total** | **~1,560 lines** | |
+
+### Edge Cases to Handle
+
+- **No traffic during analysis:** If VictoriaMetrics returns no data (service has no callers), skip the analysis step and progress on weight alone. Log a warning.
+- **Canary pods never become ready:** Timeout after 5 minutes (configurable), rollback automatically.
+- **Spec changes during active rollout:** Restart the rollout with the newest spec. Don't layer canaries.
+- **Service has no waypoint:** L4-only services (no L7 policies) can't do weighted traffic splitting. Reject `strategy: canary` at compilation time with a clear error if the service doesn't have a waypoint.
+- **Multiple ports:** The HTTPRoute targets the primary Service port. If the service exposes multiple ports, apply weighted routing to all of them.
 
 ---
 
@@ -293,55 +338,48 @@ This works because in Ambient mode, any Service-to-Service traffic that passes t
 
 | Criteria | Flagger | Argo Rollouts | Build Ourselves |
 |---|---|---|---|
-| **Integration effort** | Low (~200 lines) | High (replace Deployment) | High (~1200 lines) |
-| **Mesh policy compatibility** | Medium (Service renaming) | Good (no renaming) | Best (native) |
-| **Istio Ambient support** | Yes (Gateway API) | Yes (plugin) | Yes (Gateway API) |
+| **Istio Ambient support** | Broken ([#1822](https://github.com/fluxcd/flagger/issues/1822)) | Not implemented ([#3897](https://github.com/argoproj/argo-rollouts/discussions/3897)) | Native (Gateway API HTTPRoute) |
+| **Mesh policy compat** | Poor (Service renaming) | Medium (replaces Deployment) | Best (same labels, same SA) |
+| **Integration effort** | Low (~200 lines) but blocked | High (replace Deployment) | Medium (~1,560 lines) |
 | **Operational overhead** | +1 operator | +1 operator + plugin | None |
 | **Customization** | Limited | High | Full |
-| **Maturity** | High (CNCF) | High (Argo ecosystem) | None — we build it |
-| **Metrics integration** | Built-in (Prometheus compat) | Built-in (AnalysisTemplate) | Must build |
-| **CRD coupling** | Flagger CRD versions | Rollout CRD versions | Our own CRD |
-| **Time to MVP** | ~1-2 weeks | ~3-4 weeks | ~4-6 weeks |
-| **Maintenance burden** | Low (upstream fixes) | Low (upstream fixes) | High (all on us) |
+| **CRD coupling** | Flagger CRD versions | Rollout CRD versions | Our own types |
+| **Time to MVP** | Blocked on upstream | Blocked on upstream | ~4-6 weeks |
+| **Maintenance burden** | Depends on upstream fixes | Depends on upstream fixes | On us, but scoped |
 
----
+## Decision: Build Our Own (Option C)
 
-## Recommendation: Flagger (Option A)
+Neither OSS tool supports Istio Ambient mode today. Flagger has a known bug with waypoint routing. Argo Rollouts' Istio integration is built on VirtualService/DestinationRule which don't exist in Ambient. We'd be adopting a tool and immediately fighting its assumptions.
 
-Flagger is the best fit for Lattice because:
+Building our own gives us:
+- **Working Ambient support from day one** — Gateway API HTTPRoute with weighted `backendRefs` is the native traffic management primitive for waypoint proxies
+- **Deep mesh integration** — bilateral agreements, AuthorizationPolicy, CiliumNetworkPolicy all work without special-casing
+- **No external dependencies** — no additional operators, no CRD version coupling, no upstream blocking issues
+- **Status on LatticeService** — canary state is a first-class field, not scraped from a separate CR
 
-- **Minimal integration surface**: A single `CompilerPhase` emitting a Flagger `Canary` CR. The `CompilerPhase` architecture was literally designed for this use case.
-- **Gateway API + Istio Ambient**: Flagger has first-class support for exactly our traffic management stack. It generates HTTPRoute resources with weighted backends that waypoint proxies evaluate natively.
-- **VictoriaMetrics compatible**: Flagger queries a Prometheus-compatible endpoint. VictoriaMetrics exposes one. Zero adapter work.
-- **CanarySpec maps 1:1**: Our existing `interval`, `threshold`, `maxWeight`, `stepWeight` fields map directly to Flagger's `spec.analysis` — no CRD changes needed.
-- **Battle-tested edge cases**: Controller crash recovery, partial rollout cleanup, metric query failures — all handled by a mature codebase.
+The scope is manageable (~1,560 lines including tests) because we're not building a generic progressive delivery framework. We're building canary support for LatticeServices specifically, using primitives we already have.
 
-The Service-renaming concern is manageable: Flagger preserves pod labels, so L4 CiliumNetworkPolicy continues to work. L7 AuthorizationPolicy needs minor adjustment in the mesh-member controller to account for Flagger's virtual Service pattern.
+## Implementation Plan
 
-### Implementation Plan
+**Phase 1: Core Controller**
+- Add `CanaryStatus` / `CanaryPhase` to `lattice-common` CRD types
+- Implement `CanaryController` with the reconcile state machine
+- Canary Deployment + Service creation and cleanup
+- HTTPRoute generation with weighted `backendRefs`
+- Unit tests for state transitions and HTTPRoute generation
 
-**Phase 1: Core Integration**
-- Add Flagger Helm chart to cluster bootstrap in `lattice-infra`
-- Register `Canary` CRD kind in `crd_registry.rs`
-- Implement `FlaggerCanaryPhase` as a `CompilerPhase`
-- Map `CanarySpec` → Flagger `Canary` CR with VictoriaMetrics metrics
-- Emit Canary as a `DynamicResource` with `ApplyLayer::Workload`
+**Phase 2: Metrics Analysis**
+- VictoriaMetrics query client for `istio_requests_total`
+- Success rate computation with canary pod filtering
+- Threshold-based progression and rollback logic
+- Unit tests with mock metrics responses
 
-**Phase 2: Mesh Awareness**
-- Update mesh-member controller to handle Flagger's `-primary` / `-canary` Service pattern
-- Ensure AuthorizationPolicy targets are correct during canary rollouts
-- Verify CiliumNetworkPolicy covers both primary and canary pod selectors
-
-**Phase 3: Status & Observability**
-- Watch Flagger Canary status → propagate to `LatticeServiceStatus`
-- Add canary weight, phase, and last analysis result to status
-- Surface canary state in `lattice` CLI
+**Phase 3: Integration with ServiceReconciler**
+- Spec drift detection via `lattice.dev/config-hash`
+- Wire `CanaryController` into the existing reconcile loop
+- Validate `strategy: canary` requires waypoint (compile-time check)
 
 **Phase 4: Testing**
-- Unit tests for `FlaggerCanaryPhase` compilation
-- Integration test: deploy canary, verify HTTPRoute weights, verify rollback on bad metrics
-- E2E test: full canary lifecycle with mesh traffic verification
-
-### Escape Hatch
-
-If Flagger's constraints become limiting (e.g., Ambient mode regressions, Service renaming causes unforeseen mesh issues), we can replace `FlaggerCanaryPhase` with a native controller (Option C) without changing the CRD or user-facing API. The `CanarySpec` fields and `DeployStrategy::Canary` enum remain the same — only the implementation behind the `CompilerPhase` changes. This is the key advantage of the compiler phase architecture.
+- Integration test: deploy a canary, verify HTTPRoute weights shift, verify rollback on injected errors
+- E2E test: full canary lifecycle with mesh traffic and bilateral agreement verification
+- Chaos test: controller restart mid-rollout, verify recovery

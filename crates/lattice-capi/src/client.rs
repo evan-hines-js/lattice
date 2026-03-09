@@ -96,13 +96,15 @@ pub trait CAPIClient: Send + Sync {
         version: &str,
     ) -> Result<(), Error>;
 
-    /// Get the version from a pool's MachineDeployment (`spec.template.spec.version`).
-    async fn get_pool_version(
+    /// Get versions for all pool MachineDeployments in one list call.
+    ///
+    /// Returns a map of pool_id -> version. Pools whose MachineDeployment
+    /// doesn't exist or has no version are omitted from the map.
+    async fn get_all_pool_versions(
         &self,
         cluster_name: &str,
-        pool_id: &str,
         namespace: &str,
-    ) -> Result<Option<String>, Error>;
+    ) -> Result<std::collections::HashMap<String, String>, Error>;
 
     /// Patch the version on a pool's MachineDeployment.
     async fn update_pool_version(
@@ -130,10 +132,25 @@ impl CAPIClientImpl {
 
     /// Get API for CAPI Cluster resources using discovery
     async fn capi_cluster_api(&self, namespace: &str) -> Result<Api<DynamicObject>, Error> {
+        self.capi_api(namespace, "Cluster").await
+    }
+
+    /// Get API for CAPI MachineDeployment resources using discovery
+    async fn machine_deployment_api(&self, namespace: &str) -> Result<Api<DynamicObject>, Error> {
+        self.capi_api(namespace, "MachineDeployment").await
+    }
+
+    /// Get API for CAPI Machine resources using discovery
+    async fn machine_api(&self, namespace: &str) -> Result<Api<DynamicObject>, Error> {
+        self.capi_api(namespace, "Machine").await
+    }
+
+    /// Get API for any CAPI resource kind using discovery
+    async fn capi_api(&self, namespace: &str, kind: &str) -> Result<Api<DynamicObject>, Error> {
         let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
             &self.client,
             "cluster.x-k8s.io",
-            "Cluster",
+            kind,
         )
         .await?;
         Ok(Api::namespaced_with(self.client.clone(), namespace, &ar))
@@ -336,14 +353,7 @@ impl CAPIClient for CAPIClientImpl {
         }
 
         // Check 3: No machines are still provisioning
-        let machine_ar = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            "cluster.x-k8s.io",
-            "Machine",
-        )
-        .await?;
-        let machine_api: Api<DynamicObject> =
-            Api::namespaced_with(self.client.clone(), namespace, &machine_ar);
+        let machine_api = self.machine_api(namespace).await?;
 
         let machines = machine_api
             .list(
@@ -382,13 +392,7 @@ impl CAPIClient for CAPIClientImpl {
         pool_id: &str,
         namespace: &str,
     ) -> Result<Option<u32>, Error> {
-        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            "cluster.x-k8s.io",
-            "MachineDeployment",
-        )
-        .await?;
-        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        let api = self.machine_deployment_api(namespace).await?;
 
         let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
 
@@ -423,13 +427,7 @@ impl CAPIClient for CAPIClientImpl {
         namespace: &str,
         replicas: u32,
     ) -> Result<(), Error> {
-        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            "cluster.x-k8s.io",
-            "MachineDeployment",
-        )
-        .await?;
-        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        let api = self.machine_deployment_api(namespace).await?;
 
         let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
         let patch = serde_json::json!({ "spec": { "replicas": replicas } });
@@ -495,14 +493,7 @@ impl CAPIClient for CAPIClientImpl {
         }
 
         // Check 2: No machines in transitional states
-        let machine_ar = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            "cluster.x-k8s.io",
-            "Machine",
-        )
-        .await?;
-        let machine_api: Api<DynamicObject> =
-            Api::namespaced_with(self.client.clone(), namespace, &machine_ar);
+        let machine_api = self.machine_api(namespace).await?;
 
         let machines = machine_api
             .list(
@@ -607,46 +598,43 @@ impl CAPIClient for CAPIClientImpl {
         Ok(())
     }
 
-    async fn get_pool_version(
+    async fn get_all_pool_versions(
         &self,
         cluster_name: &str,
-        pool_id: &str,
         namespace: &str,
-    ) -> Result<Option<String>, Error> {
-        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            "cluster.x-k8s.io",
-            "MachineDeployment",
-        )
-        .await?;
-        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+    ) -> Result<std::collections::HashMap<String, String>, Error> {
+        let api = self.machine_deployment_api(namespace).await?;
 
-        let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
+        let lp = ListParams::default()
+            .labels(&format!("cluster.x-k8s.io/cluster-name={}", cluster_name));
+        let md_list = api.list(&lp).await?;
 
-        match api.get(&md_name).await {
-            Ok(md) => {
-                let version = md
-                    .data
-                    .get("spec")
-                    .and_then(|s| s.get("template"))
-                    .and_then(|t| t.get("spec"))
-                    .and_then(|s| s.get("version"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+        let prefix = format!("{}-pool-", cluster_name);
+        let mut versions = std::collections::HashMap::new();
+        for md in md_list.items {
+            let md_name = md.metadata.name.as_deref().unwrap_or_default();
+            let pool_id = match md_name.strip_prefix(&prefix) {
+                Some(id) => id.to_string(),
+                None => continue, // not a pool MachineDeployment (e.g. control plane)
+            };
+            if let Some(version) = md
+                .data
+                .get("spec")
+                .and_then(|s| s.get("template"))
+                .and_then(|t| t.get("spec"))
+                .and_then(|s| s.get("version"))
+                .and_then(|v| v.as_str())
+            {
                 debug!(
                     cluster = %cluster_name,
                     pool = %pool_id,
-                    version = ?version,
+                    version = %version,
                     "Got MachineDeployment version for pool"
                 );
-                Ok(version)
+                versions.insert(pool_id, version.to_string());
             }
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                debug!(cluster = %cluster_name, pool = %pool_id, "MachineDeployment not found for pool");
-                Ok(None)
-            }
-            Err(e) => Err(e.into()),
         }
+        Ok(versions)
     }
 
     async fn update_pool_version(
@@ -656,13 +644,7 @@ impl CAPIClient for CAPIClientImpl {
         namespace: &str,
         version: &str,
     ) -> Result<(), Error> {
-        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            "cluster.x-k8s.io",
-            "MachineDeployment",
-        )
-        .await?;
-        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        let api = self.machine_deployment_api(namespace).await?;
 
         let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
         let patch = serde_json::json!({

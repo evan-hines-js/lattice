@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
-use kube::api::ListParams;
 use kube::{Api, Client};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -22,7 +21,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 use lattice_common::crd::OIDCProvider;
-use lattice_common::{is_local_resource, INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{is_local_resource, LATTICE_SYSTEM_NAMESPACE};
 
 /// Validated user identity from OIDC token
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,22 +180,17 @@ impl OidcValidator {
     pub async fn from_crd(client: &Client) -> Result<Self> {
         let api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
-        // Fetch inherited providers (from parent clusters)
-        let inherited_lp = ListParams::default().labels(&format!("{}=true", INHERITED_LABEL));
-        let inherited: Option<OIDCProvider> = match api.list(&inherited_lp).await {
-            Ok(list) => list.items.into_iter().next(),
-            Err(e) => {
-                warn!(error = %e, "Failed to fetch inherited OIDC providers");
-                None
-            }
-        };
-
-        // Fetch local providers (not inherited)
+        // Fetch all providers in one call, partition into inherited and local
         let all_providers = api.list(&Default::default()).await?;
-        let local: Option<OIDCProvider> = all_providers
-            .items
-            .into_iter()
-            .find(|p| is_local_resource(&p.metadata));
+        let mut inherited: Option<OIDCProvider> = None;
+        let mut local: Option<OIDCProvider> = None;
+        for provider in all_providers.items {
+            if is_local_resource(&provider.metadata) {
+                local.get_or_insert(provider);
+            } else {
+                inherited.get_or_insert(provider);
+            }
+        }
 
         // Determine which provider to use
         let (provider, source) = match (inherited, local) {

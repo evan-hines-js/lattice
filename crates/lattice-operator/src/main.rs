@@ -224,7 +224,7 @@ async fn run_controller(
     guard.claim_traffic(&pod_name).await?;
 
     // Report running operator image in status.latticeImage on startup
-    if let Some(ref self_name) = std::env::var("LATTICE_CLUSTER_NAME").ok() {
+    if let Ok(ref self_name) = std::env::var("LATTICE_CLUSTER_NAME") {
         report_running_image(&client, self_name).await;
     }
 

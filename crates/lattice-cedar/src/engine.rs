@@ -22,14 +22,13 @@ use std::fmt;
 use cedar_policy::{
     Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicySet, Request, Response,
 };
-use kube::api::ListParams;
 use kube::{Api, Client};
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
 use crate::entities::{build_cluster_entity, build_entity_uid, build_user_entity};
 use lattice_common::crd::CedarPolicy;
-use lattice_common::{is_local_resource, INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{is_local_resource, LATTICE_SYSTEM_NAMESPACE};
 
 // ============================================================================
 // Error types
@@ -431,13 +430,10 @@ impl PolicyEngine {
         let api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         let all = api.list(&Default::default()).await?;
-        let inherited_lp = ListParams::default().labels(&format!("{}=true", INHERITED_LABEL));
-        let inherited = api.list(&inherited_lp).await?.items;
-        let local: Vec<_> = all
+        let (inherited, local): (Vec<_>, Vec<_>) = all
             .items
             .into_iter()
-            .filter(|p| is_local_resource(&p.metadata))
-            .collect();
+            .partition(|p| !is_local_resource(&p.metadata));
 
         let mut combined = String::new();
         let inherited_count = append_sorted_policies(&mut combined, inherited);
