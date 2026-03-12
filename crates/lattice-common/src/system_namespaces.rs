@@ -13,14 +13,10 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use crate::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
+use crate::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE};
 
 /// Core Kubernetes namespaces
 pub const CORE: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];
-
-/// Lattice operator namespace — has LatticeMeshMember coverage,
-/// so it is NOT excluded from default-deny (gets explicit CNPs instead).
-pub const LATTICE: &[&str] = &[];
 
 /// CNI (Cilium) namespace — can't enforce policies on itself
 pub const CNI: &[&str] = &["cilium-system"];
@@ -45,36 +41,23 @@ pub const CAPI: &[&str] = &[
     "capi-ipam-in-cluster-system",
 ];
 
+/// All namespace slices that are excluded from default-deny.
+const ALL_SLICES: &[&[&str]] = &[CORE, CNI, MESH, CERT, CAPI];
+
 /// Get all system namespaces that should be excluded from default-deny policies.
 ///
 /// Returns a sorted, deduplicated list of all infrastructure namespaces.
 pub fn all() -> Vec<&'static str> {
-    let mut namespaces: Vec<&'static str> = CORE
-        .iter()
-        .chain(LATTICE.iter())
-        .chain(CNI.iter())
-        .chain(MESH.iter())
-        .chain(CERT.iter())
-        .chain(CAPI.iter())
-        .copied()
-        .collect();
-
+    let mut namespaces: Vec<&'static str> =
+        ALL_SLICES.iter().flat_map(|s| s.iter()).copied().collect();
     namespaces.sort();
     namespaces.dedup();
     namespaces
 }
 
 /// Pre-computed set for O(1) system namespace lookups.
-static SYSTEM_NAMESPACE_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    CORE.iter()
-        .chain(LATTICE.iter())
-        .chain(CNI.iter())
-        .chain(MESH.iter())
-        .chain(CERT.iter())
-        .chain(CAPI.iter())
-        .copied()
-        .collect()
-});
+static SYSTEM_NAMESPACE_SET: LazyLock<HashSet<&'static str>> =
+    LazyLock::new(|| ALL_SLICES.iter().flat_map(|s| s.iter()).copied().collect());
 
 /// Check if a namespace is a system namespace that should be excluded from
 /// default-deny policies.
@@ -85,6 +68,7 @@ pub fn is_system_namespace(namespace: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LATTICE_SYSTEM_NAMESPACE;
 
     #[test]
     fn all_returns_sorted_unique_namespaces() {

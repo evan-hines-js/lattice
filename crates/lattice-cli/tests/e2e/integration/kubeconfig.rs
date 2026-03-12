@@ -43,12 +43,21 @@ pub async fn verify_kubeconfig_patched(
 
     // Try to get the kubeconfig secret from the parent cluster (pre-pivot location)
     match fetch_capi_kubeconfig_b64(parent_kubeconfig, cluster_name).await {
-        Ok(b64) => validate_proxy_kubeconfig(&b64, cluster_name),
+        Ok(b64) => match validate_proxy_kubeconfig(&b64, cluster_name) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // The parent may have a stale unpatched copy after pivot.
+                // Fall through to child verification before failing.
+                info!(
+                    "[Integration/Kubeconfig] Parent kubeconfig not patched, checking child: {}",
+                    e
+                );
+                verify_kubeconfig_on_child(cluster_name, child_kubeconfig).await
+            }
+        },
         Err(_) => {
             // Secret not on parent — expected after pivot. Check child if we have access.
-            info!(
-                "[Integration/Kubeconfig] Kubeconfig not on parent, checking child...",
-            );
+            info!("[Integration/Kubeconfig] Kubeconfig not on parent, checking child...",);
             verify_kubeconfig_on_child(cluster_name, child_kubeconfig).await
         }
     }
@@ -73,12 +82,14 @@ async fn verify_kubeconfig_on_child(
     };
 
     // Fetch from child — the secret lives there post-pivot
-    fetch_capi_kubeconfig_b64(child_kc, cluster_name).await.map_err(|e| {
-        format!(
-            "Kubeconfig secret not found on parent or child cluster for {cluster_name}. \
+    fetch_capi_kubeconfig_b64(child_kc, cluster_name)
+        .await
+        .map_err(|e| {
+            format!(
+                "Kubeconfig secret not found on parent or child cluster for {cluster_name}. \
              This means kubeconfig patching is broken. Child error: {e}"
-        )
-    })?;
+            )
+        })?;
 
     // The CAPI kubeconfig on the child has the direct API endpoint — the /clusters/
     // proxy path only exists in the parent's patched copy. Existence + non-empty is

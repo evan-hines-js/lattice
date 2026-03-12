@@ -48,4 +48,32 @@ impl DistributableResources {
             && self.cedar_policies.is_empty()
             && self.oidc_providers.is_empty()
     }
+
+    /// Total number of resources across all categories
+    pub fn total_count(&self) -> usize {
+        self.cloud_providers.len()
+            + self.secrets_providers.len()
+            + self.secrets.len()
+            + self.cedar_policies.len()
+            + self.oidc_providers.len()
+    }
+
+    /// Convert all resources to JSON strings, skipping any that aren't valid UTF-8.
+    ///
+    /// Order: secrets first (credentials needed by providers), then providers,
+    /// then policies.
+    pub fn into_json_strings(self) -> Vec<String> {
+        let all_bytes = [
+            self.secrets,
+            self.cloud_providers,
+            self.secrets_providers,
+            self.cedar_policies,
+            self.oidc_providers,
+        ];
+        all_bytes
+            .into_iter()
+            .flatten()
+            .filter_map(|bytes| String::from_utf8(bytes).ok())
+            .collect()
+    }
 }

@@ -600,8 +600,7 @@ impl KubeClient for KubeClientImpl {
     async fn get_operator_deployment_image(&self) -> Result<Option<String>, Error> {
         use k8s_openapi::api::apps::v1::Deployment;
 
-        let api: Api<Deployment> =
-            Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
         let deploy = match get_optional(&api, "lattice-operator").await? {
             Some(d) => d,
             None => return Ok(None),
@@ -617,8 +616,7 @@ impl KubeClient for KubeClientImpl {
     async fn patch_operator_deployment_image(&self, image: &str) -> Result<(), Error> {
         use k8s_openapi::api::apps::v1::Deployment;
 
-        let api: Api<Deployment> =
-            Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
         let patch = serde_json::json!({
             "spec": {
                 "template": {

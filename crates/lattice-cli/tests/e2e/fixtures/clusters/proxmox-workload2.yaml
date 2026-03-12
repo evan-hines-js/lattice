@@ -36,6 +36,11 @@ spec:
           - "10.0.0.1"
         virtualIpNetworkInterface: "ens18"
         lbCidr: "10.0.0.232/28"
+  registryMirrors:
+    - upstream: docker.io
+      mirror: "http://10.0.0.176:5555"
+    - upstream: ghcr.io
+      mirror: "http://10.0.0.176:5556"
   nodes:
     controlPlane:
       replicas: 1

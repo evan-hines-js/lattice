@@ -621,9 +621,12 @@ mod tests {
             capi_mock
                 .expect_is_cluster_stable()
                 .returning(|_, _| Ok(true));
-            capi_mock
-                .expect_get_all_pool_versions()
-                .returning(|_, _| Ok(std::collections::HashMap::from([("default".to_string(), "v1.32.0".to_string())])));
+            capi_mock.expect_get_all_pool_versions().returning(|_, _| {
+                Ok(std::collections::HashMap::from([(
+                    "default".to_string(),
+                    "v1.32.0".to_string(),
+                )]))
+            });
             Arc::new(Context::for_testing(
                 Arc::new(mock),
                 Arc::new(capi_mock),
@@ -920,15 +923,15 @@ mod tests {
             capi_mock
                 .expect_is_cluster_stable()
                 .returning(|_, _| Ok(true));
-            capi_mock
-                .expect_get_all_pool_versions()
-                .returning(|_, _| Ok(std::collections::HashMap::from([("default".to_string(), "v1.32.0".to_string())])));
+            capi_mock.expect_get_all_pool_versions().returning(|_, _| {
+                Ok(std::collections::HashMap::from([(
+                    "default".to_string(),
+                    "v1.32.0".to_string(),
+                )]))
+            });
 
-            let mut ctx = Context::for_testing(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                mock_capi_installer(),
-            );
+            let mut ctx =
+                Context::for_testing(Arc::new(mock), Arc::new(capi_mock), mock_capi_installer());
             ctx.self_cluster_name = Some("self-cluster".to_string());
             let ctx = Arc::new(ctx);
 
@@ -960,11 +963,8 @@ mod tests {
                 .returning(|_| Ok(Some(sample_docker_provider())));
 
             let capi_mock = MockCAPIClient::new();
-            let mut ctx = Context::for_testing(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                mock_capi_installer(),
-            );
+            let mut ctx =
+                Context::for_testing(Arc::new(mock), Arc::new(capi_mock), mock_capi_installer());
             ctx.self_cluster_name = Some("self-cluster".to_string());
             let ctx = Arc::new(ctx);
 
@@ -1009,15 +1009,15 @@ mod tests {
             capi_mock
                 .expect_is_cluster_stable()
                 .returning(|_, _| Ok(true));
-            capi_mock
-                .expect_get_all_pool_versions()
-                .returning(|_, _| Ok(std::collections::HashMap::from([("default".to_string(), "v1.32.0".to_string())])));
+            capi_mock.expect_get_all_pool_versions().returning(|_, _| {
+                Ok(std::collections::HashMap::from([(
+                    "default".to_string(),
+                    "v1.32.0".to_string(),
+                )]))
+            });
 
-            let mut ctx = Context::for_testing(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                mock_capi_installer(),
-            );
+            let mut ctx =
+                Context::for_testing(Arc::new(mock), Arc::new(capi_mock), mock_capi_installer());
             ctx.self_cluster_name = Some("mgmt".to_string());
             let ctx = Arc::new(ctx);
 
@@ -1061,15 +1061,15 @@ mod tests {
             capi_mock
                 .expect_is_cluster_stable()
                 .returning(|_, _| Ok(true));
-            capi_mock
-                .expect_get_all_pool_versions()
-                .returning(|_, _| Ok(std::collections::HashMap::from([("default".to_string(), "v1.32.0".to_string())])));
+            capi_mock.expect_get_all_pool_versions().returning(|_, _| {
+                Ok(std::collections::HashMap::from([(
+                    "default".to_string(),
+                    "v1.32.0".to_string(),
+                )]))
+            });
 
-            let mut ctx = Context::for_testing(
-                Arc::new(mock),
-                Arc::new(capi_mock),
-                mock_capi_installer(),
-            );
+            let mut ctx =
+                Context::for_testing(Arc::new(mock), Arc::new(capi_mock), mock_capi_installer());
             ctx.self_cluster_name = Some("self-cluster".to_string());
             let ctx = Arc::new(ctx);
 

@@ -265,15 +265,8 @@ impl StandaloneKubeconfig {
         })
     }
 
-    /// Check if chaos monkey is enabled via `LATTICE_ENABLE_CHAOS` env var.
     fn chaos_enabled() -> bool {
-        matches!(
-            std::env::var("LATTICE_ENABLE_CHAOS")
-                .unwrap_or_default()
-                .to_lowercase()
-                .as_str(),
-            "1" | "true" | "yes"
-        )
+        super::helpers::env_enabled("LATTICE_ENABLE_CHAOS")
     }
 }
 

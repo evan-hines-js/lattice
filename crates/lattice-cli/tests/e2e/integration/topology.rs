@@ -524,9 +524,18 @@ async fn test_pod_node_placement(kubeconfig: &str) -> Result<(), String> {
 // Public Entry Point
 // =============================================================================
 
-/// Run all topology integration tests
+/// Run all topology integration tests.
+///
+/// Skips gracefully if nodes lack `topology.kubernetes.io/zone` labels
+/// (e.g. on Proxmox where cloud topology metadata isn't available).
 pub async fn run_topology_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Topology] Running topology integration tests on {kubeconfig}");
+
+    // Pre-check: skip entirely if no nodes have zone labels
+    if !nodes_have_topology_labels(kubeconfig).await {
+        info!("[Topology] No nodes with topology.kubernetes.io/zone labels found — skipping topology tests");
+        return Ok(());
+    }
 
     let diag = DiagnosticContext::new(kubeconfig, TOPOLOGY_NS);
     with_diagnostics(&diag, "Topology", || async {
@@ -539,6 +548,26 @@ pub async fn run_topology_tests(kubeconfig: &str) -> Result<(), String> {
         Ok(())
     })
     .await
+}
+
+/// Check if any nodes have topology zone labels.
+async fn nodes_have_topology_labels(kubeconfig: &str) -> bool {
+    let result = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "nodes",
+        "-l",
+        "topology.kubernetes.io/zone",
+        "-o",
+        "jsonpath={.items[*].metadata.name}",
+    ])
+    .await;
+
+    match result {
+        Ok(output) => !output.trim().is_empty(),
+        Err(_) => false,
+    }
 }
 
 async fn run_topology_test_sequence(kubeconfig: &str) -> Result<(), String> {

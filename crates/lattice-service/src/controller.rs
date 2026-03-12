@@ -474,8 +474,7 @@ impl ServiceKubeClientImpl {
         let poll_interval = IMAGE_PULL_SECRET_POLL_INTERVAL;
 
         let start = std::time::Instant::now();
-        let mut remaining: std::collections::HashSet<&str> =
-            secret_names.iter().copied().collect();
+        let mut remaining: std::collections::HashSet<&str> = secret_names.iter().copied().collect();
 
         while !remaining.is_empty() {
             if start.elapsed() >= timeout {

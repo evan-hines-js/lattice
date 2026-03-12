@@ -15,7 +15,7 @@ services:
       timeout: 3s
       retries: 10
     networks:
-      - kind
+      - lattice
 
   vault-init:
     image: hashicorp/vault:1.15
@@ -32,7 +32,7 @@ services:
       - ./deploy/vault:/scripts:ro
     entrypoint: ["sh", "/scripts/init.sh"]
     networks:
-      - kind
+      - lattice
     restart: "no"
 
   keycloak:
@@ -45,12 +45,12 @@ services:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
       KC_HEALTH_ENABLED: "true"
-      KC_HOSTNAME_URL: "http://lattice-keycloak:8080"
+      KC_HOSTNAME_URL: "${LATTICE_KEYCLOAK_HOSTNAME_URL:-http://lattice-keycloak:8080}"
       KC_HOSTNAME_STRICT: "false"
     volumes:
       - ./deploy/keycloak:/opt/keycloak/data/import
     networks:
-      - kind
+      - lattice
 
   registry-mirror:
     image: registry:2
@@ -64,7 +64,7 @@ services:
     volumes:
       - registry-mirror-data:/var/lib/registry
     networks:
-      - kind
+      - lattice
 
   ghcr-mirror:
     image: registry:2
@@ -78,12 +78,14 @@ services:
     volumes:
       - ghcr-mirror-data:/var/lib/registry
     networks:
-      - kind
+      - lattice
 
 volumes:
   registry-mirror-data:
   ghcr-mirror-data:
 
 networks:
-  kind:
-    external: true
+  lattice:
+    # Use the kind network if it exists (Docker provider), otherwise create one
+    name: ${LATTICE_NETWORK:-lattice}
+    external: ${LATTICE_NETWORK_EXTERNAL:-false}

@@ -206,7 +206,12 @@ async fn run_independence_test(
 
     info!("Workload cluster has its own CAPI resources!");
 
-    watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, initial_workers).await?;
+    watch_worker_scaling(
+        &workload_kubeconfig,
+        &workload_cluster_name,
+        initial_workers,
+    )
+    .await?;
 
     // =========================================================================
     // Phase 4: Delete Management Cluster
@@ -226,11 +231,19 @@ async fn run_independence_test(
     // Phase 5: Scale Workload Cluster
     // =========================================================================
     let scaled_workers = initial_workers + 1;
-    info!("[Phase 5] Scaling workload cluster workers {} -> {}...", initial_workers, scaled_workers);
+    info!(
+        "[Phase 5] Scaling workload cluster workers {} -> {}...",
+        initial_workers, scaled_workers
+    );
     info!("If this works, the cluster is truly self-managing");
 
     // Scale up the first pool by 1 replica
-    let (first_pool_id, first_pool_spec) = workload_cluster.spec.nodes.worker_pools.iter().next()
+    let (first_pool_id, first_pool_spec) = workload_cluster
+        .spec
+        .nodes
+        .worker_pools
+        .iter()
+        .next()
         .ok_or("Workload cluster has no worker pools")?;
     let new_replicas = first_pool_spec.replicas + 1;
     let patch = format!(
@@ -255,11 +268,17 @@ async fn run_independence_test(
     // =========================================================================
     // Phase 6: Verify Scaling Succeeded
     // =========================================================================
-    info!("[Phase 6] Verifying workload cluster scaled to {} workers...", scaled_workers);
+    info!(
+        "[Phase 6] Verifying workload cluster scaled to {} workers...",
+        scaled_workers
+    );
 
     watch_worker_scaling(&workload_kubeconfig, &workload_cluster_name, scaled_workers).await?;
 
-    info!("SUCCESS: Workload cluster scaled from {} to {} workers", initial_workers, scaled_workers);
+    info!(
+        "SUCCESS: Workload cluster scaled from {} to {} workers",
+        initial_workers, scaled_workers
+    );
     info!("SUCCESS: Cluster is fully operational without parent!");
 
     Ok(())

@@ -21,8 +21,8 @@ use lattice_common::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements,
 use super::super::helpers::{
     apply_yaml, build_busybox_service, delete_namespace, deploy_and_wait_for_phase,
     ensure_fresh_namespace, load_fixture_config, resolve_model_serving_name, run_kubectl,
-    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, TestHarness,
-    with_diagnostics, DiagnosticContext, CURL_IMAGE, CYCLE_END_MARKER, CYCLE_START_MARKER,
+    setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, with_diagnostics,
+    DiagnosticContext, TestHarness, CURL_IMAGE, CYCLE_END_MARKER, CYCLE_START_MARKER,
     DEFAULT_TIMEOUT,
 };
 use super::super::mesh_helpers::parse_traffic_result;
@@ -1153,8 +1153,7 @@ async fn test_model_inference(kubeconfig: &str) -> Result<(), String> {
         || {
             let kc = kc.clone();
             async move {
-                let label =
-                    format!("{}={}", lattice_common::LABEL_NAME, INFERENCE_TESTER_NAME);
+                let label = format!("{}={}", lattice_common::LABEL_NAME, INFERENCE_TESTER_NAME);
                 let logs = run_kubectl(&[
                     "--kubeconfig",
                     &kc,
@@ -1222,8 +1221,7 @@ async fn test_pd_cross_role_connectivity(kubeconfig: &str) -> Result<(), String>
                 let mut failures = Vec::new();
 
                 for (role, expected_pattern) in &directions {
-                    let label_selector =
-                        format!("app.kubernetes.io/name={}-{}", MODEL_NAME, role);
+                    let label_selector = format!("app.kubernetes.io/name={}-{}", MODEL_NAME, role);
                     let logs = run_kubectl(&[
                         "--kubeconfig",
                         &kc,

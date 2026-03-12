@@ -25,8 +25,9 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use super::super::context::InfraContext;
 use super::super::helpers::{
-    apply_yaml, get_or_create_proxy, http_get_with_retry, proxy_service_exists, run_kubectl,
-    wait_for_condition, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
+    apply_yaml, dev_service_reachable, dev_service_url, get_or_create_proxy, http_get_with_retry,
+    proxy_service_exists, run_kubectl, wait_for_condition, with_diagnostics, DiagnosticContext,
+    DEFAULT_TIMEOUT,
 };
 use super::cedar::{apply_cedar_policy_allow_group, apply_e2e_default_policy};
 
@@ -34,11 +35,16 @@ use super::cedar::{apply_cedar_policy_allow_group, apply_e2e_default_policy};
 // Constants
 // =============================================================================
 
-/// Keycloak URL for host access (port-forwarded or docker network)
-const KEYCLOAK_HOST_URL: &str = "http://127.0.0.1:8080";
+fn keycloak_host_url() -> String {
+    dev_service_url("LATTICE_KEYCLOAK_HOST_URL", "http://127.0.0.1:8080")
+}
 
-/// Keycloak URL inside Docker/kind network
-const KEYCLOAK_INTERNAL_URL: &str = "http://lattice-keycloak:8080";
+fn keycloak_internal_url() -> String {
+    dev_service_url(
+        "LATTICE_KEYCLOAK_INTERNAL_URL",
+        "http://lattice-keycloak:8080",
+    )
+}
 
 /// Keycloak realm
 const KEYCLOAK_REALM: &str = "lattice";
@@ -52,25 +58,15 @@ const KEYCLOAK_CLIENT_ID: &str = "lattice";
 
 /// Check if OIDC tests should run (Keycloak is reachable)
 pub fn oidc_tests_enabled() -> bool {
-    std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            &format!("{}/health/ready", KEYCLOAK_HOST_URL),
-        ])
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).starts_with("200"))
-        .unwrap_or(false)
+    dev_service_reachable(&format!("{}/health/ready", keycloak_host_url()))
 }
 
 /// Get an access token from Keycloak using resource owner password grant
 async fn get_keycloak_token(username: &str, password: &str) -> Result<String, String> {
     let token_url = format!(
         "{}/realms/{}/protocol/openid-connect/token",
-        KEYCLOAK_HOST_URL, KEYCLOAK_REALM
+        keycloak_host_url(),
+        KEYCLOAK_REALM
     );
 
     let client = reqwest::Client::new();
@@ -105,7 +101,7 @@ async fn get_keycloak_token(username: &str, password: &str) -> Result<String, St
 
 /// Apply OIDCProvider CRD pointing to Keycloak
 async fn apply_oidc_provider(kubeconfig: &str) -> Result<(), String> {
-    let issuer_url = format!("{}/realms/{}", KEYCLOAK_INTERNAL_URL, KEYCLOAK_REALM);
+    let issuer_url = format!("{}/realms/{}", keycloak_internal_url(), KEYCLOAK_REALM);
 
     let yaml = format!(
         r#"apiVersion: lattice.dev/v1alpha1

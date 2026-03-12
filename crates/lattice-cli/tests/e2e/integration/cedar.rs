@@ -408,8 +408,7 @@ pub async fn run_cedar_hierarchy_tests(
             )),
         );
 
-        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
-            .await;
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
         apply_e2e_default_policy(kubeconfig).await?;
 
         harness.finish()?;

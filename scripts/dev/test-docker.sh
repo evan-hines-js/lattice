@@ -74,6 +74,10 @@ export LATTICE_ENABLE_INDEPENDENCE_TEST=true
 export LATTICE_ENABLE_HIERARCHY_TEST=true
 export LATTICE_ENABLE_MESH_TEST=true
 
+# Docker-compose uses the external kind network
+export LATTICE_NETWORK=kind
+export LATTICE_NETWORK_EXTERNAL=true
+
 # Build the lattice CLI without FIPS so kubectl can use it as an exec credential plugin.
 # The FIPS build produces a dynamic library (libaws_lc_fips_*_crypto.dylib) that macOS
 # can't locate at runtime due to missing @rpath, causing credential exec failures.

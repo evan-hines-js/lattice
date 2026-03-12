@@ -50,8 +50,8 @@ use super::super::context::InfraContext;
 use super::super::helpers::{
     build_and_push_downloader_image, build_and_push_lattice_image,
     build_and_push_pytorch_test_image, client_from_kubeconfig, create_with_retry,
-    ensure_docker_network, get_docker_kubeconfig, kubeconfig_path, load_cluster_config,
-    extract_capi_kubeconfig, load_registry_credentials, run_cmd, wait_for_operator_ready,
+    ensure_docker_network, extract_capi_kubeconfig, get_docker_kubeconfig, kubeconfig_path,
+    load_cluster_config, load_registry_credentials, run_cmd, wait_for_operator_ready,
     watch_cluster_phases, ProxySession,
 };
 use super::super::providers::InfraProvider;
@@ -85,15 +85,7 @@ impl Default for SetupConfig {
             lattice_image: DEFAULT_LATTICE_IMAGE.to_string(),
             enable_chaos: false,
             build_image: true,
-            // Skip workload2 by default for faster iteration
-            // Set LATTICE_ENABLE_WORKLOAD2=1 or LATTICE_ENABLE_WORKLOAD2=true to enable
-            skip_workload2: !matches!(
-                std::env::var("LATTICE_ENABLE_WORKLOAD2")
-                    .unwrap_or_default()
-                    .to_lowercase()
-                    .as_str(),
-                "1" | "true" | "yes"
-            ),
+            skip_workload2: !super::super::helpers::env_enabled("LATTICE_ENABLE_WORKLOAD2"),
         }
     }
 }
@@ -105,6 +97,11 @@ impl SetupConfig {
             build_image: false,
             ..Default::default()
         }
+    }
+
+    /// Check if chaos monkey is enabled via `LATTICE_ENABLE_CHAOS` env var.
+    pub fn chaos_enabled() -> bool {
+        super::super::helpers::env_enabled("LATTICE_ENABLE_CHAOS")
     }
 
     /// Create config with chaos monkey enabled
@@ -281,13 +278,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     };
 
     // Disable extras (monitoring, services) to save CPU when LATTICE_DISABLE_EXTRAS is set
-    let disable_extras = matches!(
-        std::env::var("LATTICE_DISABLE_EXTRAS")
-            .unwrap_or_default()
-            .to_lowercase()
-            .as_str(),
-        "1" | "true" | "yes"
-    );
+    let disable_extras = super::super::helpers::env_enabled("LATTICE_DISABLE_EXTRAS");
     if disable_extras {
         info!("[Setup] LATTICE_DISABLE_EXTRAS is set — disabling monitoring and services");
         workload_cluster.spec.monitoring.enabled = false;
@@ -477,7 +468,11 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
         // Run workload worker verification in parallel with workload2 provisioning
         let (worker_result, phase_result) = tokio::join!(
-            scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, workload_expected_workers),
+            scaling::verify_cluster_workers(
+                &workload_proxy_kc,
+                WORKLOAD_CLUSTER_NAME,
+                workload_expected_workers
+            ),
             watch_cluster_phases(&workload_client, WORKLOAD2_CLUSTER_NAME, None)
         );
         worker_result?;
@@ -527,7 +522,12 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         info!("[Setup/Phase 5] Skipping workload2 cluster (disabled)");
 
         // Just verify workload workers without parallel workload2 provisioning
-        scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, workload_expected_workers).await?;
+        scaling::verify_cluster_workers(
+            &workload_proxy_kc,
+            WORKLOAD_CLUSTER_NAME,
+            workload_expected_workers,
+        )
+        .await?;
 
         ctx
     };
@@ -704,7 +704,12 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
 
     // Verify cluster is operational
     capi::verify_capi_resources(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME).await?;
-    scaling::verify_cluster_workers(&workload_proxy_kc, WORKLOAD_CLUSTER_NAME, workload_expected_workers).await?;
+    scaling::verify_cluster_workers(
+        &workload_proxy_kc,
+        WORKLOAD_CLUSTER_NAME,
+        workload_expected_workers,
+    )
+    .await?;
 
     // Add to chaos targets
     if let Some(ref targets) = result.chaos_targets {

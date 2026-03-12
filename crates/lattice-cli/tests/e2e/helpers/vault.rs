@@ -1,10 +1,8 @@
 //! Vault integration test helpers
 //!
 //! Provides utilities for setting up HashiCorp Vault as an ESO backend
-//! in E2E tests. Uses the dev-mode Vault from docker-compose with token auth.
-//!
-//! Vault runs on the `kind` Docker network at `lattice-vault:8200` with
-//! root token `root` and KV v2 mounted at `secret/`.
+//! in E2E tests. Uses the dev-mode Vault from docker-compose with token auth
+//! and KV v2 mounted at `secret/`.
 
 #![cfg(feature = "provider-e2e")]
 
@@ -16,17 +14,19 @@ use tracing::info;
 
 use super::cedar::apply_yaml;
 use super::docker::run_kubectl;
-use super::wait_for_condition;
+use super::{dev_service_reachable, dev_service_url, wait_for_condition};
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-/// Vault URL for host access (port-forwarded from docker-compose)
-const VAULT_HOST_URL: &str = "http://127.0.0.1:8200";
+fn vault_host_url() -> String {
+    dev_service_url("LATTICE_VAULT_HOST_URL", "http://127.0.0.1:8200")
+}
 
-/// Vault URL inside Docker/kind network (container name from docker-compose)
-const VAULT_INTERNAL_URL: &str = "http://lattice-vault:8200";
+fn vault_internal_url() -> String {
+    dev_service_url("LATTICE_VAULT_INTERNAL_URL", "http://lattice-vault:8200")
+}
 
 /// Dev-mode root token (set via VAULT_DEV_ROOT_TOKEN_ID in docker-compose)
 const VAULT_DEV_TOKEN: &str = "root";
@@ -46,18 +46,7 @@ const VAULT_TOKEN_SECRET_NAME: &str = "vault-e2e-token";
 
 /// Check if Vault tests should run (Vault dev server is reachable)
 pub fn vault_tests_enabled() -> bool {
-    std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            &format!("{}/v1/sys/health", VAULT_HOST_URL),
-        ])
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).starts_with("200"))
-        .unwrap_or(false)
+    dev_service_reachable(&format!("{}/v1/sys/health", vault_host_url()))
 }
 
 // =============================================================================
@@ -65,8 +54,8 @@ pub fn vault_tests_enabled() -> bool {
 // =============================================================================
 
 /// Write a secret to Vault KV v2 at the given path.
-async fn vault_kv_put(path: &str, data: &BTreeMap<String, String>) -> Result<(), String> {
-    let url = format!("{}/v1/{}/data/{}", VAULT_HOST_URL, VAULT_KV_MOUNT, path);
+pub async fn vault_kv_put(path: &str, data: &BTreeMap<String, String>) -> Result<(), String> {
+    let url = format!("{}/v1/{}/data/{}", vault_host_url(), VAULT_KV_MOUNT, path);
     let payload = serde_json::json!({ "data": data });
 
     let client = reqwest::Client::new();
@@ -95,11 +84,6 @@ async fn vault_kv_put(path: &str, data: &BTreeMap<String, String>) -> Result<(),
 // Secret Seeding
 // =============================================================================
 
-/// Seed a secret into Vault KV v2 at the given path.
-pub async fn seed_vault_secret(path: &str, data: &BTreeMap<String, String>) -> Result<(), String> {
-    vault_kv_put(path, data).await
-}
-
 /// Seed all test secrets into Vault for the 5-route secret tests.
 ///
 /// Seeds the same structure as `seed_all_local_test_secrets` but into Vault KV v2
@@ -108,7 +92,7 @@ pub async fn seed_all_vault_test_secrets() -> Result<(), String> {
     info!("[Vault] Seeding all test secrets into Vault...");
 
     // db-creds (Routes 1, 2, 3)
-    seed_vault_secret(
+    vault_kv_put(
         "vault-db-creds",
         &BTreeMap::from([
             ("username".to_string(), "admin".to_string()),
@@ -118,14 +102,14 @@ pub async fn seed_all_vault_test_secrets() -> Result<(), String> {
     .await?;
 
     // api-key (Route 3 file mount)
-    seed_vault_secret(
+    vault_kv_put(
         "vault-api-key",
         &BTreeMap::from([("key".to_string(), "vk-test-67890".to_string())]),
     )
     .await?;
 
     // database-config (Route 5 dataFrom — all keys)
-    seed_vault_secret(
+    vault_kv_put(
         "vault-database-config",
         &BTreeMap::from([
             ("host".to_string(), "db.vault-prod".to_string()),
@@ -139,7 +123,7 @@ pub async fn seed_all_vault_test_secrets() -> Result<(), String> {
     // regcreds (imagePullSecrets — needed for Route 4)
     let docker_config = super::cluster::load_registry_credentials()
         .ok_or("No GHCR credentials (check .env or GHCR_USER/GHCR_TOKEN env vars)")?;
-    seed_vault_secret(
+    vault_kv_put(
         "vault-regcreds",
         &BTreeMap::from([(".dockerconfigjson".to_string(), docker_config)]),
     )
@@ -201,7 +185,7 @@ spec:
           key: token"#,
         store_name = VAULT_STORE_NAME,
         namespace = LATTICE_SYSTEM_NAMESPACE,
-        vault_url = VAULT_INTERNAL_URL,
+        vault_url = vault_internal_url(),
         kv_mount = VAULT_KV_MOUNT,
         token_secret = VAULT_TOKEN_SECRET_NAME,
     );

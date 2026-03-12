@@ -1100,8 +1100,7 @@ fn start_oidc_provider_watcher(client: kube::Client, auth_chain: Arc<AuthChain>)
 async fn report_running_image(client: &kube::Client, cluster_name: &str) {
     use k8s_openapi::api::apps::v1::Deployment;
 
-    let deploy_api: Api<Deployment> =
-        Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     let image = match deploy_api.get("lattice-operator").await {
         Ok(deploy) => deploy

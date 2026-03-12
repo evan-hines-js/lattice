@@ -36,11 +36,19 @@ const SVC_NAME: &str = "backup-svc";
 // Public API
 // =============================================================================
 
-/// Run all backup/restore integration tests
+/// Run all backup/restore integration tests.
+///
+/// Skips gracefully if Velero CRDs are not installed on the cluster.
 pub async fn run_backup_tests(kubeconfig: &str) -> Result<(), String> {
     info!("\n========================================");
     info!("Backup/Restore Integration Tests");
     info!("========================================\n");
+
+    // Pre-check: skip if Velero CRDs aren't installed
+    if !velero_crds_installed(kubeconfig).await {
+        info!("[Backup] Velero CRDs not installed — skipping backup tests");
+        return Ok(());
+    }
 
     let diag = DiagnosticContext::new(kubeconfig, BACKUP_NAMESPACE);
     with_diagnostics(&diag, "Backup", || async {
@@ -50,6 +58,22 @@ pub async fn run_backup_tests(kubeconfig: &str) -> Result<(), String> {
         Ok(())
     })
     .await
+}
+
+/// Check if Velero CRDs are installed on the cluster.
+async fn velero_crds_installed(kubeconfig: &str) -> bool {
+    let result = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "api-resources",
+        "--api-group=velero.io",
+    ])
+    .await;
+
+    match result {
+        Ok(output) => output.contains("backupstoragelocations"),
+        Err(_) => false,
+    }
 }
 
 async fn run_backup_test_sequence(kubeconfig: &str) -> Result<(), String> {

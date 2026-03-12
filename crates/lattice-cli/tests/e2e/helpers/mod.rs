@@ -31,6 +31,40 @@ pub use test_harness::*;
 pub use vault::*;
 
 // =============================================================================
+// Dev Service Helpers
+// =============================================================================
+
+/// Check if a boolean environment variable is set to a truthy value (`1`, `true`, `yes`).
+pub fn env_enabled(var: &str) -> bool {
+    matches!(
+        std::env::var(var)
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+/// Read a URL from an environment variable, falling back to a default.
+///
+/// Used for docker-compose dev services (Vault, Keycloak) that have different
+/// addresses depending on the environment (Docker localhost vs Proxmox LAN).
+pub fn dev_service_url(env_var: &str, default: &str) -> String {
+    std::env::var(env_var).unwrap_or_else(|_| default.to_string())
+}
+
+/// Check if a dev service is reachable by hitting its health endpoint.
+///
+/// Returns true if the endpoint returns HTTP 200.
+pub fn dev_service_reachable(health_url: &str) -> bool {
+    std::process::Command::new("curl")
+        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", health_url])
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).starts_with("200"))
+        .unwrap_or(false)
+}
+
+// =============================================================================
 // Generic Polling Helper
 // =============================================================================
 

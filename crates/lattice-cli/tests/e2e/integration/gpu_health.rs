@@ -351,9 +351,7 @@ pub async fn run_gpu_health_tests(kubeconfig: &str) -> Result<(), String> {
         let node = match get_first_worker_node(kubeconfig).await? {
             Some(n) => n,
             None => {
-                info!(
-                    "[Integration/GPUHealth] No worker nodes found — skipping GPU health tests"
-                );
+                info!("[Integration/GPUHealth] No worker nodes found — skipping GPU health tests");
                 return Ok(());
             }
         };

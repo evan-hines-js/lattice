@@ -2,16 +2,12 @@
 //!
 //! Generates infrastructure addons based on provider type:
 //! - **AWS**: Cloud Controller Manager + EBS CSI Driver
-//! - **Docker**: local-path-provisioner for PVC support
+//! - **local-path-provisioner**: PVC support for providers without a CSI driver
 //! - **Autoscaler**: CAPI cluster-autoscaler for scaling-enabled pools
 
 mod autoscaler;
 mod aws;
-mod docker;
-
-pub use autoscaler::generate_autoscaler_manifests;
-pub use aws::generate_aws_addon_manifests;
-pub use docker::generate_docker_addon_manifests;
+mod local_path_provisioner;
 
 use lattice_common::capi_namespace;
 use lattice_common::crd::ProviderType;
@@ -37,8 +33,8 @@ pub fn generate_for_provider(
 ) -> Vec<String> {
     let mut manifests = match provider {
         ProviderType::Aws => aws::generate_aws_addon_manifests(k8s_version),
-        ProviderType::Docker => docker::generate_docker_addon_manifests(),
-        _ => vec![], // Other providers don't need special addons yet
+        // Providers without a built-in CSI driver need local-path-provisioner
+        _ => local_path_provisioner::generate_local_path_provisioner_manifests(),
     };
 
     // Add cluster-autoscaler when any pool has autoscaling enabled
@@ -64,11 +60,19 @@ mod tests {
     }
 
     #[test]
-    fn docker_provider_generates_local_path_provisioner() {
-        let manifests = generate_for_provider(ProviderType::Docker, "1.32.0", "test", false);
-        let combined = manifests.join("\n");
-
-        assert!(combined.contains("local-path-provisioner"));
+    fn non_aws_providers_generate_local_path_provisioner() {
+        for provider in [
+            ProviderType::Docker,
+            ProviderType::Proxmox,
+            ProviderType::OpenStack,
+        ] {
+            let manifests = generate_for_provider(provider, "1.32.0", "test", false);
+            let combined = manifests.join("\n");
+            assert!(
+                combined.contains("local-path-provisioner"),
+                "{provider:?} should include local-path-provisioner"
+            );
+        }
     }
 
     #[test]
@@ -78,12 +82,5 @@ mod tests {
 
         assert!(combined.contains("cluster-autoscaler"));
         assert!(combined.contains("capi-my-cluster"));
-    }
-
-    #[test]
-    fn unknown_provider_returns_empty() {
-        let manifests = generate_for_provider(ProviderType::OpenStack, "1.32.0", "test", false);
-
-        assert!(manifests.is_empty());
     }
 }

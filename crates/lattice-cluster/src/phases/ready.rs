@@ -94,10 +94,7 @@ async fn reconcile_operator_image(
 ///
 /// For each connected child whose `spec.latticeImage` differs, patches the child's
 /// LatticeCluster CRD via the K8s API proxy (for pivoted children).
-async fn cascade_upgrade_to_children(
-    cluster: &LatticeCluster,
-    ctx: &Context,
-) {
+async fn cascade_upgrade_to_children(cluster: &LatticeCluster, ctx: &Context) {
     if !cluster.spec.cascade_upgrade {
         return;
     }
@@ -137,10 +134,7 @@ async fn cascade_upgrade_to_children(
         });
         let body = serde_json::to_vec(&patch_body).unwrap_or_default();
 
-        let path = format!(
-            "/apis/lattice.dev/v1alpha1/latticeclusters/{}",
-            child.name
-        );
+        let path = format!("/apis/lattice.dev/v1alpha1/latticeclusters/{}", child.name);
 
         let request = lattice_proto::KubernetesRequest {
             request_id: format!("cascade-upgrade-{}", child.name),
@@ -161,9 +155,9 @@ async fn cascade_upgrade_to_children(
 
         let cmd = lattice_proto::CellCommand {
             command_id: request.request_id.clone(),
-            command: Some(
-                lattice_proto::cell_command::Command::KubernetesRequest(request),
-            ),
+            command: Some(lattice_proto::cell_command::Command::KubernetesRequest(
+                request,
+            )),
         };
 
         match parent_servers

@@ -6,3 +6,4 @@ tarpaulin-report.html
 /test-charts
 /test-providers
 /endurance-logs
+.*.credentials

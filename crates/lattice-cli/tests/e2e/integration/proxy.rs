@@ -28,7 +28,8 @@ use tracing::info;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     get_or_create_proxy, get_sa_token, get_workload2_cluster_name, get_workload_cluster_name,
-    http_get_with_retry, run_kubectl, truncate, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
+    http_get_with_retry, run_kubectl, truncate, with_diagnostics, DiagnosticContext,
+    DEFAULT_TIMEOUT,
 };
 use super::cedar::{apply_e2e_default_policy, delete_cedar_policy, E2E_DEFAULT_POLICY_NAME};
 

@@ -92,8 +92,7 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<prometheus::Registry, T
             .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
 
         let otlp_reader =
-            opentelemetry_sdk::metrics::PeriodicReader::builder(otlp_exporter)
-                .build();
+            opentelemetry_sdk::metrics::PeriodicReader::builder(otlp_exporter).build();
         meter_builder = meter_builder.with_reader(otlp_reader);
 
         let provider = init_otlp_tracer(resource)?;

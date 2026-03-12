@@ -333,50 +333,34 @@ mod tests {
 
     #[test]
     fn test_distributable_resources_is_empty() {
-        let empty = DistributableResources::default();
-        assert!(empty.is_empty());
+        assert!(DistributableResources::default().is_empty());
 
-        let with_cp = DistributableResources {
-            cloud_providers: vec![vec![1, 2, 3]],
-            ..Default::default()
-        };
-        assert!(!with_cp.is_empty());
-    }
-
-    #[test]
-    fn test_distributable_resources_with_secrets_providers() {
-        let resources = DistributableResources {
-            secrets_providers: vec![vec![1]],
-            ..Default::default()
-        };
-        assert!(!resources.is_empty());
-    }
-
-    #[test]
-    fn test_distributable_resources_with_secrets() {
-        let resources = DistributableResources {
-            secrets: vec![vec![1]],
-            ..Default::default()
-        };
-        assert!(!resources.is_empty());
-    }
-
-    #[test]
-    fn test_distributable_resources_with_cedar_policies() {
-        let resources = DistributableResources {
-            cedar_policies: vec![vec![1]],
-            ..Default::default()
-        };
-        assert!(!resources.is_empty());
-    }
-
-    #[test]
-    fn test_distributable_resources_with_oidc_providers() {
-        let resources = DistributableResources {
-            oidc_providers: vec![vec![1]],
-            ..Default::default()
-        };
-        assert!(!resources.is_empty());
+        // Any single populated field should make it non-empty
+        let cases = [
+            DistributableResources {
+                cloud_providers: vec![vec![1]],
+                ..Default::default()
+            },
+            DistributableResources {
+                secrets_providers: vec![vec![1]],
+                ..Default::default()
+            },
+            DistributableResources {
+                secrets: vec![vec![1]],
+                ..Default::default()
+            },
+            DistributableResources {
+                cedar_policies: vec![vec![1]],
+                ..Default::default()
+            },
+            DistributableResources {
+                oidc_providers: vec![vec![1]],
+                ..Default::default()
+            },
+        ];
+        for (i, r) in cases.iter().enumerate() {
+            assert!(!r.is_empty(), "case {i} should not be empty");
+        }
     }
 
     // =========================================================================

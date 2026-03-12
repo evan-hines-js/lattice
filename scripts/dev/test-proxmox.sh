@@ -34,6 +34,13 @@ export LATTICE_ENABLE_INDEPENDENCE_TEST=true
 export LATTICE_ENABLE_HIERARCHY_TEST=true
 export LATTICE_ENABLE_MESH_TEST=true
 
+# Dev services host (Vault, Keycloak, registry mirrors via nginx proxy on bastion)
+DEV_HOST="${LATTICE_DEV_HOST:-10.0.0.176}"
+export LATTICE_VAULT_HOST_URL="http://${DEV_HOST}:8200"
+export LATTICE_VAULT_INTERNAL_URL="http://${DEV_HOST}:8200"
+export LATTICE_KEYCLOAK_HOST_URL="http://${DEV_HOST}:8080"
+export LATTICE_KEYCLOAK_INTERNAL_URL="http://${DEV_HOST}:8080"
+
 # Build the lattice CLI without FIPS so kubectl can use it as an exec credential plugin.
 # The FIPS build produces a dynamic library (libaws_lc_fips_*_crypto.dylib) that macOS
 # can't locate at runtime due to missing @rpath, causing credential exec failures.

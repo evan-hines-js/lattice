@@ -26,8 +26,7 @@ pub mod state_sync;
 pub mod subtree_registry;
 
 pub use bootstrap::{
-    bootstrap_router, generate_autoscaler_manifests, generate_aws_addon_manifests,
-    generate_bootstrap_bundle, generate_docker_addon_manifests, BootstrapBundleConfig,
+    bootstrap_router, generate_bootstrap_bundle, generate_for_provider, BootstrapBundleConfig,
     BootstrapState, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
 };
 pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};

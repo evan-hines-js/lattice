@@ -1,8 +1,8 @@
 //! Diagnostic dump for E2E test failures.
 //!
 //! Captures cluster state (pods, policies, logs, operator graph) to a file
-//! on disk for post-mortem analysis. All output is also pushed to stdout
-//! via `tracing::info!` so CI logs capture the full dump.
+//! on disk for post-mortem analysis. Only the file path is logged to stdout;
+//! full output goes to the dump file only.
 #![cfg(feature = "provider-e2e")]
 
 use std::any::Any;
@@ -56,14 +56,15 @@ impl DiagnosticContext {
         }
     }
 
-    /// Capture cluster diagnostics to a file on disk AND stdout.
+    /// Capture cluster diagnostics to a file on disk.
     ///
     /// Captures pod status, mesh policies, operator/ztunnel logs, the in-memory
     /// service graph (via port-forward to the operator's `/debug/graph` endpoint),
     /// unhealthy pod details, and per-service traffic generator logs.
     ///
     /// Each section is best-effort: failures are logged inline so partial dumps
-    /// survive panics (file is opened in append mode).
+    /// survive panics (file is opened in append mode). Only the file path is
+    /// logged to stdout — full output goes to the dump file only.
     ///
     /// Returns the path to the dump file.
     pub async fn dump(&self, label: &str) -> String {
@@ -77,11 +78,7 @@ impl DiagnosticContext {
             .as_secs();
         let path = format!("/tmp/lattice-diag-{}-{}.log", slug, ts);
 
-        info!(
-            "[Diagnostics] ====== FAILURE DIAGNOSTIC DUMP: {} ======",
-            label
-        );
-        info!("[Diagnostics] Writing to {}", path);
+        info!("[Diagnostics] Writing dump to {}", path);
 
         let mut file = match std::fs::OpenOptions::new()
             .create(true)
@@ -209,7 +206,6 @@ impl DiagnosticContext {
             .await;
         }
 
-        info!("[Diagnostics] ====== END DIAGNOSTIC DUMP ======");
         path
     }
 }
@@ -249,26 +245,19 @@ where
     }
 }
 
-/// Emit a single diagnostic section to both file and stdout.
+/// Emit a single diagnostic section to the dump file.
 async fn emit_section<F: std::future::Future<Output = Result<String, String>>>(
     file: &mut std::fs::File,
     name: &str,
     fut: F,
 ) {
     write_banner(file, name);
-    info!("[Diagnostics] --- {} ---", name);
-
     match fut.await {
         Ok(output) => {
             let _ = writeln!(file, "{}", output);
-            for line in output.lines() {
-                info!("[Diagnostics] {}", line);
-            }
         }
         Err(e) => {
-            let msg = format!("ERROR: {}", e);
-            let _ = writeln!(file, "{}", msg);
-            info!("[Diagnostics] {}", msg);
+            let _ = writeln!(file, "ERROR: {}", e);
         }
     }
 }

@@ -1,7 +1,7 @@
-//! Docker-specific addon manifests
+//! Local-path-provisioner addon manifests
 //!
-//! Generates local-path-provisioner for Docker/kind clusters
-//! using typed k8s_openapi structs for type safety and maintainability.
+//! Generates local-path-provisioner for clusters without a built-in CSI driver
+//! (Docker, Proxmox, OpenStack, etc.) using typed k8s_openapi structs.
 
 use std::collections::BTreeMap;
 
@@ -258,10 +258,10 @@ fn to_json<T: serde::Serialize>(resource: &T) -> String {
     serde_json::to_string(resource).expect("Failed to serialize resource")
 }
 
-/// Generate all Docker addon manifests (local-path-provisioner).
+/// Generate local-path-provisioner manifests for clusters without a CSI driver.
 ///
 /// Returns a Vec of JSON strings, one per resource.
-pub fn generate_docker_addon_manifests() -> Vec<String> {
+pub fn generate_local_path_provisioner_manifests() -> Vec<String> {
     vec![
         to_json(&namespace()),
         to_json(&service_account()),
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn manifests_contain_all_resources() {
-        let manifests = generate_docker_addon_manifests();
+        let manifests = generate_local_path_provisioner_manifests();
         let combined = manifests.join("\n");
 
         assert_eq!(manifests.len(), 7); // 7 resources

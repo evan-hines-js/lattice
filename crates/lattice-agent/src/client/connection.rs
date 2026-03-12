@@ -209,9 +209,10 @@ impl AgentClient {
                     compute_cluster_hashes(heartbeat_kube_provider.as_ref(), &cluster_name).await;
 
                 // Read current operator image from Deployment
-                let lattice_image = crate::health::get_operator_image(heartbeat_kube_provider.as_ref())
-                    .await
-                    .unwrap_or_default();
+                let lattice_image =
+                    crate::health::get_operator_image(heartbeat_kube_provider.as_ref())
+                        .await
+                        .unwrap_or_default();
 
                 // Query live K8s version for parent visibility during upgrades
                 let kubernetes_version = match heartbeat_kube_provider.create().await {

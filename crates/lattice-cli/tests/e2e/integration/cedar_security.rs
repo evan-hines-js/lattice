@@ -387,8 +387,7 @@ pub async fn run_cedar_security_tests(kubeconfig: &str) -> Result<(), String> {
 
     let diag = DiagnosticContext::new(kubeconfig, NS_DEFAULT_DENY);
     with_diagnostics(&diag, "Cedar Security", || async {
-        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
-            .await;
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
         wait_for_no_cedar_policies_with_label(
             kubeconfig,
             &format!("lattice.dev/test={}", TEST_LABEL),
@@ -416,8 +415,7 @@ pub async fn run_cedar_security_tests(kubeconfig: &str) -> Result<(), String> {
 
         harness.finish()?;
 
-        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}"))
-            .await;
+        delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
 
         info!("[CedarSecurity] All Cedar security override tests passed!");
         Ok(())

@@ -33,10 +33,7 @@ mod state;
 mod token;
 mod types;
 
-// Re-export everything so external consumers don't break
-pub use addons::{
-    generate_autoscaler_manifests, generate_aws_addon_manifests, generate_docker_addon_manifests,
-};
+pub use addons::generate_for_provider;
 pub use bundle::generate_bootstrap_bundle;
 pub use errors::BootstrapError;
 pub use generator::DefaultManifestGenerator;
@@ -128,54 +125,12 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
             std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "unknown".to_string());
         match fetch_distributable_resources(client, &parent_cluster_name).await {
             Ok(resources) => {
-                let cp_count = resources.cloud_providers.len();
-                let sp_count = resources.secrets_providers.len();
-                let secret_count = resources.secrets.len();
-                let cedar_count = resources.cedar_policies.len();
-                let oidc_count = resources.oidc_providers.len();
-
-                // Add secrets first (credentials needed by providers)
-                for secret_bytes in resources.secrets {
-                    if let Ok(json) = String::from_utf8(secret_bytes) {
-                        all_manifests.push(json);
-                    }
-                }
-
-                // Add InfraProviders
-                for cp_bytes in resources.cloud_providers {
-                    if let Ok(json) = String::from_utf8(cp_bytes) {
-                        all_manifests.push(json);
-                    }
-                }
-
-                // Add SecretProviders
-                for sp_bytes in resources.secrets_providers {
-                    if let Ok(json) = String::from_utf8(sp_bytes) {
-                        all_manifests.push(json);
-                    }
-                }
-
-                // Add CedarPolicies (inherited from parent)
-                for cedar_bytes in resources.cedar_policies {
-                    if let Ok(json) = String::from_utf8(cedar_bytes) {
-                        all_manifests.push(json);
-                    }
-                }
-
-                // Add OIDCProviders (inherited from parent)
-                for oidc_bytes in resources.oidc_providers {
-                    if let Ok(json) = String::from_utf8(oidc_bytes) {
-                        all_manifests.push(json);
-                    }
-                }
+                let count = resources.total_count();
+                all_manifests.extend(resources.into_json_strings());
 
                 info!(
                     cluster_id = %cluster_id,
-                    cloud_providers = cp_count,
-                    secrets_providers = sp_count,
-                    cedar_policies = cedar_count,
-                    oidc_providers = oidc_count,
-                    secrets = secret_count,
+                    count,
                     "included distributed resources in bootstrap"
                 );
             }
@@ -287,44 +242,6 @@ mod tests {
             .await
     }
 
-    #[test]
-    fn bearer_token_extracted_correctly() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "authorization",
-            "Bearer test-token-123"
-                .parse()
-                .expect("header value parsing should succeed"),
-        );
-
-        let token = extract_bearer_token(&headers).expect("bearer token extraction should succeed");
-        assert_eq!(token, "test-token-123");
-    }
-
-    #[test]
-    fn missing_auth_header_rejected() {
-        let headers = HeaderMap::new();
-        let result = extract_bearer_token(&headers);
-        assert!(matches!(result, Err(BootstrapError::MissingAuth)));
-    }
-
-    #[test]
-    fn non_bearer_auth_rejected() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "authorization",
-            "Basic abc123"
-                .parse()
-                .expect("header value parsing should succeed"),
-        );
-
-        let result = extract_bearer_token(&headers);
-        assert!(matches!(result, Err(BootstrapError::InvalidToken)));
-    }
-
-    /// Story: HTTP API - Bearer token extraction
-    ///
-    /// The bootstrap endpoint uses standard Bearer token authentication.
     #[test]
     fn bearer_token_authentication() {
         // Valid Bearer token

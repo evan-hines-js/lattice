@@ -392,14 +392,54 @@ pub fn build_provider_controllers(
     tracing::info!("- ServiceBackupSchedule controller");
 
     vec![
-        simple_controller(Api::<InfraProvider>::all(client.clone()), cloud_provider_ctrl::reconcile, ctx.clone(), "InfraProvider"),
-        simple_controller(Api::<SecretProvider>::all(client.clone()), secrets_provider_ctrl::reconcile, ctx.clone(), "SecretProvider"),
-        simple_controller(Api::<CedarPolicy>::all(client.clone()), cedar_validation_ctrl::reconcile, cedar_ctx, "CedarPolicy"),
-        simple_controller(Api::<OIDCProvider>::all(client.clone()), oidc_provider_ctrl::reconcile, ctx.clone(), "OIDCProvider"),
-        simple_controller(Api::<BackupStore>::all(client.clone()), backup_store_ctrl::reconcile, ctx.clone(), "BackupStore"),
-        simple_controller(Api::<LatticeClusterBackup>::all(client.clone()), cluster_backup_ctrl::reconcile, ctx.clone(), "ClusterBackup"),
-        simple_controller(Api::<LatticeRestore>::all(client.clone()), restore_ctrl::reconcile, ctx.clone(), "Restore"),
-        simple_controller(Api::<LatticeService>::all(client), service_backup_ctrl::reconcile, ctx, "ServiceBackup"),
+        simple_controller(
+            Api::<InfraProvider>::all(client.clone()),
+            cloud_provider_ctrl::reconcile,
+            ctx.clone(),
+            "InfraProvider",
+        ),
+        simple_controller(
+            Api::<SecretProvider>::all(client.clone()),
+            secrets_provider_ctrl::reconcile,
+            ctx.clone(),
+            "SecretProvider",
+        ),
+        simple_controller(
+            Api::<CedarPolicy>::all(client.clone()),
+            cedar_validation_ctrl::reconcile,
+            cedar_ctx,
+            "CedarPolicy",
+        ),
+        simple_controller(
+            Api::<OIDCProvider>::all(client.clone()),
+            oidc_provider_ctrl::reconcile,
+            ctx.clone(),
+            "OIDCProvider",
+        ),
+        simple_controller(
+            Api::<BackupStore>::all(client.clone()),
+            backup_store_ctrl::reconcile,
+            ctx.clone(),
+            "BackupStore",
+        ),
+        simple_controller(
+            Api::<LatticeClusterBackup>::all(client.clone()),
+            cluster_backup_ctrl::reconcile,
+            ctx.clone(),
+            "ClusterBackup",
+        ),
+        simple_controller(
+            Api::<LatticeRestore>::all(client.clone()),
+            restore_ctrl::reconcile,
+            ctx.clone(),
+            "Restore",
+        ),
+        simple_controller(
+            Api::<LatticeService>::all(client),
+            service_backup_ctrl::reconcile,
+            ctx,
+            "ServiceBackup",
+        ),
     ]
 }
 

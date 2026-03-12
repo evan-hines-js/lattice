@@ -377,6 +377,7 @@ kind: LatticeCluster
 metadata:
   name: webhook-test-dup-ports
 spec:
+  latticeImage: "test:latest"
   providerRef: webhook-test-fake
   provider:
     kubernetes:
@@ -413,6 +414,7 @@ kind: LatticeCluster
 metadata:
   name: webhook-test-bad-svc-type
 spec:
+  latticeImage: "test:latest"
   providerRef: webhook-test-fake
   provider:
     kubernetes:

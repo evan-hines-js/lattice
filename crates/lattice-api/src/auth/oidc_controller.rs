@@ -149,7 +149,11 @@ async fn ensure_oidc_egress_lmm(
             allowed_callers: vec![],
             dependencies: vec![],
             egress: vec![EgressRule {
-                target: EgressTarget::Fqdn(ep.host.clone()),
+                target: if ep.host.parse::<std::net::IpAddr>().is_ok() {
+                    EgressTarget::Cidr(format!("{}/32", ep.host))
+                } else {
+                    EgressTarget::Fqdn(ep.host.clone())
+                },
                 ports: vec![ep.port],
             }],
             allow_peer_traffic: false,
@@ -284,13 +288,27 @@ mod tests {
     }
 
     #[test]
-    fn egress_lmm_spec_for_external_issuer() {
+    fn egress_lmm_spec_for_ip_issuer_uses_cidr() {
         let ep = ParsedEndpoint::parse("http://172.18.0.11:8080").expect("should parse");
-        let egress = EgressRule {
-            target: EgressTarget::Fqdn(ep.host.clone()),
-            ports: vec![ep.port],
+        let target = if ep.host.parse::<std::net::IpAddr>().is_ok() {
+            EgressTarget::Cidr(format!("{}/32", ep.host))
+        } else {
+            EgressTarget::Fqdn(ep.host.clone())
         };
-        assert_eq!(egress.target, EgressTarget::Fqdn("172.18.0.11".to_string()));
-        assert_eq!(egress.ports, vec![8080]);
+        assert_eq!(target, EgressTarget::Cidr("172.18.0.11/32".to_string()));
+    }
+
+    #[test]
+    fn egress_lmm_spec_for_fqdn_issuer_uses_fqdn() {
+        let ep = ParsedEndpoint::parse("https://keycloak.example.com:8080").expect("should parse");
+        let target = if ep.host.parse::<std::net::IpAddr>().is_ok() {
+            EgressTarget::Cidr(format!("{}/32", ep.host))
+        } else {
+            EgressTarget::Fqdn(ep.host.clone())
+        };
+        assert_eq!(
+            target,
+            EgressTarget::Fqdn("keycloak.example.com".to_string())
+        );
     }
 }

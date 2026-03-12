@@ -161,8 +161,9 @@ impl Installer {
             .ok_or_else(|| Error::validation("LatticeCluster must have metadata.name"))?;
 
         // Re-serialize the cluster YAML with any mutations applied
-        let cluster_yaml = serde_json::to_string(&cluster)
-            .map_err(|e| Error::validation(format!("Failed to re-serialize LatticeCluster: {}", e)))?;
+        let cluster_yaml = serde_json::to_string(&cluster).map_err(|e| {
+            Error::validation(format!("Failed to re-serialize LatticeCluster: {}", e))
+        })?;
 
         Ok(Self {
             cluster_yaml,

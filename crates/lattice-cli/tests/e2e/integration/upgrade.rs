@@ -57,10 +57,7 @@ pub async fn verify_status_lattice_image(kubeconfig: &str) -> Result<(), String>
     )
     .await?;
 
-    info!(
-        "[Integration/Upgrade] status.latticeImage = {}",
-        image
-    );
+    info!("[Integration/Upgrade] status.latticeImage = {}", image);
     Ok(())
 }
 
@@ -101,10 +98,7 @@ pub async fn verify_operator_upgrade(
     if original_image.is_empty() {
         return Err("spec.latticeImage is empty on cluster".to_string());
     }
-    info!(
-        "[Integration/Upgrade] Current image: {}",
-        original_image
-    );
+    info!("[Integration/Upgrade] Current image: {}", original_image);
 
     // Patch spec.latticeImage to the new image
     let patch = format!(r#"{{"spec":{{"latticeImage":"{}"}}}}"#, new_image);
@@ -199,10 +193,7 @@ pub async fn verify_operator_upgrade(
     );
 
     // Restore original image
-    let restore_patch = format!(
-        r#"{{"spec":{{"latticeImage":"{}"}}}}"#,
-        original_image
-    );
+    let restore_patch = format!(r#"{{"spec":{{"latticeImage":"{}"}}}}"#, original_image);
     run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
@@ -247,7 +238,10 @@ pub async fn verify_operator_upgrade(
     )
     .await?;
 
-    info!("[Integration/Upgrade] Restored original image: {}", original_image);
+    info!(
+        "[Integration/Upgrade] Restored original image: {}",
+        original_image
+    );
     Ok(())
 }
 
