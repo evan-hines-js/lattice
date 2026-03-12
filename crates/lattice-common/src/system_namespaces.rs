@@ -18,8 +18,9 @@ use crate::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, LATTICE_SYSTEM_NAM
 /// Core Kubernetes namespaces
 pub const CORE: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];
 
-/// Lattice operator namespace (serves webhooks, runs controllers)
-pub const LATTICE: &[&str] = &[LATTICE_SYSTEM_NAMESPACE];
+/// Lattice operator namespace — has LatticeMeshMember coverage,
+/// so it is NOT excluded from default-deny (gets explicit CNPs instead).
+pub const LATTICE: &[&str] = &[];
 
 /// CNI (Cilium) namespace — can't enforce policies on itself
 pub const CNI: &[&str] = &["cilium-system"];
@@ -103,7 +104,6 @@ mod tests {
         let namespaces = all();
 
         assert!(namespaces.contains(&"kube-system"));
-        assert!(namespaces.contains(&LATTICE_SYSTEM_NAMESPACE));
         assert!(namespaces.contains(&"cilium-system"));
         assert!(namespaces.contains(&"istio-system"));
         assert!(namespaces.contains(&"cert-manager"));
@@ -115,6 +115,7 @@ mod tests {
         let namespaces = all();
 
         // These namespaces have full MeshMember coverage and are NOT system namespaces
+        assert!(!namespaces.contains(&LATTICE_SYSTEM_NAMESPACE));
         assert!(!namespaces.contains(&"kthena-system"));
         assert!(!namespaces.contains(&"monitoring"));
         assert!(!namespaces.contains(&"keda"));
@@ -133,6 +134,7 @@ mod tests {
         assert!(is_system_namespace("kube-system"));
         assert!(is_system_namespace("istio-system"));
         assert!(is_system_namespace("cert-manager"));
+        assert!(!is_system_namespace(LATTICE_SYSTEM_NAMESPACE));
         assert!(!is_system_namespace("kthena-system"));
         assert!(!is_system_namespace("monitoring"));
         assert!(!is_system_namespace("keda"));

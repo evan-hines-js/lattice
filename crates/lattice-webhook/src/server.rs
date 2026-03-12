@@ -15,8 +15,7 @@ use crate::error::Error;
 use crate::handler::{validate_handler, HandlerState};
 use crate::validators::ValidatorRegistry;
 
-/// Default port for admission webhooks (K8s convention)
-pub const WEBHOOK_PORT: u16 = 9443;
+use lattice_common::DEFAULT_WEBHOOK_PORT as WEBHOOK_PORT;
 
 /// Build the Axum router with the /validate endpoint
 pub(crate) fn build_router(registry: ValidatorRegistry) -> Router {

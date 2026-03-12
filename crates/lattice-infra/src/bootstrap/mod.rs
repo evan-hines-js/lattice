@@ -36,7 +36,7 @@ use lattice_common::crd::{
     MeshMemberTarget, MonitoringConfig, NetworkTopologyConfig, PeerAuth, ProviderType, ServiceRef,
 };
 use lattice_common::{
-    DEFAULT_AUTH_PROXY_PORT, DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT,
+    DEFAULT_AUTH_PROXY_PORT, DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT, DEFAULT_WEBHOOK_PORT,
     LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT,
     MONITORING_NAMESPACE, VMAGENT_SA_NAME,
 };
@@ -616,6 +616,12 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
             )])),
             ports: vec![
                 MeshMemberPort {
+                    port: DEFAULT_WEBHOOK_PORT,
+                    service_port: None,
+                    name: "validation-webhook".to_string(),
+                    peer_auth: PeerAuth::Webhook,
+                },
+                MeshMemberPort {
                     port: DEFAULT_BOOTSTRAP_PORT,
                     service_port: None,
                     name: "webhook".to_string(),
@@ -648,7 +654,14 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
             ],
             allowed_callers: vec![ServiceRef::new("external-secrets", "external-secrets")],
             dependencies: vec![ServiceRef::new(MONITORING_NAMESPACE, "vm-read-target")],
-            egress: vec![kube_apiserver_egress()],
+            egress: vec![
+                kube_apiserver_egress(),
+                // Agent connects outbound to parent cell's gRPC and bootstrap ports
+                EgressRule {
+                    target: EgressTarget::Entity("world".to_string()),
+                    ports: vec![DEFAULT_GRPC_PORT, DEFAULT_BOOTSTRAP_PORT],
+                },
+            ],
             allow_peer_traffic: false,
             depends_all: false,
             ingress: None,
@@ -982,8 +995,8 @@ mod tests {
         assert!(member.spec.validate().is_ok());
         assert!(member.spec.ambient);
 
-        // 5 ports: webhook (8443), grpc (50051), proxy (8081), auth-proxy (8082), local-secrets (8787)
-        assert_eq!(member.spec.ports.len(), 5);
+        // 6 ports: validation-webhook (9443), webhook (8443), grpc (50051), proxy (8081), auth-proxy (8082), local-secrets (8787)
+        assert_eq!(member.spec.ports.len(), 6);
 
         let webhook = member
             .spec

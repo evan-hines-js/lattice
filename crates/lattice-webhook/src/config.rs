@@ -24,7 +24,7 @@ const WEBHOOK_SERVICE_NAME: &str = "lattice-operator";
 const WEBHOOK_SERVICE_NAMESPACE: &str = lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 /// Port the webhook server listens on
-const WEBHOOK_PORT: i32 = 9443;
+const WEBHOOK_PORT: i32 = lattice_common::DEFAULT_WEBHOOK_PORT as i32;
 
 /// Path for the validation endpoint
 const WEBHOOK_PATH: &str = "/validate";

@@ -49,6 +49,9 @@ pub const REQUEUE_CRD_NOT_FOUND_SECS: u64 = 30;
 /// Standard requeue interval after a recoverable error
 pub const REQUEUE_ERROR_SECS: u64 = 60;
 
+/// Default port for the admission webhook server (K8s convention)
+pub const DEFAULT_WEBHOOK_PORT: u16 = 9443;
+
 /// Default port for the bootstrap HTTPS server
 pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8443;
 
