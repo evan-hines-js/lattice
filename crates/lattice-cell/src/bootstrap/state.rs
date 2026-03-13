@@ -17,8 +17,8 @@ use tracing::{debug, info, warn};
 
 use lattice_common::crd::{LatticeCluster, ProviderType};
 use lattice_common::{
-    CsrResponse, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_ENDPOINT_KEY,
-    PARENT_CONFIG_SECRET,
+    CsrResponse, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_CSR_TOKEN_KEY,
+    PARENT_CONFIG_ENDPOINT_KEY, PARENT_CONFIG_SECRET,
 };
 use lattice_infra::pki::CertificateAuthorityBundle;
 
@@ -56,6 +56,10 @@ pub struct ClusterBootstrapInfo {
     pub k8s_version: String,
     /// Whether any worker pool has autoscaling enabled (min/max set)
     pub autoscaling_enabled: bool,
+    /// One-time CSR token (generated when bootstrap token is consumed)
+    pub csr_token: Option<zeroize::Zeroizing<String>>,
+    /// Whether the CSR token has been used
+    pub csr_token_used: bool,
 }
 
 /// Bootstrap endpoint state
@@ -161,6 +165,8 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             bootstrap: registration.bootstrap,
             k8s_version: registration.k8s_version,
             autoscaling_enabled: registration.autoscaling_enabled,
+            csr_token: None,
+            csr_token_used: false,
         };
 
         self.clusters.insert(cluster_id, info);
@@ -169,22 +175,29 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
     /// Validate and consume a bootstrap token
     ///
-    /// This updates the CRD status to set bootstrap_complete=true before marking
-    /// the token as used, ensuring the status is persisted even if the operator restarts.
+    /// Uses atomic check-and-mark via DashMap::get_mut to prevent TOCTOU races
+    /// where two concurrent requests could both pass validation before either
+    /// marks the token as consumed.
+    ///
+    /// This updates the CRD status to set bootstrap_complete=true after atomically
+    /// marking the token as used, ensuring the status is persisted even if the
+    /// operator restarts.
     pub async fn validate_and_consume(
         &self,
         cluster_id: &str,
         token: &str,
     ) -> Result<ClusterBootstrapInfo, BootstrapError> {
-        // Validate token from in-memory cache
-        // Note: On operator restart, recovery.rs re-registers clusters in Provisioning/Pivoting phase
+        use subtle::ConstantTimeEq;
+
+        // Atomically validate AND mark as used while holding the mutable reference.
+        // This eliminates the TOCTOU window between check and consumption.
         let info = {
-            let entry = self
+            let mut entry = self
                 .clusters
-                .get(cluster_id)
+                .get_mut(cluster_id)
                 .ok_or_else(|| BootstrapError::ClusterNotFound(cluster_id.to_string()))?;
 
-            let info = entry.value();
+            let info = entry.value_mut();
 
             // Check if already used
             if info.token_used {
@@ -196,25 +209,28 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 return Err(BootstrapError::InvalidToken);
             }
 
-            // Verify token matches (constant-time comparison)
-            if token != *info.token {
+            // Constant-time token comparison to prevent timing side-channel attacks
+            if token.as_bytes().ct_eq(info.token.as_bytes()).unwrap_u8() != 1 {
                 return Err(BootstrapError::InvalidToken);
             }
+
+            // Mark as used WHILE still holding the lock — prevents concurrent use
+            info.token_used = true;
+
+            // Generate a one-time CSR token for authenticating the subsequent CSR request.
+            // This prevents an attacker who didn't consume the bootstrap token from
+            // requesting a certificate just by knowing the cluster ID.
+            let csr_token = BootstrapToken::generate();
+            info.csr_token = Some(zeroize::Zeroizing::new(csr_token.as_str().to_string()));
 
             info.clone()
         };
 
-        // Update CRD status to set bootstrap_complete BEFORE marking token as used
-        // This ensures the status is persisted even if operator restarts
+        // Update CRD status to set bootstrap_complete AFTER marking token as used
         if let Err(e) = self.set_bootstrap_complete(cluster_id).await {
             warn!(cluster_id = %cluster_id, error = %e, "Failed to set bootstrap_complete in CRD status");
             // Don't fail the request - the cluster can still bootstrap, and we'll
             // re-register it on operator restart based on phase
-        }
-
-        // Now mark as used
-        if let Some(mut entry) = self.clusters.get_mut(cluster_id) {
-            entry.value_mut().token_used = true;
         }
 
         Ok(info)
@@ -279,6 +295,25 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             generate_bootstrap_bundle(&self.manifest_generator, &bundle_config).await?;
 
         // Add parent connection config Secret (webhook-specific, not needed for installer)
+        let mut parent_config_data = BTreeMap::from([
+            (
+                PARENT_CONFIG_ENDPOINT_KEY.to_string(),
+                info.cell_endpoint.clone(),
+            ),
+            (
+                PARENT_CONFIG_CA_KEY.to_string(),
+                info.ca_certificate.clone(),
+            ),
+        ]);
+
+        // Include the CSR token so the agent can authenticate its CSR request
+        if let Some(ref csr_token) = info.csr_token {
+            parent_config_data.insert(
+                PARENT_CONFIG_CSR_TOKEN_KEY.to_string(),
+                csr_token.as_str().to_string(),
+            );
+        }
+
         let parent_config = Secret {
             metadata: ObjectMeta {
                 name: Some(PARENT_CONFIG_SECRET.to_string()),
@@ -286,16 +321,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 ..Default::default()
             },
             type_: Some("Opaque".to_string()),
-            string_data: Some(BTreeMap::from([
-                (
-                    PARENT_CONFIG_ENDPOINT_KEY.to_string(),
-                    info.cell_endpoint.clone(),
-                ),
-                (
-                    PARENT_CONFIG_CA_KEY.to_string(),
-                    info.ca_certificate.clone(),
-                ),
-            ])),
+            string_data: Some(parent_config_data),
             ..Default::default()
         };
         manifests.push(serde_json::to_string(&parent_config).map_err(|e| {
@@ -315,39 +341,55 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
     /// Sign a CSR for a cluster
     ///
-    /// The cluster must be registered and have completed bootstrap (token used).
-    /// This ensures only legitimate agents can get certificates.
+    /// Requires a valid one-time CSR token that was issued during bootstrap.
+    /// This ensures only the agent that consumed the bootstrap token can get a certificate.
     pub async fn sign_csr(
         &self,
         cluster_id: &str,
         csr_pem: &str,
+        csr_token: &str,
     ) -> Result<CsrResponse, BootstrapError> {
-        // Check if cluster has completed bootstrap
-        // CRD status.bootstrap_complete is the source of truth (persists across restarts)
-        // In-memory token_used is only reliable if set during this operator session
-        let is_bootstrapped = if let Some(entry) = self.clusters.get(cluster_id) {
-            if entry.token_used {
-                // Token was consumed during this session - definitely bootstrapped
-                true
-            } else if self.kube_client.is_some() {
-                // In-memory says not used, but check CRD (may have been re-registered after restart)
-                self.check_bootstrap_complete_in_crd(cluster_id).await?
-            } else {
-                // No kube client (tests) - trust in-memory state
-                false
-            }
-        } else if self.kube_client.is_some() {
-            // Not in memory - check CRD status
-            self.check_bootstrap_complete_in_crd(cluster_id).await?
-        } else {
-            // No kube client, not in memory - cluster not found
-            return Err(BootstrapError::ClusterNotFound(cluster_id.to_string()));
-        };
+        use subtle::ConstantTimeEq;
 
-        if !is_bootstrapped {
-            return Err(BootstrapError::ClusterNotBootstrapped(
-                cluster_id.to_string(),
-            ));
+        // Atomically validate AND consume the CSR token
+        {
+            let mut entry = self
+                .clusters
+                .get_mut(cluster_id)
+                .ok_or_else(|| BootstrapError::ClusterNotFound(cluster_id.to_string()))?;
+
+            let info = entry.value_mut();
+
+            // Must have completed bootstrap (token consumed)
+            if !info.token_used {
+                return Err(BootstrapError::ClusterNotBootstrapped(
+                    cluster_id.to_string(),
+                ));
+            }
+
+            // CSR token must exist (generated during validate_and_consume)
+            let expected_token = info
+                .csr_token
+                .as_ref()
+                .ok_or(BootstrapError::InvalidCsrToken)?;
+
+            // CSR token must not already be used
+            if info.csr_token_used {
+                return Err(BootstrapError::CsrTokenAlreadyUsed);
+            }
+
+            // Constant-time comparison
+            if csr_token
+                .as_bytes()
+                .ct_eq(expected_token.as_bytes())
+                .unwrap_u8()
+                != 1
+            {
+                return Err(BootstrapError::InvalidCsrToken);
+            }
+
+            // Mark as consumed
+            info.csr_token_used = true;
         }
 
         // Sign the CSR with the active CA
@@ -365,35 +407,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         self.clusters.contains_key(cluster_id)
     }
 
-    /// Check bootstrap_complete in CRD status (source of truth)
-    ///
-    /// Returns Ok(true) if bootstrapped, Ok(false) if not bootstrapped,
-    /// or Err(ClusterNotFound) if the cluster doesn't exist.
-    async fn check_bootstrap_complete_in_crd(
-        &self,
-        cluster_id: &str,
-    ) -> Result<bool, BootstrapError> {
-        let Some(client) = &self.kube_client else {
-            return Err(BootstrapError::ClusterNotFound(cluster_id.to_string()));
-        };
-
-        let cluster_api: Api<LatticeCluster> = Api::all(client.clone());
-        match cluster_api.get(cluster_id).await {
-            Ok(cluster) => Ok(cluster
-                .status
-                .as_ref()
-                .map(|s| s.bootstrap_complete)
-                .unwrap_or(false)),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                Err(BootstrapError::ClusterNotFound(cluster_id.to_string()))
-            }
-            Err(e) => {
-                debug!(cluster = %cluster_id, error = %e, "Failed to check bootstrap_complete in CRD");
-                // API error - conservatively return not bootstrapped
-                Ok(false)
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -545,6 +558,14 @@ mod tests {
 
     // CSR signing tests
 
+    /// Helper: extract CSR token from cluster info after bootstrap
+    fn csr_token_from_info(info: &ClusterBootstrapInfo) -> &str {
+        info.csr_token
+            .as_ref()
+            .expect("CSR token should be set after bootstrap")
+            .as_str()
+    }
+
     #[tokio::test]
     async fn csr_requires_bootstrapped_cluster() {
         let state = test_state();
@@ -561,7 +582,7 @@ mod tests {
         let agent_req = AgentCertRequest::new("not-bootstrapped")
             .expect("agent cert request creation should succeed");
         let result = state
-            .sign_csr("not-bootstrapped", agent_req.csr_pem())
+            .sign_csr("not-bootstrapped", agent_req.csr_pem(), "dummy-token")
             .await;
 
         assert!(matches!(
@@ -576,7 +597,9 @@ mod tests {
 
         let agent_req =
             AgentCertRequest::new("unknown").expect("agent cert request creation should succeed");
-        let result = state.sign_csr("unknown", agent_req.csr_pem()).await;
+        let result = state
+            .sign_csr("unknown", agent_req.csr_pem(), "dummy-token")
+            .await;
 
         assert!(matches!(result, Err(BootstrapError::ClusterNotFound(_))));
     }
@@ -594,15 +617,18 @@ mod tests {
             ca_cert,
         )
         .await;
-        state
+        let info = state
             .validate_and_consume("csr-test", token.as_str())
             .await
             .expect("token validation should succeed");
+        let csr_tok = csr_token_from_info(&info);
 
         // Now CSR signing should work
         let agent_req =
             AgentCertRequest::new("csr-test").expect("agent cert request creation should succeed");
-        let result = state.sign_csr("csr-test", agent_req.csr_pem()).await;
+        let result = state
+            .sign_csr("csr-test", agent_req.csr_pem(), csr_tok)
+            .await;
 
         assert!(result.is_ok());
         let response = result.expect("CSR signing should succeed");
@@ -623,16 +649,17 @@ mod tests {
             ca_cert,
         )
         .await;
-        state
+        let info = state
             .validate_and_consume("cluster-xyz", token.as_str())
             .await
             .expect("token validation should succeed");
+        let csr_tok = csr_token_from_info(&info);
 
         // Sign CSR
         let agent_req = AgentCertRequest::new("cluster-xyz")
             .expect("agent cert request creation should succeed");
         let response = state
-            .sign_csr("cluster-xyz", agent_req.csr_pem())
+            .sign_csr("cluster-xyz", agent_req.csr_pem(), csr_tok)
             .await
             .expect("CSR signing should succeed");
 
@@ -706,10 +733,13 @@ mod tests {
             .expect("agent cert request creation should succeed");
         assert!(!agent_request.csr_pem().contains("PRIVATE KEY")); // CSR doesn't contain key
 
-        // Chapter 5: Cell signs the CSR
+        // The CSR token was generated during bootstrap and delivered via the parent config Secret
+        let csr_tok = csr_token_from_info(&info);
+
+        // Chapter 5: Cell signs the CSR (authenticated by one-time CSR token)
         // ------------------------------
         let csr_response = state
-            .sign_csr("prod-us-west-001", agent_request.csr_pem())
+            .sign_csr("prod-us-west-001", agent_request.csr_pem(), csr_tok)
             .await
             .expect("CSR signing should succeed");
         assert!(csr_response.certificate_pem.contains("BEGIN CERTIFICATE"));
@@ -818,7 +848,7 @@ mod tests {
         let agent_request = AgentCertRequest::new("premature-cluster")
             .expect("agent cert request creation should succeed");
         let result = state
-            .sign_csr("premature-cluster", agent_request.csr_pem())
+            .sign_csr("premature-cluster", agent_request.csr_pem(), "dummy-token")
             .await;
 
         // Blocked! Must complete bootstrap first
@@ -846,7 +876,7 @@ mod tests {
         let agent_request = AgentCertRequest::new("hacker-cluster")
             .expect("agent cert request creation should succeed");
         let csr_result = state
-            .sign_csr("hacker-cluster", agent_request.csr_pem())
+            .sign_csr("hacker-cluster", agent_request.csr_pem(), "dummy-token")
             .await;
         assert!(matches!(
             csr_result,
@@ -897,18 +927,87 @@ mod tests {
             state.ca_trust_bundle_pem().await,
         )
         .await;
-        state
+        let info = state
             .validate_and_consume("malformed-csr-test", token.as_str())
             .await
             .expect("token validation should succeed");
+        let csr_tok = csr_token_from_info(&info);
 
         // Try to sign a malformed CSR
         let result = state
-            .sign_csr("malformed-csr-test", "not a valid CSR")
+            .sign_csr("malformed-csr-test", "not a valid CSR", csr_tok)
             .await;
 
         // Should fail with CsrSigningFailed
         assert!(matches!(result, Err(BootstrapError::CsrSigningFailed(_))));
+    }
+
+    /// Story: Security - CSR token replay is prevented
+    ///
+    /// The CSR token is one-time use. An attacker who observes the token
+    /// cannot use it to get a second certificate.
+    #[tokio::test]
+    async fn csr_token_replay_prevention() {
+        let state = test_state();
+        let ca_cert = state.ca_trust_bundle_pem().await;
+
+        let token = register_test_cluster(
+            &state,
+            "csr-replay".to_string(),
+            "cell:8443:50051".to_string(),
+            ca_cert,
+        )
+        .await;
+        let info = state
+            .validate_and_consume("csr-replay", token.as_str())
+            .await
+            .expect("bootstrap should succeed");
+        let csr_tok = csr_token_from_info(&info);
+
+        // First CSR signing succeeds
+        let agent_req = AgentCertRequest::new("csr-replay")
+            .expect("agent cert request creation should succeed");
+        state
+            .sign_csr("csr-replay", agent_req.csr_pem(), csr_tok)
+            .await
+            .expect("first CSR signing should succeed");
+
+        // Second attempt with same token fails
+        let agent_req2 = AgentCertRequest::new("csr-replay")
+            .expect("agent cert request creation should succeed");
+        let result = state
+            .sign_csr("csr-replay", agent_req2.csr_pem(), csr_tok)
+            .await;
+        assert!(matches!(result, Err(BootstrapError::CsrTokenAlreadyUsed)));
+    }
+
+    /// Story: Security - Wrong CSR token is rejected
+    ///
+    /// An attacker who knows the cluster ID but not the CSR token cannot
+    /// get a certificate signed.
+    #[tokio::test]
+    async fn wrong_csr_token_rejected() {
+        let state = test_state();
+        let ca_cert = state.ca_trust_bundle_pem().await;
+
+        let token = register_test_cluster(
+            &state,
+            "wrong-csr-tok".to_string(),
+            "cell:8443:50051".to_string(),
+            ca_cert,
+        )
+        .await;
+        state
+            .validate_and_consume("wrong-csr-tok", token.as_str())
+            .await
+            .expect("bootstrap should succeed");
+
+        let agent_req = AgentCertRequest::new("wrong-csr-tok")
+            .expect("agent cert request creation should succeed");
+        let result = state
+            .sign_csr("wrong-csr-tok", agent_req.csr_pem(), "attacker-guessed-token")
+            .await;
+        assert!(matches!(result, Err(BootstrapError::InvalidCsrToken)));
     }
 
     /// Story: CA certificate availability for distribution
@@ -976,6 +1075,8 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
+                csr_token: None,
+                csr_token_used: false,
             },
         );
 
@@ -1041,6 +1142,8 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
+                csr_token: None,
+                csr_token_used: false,
             },
         );
 

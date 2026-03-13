@@ -7,8 +7,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! let compiled = WorkloadCompiler::new(name, namespace, workload, runtime, provider_type)
-//!     .with_cedar(cedar)
+//! let compiled = WorkloadCompiler::new(name, namespace, workload, runtime, provider_type, cedar)
 //!     .with_cluster_name(cluster_name)
 //!     .with_volume_authorization(VolumeAuthorizationMode::Full { graph })
 //!     .with_annotations(&annotations)

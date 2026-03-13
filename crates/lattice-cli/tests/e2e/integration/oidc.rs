@@ -29,7 +29,9 @@ use super::super::helpers::{
     proxy_service_exists, run_kubectl, wait_for_condition, with_diagnostics, DiagnosticContext,
     DEFAULT_TIMEOUT,
 };
-use super::cedar::{apply_cedar_policy_allow_group, apply_e2e_default_policy};
+use super::cedar::{
+    apply_cedar_policy_allow_group, apply_e2e_default_policy, remove_e2e_default_policy,
+};
 
 // =============================================================================
 // Constants
@@ -339,6 +341,11 @@ pub async fn run_oidc_hierarchy_tests(
 
     let diag = DiagnosticContext::new(&ctx.mgmt_kubeconfig, LATTICE_SYSTEM_NAMESPACE);
     with_diagnostics(&diag, "OIDC Hierarchy", || async {
+        // Remove the default permit-all Cedar policy so the OIDC group policy
+        // is the only active policy. Without this, the default policy (priority
+        // 1000) permits all users, masking the group-based deny.
+        remove_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
+
         let proxy_url = ctx.mgmt_proxy_url.as_deref();
         run_oidc_auth_test(&ctx.mgmt_kubeconfig, child_cluster_name, proxy_url).await?;
         apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;

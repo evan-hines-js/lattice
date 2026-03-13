@@ -522,6 +522,7 @@ async fn test_parent_config_immutability(kubeconfig: &str) -> Result<(), String>
             let cn = cluster_name.clone();
             async move {
                 let yaml = get_cluster_yaml(&kc, &cn).await?;
+                let yaml = strip_status_section(&yaml);
                 Ok(strip_parent_config(&yaml))
             }
         },
@@ -560,6 +561,18 @@ fn inject_parent_config(yaml: &str) -> String {
     } else {
         format!("{}\n{}\n", yaml.trim_end(), parent_config_block)
     }
+}
+
+/// Strip everything from `status:` onward from a `kubectl get -o yaml` dump.
+///
+/// `kubectl apply` should only send spec fields. Including the status section
+/// can interfere with server-side apply's three-way merge, causing it to miss
+/// field removals (e.g., parentConfig stripped from spec).
+fn strip_status_section(yaml: &str) -> String {
+    yaml.lines()
+        .take_while(|line| !line.starts_with("status:"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Strip the parentConfig block from a LatticeCluster YAML.

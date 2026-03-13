@@ -22,6 +22,7 @@ pub(crate) fn build_router(registry: ValidatorRegistry) -> Router {
     let state = Arc::new(HandlerState { registry });
     Router::new()
         .route("/validate", post(validate_handler))
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)) // 1 MiB — admission reviews are bounded
         .with_state(state)
 }
 

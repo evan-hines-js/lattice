@@ -110,8 +110,13 @@ pub(crate) async fn proxy_handler(
     let (target_path, _k8s_path) = parse_cluster_path(path)
         .ok_or_else(|| Error::ClusterNotFound("missing cluster path".to_string()))?;
 
-    // Authorize against the first hop cluster (the direct child)
+    // Authorize against EVERY cluster in the multi-hop chain, not just the first.
+    // This prevents IDOR where a user authorized for cluster A accesses A's
+    // children without separate authorization for each hop.
     let identity = authorize_request(&state, cluster_name, request.headers()).await?;
+    for hop in target_path.split('/').skip(1) {
+        authorize_request(&state, hop, request.headers()).await?;
+    }
 
     route_to_cluster(&state, &target_path, &identity, request).await
 }

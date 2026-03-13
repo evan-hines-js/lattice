@@ -33,8 +33,9 @@ pub struct AuthContext {
 impl AuthContext {
     /// Create AuthContext from an HTTP request
     ///
-    /// Extracts temporal context (always present) and optional break-glass
-    /// headers for emergency access policies.
+    /// Extracts temporal context (always present) and client IP.
+    /// Break-glass fields are NOT extracted from client headers to prevent
+    /// spoofing — they must be set through trusted server-side mechanisms.
     pub fn from_request(req: &Request<Body>) -> Self {
         let now = Utc::now();
 
@@ -43,9 +44,9 @@ impl AuthContext {
             hour: i64::from(now.hour()),
             weekday: weekday_str(now.weekday()),
             source_ip: extract_client_ip(req),
-            break_glass: extract_header_bool(req, "X-Lattice-Break-Glass"),
-            break_glass_expires: extract_header_string(req, "X-Lattice-Break-Glass-Expires"),
-            incident_id: extract_header_string(req, "X-Lattice-Incident-Id"),
+            break_glass: false,
+            break_glass_expires: None,
+            incident_id: None,
         }
     }
 
@@ -174,26 +175,6 @@ fn extract_client_ip(req: &Request<Body>) -> String {
     "unknown".to_string()
 }
 
-/// Extract boolean value from header
-///
-/// Returns true if header is present and has value "true" (case-insensitive)
-fn extract_header_bool(req: &Request<Body>, header_name: &str) -> bool {
-    req.headers()
-        .get(header_name)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-/// Extract string value from header
-fn extract_header_string(req: &Request<Body>, header_name: &str) -> Option<String> {
-    req.headers()
-        .get(header_name)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,61 +253,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Header Extraction Tests
-    // =========================================================================
-
-    #[test]
-    fn test_extract_header_bool_true() {
-        let req = make_request_with_headers(vec![("X-Lattice-Break-Glass", "true")]);
-        assert!(extract_header_bool(&req, "X-Lattice-Break-Glass"));
-    }
-
-    #[test]
-    fn test_extract_header_bool_true_uppercase() {
-        let req = make_request_with_headers(vec![("X-Lattice-Break-Glass", "TRUE")]);
-        assert!(extract_header_bool(&req, "X-Lattice-Break-Glass"));
-    }
-
-    #[test]
-    fn test_extract_header_bool_false() {
-        let req = make_request_with_headers(vec![("X-Lattice-Break-Glass", "false")]);
-        assert!(!extract_header_bool(&req, "X-Lattice-Break-Glass"));
-    }
-
-    #[test]
-    fn test_extract_header_bool_missing() {
-        let req = make_request_with_headers(vec![]);
-        assert!(!extract_header_bool(&req, "X-Lattice-Break-Glass"));
-    }
-
-    #[test]
-    fn test_extract_header_string_present() {
-        let req = make_request_with_headers(vec![("X-Lattice-Incident-Id", "INC-12345")]);
-        assert_eq!(
-            extract_header_string(&req, "X-Lattice-Incident-Id"),
-            Some("INC-12345".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_header_string_missing() {
-        let req = make_request_with_headers(vec![]);
-        assert_eq!(extract_header_string(&req, "X-Lattice-Incident-Id"), None);
-    }
-
-    #[test]
-    fn test_extract_header_string_empty() {
-        let req = make_request_with_headers(vec![("X-Lattice-Incident-Id", "")]);
-        assert_eq!(extract_header_string(&req, "X-Lattice-Incident-Id"), None);
-    }
-
-    #[test]
-    fn test_extract_header_string_whitespace_only() {
-        let req = make_request_with_headers(vec![("X-Lattice-Incident-Id", "   ")]);
-        assert_eq!(extract_header_string(&req, "X-Lattice-Incident-Id"), None);
-    }
-
-    // =========================================================================
     // AuthContext Construction Tests
     // =========================================================================
 
@@ -345,7 +271,9 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_context_from_request_with_break_glass() {
+    fn test_auth_context_from_request_ignores_break_glass_headers() {
+        // Break-glass headers from clients are ignored to prevent spoofing.
+        // They must be set through trusted server-side mechanisms.
         let req = make_request_with_headers(vec![
             ("X-Forwarded-For", "10.0.1.100"),
             ("X-Lattice-Break-Glass", "true"),
@@ -354,12 +282,9 @@ mod tests {
         ]);
         let ctx = AuthContext::from_request(&req);
 
-        assert!(ctx.break_glass);
-        assert_eq!(
-            ctx.break_glass_expires,
-            Some("2024-06-01T00:00:00Z".to_string())
-        );
-        assert_eq!(ctx.incident_id, Some("INC-12345".to_string()));
+        assert!(!ctx.break_glass, "break_glass should not be extracted from client headers");
+        assert!(ctx.break_glass_expires.is_none(), "break_glass_expires should not be extracted from client headers");
+        assert!(ctx.incident_id.is_none(), "incident_id should not be extracted from client headers");
     }
 
     #[test]

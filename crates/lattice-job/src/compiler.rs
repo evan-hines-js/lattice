@@ -135,8 +135,8 @@ pub async fn compile_job(
             &task_spec.workload,
             &task_spec.runtime,
             provider_type,
+            cedar,
         )
-        .with_cedar(cedar)
         .with_cluster_name(cluster_name)
         .with_graph(graph)
         .with_image_pull_secrets(&task_spec.runtime.image_pull_secrets)

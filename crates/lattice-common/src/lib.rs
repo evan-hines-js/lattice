@@ -190,6 +190,8 @@ pub struct ParentConnectionConfig {
     pub endpoint: CellEndpoint,
     /// CA certificate PEM for TLS verification
     pub ca_cert_pem: String,
+    /// One-time CSR token for authenticating certificate signing requests
+    pub csr_token: Option<String>,
 }
 
 impl ParentConnectionConfig {
@@ -236,9 +238,15 @@ impl ParentConnectionConfig {
             .map_err(|e| Error::internal(format!("invalid CA cert encoding: {}", e)))?
             .to_string();
 
+        let csr_token = data
+            .get(PARENT_CONFIG_CSR_TOKEN_KEY)
+            .and_then(|bytes| std::str::from_utf8(&bytes.0).ok())
+            .map(|s| s.to_string());
+
         Ok(Some(Self {
             endpoint,
             ca_cert_pem,
+            csr_token,
         }))
     }
 }
@@ -271,6 +279,8 @@ pub const PARENT_CONFIG_SECRET: &str = "lattice-parent-config";
 pub const PARENT_CONFIG_ENDPOINT_KEY: &str = "cell_endpoint";
 /// Key for CA certificate in parent config secret
 pub const PARENT_CONFIG_CA_KEY: &str = "ca.crt";
+/// Key for one-time CSR token in parent config secret (used to authenticate CSR requests)
+pub const PARENT_CONFIG_CSR_TOKEN_KEY: &str = "csr_token";
 /// Secret containing private registry credentials (Docker config)
 pub const REGISTRY_CREDENTIALS_SECRET: &str = "lattice-registry";
 /// Secret containing agent mTLS credentials (cert, key, CA)

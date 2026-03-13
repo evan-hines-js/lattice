@@ -238,8 +238,8 @@ async fn compile_workload(
         workload,
         runtime,
         ctx.provider_type,
+        ctx.cedar,
     )
-    .with_cedar(ctx.cedar)
     .with_cluster_name(ctx.cluster_name)
     .with_graph(ctx.graph)
     .with_image_pull_secrets(&runtime.image_pull_secrets);

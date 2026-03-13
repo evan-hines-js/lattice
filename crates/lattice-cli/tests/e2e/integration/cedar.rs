@@ -351,7 +351,7 @@ pub async fn run_cedar_group_test(
 ///
 /// Cedar deny tests require the default permit-all policy to be absent,
 /// otherwise denied SAs would still be allowed through.
-async fn remove_e2e_default_policy(kubeconfig: &str) -> Result<(), String> {
+pub async fn remove_e2e_default_policy(kubeconfig: &str) -> Result<(), String> {
     let _ = delete_cedar_policy(kubeconfig, E2E_DEFAULT_POLICY_NAME).await;
     wait_for_condition(
         &format!("Cedar policy '{}' deleted", E2E_DEFAULT_POLICY_NAME),

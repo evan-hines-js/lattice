@@ -392,26 +392,21 @@ impl PodTemplateCompiler {
 
         let is_privileged = s.privileged == Some(true);
 
-        let capabilities = if is_privileged && s.capabilities.is_empty() {
-            None
-        } else {
-            Some(Capabilities {
-                add: if s.capabilities.is_empty() {
-                    None
-                } else {
-                    Some(s.capabilities.clone())
-                },
-                drop: if is_privileged {
-                    None
-                } else {
-                    Some(
-                        s.drop_capabilities
-                            .clone()
-                            .unwrap_or_else(|| vec!["ALL".to_string()]),
-                    )
-                },
-            })
-        };
+        let capabilities = Some(Capabilities {
+            add: if s.capabilities.is_empty() {
+                None
+            } else {
+                Some(s.capabilities.clone())
+            },
+            // Always drop ALL capabilities — even for privileged containers.
+            // The kernel still grants all caps when privileged=true, but this
+            // ensures the security context is explicit and auditable.
+            drop: Some(
+                s.drop_capabilities
+                    .clone()
+                    .unwrap_or_else(|| vec!["ALL".to_string()]),
+            ),
+        });
 
         let run_as_non_root = if s.run_as_user == Some(0) {
             Some(s.run_as_non_root.unwrap_or(false))
@@ -419,11 +414,9 @@ impl PodTemplateCompiler {
             Some(s.run_as_non_root.unwrap_or(true))
         };
 
-        let allow_privilege_escalation = if is_privileged {
-            s.allow_privilege_escalation
-        } else {
-            Some(s.allow_privilege_escalation.unwrap_or(false))
-        };
+        let allow_privilege_escalation = Some(
+            s.allow_privilege_escalation.unwrap_or(is_privileged),
+        );
 
         let seccomp_profile = Some(SeccompProfile {
             type_: s

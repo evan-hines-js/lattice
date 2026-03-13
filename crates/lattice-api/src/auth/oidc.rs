@@ -289,17 +289,42 @@ impl OidcValidator {
             return Err(Error::Config("OIDC not configured".into()));
         }
 
+        // Reject excessively long tokens to prevent DoS via base64 decode
+        if token.len() > 16_384 {
+            return Err(Error::Unauthorized("Token too large".into()));
+        }
+
         // Decode header to get kid and algorithm
         let header = decode_header(token)?;
         let kid = header.kid.as_deref();
         let alg = header.alg;
+
+        // Restrict to asymmetric algorithms only to prevent algorithm substitution
+        // attacks (e.g., using HMAC with a public key as the secret)
+        use jsonwebtoken::Algorithm;
+        match alg {
+            Algorithm::RS256
+            | Algorithm::RS384
+            | Algorithm::RS512
+            | Algorithm::ES256
+            | Algorithm::ES384
+            | Algorithm::PS256
+            | Algorithm::PS384
+            | Algorithm::PS512 => {}
+            _ => {
+                return Err(Error::Unauthorized(format!(
+                    "Unsupported JWT algorithm: {:?}",
+                    alg
+                )));
+            }
+        }
 
         debug!(kid = ?kid, alg = ?alg, "Decoded JWT header");
 
         // Get decoding key from JWKS
         let key = self.get_decoding_key(kid).await?;
 
-        // Build validation
+        // Build validation with the verified asymmetric algorithm
         let mut validation = Validation::new(alg);
         validation.set_issuer(&[&self.config.issuer_url]);
         validation.set_audience(&self.config.audiences);

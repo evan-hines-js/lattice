@@ -192,6 +192,7 @@ impl AgentClient {
     /// * `http_endpoint` - Cell's HTTP endpoint for CSR signing
     /// * `cluster_id` - The cluster ID to include in the certificate
     /// * `ca_cert_pem` - CA certificate PEM for verifying cell's TLS certificate
+    /// * `csr_token` - One-time CSR token issued during bootstrap
     ///
     /// # Returns
     /// Agent credentials including the signed certificate, private key, and CA cert
@@ -199,6 +200,7 @@ impl AgentClient {
         http_endpoint: &str,
         cluster_id: &str,
         ca_cert_pem: &str,
+        csr_token: &str,
     ) -> Result<AgentCredentials, CertificateError> {
         info!(cluster_id = %cluster_id, "Generating keypair and CSR");
 
@@ -228,7 +230,10 @@ impl AgentClient {
 
         let response = http_client
             .post(&url)
-            .json(&CsrRequest { csr_pem })
+            .json(&CsrRequest {
+                csr_pem,
+                csr_token: csr_token.to_string(),
+            })
             .send()
             .await
             .map_err(|e| CertificateError::HttpError(format!("{:#}", e)))?;

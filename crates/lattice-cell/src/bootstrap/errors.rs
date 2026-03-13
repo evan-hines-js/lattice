@@ -33,6 +33,14 @@ pub enum BootstrapError {
     #[error("cluster not bootstrapped: {0}")]
     ClusterNotBootstrapped(String),
 
+    /// Invalid or missing CSR token
+    #[error("invalid CSR token")]
+    InvalidCsrToken,
+
+    /// CSR token already used
+    #[error("CSR token already used")]
+    CsrTokenAlreadyUsed,
+
     /// Manifest generation failed
     #[error("manifest generation failed: {0}")]
     ManifestGeneration(String),
@@ -53,6 +61,12 @@ impl IntoResponse for BootstrapError {
             BootstrapError::CsrSigningFailed(_) => (StatusCode::BAD_REQUEST, "CSR signing failed"),
             BootstrapError::ClusterNotBootstrapped(_) => {
                 (StatusCode::PRECONDITION_FAILED, "cluster not bootstrapped")
+            }
+            BootstrapError::InvalidCsrToken => {
+                (StatusCode::UNAUTHORIZED, "authentication failed")
+            }
+            BootstrapError::CsrTokenAlreadyUsed => {
+                (StatusCode::GONE, "CSR token already used")
             }
             BootstrapError::ManifestGeneration(_) | BootstrapError::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -148,6 +162,18 @@ mod tests {
             BootstrapError::ManifestGeneration("oops".to_string()).into_response(),
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal error",
+        ).await;
+
+        assert_status_response(
+            BootstrapError::InvalidCsrToken.into_response(),
+            StatusCode::UNAUTHORIZED,
+            "authentication failed",
+        ).await;
+
+        assert_status_response(
+            BootstrapError::CsrTokenAlreadyUsed.into_response(),
+            StatusCode::GONE,
+            "CSR token already used",
         ).await;
     }
 

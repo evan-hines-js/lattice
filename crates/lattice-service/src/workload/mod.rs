@@ -783,8 +783,8 @@ mod tests {
             &service.spec.workload,
             &service.spec.runtime,
             crate::crd::ProviderType::Docker,
+            &cedar,
         )
-        .with_cedar(&cedar)
         .with_graph(&graph)
         .with_cluster_name("test-cluster")
         .with_image_pull_secrets(&service.spec.runtime.image_pull_secrets)

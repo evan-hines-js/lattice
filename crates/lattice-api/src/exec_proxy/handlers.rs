@@ -100,7 +100,7 @@ async fn handle_websocket_connection(
 
     // Route to local K8s API or through backend tunnel
     if route_info.is_self {
-        handle_local_exec(socket, path, query).await;
+        handle_local_exec(socket, identity.clone(), path, query).await;
     } else {
         handle_remote_exec(
             socket,
@@ -136,7 +136,10 @@ async fn send_error_and_close(socket: WebSocket, msg: impl Into<String>) {
 }
 
 /// Handle exec for the local cluster using kube-rs
-async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
+///
+/// Uses the authenticated user's identity for impersonation to ensure
+/// K8s RBAC is enforced rather than executing as the operator's SA.
+async fn handle_local_exec(socket: WebSocket, identity: UserIdentity, path: String, query: String) {
     let request_id = Uuid::new_v4().to_string();
 
     // Parse the path to extract namespace and pod name
@@ -154,11 +157,23 @@ async fn handle_local_exec(socket: WebSocket, path: String, query: String) {
         "Starting local exec session"
     );
 
-    // Create kube client
-    let client = match Client::try_default().await {
-        Ok(c) => c,
+    // Create kube client with impersonation headers to enforce K8s RBAC
+    // as the authenticated user, not the operator's service account
+    let client = match kube::Config::incluster() {
+        Ok(mut config) => {
+            config.auth_info.impersonate = Some(identity.username.clone());
+            config.auth_info.impersonate_groups = Some(identity.groups.clone());
+            match Client::try_from(config) {
+                Ok(c) => c,
+                Err(e) => {
+                    error!(request_id = %request_id, error = %e, "Failed to create impersonating K8s client");
+                    send_error_and_close(socket, "Failed to create K8s client").await;
+                    return;
+                }
+            }
+        }
         Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to create K8s client");
+            error!(request_id = %request_id, error = %e, "Failed to load in-cluster config");
             send_error_and_close(socket, "Failed to create K8s client").await;
             return;
         }

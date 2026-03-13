@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub struct CsrRequest {
     /// CSR in PEM format
     pub csr_pem: String,
+    /// One-time CSR token issued during bootstrap (authenticates the request)
+    pub csr_token: String,
 }
 
 /// CSR signing response with signed certificate

@@ -4,7 +4,7 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
 use lattice_common::crd::LatticeMeshMember;
 
-use super::Validator;
+use super::{reject_system_namespace, Validator};
 
 /// Validates LatticeMeshMember CREATE and UPDATE requests
 pub struct MeshMemberValidator;
@@ -15,6 +15,10 @@ impl Validator for MeshMemberValidator {
     }
 
     fn validate(&self, request: &AdmissionRequest<DynamicObject>) -> AdmissionResponse {
+        if let Some(denied) = reject_system_namespace(request) {
+            return denied;
+        }
+
         let response = AdmissionResponse::from(request);
 
         let obj = match &request.object {

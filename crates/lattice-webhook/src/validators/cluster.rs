@@ -36,32 +36,40 @@ impl Validator for ClusterValidator {
         if request.operation == Operation::Update {
             if let Some(ref old_obj) = request.old_object {
                 let old_raw = serde_json::to_value(old_obj).unwrap_or_default();
-                if let Ok(old_cluster) = serde_json::from_value::<LatticeCluster>(old_raw) {
-                    match (&old_cluster.spec.parent_config, &cluster.spec.parent_config) {
-                        // None → None or Some(A) → Some(A): no change, allow
-                        (None, None) => {}
-                        (Some(old), Some(new)) if old == new => {}
-                        // None → Some: promotion, allow
-                        (None, Some(_)) => {}
-                        // Some → None: demotion, deny
-                        (Some(_), None) => {
-                            return response.deny(
-                                "spec.parentConfig cannot be removed once set. \
-                                 Delete and recreate the cluster.",
-                            );
-                        }
-                        // Some(A) → Some(B): modification, deny
-                        (Some(_), Some(_)) => {
-                            return response.deny(
-                                "spec.parentConfig is immutable once set. \
-                                 Delete and recreate the cluster to change parent configuration.",
-                            );
+                match serde_json::from_value::<LatticeCluster>(old_raw) {
+                    Ok(old_cluster) => {
+                        match (&old_cluster.spec.parent_config, &cluster.spec.parent_config) {
+                            // None → None or Some(A) → Some(A): no change, allow
+                            (None, None) => {}
+                            (Some(old), Some(new)) if old == new => {}
+                            // None → Some: promotion, allow
+                            (None, Some(_)) => {}
+                            // Some → None: demotion, deny
+                            (Some(_), None) => {
+                                return response.deny(
+                                    "spec.parentConfig cannot be removed once set. \
+                                     Delete and recreate the cluster.",
+                                );
+                            }
+                            // Some(A) → Some(B): modification, deny
+                            (Some(_), Some(_)) => {
+                                return response.deny(
+                                    "spec.parentConfig is immutable once set. \
+                                     Delete and recreate the cluster to change parent configuration.",
+                                );
+                            }
                         }
                     }
+                    // Fail-closed: if old_object can't be deserialized, deny the update
+                    // to prevent bypassing immutability checks with crafted objects
+                    Err(e) => {
+                        return response.deny(format!(
+                            "failed to deserialize old LatticeCluster for immutability check: {e}"
+                        ));
+                    }
                 }
-                // If old_object fails to deserialize, allow (fail-open for safety)
             }
-            // If old_object is missing on UPDATE, allow (fail-open for safety)
+            // If old_object is missing on UPDATE, allow (K8s guarantees old_object on UPDATE)
         }
 
         response

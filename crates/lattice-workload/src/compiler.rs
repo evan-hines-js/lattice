@@ -31,8 +31,7 @@ use crate::pipeline::{env, files, pod_template::PodTemplateCompiler, secrets::Se
 /// Uses a builder pattern for optional features:
 ///
 /// ```rust,ignore
-/// let compiled = WorkloadCompiler::new(name, namespace, workload, runtime, provider_type)
-///     .with_cedar(cedar)
+/// let compiled = WorkloadCompiler::new(name, namespace, workload, runtime, provider_type, cedar)
 ///     .with_cluster_name(cluster_name)
 ///     .with_volume_authorization(VolumeAuthorizationMode::Full { graph })
 ///     .with_annotations(&annotations)
@@ -45,7 +44,7 @@ pub struct WorkloadCompiler<'a> {
     workload: &'a WorkloadSpec,
     runtime: &'a RuntimeSpec,
     provider_type: ProviderType,
-    cedar: Option<&'a PolicyEngine>,
+    cedar: &'a PolicyEngine,
     cluster_name: Option<&'a str>,
     volume_auth: Option<VolumeAuthorizationMode<'a>>,
     annotations: BTreeMap<String, String>,
@@ -59,12 +58,15 @@ pub struct WorkloadCompiler<'a> {
 
 impl<'a> WorkloadCompiler<'a> {
     /// Create a new WorkloadCompiler with required parameters.
+    ///
+    /// Cedar is required — authorization cannot be bypassed.
     pub fn new(
         name: &'a str,
         namespace: &'a str,
         workload: &'a WorkloadSpec,
         runtime: &'a RuntimeSpec,
         provider_type: ProviderType,
+        cedar: &'a PolicyEngine,
     ) -> Self {
         Self {
             name,
@@ -72,7 +74,7 @@ impl<'a> WorkloadCompiler<'a> {
             workload,
             runtime,
             provider_type,
-            cedar: None,
+            cedar,
             cluster_name: None,
             volume_auth: None,
             annotations: BTreeMap::new(),
@@ -83,12 +85,6 @@ impl<'a> WorkloadCompiler<'a> {
             owner_references: Vec::new(),
             has_topology: false,
         }
-    }
-
-    /// Set Cedar policy engine for authorization.
-    pub fn with_cedar(mut self, cedar: &'a PolicyEngine) -> Self {
-        self.cedar = Some(cedar);
-        self
     }
 
     /// Set cluster name for template resolution.
@@ -199,52 +195,50 @@ impl<'a> WorkloadCompiler<'a> {
             self.image_pull_secrets,
         )?;
 
-        // Authorization (if Cedar is configured)
-        if let Some(cedar) = self.cedar {
-            crate::authorization::secrets::authorize_secrets(
-                cedar,
-                self.name,
-                self.namespace,
-                self.workload,
-            )
-            .await?;
+        // Authorization — Cedar is always enforced
+        crate::authorization::secrets::authorize_secrets(
+            self.cedar,
+            self.name,
+            self.namespace,
+            self.workload,
+        )
+        .await?;
 
-            if let Some(ref volume_auth) = self.volume_auth {
-                match volume_auth {
-                    VolumeAuthorizationMode::Full { graph } => {
-                        crate::authorization::volumes::authorize_volumes(
-                            cedar,
-                            graph,
-                            self.name,
-                            self.namespace,
-                            self.workload,
-                        )
-                        .await?;
-                    }
-                    VolumeAuthorizationMode::CedarOnly => {
-                        // Skip owner consent, only Cedar policy check
-                        // (volumes authorization without graph)
-                    }
+        if let Some(ref volume_auth) = self.volume_auth {
+            match volume_auth {
+                VolumeAuthorizationMode::Full { graph } => {
+                    crate::authorization::volumes::authorize_volumes(
+                        self.cedar,
+                        graph,
+                        self.name,
+                        self.namespace,
+                        self.workload,
+                    )
+                    .await?;
+                }
+                VolumeAuthorizationMode::CedarOnly => {
+                    // Skip owner consent, only Cedar policy check
+                    // (volumes authorization without graph)
                 }
             }
-
-            crate::authorization::security::authorize_security_overrides(
-                cedar,
-                self.name,
-                self.namespace,
-                self.workload,
-                self.runtime,
-            )
-            .await?;
-
-            crate::authorization::external_endpoints::authorize_external_endpoints(
-                cedar,
-                self.name,
-                self.namespace,
-                self.workload,
-            )
-            .await?;
         }
+
+        crate::authorization::security::authorize_security_overrides(
+            self.cedar,
+            self.name,
+            self.namespace,
+            self.workload,
+            self.runtime,
+        )
+        .await?;
+
+        crate::authorization::external_endpoints::authorize_external_endpoints(
+            self.cedar,
+            self.name,
+            self.namespace,
+            self.workload,
+        )
+        .await?;
 
         // Build template context and render all containers
         let graph = self.graph.ok_or_else(|| {

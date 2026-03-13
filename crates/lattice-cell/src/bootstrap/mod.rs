@@ -8,22 +8,24 @@
 //!
 //! - Endpoints are NON-mTLS (agent doesn't have cert yet)
 //! - Bootstrap uses one-time token authentication
-//! - CSR signing validates cluster is registered
+//! - CSR signing uses a separate one-time CSR token (issued during bootstrap)
+//! - Both tokens use constant-time comparison to prevent timing attacks
 //!
 //! # Bootstrap Flow
 //!
 //! 1. Cluster created → bootstrap token generated
 //! 2. kubeadm runs postKubeadmCommands
 //! 3. Script calls `GET /api/clusters/{id}/manifests` with Bearer token
-//! 4. Endpoint validates token, marks as used
-//! 5. Returns: agent manifest, CNI manifest, CA certificate
+//! 4. Endpoint validates token, marks as used, generates one-time CSR token
+//! 5. Returns: agent manifest, CNI manifest, CA certificate, CSR token (in parent config Secret)
 //!
 //! # CSR Flow
 //!
 //! 1. Agent generates keypair locally (private key never leaves agent)
-//! 2. Agent creates CSR and sends to `POST /api/clusters/{id}/csr`
-//! 3. Cell signs CSR with CA and returns certificate
-//! 4. Agent uses cert for mTLS connection to gRPC server
+//! 2. Agent reads CSR token from parent config Secret
+//! 3. Agent creates CSR and sends to `POST /api/clusters/{id}/csr` with CSR token
+//! 4. Cell validates and consumes CSR token, signs CSR, returns certificate
+//! 5. Agent uses cert for mTLS connection to gRPC server
 
 mod addons;
 mod bundle;
@@ -83,8 +85,10 @@ pub async fn csr_handler<G: ManifestGenerator>(
 ) -> Result<Json<lattice_common::CsrResponse>, BootstrapError> {
     debug!(cluster_id = %cluster_id, "CSR signing request received");
 
-    // Sign the CSR
-    let response = state.sign_csr(&cluster_id, &request.csr_pem).await?;
+    // Sign the CSR (validates and consumes the one-time CSR token)
+    let response = state
+        .sign_csr(&cluster_id, &request.csr_pem, &request.csr_token)
+        .await?;
 
     info!(cluster_id = %cluster_id, "CSR signed successfully");
 
@@ -171,6 +175,7 @@ pub fn bootstrap_router<G: ManifestGenerator + 'static>(
             get(bootstrap_manifests_handler::<G>),
         )
         .route("/api/clusters/{cluster_id}/csr", post(csr_handler::<G>))
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)) // 64 KiB — CSR payloads are small
         .with_state(state)
 }
 
@@ -343,6 +348,19 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// Helper: extract CSR token from bootstrap state for a cluster
+    fn get_csr_token(state: &Arc<BootstrapState<test_helpers::TestManifestGenerator>>, cluster_id: &str) -> String {
+        state
+            .clusters
+            .get(cluster_id)
+            .expect("cluster should be registered")
+            .csr_token
+            .as_ref()
+            .expect("CSR token should be set after bootstrap")
+            .as_str()
+            .to_string()
+    }
+
     /// Integration test: CSR endpoint with valid request
     #[tokio::test]
     async fn integration_csr_handler_success() {
@@ -361,11 +379,14 @@ mod tests {
             .await
             .expect("token validation should succeed");
 
+        let csr_tok = get_csr_token(&state, "csr-http-test");
+
         // Generate CSR
         let agent_req = AgentCertRequest::new("csr-http-test")
             .expect("agent cert request creation should succeed");
         let csr_request = CsrRequest {
             csr_pem: agent_req.csr_pem().to_string(),
+            csr_token: csr_tok,
         };
 
         let router = bootstrap_router(state);
@@ -416,6 +437,7 @@ mod tests {
             .expect("agent cert request creation should succeed");
         let csr_request = CsrRequest {
             csr_pem: agent_req.csr_pem().to_string(),
+            csr_token: "dummy-token".to_string(),
         };
 
         let router = bootstrap_router(state);
@@ -445,6 +467,7 @@ mod tests {
             AgentCertRequest::new("unknown").expect("agent cert request creation should succeed");
         let csr_request = CsrRequest {
             csr_pem: agent_req.csr_pem().to_string(),
+            csr_token: "dummy-token".to_string(),
         };
 
         let router = bootstrap_router(state);
@@ -480,7 +503,7 @@ mod tests {
         )
         .await;
 
-        let router = bootstrap_router(state);
+        let router = bootstrap_router(state.clone());
 
         // Step 2: Get manifests (returns raw YAML for kubectl apply)
         let manifests_request = Request::builder()
@@ -504,12 +527,16 @@ mod tests {
             String::from_utf8(body.to_vec()).expect("response should be valid UTF-8");
         // Manifest contains image from TestManifestGenerator, not cluster ID
         assert!(manifests_yaml.contains("# Test manifest"));
+        // Manifests should include the CSR token in the parent config secret
+        assert!(manifests_yaml.contains("csr_token"));
 
-        // Step 3: CSR signing
+        // Step 3: CSR signing (using the CSR token from bootstrap)
+        let csr_tok = get_csr_token(&state, "full-flow-test");
         let agent_req = AgentCertRequest::new("full-flow-test")
             .expect("agent cert request creation should succeed");
         let csr_body = serde_json::to_string(&CsrRequest {
             csr_pem: agent_req.csr_pem().to_string(),
+            csr_token: csr_tok,
         })
         .expect("JSON serialization should succeed");
 

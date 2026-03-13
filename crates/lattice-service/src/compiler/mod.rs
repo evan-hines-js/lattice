@@ -215,8 +215,8 @@ impl<'a> ServiceCompiler<'a> {
             &service.spec.workload,
             &service.spec.runtime,
             self.provider_type,
+            self.cedar,
         )
-        .with_cedar(self.cedar)
         .with_graph(self.graph)
         .with_cluster_name(&self.cluster_name)
         .with_volume_authorization(lattice_workload::VolumeAuthorizationMode::Full {

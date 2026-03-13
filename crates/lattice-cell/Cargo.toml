@@ -57,6 +57,7 @@ tracing = { workspace = true }
 
 # Security
 zeroize = { workspace = true }
+subtle = { workspace = true }
 
 # Time
 chrono = { workspace = true }

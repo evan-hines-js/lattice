@@ -32,7 +32,9 @@ use lattice_common::{LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT};
 const SECRET_SOURCE_LABEL: &str = "lattice.dev/secret-source";
 
 /// Credentials for webhook Basic auth
-#[derive(Clone, Debug)]
+///
+/// Debug is intentionally not derived to prevent accidental password logging.
+#[derive(Clone)]
 pub struct WebhookCredentials {
     /// HTTP Basic auth username
     pub username: String,
@@ -104,17 +106,17 @@ async fn fetch_secret_data(
     let api: Api<k8s_openapi::api::core::v1::Secret> =
         Api::namespaced(client.clone(), LOCAL_SECRETS_NAMESPACE);
 
-    let secret = api.get(name).await.map_err(|e| {
+    let secret = api.get(name).await.map_err(|_| {
         (
             StatusCode::NOT_FOUND,
-            format!("secret '{}' not found: {}", name, e),
+            "secret not found".to_string(),
         )
     })?;
 
     if !is_labeled_source(&secret) {
         return Err((
             StatusCode::NOT_FOUND,
-            format!("secret '{}' not labeled as source", name),
+            "secret not found".to_string(),
         ));
     }
 

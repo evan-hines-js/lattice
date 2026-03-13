@@ -109,10 +109,17 @@ async fn start_agent_if_needed(
         }
         Err(_) => {
             tracing::info!("No existing credentials, requesting new certificate from cell");
-            let creds =
-                AgentClient::request_certificate(&http_endpoint, cluster_name, &parent.ca_cert_pem)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("failed to get certificate: {}", e))?;
+            let csr_token = parent.csr_token.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("no CSR token in parent config — cannot authenticate CSR request")
+            })?;
+            let creds = AgentClient::request_certificate(
+                &http_endpoint,
+                cluster_name,
+                &parent.ca_cert_pem,
+                csr_token,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to get certificate: {}", e))?;
 
             // Store credentials for future restarts
             save_agent_credentials(&secrets, &creds)
