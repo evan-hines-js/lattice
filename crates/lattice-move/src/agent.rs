@@ -272,6 +272,10 @@ impl AgentMover {
             .as_str()
             .ok_or_else(|| MoveError::Serialization("missing kind".to_string()))?
             .to_string();
+
+        // Validate object kind against allowlist to prevent injection of
+        // RBAC or other privileged resources during move operations
+        validate_move_object_kind(&api_version, &kind)?;
         let name = obj["metadata"]["name"]
             .as_str()
             .ok_or_else(|| MoveError::Serialization("missing metadata.name".to_string()))?
@@ -448,6 +452,28 @@ pub struct MoveObjectError {
     pub retryable: bool,
 }
 
+/// API groups that must never be created during move operations.
+/// Prevents a compromised agent from injecting privilege-escalation
+/// resources into the parent cluster during unpivot.
+const BLOCKED_MOVE_API_GROUPS: &[&str] = &["rbac.authorization.k8s.io"];
+
+/// Validate that an object kind is not a blocked type during move operations.
+///
+/// Rejects RBAC resources (ClusterRole, ClusterRoleBinding, Role, RoleBinding)
+/// to prevent privilege escalation through the move protocol.
+fn validate_move_object_kind(api_version: &str, kind: &str) -> Result<(), MoveError> {
+    let group = api_version.split('/').next().unwrap_or("");
+
+    if BLOCKED_MOVE_API_GROUPS.contains(&group) {
+        return Err(MoveError::Serialization(format!(
+            "RBAC object '{}' (group '{}') is not allowed during move operations",
+            kind, group
+        )));
+    }
+
+    Ok(())
+}
+
 /// Strip transient fields that shouldn't be copied to target
 fn strip_transient_fields(obj: &mut Value) {
     if let Some(metadata) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
@@ -534,6 +560,24 @@ mod tests {
     #[test]
     fn test_source_uid_annotation_constant() {
         assert_eq!(SOURCE_UID_ANNOTATION, "lattice.dev/source-uid");
+    }
+
+    #[test]
+    fn test_validate_move_object_kind_allows_capi_and_core() {
+        assert!(validate_move_object_kind("cluster.x-k8s.io/v1beta1", "Cluster").is_ok());
+        assert!(validate_move_object_kind("infrastructure.cluster.x-k8s.io/v1beta2", "AWSCluster").is_ok());
+        assert!(validate_move_object_kind("bootstrap.cluster.x-k8s.io/v1beta1", "KubeadmConfig").is_ok());
+        assert!(validate_move_object_kind("v1", "Secret").is_ok());
+        assert!(validate_move_object_kind("v1", "ConfigMap").is_ok());
+        assert!(validate_move_object_kind("apps/v1", "Deployment").is_ok());
+    }
+
+    #[test]
+    fn test_validate_move_object_kind_rejects_rbac() {
+        assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "ClusterRole").is_err());
+        assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "ClusterRoleBinding").is_err());
+        assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "Role").is_err());
+        assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "RoleBinding").is_err());
     }
 
     #[test]

@@ -52,7 +52,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use lattice_common::CsrRequest;
 
@@ -127,30 +127,35 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     // Include InfraProvider, SecretProvider, CedarPolicy, OIDCProvider and their referenced secrets
     // This ensures credentials and policies are available when the operator starts, before the gRPC connection
     if let Some(ref client) = state.kube_client {
-        let parent_cluster_name = std::env::var("CLUSTER_NAME").map_err(|_| {
+        let parent_cluster_name = std::env::var("LATTICE_CLUSTER_NAME").map_err(|_| {
             BootstrapError::Internal(
-                "CLUSTER_NAME environment variable not set — cannot fetch distributable resources"
+                "LATTICE_CLUSTER_NAME environment variable not set — cannot fetch distributable resources"
                     .to_string(),
             )
         })?;
-        let resources =
-            fetch_distributable_resources(client, &parent_cluster_name)
-                .await
-                .map_err(|e| {
-                    BootstrapError::Internal(format!(
-                        "failed to fetch distributable resources: {}",
-                        e
-                    ))
-                })?;
+        match fetch_distributable_resources(client, &parent_cluster_name).await {
+            Ok(resources) => {
+                let count = resources.total_count();
+                all_manifests.extend(resources.into_json_strings());
 
-        let count = resources.total_count();
-        all_manifests.extend(resources.into_json_strings());
-
-        info!(
-            cluster_id = %cluster_id,
-            count,
-            "included distributed resources in bootstrap"
-        );
+                info!(
+                    cluster_id = %cluster_id,
+                    count,
+                    "included distributed resources in bootstrap"
+                );
+            }
+            Err(e) => {
+                // Distributable resources are best-effort during bootstrap.
+                // They will be synced via the gRPC stream once the agent connects.
+                // Failing the entire bootstrap here would consume the one-time token
+                // and permanently block the cluster from bootstrapping.
+                warn!(
+                    cluster_id = %cluster_id,
+                    error = %e,
+                    "failed to fetch distributable resources, they will sync via gRPC"
+                );
+            }
+        }
     }
 
     // Join with YAML document separator

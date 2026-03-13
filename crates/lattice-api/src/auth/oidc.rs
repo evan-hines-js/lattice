@@ -683,6 +683,8 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || v6.is_unspecified()    // ::
                 // fc00::/7 (unique local)
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // IPv4-mapped IPv6 (::ffff:x.x.x.x) — check the embedded v4 address
+                || v6.to_ipv4_mapped().is_some_and(|v4| is_private_ip(&std::net::IpAddr::V4(v4)))
         }
     }
 }
@@ -825,5 +827,22 @@ mod tests {
         assert!(is_private_ip(&"::1".parse().unwrap()));
         assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
         assert!(!is_private_ip(&"1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_ipv4_mapped_ipv6() {
+        // IPv4-mapped IPv6 addresses must be checked against their embedded v4 address
+        assert!(is_private_ip(&"::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:169.254.169.254".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:192.168.1.1".parse().unwrap()));
+        assert!(!is_private_ip(&"::ffff:8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_validate_issuer_url_rejects_ipv4_mapped_ipv6() {
+        assert!(validate_issuer_url("https://[::ffff:169.254.169.254]").is_err());
+        assert!(validate_issuer_url("https://[::ffff:10.0.0.1]").is_err());
+        assert!(validate_issuer_url("https://[::ffff:127.0.0.1]").is_err());
     }
 }

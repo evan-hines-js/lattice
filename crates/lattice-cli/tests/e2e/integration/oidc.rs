@@ -25,13 +25,11 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use super::super::context::InfraContext;
 use super::super::helpers::{
-    apply_yaml, dev_service_reachable, dev_service_url, get_or_create_proxy, http_get_with_retry,
-    proxy_service_exists, run_kubectl, wait_for_condition, with_diagnostics, DiagnosticContext,
-    DEFAULT_TIMEOUT,
+    apply_cedar_policy_crd, apply_yaml, dev_service_reachable, dev_service_url,
+    get_or_create_proxy, http_get_with_retry, proxy_service_exists, run_kubectl,
+    wait_for_condition, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
 };
-use super::cedar::{
-    apply_cedar_policy_allow_group, apply_e2e_default_policy, remove_e2e_default_policy,
-};
+use super::cedar::apply_cedar_policy_allow_group;
 
 // =============================================================================
 // Constants
@@ -257,19 +255,43 @@ roleRef:
     )
     .await?;
 
-    // Label the policy for cleanup
-    let _ = run_kubectl(&[
-        "--kubeconfig",
+    // Add a forbid policy for the viewer user. Cedar forbid overrides permit
+    // regardless of priority, so the viewer is denied even with the e2e-allow-all
+    // policy in place. This avoids removing the default policy, which would break
+    // other concurrent tests that need proxy access.
+    let forbid_cedar = format!(
+        r#"forbid(
+  principal == Lattice::User::"{viewer}",
+  action,
+  resource == Lattice::Cluster::"{cluster}"
+);"#,
+        viewer = "viewer@lattice.dev",
+        cluster = child_cluster_name,
+    );
+    apply_cedar_policy_crd(
         parent_kubeconfig,
-        "label",
-        "cedarpolicy",
-        "oidc-test-allow-admins",
-        "-n",
-        LATTICE_SYSTEM_NAMESPACE,
-        "lattice.dev/test=oidc",
-        "--overwrite",
-    ])
-    .await;
+        "oidc-test-deny-viewer",
+        "oidc",
+        100,
+        &forbid_cedar,
+    )
+    .await?;
+
+    // Label both policies for cleanup
+    for policy_name in ["oidc-test-allow-admins", "oidc-test-deny-viewer"] {
+        let _ = run_kubectl(&[
+            "--kubeconfig",
+            parent_kubeconfig,
+            "label",
+            "cedarpolicy",
+            policy_name,
+            "-n",
+            LATTICE_SYSTEM_NAMESPACE,
+            "lattice.dev/test=oidc",
+            "--overwrite",
+        ])
+        .await;
+    }
 
     // Wait for the OIDC validator to reload and the admin token to be accepted.
     //    Polls until the proxy returns 200 for the admin OIDC token, which confirms
@@ -341,14 +363,12 @@ pub async fn run_oidc_hierarchy_tests(
 
     let diag = DiagnosticContext::new(&ctx.mgmt_kubeconfig, LATTICE_SYSTEM_NAMESPACE);
     with_diagnostics(&diag, "OIDC Hierarchy", || async {
-        // Remove the default permit-all Cedar policy so the OIDC group policy
-        // is the only active policy. Without this, the default policy (priority
-        // 1000) permits all users, masking the group-based deny.
-        remove_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
-
+        // The test uses a Cedar forbid policy for the viewer user instead of
+        // removing the default e2e-allow-all policy. This keeps the default
+        // policy in place so concurrent tests that need proxy access are not
+        // disrupted. Cedar forbid overrides permit regardless of priority.
         let proxy_url = ctx.mgmt_proxy_url.as_deref();
         run_oidc_auth_test(&ctx.mgmt_kubeconfig, child_cluster_name, proxy_url).await?;
-        apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
 
         info!("[Integration/OIDC] All OIDC hierarchy tests passed!");
         Ok(())
