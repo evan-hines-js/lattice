@@ -1,5 +1,4 @@
 //! Shared test helpers for bootstrap module tests.
-#![cfg(test)]
 
 use std::sync::Arc;
 use std::time::Duration;
