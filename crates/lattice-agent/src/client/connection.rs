@@ -11,6 +11,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Endpoint;
 use tracing::{debug, error, info, warn};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::commands::{self, CommandContext};
 use crate::subtree::SubtreeSender;
 use lattice_proto::lattice_agent_client::LatticeAgentClient;
@@ -135,10 +137,15 @@ impl AgentClient {
             self.subtree_watcher_handle = Some(subtree_sender.spawn_watcher(message_tx.clone()));
         }
 
+        // Token that cancels when the command handler exits, stopping the heartbeat.
+        // Without this, heartbeats keep flowing even when the agent can't process
+        // proxy requests — making the parent think everything is fine.
+        let command_handler_alive = CancellationToken::new();
+
         // Spawn background tasks
-        self.spawn_heartbeat_task(message_tx.clone());
+        self.spawn_heartbeat_task(message_tx.clone(), command_handler_alive.clone());
         self.spawn_deletion_watcher_task(message_tx.clone());
-        self.spawn_command_handler_task(inbound, shutdown_rx);
+        self.spawn_command_handler_task(inbound, shutdown_rx, command_handler_alive);
 
         Ok(())
     }
@@ -187,8 +194,14 @@ impl AgentClient {
     ///
     /// Sends a `Heartbeat` message at `self.config.heartbeat_interval` containing
     /// the current agent state, timestamp, uptime, and cluster health.
+    /// Stops immediately when `command_handler_alive` is cancelled (command handler
+    /// exited), because heartbeats without a working command handler are misleading.
     /// Sets `self.heartbeat_handle`.
-    fn spawn_heartbeat_task(&mut self, message_tx: mpsc::Sender<AgentMessage>) {
+    fn spawn_heartbeat_task(
+        &mut self,
+        message_tx: mpsc::Sender<AgentMessage>,
+        command_handler_alive: CancellationToken,
+    ) {
         let heartbeat_interval = self.config.heartbeat_interval;
         let heartbeat_state = self.agent_state.clone();
         let cluster_name = self.config.cluster_name.clone();
@@ -198,7 +211,13 @@ impl AgentClient {
         self.heartbeat_handle = Some(tokio::spawn(async move {
             let mut ticker = interval(heartbeat_interval);
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = command_handler_alive.cancelled() => {
+                        warn!("Command handler exited, stopping heartbeat");
+                        break;
+                    }
+                }
 
                 let current_state = *heartbeat_state.read().await;
                 let health =
@@ -294,6 +313,7 @@ impl AgentClient {
         &mut self,
         mut inbound: tonic::Streaming<lattice_proto::CellCommand>,
         mut shutdown_rx: oneshot::Receiver<()>,
+        command_handler_alive: CancellationToken,
     ) {
         let state = self.state.clone();
         let agent_state = self.agent_state.clone();
@@ -346,6 +366,9 @@ impl AgentClient {
                 warn!("Connection lost during pivot - resetting to Provisioning for retry");
                 *agent_state.write().await = AgentState::Provisioning;
             }
+
+            // Signal heartbeat to stop — no point heartbeating without a command handler
+            command_handler_alive.cancel();
 
             *state.write().await = ClientState::Disconnected;
             info!("Disconnected from cell");
