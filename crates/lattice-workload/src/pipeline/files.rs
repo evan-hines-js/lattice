@@ -78,6 +78,7 @@ pub fn compile(
     compile_text_files(&base_name, namespace, &text_files, &mut result);
     compile_binary_files(&base_name, namespace, &binary_files, &mut result);
     compile_secret_files(
+        service_name,
         &base_name,
         namespace,
         &secret_files,
@@ -160,6 +161,7 @@ fn compile_binary_files(
 /// all come from the same ClusterSecretStore (validated here), but different files
 /// may use different stores.
 fn compile_secret_files(
+    service_name: &str,
     base_name: &str,
     namespace: &str,
     secret_files: &BTreeMap<String, (String, String, Vec<FileSecretRef>)>,
@@ -182,8 +184,14 @@ fn compile_secret_files(
         let mut template_data = BTreeMap::new();
         template_data.insert(key.clone(), content.clone());
 
-        let external_secret =
+        let mut external_secret =
             ExternalSecret::templated(&es_name, namespace, &store, template_data, eso_data);
+
+        // Label with owning service for cleanup on Cedar policy revocation
+        external_secret.metadata.labels.insert(
+            lattice_common::LABEL_SERVICE_OWNER.to_string(),
+            service_name.to_string(),
+        );
 
         result.file_external_secrets.push(external_secret);
 

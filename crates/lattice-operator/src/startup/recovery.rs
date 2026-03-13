@@ -222,8 +222,14 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
             .as_ref()
             .and_then(|s| s.bootstrap_token.as_deref());
 
+        // Recover persisted CSR token hash so CSR signing survives restarts
+        let recovery_csr_hash = cluster
+            .status
+            .as_ref()
+            .and_then(|s| s.csr_token_hash.clone());
+
         bootstrap_state
-            .register_cluster(registration, existing_token)
+            .register_cluster(registration, existing_token, recovery_csr_hash)
             .await;
         tracing::info!(cluster = %name, "re-registered cluster after operator restart");
     }

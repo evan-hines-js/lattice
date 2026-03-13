@@ -47,23 +47,30 @@ pub(crate) struct ExecPath {
     pub pod: String,
 }
 
-/// Look up cluster attributes from the backend for Cedar authorization
-async fn cluster_attrs(state: &AppState, cluster_name: &str) -> ClusterAttributes {
-    match state.backend.get_route(cluster_name).await {
-        Some(route) => ClusterAttributes::from_labels(&route.labels),
-        None => ClusterAttributes::default(),
-    }
+/// Look up cluster attributes from the backend for Cedar authorization.
+///
+/// Returns an error if the cluster is unknown — we never authorize against
+/// default attributes because that could bypass Cedar policies that assume
+/// attributes are always populated from real cluster state.
+fn cluster_attrs(route: &crate::backend::ProxyRouteInfo) -> ClusterAttributes {
+    ClusterAttributes::from_labels(&route.labels)
 }
 
-/// Authenticate a request and authorize it against Cedar policies for a cluster
+/// Authenticate a request and authorize it against Cedar policies for a cluster.
 ///
-/// Combines cluster attribute lookup, token validation, and Cedar authorization.
+/// Rejects unknown clusters with ClusterNotFound instead of evaluating against
+/// default attributes, which would silently pass permissive policies.
 pub(crate) async fn authorize_request(
     state: &AppState,
     cluster_name: &str,
     headers: &axum::http::HeaderMap,
 ) -> Result<crate::auth::UserIdentity, Error> {
-    let attrs = cluster_attrs(state, cluster_name).await;
+    let route = state
+        .backend
+        .get_route(cluster_name)
+        .await
+        .ok_or_else(|| Error::ClusterNotFound(cluster_name.to_string()))?;
+    let attrs = cluster_attrs(&route);
     authenticate_and_authorize(&state.auth, &state.cedar, headers, cluster_name, &attrs).await
 }
 
@@ -153,7 +160,15 @@ pub(crate) async fn exec_handler(
         "Exec WebSocket request received"
     );
 
+    // Authorize the target cluster
     let identity = authorize_request(&state, cluster_name, request.headers()).await?;
+
+    // Authorize any additional hops in the path (consistent with proxy_handler)
+    if let Some((target_path, _)) = parse_cluster_path(path) {
+        for hop in target_path.split('/').skip(1) {
+            authorize_request(&state, hop, request.headers()).await?;
+        }
+    }
 
     // Strip the /clusters/{cluster_name} prefix from the path
     let api_path = strip_cluster_prefix(path, cluster_name);

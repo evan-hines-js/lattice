@@ -144,34 +144,19 @@ fn weekday_str(day: chrono::Weekday) -> String {
     .to_string()
 }
 
-/// Extract client IP from request headers
+/// Extract client IP from the request's TCP peer address.
 ///
-/// Checks X-Forwarded-For header first (for proxied requests),
-/// falls back to X-Real-IP, then "unknown" if neither present.
+/// Uses axum's `ConnectInfo<SocketAddr>` extension (set via `.into_make_service_with_connect_info()`)
+/// which comes from the actual TCP connection, not from spoofable headers like X-Forwarded-For.
+///
+/// Falls back to "unknown" if ConnectInfo is not available (e.g., in tests).
 fn extract_client_ip(req: &Request<Body>) -> String {
-    // Check X-Forwarded-For first (may contain multiple IPs, take the first)
-    if let Some(xff) = req.headers().get("X-Forwarded-For") {
-        if let Ok(xff_str) = xff.to_str() {
-            if let Some(first_ip) = xff_str.split(',').next() {
-                let ip = first_ip.trim();
-                if !ip.is_empty() {
-                    return ip.to_string();
-                }
-            }
-        }
+    // Use the TCP peer address from axum's ConnectInfo — this cannot be spoofed
+    if let Some(connect_info) = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
+        return connect_info.0.ip().to_string();
     }
 
-    // Fall back to X-Real-IP
-    if let Some(real_ip) = req.headers().get("X-Real-IP") {
-        if let Ok(ip_str) = real_ip.to_str() {
-            let ip = ip_str.trim();
-            if !ip.is_empty() {
-                return ip.to_string();
-            }
-        }
-    }
-
-    tracing::debug!("No X-Forwarded-For or X-Real-IP header, client IP unknown");
+    tracing::debug!("No ConnectInfo available, client IP unknown");
     "unknown".to_string()
 }
 
@@ -213,42 +198,28 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_extract_client_ip_from_x_forwarded_for() {
+    fn test_extract_client_ip_from_connect_info() {
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            std::net::SocketAddr::from(([10, 0, 1, 100], 12345)),
+        ));
+        assert_eq!(extract_client_ip(&req), "10.0.1.100");
+    }
+
+    #[test]
+    fn test_extract_client_ip_ignores_xff_headers() {
+        // X-Forwarded-For must NOT be trusted — it's spoofable
         let req = make_request_with_headers(vec![("X-Forwarded-For", "10.0.1.100")]);
-        assert_eq!(extract_client_ip(&req), "10.0.1.100");
-    }
-
-    #[test]
-    fn test_extract_client_ip_from_x_forwarded_for_multiple() {
-        let req =
-            make_request_with_headers(vec![("X-Forwarded-For", "10.0.1.100, 172.16.0.1, 8.8.8.8")]);
-        assert_eq!(extract_client_ip(&req), "10.0.1.100");
-    }
-
-    #[test]
-    fn test_extract_client_ip_from_x_real_ip() {
-        let req = make_request_with_headers(vec![("X-Real-IP", "192.168.1.50")]);
-        assert_eq!(extract_client_ip(&req), "192.168.1.50");
-    }
-
-    #[test]
-    fn test_extract_client_ip_prefers_x_forwarded_for() {
-        let req = make_request_with_headers(vec![
-            ("X-Forwarded-For", "10.0.1.100"),
-            ("X-Real-IP", "192.168.1.50"),
-        ]);
-        assert_eq!(extract_client_ip(&req), "10.0.1.100");
-    }
-
-    #[test]
-    fn test_extract_client_ip_unknown_when_no_headers() {
-        let req = make_request_with_headers(vec![]);
         assert_eq!(extract_client_ip(&req), "unknown");
     }
 
     #[test]
-    fn test_extract_client_ip_unknown_when_empty_header() {
-        let req = make_request_with_headers(vec![("X-Forwarded-For", "")]);
+    fn test_extract_client_ip_unknown_without_connect_info() {
+        let req = make_request_with_headers(vec![]);
         assert_eq!(extract_client_ip(&req), "unknown");
     }
 
@@ -258,7 +229,14 @@ mod tests {
 
     #[test]
     fn test_auth_context_from_request_basic() {
-        let req = make_request_with_headers(vec![("X-Forwarded-For", "10.0.1.100")]);
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            std::net::SocketAddr::from(([10, 0, 1, 100], 12345)),
+        ));
         let ctx = AuthContext::from_request(&req);
 
         assert!(!ctx.now.is_empty());

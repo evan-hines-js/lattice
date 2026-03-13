@@ -62,13 +62,19 @@ pub(crate) fn compile_eso_templated_env_vars(
         let context = format!("env var(s) in {}", es_name);
         let eso_data = resolve_eso_data(&flat_refs, secret_refs, &context)?;
 
-        external_secrets.push(ExternalSecret::templated(
+        let mut es = ExternalSecret::templated(
             &es_name,
             namespace,
             store_name,
             template_data,
             eso_data,
-        ));
+        );
+        // Label with owning service for cleanup on Cedar policy revocation
+        es.metadata.labels.insert(
+            lattice_common::LABEL_SERVICE_OWNER.to_string(),
+            service_name.to_string(),
+        );
+        external_secrets.push(es);
 
         env_from_refs.push(EnvFromSource {
             config_map_ref: None,

@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use std::sync::{Arc, OnceLock};
 use tracing::debug;
 
@@ -38,6 +38,11 @@ use lattice_proto::is_watch_query;
 
 /// Default timeout for local K8s API requests (30 seconds)
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Maximum duration for watch/streaming requests (30 minutes)
+/// Prevents indefinitely-held streaming connections from exhausting resources.
+/// Clients should reconnect with a resourceVersion to resume watching.
+const MAX_WATCH_DURATION: std::time::Duration = std::time::Duration::from_secs(1800);
 
 // ============================================================================
 // Constants
@@ -502,12 +507,18 @@ fn build_response_base(status: u16, content_type: String) -> axum::http::respons
 }
 
 /// Build a streaming response for watch/follow queries
+///
+/// The stream is bounded by `MAX_WATCH_DURATION` to prevent indefinitely-held
+/// connections. Clients should reconnect with a resourceVersion to resume.
 fn build_streaming_response(response: StreamingHttpResponse) -> Result<Response<Body>, Error> {
     debug!(status = response.status, "Starting streaming response");
 
+    let deadline = tokio::time::sleep(MAX_WATCH_DURATION);
+    let bounded_stream = response.stream.take_until(deadline);
+
     build_response_base(response.status, response.content_type)
         .header("Transfer-Encoding", "chunked")
-        .body(Body::from_stream(response.stream))
+        .body(Body::from_stream(bounded_stream))
         .map_err(|e| Error::Internal(format!("Failed to build streaming response: {}", e)))
 }
 

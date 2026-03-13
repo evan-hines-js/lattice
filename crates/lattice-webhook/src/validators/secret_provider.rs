@@ -4,7 +4,7 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
 use lattice_common::crd::SecretProvider;
 
-use super::Validator;
+use super::{reject_system_namespace, Validator};
 
 /// Validates SecretProvider CREATE and UPDATE requests
 pub struct SecretProviderValidator;
@@ -15,6 +15,10 @@ impl Validator for SecretProviderValidator {
     }
 
     fn validate(&self, request: &AdmissionRequest<DynamicObject>) -> AdmissionResponse {
+        if let Some(denied) = reject_system_namespace(request) {
+            return denied;
+        }
+
         let response = AdmissionResponse::from(request);
 
         let obj = match &request.object {
@@ -39,7 +43,7 @@ impl Validator for SecretProviderValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validators::tests_common::make_admission_request;
+    use crate::validators::tests_common::{make_admission_request, make_admission_request_in_namespace};
 
     fn valid_secret_provider_json() -> serde_json::Value {
         serde_json::json!({
@@ -111,6 +115,20 @@ mod tests {
         let request = make_admission_request("lattice.dev", "v1alpha1", "secretproviders", json);
         let response = validator.validate(&request);
         assert!(!response.allowed, "multi-key provider should be denied");
+    }
+
+    #[test]
+    fn denies_system_namespace() {
+        let validator = SecretProviderValidator;
+        let request = make_admission_request_in_namespace(
+            "lattice.dev",
+            "v1alpha1",
+            "secretproviders",
+            "kube-system",
+            valid_secret_provider_json(),
+        );
+        let response = validator.validate(&request);
+        assert!(!response.allowed, "system namespace should be denied");
     }
 
     #[test]

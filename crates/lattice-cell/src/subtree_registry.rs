@@ -143,9 +143,13 @@ impl SubtreeRegistry {
     /// Handle incremental subtree update from an agent
     ///
     /// # Arguments
-    /// * `agent_id` - ID of the agent sending this update
+    /// * `agent_id` - ID of the agent sending this update (validated via mTLS cert)
     /// * `added` - Clusters to add
     /// * `removed` - Cluster names to remove
+    ///
+    /// # Security
+    /// Only inserts routes owned by `agent_id`. Rejects attempts to overwrite
+    /// routes owned by other agents or the self route, preventing route hijacking.
     pub async fn handle_delta(
         &self,
         agent_id: &str,
@@ -154,9 +158,8 @@ impl SubtreeRegistry {
     ) {
         let mut routes = self.routes.write().await;
 
-        // Remove clusters
+        // Remove clusters — only if routed via this agent
         for name in removed {
-            // Only remove if it was routed via this agent
             if routes
                 .get(&name)
                 .map(|r| r.agent_id.as_deref() == Some(agent_id))
@@ -166,15 +169,42 @@ impl SubtreeRegistry {
             }
         }
 
-        // Add clusters
+        // Add clusters — only if no existing route from a different agent
         for cluster in added {
+            let cluster_name = cluster.name.clone();
+
+            // Reject attempts to overwrite the self route
+            if cluster_name == self.cluster_name {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    cluster = %cluster_name,
+                    "Agent attempted to register a route for the cell itself — rejected"
+                );
+                continue;
+            }
+
+            // Reject attempts to overwrite routes owned by other agents
+            if let Some(existing) = routes.get(&cluster_name) {
+                if let Some(ref existing_agent) = existing.agent_id {
+                    if existing_agent != agent_id && existing.connected {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            existing_agent = %existing_agent,
+                            cluster = %cluster_name,
+                            "Agent attempted to hijack route owned by another agent — rejected"
+                        );
+                        continue;
+                    }
+                }
+            }
+
             let route = RouteInfo {
                 agent_id: Some(agent_id.to_string()),
                 is_self: false,
                 connected: true,
                 cluster,
             };
-            routes.insert(route.cluster.name.clone(), route);
+            routes.insert(cluster_name, route);
         }
     }
 
@@ -347,6 +377,80 @@ mod tests {
 
         assert!(!registry.contains("cluster-1").await);
         assert!(registry.contains("cluster-2").await);
+    }
+
+    #[tokio::test]
+    async fn test_delta_rejects_self_route_hijack() {
+        let registry = SubtreeRegistry::new("parent".to_string());
+
+        // Try to hijack the self route via delta
+        let added = vec![ClusterInfo {
+            name: "parent".to_string(),
+            parent: "".to_string(),
+            phase: "Ready".to_string(),
+            labels: HashMap::new(),
+        }];
+        registry.handle_delta("agent-1", added, vec![]).await;
+
+        // Self route should be unchanged
+        let route = registry.get_route("parent").await.unwrap();
+        assert!(route.is_self);
+        assert!(route.agent_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delta_rejects_cross_agent_route_hijack() {
+        let registry = SubtreeRegistry::new("parent".to_string());
+
+        // Agent-1 registers a cluster
+        let clusters = vec![ClusterInfo {
+            name: "child-1".to_string(),
+            parent: "parent".to_string(),
+            phase: "Ready".to_string(),
+            labels: HashMap::new(),
+        }];
+        registry.handle_full_sync("agent-1", clusters).await;
+
+        // Agent-2 tries to hijack child-1's route
+        let hijack = vec![ClusterInfo {
+            name: "child-1".to_string(),
+            parent: "parent".to_string(),
+            phase: "Ready".to_string(),
+            labels: HashMap::new(),
+        }];
+        registry.handle_delta("agent-2", hijack, vec![]).await;
+
+        // Route should still belong to agent-1
+        let route = registry.get_route("child-1").await.unwrap();
+        assert_eq!(route.agent_id, Some("agent-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_delta_allows_takeover_of_disconnected_route() {
+        let registry = SubtreeRegistry::new("parent".to_string());
+
+        // Agent-1 registers a cluster then disconnects
+        let clusters = vec![ClusterInfo {
+            name: "child-1".to_string(),
+            parent: "parent".to_string(),
+            phase: "Ready".to_string(),
+            labels: HashMap::new(),
+        }];
+        registry.handle_full_sync("agent-1", clusters).await;
+        registry.handle_agent_disconnect("agent-1").await;
+
+        // Agent-2 can take over a disconnected route
+        let added = vec![ClusterInfo {
+            name: "child-1".to_string(),
+            parent: "parent".to_string(),
+            phase: "Ready".to_string(),
+            labels: HashMap::new(),
+        }];
+        registry.handle_delta("agent-2", added, vec![]).await;
+
+        let route = registry.get_route("child-1").await.unwrap();
+        assert_eq!(route.agent_id, Some("agent-2".to_string()));
+        assert!(route.connected);
     }
 
     #[tokio::test]

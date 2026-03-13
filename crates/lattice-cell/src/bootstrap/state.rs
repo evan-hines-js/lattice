@@ -29,6 +29,9 @@ use super::types::{
     BootstrapBundleConfig, BootstrapResponse, ClusterRegistration, ManifestGenerator,
 };
 
+/// CSR token TTL — CSR must be signed within this window after bootstrap
+const CSR_TOKEN_TTL: Duration = Duration::from_secs(600);
+
 /// Cluster info stored in bootstrap state
 #[derive(Clone, Debug)]
 pub struct ClusterBootstrapInfo {
@@ -40,8 +43,8 @@ pub struct ClusterBootstrapInfo {
     pub ca_certificate: String,
     /// The LatticeCluster CRD manifest (JSON) to apply on the workload cluster
     pub cluster_manifest: String,
-    /// The bootstrap token (base64 string, zeroized on drop)
-    pub token: zeroize::Zeroizing<String>,
+    /// SHA-256 hash of the bootstrap token (raw token never stored)
+    pub token_hash: String,
     /// When the token was created
     pub token_created: Instant,
     /// Whether the token has been used
@@ -56,10 +59,14 @@ pub struct ClusterBootstrapInfo {
     pub k8s_version: String,
     /// Whether any worker pool has autoscaling enabled (min/max set)
     pub autoscaling_enabled: bool,
-    /// One-time CSR token (generated when bootstrap token is consumed)
-    pub csr_token: Option<zeroize::Zeroizing<String>>,
+    /// SHA-256 hash of the one-time CSR token (raw token never stored)
+    pub csr_token_hash: Option<String>,
+    /// When the CSR token was created (for TTL enforcement)
+    pub csr_token_created: Option<Instant>,
     /// Whether the CSR token has been used
     pub csr_token_used: bool,
+    /// Raw CSR token (held temporarily until bootstrap response is sent, then cleared)
+    pub csr_token_raw: Option<zeroize::Zeroizing<String>>,
 }
 
 /// Bootstrap endpoint state
@@ -129,48 +136,77 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     /// it returns the existing token.
     ///
     /// Pass `existing_token` to reuse a token from a previous session (recovery).
+    /// Pass `recovery_csr_hash` to restore a persisted CSR token hash (H4 restart survival).
+    ///
+    /// Uses DashMap's `entry` API to atomically check-and-insert, eliminating
+    /// the TOCTOU race between get() and insert() that could destroy a CSR
+    /// token if a concurrent operation removes the entry between the two calls.
     pub async fn register_cluster(
         &self,
         registration: ClusterRegistration,
         existing_token: Option<&str>,
+        recovery_csr_hash: Option<String>,
     ) -> BootstrapToken {
         let cluster_id = registration.cluster_id.clone();
 
-        // Fast path: check in-memory cache first
-        if let Some(entry) = self.clusters.get(&cluster_id) {
-            debug!(cluster = %cluster_id, "Cluster already registered (in memory), reusing existing token");
-            return BootstrapToken::from_string(&entry.token)
-                .expect("stored token should be valid");
+        // Atomic check-and-insert using entry API — holds write lock for the
+        // duration, preventing concurrent removal between check and insert.
+        let entry = self.clusters.entry(cluster_id.clone());
+        match entry {
+            dashmap::Entry::Occupied(mut existing) => {
+                // Cluster already registered — generate a fresh token and update
+                // the stored hash so re-registration is idempotent. This handles
+                // controller re-reconciliation and operator restart recovery.
+                debug!(cluster = %cluster_id, "Cluster already registered (in memory), rotating token");
+                let token = match existing_token {
+                    Some(t) => BootstrapToken::from_string(t).unwrap_or_else(|_| {
+                        warn!(cluster = %cluster_id, "Invalid existing token, generating new one");
+                        BootstrapToken::generate()
+                    }),
+                    None => BootstrapToken::generate(),
+                };
+                let info = existing.get_mut();
+                if !info.token_used {
+                    info.token_hash = token.hash();
+                    info.token_created = Instant::now();
+                }
+                token
+            }
+            dashmap::Entry::Vacant(vacant) => {
+                let token = match existing_token {
+                    Some(t) => BootstrapToken::from_string(t).unwrap_or_else(|_| {
+                        warn!(cluster = %cluster_id, "Invalid existing token, generating new one");
+                        BootstrapToken::generate()
+                    }),
+                    None => BootstrapToken::generate(),
+                };
+
+                // If recovering with a CSR hash, mark bootstrap token as already used
+                let token_used = recovery_csr_hash.is_some();
+
+                let info = ClusterBootstrapInfo {
+                    cluster_id: cluster_id.clone(),
+                    cell_endpoint: registration.cell_endpoint,
+                    ca_certificate: registration.ca_certificate,
+                    cluster_manifest: registration.cluster_manifest,
+                    token_hash: token.hash(),
+                    token_created: Instant::now(),
+                    token_used,
+                    lb_cidr: registration.lb_cidr,
+                    provider: registration.provider,
+                    bootstrap: registration.bootstrap,
+                    k8s_version: registration.k8s_version,
+                    autoscaling_enabled: registration.autoscaling_enabled,
+                    csr_token_hash: recovery_csr_hash,
+                    csr_token_created: if token_used { Some(Instant::now()) } else { None },
+                    csr_token_used: false,
+                    csr_token_raw: None,
+                };
+
+                vacant.insert(info);
+                token
+            }
         }
-
-        // Use existing token if provided, otherwise generate new one
-        let token = match existing_token {
-            Some(t) => BootstrapToken::from_string(t).unwrap_or_else(|_| {
-                warn!(cluster = %cluster_id, "Invalid existing token, generating new one");
-                BootstrapToken::generate()
-            }),
-            None => BootstrapToken::generate(),
-        };
-
-        let info = ClusterBootstrapInfo {
-            cluster_id: cluster_id.clone(),
-            cell_endpoint: registration.cell_endpoint,
-            ca_certificate: registration.ca_certificate,
-            cluster_manifest: registration.cluster_manifest,
-            token: zeroize::Zeroizing::new(token.as_str().to_string()),
-            token_created: Instant::now(),
-            token_used: false,
-            lb_cidr: registration.lb_cidr,
-            provider: registration.provider,
-            bootstrap: registration.bootstrap,
-            k8s_version: registration.k8s_version,
-            autoscaling_enabled: registration.autoscaling_enabled,
-            csr_token: None,
-            csr_token_used: false,
-        };
-
-        self.clusters.insert(cluster_id, info);
-        token
     }
 
     /// Validate and consume a bootstrap token
@@ -191,7 +227,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
         // Atomically validate AND mark as used while holding the mutable reference.
         // This eliminates the TOCTOU window between check and consumption.
-        let info = {
+        let (info, csr_token_hash) = {
             let mut entry = self
                 .clusters
                 .get_mut(cluster_id)
@@ -209,8 +245,14 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 return Err(BootstrapError::InvalidToken);
             }
 
-            // Constant-time token comparison to prevent timing side-channel attacks
-            if token.as_bytes().ct_eq(info.token.as_bytes()).unwrap_u8() != 1 {
+            // Parse the provided token and compute its hash for comparison
+            let provided_token = BootstrapToken::from_string(token)
+                .map_err(|_| BootstrapError::InvalidToken)?;
+            let provided_hash = provided_token.hash();
+
+            // Constant-time hash comparison to prevent timing side-channel attacks.
+            // We compare hashes (not raw tokens) because raw tokens are never stored.
+            if provided_hash.as_bytes().ct_eq(info.token_hash.as_bytes()).unwrap_u8() != 1 {
                 return Err(BootstrapError::InvalidToken);
             }
 
@@ -218,26 +260,31 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             info.token_used = true;
 
             // Generate a one-time CSR token for authenticating the subsequent CSR request.
-            // This prevents an attacker who didn't consume the bootstrap token from
-            // requesting a certificate just by knowing the cluster ID.
+            // Store only the hash; the raw token is held temporarily for the response.
             let csr_token = BootstrapToken::generate();
-            info.csr_token = Some(zeroize::Zeroizing::new(csr_token.as_str().to_string()));
+            let csr_hash = csr_token.hash();
+            info.csr_token_hash = Some(csr_hash.clone());
+            info.csr_token_created = Some(Instant::now());
+            info.csr_token_raw = Some(zeroize::Zeroizing::new(csr_token.as_str().to_string()));
 
-            info.clone()
+            (info.clone(), csr_hash)
         };
 
-        // Update CRD status to set bootstrap_complete AFTER marking token as used
-        if let Err(e) = self.set_bootstrap_complete(cluster_id).await {
-            warn!(cluster_id = %cluster_id, error = %e, "Failed to set bootstrap_complete in CRD status");
-            // Don't fail the request - the cluster can still bootstrap, and we'll
-            // re-register it on operator restart based on phase
+        // Persist bootstrap_complete AND csr_token_hash to CRD status.
+        // This ensures the CSR token survives operator restarts (H4) and
+        // makes consumption atomic with persistence (L1).
+        if let Err(e) = self.persist_bootstrap_status(cluster_id, &csr_token_hash).await {
+            warn!(cluster_id = %cluster_id, error = %e, "Failed to persist bootstrap status to CRD");
         }
 
         Ok(info)
     }
 
-    /// Set bootstrap_complete in the cluster's CRD status
-    async fn set_bootstrap_complete(&self, cluster_id: &str) -> Result<(), kube::Error> {
+    /// Persist bootstrap_complete and csr_token_hash to the cluster's CRD status
+    ///
+    /// Persisting the CSR token hash ensures it survives operator restarts (H4)
+    /// and makes token consumption atomic with persistence (L1).
+    async fn persist_bootstrap_status(&self, cluster_id: &str, csr_token_hash: &str) -> Result<(), kube::Error> {
         let Some(ref client) = self.kube_client else {
             // No client (tests) - skip CRD update
             return Ok(());
@@ -249,6 +296,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         let cluster = api.get(cluster_id).await?;
         let mut status = cluster.status.unwrap_or_default();
         status.bootstrap_complete = true;
+        status.csr_token_hash = Some(csr_token_hash.to_string());
 
         let patch = serde_json::json!({
             "status": status
@@ -261,7 +309,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         )
         .await?;
 
-        info!(cluster_id = %cluster_id, "Set bootstrap_complete in CRD status");
+        info!(cluster_id = %cluster_id, "Persisted bootstrap_complete and csr_token_hash to CRD status");
         Ok(())
     }
 
@@ -307,7 +355,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         ]);
 
         // Include the CSR token so the agent can authenticate its CSR request
-        if let Some(ref csr_token) = info.csr_token {
+        if let Some(ref csr_token) = info.csr_token_raw {
             parent_config_data.insert(
                 PARENT_CONFIG_CSR_TOKEN_KEY.to_string(),
                 csr_token.as_str().to_string(),
@@ -367,9 +415,9 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 ));
             }
 
-            // CSR token must exist (generated during validate_and_consume)
-            let expected_token = info
-                .csr_token
+            // CSR token hash must exist (generated during validate_and_consume)
+            let expected_hash = info
+                .csr_token_hash
                 .as_ref()
                 .ok_or(BootstrapError::InvalidCsrToken)?;
 
@@ -378,10 +426,22 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 return Err(BootstrapError::CsrTokenAlreadyUsed);
             }
 
-            // Constant-time comparison
-            if csr_token
+            // Check CSR token TTL
+            if let Some(created) = info.csr_token_created {
+                if created.elapsed() > CSR_TOKEN_TTL {
+                    return Err(BootstrapError::InvalidCsrToken);
+                }
+            }
+
+            // Parse the provided CSR token and compute its hash
+            let provided_token = BootstrapToken::from_string(csr_token)
+                .map_err(|_| BootstrapError::InvalidCsrToken)?;
+            let provided_hash = provided_token.hash();
+
+            // Constant-time hash comparison
+            if provided_hash
                 .as_bytes()
-                .ct_eq(expected_token.as_bytes())
+                .ct_eq(expected_hash.as_bytes())
                 .unwrap_u8()
                 != 1
             {
@@ -558,9 +618,9 @@ mod tests {
 
     // CSR signing tests
 
-    /// Helper: extract CSR token from cluster info after bootstrap
+    /// Helper: extract raw CSR token from cluster info after bootstrap
     fn csr_token_from_info(info: &ClusterBootstrapInfo) -> &str {
-        info.csr_token
+        info.csr_token_raw
             .as_ref()
             .expect("CSR token should be set after bootstrap")
             .as_str()
@@ -1066,7 +1126,7 @@ mod tests {
                 cell_endpoint: "cell:8443:50051".to_string(),
                 ca_certificate: "ca-cert".to_string(),
                 cluster_manifest,
-                token: zeroize::Zeroizing::new("test-token".to_string()),
+                token_hash: "test-token-hash".to_string(),
                 token_created: std::time::Instant::now(),
                 token_used: true,
                 lb_cidr: None,
@@ -1075,8 +1135,10 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
-                csr_token: None,
+                csr_token_hash: None,
+                csr_token_created: None,
                 csr_token_used: false,
+                csr_token_raw: None,
             },
         );
 
@@ -1133,7 +1195,7 @@ mod tests {
                 cell_endpoint: "cell:8443:50051".to_string(),
                 ca_certificate: "ca-cert".to_string(),
                 cluster_manifest,
-                token: zeroize::Zeroizing::new("test-token".to_string()),
+                token_hash: "test-token-hash".to_string(),
                 token_created: std::time::Instant::now(),
                 token_used: true,
                 lb_cidr: None,
@@ -1142,8 +1204,10 @@ mod tests {
                 bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
-                csr_token: None,
+                csr_token_hash: None,
+                csr_token_created: None,
                 csr_token_used: false,
+                csr_token_raw: None,
             },
         );
 

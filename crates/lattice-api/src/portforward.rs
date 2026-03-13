@@ -12,6 +12,11 @@ use axum::response::Response;
 use tracing::{debug, error, info, instrument};
 
 use std::sync::OnceLock;
+use std::time::Duration;
+
+/// Maximum idle time for a portforward session before it's terminated.
+/// Prevents slowloris-style resource exhaustion via idle connections.
+const PORTFORWARD_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 use crate::error::Error;
 use crate::k8s_forwarder::{FileTokenReader, TokenReader, CA_CERT_PATH};
@@ -161,7 +166,7 @@ async fn proxy_upgrade_to_k8s(
         .await
         .map_err(|e| Error::Internal(format!("Failed to upgrade upstream connection: {}", e)))?;
 
-    // Spawn a task to bridge the two upgraded connections
+    // Spawn a task to bridge the two upgraded connections with idle timeout
     tokio::spawn(async move {
         match incoming_upgrade.await {
             Ok(incoming_upgraded) => {
@@ -170,12 +175,22 @@ async fn proxy_upgrade_to_k8s(
                 // reqwest::Upgraded already implements tokio AsyncRead/Write
                 let mut upstream = upstream_upgraded;
 
-                match tokio::io::copy_bidirectional(&mut incoming, &mut upstream).await {
-                    Ok((from_client, from_server)) => {
+                // Apply idle timeout to prevent resource exhaustion via
+                // idle connections (slowloris defense)
+                match tokio::time::timeout(
+                    PORTFORWARD_IDLE_TIMEOUT,
+                    tokio::io::copy_bidirectional(&mut incoming, &mut upstream),
+                )
+                .await
+                {
+                    Ok(Ok((from_client, from_server))) => {
                         info!(from_client, from_server, "Portforward session ended");
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         debug!(error = %e, "Portforward bridge error");
+                    }
+                    Err(_) => {
+                        info!("Portforward session timed out after {:?} idle", PORTFORWARD_IDLE_TIMEOUT);
                     }
                 }
             }

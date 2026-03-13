@@ -396,9 +396,42 @@ impl OidcValidator {
         claims.groups.clone().into_vec()
     }
 
-    /// Get decoding key from JWKS cache, refreshing if needed
+    /// Get decoding key from JWKS cache, refreshing if needed.
+    ///
+    /// On a cache miss for an unknown `kid`, triggers a refresh before failing.
+    /// This handles legitimate key rotation where the IdP starts signing with a
+    /// new key before our cache TTL expires, preventing auth outages.
     async fn get_decoding_key(&self, kid: Option<&str>) -> Result<DecodingKey> {
-        // Check if cache needs refresh
+        // Refresh if cache is empty or expired
+        self.ensure_jwks_fresh().await?;
+
+        // Try to find the key
+        if let Some(key) = self.lookup_key(kid).await {
+            return Ok(key);
+        }
+
+        // Key not found — could be a legitimate key rotation. Force refresh
+        // once and retry, unless we just refreshed (prevents refresh storms).
+        debug!(kid = ?kid, "Key not found in JWKS cache, forcing refresh for possible key rotation");
+        self.force_refresh_jwks().await?;
+
+        self.lookup_key(kid).await.ok_or_else(|| {
+            Error::Unauthorized(format!("No matching key found in JWKS for kid: {:?}", kid))
+        })
+    }
+
+    /// Look up a key in the current JWKS cache
+    async fn lookup_key(&self, kid: Option<&str>) -> Option<DecodingKey> {
+        let cache = self.jwks_cache.read().await;
+        let cache = cache.as_ref()?;
+        match kid {
+            Some(kid) => cache.keys.get(kid).cloned(),
+            None => cache.keys.values().next().cloned(),
+        }
+    }
+
+    /// Ensure JWKS cache is populated and not expired
+    async fn ensure_jwks_fresh(&self) -> Result<()> {
         let needs_refresh = {
             let cache = self.jwks_cache.read().await;
             match &*cache {
@@ -408,36 +441,27 @@ impl OidcValidator {
         };
 
         if needs_refresh {
-            // Serialize refresh attempts to prevent thundering herd
-            let _guard = self.refresh_lock.lock().await;
-            // Re-check after acquiring lock — another task may have refreshed already
-            let still_needs_refresh = {
-                let cache = self.jwks_cache.read().await;
-                match &*cache {
-                    None => true,
-                    Some(c) => c.last_refresh.elapsed() > self.config.jwks_refresh_interval,
-                }
-            };
-            if still_needs_refresh {
-                self.refresh_jwks().await?;
-            }
+            self.force_refresh_jwks().await?;
         }
+        Ok(())
+    }
 
-        // Get key from cache
-        let cache = self.jwks_cache.read().await;
-        let cache = cache
-            .as_ref()
-            .ok_or_else(|| Error::Internal("JWKS cache empty after refresh".into()))?;
-
-        // Find key by kid, or use first key if no kid specified
-        let key = match kid {
-            Some(kid) => cache.keys.get(kid).cloned(),
-            None => cache.keys.values().next().cloned(),
+    /// Force a JWKS refresh, serializing concurrent attempts
+    async fn force_refresh_jwks(&self) -> Result<()> {
+        let _guard = self.refresh_lock.lock().await;
+        // Re-check after acquiring lock — another task may have refreshed already.
+        // Use a short threshold (5s) to avoid re-fetching if we literally just did.
+        let still_needs = {
+            let cache = self.jwks_cache.read().await;
+            match &*cache {
+                None => true,
+                Some(c) => c.last_refresh.elapsed() > Duration::from_secs(5),
+            }
         };
-
-        key.ok_or_else(|| {
-            Error::Unauthorized(format!("No matching key found in JWKS for kid: {:?}", kid))
-        })
+        if still_needs {
+            self.refresh_jwks().await?;
+        }
+        Ok(())
     }
 
     /// Refresh JWKS from the issuer

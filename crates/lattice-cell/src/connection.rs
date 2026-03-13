@@ -205,9 +205,11 @@ pub struct AgentRegistry {
     /// Clusters with teardown in progress (prevents concurrent teardown spawns).
     /// Stores the time the teardown started; guards older than TEARDOWN_GUARD_TTL are stale.
     teardown_in_progress: DashMap<String, Instant>,
-    /// Pending batch acks keyed by request_id (CellCommand.command_id)
+    /// Pending batch acks keyed by request_id (CellCommand.command_id).
+    /// Bounded by MAX_PENDING_ACKS to prevent unbounded growth if agent disconnects mid-pivot.
     pending_batch_acks: DashMap<String, oneshot::Sender<BatchAck>>,
-    /// Pending complete acks keyed by request_id (CellCommand.command_id)
+    /// Pending complete acks keyed by request_id (CellCommand.command_id).
+    /// Bounded by MAX_PENDING_ACKS to prevent unbounded growth if agent disconnects mid-pivot.
     pending_complete_acks: DashMap<String, oneshot::Sender<CompleteAck>>,
     /// Pending K8s API proxy responses keyed by request_id
     /// Uses mpsc::Sender to support streaming responses (watches).
@@ -234,6 +236,10 @@ const TEARDOWN_GUARD_TTL: Duration = Duration::from_secs(600);
 /// Heartbeat staleness threshold (3x the 30s agent heartbeat interval).
 /// Connected agents that haven't sent a heartbeat within this window are considered stale.
 pub const HEARTBEAT_STALE_THRESHOLD: Duration = Duration::from_secs(90);
+
+/// Maximum number of pending batch/complete acks.
+/// Prevents unbounded memory growth if agents disconnect mid-pivot.
+const MAX_PENDING_ACKS: usize = 1000;
 
 /// TTL for pending K8s API responses and exec data in the cache.
 /// Entries older than this are evicted to prevent unbounded memory growth
@@ -657,6 +663,13 @@ impl AgentRegistry {
     ///
     /// The request_id should be the CellCommand.command_id.
     pub fn register_pending_batch_ack(&self, request_id: &str, sender: oneshot::Sender<BatchAck>) {
+        if self.pending_batch_acks.len() >= MAX_PENDING_ACKS {
+            warn!(request_id = %request_id, "Pending batch ack map at capacity ({}), dropping oldest", MAX_PENDING_ACKS);
+            // Drop a random entry to make room
+            if let Some(entry) = self.pending_batch_acks.iter().next() {
+                self.pending_batch_acks.remove(entry.key());
+            }
+        }
         self.pending_batch_acks
             .insert(request_id.to_string(), sender);
         debug!(request_id = %request_id, "Registered pending batch ack");
@@ -664,9 +677,7 @@ impl AgentRegistry {
 
     /// Take the pending batch ack sender
     pub fn take_pending_batch_ack(&self, request_id: &str) -> Option<oneshot::Sender<BatchAck>> {
-        self.pending_batch_acks
-            .remove(request_id)
-            .map(|(_, sender)| sender)
+        self.pending_batch_acks.remove(request_id).map(|(_, v)| v)
     }
 
     /// Register a pending complete ack channel
@@ -675,6 +686,12 @@ impl AgentRegistry {
         request_id: &str,
         sender: oneshot::Sender<CompleteAck>,
     ) {
+        if self.pending_complete_acks.len() >= MAX_PENDING_ACKS {
+            warn!(request_id = %request_id, "Pending complete ack map at capacity ({}), dropping oldest", MAX_PENDING_ACKS);
+            if let Some(entry) = self.pending_complete_acks.iter().next() {
+                self.pending_complete_acks.remove(entry.key());
+            }
+        }
         self.pending_complete_acks
             .insert(request_id.to_string(), sender);
         debug!(request_id = %request_id, "Registered pending complete ack");
@@ -685,9 +702,7 @@ impl AgentRegistry {
         &self,
         request_id: &str,
     ) -> Option<oneshot::Sender<CompleteAck>> {
-        self.pending_complete_acks
-            .remove(request_id)
-            .map(|(_, sender)| sender)
+        self.pending_complete_acks.remove(request_id).map(|(_, v)| v)
     }
 
     // =========================================================================

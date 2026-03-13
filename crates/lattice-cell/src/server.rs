@@ -35,7 +35,8 @@ use crate::kubeconfig::patch_kubeconfig_for_proxy;
 use crate::state_sync;
 use crate::subtree_registry::{ClusterInfo, SubtreeRegistry};
 use crate::{AgentConnection, SharedAgentRegistry};
-use lattice_infra::ServerMtlsConfig;
+use lattice_infra::{extract_cluster_id_from_cert, ServerMtlsConfig};
+use tonic::transport::server::TlsConnectInfo;
 
 /// Shared reference to SubtreeRegistry
 pub type SharedSubtreeRegistry = std::sync::Arc<SubtreeRegistry>;
@@ -710,6 +711,37 @@ impl AgentServer {
     }
 }
 
+/// Extract the cluster ID from the mTLS client certificate presented during TLS handshake.
+///
+/// The certificate CN is in the format "lattice-agent-{cluster_id}".
+/// This is the cryptographic source of truth for agent identity — it cannot be spoofed
+/// because the certificate was signed by our CA during bootstrap.
+fn extract_cluster_id_from_request<T>(
+    request: &Request<T>,
+) -> Result<String, Status> {
+    let tls_info = request
+        .extensions()
+        .get::<TlsConnectInfo<tonic::transport::server::TcpConnectInfo>>()
+        .ok_or_else(|| {
+            Status::unauthenticated("No TLS connection info — mTLS is required")
+        })?;
+
+    let certs = tls_info.peer_certs().ok_or_else(|| {
+        Status::unauthenticated("No client certificate presented — mTLS is required")
+    })?;
+
+    let cert_der = certs.first().ok_or_else(|| {
+        Status::unauthenticated("Empty client certificate chain")
+    })?;
+
+    extract_cluster_id_from_cert(cert_der).map_err(|e| {
+        Status::unauthenticated(format!(
+            "Failed to extract cluster ID from certificate: {}",
+            e
+        ))
+    })
+}
+
 #[tonic::async_trait]
 impl LatticeAgent for AgentServer {
     type StreamMessagesStream =
@@ -721,7 +753,17 @@ impl LatticeAgent for AgentServer {
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::StreamMessagesStream>, Status> {
         let remote_addr = request.remote_addr();
-        info!(?remote_addr, "New agent connection");
+
+        // Extract cluster ID from mTLS client certificate CN.
+        // This is the cryptographic identity — message-level cluster_name
+        // is validated against this to prevent impersonation.
+        let cert_cluster_id = extract_cluster_id_from_request(&request)?;
+
+        info!(
+            ?remote_addr,
+            cert_cluster_id = %cert_cluster_id,
+            "New agent connection (mTLS verified)"
+        );
 
         let mut inbound = request.into_inner();
 
@@ -736,17 +778,21 @@ impl LatticeAgent for AgentServer {
 
         // Spawn task to handle incoming messages
         tokio::spawn(async move {
-            let mut cluster_name: Option<String> = None;
-
             while let Some(result) = inbound.next().await {
                 match result {
                     Ok(msg) => {
-                        // Track the cluster name for cleanup
-                        if cluster_name.is_none() {
-                            cluster_name = Some(msg.cluster_name.clone());
+                        // Enforce that every message's cluster_name matches the
+                        // mTLS certificate CN. A compromised agent cannot claim
+                        // to be a different cluster.
+                        if msg.cluster_name != cert_cluster_id {
+                            error!(
+                                cert_cluster_id = %cert_cluster_id,
+                                msg_cluster_name = %msg.cluster_name,
+                                "Cluster name mismatch: message claims different identity than mTLS certificate"
+                            );
+                            break;
                         }
 
-                        // Handle message directly using standalone function (no temp object)
                         process_agent_message(
                             registry.clone(),
                             subtree_registry.clone(),
@@ -764,11 +810,11 @@ impl LatticeAgent for AgentServer {
             }
 
             // Cleanup on disconnect
-            if let Some(name) = cluster_name {
-                info!(cluster = %name, "Agent disconnected");
-                registry.unregister(&name);
-                subtree_registry.handle_agent_disconnect(&name).await;
-            }
+            info!(cluster = %cert_cluster_id, "Agent disconnected");
+            registry.unregister(&cert_cluster_id);
+            subtree_registry
+                .handle_agent_disconnect(&cert_cluster_id)
+                .await;
         });
 
         // Return stream of commands to send to agent

@@ -1,8 +1,6 @@
 //! Volume access authorization
 //!
 //! Evaluates Cedar policies to authorize a service's access to shared volumes.
-//! Permissive by default: no policies = all volume access allowed (owner consent
-//! is the primary gate, Cedar is the secondary layer).
 
 use cedar_policy::{Context, Decision, Entities, EntityUid, PolicySet};
 
@@ -21,6 +19,13 @@ pub struct VolumeAuthzRequest {
     pub namespace: String,
     /// Volume references to authorize: (resource_name, volume_namespace, volume_id)
     pub volume_refs: Vec<(String, String, String)>,
+    /// When true, an explicit `permit` policy is required (default-deny).
+    /// When false, no-policies-matched is treated as allowed (permissive default).
+    ///
+    /// Use `require_explicit_permit = false` when owner consent has already been
+    /// verified as a first authorization layer. Use `true` when Cedar is the sole
+    /// authorization gate.
+    pub require_explicit_permit: bool,
 }
 
 /// Result of authorizing a service's volume access
@@ -54,18 +59,14 @@ impl PolicyEngine {
     /// Authorize a service's volume access.
     ///
     /// Evaluates all volume references in a single call (batch).
-    /// **Permissive by default**: no policies = all access allowed.
-    /// Only an explicit `forbid` policy will deny access.
+    /// Behavior depends on `request.require_explicit_permit`:
+    /// - `false` (permissive): no policies = allowed (owner consent is the primary gate)
+    /// - `true` (strict): no policies = denied (Cedar is the sole gate)
     ///
     /// Reads the `RwLock<PolicySet>` once for the batch, then evaluates each
     /// volume synchronously against the same snapshot.
     pub async fn authorize_volumes(&self, request: &VolumeAuthzRequest) -> VolumeAuthzResult {
         let policy_set = self.read_policy_set().await;
-
-        // Note: unlike secrets, volume access is permissive by default.
-        // If Cedar returns Deny but no policies matched (no determining policies),
-        // that means no one wrote a volume policy — treat as allowed.
-        // Only an explicit `forbid` policy will deny access.
 
         let action_uid = match build_entity_uid("Action", "AccessVolume") {
             Ok(uid) => uid,
@@ -86,6 +87,7 @@ impl PolicyEngine {
                 volume_id,
                 action_uid: &action_uid,
                 policy_set: &policy_set,
+                require_explicit_permit: request.require_explicit_permit,
             };
             match eval.evaluate() {
                 Ok(()) => {} // allowed
@@ -107,6 +109,7 @@ struct VolumeEvalContext<'a> {
     volume_id: &'a str,
     action_uid: &'a EntityUid,
     policy_set: &'a PolicySet,
+    require_explicit_permit: bool,
 }
 
 impl VolumeEvalContext<'_> {
@@ -148,16 +151,25 @@ impl VolumeEvalContext<'_> {
                 Ok(())
             }
             Decision::Deny => {
-                // Permissive by default: if no policies matched (no determining
-                // policies), no one wrote a volume policy — treat as allowed.
-                // Only an explicit `forbid` triggers denial.
-                if response.diagnostics().reason().next().is_some() {
+                let has_determining_policies =
+                    response.diagnostics().reason().next().is_some();
+
+                if has_determining_policies {
+                    // Explicit forbid policy matched — always deny
                     lattice_common::metrics::record_cedar_decision(
                         lattice_common::metrics::AuthDecision::Deny,
                         "AccessVolume",
                     );
                     Err(self.denial(DenialReason::ExplicitForbid))
+                } else if self.require_explicit_permit {
+                    // No policies matched and we require explicit permit — deny
+                    lattice_common::metrics::record_cedar_decision(
+                        lattice_common::metrics::AuthDecision::Deny,
+                        "AccessVolume",
+                    );
+                    Err(self.denial(DenialReason::NoPermitPolicy))
                 } else {
+                    // No policies matched, permissive mode — allow
                     Ok(())
                 }
             }
@@ -208,6 +220,23 @@ mod tests {
                 .into_iter()
                 .map(|(name, ns, id)| (name.to_string(), ns.to_string(), id.to_string()))
                 .collect(),
+            require_explicit_permit: false,
+        }
+    }
+
+    fn make_strict_request(
+        namespace: &str,
+        service: &str,
+        refs: Vec<(&str, &str, &str)>,
+    ) -> VolumeAuthzRequest {
+        VolumeAuthzRequest {
+            service_name: service.to_string(),
+            namespace: namespace.to_string(),
+            volume_refs: refs
+                .into_iter()
+                .map(|(name, ns, id)| (name.to_string(), ns.to_string(), id.to_string()))
+                .collect(),
+            require_explicit_permit: true,
         }
     }
 
@@ -216,7 +245,7 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
-    async fn test_no_policies_allows_all() {
+    async fn test_no_policies_allows_all_permissive() {
         let engine = PolicyEngine::new();
         let request = make_request(
             "media",
@@ -232,6 +261,48 @@ mod tests {
     async fn test_empty_refs_always_allowed() {
         let engine = PolicyEngine::new();
         let request = make_request("any", "any", vec![]);
+
+        let result = engine.authorize_volumes(&request).await;
+        assert!(result.is_allowed());
+    }
+
+    // ========================================================================
+    // Strict Mode (require_explicit_permit) Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_no_policies_denies_in_strict_mode() {
+        let engine = PolicyEngine::new();
+        let request = make_strict_request(
+            "media",
+            "plex",
+            vec![("downloads", "media", "media-storage")],
+        );
+
+        let result = engine.authorize_volumes(&request).await;
+        assert!(!result.is_allowed());
+        assert_eq!(result.denied.len(), 1);
+        assert_eq!(result.denied[0].reason, DenialReason::NoPermitPolicy);
+    }
+
+    #[tokio::test]
+    async fn test_explicit_permit_allows_in_strict_mode() {
+        let engine = PolicyEngine::with_policies(
+            r#"
+            permit(
+                principal == Lattice::Service::"media/plex",
+                action == Lattice::Action::"AccessVolume",
+                resource == Lattice::Volume::"media/media-storage"
+            );
+            "#,
+        )
+        .unwrap();
+
+        let request = make_strict_request(
+            "media",
+            "plex",
+            vec![("downloads", "media", "media-storage")],
+        );
 
         let result = engine.authorize_volumes(&request).await;
         assert!(result.is_allowed());

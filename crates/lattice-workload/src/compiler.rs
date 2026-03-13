@@ -217,8 +217,13 @@ impl<'a> WorkloadCompiler<'a> {
                     .await?;
                 }
                 VolumeAuthorizationMode::CedarOnly => {
-                    // Skip owner consent, only Cedar policy check
-                    // (volumes authorization without graph)
+                    crate::authorization::volumes::authorize_volumes_cedar_only(
+                        self.cedar,
+                        self.name,
+                        self.namespace,
+                        self.workload,
+                    )
+                    .await?;
                 }
             }
         }

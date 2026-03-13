@@ -339,6 +339,8 @@ pub const LABEL_NAME: &str = "app.kubernetes.io/name";
 pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 /// Standard managed-by label value for Lattice-managed resources
 pub const LABEL_MANAGED_BY_LATTICE: &str = "lattice";
+/// Label identifying the owning LatticeService (for cleanup on policy revocation)
+pub const LABEL_SERVICE_OWNER: &str = "lattice.dev/service";
 /// Label prefix for shared volume co-location (e.g., lattice.io/vol-media-storage)
 pub const LABEL_VOLUME_PREFIX: &str = "lattice.io/vol-";
 

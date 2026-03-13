@@ -6,19 +6,14 @@ use lattice_common::graph::ServiceGraph;
 
 use crate::error::CompilationError;
 
-/// Authorize volume access for shared volume references.
+/// Collect volume references from a workload spec.
 ///
-/// Two-layer authorization:
-/// 1. **Owner consent**: The volume owner must list this service in `allowedConsumers`
-/// 2. **Cedar policy**: If Cedar policies exist, they must permit `AccessVolume`
-pub(crate) async fn authorize_volumes(
-    cedar: &PolicyEngine,
-    graph: &ServiceGraph,
-    name: &str,
+/// Returns `(resource_name, volume_namespace, volume_id)` tuples.
+fn collect_volume_refs(
     namespace: &str,
     workload: &WorkloadSpec,
-) -> Result<(), CompilationError> {
-    let volume_refs: Vec<_> = workload
+) -> Vec<(String, String, String)> {
+    workload
         .resources
         .iter()
         .filter(|(_, r)| r.is_volume_reference())
@@ -27,8 +22,59 @@ pub(crate) async fn authorize_volumes(
             let vol_ns = r.namespace.as_deref().unwrap_or(namespace);
             Some((resource_name.clone(), vol_ns.to_string(), volume_id.clone()))
         })
-        .collect();
+        .collect()
+}
 
+/// Run Cedar policy authorization on volume references.
+///
+/// Returns an error if any volume access is denied by Cedar policy.
+async fn authorize_cedar(
+    cedar: &PolicyEngine,
+    name: &str,
+    namespace: &str,
+    volume_refs: Vec<(String, String, String)>,
+    require_explicit_permit: bool,
+) -> Result<(), CompilationError> {
+    let result = cedar
+        .authorize_volumes(&VolumeAuthzRequest {
+            service_name: name.to_string(),
+            namespace: namespace.to_string(),
+            volume_refs,
+            require_explicit_permit,
+        })
+        .await;
+
+    if !result.is_allowed() {
+        let details = result
+            .denied
+            .iter()
+            .map(|d| {
+                format!(
+                    "'{}' (volume '{}'): {}",
+                    d.resource_name, d.volume_id, d.reason
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(CompilationError::volume_access_denied(details));
+    }
+
+    Ok(())
+}
+
+/// Authorize volume access for shared volume references.
+///
+/// Two-layer authorization:
+/// - **Owner consent**: The volume owner must list this service in `allowedConsumers`
+/// - **Cedar policy**: If Cedar policies exist, they must permit `AccessVolume`
+pub(crate) async fn authorize_volumes(
+    cedar: &PolicyEngine,
+    graph: &ServiceGraph,
+    name: &str,
+    namespace: &str,
+    workload: &WorkloadSpec,
+) -> Result<(), CompilationError> {
+    let volume_refs = collect_volume_refs(namespace, workload);
     if volume_refs.is_empty() {
         return Ok(());
     }
@@ -72,29 +118,26 @@ pub(crate) async fn authorize_volumes(
         return Err(CompilationError::volume_access_denied(denied.join("; ")));
     }
 
-    // Layer 2: Cedar policy authorization
-    let result = cedar
-        .authorize_volumes(&VolumeAuthzRequest {
-            service_name: name.to_string(),
-            namespace: namespace.to_string(),
-            volume_refs,
-        })
-        .await;
+    // Layer 2: Cedar policy authorization (permissive — owner consent is primary gate)
+    authorize_cedar(cedar, name, namespace, volume_refs, false).await
+}
 
-    if !result.is_allowed() {
-        let details = result
-            .denied
-            .iter()
-            .map(|d| {
-                format!(
-                    "'{}' (volume '{}'): {}",
-                    d.resource_name, d.volume_id, d.reason
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(CompilationError::volume_access_denied(details));
+/// Authorize volume access using Cedar policies only (no owner consent check).
+///
+/// Used when the service graph is not available. Cedar policies are the sole
+/// authorization layer — if no policies exist, access is denied by default
+/// (defense in depth: no graph means no owner consent, so Cedar must explicitly permit).
+pub(crate) async fn authorize_volumes_cedar_only(
+    cedar: &PolicyEngine,
+    name: &str,
+    namespace: &str,
+    workload: &WorkloadSpec,
+) -> Result<(), CompilationError> {
+    let volume_refs = collect_volume_refs(namespace, workload);
+    if volume_refs.is_empty() {
+        return Ok(());
     }
 
-    Ok(())
+    // Strict mode — Cedar is the sole authorization gate, require explicit permit
+    authorize_cedar(cedar, name, namespace, volume_refs, true).await
 }

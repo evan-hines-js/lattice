@@ -358,6 +358,13 @@ pub struct LatticeClusterStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_token: Option<String>,
 
+    /// SHA-256 hash of the one-time CSR token (generated when bootstrap is consumed)
+    ///
+    /// Persisted to CRD status so CSR signing survives operator restarts.
+    /// The raw CSR token is never persisted — only sent once in the bootstrap response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csr_token_hash: Option<String>,
+
     /// Health of child clusters connected via agent
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children_health: Vec<ChildClusterHealth>,

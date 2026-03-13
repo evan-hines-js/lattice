@@ -209,6 +209,12 @@ impl SecretsCompiler {
                 external_secret = external_secret.with_secret_type(st);
             }
 
+            // Label with owning service for cleanup on Cedar policy revocation
+            external_secret.metadata.labels.insert(
+                lattice_common::LABEL_SERVICE_OWNER.to_string(),
+                service_name.to_string(),
+            );
+
             output.external_secrets.push(external_secret);
 
             output.secret_refs.insert(

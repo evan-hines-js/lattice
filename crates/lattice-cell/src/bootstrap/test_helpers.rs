@@ -75,6 +75,7 @@ pub async fn register_test_cluster<G: ManifestGenerator>(
                 autoscaling_enabled: false,
             },
             None,
+            None,
         )
         .await
 }

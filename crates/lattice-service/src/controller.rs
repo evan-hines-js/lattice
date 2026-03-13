@@ -100,6 +100,18 @@ pub trait ServiceKubeClient: Send + Sync {
     /// Check if a LatticeMeshMember is Ready (policies fully applied, including ServiceEntries)
     async fn is_mesh_member_ready(&self, name: &str, namespace: &str) -> Result<bool, Error>;
 
+    /// Delete ExternalSecrets owned by a service when Cedar policy revokes access.
+    ///
+    /// When a Cedar policy change denies a previously-allowed secret, compilation fails
+    /// but the ExternalSecret remains in the cluster, continuing to sync the revoked secret.
+    /// This method deletes all ExternalSecrets labeled with the service name to enforce
+    /// the revocation immediately.
+    async fn delete_revoked_external_secrets(
+        &self,
+        service_name: &str,
+        namespace: &str,
+    ) -> Result<(), Error>;
+
     /// Delete resources that were previously applied but are no longer in the compiled output.
     ///
     /// When a spec change causes compilation to produce fewer resources (e.g., removing
@@ -335,6 +347,49 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             &Patch::Merge(&patch),
         )
         .await?;
+        Ok(())
+    }
+
+    async fn delete_revoked_external_secrets(
+        &self,
+        service_name: &str,
+        namespace: &str,
+    ) -> Result<(), Error> {
+        use lattice_common::crd_registry::CrdKind;
+
+        let Some(ar) = self.registry.resolve(CrdKind::ExternalSecret).await? else {
+            return Ok(());
+        };
+
+        let api: Api<kube::api::DynamicObject> =
+            Api::namespaced_with(self.client.clone(), namespace, &ar);
+
+        let label_selector = format!(
+            "{}={}",
+            lattice_common::LABEL_SERVICE_OWNER,
+            service_name
+        );
+        let lp = kube::api::ListParams::default().labels(&label_selector);
+
+        let list = api.list(&lp).await.map_err(|e| {
+            Error::internal_with_context(
+                "delete_revoked_external_secrets",
+                format!("list ExternalSecrets for {}: {}", service_name, e),
+            )
+        })?;
+
+        for es in &list.items {
+            if let Some(name) = &es.metadata.name {
+                tracing::info!(
+                    service = %service_name,
+                    external_secret = %name,
+                    "Deleting revoked ExternalSecret"
+                );
+                let dp = kube::api::DeleteParams::default();
+                let _ = api.delete(name, &dp).await;
+            }
+        }
+
         Ok(())
     }
 
@@ -825,6 +880,19 @@ async fn compile_and_apply(
                 debug!(error = %msg, "compilation still failing");
             }
 
+            // When a Cedar policy revokes secret access, delete ExternalSecrets
+            // that were previously applied. Without this, ESO continues syncing
+            // the revoked secret from the external store.
+            if e.is_policy_denied() {
+                if let Err(cleanup_err) = ctx
+                    .kube
+                    .delete_revoked_external_secrets(name, namespace)
+                    .await
+                {
+                    warn!(error = %cleanup_err, "failed to delete revoked ExternalSecrets (non-fatal)");
+                }
+            }
+
             ServiceStatusUpdate::failed(&msg, service.metadata.generation)
                 .apply(ctx.kube.as_ref(), service)
                 .await?;
@@ -1218,6 +1286,8 @@ mod tests {
             .returning(|_, _, _, _| Ok(()));
         mock.expect_is_mesh_member_ready()
             .returning(|_, _| Ok(true));
+        mock.expect_delete_revoked_external_secrets()
+            .returning(|_, _| Ok(()));
         mock
     }
 

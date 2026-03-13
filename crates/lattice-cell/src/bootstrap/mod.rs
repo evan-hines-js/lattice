@@ -348,13 +348,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    /// Helper: extract CSR token from bootstrap state for a cluster
+    /// Helper: extract raw CSR token from bootstrap state for a cluster
     fn get_csr_token(state: &Arc<BootstrapState<test_helpers::TestManifestGenerator>>, cluster_id: &str) -> String {
         state
             .clusters
             .get(cluster_id)
             .expect("cluster should be registered")
-            .csr_token
+            .csr_token_raw
             .as_ref()
             .expect("CSR token should be set after bootstrap")
             .as_str()

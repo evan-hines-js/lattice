@@ -28,6 +28,14 @@ use super::websocket::{
 use crate::auth::UserIdentity;
 use crate::server::AppState;
 
+/// Maximum idle time for an exec session before it's terminated.
+/// Prevents resource exhaustion via idle WebSocket connections.
+const EXEC_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Maximum total duration for an exec session.
+/// Prevents indefinitely-held connections from exhausting resources.
+const EXEC_MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// Check if headers indicate a WebSocket upgrade request
 pub fn has_websocket_upgrade_headers(headers: &axum::http::HeaderMap) -> bool {
     let has_upgrade = headers
@@ -293,10 +301,22 @@ async fn run_exec_bridge_inner(socket: WebSocket, mut io: Box<dyn ExecIo>, reque
     debug!(request_id = %request_id, "Exec bridge started");
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
+    let session_start = tokio::time::Instant::now();
+    let idle_deadline = tokio::time::sleep(EXEC_IDLE_TIMEOUT);
+    tokio::pin!(idle_deadline);
 
     loop {
+        // Check max session duration
+        if session_start.elapsed() > EXEC_MAX_DURATION {
+            info!(request_id = %request_id, "Exec session exceeded max duration, terminating");
+            break;
+        }
+
         tokio::select! {
             ws_msg = ws_receiver.next() => {
+                // Reset idle timer on any client activity
+                idle_deadline.as_mut().reset(tokio::time::Instant::now() + EXEC_IDLE_TIMEOUT);
+
                 match ws_msg {
                     Some(Ok(Message::Binary(data))) => {
                         if let Some(k8s_msg) = parse_k8s_message(&data) {
@@ -337,6 +357,9 @@ async fn run_exec_bridge_inner(socket: WebSocket, mut io: Box<dyn ExecIo>, reque
             }
 
             output = io.output_rx().recv() => {
+                // Reset idle timer on any server activity
+                idle_deadline.as_mut().reset(tokio::time::Instant::now() + EXEC_IDLE_TIMEOUT);
+
                 match output {
                     Some(exec_output) => {
                         let msg = build_k8s_message(exec_output.stream_id, &exec_output.data);
@@ -352,6 +375,11 @@ async fn run_exec_bridge_inner(socket: WebSocket, mut io: Box<dyn ExecIo>, reque
                         break;
                     }
                 }
+            }
+
+            _ = &mut idle_deadline => {
+                info!(request_id = %request_id, "Exec session idle timeout, terminating");
+                break;
             }
         }
     }
