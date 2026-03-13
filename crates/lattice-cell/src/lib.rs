@@ -39,8 +39,7 @@ pub use exec_tunnel::{
     start_exec_session, ExecRequestParams, ExecSession, ExecTunnelError, EXEC_CHANNEL_SIZE,
 };
 pub use k8s_tunnel::{
-    build_http_response, tunnel_request, tunnel_request_streaming, K8sRequestParams, TunnelError,
-    DEFAULT_TIMEOUT,
+    build_http_response, tunnel_request_streaming, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT,
 };
 pub use kubeconfig::patch_kubeconfig_for_proxy;
 pub use move_sender::GrpcMoveCommandSender;

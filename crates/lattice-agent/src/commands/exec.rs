@@ -44,27 +44,28 @@ pub async fn handle_exec_request(req: &ExecRequest, ctx: &CommandContext) {
 
 /// Handle a local exec request.
 async fn handle_local_exec(req: &ExecRequest, ctx: &CommandContext) {
-    let client = match ctx.kube_provider.create().await {
-        Ok(c) => c,
-        Err(e) => {
-            error!(error = %e, "Failed to create K8s client for exec");
-            send_exec_error(
-                &ctx.message_tx,
-                &ctx.cluster_name,
-                &req.request_id,
-                &format!("Failed to create K8s client: {}", e),
-            )
-            .await;
-            return;
-        }
-    };
-
     let cluster_name = ctx.cluster_name.clone();
     let message_tx = ctx.message_tx.clone();
     let req = req.clone();
     let registry = ctx.exec_registry.clone();
+    let provider = ctx.kube_provider.clone();
 
     tokio::spawn(async move {
+        let client = match provider.create().await {
+            Ok(c) => c,
+            Err(e) => {
+                error!(error = %e, "Failed to create K8s client for exec");
+                send_exec_error(
+                    &message_tx,
+                    &cluster_name,
+                    &req.request_id,
+                    &format!("Failed to create K8s client: {}", e),
+                )
+                .await;
+                return;
+            }
+        };
+
         crate::exec::execute_exec(client, req, cluster_name, message_tx, registry).await;
     });
 }
@@ -153,13 +154,18 @@ async fn handle_forwarded_exec(req: &ExecRequest, forward_path: &str, ctx: &Comm
                 forward_path = %forward_path,
                 "No exec forwarder configured, returning error"
             );
-            send_exec_error(
-                &ctx.message_tx,
-                &ctx.cluster_name,
-                &request_id,
-                &format!("cluster '{}' not found in subtree", forward_path),
-            )
-            .await;
+            let message_tx = ctx.message_tx.clone();
+            let cluster_name = ctx.cluster_name.clone();
+            let forward_path = forward_path.to_string();
+            tokio::spawn(async move {
+                send_exec_error(
+                    &message_tx,
+                    &cluster_name,
+                    &request_id,
+                    &format!("cluster '{}' not found in subtree", forward_path),
+                )
+                .await;
+            });
         }
     }
 }

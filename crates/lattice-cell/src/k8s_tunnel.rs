@@ -91,12 +91,8 @@ pub async fn tunnel_request(
         Ok(response) => {
             timer.complete(ProxyStatus::from_status_code(response.status().as_u16()));
         }
-        Err(e) => {
-            let status = match e {
-                TunnelError::Timeout => ProxyStatus::ServerError,
-                _ => ProxyStatus::ServerError,
-            };
-            timer.complete(status);
+        Err(_) => {
+            timer.complete(ProxyStatus::ServerError);
         }
     }
 
