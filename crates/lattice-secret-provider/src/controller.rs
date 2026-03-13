@@ -399,7 +399,7 @@ async fn ensure_external_egress_lmm(
     let egress_rules: Vec<EgressRule> = endpoints
         .iter()
         .map(|ep| EgressRule {
-            target: EgressTarget::Fqdn(ep.host.clone()),
+            target: EgressTarget::for_host(&ep.host),
             ports: vec![ep.port],
         })
         .collect();

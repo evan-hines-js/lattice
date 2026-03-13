@@ -147,6 +147,19 @@ pub enum EgressTarget {
     Fqdn(String),
 }
 
+impl EgressTarget {
+    /// Build the appropriate EgressTarget for a host string.
+    /// IPs use CIDR/32 (Istio rejects bare IPs as ServiceEntry hosts),
+    /// hostnames use FQDN.
+    pub fn for_host(host: &str) -> Self {
+        if host.parse::<std::net::IpAddr>().is_ok() {
+            Self::Cidr(format!("{}/32", host))
+        } else {
+            Self::Fqdn(host.to_string())
+        }
+    }
+}
+
 impl EgressRule {
     /// Parse an entity egress reference from an external-service resource id.
     ///
@@ -528,5 +541,33 @@ mod tests {
     fn non_entity_prefix_returns_none() {
         assert!(EgressRule::from_entity_id("fqdn:example.com").is_none());
         assert!(EgressRule::from_entity_id("world:443").is_none());
+    }
+
+    // =========================================================================
+    // Story: EgressTarget::for_host
+    // =========================================================================
+
+    #[test]
+    fn for_host_ip_uses_cidr() {
+        assert_eq!(
+            EgressTarget::for_host("172.18.0.11"),
+            EgressTarget::Cidr("172.18.0.11/32".to_string())
+        );
+    }
+
+    #[test]
+    fn for_host_fqdn_uses_fqdn() {
+        assert_eq!(
+            EgressTarget::for_host("keycloak.example.com"),
+            EgressTarget::Fqdn("keycloak.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn for_host_ipv6_uses_cidr() {
+        assert_eq!(
+            EgressTarget::for_host("::1"),
+            EgressTarget::Cidr("::1/32".to_string())
+        );
     }
 }

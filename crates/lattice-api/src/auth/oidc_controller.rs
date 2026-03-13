@@ -48,16 +48,6 @@ fn requeue_for_phase(phase: &OIDCProviderPhase) -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Build the appropriate EgressTarget for a host string.
-/// IPs use CIDR/32 (Istio rejects bare IPs as ServiceEntry hosts),
-/// hostnames use FQDN.
-fn egress_target_for_host(host: &str) -> EgressTarget {
-    if host.parse::<std::net::IpAddr>().is_ok() {
-        EgressTarget::Cidr(format!("{}/32", host))
-    } else {
-        EgressTarget::Fqdn(host.to_string())
-    }
-}
 
 /// Reconcile an OIDCProvider — validate connectivity and update status
 pub async fn reconcile(
@@ -158,7 +148,7 @@ async fn ensure_oidc_egress_lmm(
             allowed_callers: vec![],
             dependencies: vec![],
             egress: vec![EgressRule {
-                target: egress_target_for_host(&ep.host),
+                target: EgressTarget::for_host(&ep.host),
                 ports: vec![ep.port],
             }],
             allow_peer_traffic: false,
@@ -275,19 +265,4 @@ mod tests {
         assert!(ep.is_cluster_local());
     }
 
-    #[test]
-    fn egress_target_ip_uses_cidr() {
-        assert_eq!(
-            egress_target_for_host("172.18.0.11"),
-            EgressTarget::Cidr("172.18.0.11/32".to_string())
-        );
-    }
-
-    #[test]
-    fn egress_target_fqdn_uses_fqdn() {
-        assert_eq!(
-            egress_target_for_host("keycloak.example.com"),
-            EgressTarget::Fqdn("keycloak.example.com".to_string())
-        );
-    }
 }

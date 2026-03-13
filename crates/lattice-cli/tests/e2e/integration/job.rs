@@ -158,7 +158,7 @@ async fn test_tracing_policies_created(kubeconfig: &str) -> Result<(), String> {
     let expected_clone = expected.clone();
     wait_for_condition(
         "TracingPolicyNamespaced resources to exist",
-        Duration::from_secs(120),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(5),
         || {
             let kc = kc.clone();
