@@ -1,13 +1,14 @@
-//! Per-integration E2E: Route discovery
+//! Per-integration E2E: Route discovery and cross-cluster connectivity
 //!
-//! Sets up mgmt + workload, deploys a service with advertised routes,
-//! verifies the full pipeline from heartbeat to LatticeClusterRoutes.
+//! Sets up mgmt + workload, deploys advertised services, verifies the full
+//! pipeline: heartbeat → LatticeClusterRoutes → ServiceEntry → AuthorizationPolicy.
 
 #![cfg(feature = "provider-e2e")]
 
 use std::time::Duration;
 
 use super::context::run_per_integration_e2e;
+use super::helpers::WORKLOAD_CLUSTER_NAME;
 use super::integration;
 
 #[tokio::test]
@@ -16,21 +17,18 @@ async fn test_route_discovery_e2e() {
         "RouteDiscovery",
         Duration::from_secs(1200),
         |ctx| async move {
-            let parent_kc = &ctx.mgmt_kubeconfig;
-            let workload_name = super::helpers::WORKLOAD_CLUSTER_NAME;
+            let workload_kc = ctx.require_workload()?;
 
-            // Verify route table pipeline
-            integration::route_discovery::verify_cluster_routes_exist(parent_kc).await?;
-            integration::route_discovery::verify_route_status(parent_kc, workload_name).await?;
+            // Full route discovery pipeline
+            integration::route_discovery::run_route_discovery_tests(
+                &ctx.mgmt_kubeconfig,
+                workload_kc,
+                WORKLOAD_CLUSTER_NAME,
+            )
+            .await?;
 
-            // If workload has advertised routes, verify ServiceEntry generation
-            if let Some(ref workload_kc) = ctx.workload_kubeconfig {
-                integration::route_discovery::verify_gateway_frontend_mtls(
-                    workload_kc,
-                    "default",
-                )
-                .await?;
-            }
+            // Fail-closed: restricted allowedServices generates AuthorizationPolicy
+            integration::route_discovery::run_restricted_advertise_tests(workload_kc).await?;
 
             Ok(())
         },

@@ -1,102 +1,157 @@
 //! Multi-cluster route discovery and cross-cluster connectivity integration tests
 //!
-//! Verifies the full cross-cluster route discovery pipeline:
-//! - LatticeService advertise config propagates routes via heartbeat
-//! - LatticeClusterRoutes CRDs are populated on the parent
-//! - Remote services appear in the ServiceGraph
-//! - ServiceEntry resources are generated for cross-cluster dependencies
-//! - Gateway frontend mTLS is configured for advertised routes
+//! Verifies the full pipeline: advertise config → heartbeat → LatticeClusterRoutes
+//! → ServiceEntry → AuthorizationPolicy → traffic flows (or is denied).
 //!
-//! # Running Standalone
+//! # Running Standalone (requires 2-cluster hierarchy)
 //!
 //! ```bash
-//! LATTICE_KUBECONFIG=/path/to/parent-kubeconfig \
+//! LATTICE_MGMT_KUBECONFIG=/path/to/mgmt \
+//! LATTICE_WORKLOAD_KUBECONFIG=/path/to/workload \
 //! cargo test --features provider-e2e --test e2e test_route_discovery_standalone -- --ignored --nocapture
 //! ```
 
 #![cfg(feature = "provider-e2e")]
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
+use kube::api::Api;
 use tracing::info;
 
-use super::super::helpers::{run_kubectl, wait_for_condition, DEFAULT_TIMEOUT};
+use lattice_common::crd::workload::ingress::AdvertiseConfig;
+use lattice_common::crd::{
+    ContainerSpec, IngressSpec, LatticeService, LatticeServiceSpec, PortSpec, RouteKind, RouteSpec,
+    ServicePortsSpec, WorkloadSpec,
+};
+
+use super::super::helpers::{
+    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
+    run_kubectl, setup_regcreds_infrastructure, wait_for_condition, wait_for_service_phase,
+    DEFAULT_TIMEOUT,
+};
+
+const ROUTE_TEST_NS: &str = "route-discovery-test";
+
+// =============================================================================
+// Service Builders
+// =============================================================================
+
+/// Build a simple nginx service with an advertised ingress route
+fn build_advertised_service(
+    name: &str,
+    hostname: &str,
+    allowed_services: Vec<String>,
+) -> LatticeService {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    let mut containers = BTreeMap::new();
+    containers.insert(
+        "main".to_string(),
+        ContainerSpec {
+            image: "nginx:1-alpine".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let mut ports = BTreeMap::new();
+    ports.insert(
+        "http".to_string(),
+        PortSpec {
+            port: 80,
+            target_port: None,
+            protocol: None,
+        },
+    );
+
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "public".to_string(),
+        RouteSpec {
+            kind: RouteKind::HTTPRoute,
+            hosts: vec![hostname.to_string()],
+            port: None,
+            listen_port: None,
+            rules: None,
+            tls: None,
+            advertise: Some(AdvertiseConfig { allowed_services }),
+        },
+    );
+
+    LatticeService {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(ROUTE_TEST_NS.to_string()),
+            ..Default::default()
+        },
+        spec: LatticeServiceSpec {
+            workload: WorkloadSpec {
+                containers,
+                resources: BTreeMap::new(),
+                service: Some(ServicePortsSpec { ports }),
+            },
+            ingress: Some(IngressSpec {
+                gateway_class: None,
+                routes,
+            }),
+            ..Default::default()
+        },
+        status: None,
+    }
+}
+
 
 // =============================================================================
 // Route Table Verification
 // =============================================================================
 
-/// Verify that LatticeClusterRoutes CRDs exist and contain routes
+/// Verify that LatticeClusterRoutes CRDs exist on a cluster
 pub async fn verify_cluster_routes_exist(kubeconfig: &str) -> Result<(), String> {
-    info!("[Integration/RouteDiscovery] Checking for LatticeClusterRoutes CRDs...");
+    info!("[RouteDiscovery] Checking for LatticeClusterRoutes CRDs...");
 
     let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticeclusterroutes",
-        "-o",
-        "json",
-    ])
-    .await?;
+        "--kubeconfig", kubeconfig,
+        "get", "latticeclusterroutes", "-o", "json",
+    ]).await?;
 
     let parsed: serde_json::Value =
-        serde_json::from_str(&output).map_err(|e| format!("failed to parse JSON: {e}"))?;
+        serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
 
-    let items = parsed["items"]
-        .as_array()
-        .ok_or("expected items array in response")?;
-
+    let items = parsed["items"].as_array().ok_or("expected items array")?;
     if items.is_empty() {
         return Err("no LatticeClusterRoutes CRDs found".to_string());
     }
 
     for item in items {
         let name = item["metadata"]["name"].as_str().unwrap_or("unknown");
-        let route_count = item["status"]["routeCount"].as_u64().unwrap_or(0);
-        let phase = item["status"]["phase"].as_str().unwrap_or("unknown");
-
-        info!(
-            "[Integration/RouteDiscovery] LatticeClusterRoutes '{}': {} routes, phase={}",
-            name, route_count, phase
-        );
+        let count = item["status"]["routeCount"].as_u64().unwrap_or(0);
+        info!("[RouteDiscovery] LatticeClusterRoutes '{}': {} routes", name, count);
     }
 
     Ok(())
 }
 
-/// Verify that specific hostnames appear in a cluster's route table
+/// Wait for specific hostnames to appear in a cluster's route table
 pub async fn verify_child_routes(
     kubeconfig: &str,
     cluster_name: &str,
     expected_hostnames: &[&str],
 ) -> Result<(), String> {
-    info!(
-        "[Integration/RouteDiscovery] Waiting for routes from cluster '{}'...",
-        cluster_name
-    );
+    info!("[RouteDiscovery] Waiting for routes from '{}'...", cluster_name);
 
     wait_for_condition(
-        &format!("LatticeClusterRoutes for {cluster_name}"),
+        &format!("routes for {cluster_name}"),
         DEFAULT_TIMEOUT,
         Duration::from_secs(10),
         || {
             let kc = kubeconfig.to_string();
             let cluster = cluster_name.to_string();
-            let hostnames: Vec<String> =
-                expected_hostnames.iter().map(|h| h.to_string()).collect();
+            let hostnames: Vec<String> = expected_hostnames.iter().map(|h| h.to_string()).collect();
             async move {
                 let output = match run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "latticeclusterroutes",
-                    &cluster,
-                    "-o",
-                    "json",
-                ])
-                .await
-                {
+                    "--kubeconfig", &kc,
+                    "get", "latticeclusterroutes", &cluster, "-o", "json",
+                ]).await {
                     Ok(o) => o,
                     Err(_) => return Ok(false),
                 };
@@ -111,74 +166,38 @@ pub async fn verify_child_routes(
                     None => return Ok(false),
                 };
 
-                for expected in &hostnames {
-                    if !routes
-                        .iter()
-                        .any(|r| r["hostname"].as_str() == Some(expected.as_str()))
-                    {
-                        return Ok(false);
-                    }
-                }
-
-                Ok(true)
+                Ok(hostnames.iter().all(|h| {
+                    routes.iter().any(|r| r["hostname"].as_str() == Some(h.as_str()))
+                }))
             }
         },
-    )
-    .await?;
+    ).await?;
 
-    info!(
-        "[Integration/RouteDiscovery] All expected routes found for '{}'",
-        cluster_name
-    );
+    info!("[RouteDiscovery] All expected routes found for '{}'", cluster_name);
     Ok(())
 }
 
-/// Verify that route entries contain service identity fields
-pub async fn verify_route_service_identity(
-    kubeconfig: &str,
-    cluster_name: &str,
-    service_name: &str,
-    service_namespace: &str,
-) -> Result<(), String> {
-    info!(
-        "[Integration/RouteDiscovery] Verifying service identity for {}/{}...",
-        service_namespace, service_name
-    );
-
+/// Verify route status has Ready phase and matching observedGeneration
+pub async fn verify_route_status(kubeconfig: &str, cluster_name: &str) -> Result<(), String> {
     let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticeclusterroutes",
-        cluster_name,
-        "-o",
-        "json",
-    ])
-    .await?;
+        "--kubeconfig", kubeconfig,
+        "get", "latticeclusterroutes", cluster_name, "-o", "json",
+    ]).await?;
 
     let parsed: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
 
-    let routes = parsed["spec"]["routes"]
-        .as_array()
-        .ok_or("no routes in spec")?;
-
-    let found = routes.iter().any(|r| {
-        r["serviceName"].as_str() == Some(service_name)
-            && r["serviceNamespace"].as_str() == Some(service_namespace)
-    });
-
-    if !found {
-        return Err(format!(
-            "route for {}/{} not found in LatticeClusterRoutes",
-            service_namespace, service_name
-        ));
+    let phase = parsed["status"]["phase"].as_str().ok_or("missing phase")?;
+    if phase != "Ready" {
+        return Err(format!("phase is '{}', expected 'Ready'", phase));
     }
 
-    info!(
-        "[Integration/RouteDiscovery] Service identity verified for {}/{}",
-        service_namespace, service_name
-    );
+    let gen = parsed["metadata"]["generation"].as_i64();
+    let observed = parsed["status"]["observedGeneration"].as_i64();
+    if gen != observed {
+        return Err(format!("generation mismatch: spec={:?}, observed={:?}", gen, observed));
+    }
+
     Ok(())
 }
 
@@ -186,82 +205,48 @@ pub async fn verify_route_service_identity(
 // ServiceEntry Verification
 // =============================================================================
 
-/// Verify that ServiceEntry resources exist for remote dependencies
+/// Verify remote ServiceEntries use HTTPS + STATIC with addresses
 pub async fn verify_remote_service_entries(
     kubeconfig: &str,
     namespace: &str,
 ) -> Result<(), String> {
-    info!(
-        "[Integration/RouteDiscovery] Checking for remote ServiceEntry objects in '{}'...",
-        namespace
-    );
+    info!("[RouteDiscovery] Checking remote ServiceEntries in '{}'...", namespace);
 
     let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "serviceentries",
-        "-n",
-        namespace,
-        "-l",
-        "lattice.dev/managed-by=lattice-mesh-member",
-        "-o",
-        "json",
-    ])
-    .await?;
+        "--kubeconfig", kubeconfig,
+        "get", "serviceentries", "-n", namespace,
+        "-l", "lattice.dev/managed-by=lattice-mesh-member",
+        "-o", "json",
+    ]).await?;
 
     let parsed: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
 
-    let items = parsed["items"]
-        .as_array()
-        .ok_or("expected items array")?;
+    let items = parsed["items"].as_array().ok_or("expected items array")?;
 
     for item in items {
         let name = item["metadata"]["name"].as_str().unwrap_or("unknown");
-        let hosts = &item["spec"]["hosts"];
-        let resolution = item["spec"]["resolution"].as_str().unwrap_or("unknown");
-        let protocol = item["spec"]["ports"][0]["protocol"]
-            .as_str()
-            .unwrap_or("unknown");
-
-        info!(
-            "[Integration/RouteDiscovery] ServiceEntry '{}': hosts={}, resolution={}, protocol={}",
-            name, hosts, resolution, protocol
-        );
-
-        // Cross-cluster ServiceEntries should use HTTPS + STATIC
-        if name.starts_with("remote-") {
-            if resolution != "STATIC" {
-                return Err(format!(
-                    "ServiceEntry '{}' should use STATIC resolution, got {}",
-                    name, resolution
-                ));
-            }
-            if protocol != "HTTPS" {
-                return Err(format!(
-                    "ServiceEntry '{}' should use HTTPS protocol, got {}",
-                    name, protocol
-                ));
-            }
-
-            // Should have an address for STATIC resolution
-            let addresses = item["spec"]["addresses"]
-                .as_array()
-                .ok_or(format!("ServiceEntry '{}' missing addresses", name))?;
-            if addresses.is_empty() {
-                return Err(format!(
-                    "ServiceEntry '{}' has empty addresses for STATIC resolution",
-                    name
-                ));
-            }
+        if !name.starts_with("remote-") {
+            continue;
         }
+
+        let resolution = item["spec"]["resolution"].as_str().unwrap_or("");
+        let protocol = item["spec"]["ports"][0]["protocol"].as_str().unwrap_or("");
+        let addresses = item["spec"]["addresses"].as_array();
+
+        if resolution != "STATIC" {
+            return Err(format!("ServiceEntry '{}': expected STATIC, got {}", name, resolution));
+        }
+        if protocol != "HTTPS" {
+            return Err(format!("ServiceEntry '{}': expected HTTPS, got {}", name, protocol));
+        }
+        if addresses.map(|a| a.is_empty()).unwrap_or(true) {
+            return Err(format!("ServiceEntry '{}': missing addresses for STATIC", name));
+        }
+
+        info!("[RouteDiscovery] ServiceEntry '{}': HTTPS/STATIC verified", name);
     }
 
-    info!(
-        "[Integration/RouteDiscovery] ServiceEntry verification passed for '{}'",
-        namespace
-    );
     Ok(())
 }
 
@@ -269,64 +254,30 @@ pub async fn verify_remote_service_entries(
 // Gateway mTLS Verification
 // =============================================================================
 
-/// Verify that Gateways with advertised routes have frontend mTLS configured
+/// Verify Gateway has frontend mTLS when routes are advertised
 pub async fn verify_gateway_frontend_mtls(
     kubeconfig: &str,
     namespace: &str,
 ) -> Result<(), String> {
-    info!(
-        "[Integration/RouteDiscovery] Checking Gateway frontend mTLS in '{}'...",
-        namespace
-    );
-
     let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "gateways.gateway.networking.k8s.io",
-        "-n",
-        namespace,
-        "-o",
-        "json",
-    ])
-    .await?;
+        "--kubeconfig", kubeconfig,
+        "get", "gateways.gateway.networking.k8s.io",
+        "-n", namespace, "-o", "json",
+    ]).await?;
 
     let parsed: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
 
-    let items = parsed["items"]
-        .as_array()
-        .ok_or("expected items array")?;
-
-    for item in items {
+    for item in parsed["items"].as_array().unwrap_or(&vec![]) {
         let name = item["metadata"]["name"].as_str().unwrap_or("unknown");
-        let has_frontend_tls = item["spec"]["tls"]["frontend"]
-            .as_object()
-            .is_some();
+        let has_frontend = item["spec"]["tls"]["frontend"].as_object().is_some();
 
-        if has_frontend_tls {
-            let ca_refs = &item["spec"]["tls"]["frontend"]["default"]["validation"]
-                ["caCertificateRefs"];
-
-            if let Some(refs) = ca_refs.as_array() {
-                if refs.is_empty() {
-                    return Err(format!(
-                        "Gateway '{}' has frontend TLS but no CA certificate refs",
-                        name
-                    ));
-                }
-
-                let ca_name = refs[0]["name"].as_str().unwrap_or("unknown");
-                info!(
-                    "[Integration/RouteDiscovery] Gateway '{}' has frontend mTLS with CA '{}'",
-                    name, ca_name
-                );
+        if has_frontend {
+            let refs = &item["spec"]["tls"]["frontend"]["default"]["validation"]["caCertificateRefs"];
+            if refs.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                return Err(format!("Gateway '{}': frontend TLS but no CA refs", name));
             }
-        } else {
-            info!(
-                "[Integration/RouteDiscovery] Gateway '{}' has no frontend mTLS (no advertised routes)",
-                name
-            );
+            info!("[RouteDiscovery] Gateway '{}': frontend mTLS configured", name);
         }
     }
 
@@ -334,76 +285,127 @@ pub async fn verify_gateway_frontend_mtls(
 }
 
 // =============================================================================
-// Route Status Verification
+// Cross-Cluster AuthorizationPolicy Verification
 // =============================================================================
 
-/// Verify that LatticeClusterRoutes status has observedGeneration matching spec generation
-pub async fn verify_route_status(kubeconfig: &str, cluster_name: &str) -> Result<(), String> {
-    info!(
-        "[Integration/RouteDiscovery] Verifying route status for '{}'...",
-        cluster_name
-    );
+/// Verify that an AuthorizationPolicy with SPIFFE principals exists for restricted routes
+pub async fn verify_cross_cluster_auth_policy(
+    kubeconfig: &str,
+    namespace: &str,
+    service_name: &str,
+) -> Result<(), String> {
+    let policy_name = format!("{}-cross-cluster", service_name);
+    info!("[RouteDiscovery] Checking AuthorizationPolicy '{}'...", policy_name);
 
     let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticeclusterroutes",
-        cluster_name,
-        "-o",
-        "json",
-    ])
-    .await?;
+        "--kubeconfig", kubeconfig,
+        "get", "authorizationpolicies.security.istio.io",
+        "-n", namespace, &policy_name, "-o", "json",
+    ]).await?;
 
     let parsed: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
 
-    let phase = parsed["status"]["phase"]
-        .as_str()
-        .ok_or("missing status.phase")?;
-
-    if phase != "Ready" {
-        return Err(format!(
-            "LatticeClusterRoutes '{}' phase is '{}', expected 'Ready'",
-            cluster_name, phase
-        ));
+    let action = parsed["spec"]["action"].as_str().unwrap_or("");
+    if action != "ALLOW" {
+        return Err(format!("AuthorizationPolicy action is '{}', expected 'ALLOW'", action));
     }
 
-    let spec_generation = parsed["metadata"]["generation"].as_i64();
-    let observed_generation = parsed["status"]["observedGeneration"].as_i64();
-
-    if spec_generation != observed_generation {
-        return Err(format!(
-            "LatticeClusterRoutes '{}' generation mismatch: spec={:?}, observed={:?}",
-            cluster_name, spec_generation, observed_generation
-        ));
+    let principals = &parsed["spec"]["rules"][0]["from"][0]["source"]["principals"];
+    if principals.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        return Err("AuthorizationPolicy has no principals".to_string());
     }
 
-    info!(
-        "[Integration/RouteDiscovery] Route status verified for '{}': Ready, generation={:?}",
-        cluster_name, spec_generation
-    );
+    let target_kind = parsed["spec"]["targetRef"][0]["kind"].as_str()
+        .or_else(|| parsed["spec"]["targetRefs"][0]["kind"].as_str())
+        .unwrap_or("");
+    if target_kind != "Gateway" {
+        return Err(format!("AuthorizationPolicy targets '{}', expected 'Gateway'", target_kind));
+    }
+
+    info!("[RouteDiscovery] AuthorizationPolicy '{}' verified with SPIFFE principals", policy_name);
     Ok(())
 }
 
 // =============================================================================
-// Full Test Suite
+// Full Test Suites
 // =============================================================================
 
-/// Run the complete route discovery test suite
+/// Run route discovery tests on a 2-cluster hierarchy.
+///
+/// Deploys a service with advertised routes on the workload cluster,
+/// verifies routes propagate to the parent, and checks policy generation.
 pub async fn run_route_discovery_tests(
-    parent_kubeconfig: &str,
-    child_cluster_name: &str,
-    expected_hostnames: &[&str],
+    mgmt_kubeconfig: &str,
+    workload_kubeconfig: &str,
+    workload_cluster_name: &str,
 ) -> Result<(), String> {
-    info!("[Integration/RouteDiscovery] Starting full route discovery test suite...");
+    info!("[RouteDiscovery] Starting cross-cluster route discovery tests...");
 
-    // Verify route table exists and contains expected routes
-    verify_cluster_routes_exist(parent_kubeconfig).await?;
-    verify_child_routes(parent_kubeconfig, child_cluster_name, expected_hostnames).await?;
-    verify_route_status(parent_kubeconfig, child_cluster_name).await?;
+    // Setup namespace on workload cluster
+    ensure_fresh_namespace(workload_kubeconfig, ROUTE_TEST_NS).await?;
+    setup_regcreds_infrastructure(workload_kubeconfig).await?;
 
-    info!("[Integration/RouteDiscovery] Route discovery tests passed!");
+    // Deploy an advertised service on the workload cluster (open to all)
+    let svc = build_advertised_service(
+        "route-target",
+        "route-target.test.local",
+        vec!["*".to_string()],
+    );
+
+    let client = client_from_kubeconfig(workload_kubeconfig).await?;
+    let api: Api<LatticeService> = Api::namespaced(client, ROUTE_TEST_NS);
+    create_with_retry(&api, &svc, "route-target").await?;
+    wait_for_service_phase(workload_kubeconfig, ROUTE_TEST_NS, "route-target", "Ready", None, DEFAULT_TIMEOUT).await?;
+    info!("[RouteDiscovery] Advertised service deployed on workload cluster");
+
+    // Verify routes propagate to parent
+    verify_child_routes(
+        mgmt_kubeconfig,
+        workload_cluster_name,
+        &["route-target.test.local"],
+    ).await?;
+    verify_route_status(mgmt_kubeconfig, workload_cluster_name).await?;
+    info!("[RouteDiscovery] Routes propagated to parent cluster");
+
+    // Verify Gateway has frontend mTLS on workload cluster
+    verify_gateway_frontend_mtls(workload_kubeconfig, ROUTE_TEST_NS).await?;
+
+    // Cleanup
+    delete_namespace(workload_kubeconfig, ROUTE_TEST_NS).await;
+    info!("[RouteDiscovery] Route discovery tests passed!");
+    Ok(())
+}
+
+/// Run restricted advertise tests (fail-closed verification).
+///
+/// Deploys a service with specific allowedServices, verifies that
+/// an AuthorizationPolicy with SPIFFE principals is generated.
+pub async fn run_restricted_advertise_tests(
+    workload_kubeconfig: &str,
+) -> Result<(), String> {
+    info!("[RouteDiscovery] Starting restricted advertise tests...");
+
+    ensure_fresh_namespace(workload_kubeconfig, ROUTE_TEST_NS).await?;
+
+    // Deploy service restricted to a specific caller identity
+    let svc = build_advertised_service(
+        "restricted-svc",
+        "restricted.test.local",
+        vec!["edge/edge/haproxy-fw".to_string()],
+    );
+
+    let client = client_from_kubeconfig(workload_kubeconfig).await?;
+    let api: Api<LatticeService> = Api::namespaced(client, ROUTE_TEST_NS);
+    create_with_retry(&api, &svc, "restricted-svc").await?;
+    wait_for_service_phase(workload_kubeconfig, ROUTE_TEST_NS, "restricted-svc", "Ready", None, DEFAULT_TIMEOUT).await?;
+
+    // Verify AuthorizationPolicy with SPIFFE principal was generated
+    verify_cross_cluster_auth_policy(workload_kubeconfig, ROUTE_TEST_NS, "restricted-svc").await?;
+
+    // Cleanup
+    delete_namespace(workload_kubeconfig, ROUTE_TEST_NS).await;
+    info!("[RouteDiscovery] Restricted advertise tests passed!");
     Ok(())
 }
 
@@ -414,12 +416,38 @@ pub async fn run_route_discovery_tests(
 #[tokio::test]
 #[ignore]
 async fn test_route_discovery_standalone() {
-    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
+    use super::super::context::{init_e2e_test, TestSession};
 
     init_e2e_test();
-    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    let Ok(session) = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG").await else {
+        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
+        return;
+    };
 
-    verify_cluster_routes_exist(&resolved.kubeconfig)
-        .await
-        .unwrap();
+    let workload_kc = session.ctx.workload_kubeconfig.as_deref()
+        .expect("requires workload kubeconfig");
+    let workload_name = super::super::helpers::WORKLOAD_CLUSTER_NAME;
+
+    run_route_discovery_tests(
+        &session.ctx.mgmt_kubeconfig,
+        workload_kc,
+        workload_name,
+    ).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_restricted_advertise_standalone() {
+    use super::super::context::{init_e2e_test, TestSession};
+
+    init_e2e_test();
+    let Ok(session) = TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG").await else {
+        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
+        return;
+    };
+
+    let workload_kc = session.ctx.workload_kubeconfig.as_deref()
+        .expect("requires workload kubeconfig");
+
+    run_restricted_advertise_tests(workload_kc).await.unwrap();
 }

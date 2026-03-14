@@ -128,32 +128,64 @@ async fn handle_service_lookup(
                                 .name
                                 .clone()
                                 .unwrap_or_default(),
+                            error: String::new(),
                         };
                     }
                 }
             }
+            // Service not found in any route table
+            lattice_proto::ServiceLookupResponse {
+                request_id: req.request_id.clone(),
+                found: false,
+                address: String::new(),
+                port: 0,
+                hostname: String::new(),
+                cluster: String::new(),
+                error: String::new(),
+            }
         }
         Err(e) => {
             warn!(error = %e, "Failed to list LatticeClusterRoutes for service lookup");
+            lattice_proto::ServiceLookupResponse {
+                request_id: req.request_id.clone(),
+                found: false,
+                address: String::new(),
+                port: 0,
+                hostname: String::new(),
+                cluster: String::new(),
+                error: format!("lookup failed: {e}"),
+            }
         }
-    }
-
-    lattice_proto::ServiceLookupResponse {
-        request_id: req.request_id.clone(),
-        found: false,
-        address: String::new(),
-        port: 0,
-        hostname: String::new(),
-        cluster: String::new(),
     }
 }
 
-/// Convert SubtreeState services to ClusterRoute CRD entries
+/// Convert SubtreeState services to ClusterRoute CRD entries.
+///
+/// Skips services with invalid ports (> 65535) or empty addresses rather
+/// than silently truncating or propagating invalid routes.
 fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> {
     state
         .services
         .iter()
         .filter(|s| !s.removed)
+        .filter(|s| {
+            if s.port > u16::MAX as u32 {
+                warn!(
+                    service = %s.name,
+                    port = s.port,
+                    "skipping service with port > 65535"
+                );
+                return false;
+            }
+            if s.address.is_empty() {
+                warn!(
+                    service = %s.name,
+                    "skipping service with empty address"
+                );
+                return false;
+            }
+            true
+        })
         .map(|s| ClusterRoute {
             service_name: s.name.clone(),
             service_namespace: s.namespace.clone(),

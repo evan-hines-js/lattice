@@ -710,4 +710,7 @@ message ServiceLookupResponse {
   string hostname = 5;
   // Cluster hosting the service
   string cluster = 6;
+  // Non-empty if the lookup failed (e.g., K8s API error).
+  // Callers should retry rather than caching a negative result.
+  string error = 7;
 }

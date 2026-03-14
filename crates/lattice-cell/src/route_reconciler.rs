@@ -180,8 +180,9 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
             continue;
         }
 
-        write_cluster_routes(&api, &cluster_name, &merged).await;
-        last_written = merged;
+        if write_cluster_routes(&api, &cluster_name, &merged).await.is_ok() {
+            last_written = merged;
+        }
     }
 
     info!(cluster = %cluster_name, "Route reconciler stopped");
@@ -307,12 +308,15 @@ fn resolve_gateway_address(
     (String::new(), 0)
 }
 
-/// Write the merged route table to the LatticeClusterRoutes CRD
+/// Write the merged route table to the LatticeClusterRoutes CRD.
+///
+/// Returns `Ok(())` on success so callers can decide whether to update their
+/// cached state. A failed write returns `Err` and the caller should retry.
 async fn write_cluster_routes(
     api: &Api<LatticeClusterRoutes>,
     cluster_name: &str,
     routes: &[ClusterRoute],
-) {
+) -> Result<(), kube::Error> {
     let route_count = routes.len() as u32;
 
     let route_table = LatticeClusterRoutes::new(
@@ -322,20 +326,17 @@ async fn write_cluster_routes(
         },
     );
 
-    let applied = match api
+    let applied = api
         .patch(
             cluster_name,
             &PatchParams::apply("lattice-route-reconciler"),
             &Patch::Apply(route_table),
         )
         .await
-    {
-        Ok(applied) => applied,
-        Err(e) => {
+        .map_err(|e| {
             error!(cluster = %cluster_name, error = %e, "failed to write LatticeClusterRoutes");
-            return;
-        }
-    };
+            e
+        })?;
 
     let observed_generation = applied.metadata.generation;
 
@@ -363,6 +364,7 @@ async fn write_cluster_routes(
     }
 
     info!(cluster = %cluster_name, routes = route_count, "reconciled LatticeClusterRoutes");
+    Ok(())
 }
 
 #[cfg(test)]
