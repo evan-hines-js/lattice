@@ -109,6 +109,7 @@ mod mesh_onboarding_e2e;
 mod oidc_e2e;
 mod pivot_standalone_e2e;
 mod proxy_e2e;
+mod route_discovery_e2e;
 mod scaling_e2e;
 mod secrets_e2e;
 mod topology_e2e;
