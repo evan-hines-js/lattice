@@ -60,7 +60,7 @@ pub async fn reconcile(
 
     let bsl_name = format!("lattice-{}", store_name);
     let ttl = backup.retention.as_ref().and_then(|r| r.ttl.clone());
-    let schedule = build_service_schedule(&name, &namespace, cron, &bsl_name, ttl);
+    let schedule = build_service_schedule(&name, &namespace, cron, &bsl_name, ttl)?;
 
     match velero::apply_resource(&ctx.client, &schedule, FIELD_MANAGER).await {
         Ok(()) => {

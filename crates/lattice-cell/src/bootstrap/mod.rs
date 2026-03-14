@@ -84,8 +84,7 @@ pub async fn csr_handler<G: ManifestGenerator>(
     Path(cluster_id): Path<String>,
     Json(request): Json<CsrRequest>,
 ) -> Result<Json<lattice_common::CsrResponse>, BootstrapError> {
-    validate_dns_label(&cluster_id, "cluster_id")
-        .map_err(|_| BootstrapError::InvalidToken)?;
+    validate_dns_label(&cluster_id, "cluster_id").map_err(|_| BootstrapError::InvalidToken)?;
 
     debug!(cluster_id = %cluster_id, "CSR signing request received");
 
@@ -112,8 +111,7 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     Path(cluster_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, BootstrapError> {
-    validate_dns_label(&cluster_id, "cluster_id")
-        .map_err(|_| BootstrapError::InvalidToken)?;
+    validate_dns_label(&cluster_id, "cluster_id").map_err(|_| BootstrapError::InvalidToken)?;
 
     debug!(cluster_id = %cluster_id, "Bootstrap manifests request received");
 

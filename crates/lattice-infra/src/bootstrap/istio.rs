@@ -164,10 +164,7 @@ impl IstioReconciler {
             AuthorizationPolicySpec {
                 target_refs: vec![],
                 selector: Some(WorkloadSelector {
-                    match_labels: BTreeMap::from([(
-                        "app".to_string(),
-                        OPERATOR_NAME.to_string(),
-                    )]),
+                    match_labels: BTreeMap::from([("app".to_string(), OPERATOR_NAME.to_string())]),
                 }),
                 action: "ALLOW".to_string(),
                 rules: vec![AuthorizationRule {

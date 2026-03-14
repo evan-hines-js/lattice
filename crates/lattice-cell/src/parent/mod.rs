@@ -157,10 +157,18 @@ struct ServerHandles {
     grpc_handle: JoinHandle<()>,
     secret_sync_handle: JoinHandle<()>,
     proxy_handle: JoinHandle<()>,
+    agent_cleanup_handle: JoinHandle<()>,
 }
 
 /// Interval for periodic secret sync (safety net)
 const SECRET_SYNC_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
+
+/// How long a disconnected agent stays in the registry before cleanup.
+/// Agents disconnected longer than this are removed to prevent memory leaks.
+const DISCONNECTED_AGENT_TTL: Duration = Duration::from_secs(3600); // 1 hour
+
+/// Interval for periodic stale agent cleanup
+const AGENT_CLEANUP_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Push distributable resources to all connected agents
 async fn push_resources_to_agents(
@@ -326,6 +334,9 @@ pub enum CellServerError {
     /// Failed to configure TLS
     #[error("Failed to configure TLS: {0}")]
     TlsConfig(String),
+    /// Failed to load certificate blocklist
+    #[error("Failed to load certificate blocklist: {0}")]
+    BlocklistLoad(String),
     /// Servers are already running
     #[error("Servers already running")]
     AlreadyRunning,
@@ -780,14 +791,17 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         let registry = self.agent_registry.clone();
         let subtree_registry = self.subtree_registry.clone();
 
-        // Load certificate blocklist for immediate revocation
-        let blocklist =
-            crate::blocklist::CertificateBlocklist::load_from_configmap(&kube_client)
-                .await
-                .unwrap_or_else(|e| {
-                    warn!(error = %e, "Failed to load cert blocklist, starting empty");
-                    crate::blocklist::CertificateBlocklist::new()
-                });
+        // Load certificate blocklist for immediate revocation.
+        // Fail-closed: if we can't load the blocklist, refuse to start the gRPC
+        // server. Starting with an empty blocklist would silently re-admit any
+        // previously revoked agent certificates.
+        let blocklist = crate::blocklist::CertificateBlocklist::load_from_configmap(&kube_client)
+            .await
+            .map_err(|e| {
+                CellServerError::BlocklistLoad(format!(
+                    "cannot start gRPC server without certificate blocklist: {e}"
+                ))
+            })?;
 
         info!(addr = %grpc_addr, "Starting gRPC server");
         let grpc_handle = tokio::spawn(async move {
@@ -834,12 +848,27 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             }
         });
 
+        // Start periodic cleanup of stale disconnected agents
+        let cleanup_registry = self.agent_registry.clone();
+        let agent_cleanup_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(AGENT_CLEANUP_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let removed = cleanup_registry.cleanup_stale_disconnected(DISCONNECTED_AGENT_TTL);
+                if removed > 0 {
+                    info!(removed, "Cleaned up stale disconnected agents");
+                }
+            }
+        });
+
         // Store handles
         *self.handles.write().await = Some(ServerHandles {
             bootstrap_handle,
             grpc_handle,
             secret_sync_handle,
             proxy_handle,
+            agent_cleanup_handle,
         });
 
         info!("Cell servers started successfully");
@@ -860,6 +889,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             handles.grpc_handle.abort();
             handles.secret_sync_handle.abort();
             handles.proxy_handle.abort();
+            handles.agent_cleanup_handle.abort();
         }
 
         *self.bootstrap_state.write().await = None;

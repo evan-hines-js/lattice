@@ -35,7 +35,7 @@ use crate::kubeconfig::patch_kubeconfig_for_proxy;
 use crate::state_sync;
 use crate::subtree_registry::{ClusterInfo, SubtreeRegistry};
 use crate::{AgentConnection, SharedAgentRegistry};
-use lattice_infra::{extract_cluster_id_from_cert, ServerMtlsConfig};
+use lattice_infra::{extract_cluster_id_from_cert, MtlsError, ServerMtlsConfig};
 use tonic::transport::server::TlsConnectInfo;
 
 /// Shared reference to SubtreeRegistry
@@ -44,6 +44,11 @@ pub type SharedSubtreeRegistry = std::sync::Arc<SubtreeRegistry>;
 /// Timeout for CAPI object import during unpivot. If the distributed move hangs,
 /// the agent will retry on the next attempt rather than blocking indefinitely.
 const CAPI_IMPORT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Maximum total concurrent gRPC streams across all connections.
+/// Prevents file descriptor and memory exhaustion from connection flooding.
+/// 64 streams/connection × 256 global cap is generous for legitimate traffic.
+const MAX_GLOBAL_CONCURRENT_STREAMS: usize = 256;
 
 /// Errors that can occur during CAPI object import
 #[derive(Debug, thiserror::Error)]
@@ -291,6 +296,19 @@ async fn import_capi_objects(
     info!(cluster = %cluster, "Cluster unpaused successfully");
 
     Ok(())
+}
+
+/// Typed errors from the gRPC server startup path.
+///
+/// Replaces `Box<dyn Error>` so callers never accidentally leak internal
+/// details (file paths, library versions, cert parsing messages) to
+/// external observers.
+#[derive(Debug, thiserror::Error)]
+pub enum GrpcServerError {
+    #[error("mTLS configuration error: {0}")]
+    Mtls(#[from] MtlsError),
+    #[error("gRPC transport error: {0}")]
+    Transport(#[from] tonic::transport::Error),
 }
 
 /// Configuration for starting the gRPC agent server
@@ -709,7 +727,7 @@ impl AgentServer {
     /// - Server certificate (presented to agents)
     /// - Server private key
     /// - CA certificate (for verifying agent certificates)
-    pub async fn serve_with_mtls(config: GrpcServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn serve_with_mtls(config: GrpcServerConfig) -> Result<(), GrpcServerError> {
         let server = Self::new(
             config.registry,
             config.subtree_registry,
@@ -724,6 +742,9 @@ impl AgentServer {
         Server::builder()
             .tls_config(tls_config)?
             .concurrency_limit_per_connection(64)
+            .layer(tower::limit::ConcurrencyLimitLayer::new(
+                MAX_GLOBAL_CONCURRENT_STREAMS,
+            ))
             .add_service(server.into_service())
             .serve(addr)
             .await?;
@@ -787,8 +808,7 @@ fn authenticate_request<T>(
         return Err(MtlsAuthError::CertificateBlocked(fingerprint));
     }
 
-    extract_cluster_id_from_cert(&cert_der)
-        .map_err(|e| MtlsAuthError::InvalidCert(e.to_string()))
+    extract_cluster_id_from_cert(&cert_der).map_err(|e| MtlsAuthError::InvalidCert(e.to_string()))
 }
 
 #[tonic::async_trait]

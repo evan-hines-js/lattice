@@ -21,8 +21,8 @@ use lattice_common::kube_utils::HasApiResource;
 use lattice_common::status_check;
 use lattice_common::{
     ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME,
-    LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT, OPERATOR_NAME,
-    LOCAL_WEBHOOK_AUTH_SECRET, LOCAL_WEBHOOK_STORE_NAME, REQUEUE_CRD_NOT_FOUND_SECS,
+    LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT,
+    LOCAL_WEBHOOK_AUTH_SECRET, LOCAL_WEBHOOK_STORE_NAME, OPERATOR_NAME, REQUEUE_CRD_NOT_FOUND_SECS,
     REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS,
 };
 
@@ -493,6 +493,10 @@ async fn check_cluster_secret_store_ready(
 /// that failed due to the store being unavailable won't retry until their
 /// `refreshInterval` (typically 1h). This function annotates them with
 /// `force-sync=<timestamp>` to trigger immediate resync.
+/// Page size for paginated ExternalSecret listing.
+/// Keeps per-page memory bounded while minimizing API round-trips.
+const ES_LIST_PAGE_SIZE: u32 = 100;
+
 async fn force_refresh_failed_external_secrets(
     client: &Client,
     store_name: &str,
@@ -500,85 +504,97 @@ async fn force_refresh_failed_external_secrets(
     let api_resource = ExternalSecret::api_resource();
     let es_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
 
-    let es_list = es_api.list(&ListParams::default()).await?;
-
     let timestamp = chrono::Utc::now().timestamp().to_string();
     let mut refreshed = 0u32;
 
-    for es in &es_list {
-        // Check if this ExternalSecret references the given store
-        let refs_store = es
-            .data
-            .get("spec")
-            .and_then(|s| s.get("secretStoreRef"))
-            .map(|r| {
-                let name_match = r.get("name").and_then(|n| n.as_str()) == Some(store_name);
-                let kind_match = r
-                    .get("kind")
-                    .and_then(|k| k.as_str())
-                    .map(|k| k == "ClusterSecretStore")
-                    .unwrap_or(true); // default kind is ClusterSecretStore
-                name_match && kind_match
-            })
-            .unwrap_or(false);
+    // Paginate to avoid loading all ExternalSecrets into memory at once
+    let mut lp = ListParams::default().limit(ES_LIST_PAGE_SIZE);
+    loop {
+        let es_list = es_api.list(&lp).await?;
 
-        if !refs_store {
-            continue;
-        }
-
-        // Check if this ExternalSecret is in a failed state (Ready=False)
-        let is_failed = es
-            .data
-            .get("status")
-            .and_then(|s| s.get("conditions"))
-            .and_then(|c| c.as_array())
-            .map(|conditions| {
-                conditions.iter().any(|c| {
-                    c.get("type").and_then(|t| t.as_str()) == Some("Ready")
-                        && c.get("status").and_then(|s| s.as_str()) == Some("False")
+        for es in &es_list {
+            // Check if this ExternalSecret references the given store
+            let refs_store = es
+                .data
+                .get("spec")
+                .and_then(|s| s.get("secretStoreRef"))
+                .map(|r| {
+                    let name_match = r.get("name").and_then(|n| n.as_str()) == Some(store_name);
+                    let kind_match = r
+                        .get("kind")
+                        .and_then(|k| k.as_str())
+                        .map(|k| k == "ClusterSecretStore")
+                        .unwrap_or(true); // default kind is ClusterSecretStore
+                    name_match && kind_match
                 })
-            })
-            .unwrap_or(false);
+                .unwrap_or(false);
 
-        if !is_failed {
-            continue;
+            if !refs_store {
+                continue;
+            }
+
+            // Check if this ExternalSecret is in a failed state (Ready=False)
+            let is_failed = es
+                .data
+                .get("status")
+                .and_then(|s| s.get("conditions"))
+                .and_then(|c| c.as_array())
+                .map(|conditions| {
+                    conditions.iter().any(|c| {
+                        c.get("type").and_then(|t| t.as_str()) == Some("Ready")
+                            && c.get("status").and_then(|s| s.as_str()) == Some("False")
+                    })
+                })
+                .unwrap_or(false);
+
+            if !is_failed {
+                continue;
+            }
+
+            let es_name = es.metadata.name.as_deref().unwrap_or("unknown");
+            let es_namespace = es.metadata.namespace.as_deref().unwrap_or("default");
+
+            // Annotate with force-sync to trigger immediate resync
+            let patch = serde_json::json!({
+                "metadata": {
+                    "annotations": {
+                        "force-sync": &timestamp
+                    }
+                }
+            });
+
+            let ns_api: Api<DynamicObject> =
+                Api::namespaced_with(client.clone(), es_namespace, &api_resource);
+            if let Err(e) = ns_api
+                .patch(
+                    es_name,
+                    &PatchParams::apply(FIELD_MANAGER).force(),
+                    &Patch::Merge(&patch),
+                )
+                .await
+            {
+                warn!(
+                    external_secret = %es_name,
+                    namespace = %es_namespace,
+                    error = %e,
+                    "Failed to force-refresh ExternalSecret"
+                );
+            } else {
+                info!(
+                    external_secret = %es_name,
+                    namespace = %es_namespace,
+                    "Force-refreshed failed ExternalSecret after store recovery"
+                );
+                refreshed += 1;
+            }
         }
 
-        let es_name = es.metadata.name.as_deref().unwrap_or("unknown");
-        let es_namespace = es.metadata.namespace.as_deref().unwrap_or("default");
-
-        // Annotate with force-sync to trigger immediate resync
-        let patch = serde_json::json!({
-            "metadata": {
-                "annotations": {
-                    "force-sync": &timestamp
-                }
+        // Continue to next page or break
+        match es_list.metadata.continue_ {
+            Some(ref token) if !token.is_empty() => {
+                lp = lp.continue_token(token);
             }
-        });
-
-        let ns_api: Api<DynamicObject> =
-            Api::namespaced_with(client.clone(), es_namespace, &api_resource);
-        if let Err(e) = ns_api
-            .patch(
-                es_name,
-                &PatchParams::apply(FIELD_MANAGER).force(),
-                &Patch::Merge(&patch),
-            )
-            .await
-        {
-            warn!(
-                external_secret = %es_name,
-                namespace = %es_namespace,
-                error = %e,
-                "Failed to force-refresh ExternalSecret"
-            );
-        } else {
-            info!(
-                external_secret = %es_name,
-                namespace = %es_namespace,
-                "Force-refreshed failed ExternalSecret after store recovery"
-            );
-            refreshed += 1;
+            _ => break,
         }
     }
 

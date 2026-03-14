@@ -71,10 +71,7 @@ pub fn generate_eso_mesh_members() -> Vec<LatticeMeshMember> {
                 )])),
                 ports: vec![],
                 allowed_callers: vec![],
-                dependencies: vec![ServiceRef::new(
-                    LATTICE_SYSTEM_NAMESPACE,
-                    OPERATOR_NAME,
-                )],
+                dependencies: vec![ServiceRef::new(LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME)],
                 egress: vec![kube_apiserver_egress()],
                 allow_peer_traffic: false,
                 ingress: None,

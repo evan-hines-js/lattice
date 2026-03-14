@@ -358,26 +358,31 @@ pub fn build_included_resources(control_plane: bool, gpu_paas: bool) -> Vec<Stri
 /// Used by the service controller when `ServiceBackupSpec.schedule` is set.
 /// The schedule targets only pods matching `app.kubernetes.io/name: <service_name>`
 /// in the service's namespace.
+///
+/// Validates that `service_name` and `namespace` are DNS labels (defense-in-depth
+/// since they're interpolated into a label selector) and that the cron expression
+/// doesn't fire more than once per hour.
 pub fn build_service_schedule(
     service_name: &str,
     namespace: &str,
     cron: &str,
     bsl_name: &str,
     ttl: Option<String>,
-) -> Schedule {
+) -> Result<Schedule, ReconcileError> {
+    validate_dns_label_field(service_name, "service name")?;
+    validate_dns_label_field(namespace, "namespace")?;
+    validate_cron_minimum_interval(cron)?;
+
     let schedule_name = format!("lattice-svc-{}-{}", namespace, service_name);
 
     let mut match_labels = BTreeMap::new();
-    match_labels.insert(
-        LABEL_NAME.to_string(),
-        service_name.to_string(),
-    );
+    match_labels.insert(LABEL_NAME.to_string(), service_name.to_string());
     match_labels.insert(
         LABEL_MANAGED_BY.to_string(),
         LABEL_MANAGED_BY_LATTICE.to_string(),
     );
 
-    Schedule::new(
+    Ok(Schedule::new(
         schedule_name,
         VELERO_NAMESPACE,
         ScheduleSpec {
@@ -395,7 +400,54 @@ pub fn build_service_schedule(
                 label_selector: Some(LabelSelector { match_labels }),
             },
         },
-    )
+    ))
+}
+
+/// Wrap `validate_dns_label` into a `ReconcileError`.
+fn validate_dns_label_field(value: &str, field: &str) -> Result<(), ReconcileError> {
+    lattice_common::crd::validate_dns_label(value, field)
+        .map_err(|e| ReconcileError::Validation(format!("invalid {field} for backup schedule: {e}")))
+}
+
+/// Reject cron expressions that fire more than once per hour.
+///
+/// Only the minute field matters: any wildcard, step, list, or range that
+/// produces multiple values means sub-hourly firing regardless of the hour
+/// field (e.g. `0,30 2 * * *` still fires twice during hour 2).
+fn validate_cron_minimum_interval(cron: &str) -> Result<(), ReconcileError> {
+    let fields: Vec<&str> = cron.split_whitespace().collect();
+    if fields.len() != 5 {
+        return Err(ReconcileError::Validation(
+            "cron expression must have exactly 5 fields".to_string(),
+        ));
+    }
+
+    let fires_sub_hourly = match fields[0] {
+        "*" => true,
+        s if s.starts_with("*/") => {
+            s[2..].parse::<u32>().map_or(true, |n| n == 0 || n < 60)
+        }
+        s if s.contains(',') => s.split(',').count() > 1,
+        s if s.contains('-') => {
+            let mut parts = s.splitn(2, '-');
+            match (
+                parts.next().and_then(|v| v.parse::<u32>().ok()),
+                parts.next().and_then(|v| v.parse::<u32>().ok()),
+            ) {
+                (Some(lo), Some(hi)) => hi > lo,
+                _ => true,
+            }
+        }
+        _ => false,
+    };
+
+    if fires_sub_hourly {
+        return Err(ReconcileError::Validation(
+            "backup schedule must not fire more frequently than once per hour".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 // =============================================================================
@@ -593,7 +645,8 @@ mod tests {
             "0 */1 * * *",
             "lattice-production-s3",
             Some("168h".to_string()),
-        );
+        )
+        .expect("valid schedule");
 
         assert_eq!(schedule.metadata.name, "lattice-svc-prod-my-db");
         assert_eq!(schedule.metadata.namespace, VELERO_NAMESPACE);
@@ -618,12 +671,75 @@ mod tests {
 
     #[test]
     fn test_service_schedule_json_structure() {
-        let schedule = build_service_schedule("api", "default", "0 0 * * *", "lattice-s3", None);
+        let schedule = build_service_schedule("api", "default", "0 0 * * *", "lattice-s3", None)
+            .expect("valid schedule");
         let json = serde_json::to_value(&schedule).unwrap();
 
         assert_eq!(json["apiVersion"], "velero.io/v1");
         assert_eq!(json["kind"], "Schedule");
         assert_eq!(json["metadata"]["name"], "lattice-svc-default-api");
         assert_eq!(json["spec"]["template"]["includedNamespaces"][0], "default");
+    }
+
+    #[test]
+    fn test_sub_hourly_cron_rejected() {
+        let result = build_service_schedule("api", "default", "*/5 * * * *", "lattice-s3", None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("once per hour"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_wildcard_minute_cron_rejected() {
+        let result = build_service_schedule("api", "default", "* * * * *", "lattice-s3", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_cron_field_count_rejected() {
+        let result = build_service_schedule("api", "default", "0 0 * *", "lattice-s3", None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("5 fields"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_hourly_cron_accepted() {
+        let result = build_service_schedule("api", "default", "0 */1 * * *", "lattice-s3", None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_daily_cron_accepted() {
+        let result = build_service_schedule("api", "default", "0 2 * * *", "lattice-s3", None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_minute_range_cron_rejected() {
+        let result = build_service_schedule("api", "default", "1-59 * * * *", "lattice-s3", None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("once per hour"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_step_zero_cron_rejected() {
+        let result = build_service_schedule("api", "default", "*/0 * * * *", "lattice-s3", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multi_minute_single_hour_rejected() {
+        // "0,30 2 * * *" still fires every 30 min during hour 2
+        let result = build_service_schedule("api", "default", "0,30 2 * * *", "lattice-s3", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hour_range_with_multi_minute_rejected() {
+        // "0,30 1-5 * * *" fires every 30 min across hours 1-5
+        let result = build_service_schedule("api", "default", "0,30 1-5 * * *", "lattice-s3", None);
+        assert!(result.is_err());
     }
 }

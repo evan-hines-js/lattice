@@ -83,6 +83,8 @@ pub struct AgentConnection {
     pub status_hash: Vec<u8>,
     /// Operator image running on this child (from heartbeat)
     pub lattice_image: Option<String>,
+    /// When the agent last disconnected (None if never disconnected or currently connected)
+    pub disconnected_at: Option<Instant>,
 }
 
 impl AgentConnection {
@@ -107,6 +109,7 @@ impl AgentConnection {
             spec_hash: vec![],
             status_hash: vec![],
             lattice_image: None,
+            disconnected_at: None,
         }
     }
 
@@ -324,6 +327,7 @@ impl AgentRegistry {
     pub fn unregister(&self, cluster_name: &str) {
         if let Some(mut agent) = self.agents.get_mut(cluster_name) {
             agent.connected = false;
+            agent.disconnected_at = Some(Instant::now());
             // Clear teardown guard when agent disconnects
             self.teardown_in_progress.remove(cluster_name);
             info!(cluster = %cluster_name, "Agent disconnected");
@@ -804,6 +808,35 @@ impl AgentRegistry {
             })
             .map(|r| r.key().clone())
             .collect()
+    }
+
+    /// Remove agents that have been disconnected longer than `max_age`.
+    ///
+    /// Returns the number of agents removed. Also cleans up associated
+    /// unpivot/pivot manifests for removed agents.
+    pub fn cleanup_stale_disconnected(&self, max_age: Duration) -> usize {
+        let stale: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|r| {
+                let agent = r.value();
+                !agent.connected
+                    && agent
+                        .disconnected_at
+                        .map(|t| t.elapsed() > max_age)
+                        .unwrap_or(false)
+            })
+            .map(|r| r.key().clone())
+            .collect();
+
+        let count = stale.len();
+        for name in &stale {
+            self.agents.remove(name);
+            self.unpivot_manifests.remove(name);
+            self.pivot_source_manifests.remove(name);
+            info!(cluster = %name, "Removed stale disconnected agent from registry");
+        }
+        count
     }
 }
 
@@ -1557,5 +1590,100 @@ mod tests {
 
         let changed = registry.update_hashes("nonexistent", &spec_hash, &status_hash);
         assert!(!changed, "Unknown cluster should not trigger sync");
+    }
+
+    // =========================================================================
+    // Stale Agent Cleanup Tests
+    // =========================================================================
+
+    #[test]
+    fn test_cleanup_removes_stale_disconnected_agents() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("stale-cluster");
+        registry.register(conn);
+        registry.unregister("stale-cluster");
+
+        // Backdate disconnected_at past the threshold
+        if let Some(mut agent) = registry.get_mut("stale-cluster") {
+            agent.disconnected_at = Some(Instant::now() - Duration::from_secs(7200));
+        }
+
+        let removed = registry.cleanup_stale_disconnected(Duration::from_secs(3600));
+        assert_eq!(removed, 1);
+        assert!(!registry.is_known("stale-cluster"));
+    }
+
+    #[test]
+    fn test_cleanup_preserves_recently_disconnected() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("recent-cluster");
+        registry.register(conn);
+        registry.unregister("recent-cluster");
+
+        let removed = registry.cleanup_stale_disconnected(Duration::from_secs(3600));
+        assert_eq!(removed, 0);
+        assert!(registry.is_known("recent-cluster"));
+    }
+
+    #[test]
+    fn test_cleanup_preserves_connected_agents() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("active-cluster");
+        registry.register(conn);
+
+        let removed = registry.cleanup_stale_disconnected(Duration::from_secs(0));
+        assert_eq!(removed, 0);
+        assert!(registry.is_connected("active-cluster"));
+    }
+
+    #[test]
+    fn test_cleanup_also_removes_associated_manifests() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("manifest-cluster");
+        registry.register(conn);
+
+        registry.set_unpivot_manifests(
+            "manifest-cluster",
+            UnpivotManifests {
+                capi_manifests: vec![b"data".to_vec()],
+                namespace: "ns".to_string(),
+            },
+        );
+        registry.set_pivot_source_manifests(
+            "manifest-cluster",
+            PivotSourceManifests {
+                capi_manifests: vec![b"data".to_vec()],
+                namespace: "ns".to_string(),
+            },
+        );
+
+        registry.unregister("manifest-cluster");
+        if let Some(mut agent) = registry.get_mut("manifest-cluster") {
+            agent.disconnected_at = Some(Instant::now() - Duration::from_secs(7200));
+        }
+
+        registry.cleanup_stale_disconnected(Duration::from_secs(3600));
+        assert!(!registry.has_unpivot_manifests("manifest-cluster"));
+        assert!(registry
+            .take_pivot_source_manifests("manifest-cluster")
+            .is_none());
+    }
+
+    #[test]
+    fn test_unregister_sets_disconnected_at() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("cluster-a");
+        registry.register(conn);
+
+        // Initially no disconnected_at
+        {
+            let agent = registry.get("cluster-a").unwrap();
+            assert!(agent.disconnected_at.is_none());
+        }
+
+        registry.unregister("cluster-a");
+
+        let agent = registry.get("cluster-a").unwrap();
+        assert!(agent.disconnected_at.is_some());
     }
 }

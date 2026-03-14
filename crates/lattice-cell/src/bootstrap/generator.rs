@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, LocalObjectReference, Namespace,
-    ObjectFieldSelector, PodSpec, PodTemplateSpec, Probe, Secret, SecretVolumeSource,
+    ConfigMap, Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, LocalObjectReference,
+    Namespace, ObjectFieldSelector, PodSpec, PodTemplateSpec, Probe, Secret, SecretVolumeSource,
     ServiceAccount, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
@@ -18,7 +18,9 @@ use k8s_openapi::ByteString;
 
 use kube::CustomResourceExt;
 use lattice_common::crd::{LatticeCluster, ProviderType};
-use lattice_common::{LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME, REGISTRY_CREDENTIALS_SECRET, SECRET_TYPE_DOCKERCONFIG};
+use lattice_common::{
+    LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME, REGISTRY_CREDENTIALS_SECRET, SECRET_TYPE_DOCKERCONFIG,
+};
 
 use super::types::ManifestGenerator;
 
@@ -57,6 +59,21 @@ impl DefaultManifestGenerator {
                 name: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
+            ..Default::default()
+        };
+
+        // Certificate blocklist ConfigMap (empty).
+        // Must exist before the gRPC server starts (fail-closed).
+        let cert_blocklist_cm = ConfigMap {
+            metadata: ObjectMeta {
+                name: Some("lattice-cert-blocklist".to_string()),
+                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+                ..Default::default()
+            },
+            data: Some(BTreeMap::from([(
+                "fingerprints".to_string(),
+                String::new(),
+            )])),
             ..Default::default()
         };
 
@@ -290,6 +307,7 @@ impl DefaultManifestGenerator {
         let mut manifests = vec![serde_json::to_string(&crd)?];
 
         manifests.push(serde_json::to_string(&namespace)?);
+        manifests.push(serde_json::to_string(&cert_blocklist_cm)?);
         if let Some(ref reg_secret) = registry_secret {
             manifests.push(serde_json::to_string(reg_secret)?);
         }
