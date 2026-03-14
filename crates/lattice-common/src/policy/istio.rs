@@ -96,21 +96,31 @@ impl AuthorizationPolicy {
     /// Uses `notPrincipals` on a DENY action targeting a Gateway. Istio evaluates
     /// DENY before ALLOW, so this blocks unauthorized callers even if a permissive
     /// ALLOW policy exists on the same Gateway.
+    /// DENY policy that blocks traffic from identities NOT in the allowed list.
+    ///
+    /// Uses `notPrincipals` on a DENY action with pod selector (same scope as
+    /// the permissive gateway ALLOW policy). Istio evaluates DENY before ALLOW
+    /// within the same scope, so this blocks unauthorized callers.
+    ///
+    /// Must use pod selector (not targetRefs) to be in the same evaluation
+    /// scope as the gateway_auth_policy — otherwise Istio may evaluate them
+    /// independently and the ALLOW wins.
     pub fn new_deny_not_principals(
         name: &str,
         namespace: &str,
         gateway_name: &str,
         allowed_principals: &[String],
     ) -> Self {
+        let match_labels = std::collections::BTreeMap::from([(
+            "gateway.networking.k8s.io/gateway-name".to_string(),
+            gateway_name.to_string(),
+        )]);
+
         Self::new(
             ObjectMeta::new(name, namespace),
             AuthorizationPolicySpec {
-                target_refs: vec![TargetRef {
-                    group: "gateway.networking.k8s.io".to_string(),
-                    kind: "Gateway".to_string(),
-                    name: gateway_name.to_string(),
-                }],
-                selector: None,
+                target_refs: vec![],
+                selector: Some(WorkloadSelector { match_labels }),
                 action: "DENY".to_string(),
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {

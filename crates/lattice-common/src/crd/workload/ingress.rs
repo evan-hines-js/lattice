@@ -109,21 +109,47 @@ impl AdvertiseConfig {
     /// Each "cluster/namespace/name" entry becomes
     /// `lattice.{cluster}.local/ns/{namespace}/sa/{name}`.
     /// Wildcard entries are skipped (use is_open() to check).
+    /// Malformed entries are logged as warnings and skipped.
     pub fn to_spiffe_principals(&self) -> Vec<String> {
         self.allowed_services
             .iter()
             .filter(|s| *s != "*")
             .filter_map(|s| {
                 let parts: Vec<&str> = s.splitn(3, '/').collect();
-                if parts.len() == 3 {
+                if parts.len() == 3
+                    && !parts[0].is_empty()
+                    && !parts[1].is_empty()
+                    && !parts[2].is_empty()
+                {
                     Some(crate::mesh::trust_domain::principal(
                         parts[0], parts[1], parts[2],
                     ))
                 } else {
+                    tracing::warn!(
+                        entry = %s,
+                        "malformed allowedServices entry (expected cluster/namespace/name), skipping"
+                    );
                     None
                 }
             })
             .collect()
+    }
+
+    /// Validate the advertise config. Returns an error for malformed entries.
+    pub fn validate(&self) -> Result<(), String> {
+        for entry in &self.allowed_services {
+            if entry == "*" {
+                continue;
+            }
+            let parts: Vec<&str> = entry.splitn(3, '/').collect();
+            if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
+                return Err(format!(
+                    "invalid allowedServices entry '{}': must be 'cluster/namespace/name' or '*'",
+                    entry
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
