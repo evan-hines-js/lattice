@@ -438,20 +438,6 @@ pub async fn build_and_push_pytorch_test_image(image: &str) -> Result<(), String
     Ok(())
 }
 
-/// Build and push the lattice-downloader Docker image
-pub async fn build_and_push_downloader_image(image: &str) -> Result<(), String> {
-    info!("Building lattice-downloader Docker image...");
-    docker_build(
-        "docker",
-        &["build", "-f", "Dockerfile.downloader", "-t", image, "."],
-        "downloader",
-    )?;
-    info!("Pushing downloader image to registry...");
-    docker_push(image)?;
-    info!("Downloader image pushed successfully");
-    Ok(())
-}
-
 // =============================================================================
 // Operator Management
 // =============================================================================

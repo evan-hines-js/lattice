@@ -136,6 +136,7 @@ impl WaypointCompiler {
                     tls: None,
                     allowed_routes: Some(AllowedRoutes::same_namespace()),
                 }],
+                tls: None,
             },
         )
     }
@@ -266,11 +267,37 @@ impl IngressCompiler {
                 &gateway_name,
                 &all_listeners,
             ));
+            // Enable frontend mTLS if any route is advertised for cross-cluster access.
+            // This ensures only clusters sharing the Lattice CA can connect.
+            let has_advertised_routes = ingress
+                .routes
+                .values()
+                .any(|r| r.advertise.is_some());
+
+            let frontend_tls = if has_advertised_routes {
+                Some(GatewayFrontendMtls {
+                    frontend: GatewayFrontendTls {
+                        default: GatewayFrontendTlsDefault {
+                            validation: GatewayFrontendValidation {
+                                ca_certificate_refs: vec![CaCertificateRef {
+                                    group: String::new(),
+                                    kind: "ConfigMap".to_string(),
+                                    name: mesh::LATTICE_CA_CONFIGMAP.to_string(),
+                                }],
+                            },
+                        },
+                    },
+                })
+            } else {
+                None
+            };
+
             output.gateway = Some(Gateway::new(
                 ObjectMeta::new(&gateway_name, namespace),
                 GatewaySpec {
                     gateway_class_name: gateway_class.to_string(),
                     listeners: all_listeners,
+                    tls: frontend_tls,
                 },
             ));
             output.gateway_graph_registration = Some(GraphRegistration {

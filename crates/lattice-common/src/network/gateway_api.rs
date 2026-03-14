@@ -76,6 +76,56 @@ pub struct GatewaySpec {
     pub gateway_class_name: String,
     /// Listener configurations
     pub listeners: Vec<GatewayListener>,
+    /// TLS configuration for the gateway (frontend mTLS, client cert validation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<GatewayFrontendMtls>,
+}
+
+/// Gateway-level TLS configuration for frontend mTLS (client cert validation)
+///
+/// Distinct from per-listener `GatewayTlsConfig` — this is `spec.tls.frontend`
+/// per the Gateway API spec for client certificate validation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayFrontendMtls {
+    /// Frontend TLS settings (client certificate validation)
+    pub frontend: GatewayFrontendTls,
+}
+
+/// Frontend TLS configuration for client certificate validation
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayFrontendTls {
+    /// Default validation settings applied to all listeners
+    pub default: GatewayFrontendTlsDefault,
+}
+
+/// Default frontend TLS validation settings
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayFrontendTlsDefault {
+    /// Validation configuration
+    pub validation: GatewayFrontendValidation,
+}
+
+/// Frontend TLS validation — CA certificate references for client cert verification
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayFrontendValidation {
+    /// References to ConfigMaps containing PEM-encoded CA certificate bundles
+    pub ca_certificate_refs: Vec<CaCertificateRef>,
+}
+
+/// Reference to a CA certificate for client verification
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaCertificateRef {
+    /// API group (empty string for core group)
+    pub group: String,
+    /// Kind of the referenced resource
+    pub kind: String,
+    /// Name of the ConfigMap containing the CA certificate bundle
+    pub name: String,
 }
 
 /// Gateway listener configuration

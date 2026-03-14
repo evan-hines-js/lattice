@@ -64,6 +64,12 @@ pub const WAYPOINT_FOR_SERVICE: &str = "service";
 /// Value for DATAPLANE_MODE_LABEL enabling ambient mesh enrollment.
 pub const DATAPLANE_MODE_AMBIENT: &str = "ambient";
 
+/// ConfigMap name containing the Lattice CA trust bundle for cross-cluster mTLS.
+///
+/// Gateway API frontend mTLS references this ConfigMap to validate client certs.
+/// The operator ensures this ConfigMap exists with the CA trust bundle PEM.
+pub const LATTICE_CA_CONFIGMAP: &str = "lattice-ca-trust";
+
 // =============================================================================
 // Naming Helpers
 // =============================================================================
