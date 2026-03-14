@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use futures::Stream;
@@ -78,10 +79,10 @@ pub enum ImportError {
 
 /// Convert SubtreeState clusters to ClusterInfo, filtering out removed clusters
 fn convert_subtree_to_cluster_infos(state: &SubtreeState) -> Vec<ClusterInfo> {
-    if state.clusters.len() > MAX_CLUSTERS_PER_SUBTREE {
+    if state.clusters.len() > *MAX_CLUSTERS_PER_SUBTREE {
         warn!(
             count = state.clusters.len(),
-            max = MAX_CLUSTERS_PER_SUBTREE,
+            max = *MAX_CLUSTERS_PER_SUBTREE,
             "rejecting SubtreeState: too many cluster entries"
         );
         return Vec::new();
@@ -169,9 +170,22 @@ async fn handle_service_lookup(
 }
 
 /// Maximum routes accepted from a single child. Prevents unbounded CRD/memory growth.
-const MAX_ROUTES_PER_CLUSTER: usize = 1000;
+/// Override with `LATTICE_MAX_ROUTES_PER_CLUSTER` env var.
+static MAX_ROUTES_PER_CLUSTER: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("LATTICE_MAX_ROUTES_PER_CLUSTER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000)
+});
+
 /// Maximum clusters accepted in a single SubtreeState. Prevents DashMap exhaustion.
-const MAX_CLUSTERS_PER_SUBTREE: usize = 500;
+/// Override with `LATTICE_MAX_CLUSTERS_PER_SUBTREE` env var.
+static MAX_CLUSTERS_PER_SUBTREE: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("LATTICE_MAX_CLUSTERS_PER_SUBTREE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500)
+});
 
 /// Convert SubtreeState services to ClusterRoute CRD entries.
 ///
@@ -179,10 +193,10 @@ const MAX_CLUSTERS_PER_SUBTREE: usize = 500;
 fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> {
     use lattice_common::system_namespaces;
 
-    if state.services.len() > MAX_ROUTES_PER_CLUSTER {
+    if state.services.len() > *MAX_ROUTES_PER_CLUSTER {
         warn!(
             count = state.services.len(),
-            max = MAX_ROUTES_PER_CLUSTER,
+            max = *MAX_ROUTES_PER_CLUSTER,
             "rejecting SubtreeState: too many service routes"
         );
         return Vec::new();

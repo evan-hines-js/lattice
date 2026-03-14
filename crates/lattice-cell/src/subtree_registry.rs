@@ -15,7 +15,7 @@
 //!
 //! Uses DashMap for lock-free concurrent reads/writes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dashmap::DashMap;
 
@@ -111,17 +111,38 @@ impl SubtreeRegistry {
 
     /// Handle full subtree state from an agent (replaces previous state)
     ///
+    /// Uses insert-then-remove to avoid a window where routes are missing.
+    /// New routes are inserted first (overwriting old values atomically),
+    /// then stale routes owned by this agent that aren't in the new set are removed.
+    ///
     /// # Security
     /// Rejects attempts to overwrite the self route or routes owned by other
     /// connected agents.
     pub async fn handle_full_sync(&self, agent_id: &str, clusters: Vec<ClusterInfo>) {
-        // Remove all clusters previously routed via this agent
-        self.routes
-            .retain(|_, info| info.agent_id.as_deref() != Some(agent_id));
+        // Collect the new cluster names for this agent
+        let mut new_names: HashSet<String> = HashSet::new();
 
-        // Add new clusters with security guards
+        // Insert new routes first (atomic per-key, no missing window)
         for cluster in clusters {
+            new_names.insert(cluster.name.clone());
             self.try_insert_route(agent_id, cluster);
+        }
+
+        // Remove stale routes owned by this agent that aren't in the new set
+        let stale_keys: Vec<String> = self
+            .routes
+            .iter()
+            .filter(|entry| {
+                entry.value().agent_id.as_deref() == Some(agent_id)
+                    && !new_names.contains(entry.key())
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in stale_keys {
+            self.routes.remove_if(&key, |_, info| {
+                info.agent_id.as_deref() == Some(agent_id)
+            });
         }
     }
 
