@@ -387,7 +387,7 @@ impl TestSession {
         // Start port-forward to mgmt proxy if we have child kubeconfigs
         // (all child access routes through mgmt's proxy)
         let mgmt_proxy = if ctx.workload_kubeconfig.is_some() {
-            match ProxySession::start(&ctx.mgmt_kubeconfig).await {
+            match ProxySession::start_for_provider(&ctx.mgmt_kubeconfig, ctx.provider).await {
                 Ok(session) => {
                     ctx.mgmt_proxy_url = Some(session.url.clone());
                     Some(session)
