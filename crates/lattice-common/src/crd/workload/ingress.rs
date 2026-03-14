@@ -420,7 +420,8 @@ impl RouteSpec {
 
         // Validate advertise config if present
         if let Some(ref adv) = self.advertise {
-            adv.validate().map_err(|e| format!("route '{}': {}", route_name, e))?;
+            adv.validate()
+                .map_err(|e| format!("route '{}': {}", route_name, e))?;
         }
 
         Ok(())
@@ -839,16 +840,10 @@ mod tests {
     #[test]
     fn advertise_to_spiffe_principals() {
         let config = AdvertiseConfig {
-            allowed_services: vec![
-                "edge/edge/haproxy-fw".to_string(),
-                "*".to_string(),
-            ],
+            allowed_services: vec!["edge/edge/haproxy-fw".to_string(), "*".to_string()],
         };
         let principals = config.to_spiffe_principals();
         assert_eq!(principals.len(), 1); // wildcard skipped
-        assert_eq!(
-            principals[0],
-            "lattice.edge.local/ns/edge/sa/haproxy-fw"
-        );
+        assert_eq!(principals[0], "lattice.edge.local/ns/edge/sa/haproxy-fw");
     }
 }

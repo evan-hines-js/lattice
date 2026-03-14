@@ -78,10 +78,7 @@ struct GatewayListener {
 /// Spawn the route reconciler task.
 ///
 /// Returns a sender for submitting child route updates.
-pub fn spawn_route_reconciler(
-    cluster_name: String,
-    client: Client,
-) -> RouteUpdateSender {
+pub fn spawn_route_reconciler(cluster_name: String, client: Client) -> RouteUpdateSender {
     let (tx, rx) = mpsc::channel::<RouteUpdate>(256);
     let config = RouteReconcilerConfig {
         cluster_name,
@@ -114,8 +111,7 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
     info!(cluster = %cluster_name, "Route reconciler started");
 
     let svc_api: Api<LatticeService> = Api::all(client.clone());
-    let mut svc_stream =
-        std::pin::pin!(resilient_watcher(svc_api, watcher::Config::default()));
+    let mut svc_stream = std::pin::pin!(resilient_watcher(svc_api, watcher::Config::default()));
 
     loop {
         let mut should_reconcile = false;
@@ -168,7 +164,10 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
             continue;
         }
 
-        if write_cluster_routes(&api, &cluster_name, &merged).await.is_ok() {
+        if write_cluster_routes(&api, &cluster_name, &merged)
+            .await
+            .is_ok()
+        {
             last_written = merged;
         }
     }
@@ -234,7 +233,11 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
 
             let protocol = match route.kind {
                 lattice_common::crd::RouteKind::HTTPRoute => {
-                    if route.tls.is_some() { "HTTPS" } else { "HTTP" }
+                    if route.tls.is_some() {
+                        "HTTPS"
+                    } else {
+                        "HTTP"
+                    }
                 }
                 lattice_common::crd::RouteKind::GRPCRoute => "GRPC",
                 lattice_common::crd::RouteKind::TCPRoute => "TCP",

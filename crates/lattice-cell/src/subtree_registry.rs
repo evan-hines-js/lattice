@@ -140,9 +140,8 @@ impl SubtreeRegistry {
             .collect();
 
         for key in stale_keys {
-            self.routes.remove_if(&key, |_, info| {
-                info.agent_id.as_deref() == Some(agent_id)
-            });
+            self.routes
+                .remove_if(&key, |_, info| info.agent_id.as_deref() == Some(agent_id));
         }
     }
 
@@ -159,9 +158,8 @@ impl SubtreeRegistry {
     ) {
         // Remove clusters — only if routed via this agent
         for name in removed {
-            self.routes.remove_if(&name, |_, info| {
-                info.agent_id.as_deref() == Some(agent_id)
-            });
+            self.routes
+                .remove_if(&name, |_, info| info.agent_id.as_deref() == Some(agent_id));
         }
 
         // Add clusters with security guards

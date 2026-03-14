@@ -14,8 +14,8 @@ mod sync_resources;
 
 use std::sync::Arc;
 
-use moka::future::Cache;
 use dashmap::DashMap;
+use moka::future::Cache;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -62,7 +62,8 @@ pub struct CommandContext {
     /// Provider for creating Kubernetes clients
     pub kube_provider: Arc<dyn KubeClientProvider>,
     /// Pending service lookup responses keyed by request_id
-    pub pending_lookups: DashMap<String, tokio::sync::oneshot::Sender<lattice_proto::ServiceLookupResponse>>,
+    pub pending_lookups:
+        DashMap<String, tokio::sync::oneshot::Sender<lattice_proto::ServiceLookupResponse>>,
 }
 
 impl CommandContext {

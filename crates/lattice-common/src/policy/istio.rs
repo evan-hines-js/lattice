@@ -74,7 +74,10 @@ impl AuthorizationPolicy {
                 action: "ALLOW".to_string(),
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
-                        source: SourceSpec { principals, not_principals: vec![] },
+                        source: SourceSpec {
+                            principals,
+                            not_principals: vec![],
+                        },
                     }],
                     to: vec![AuthorizationOperation {
                         operation: OperationSpec {
@@ -155,7 +158,10 @@ impl AuthorizationPolicy {
                 action: "ALLOW".to_string(),
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
-                        source: SourceSpec { principals, not_principals: vec![] },
+                        source: SourceSpec {
+                            principals,
+                            not_principals: vec![],
+                        },
                     }],
                     to: vec![AuthorizationOperation {
                         operation: OperationSpec {

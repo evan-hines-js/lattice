@@ -734,7 +734,9 @@ async fn setup_cell_infra(
 
     let auth_proxy_handle = if is_cell {
         let extra_sans = get_cell_server_sans(client, self_cluster_name, is_bootstrap).await;
-        let tx = route_update_tx.clone().expect("route_update_tx required for cell");
+        let tx = route_update_tx
+            .clone()
+            .expect("route_update_tx required for cell");
         activate_cell_services(
             client,
             &servers,
@@ -754,7 +756,9 @@ async fn setup_cell_infra(
             let watcher_servers = servers.clone();
             let watcher_cedar = cedar;
             let watcher_oidc_insecure = config.oidc_allow_insecure_http;
-            let watcher_route_tx = route_update_tx.clone().expect("route_update_tx required for leaf");
+            let watcher_route_tx = route_update_tx
+                .clone()
+                .expect("route_update_tx required for leaf");
             tokio::spawn(async move {
                 cell_activation_watcher(
                     watcher_client,
@@ -787,7 +791,12 @@ async fn activate_cell_services(
     route_update_tx: lattice_cell::route_reconciler::RouteUpdateSender,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     servers
-        .ensure_running(DefaultManifestGenerator::new(), extra_sans, client.clone(), route_update_tx)
+        .ensure_running(
+            DefaultManifestGenerator::new(),
+            extra_sans,
+            client.clone(),
+            route_update_tx,
+        )
         .await?;
     tracing::info!("Cell servers started");
 

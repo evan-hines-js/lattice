@@ -47,11 +47,17 @@ fn build_advertised_service(
 
     use lattice_common::crd::{ResourceQuantity, ResourceRequirements};
 
+    use lattice_common::crd::VolumeMount;
+
+    let mut volumes = BTreeMap::new();
+    volumes.insert("/tmp".to_string(), VolumeMount::default());
+
     let mut containers = BTreeMap::new();
     containers.insert(
         "main".to_string(),
         ContainerSpec {
             image: NGINX_IMAGE.clone(),
+            volumes,
             resources: Some(ResourceRequirements {
                 requests: Some(ResourceQuantity {
                     cpu: Some("50m".to_string()),
@@ -112,7 +118,6 @@ fn build_advertised_service(
     }
 }
 
-
 /// Build a consumer service on the mgmt cluster that curls a remote (cross-cluster) service.
 ///
 /// The consumer declares an outbound dependency to the remote service. The compiler
@@ -127,7 +132,9 @@ fn build_cross_cluster_consumer(
     advertised_hostname: &str,
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_common::crd::{DependencyDirection, ResourceSpec, ResourceType, ResourceQuantity, ResourceRequirements};
+    use lattice_common::crd::{
+        DependencyDirection, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
+    };
 
     let script = format!(
         r#"while true; do
@@ -208,16 +215,23 @@ async fn verify_cross_cluster_traffic(
             let name = service_name.to_string();
             async move {
                 let output = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "logs", "-n", &ns,
-                    "-l", &format!("lattice.dev/service={name}"),
+                    "--kubeconfig",
+                    &kc,
+                    "logs",
+                    "-n",
+                    &ns,
+                    "-l",
+                    &format!("lattice.dev/service={name}"),
                     "--tail=20",
-                ]).await.unwrap_or_default();
+                ])
+                .await
+                .unwrap_or_default();
 
                 Ok(output.contains("CROSS_CLUSTER_OK"))
             }
         },
-    ).await
+    )
+    .await
 }
 
 // =============================================================================
@@ -229,9 +243,14 @@ pub async fn verify_cluster_routes_exist(kubeconfig: &str) -> Result<(), String>
     info!("[RouteDiscovery] Checking for LatticeClusterRoutes CRDs...");
 
     let output = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "latticeclusterroutes", "-o", "json",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "latticeclusterroutes",
+        "-o",
+        "json",
+    ])
+    .await?;
 
     let parsed: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
@@ -244,7 +263,10 @@ pub async fn verify_cluster_routes_exist(kubeconfig: &str) -> Result<(), String>
     for item in items {
         let name = item["metadata"]["name"].as_str().unwrap_or("unknown");
         let count = item["status"]["routeCount"].as_u64().unwrap_or(0);
-        info!("[RouteDiscovery] LatticeClusterRoutes '{}': {} routes", name, count);
+        info!(
+            "[RouteDiscovery] LatticeClusterRoutes '{}': {} routes",
+            name, count
+        );
     }
 
     Ok(())
@@ -256,7 +278,10 @@ pub async fn verify_child_routes(
     cluster_name: &str,
     expected_hostnames: &[&str],
 ) -> Result<(), String> {
-    info!("[RouteDiscovery] Waiting for routes from '{}'...", cluster_name);
+    info!(
+        "[RouteDiscovery] Waiting for routes from '{}'...",
+        cluster_name
+    );
 
     wait_for_condition(
         &format!("routes for {cluster_name}"),
@@ -268,9 +293,16 @@ pub async fn verify_child_routes(
             let hostnames: Vec<String> = expected_hostnames.iter().map(|h| h.to_string()).collect();
             async move {
                 let output = match run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "latticeclusterroutes", &cluster, "-o", "json",
-                ]).await {
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "latticeclusterroutes",
+                    &cluster,
+                    "-o",
+                    "json",
+                ])
+                .await
+                {
                     Ok(o) => o,
                     Err(_) => return Ok(false),
                 };
@@ -286,22 +318,34 @@ pub async fn verify_child_routes(
                 };
 
                 Ok(hostnames.iter().all(|h| {
-                    routes.iter().any(|r| r["hostname"].as_str() == Some(h.as_str()))
+                    routes
+                        .iter()
+                        .any(|r| r["hostname"].as_str() == Some(h.as_str()))
                 }))
             }
         },
-    ).await?;
+    )
+    .await?;
 
-    info!("[RouteDiscovery] All expected routes found for '{}'", cluster_name);
+    info!(
+        "[RouteDiscovery] All expected routes found for '{}'",
+        cluster_name
+    );
     Ok(())
 }
 
 /// Verify route status has Ready phase and matching observedGeneration
 pub async fn verify_route_status(kubeconfig: &str, cluster_name: &str) -> Result<(), String> {
     let output = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "latticeclusterroutes", cluster_name, "-o", "json",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "latticeclusterroutes",
+        cluster_name,
+        "-o",
+        "json",
+    ])
+    .await?;
 
     let parsed: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
@@ -314,7 +358,10 @@ pub async fn verify_route_status(kubeconfig: &str, cluster_name: &str) -> Result
     let gen = parsed["metadata"]["generation"].as_i64();
     let observed = parsed["status"]["observedGeneration"].as_i64();
     if gen != observed {
-        return Err(format!("generation mismatch: spec={:?}, observed={:?}", gen, observed));
+        return Err(format!(
+            "generation mismatch: spec={:?}, observed={:?}",
+            gen, observed
+        ));
     }
 
     Ok(())
@@ -329,14 +376,24 @@ pub async fn verify_remote_service_entries(
     kubeconfig: &str,
     namespace: &str,
 ) -> Result<(), String> {
-    info!("[RouteDiscovery] Checking remote ServiceEntries in '{}'...", namespace);
+    info!(
+        "[RouteDiscovery] Checking remote ServiceEntries in '{}'...",
+        namespace
+    );
 
     let output = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "serviceentries", "-n", namespace,
-        "-l", "lattice.dev/managed-by=lattice-mesh-member",
-        "-o", "json",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "serviceentries",
+        "-n",
+        namespace,
+        "-l",
+        "lattice.dev/managed-by=lattice-mesh-member",
+        "-o",
+        "json",
+    ])
+    .await?;
 
     let parsed: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
@@ -354,16 +411,28 @@ pub async fn verify_remote_service_entries(
         let addresses = item["spec"]["addresses"].as_array();
 
         if resolution != "STATIC" {
-            return Err(format!("ServiceEntry '{}': expected STATIC, got {}", name, resolution));
+            return Err(format!(
+                "ServiceEntry '{}': expected STATIC, got {}",
+                name, resolution
+            ));
         }
         if protocol != "HTTPS" {
-            return Err(format!("ServiceEntry '{}': expected HTTPS, got {}", name, protocol));
+            return Err(format!(
+                "ServiceEntry '{}': expected HTTPS, got {}",
+                name, protocol
+            ));
         }
         if addresses.map(|a| a.is_empty()).unwrap_or(true) {
-            return Err(format!("ServiceEntry '{}': missing addresses for STATIC", name));
+            return Err(format!(
+                "ServiceEntry '{}': missing addresses for STATIC",
+                name
+            ));
         }
 
-        info!("[RouteDiscovery] ServiceEntry '{}': HTTPS/STATIC verified", name);
+        info!(
+            "[RouteDiscovery] ServiceEntry '{}': HTTPS/STATIC verified",
+            name
+        );
     }
 
     Ok(())
@@ -374,15 +443,18 @@ pub async fn verify_remote_service_entries(
 // =============================================================================
 
 /// Verify Gateway has frontend mTLS when routes are advertised
-pub async fn verify_gateway_frontend_mtls(
-    kubeconfig: &str,
-    namespace: &str,
-) -> Result<(), String> {
+pub async fn verify_gateway_frontend_mtls(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     let output = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "gateways.gateway.networking.k8s.io",
-        "-n", namespace, "-o", "json",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "gateways.gateway.networking.k8s.io",
+        "-n",
+        namespace,
+        "-o",
+        "json",
+    ])
+    .await?;
 
     let parsed: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
@@ -392,11 +464,15 @@ pub async fn verify_gateway_frontend_mtls(
         let has_frontend = item["spec"]["tls"]["frontend"].as_object().is_some();
 
         if has_frontend {
-            let refs = &item["spec"]["tls"]["frontend"]["default"]["validation"]["caCertificateRefs"];
+            let refs =
+                &item["spec"]["tls"]["frontend"]["default"]["validation"]["caCertificateRefs"];
             if refs.as_array().map(|a| a.is_empty()).unwrap_or(true) {
                 return Err(format!("Gateway '{}': frontend TLS but no CA refs", name));
             }
-            info!("[RouteDiscovery] Gateway '{}': frontend mTLS configured", name);
+            info!(
+                "[RouteDiscovery] Gateway '{}': frontend mTLS configured",
+                name
+            );
         }
     }
 
@@ -414,20 +490,33 @@ pub async fn verify_cross_cluster_auth_policy(
     service_name: &str,
 ) -> Result<(), String> {
     let policy_name = format!("{}-cross-cluster-deny", service_name);
-    info!("[RouteDiscovery] Checking AuthorizationPolicy '{}'...", policy_name);
+    info!(
+        "[RouteDiscovery] Checking AuthorizationPolicy '{}'...",
+        policy_name
+    );
 
     let output = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "authorizationpolicies.security.istio.io",
-        "-n", namespace, &policy_name, "-o", "json",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "authorizationpolicies.security.istio.io",
+        "-n",
+        namespace,
+        &policy_name,
+        "-o",
+        "json",
+    ])
+    .await?;
 
     let parsed: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
 
     let action = parsed["spec"]["action"].as_str().unwrap_or("");
     if action != "ALLOW" {
-        return Err(format!("AuthorizationPolicy action is '{}', expected 'ALLOW'", action));
+        return Err(format!(
+            "AuthorizationPolicy action is '{}', expected 'ALLOW'",
+            action
+        ));
     }
 
     let principals = &parsed["spec"]["rules"][0]["from"][0]["source"]["principals"];
@@ -435,14 +524,21 @@ pub async fn verify_cross_cluster_auth_policy(
         return Err("AuthorizationPolicy has no principals".to_string());
     }
 
-    let target_kind = parsed["spec"]["targetRef"][0]["kind"].as_str()
+    let target_kind = parsed["spec"]["targetRef"][0]["kind"]
+        .as_str()
         .or_else(|| parsed["spec"]["targetRefs"][0]["kind"].as_str())
         .unwrap_or("");
     if target_kind != "Gateway" {
-        return Err(format!("AuthorizationPolicy targets '{}', expected 'Gateway'", target_kind));
+        return Err(format!(
+            "AuthorizationPolicy targets '{}', expected 'Gateway'",
+            target_kind
+        ));
     }
 
-    info!("[RouteDiscovery] AuthorizationPolicy '{}' verified with SPIFFE principals", policy_name);
+    info!(
+        "[RouteDiscovery] AuthorizationPolicy '{}' verified with SPIFFE principals",
+        policy_name
+    );
     Ok(())
 }
 
@@ -477,7 +573,15 @@ pub async fn run_route_discovery_tests(
     let client = client_from_kubeconfig(workload_kubeconfig).await?;
     let api: Api<LatticeService> = Api::namespaced(client, ROUTE_TEST_NS);
     create_with_retry(&api, &svc, "route-target").await?;
-    wait_for_service_phase(workload_kubeconfig, ROUTE_TEST_NS, "route-target", "Ready", None, DEFAULT_TIMEOUT).await?;
+    wait_for_service_phase(
+        workload_kubeconfig,
+        ROUTE_TEST_NS,
+        "route-target",
+        "Ready",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
     info!("[RouteDiscovery] Advertised service deployed on workload cluster");
 
     // Verify routes propagate to parent's LatticeClusterRoutes CRD.
@@ -488,7 +592,8 @@ pub async fn run_route_discovery_tests(
         mgmt_kubeconfig,
         mgmt_cluster_name,
         &["route-target.test.local"],
-    ).await?;
+    )
+    .await?;
     verify_route_status(mgmt_kubeconfig, mgmt_cluster_name).await?;
     info!("[RouteDiscovery] Routes propagated to parent cluster");
 
@@ -514,7 +619,15 @@ pub async fn run_route_discovery_tests(
     let mgmt_client = client_from_kubeconfig(mgmt_kubeconfig).await?;
     let consumer_api: Api<LatticeService> = Api::namespaced(mgmt_client, consumer_ns);
     create_with_retry(&consumer_api, &consumer, "consumer").await?;
-    wait_for_service_phase(mgmt_kubeconfig, consumer_ns, "consumer", "Ready", None, DEFAULT_TIMEOUT).await?;
+    wait_for_service_phase(
+        mgmt_kubeconfig,
+        consumer_ns,
+        "consumer",
+        "Ready",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
     info!("[RouteDiscovery] Consumer deployed, waiting for curl to succeed...");
 
     // Wait for the consumer pod to successfully curl the remote service
@@ -532,9 +645,7 @@ pub async fn run_route_discovery_tests(
 ///
 /// Deploys a service with specific allowedServices, verifies that
 /// an AuthorizationPolicy with SPIFFE principals is generated.
-pub async fn run_restricted_advertise_tests(
-    workload_kubeconfig: &str,
-) -> Result<(), String> {
+pub async fn run_restricted_advertise_tests(workload_kubeconfig: &str) -> Result<(), String> {
     info!("[RouteDiscovery] Starting restricted advertise tests...");
 
     ensure_fresh_namespace(workload_kubeconfig, ROUTE_TEST_NS).await?;
@@ -549,7 +660,15 @@ pub async fn run_restricted_advertise_tests(
     let client = client_from_kubeconfig(workload_kubeconfig).await?;
     let api: Api<LatticeService> = Api::namespaced(client, ROUTE_TEST_NS);
     create_with_retry(&api, &svc, "restricted-svc").await?;
-    wait_for_service_phase(workload_kubeconfig, ROUTE_TEST_NS, "restricted-svc", "Ready", None, DEFAULT_TIMEOUT).await?;
+    wait_for_service_phase(
+        workload_kubeconfig,
+        ROUTE_TEST_NS,
+        "restricted-svc",
+        "Ready",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
 
     // Verify AuthorizationPolicy with SPIFFE principal was generated
     verify_cross_cluster_auth_policy(workload_kubeconfig, ROUTE_TEST_NS, "restricted-svc").await?;
@@ -575,13 +694,15 @@ async fn test_route_discovery_standalone() {
         return;
     };
 
-    let workload_kc = session.ctx.workload_kubeconfig.as_deref()
+    let workload_kc = session
+        .ctx
+        .workload_kubeconfig
+        .as_deref()
         .expect("requires workload kubeconfig");
 
-    run_route_discovery_tests(
-        &session.ctx.mgmt_kubeconfig,
-        workload_kc,
-    ).await.unwrap();
+    run_route_discovery_tests(&session.ctx.mgmt_kubeconfig, workload_kc)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -595,7 +716,10 @@ async fn test_restricted_advertise_standalone() {
         return;
     };
 
-    let workload_kc = session.ctx.workload_kubeconfig.as_deref()
+    let workload_kc = session
+        .ctx
+        .workload_kubeconfig
+        .as_deref()
         .expect("requires workload kubeconfig");
 
     run_restricted_advertise_tests(workload_kc).await.unwrap();

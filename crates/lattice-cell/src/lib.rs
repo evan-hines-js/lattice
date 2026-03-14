@@ -13,7 +13,6 @@
 pub mod blocklist;
 pub mod bootstrap;
 // must be declared before server (server uses it)
-pub mod route_reconciler;
 pub mod capi_proxy;
 pub mod cilium;
 pub mod connection;
@@ -24,6 +23,7 @@ pub mod move_sender;
 pub mod parent;
 pub mod resilient_tunnel;
 pub mod resources;
+pub mod route_reconciler;
 pub mod server;
 pub mod state_sync;
 pub mod subtree_registry;

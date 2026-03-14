@@ -116,7 +116,10 @@ impl CertificateBlocklist {
             .patch(BLOCKLIST_CONFIGMAP, &params, &Patch::Apply(&cm))
             .await?;
 
-        info!(count = fingerprints.len(), "Persisted certificate blocklist to ConfigMap");
+        info!(
+            count = fingerprints.len(),
+            "Persisted certificate blocklist to ConfigMap"
+        );
         Ok(())
     }
 
@@ -126,7 +129,11 @@ impl CertificateBlocklist {
             Ok(cm) => {
                 let added = self.ingest_configmap_data(&cm);
                 if added > 0 {
-                    info!(added, total = self.len(), "Synced new entries from blocklist ConfigMap");
+                    info!(
+                        added,
+                        total = self.len(),
+                        "Synced new entries from blocklist ConfigMap"
+                    );
                 }
             }
             Err(kube::Error::Api(e)) if e.code == 404 => {

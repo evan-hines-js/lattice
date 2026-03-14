@@ -739,16 +739,15 @@ impl ServiceGraph {
     /// Remote services are registered with `allowed_callers` derived from the
     /// route's `allowed_services`. Empty list = fail-closed (nobody allowed).
     /// Must use `["*"]` explicitly to allow all callers.
-    pub fn put_remote_service(
-        &self,
-        source_cluster: &str,
-        route: &crate::crd::ClusterRoute,
-    ) {
+    pub fn put_remote_service(&self, source_cluster: &str, route: &crate::crd::ClusterRoute) {
         let namespace = &route.service_namespace;
         let name = &route.service_name;
 
         // Don't overwrite local or mesh-member nodes — local takes precedence
-        if let Some(existing) = self.vertices.get(&(namespace.to_string(), name.to_string())) {
+        if let Some(existing) = self
+            .vertices
+            .get(&(namespace.to_string(), name.to_string()))
+        {
             if existing.type_.is_local() || existing.type_.is_mesh_member() {
                 return;
             }
@@ -817,19 +816,17 @@ impl ServiceGraph {
     /// Removes all `Remote` nodes that were sourced from `source_cluster` and
     /// inserts the new routes. This is per-cluster, so updates from cluster A
     /// don't affect routes from cluster B (no flapping).
-    pub fn sync_remote_services(
-        &self,
-        source_cluster: &str,
-        routes: &[crate::crd::ClusterRoute],
-    ) {
+    pub fn sync_remote_services(&self, source_cluster: &str, routes: &[crate::crd::ClusterRoute]) {
         // Remove existing remote nodes from this source cluster only
         let stale_keys: Vec<QualifiedName> = self
             .vertices
             .iter()
-            .filter(|entry| matches!(
-                &entry.value().type_,
-                ServiceType::Remote { source_cluster: ref sc, .. } if sc == source_cluster
-            ))
+            .filter(|entry| {
+                matches!(
+                    &entry.value().type_,
+                    ServiceType::Remote { source_cluster: ref sc, .. } if sc == source_cluster
+                )
+            })
             .map(|entry| entry.key().clone())
             .collect();
 

@@ -134,10 +134,10 @@ async fn handle_service_lookup(
                     {
                         // Check that the requesting cluster is authorized to
                         // discover this route (bilateral agreement check).
-                        let allowed = route.allowed_services.iter().any(|s| {
-                            s == "*"
-                                || s.starts_with(&format!("{requesting_cluster}/"))
-                        });
+                        let allowed = route
+                            .allowed_services
+                            .iter()
+                            .any(|s| s == "*" || s.starts_with(&format!("{requesting_cluster}/")));
                         if !allowed {
                             debug!(
                                 service = %req.service_name,
@@ -154,11 +154,7 @@ async fn handle_service_lookup(
                             address: route.address.clone(),
                             port: route.port as u32,
                             hostname: route.hostname.clone(),
-                            cluster: table
-                                .metadata
-                                .name
-                                .clone()
-                                .unwrap_or_default(),
+                            cluster: table.metadata.name.clone().unwrap_or_default(),
                             error: String::new(),
                         };
                     }
@@ -254,7 +250,6 @@ fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> 
         })
         .collect()
 }
-
 
 /// Handle cluster deletion (unpivot flow)
 ///
@@ -871,7 +866,9 @@ async fn process_agent_message(
             let response = handle_service_lookup(kube_client, req, cluster_name).await;
             let cmd = lattice_proto::CellCommand {
                 command_id: req.request_id.clone(),
-                command: Some(lattice_proto::cell_command::Command::ServiceLookupResponse(response)),
+                command: Some(lattice_proto::cell_command::Command::ServiceLookupResponse(
+                    response,
+                )),
             };
             if let Err(e) = command_tx.send(cmd).await {
                 warn!(

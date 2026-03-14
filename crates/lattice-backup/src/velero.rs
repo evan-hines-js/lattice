@@ -405,8 +405,9 @@ pub fn build_service_schedule(
 
 /// Wrap `validate_dns_label` into a `ReconcileError`.
 fn validate_dns_label_field(value: &str, field: &str) -> Result<(), ReconcileError> {
-    lattice_common::crd::validate_dns_label(value, field)
-        .map_err(|e| ReconcileError::Validation(format!("invalid {field} for backup schedule: {e}")))
+    lattice_common::crd::validate_dns_label(value, field).map_err(|e| {
+        ReconcileError::Validation(format!("invalid {field} for backup schedule: {e}"))
+    })
 }
 
 /// Reject cron expressions that fire more than once per hour.
@@ -424,9 +425,7 @@ fn validate_cron_minimum_interval(cron: &str) -> Result<(), ReconcileError> {
 
     let fires_sub_hourly = match fields[0] {
         "*" => true,
-        s if s.starts_with("*/") => {
-            s[2..].parse::<u32>().map_or(true, |n| n == 0 || n < 60)
-        }
+        s if s.starts_with("*/") => s[2..].parse::<u32>().map_or(true, |n| n == 0 || n < 60),
         s if s.contains(',') => s.split(',').count() > 1,
         s if s.contains('-') => {
             let mut parts = s.splitn(2, '-');

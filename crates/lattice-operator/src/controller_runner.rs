@@ -132,7 +132,10 @@ pub async fn build_service_controllers(
     ));
     let mut service_ctx = ServiceContext::new(
         svc_kube_client,
-        Arc::new(lattice_common::graph::ServiceGraph::new().with_cluster_name(cluster.cluster_name.clone())),
+        Arc::new(
+            lattice_common::graph::ServiceGraph::new()
+                .with_cluster_name(cluster.cluster_name.clone()),
+        ),
         cluster,
         cedar.clone(),
         svc_events,

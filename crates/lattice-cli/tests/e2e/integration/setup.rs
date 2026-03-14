@@ -48,11 +48,10 @@ use lattice_common::crd::LatticeCluster;
 use super::super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::super::context::InfraContext;
 use super::super::helpers::{
-    build_and_push_lattice_image,
-    build_and_push_pytorch_test_image, client_from_kubeconfig, create_with_retry,
-    ensure_docker_network, extract_capi_kubeconfig, get_docker_kubeconfig, kubeconfig_path,
-    load_cluster_config, load_registry_credentials, run_cmd, wait_for_operator_ready,
-    watch_cluster_phases, ProxySession,
+    build_and_push_lattice_image, build_and_push_pytorch_test_image, client_from_kubeconfig,
+    create_with_retry, ensure_docker_network, extract_capi_kubeconfig, get_docker_kubeconfig,
+    kubeconfig_path, load_cluster_config, load_registry_credentials, run_cmd,
+    wait_for_operator_ready, watch_cluster_phases, ProxySession,
 };
 use super::super::providers::InfraProvider;
 use super::{capi, cedar, scaling};
@@ -62,8 +61,8 @@ use super::{capi, cedar, scaling};
 // =============================================================================
 
 use super::super::helpers::{
-    DEFAULT_LATTICE_IMAGE, DEFAULT_PYTORCH_TEST_IMAGE, MGMT_CLUSTER_NAME,
-    WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
+    DEFAULT_LATTICE_IMAGE, DEFAULT_PYTORCH_TEST_IMAGE, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME,
+    WORKLOAD_CLUSTER_NAME,
 };
 
 /// Configuration for infrastructure setup

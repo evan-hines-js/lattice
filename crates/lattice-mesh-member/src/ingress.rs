@@ -274,10 +274,7 @@ impl IngressCompiler {
             ));
             // Enable frontend mTLS if any route is advertised for cross-cluster access.
             // This ensures only clusters sharing the Lattice CA can connect.
-            let has_advertised_routes = ingress
-                .routes
-                .values()
-                .any(|r| r.advertise.is_some());
+            let has_advertised_routes = ingress.routes.values().any(|r| r.advertise.is_some());
 
             let frontend_tls = if has_advertised_routes {
                 Some(GatewayFrontendMtls {
@@ -1099,7 +1096,7 @@ mod tests {
                         listen_port: None,
                         rules: None,
                         tls: None,
-                    advertise: None,
+                        advertise: None,
                     },
                 ),
                 (
@@ -1111,7 +1108,7 @@ mod tests {
                         listen_port: None,
                         rules: None,
                         tls: None,
-                    advertise: None,
+                        advertise: None,
                     },
                 ),
                 (
@@ -1123,7 +1120,7 @@ mod tests {
                         listen_port: Some(9090),
                         rules: None,
                         tls: None,
-                    advertise: None,
+                        advertise: None,
                     },
                 ),
             ]),

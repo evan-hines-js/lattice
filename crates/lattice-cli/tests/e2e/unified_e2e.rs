@@ -294,11 +294,8 @@ async fn run_full_e2e() -> Result<(), String> {
             "Route discovery",
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
-                integration::route_discovery::run_route_discovery_tests(
-                    &mgmt_kc,
-                    &workload_kc,
-                )
-                .await?;
+                integration::route_discovery::run_route_discovery_tests(&mgmt_kc, &workload_kc)
+                    .await?;
                 integration::route_discovery::run_restricted_advertise_tests(&workload_kc).await?;
                 Ok(())
             }),

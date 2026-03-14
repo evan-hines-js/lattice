@@ -258,10 +258,7 @@ impl<'a> PolicyCompiler<'a> {
             // ServiceEntry with waypoint label so Istio ambient routes through
             // the waypoint proxy for L7 AuthorizationPolicy enforcement.
             let se_metadata = ObjectMeta::new(&se_name, namespace)
-                .with_label(
-                    "lattice.dev/managed-by",
-                    "lattice-mesh-member",
-                )
+                .with_label("lattice.dev/managed-by", "lattice-mesh-member")
                 .with_label(
                     lattice_common::mesh::USE_WAYPOINT_LABEL,
                     lattice_common::mesh::waypoint_name(namespace),
@@ -289,15 +286,15 @@ impl<'a> PolicyCompiler<'a> {
                 &edge.caller_namespace,
                 &edge.caller_name,
             );
-            output.authorization_policies.push(
-                AuthorizationPolicy::allow_to_service(
+            output
+                .authorization_policies
+                .push(AuthorizationPolicy::allow_to_service(
                     format!("allow-remote-{}-{}", dep.namespace, dep.name),
                     namespace,
                     se_name,
                     vec![caller_principal],
                     vec![port.to_string()],
-                ),
-            );
+                ));
         }
     }
 }

@@ -334,9 +334,7 @@ mod tests {
             address: "10.0.0.217".to_string(),
             port: 80,
             protocol: "HTTP".to_string(),
-            labels: HashMap::from([
-                ("lattice.dev/environment".to_string(), "homelab".to_string()),
-            ]),
+            labels: HashMap::from([("lattice.dev/environment".to_string(), "homelab".to_string())]),
             allowed_services: vec![],
         };
 
