@@ -101,7 +101,6 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
     let mut child_rx = config.child_routes_rx;
 
     let api: Api<LatticeClusterRoutes> = Api::all(client.clone());
-    let svc_api: Api<LatticeService> = Api::all(client.clone());
 
     // Local service state
     let mut local_routes: Vec<ClusterRoute> = Vec::new();
@@ -112,9 +111,11 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
 
     info!(cluster = %cluster_name, "Route reconciler started");
 
-    // Watch local LatticeServices for changes
-    let mut svc_stream =
-        watcher::watcher(svc_api, watcher::Config::default()).boxed();
+    // Watch local LatticeServices for changes.
+    // The stream is recreated on error since kube watcher streams are terminal after failure.
+    let svc_api: Api<LatticeService> = Api::all(client.clone());
+    let new_svc_watcher = || watcher::watcher(svc_api.clone(), watcher::Config::default()).boxed();
+    let mut svc_stream = new_svc_watcher();
 
     loop {
         let mut should_reconcile = false;
@@ -129,13 +130,16 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
                             should_reconcile = true;
                         }
                     }
-                    Ok(None) => {
-                        warn!(cluster = %cluster_name, "LatticeService watcher ended");
-                        break;
-                    }
-                    Err(e) => {
-                        warn!(cluster = %cluster_name, error = %e, "LatticeService watcher error");
+                    // Stream ended or errored — both are terminal; restart after backoff
+                    Ok(None) | Err(_) => {
+                        if let Err(ref e) = event {
+                            warn!(cluster = %cluster_name, error = %e, "LatticeService watcher error, restarting");
+                        } else {
+                            warn!(cluster = %cluster_name, "LatticeService watcher ended, restarting");
+                        }
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        svc_stream = new_svc_watcher();
+                        continue;
                     }
                 }
             }
