@@ -73,6 +73,26 @@ pub struct ClusterBootstrapInfo {
     pub csr_token_raw: Option<zeroize::Zeroizing<String>>,
 }
 
+/// Configuration for creating a [`BootstrapState`]
+pub struct BootstrapConfig<G: ManifestGenerator> {
+    /// Manifest generator for bootstrap responses
+    pub generator: G,
+    /// How long bootstrap tokens remain valid
+    pub token_ttl: Duration,
+    /// CA bundle for signing CSRs (supports rotation)
+    pub ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
+    /// Lattice image to deploy on child clusters
+    pub image: String,
+    /// Registry credentials (optional)
+    pub registry_credentials: Option<String>,
+    /// Certificate validity duration in hours
+    pub cert_validity_hours: u32,
+    /// Kubernetes client for CRD status updates (None in tests)
+    pub kube_client: Option<Client>,
+    /// Parent cluster name (for fetching distributable resources)
+    pub cluster_name: Option<String>,
+}
+
 /// Bootstrap endpoint state
 pub struct BootstrapState<G: ManifestGenerator = super::generator::DefaultManifestGenerator> {
     /// Cluster info indexed by cluster_id
@@ -87,6 +107,8 @@ pub struct BootstrapState<G: ManifestGenerator = super::generator::DefaultManife
     token_ttl: Duration,
     /// Certificate authority bundle for signing CSRs (supports rotation)
     ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
+    /// Certificate validity duration in hours (from parent's CertPolicy)
+    cert_validity_hours: u32,
     /// Kubernetes client for updating CRD status and fetching distributed resources (None in tests)
     pub(crate) kube_client: Option<Client>,
     /// Parent cluster name (for fetching distributable resources during bootstrap)
@@ -94,25 +116,18 @@ pub struct BootstrapState<G: ManifestGenerator = super::generator::DefaultManife
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
-    /// Create a new bootstrap state with a CA bundle
-    pub fn new(
-        generator: G,
-        token_ttl: Duration,
-        ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
-        image: String,
-        registry_credentials: Option<String>,
-        kube_client: Option<Client>,
-        cluster_name: Option<String>,
-    ) -> Self {
+    /// Create a new bootstrap state from config
+    pub fn new(config: BootstrapConfig<G>) -> Self {
         Self {
             clusters: DashMap::new(),
-            manifest_generator: generator,
-            image,
-            registry_credentials,
-            token_ttl,
-            ca_bundle,
-            kube_client,
-            cluster_name,
+            manifest_generator: config.generator,
+            image: config.image,
+            registry_credentials: config.registry_credentials,
+            token_ttl: config.token_ttl,
+            ca_bundle: config.ca_bundle,
+            cert_validity_hours: config.cert_validity_hours,
+            kube_client: config.kube_client,
+            cluster_name: config.cluster_name,
         }
     }
 
@@ -513,7 +528,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
         // Sign the CSR with the active CA
         let bundle = self.ca_bundle.read().await;
-        let certificate_pem = bundle.sign_csr(csr_pem, cluster_id)?;
+        let certificate_pem = bundle.sign_csr(csr_pem, cluster_id, self.cert_validity_hours)?;
 
         Ok(CsrResponse {
             certificate_pem,
@@ -1168,17 +1183,19 @@ mod tests {
     #[tokio::test]
     async fn aws_clusters_include_ccm_and_csi() {
         use super::super::generator::DefaultManifestGenerator;
+        use lattice_infra::pki::DEFAULT_CERT_VALIDITY_HOURS;
 
         // Use real DefaultManifestGenerator
-        let state = BootstrapState::new(
-            DefaultManifestGenerator::new(),
-            Duration::from_secs(3600),
-            test_ca_bundle(),
-            "test:latest".to_string(),
-            None,
-            None,
-            None,
-        );
+        let state = BootstrapState::new(BootstrapConfig {
+            generator: DefaultManifestGenerator::new(),
+            token_ttl: Duration::from_secs(3600),
+            ca_bundle: test_ca_bundle(),
+            image: "test:latest".to_string(),
+            registry_credentials: None,
+            cert_validity_hours: DEFAULT_CERT_VALIDITY_HOURS,
+            kube_client: None,
+            cluster_name: None,
+        });
 
         // Register AWS cluster
         let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"aws-test"}}"#.to_string();
@@ -1238,17 +1255,19 @@ mod tests {
     #[tokio::test]
     async fn non_aws_clusters_no_ccm() {
         use super::super::generator::DefaultManifestGenerator;
+        use lattice_infra::pki::DEFAULT_CERT_VALIDITY_HOURS;
 
         // Use real DefaultManifestGenerator
-        let state = BootstrapState::new(
-            DefaultManifestGenerator::new(),
-            Duration::from_secs(3600),
-            test_ca_bundle(),
-            "test:latest".to_string(),
-            None,
-            None,
-            None,
-        );
+        let state = BootstrapState::new(BootstrapConfig {
+            generator: DefaultManifestGenerator::new(),
+            token_ttl: Duration::from_secs(3600),
+            ca_bundle: test_ca_bundle(),
+            image: "test:latest".to_string(),
+            registry_credentials: None,
+            cert_validity_hours: DEFAULT_CERT_VALIDITY_HOURS,
+            kube_client: None,
+            cluster_name: None,
+        });
 
         // Register Docker cluster
         let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"docker-test"}}"#.to_string();

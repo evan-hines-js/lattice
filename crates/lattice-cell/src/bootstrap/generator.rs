@@ -18,7 +18,7 @@ use k8s_openapi::ByteString;
 
 use kube::CustomResourceExt;
 use lattice_common::crd::{LatticeCluster, ProviderType};
-use lattice_common::{LATTICE_SYSTEM_NAMESPACE, REGISTRY_CREDENTIALS_SECRET};
+use lattice_common::{LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME, REGISTRY_CREDENTIALS_SECRET, SECRET_TYPE_DOCKERCONFIG};
 
 use super::types::ManifestGenerator;
 
@@ -67,7 +67,7 @@ impl DefaultManifestGenerator {
                 namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
-            type_: Some("kubernetes.io/dockerconfigjson".to_string()),
+            type_: Some(SECRET_TYPE_DOCKERCONFIG.to_string()),
             data: Some(BTreeMap::from([(
                 ".dockerconfigjson".to_string(),
                 ByteString(creds.as_bytes().to_vec()),
@@ -78,7 +78,7 @@ impl DefaultManifestGenerator {
         // 3. ServiceAccount
         let service_account = ServiceAccount {
             metadata: ObjectMeta {
-                name: Some("lattice-operator".to_string()),
+                name: Some(OPERATOR_NAME.to_string()),
                 namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
@@ -88,7 +88,7 @@ impl DefaultManifestGenerator {
         // 4. ClusterRoleBinding (cluster-admin - we manage everything)
         let cluster_role_binding = ClusterRoleBinding {
             metadata: ObjectMeta {
-                name: Some("lattice-operator".to_string()),
+                name: Some(OPERATOR_NAME.to_string()),
                 ..Default::default()
             },
             role_ref: RoleRef {
@@ -98,7 +98,7 @@ impl DefaultManifestGenerator {
             },
             subjects: Some(vec![Subject {
                 kind: "ServiceAccount".to_string(),
-                name: "lattice-operator".to_string(),
+                name: OPERATOR_NAME.to_string(),
                 namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             }]),
@@ -106,11 +106,11 @@ impl DefaultManifestGenerator {
 
         // 5. Operator Deployment
         let mut labels = BTreeMap::new();
-        labels.insert("app".to_string(), "lattice-operator".to_string());
+        labels.insert("app".to_string(), OPERATOR_NAME.to_string());
 
         let operator_deployment = Deployment {
             metadata: ObjectMeta {
-                name: Some("lattice-operator".to_string()),
+                name: Some(OPERATOR_NAME.to_string()),
                 namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
                 ..Default::default()
             },
@@ -127,7 +127,7 @@ impl DefaultManifestGenerator {
                         ..Default::default()
                     }),
                     spec: Some(PodSpec {
-                        service_account_name: Some("lattice-operator".to_string()),
+                        service_account_name: Some(OPERATOR_NAME.to_string()),
                         image_pull_secrets: if registry_secret.is_some() {
                             Some(vec![LocalObjectReference {
                                 name: REGISTRY_CREDENTIALS_SECRET.to_string(),

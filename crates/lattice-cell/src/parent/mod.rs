@@ -65,6 +65,8 @@ pub struct ParentConfig {
     pub image: String,
     /// Registry credentials (optional)
     pub registry_credentials: Option<String>,
+    /// Certificate validity duration in hours for child agent certificates
+    pub cert_validity_hours: u32,
 }
 
 impl ParentConfig {
@@ -101,6 +103,7 @@ impl ParentConfig {
             ],
             image: config.image.clone(),
             registry_credentials: load_registry_credentials(),
+            cert_validity_hours: lattice_infra::pki::DEFAULT_CERT_VALIDITY_HOURS,
         }
     }
 }
@@ -696,15 +699,16 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         // Create bootstrap state
         // InfraProvider/SecretProvider CRDs and their referenced secrets
         // are automatically synced to child clusters during pivot
-        let bootstrap_state = Arc::new(BootstrapState::new(
-            manifest_generator,
-            self.config.token_ttl,
-            self.ca_bundle.clone(),
-            self.config.image.clone(),
-            self.config.registry_credentials.clone(),
-            Some(kube_client.clone()),
-            Some(self.config.cluster_name.clone()),
-        ));
+        let bootstrap_state = Arc::new(BootstrapState::new(crate::bootstrap::BootstrapConfig {
+            generator: manifest_generator,
+            token_ttl: self.config.token_ttl,
+            ca_bundle: self.ca_bundle.clone(),
+            image: self.config.image.clone(),
+            registry_credentials: self.config.registry_credentials.clone(),
+            cert_validity_hours: self.config.cert_validity_hours,
+            kube_client: Some(kube_client.clone()),
+            cluster_name: Some(self.config.cluster_name.clone()),
+        }));
 
         // Store bootstrap state
         *self.bootstrap_state.write().await = Some(bootstrap_state.clone());
@@ -776,15 +780,25 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         let registry = self.agent_registry.clone();
         let subtree_registry = self.subtree_registry.clone();
 
+        // Load certificate blocklist for immediate revocation
+        let blocklist =
+            crate::blocklist::CertificateBlocklist::load_from_configmap(&kube_client)
+                .await
+                .unwrap_or_else(|e| {
+                    warn!(error = %e, "Failed to load cert blocklist, starting empty");
+                    crate::blocklist::CertificateBlocklist::new()
+                });
+
         info!(addr = %grpc_addr, "Starting gRPC server");
         let grpc_handle = tokio::spawn(async move {
-            if let Err(e) = AgentServer::serve_with_mtls(
+            if let Err(e) = AgentServer::serve_with_mtls(crate::server::GrpcServerConfig {
                 registry,
                 subtree_registry,
-                grpc_addr,
+                addr: grpc_addr,
                 mtls_config,
-                grpc_kube_client,
-            )
+                kube_client: grpc_kube_client,
+                blocklist,
+            })
             .await
             {
                 error!(error = %e, "gRPC server error");

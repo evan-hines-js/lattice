@@ -18,7 +18,7 @@ use crate::error::Error;
 const WEBHOOK_CONFIG_NAME: &str = "lattice-validating-webhook";
 
 /// Service name for the webhook
-const WEBHOOK_SERVICE_NAME: &str = "lattice-operator";
+const WEBHOOK_SERVICE_NAME: &str = lattice_common::OPERATOR_NAME;
 
 /// Service namespace for the webhook
 const WEBHOOK_SERVICE_NAMESPACE: &str = lattice_common::LATTICE_SYSTEM_NAMESPACE;
@@ -84,12 +84,12 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), Error> {
             "name": WEBHOOK_SERVICE_NAME,
             "namespace": WEBHOOK_SERVICE_NAMESPACE,
             "labels": {
-                "app.kubernetes.io/managed-by": lattice_common::LABEL_MANAGED_BY_LATTICE
+                (lattice_common::LABEL_MANAGED_BY): lattice_common::LABEL_MANAGED_BY_LATTICE
             }
         },
         "spec": {
             "selector": {
-                "app": "lattice-operator"
+                "app": lattice_common::OPERATOR_NAME
             },
             "ports": [{
                 "name": "webhook",

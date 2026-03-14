@@ -17,7 +17,8 @@ use lattice_common::crd::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderStatus, ParsedEndpoint,
 };
 use lattice_common::{
-    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_SUCCESS_SECS,
+    ControllerContext, ReconcileError, LABEL_MANAGED_BY, LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME,
+    REQUEUE_SUCCESS_SECS,
 };
 
 /// Shorter retry interval for OIDC validation failures. The global REQUEUE_ERROR_SECS (60s) is
@@ -141,7 +142,7 @@ async fn ensure_oidc_egress_lmm(
         LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
                 "app".to_string(),
-                "lattice-operator".to_string(),
+                OPERATOR_NAME.to_string(),
             )])),
             ports: vec![],
             allowed_callers: vec![],
@@ -153,13 +154,13 @@ async fn ensure_oidc_egress_lmm(
             allow_peer_traffic: false,
             depends_all: false,
             ingress: None,
-            service_account: Some("lattice-operator".to_string()),
+            service_account: Some(OPERATOR_NAME.to_string()),
             ambient: true,
         },
     );
     lmm.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
     lmm.metadata.labels = Some(BTreeMap::from([(
-        "app.kubernetes.io/managed-by".to_string(),
+        LABEL_MANAGED_BY.to_string(),
         "oidc-provider-controller".to_string(),
     )]));
 

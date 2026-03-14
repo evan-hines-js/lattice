@@ -6,6 +6,7 @@
 
 use k8s_openapi::api::core::v1::Node;
 use lattice_common::resources::{is_control_plane_node, is_node_ready};
+use lattice_common::OPERATOR_NAME;
 use tracing::{debug, warn};
 
 use crate::kube_client::KubeClientProvider;
@@ -19,7 +20,7 @@ pub async fn get_operator_image(kube_provider: &dyn KubeClientProvider) -> Optio
     let deploy_api: kube::Api<k8s_openapi::api::apps::v1::Deployment> =
         kube::Api::namespaced(client, lattice_common::LATTICE_SYSTEM_NAMESPACE);
 
-    let deploy = deploy_api.get("lattice-operator").await.ok()?;
+    let deploy = deploy_api.get(OPERATOR_NAME).await.ok()?;
     deploy
         .spec?
         .template

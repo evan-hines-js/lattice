@@ -29,24 +29,23 @@ use thiserror::Error;
 use x509_parser::prelude::*;
 use zeroize::Zeroizing;
 
-/// Default validity period for CA certificates (10 years)
-pub const CA_VALIDITY_YEARS: i64 = 10;
+/// Default validity period for CA certificates (10 years in hours)
+pub const CA_VALIDITY_HOURS: u32 = 10 * 365 * 24;
 
-/// Default validity period for server/agent certificates (1 year)
-pub const CERT_VALIDITY_YEARS: i64 = 1;
+/// Default validity period for server/agent certificates (1 year in hours).
+/// Overridden per-cluster via `CertPolicy` on the parent's `EndpointsSpec`.
+pub const DEFAULT_CERT_VALIDITY_HOURS: u32 = 8760;
 
 /// Rotation threshold as a fraction of TTL (80%)
 /// Certificates should be rotated when this fraction of their lifetime has passed.
 pub const ROTATION_THRESHOLD: f64 = 0.80;
 
-/// Compute certificate validity period from now
+/// Compute certificate validity period from now.
 ///
 /// Returns (not_before, not_after) timestamps for certificate generation.
-/// The not_before is set to current time, and not_after is set to the
-/// specified number of years from now.
-fn compute_validity(years: i64) -> (::time::OffsetDateTime, ::time::OffsetDateTime) {
+fn compute_validity(hours: u32) -> (::time::OffsetDateTime, ::time::OffsetDateTime) {
     let now = ::time::OffsetDateTime::now_utc();
-    let not_after = now + ::time::Duration::days(years * 365);
+    let not_after = now + ::time::Duration::hours(hours as i64);
     (now, not_after)
 }
 
@@ -292,7 +291,7 @@ impl CertificateAuthority {
         ];
 
         // 10 year validity from current time
-        let (not_before, not_after) = compute_validity(CA_VALIDITY_YEARS);
+        let (not_before, not_after) = compute_validity(CA_VALIDITY_HOURS);
         params.not_before = not_before;
         params.not_after = not_after;
 
@@ -386,7 +385,7 @@ impl CertificateAuthority {
         params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
 
         // Set validity from current time
-        let (not_before, not_after) = compute_validity(CERT_VALIDITY_YEARS);
+        let (not_before, not_after) = compute_validity(DEFAULT_CERT_VALIDITY_HOURS);
         params.not_before = not_before;
         params.not_after = not_after;
 
@@ -439,7 +438,15 @@ impl CertificateAuthority {
     /// Validates that the CSR uses a FIPS-approved key algorithm and strength:
     /// - ECDSA with P-256 or P-384
     /// - RSA with key size >= 2048 bits
-    pub fn sign_csr(&self, csr_pem: &str, cluster_id: &str) -> Result<String> {
+    ///
+    /// `validity_hours` controls the certificate lifespan. Use
+    /// `DEFAULT_CERT_VALIDITY_HOURS` for the standard 1-year default.
+    pub fn sign_csr(
+        &self,
+        csr_pem: &str,
+        cluster_id: &str,
+        validity_hours: u32,
+    ) -> Result<String> {
         // Validate key strength before signing (FIPS requirement)
         validate_csr_key_strength(csr_pem)?;
 
@@ -476,7 +483,7 @@ impl CertificateAuthority {
         ];
 
         // Set validity from current time
-        let (not_before, not_after) = compute_validity(CERT_VALIDITY_YEARS);
+        let (not_before, not_after) = compute_validity(validity_hours);
         csr_params.params.not_before = not_before;
         csr_params.params.not_after = not_after;
 
@@ -604,8 +611,13 @@ impl CertificateAuthorityBundle {
     }
 
     /// Sign a CSR with the active CA
-    pub fn sign_csr(&self, csr_pem: &str, cluster_id: &str) -> Result<String> {
-        self.active().sign_csr(csr_pem, cluster_id)
+    pub fn sign_csr(
+        &self,
+        csr_pem: &str,
+        cluster_id: &str,
+        validity_hours: u32,
+    ) -> Result<String> {
+        self.active().sign_csr(csr_pem, cluster_id, validity_hours)
     }
 
     /// Verify a certificate was signed by any CA in the bundle
@@ -851,7 +863,7 @@ mod tests {
 
         // Sign the CSR
         let signed_cert = ca
-            .sign_csr(request.csr_pem(), "my-cluster")
+            .sign_csr(request.csr_pem(), "my-cluster", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("CSR signing should succeed");
 
         // Should be a valid certificate
@@ -866,7 +878,7 @@ mod tests {
         let request =
             AgentCertRequest::new("verified-cluster").expect("CSR generation should succeed");
         let signed_cert_pem = ca
-            .sign_csr(request.csr_pem(), "verified-cluster")
+            .sign_csr(request.csr_pem(), "verified-cluster", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("CSR signing should succeed");
 
         // Parse to DER for verification
@@ -890,7 +902,7 @@ mod tests {
         // Agent gets cert signed by CA1
         let request = AgentCertRequest::new("cluster").expect("CSR generation should succeed");
         let signed_cert_pem = ca1
-            .sign_csr(request.csr_pem(), "cluster")
+            .sign_csr(request.csr_pem(), "cluster", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("CSR signing should succeed");
 
         // Try to verify with CA2 (should fail)
@@ -909,7 +921,7 @@ mod tests {
     fn invalid_csr_rejected() {
         let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
 
-        let result = ca.sign_csr("not a valid csr", "cluster");
+        let result = ca.sign_csr("not a valid csr", "cluster", DEFAULT_CERT_VALIDITY_HOURS);
 
         assert!(matches!(result, Err(PkiError::InvalidCsr(_))));
     }
@@ -920,7 +932,7 @@ mod tests {
         let request =
             AgentCertRequest::new("prod-us-west-123").expect("CSR generation should succeed");
         let signed_cert_pem = ca
-            .sign_csr(request.csr_pem(), "prod-us-west-123")
+            .sign_csr(request.csr_pem(), "prod-us-west-123", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("CSR signing should succeed");
 
         let cert_der = parse_pem(&signed_cert_pem).expect("PEM parsing should succeed");
@@ -997,7 +1009,7 @@ mod tests {
 
         // Should be able to sign CSRs
         let request = AgentCertRequest::new("test").expect("CSR generation should succeed");
-        let signed = ca2.sign_csr(request.csr_pem(), "test");
+        let signed = ca2.sign_csr(request.csr_pem(), "test", DEFAULT_CERT_VALIDITY_HOURS);
         assert!(signed.is_ok());
     }
 
@@ -1041,7 +1053,7 @@ mod tests {
         // Chapter 3: Cell signs the CSR
         // ------------------------------
         let signed_cert = ca
-            .sign_csr(agent_request.csr_pem(), "workload-east-1")
+            .sign_csr(agent_request.csr_pem(), "workload-east-1", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("CSR signing should succeed");
         assert!(signed_cert.contains("BEGIN CERTIFICATE"));
 
@@ -1075,7 +1087,7 @@ mod tests {
         let evil_agent = AgentCertRequest::new("trojan-cluster")
             .expect("evil agent CSR generation should succeed");
         let evil_cert = attacker_ca
-            .sign_csr(evil_agent.csr_pem(), "trojan-cluster")
+            .sign_csr(evil_agent.csr_pem(), "trojan-cluster", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("attacker CSR signing should succeed");
 
         // Attacker tries to connect to legitimate cell
@@ -1107,7 +1119,7 @@ mod tests {
         for cluster_id in clusters {
             let request = AgentCertRequest::new(cluster_id).expect("CSR generation should succeed");
             let signed_cert = ca
-                .sign_csr(request.csr_pem(), cluster_id)
+                .sign_csr(request.csr_pem(), cluster_id, DEFAULT_CERT_VALIDITY_HOURS)
                 .expect("CSR signing should succeed");
 
             let cert_der = parse_pem(&signed_cert).expect("PEM parsing should succeed");
@@ -1132,7 +1144,7 @@ mod tests {
         let agent_request =
             AgentCertRequest::new("long-lived-cluster").expect("CSR generation should succeed");
         let original_cert = original_ca
-            .sign_csr(agent_request.csr_pem(), "long-lived-cluster")
+            .sign_csr(agent_request.csr_pem(), "long-lived-cluster", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("CSR signing should succeed");
 
         // Simulate disaster: Save CA state
@@ -1152,7 +1164,7 @@ mod tests {
         // Restored CA can issue new certificates
         let new_agent =
             AgentCertRequest::new("new-cluster").expect("new agent CSR generation should succeed");
-        let new_cert = restored_ca.sign_csr(new_agent.csr_pem(), "new-cluster");
+        let new_cert = restored_ca.sign_csr(new_agent.csr_pem(), "new-cluster", DEFAULT_CERT_VALIDITY_HOURS);
         assert!(new_cert.is_ok());
     }
 
@@ -1172,7 +1184,7 @@ mod tests {
         ];
 
         for invalid in invalid_inputs {
-            let result = ca.sign_csr(invalid, "test-cluster");
+            let result = ca.sign_csr(invalid, "test-cluster", DEFAULT_CERT_VALIDITY_HOURS);
             assert!(result.is_err());
 
             match result {
@@ -1260,7 +1272,7 @@ mod tests {
         let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
         let request = AgentCertRequest::new("test").expect("CSR generation should succeed");
         let signed_cert = ca
-            .sign_csr(request.csr_pem(), "test")
+            .sign_csr(request.csr_pem(), "test", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("CSR signing should succeed");
 
         // Try to verify with invalid CA PEM
@@ -1351,7 +1363,7 @@ mod tests {
         let request =
             AgentCertRequest::new("future-cluster").expect("CSR generation should succeed");
         let signed_cert_pem = ca
-            .sign_csr(request.csr_pem(), "future-cluster")
+            .sign_csr(request.csr_pem(), "future-cluster", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("CSR signing should succeed");
         let cert_der = parse_pem(&signed_cert_pem).expect("PEM parsing should succeed");
 
@@ -1386,7 +1398,7 @@ mod tests {
         let request =
             AgentCertRequest::new("expiry-cluster").expect("CSR generation should succeed");
         let signed_cert_pem = ca
-            .sign_csr(request.csr_pem(), "expiry-cluster")
+            .sign_csr(request.csr_pem(), "expiry-cluster", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("CSR signing should succeed");
         let cert_der = parse_pem(&signed_cert_pem).expect("PEM parsing should succeed");
 
@@ -1400,17 +1412,17 @@ mod tests {
             .expect("system clock is after 1970")
             .as_secs() as i64;
 
-        // Verify certificate has proper validity period (approximately CERT_VALIDITY_YEARS)
+        // Verify certificate has proper validity period
         let validity_days = (not_after - not_before) / (24 * 60 * 60);
-        let expected_days = CERT_VALIDITY_YEARS * 365;
+        let expected_days = (DEFAULT_CERT_VALIDITY_HOURS / 24) as i64;
         assert!(
             (validity_days - expected_days).abs() <= 1,
-            "cert should have {} year validity, got {} days",
-            CERT_VALIDITY_YEARS,
+            "cert should have {} days validity, got {} days",
+            expected_days,
             validity_days
         );
 
-        // The cert we generate has notAfter set to CERT_VALIDITY_YEARS from now
+        // The cert we generate has notAfter set to DEFAULT_CERT_VALIDITY_HOURS from now
         assert!(now < not_after, "cert notAfter should be in the future");
 
         // Verify normal path works
@@ -1432,13 +1444,13 @@ mod tests {
         let not_before = cert.validity().not_before.timestamp();
         let not_after = cert.validity().not_after.timestamp();
 
-        // Verify CA certificate has proper validity period (approximately CA_VALIDITY_YEARS)
+        // Verify CA certificate has proper validity period (approximately CA_VALIDITY_HOURS)
         let validity_days = (not_after - not_before) / (24 * 60 * 60);
-        let expected_days = CA_VALIDITY_YEARS * 365;
+        let expected_days = (CA_VALIDITY_HOURS / 24) as i64;
         assert!(
             (validity_days - expected_days).abs() <= 1,
-            "CA cert should have {} year validity, got {} days",
-            CA_VALIDITY_YEARS,
+            "CA cert should have {} days validity, got {} days",
+            expected_days,
             validity_days
         );
     }
@@ -1453,9 +1465,9 @@ mod tests {
         // Should have the right common name
         assert_eq!(info.common_name, "Test CA");
 
-        // Lifetime should be approximately CA_VALIDITY_YEARS
+        // Lifetime should be approximately CA_VALIDITY_HOURS
         let lifetime_days = info.lifetime_secs() / (24 * 60 * 60);
-        let expected_days = CA_VALIDITY_YEARS * 365;
+        let expected_days = (CA_VALIDITY_HOURS / 24) as i64;
         assert!(
             (lifetime_days - expected_days).abs() <= 1,
             "lifetime should be {} days, got {}",
@@ -1500,7 +1512,7 @@ mod tests {
         // Should be able to sign CSRs
         let agent = AgentCertRequest::new("test-cluster").expect("agent CSR should succeed");
         let cert = bundle
-            .sign_csr(agent.csr_pem(), "test-cluster")
+            .sign_csr(agent.csr_pem(), "test-cluster", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("signing should succeed");
         assert!(cert.contains("BEGIN CERTIFICATE"));
     }
@@ -1514,7 +1526,7 @@ mod tests {
         // Sign a cert with the original CA
         let agent1 = AgentCertRequest::new("cluster-1").expect("agent CSR should succeed");
         let cert1 = bundle
-            .sign_csr(agent1.csr_pem(), "cluster-1")
+            .sign_csr(agent1.csr_pem(), "cluster-1", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("signing should succeed");
         let cert1_der = parse_pem(&cert1).expect("cert parsing should succeed");
 
@@ -1534,7 +1546,7 @@ mod tests {
         // New certs are signed by the new CA
         let agent2 = AgentCertRequest::new("cluster-2").expect("agent CSR should succeed");
         let cert2 = bundle
-            .sign_csr(agent2.csr_pem(), "cluster-2")
+            .sign_csr(agent2.csr_pem(), "cluster-2", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("signing should succeed");
         let cert2_der = parse_pem(&cert2).expect("cert parsing should succeed");
 
@@ -1555,7 +1567,7 @@ mod tests {
         // Sign with a different CA not in the bundle
         let agent = AgentCertRequest::new("test-cluster").expect("agent CSR should succeed");
         let cert = ca2
-            .sign_csr(agent.csr_pem(), "test-cluster")
+            .sign_csr(agent.csr_pem(), "test-cluster", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("signing should succeed");
         let cert_der = parse_pem(&cert).expect("cert parsing should succeed");
 
@@ -1593,7 +1605,7 @@ mod tests {
     fn sign_csr_validates_key_strength() {
         let ca = CertificateAuthority::new("Key Strength CA").expect("CA creation should succeed");
         let request = AgentCertRequest::new("valid-key").expect("CSR generation should succeed");
-        assert!(ca.sign_csr(request.csr_pem(), "valid-key").is_ok());
+        assert!(ca.sign_csr(request.csr_pem(), "valid-key", DEFAULT_CERT_VALIDITY_HOURS).is_ok());
     }
 
     /// CSR key strength validation: invalid PEM is rejected

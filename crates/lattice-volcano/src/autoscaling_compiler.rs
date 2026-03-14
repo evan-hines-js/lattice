@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use lattice_common::crd::LatticeModel;
+use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 
 use crate::routing_compiler::owner_reference;
 use crate::types::{
@@ -111,10 +112,10 @@ pub fn compile_model_autoscaling(model: &LatticeModel) -> CompiledAutoscaling {
             namespace: namespace.to_string(),
             labels: BTreeMap::from([
                 (
-                    "app.kubernetes.io/managed-by".to_string(),
-                    "lattice".to_string(),
+                    LABEL_MANAGED_BY.to_string(),
+                    LABEL_MANAGED_BY_LATTICE.to_string(),
                 ),
-                ("app.kubernetes.io/name".to_string(), name.to_string()),
+                (LABEL_NAME.to_string(), name.to_string()),
             ]),
             owner_references: vec![owner_reference(name, uid)],
         };

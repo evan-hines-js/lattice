@@ -293,6 +293,22 @@ async fn import_capi_objects(
     Ok(())
 }
 
+/// Configuration for starting the gRPC agent server
+pub struct GrpcServerConfig {
+    /// Agent registry for tracking connections
+    pub registry: SharedAgentRegistry,
+    /// Subtree registry for tracking cluster hierarchy
+    pub subtree_registry: SharedSubtreeRegistry,
+    /// Address to bind the server to
+    pub addr: SocketAddr,
+    /// mTLS configuration (server cert, key, CA)
+    pub mtls_config: ServerMtlsConfig,
+    /// Kubernetes client for persisting deletion requests
+    pub kube_client: Client,
+    /// Certificate blocklist for immediate revocation
+    pub blocklist: crate::blocklist::CertificateBlocklist,
+}
+
 /// gRPC server for agent communication
 pub struct AgentServer {
     registry: SharedAgentRegistry,
@@ -300,6 +316,8 @@ pub struct AgentServer {
     subtree_registry: SharedSubtreeRegistry,
     /// Kubernetes client for persisting deletion requests
     kube_client: Client,
+    /// Certificate blocklist for immediate revocation
+    blocklist: crate::blocklist::CertificateBlocklist,
 }
 
 /// Process an agent message (standalone function to avoid temporary object creation)
@@ -666,11 +684,13 @@ impl AgentServer {
         registry: SharedAgentRegistry,
         subtree_registry: SharedSubtreeRegistry,
         kube_client: Client,
+        blocklist: crate::blocklist::CertificateBlocklist,
     ) -> Self {
         Self {
             registry,
             subtree_registry,
             kube_client,
+            blocklist,
         }
     }
 
@@ -689,20 +709,21 @@ impl AgentServer {
     /// - Server certificate (presented to agents)
     /// - Server private key
     /// - CA certificate (for verifying agent certificates)
-    pub async fn serve_with_mtls(
-        registry: SharedAgentRegistry,
-        subtree_registry: SharedSubtreeRegistry,
-        addr: SocketAddr,
-        mtls_config: ServerMtlsConfig,
-        kube_client: Client,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let server = Self::new(registry, subtree_registry, kube_client);
-        let tls_config = mtls_config.to_tonic_config()?;
+    pub async fn serve_with_mtls(config: GrpcServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+        let server = Self::new(
+            config.registry,
+            config.subtree_registry,
+            config.kube_client,
+            config.blocklist,
+        );
+        let tls_config = config.mtls_config.to_tonic_config()?;
+        let addr = config.addr;
 
         info!(%addr, "Starting gRPC server with mTLS");
 
         Server::builder()
             .tls_config(tls_config)?
+            .concurrency_limit_per_connection(64)
             .add_service(server.into_service())
             .serve(addr)
             .await?;
@@ -730,6 +751,8 @@ enum MtlsAuthError {
     EmptyChain,
     #[error("Failed to extract cluster ID from certificate: {0}")]
     InvalidCert(String),
+    #[error("Certificate is blocklisted (fingerprint: {0})")]
+    CertificateBlocked(String),
 }
 
 impl From<MtlsAuthError> for Status {
@@ -738,17 +761,34 @@ impl From<MtlsAuthError> for Status {
     }
 }
 
-fn extract_cluster_id_from_request<T>(request: &Request<T>) -> Result<String, MtlsAuthError> {
+/// Extract the client certificate DER bytes from a gRPC request.
+fn extract_cert_der_from_request<T>(request: &Request<T>) -> Result<Vec<u8>, MtlsAuthError> {
     let tls_info = request
         .extensions()
         .get::<TlsConnectInfo<tonic::transport::server::TcpConnectInfo>>()
         .ok_or(MtlsAuthError::NoTls)?;
 
     let certs = tls_info.peer_certs().ok_or(MtlsAuthError::NoCert)?;
+    let cert = certs.first().ok_or(MtlsAuthError::EmptyChain)?;
 
-    let cert_der = certs.first().ok_or(MtlsAuthError::EmptyChain)?;
+    Ok(cert.to_vec())
+}
 
-    extract_cluster_id_from_cert(cert_der).map_err(|e| MtlsAuthError::InvalidCert(e.to_string()))
+/// Extract the cluster ID and check the blocklist in a single pass.
+fn authenticate_request<T>(
+    request: &Request<T>,
+    blocklist: &crate::blocklist::CertificateBlocklist,
+) -> Result<String, MtlsAuthError> {
+    let cert_der = extract_cert_der_from_request(request)?;
+
+    // Check blocklist before extracting identity
+    let fingerprint = crate::blocklist::CertificateBlocklist::fingerprint(&cert_der);
+    if blocklist.is_blocked(&fingerprint) {
+        return Err(MtlsAuthError::CertificateBlocked(fingerprint));
+    }
+
+    extract_cluster_id_from_cert(&cert_der)
+        .map_err(|e| MtlsAuthError::InvalidCert(e.to_string()))
 }
 
 #[tonic::async_trait]
@@ -763,10 +803,10 @@ impl LatticeAgent for AgentServer {
     ) -> Result<Response<Self::StreamMessagesStream>, Status> {
         let remote_addr = request.remote_addr();
 
-        // Extract cluster ID from mTLS client certificate CN.
+        // Extract cluster ID from mTLS client certificate CN and check blocklist.
         // This is the cryptographic identity — message-level cluster_name
         // is validated against this to prevent impersonation.
-        let cert_cluster_id = extract_cluster_id_from_request(&request)?;
+        let cert_cluster_id = authenticate_request(&request, &self.blocklist)?;
 
         info!(
             ?remote_addr,

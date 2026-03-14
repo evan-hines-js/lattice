@@ -454,19 +454,27 @@ pub struct MoveObjectError {
 
 /// API groups that must never be created during move operations.
 /// Prevents a compromised agent from injecting privilege-escalation
-/// resources into the parent cluster during unpivot.
-const BLOCKED_MOVE_API_GROUPS: &[&str] = &["rbac.authorization.k8s.io"];
+/// resources into the target cluster during move.
+const BLOCKED_MOVE_API_GROUPS: &[&str] = &[
+    "rbac.authorization.k8s.io",
+    "admissionregistration.k8s.io",
+    "networking.k8s.io",
+    "storage.k8s.io",
+    "policy",
+    "certificates.k8s.io",
+];
 
 /// Validate that an object kind is not a blocked type during move operations.
 ///
-/// Rejects RBAC resources (ClusterRole, ClusterRoleBinding, Role, RoleBinding)
-/// to prevent privilege escalation through the move protocol.
+/// Rejects resources from API groups that could escalate privileges or
+/// compromise cluster security (RBAC, admission webhooks, network policies,
+/// storage classes, pod security policies, certificate signing requests).
 fn validate_move_object_kind(api_version: &str, kind: &str) -> Result<(), MoveError> {
     let group = api_version.split('/').next().unwrap_or("");
 
     if BLOCKED_MOVE_API_GROUPS.contains(&group) {
         return Err(MoveError::Serialization(format!(
-            "RBAC object '{}' (group '{}') is not allowed during move operations",
+            "object '{}' (group '{}') is not allowed during move operations",
             kind, group
         )));
     }
@@ -579,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_move_object_kind_rejects_rbac() {
+    fn test_validate_move_object_kind_rejects_privileged_groups() {
         assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "ClusterRole").is_err());
         assert!(
             validate_move_object_kind("rbac.authorization.k8s.io/v1", "ClusterRoleBinding")
@@ -587,6 +595,11 @@ mod tests {
         );
         assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "Role").is_err());
         assert!(validate_move_object_kind("rbac.authorization.k8s.io/v1", "RoleBinding").is_err());
+        assert!(validate_move_object_kind("networking.k8s.io/v1", "NetworkPolicy").is_err());
+        assert!(validate_move_object_kind("admissionregistration.k8s.io/v1", "ValidatingWebhookConfiguration").is_err());
+        assert!(validate_move_object_kind("storage.k8s.io/v1", "StorageClass").is_err());
+        assert!(validate_move_object_kind("policy/v1", "PodDisruptionBudget").is_err());
+        assert!(validate_move_object_kind("certificates.k8s.io/v1", "CertificateSigningRequest").is_err());
     }
 
     #[test]

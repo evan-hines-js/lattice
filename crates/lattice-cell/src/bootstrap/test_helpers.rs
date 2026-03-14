@@ -4,11 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lattice_common::crd::ProviderType;
-use lattice_infra::pki::{CertificateAuthority, CertificateAuthorityBundle};
+use lattice_infra::pki::{
+    CertificateAuthority, CertificateAuthorityBundle, DEFAULT_CERT_VALIDITY_HOURS,
+};
 use tokio::sync::RwLock;
 
 use super::errors::BootstrapError;
-use super::state::BootstrapState;
+use super::state::{BootstrapConfig, BootstrapState};
 use super::token::BootstrapToken;
 use super::types::{ClusterRegistration, ManifestGenerator};
 
@@ -33,27 +35,29 @@ pub fn test_ca_bundle() -> Arc<RwLock<CertificateAuthorityBundle>> {
 }
 
 pub fn test_state() -> BootstrapState<TestManifestGenerator> {
-    BootstrapState::new(
-        TestManifestGenerator,
-        Duration::from_secs(3600),
-        test_ca_bundle(),
-        "test:latest".to_string(),
-        None,
-        None,
-        None,
-    )
+    BootstrapState::new(BootstrapConfig {
+        generator: TestManifestGenerator,
+        token_ttl: Duration::from_secs(3600),
+        ca_bundle: test_ca_bundle(),
+        image: "test:latest".to_string(),
+        registry_credentials: None,
+        cert_validity_hours: DEFAULT_CERT_VALIDITY_HOURS,
+        kube_client: None,
+        cluster_name: None,
+    })
 }
 
 pub fn test_state_with_ttl(ttl: Duration) -> BootstrapState<TestManifestGenerator> {
-    BootstrapState::new(
-        TestManifestGenerator,
-        ttl,
-        test_ca_bundle(),
-        "test:latest".to_string(),
-        None,
-        None,
-        None,
-    )
+    BootstrapState::new(BootstrapConfig {
+        generator: TestManifestGenerator,
+        token_ttl: ttl,
+        ca_bundle: test_ca_bundle(),
+        image: "test:latest".to_string(),
+        registry_credentials: None,
+        cert_validity_hours: DEFAULT_CERT_VALIDITY_HOURS,
+        kube_client: None,
+        cluster_name: None,
+    })
 }
 
 pub async fn register_test_cluster<G: ManifestGenerator>(

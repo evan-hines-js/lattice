@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use lattice_common::crd::{LatticeModel, ModelRoutingSpec};
-
 use lattice_common::kube_utils::OwnerReference;
+use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 
 use crate::types::{
     KthenaHeaderMatch, KthenaKvConnector, KthenaModelMatch, KthenaModelRoute, KthenaModelRouteSpec,
@@ -74,10 +74,10 @@ fn compile_model_server(
             namespace: namespace.to_string(),
             labels: BTreeMap::from([
                 (
-                    "app.kubernetes.io/managed-by".to_string(),
-                    "lattice".to_string(),
+                    LABEL_MANAGED_BY.to_string(),
+                    LABEL_MANAGED_BY_LATTICE.to_string(),
                 ),
-                ("app.kubernetes.io/name".to_string(), name.to_string()),
+                (LABEL_NAME.to_string(), name.to_string()),
             ]),
             owner_references: vec![owner_reference(name, uid)],
         },
@@ -185,10 +185,10 @@ fn compile_model_route(
             namespace: namespace.to_string(),
             labels: BTreeMap::from([
                 (
-                    "app.kubernetes.io/managed-by".to_string(),
-                    "lattice".to_string(),
+                    LABEL_MANAGED_BY.to_string(),
+                    LABEL_MANAGED_BY_LATTICE.to_string(),
                 ),
-                ("app.kubernetes.io/name".to_string(), name.to_string()),
+                (LABEL_NAME.to_string(), name.to_string()),
             ]),
             owner_references: vec![owner_reference(name, uid)],
         },

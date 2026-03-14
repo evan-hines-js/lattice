@@ -11,7 +11,6 @@ use std::time::Duration;
 use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
-use rand::Rng;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{
@@ -22,7 +21,7 @@ use lattice_common::kube_utils::HasApiResource;
 use lattice_common::status_check;
 use lattice_common::{
     ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME,
-    LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT,
+    LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_NAMESPACE, LOCAL_SECRETS_PORT, OPERATOR_NAME,
     LOCAL_WEBHOOK_AUTH_SECRET, LOCAL_WEBHOOK_STORE_NAME, REQUEUE_CRD_NOT_FOUND_SECS,
     REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS,
 };
@@ -73,16 +72,25 @@ pub async fn ensure_webhook_credentials(
         }
     }
 
-    // Generate new random credentials
-    let mut rng = rand::thread_rng();
-    let username = format!("lattice-webhook-{:08x}", rng.gen::<u32>());
-    let password: String = (0..32)
-        .map(|_| {
-            let idx = rng.gen_range(0..62);
+    // Generate new random credentials using FIPS-validated RNG
+    let mut id_bytes = [0u8; 4];
+    aws_lc_rs::rand::fill(&mut id_bytes).map_err(|_| {
+        ReconcileError::Internal("FIPS RNG failure generating webhook credentials".into())
+    })?;
+    let username = format!("lattice-webhook-{:08x}", u32::from_be_bytes(id_bytes));
+
+    let mut pwd_bytes = [0u8; 32];
+    aws_lc_rs::rand::fill(&mut pwd_bytes).map_err(|_| {
+        ReconcileError::Internal("FIPS RNG failure generating webhook credentials".into())
+    })?;
+    let password: String = pwd_bytes
+        .iter()
+        .map(|b| {
+            let idx = (*b as usize) % 62;
             match idx {
-                0..=9 => (b'0' + idx) as char,
-                10..=35 => (b'a' + idx - 10) as char,
-                _ => (b'A' + idx - 36) as char,
+                0..=9 => (b'0' + idx as u8) as char,
+                10..=35 => (b'a' + (idx - 10) as u8) as char,
+                _ => (b'A' + (idx - 36) as u8) as char,
             }
         })
         .collect();
@@ -639,7 +647,7 @@ async fn ensure_local_secrets_namespace(client: &Client) -> Result<(), Reconcile
         "metadata": {
             "name": LOCAL_SECRETS_NAMESPACE,
             "labels": {
-                "app.kubernetes.io/managed-by": lattice_common::LABEL_MANAGED_BY_LATTICE
+                (LABEL_MANAGED_BY): LABEL_MANAGED_BY_LATTICE
             }
         }
     });
@@ -662,12 +670,12 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
             "name": LOCAL_SECRETS_SERVICE,
             "namespace": LATTICE_SYSTEM_NAMESPACE,
             "labels": {
-                "app.kubernetes.io/managed-by": lattice_common::LABEL_MANAGED_BY_LATTICE
+                (LABEL_MANAGED_BY): LABEL_MANAGED_BY_LATTICE
             }
         },
         "spec": {
             "selector": {
-                "app": "lattice-operator"
+                "app": OPERATOR_NAME
             },
             "ports": [{
                 "name": "webhook",

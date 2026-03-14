@@ -166,6 +166,8 @@ pub struct OidcValidator {
     /// Counter for force-refresh attempts triggered by unknown `kid` values.
     /// Reset on each successful scheduled refresh.
     unknown_kid_refresh_count: std::sync::atomic::AtomicU32,
+    /// Whether HTTP issuer URLs are allowed (for dev/testing)
+    allow_insecure_http: bool,
 }
 
 impl OidcValidator {
@@ -177,6 +179,7 @@ impl OidcValidator {
             refresh_lock: tokio::sync::Mutex::new(()),
             http_client: reqwest::Client::new(),
             unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
+            allow_insecure_http: false,
         }
     }
 
@@ -236,7 +239,7 @@ impl OidcValidator {
         let spec = &provider.spec;
 
         // Validate issuer URL to prevent SSRF via CRD manipulation
-        validate_issuer_url(&spec.issuer_url, allow_insecure_http)?;
+        validate_issuer_url(&spec.issuer_url, allow_insecure_http).await?;
 
         let audiences = if spec.audiences.is_empty() {
             vec![spec.client_id.clone()]
@@ -271,6 +274,7 @@ impl OidcValidator {
                 .build()
                 .map_err(|e| Error::Config(format!("Failed to create HTTP client: {}", e)))?,
             unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
+            allow_insecure_http,
         })
     }
 
@@ -282,6 +286,7 @@ impl OidcValidator {
             refresh_lock: tokio::sync::Mutex::new(()),
             http_client: reqwest::Client::new(),
             unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
+            allow_insecure_http: false,
         }
     }
 
@@ -509,6 +514,11 @@ impl OidcValidator {
 
     /// Refresh JWKS from the issuer
     async fn refresh_jwks(&self) -> Result<()> {
+        // Re-validate issuer DNS resolution before fetching to prevent DNS rebinding.
+        // The issuer URL was validated at CRD creation time, but DNS could have been
+        // rebound to a private/reserved IP since then.
+        validate_issuer_url(&self.config.issuer_url, self.allow_insecure_http).await?;
+
         // Fetch OIDC discovery document
         let discovery_url = format!(
             "{}/.well-known/openid-configuration",
@@ -631,14 +641,14 @@ impl OidcValidator {
 
 /// Validate that an OIDC issuer URL is safe to fetch from.
 ///
-/// Prevents SSRF by requiring HTTPS and rejecting IP-literal URLs pointing to
+/// Prevents SSRF by requiring HTTPS and rejecting URLs pointing to
 /// private/reserved ranges (RFC 1918, loopback, link-local, cloud metadata).
-/// Hostnames are allowed since we can't reliably pre-resolve them, but blocking
-/// IP literals covers the direct SSRF vector.
+/// Both IP literals and hostnames are checked — hostnames are resolved via DNS
+/// and all resulting IPs are validated against the private range blocklist.
 ///
 /// Set `allow_insecure_http` to true (via `LATTICE_OIDC_ALLOW_INSECURE_HTTP`)
 /// to permit HTTP issuer URLs for development/testing.
-fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<()> {
+async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<()> {
     if !url.starts_with("https://") {
         if url.starts_with("http://") && allow_insecure_http {
             warn!(
@@ -656,13 +666,40 @@ fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<()> {
     let host = extract_host(url)
         .ok_or_else(|| Error::Config(format!("Failed to parse host from issuer URL: {}", url)))?;
 
-    // If the host is an IP literal, check it's not a private/reserved address
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        // IP literal — check directly
         if is_private_ip(&ip) {
             return Err(Error::Config(format!(
                 "OIDC issuer URL must not point to a private/reserved IP address: {}",
                 url
             )));
+        }
+    } else {
+        // Hostname — resolve via DNS and check all resulting IPs
+        let addrs = tokio::net::lookup_host(format!("{}:0", host))
+            .await
+            .map_err(|e| {
+                Error::Config(format!(
+                    "Failed to resolve OIDC issuer hostname '{}': {}",
+                    host, e
+                ))
+            })?;
+
+        let resolved: Vec<std::net::IpAddr> = addrs.map(|a| a.ip()).collect();
+        if resolved.is_empty() {
+            return Err(Error::Config(format!(
+                "OIDC issuer hostname '{}' did not resolve to any addresses",
+                host
+            )));
+        }
+
+        for ip in &resolved {
+            if is_private_ip(ip) {
+                return Err(Error::Config(format!(
+                    "OIDC issuer hostname '{}' resolves to private/reserved IP {}",
+                    host, ip
+                )));
+            }
         }
     }
 
@@ -791,49 +828,69 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("not configured"));
     }
 
-    #[test]
-    fn test_validate_issuer_url_accepts_https() {
-        assert!(validate_issuer_url("https://accounts.google.com", false).is_ok());
-        assert!(validate_issuer_url("https://idp.example.com/realms/lattice", false).is_ok());
+    #[tokio::test]
+    async fn test_validate_issuer_url_accepts_https_ip_literals() {
+        // IP literals skip DNS resolution — these test the scheme + IP validation
+        assert!(validate_issuer_url("https://8.8.8.8", false).await.is_ok());
+        assert!(validate_issuer_url("https://1.1.1.1", false).await.is_ok());
     }
 
-    #[test]
-    fn test_validate_issuer_url_rejects_http() {
-        let result = validate_issuer_url("http://accounts.google.com", false);
+    #[tokio::test]
+    async fn test_validate_issuer_url_rejects_http() {
+        let result = validate_issuer_url("http://8.8.8.8", false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("HTTPS"));
     }
 
-    #[test]
-    fn test_validate_issuer_url_allows_http_when_configured() {
-        assert!(validate_issuer_url("http://keycloak.local:8080/realms/test", true).is_ok());
+    #[tokio::test]
+    async fn test_validate_issuer_url_allows_http_when_configured() {
+        // IP literal with HTTP allowed — no DNS resolution needed
+        assert!(validate_issuer_url("http://8.8.8.8:8080/realms/test", true).await.is_ok());
         // Still rejects non-http/https schemes
-        assert!(validate_issuer_url("ftp://keycloak.local:8080", true).is_err());
+        assert!(validate_issuer_url("ftp://8.8.8.8:8080", true).await.is_err());
     }
 
-    #[test]
-    fn test_validate_issuer_url_rejects_private_ips() {
-        assert!(validate_issuer_url("https://10.0.0.1", false).is_err());
-        assert!(validate_issuer_url("https://172.16.0.1", false).is_err());
-        assert!(validate_issuer_url("https://192.168.1.1", false).is_err());
-        assert!(validate_issuer_url("https://127.0.0.1", false).is_err());
+    #[tokio::test]
+    async fn test_validate_issuer_url_rejects_private_ips() {
+        assert!(validate_issuer_url("https://10.0.0.1", false).await.is_err());
+        assert!(validate_issuer_url("https://172.16.0.1", false).await.is_err());
+        assert!(validate_issuer_url("https://192.168.1.1", false).await.is_err());
+        assert!(validate_issuer_url("https://127.0.0.1", false).await.is_err());
     }
 
-    #[test]
-    fn test_validate_issuer_url_rejects_link_local() {
+    #[tokio::test]
+    async fn test_validate_issuer_url_rejects_link_local() {
         // Cloud metadata endpoint
-        assert!(validate_issuer_url("https://169.254.169.254", false).is_err());
+        assert!(validate_issuer_url("https://169.254.169.254", false).await.is_err());
     }
 
-    #[test]
-    fn test_validate_issuer_url_accepts_public_ip() {
-        assert!(validate_issuer_url("https://8.8.8.8", false).is_ok());
+    #[tokio::test]
+    async fn test_validate_issuer_url_accepts_public_ip() {
+        assert!(validate_issuer_url("https://8.8.8.8", false).await.is_ok());
     }
 
-    #[test]
-    fn test_validate_issuer_url_accepts_hostname() {
-        // Hostnames can't be pre-resolved so they're allowed
-        assert!(validate_issuer_url("https://internal.corp.example.com", false).is_ok());
+    #[tokio::test]
+    async fn test_validate_issuer_url_rejects_hostname_resolving_to_loopback() {
+        // localhost resolves to 127.0.0.1 — must be rejected
+        let result = validate_issuer_url("https://localhost", false).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("private/reserved IP"),
+            "Expected private IP error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_issuer_url_rejects_unresolvable_hostname() {
+        // Non-existent hostname — DNS resolution must fail, not silently pass
+        let result = validate_issuer_url("https://this-hostname-does-not-exist.invalid", false).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("resolve"),
+            "Expected DNS resolution error, got: {err}"
+        );
     }
 
     #[test]
@@ -878,10 +935,10 @@ mod tests {
         assert!(!is_private_ip(&"::ffff:8.8.8.8".parse().unwrap()));
     }
 
-    #[test]
-    fn test_validate_issuer_url_rejects_ipv4_mapped_ipv6() {
-        assert!(validate_issuer_url("https://[::ffff:169.254.169.254]", false).is_err());
-        assert!(validate_issuer_url("https://[::ffff:10.0.0.1]", false).is_err());
-        assert!(validate_issuer_url("https://[::ffff:127.0.0.1]", false).is_err());
+    #[tokio::test]
+    async fn test_validate_issuer_url_rejects_ipv4_mapped_ipv6() {
+        assert!(validate_issuer_url("https://[::ffff:169.254.169.254]", false).await.is_err());
+        assert!(validate_issuer_url("https://[::ffff:10.0.0.1]", false).await.is_err());
+        assert!(validate_issuer_url("https://[::ffff:127.0.0.1]", false).await.is_err());
     }
 }

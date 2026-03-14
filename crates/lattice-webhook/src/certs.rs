@@ -9,6 +9,7 @@ use kube::api::{ObjectMeta, PostParams};
 use kube::{Api, Client};
 use std::collections::BTreeMap;
 
+use lattice_common::SECRET_TYPE_TLS;
 use lattice_infra::pki::CertificateAuthority;
 
 use crate::error::Error;
@@ -122,7 +123,7 @@ async fn store_secret(client: &Client, tls: &WebhookTls) -> Result<(), Error> {
             ..Default::default()
         },
         data: Some(data),
-        type_: Some("kubernetes.io/tls".to_string()),
+        type_: Some(SECRET_TYPE_TLS.to_string()),
         ..Default::default()
     };
 

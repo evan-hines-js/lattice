@@ -3130,13 +3130,13 @@ dependencies = [
 name = "lattice-secret-provider"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "axum 0.8.8",
  "base64",
  "chrono",
  "k8s-openapi",
  "kube",
  "lattice-common",
- "rand 0.8.5",
  "serde",
  "serde_json",
  "subtle",

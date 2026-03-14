@@ -466,6 +466,7 @@ mod tests {
             service: ServiceSpec {
                 type_: "LoadBalancer".to_string(),
             },
+            cert_policy: None,
         });
         cluster
     }

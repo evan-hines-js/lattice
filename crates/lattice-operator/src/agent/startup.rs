@@ -17,7 +17,7 @@ use lattice_agent::{
 };
 use lattice_common::{
     ParentConnectionConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY, LATTICE_SYSTEM_NAMESPACE,
-    TLS_CERT_KEY, TLS_KEY_KEY,
+    SECRET_TYPE_TLS, TLS_CERT_KEY, TLS_KEY_KEY,
 };
 
 /// Supervise agent connection with automatic reconnection.
@@ -202,7 +202,7 @@ async fn save_agent_credentials(
             ..Default::default()
         },
         data: Some(data),
-        type_: Some("kubernetes.io/tls".to_string()),
+        type_: Some(SECRET_TYPE_TLS.to_string()),
         ..Default::default()
     };
 

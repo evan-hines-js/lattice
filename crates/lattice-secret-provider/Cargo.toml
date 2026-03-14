@@ -18,9 +18,11 @@ tokio = { workspace = true }
 # HTTP
 axum = { workspace = true }
 
-# Encoding / random
+# Encoding
 base64 = { workspace = true }
-rand = { workspace = true }
+
+# Crypto (FIPS-validated RNG)
+aws-lc-rs = { workspace = true }
 
 # Crypto
 subtle = { workspace = true }

@@ -680,6 +680,78 @@ pub struct RegistryMirror {
 // Endpoints Configuration
 // =============================================================================
 
+/// Certificate policy for child cluster agent certificates.
+///
+/// Controls the lifespan of mTLS certificates issued to child clusters.
+/// The parent defines min/max bounds; children receive certificates with the
+/// default lifespan. Data center clusters might use 24h, edge clusters 1 year.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CertPolicy {
+    /// Minimum allowed certificate lifespan in hours (default: 24, must be >= 1)
+    #[serde(default = "default_min_lifespan_hours")]
+    pub min_lifespan_hours: u32,
+
+    /// Maximum allowed certificate lifespan in hours (default: 8760 = 1 year)
+    #[serde(default = "default_max_lifespan_hours")]
+    pub max_lifespan_hours: u32,
+
+    /// Default certificate lifespan in hours (default: 720 = 30 days)
+    #[serde(default = "default_cert_lifespan_hours")]
+    pub default_lifespan_hours: u32,
+}
+
+fn default_min_lifespan_hours() -> u32 {
+    24
+}
+fn default_max_lifespan_hours() -> u32 {
+    8760
+}
+fn default_cert_lifespan_hours() -> u32 {
+    720
+}
+
+impl Default for CertPolicy {
+    fn default() -> Self {
+        Self {
+            min_lifespan_hours: default_min_lifespan_hours(),
+            max_lifespan_hours: default_max_lifespan_hours(),
+            default_lifespan_hours: default_cert_lifespan_hours(),
+        }
+    }
+}
+
+impl CertPolicy {
+    /// Validate that the policy is internally consistent.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        if self.min_lifespan_hours < 1 {
+            return Err(crate::Error::validation(
+                "certPolicy.minLifespanHours must be at least 1",
+            ));
+        }
+        if self.min_lifespan_hours > self.max_lifespan_hours {
+            return Err(crate::Error::validation(format!(
+                "certPolicy.minLifespanHours ({}) must be <= maxLifespanHours ({})",
+                self.min_lifespan_hours, self.max_lifespan_hours
+            )));
+        }
+        if self.default_lifespan_hours < self.min_lifespan_hours
+            || self.default_lifespan_hours > self.max_lifespan_hours
+        {
+            return Err(crate::Error::validation(format!(
+                "certPolicy.defaultLifespanHours ({}) must be between min ({}) and max ({})",
+                self.default_lifespan_hours, self.min_lifespan_hours, self.max_lifespan_hours
+            )));
+        }
+        Ok(())
+    }
+
+    /// Clamp a requested lifespan to within the policy bounds.
+    pub fn clamp_hours(&self, requested: u32) -> u32 {
+        requested.clamp(self.min_lifespan_hours, self.max_lifespan_hours)
+    }
+}
+
 /// Parent cluster endpoint configuration
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -698,6 +770,11 @@ pub struct EndpointsSpec {
 
     /// Service exposure configuration
     pub service: ServiceSpec,
+
+    /// Certificate policy for child cluster certificates.
+    /// Controls lifespan bounds (min/max/default) enforced when signing CSRs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_policy: Option<CertPolicy>,
 }
 
 fn default_grpc_port() -> u16 {
@@ -761,6 +838,9 @@ impl EndpointsSpec {
             ));
         }
         self.service.validate()?;
+        if let Some(ref policy) = self.cert_policy {
+            policy.validate()?;
+        }
         Ok(())
     }
 }
@@ -1785,7 +1865,85 @@ mod tests {
                 service: ServiceSpec {
                     type_: "LoadBalancer".to_string(),
                 },
+                cert_policy: None,
             }
+        }
+
+        #[test]
+        fn cert_policy_default_is_valid() {
+            assert!(CertPolicy::default().validate().is_ok());
+        }
+
+        #[test]
+        fn cert_policy_min_greater_than_max_fails() {
+            let policy = CertPolicy {
+                min_lifespan_hours: 100,
+                max_lifespan_hours: 10,
+                default_lifespan_hours: 50,
+            };
+            assert!(policy.validate().is_err());
+        }
+
+        #[test]
+        fn cert_policy_default_out_of_range_fails() {
+            let policy = CertPolicy {
+                min_lifespan_hours: 24,
+                max_lifespan_hours: 720,
+                default_lifespan_hours: 8760,
+            };
+            assert!(policy.validate().is_err());
+        }
+
+        #[test]
+        fn cert_policy_zero_min_fails() {
+            let policy = CertPolicy {
+                min_lifespan_hours: 0,
+                max_lifespan_hours: 720,
+                default_lifespan_hours: 24,
+            };
+            assert!(policy.validate().is_err());
+        }
+
+        #[test]
+        fn cert_policy_clamp_respects_bounds() {
+            let policy = CertPolicy {
+                min_lifespan_hours: 24,
+                max_lifespan_hours: 720,
+                default_lifespan_hours: 168,
+            };
+            assert_eq!(policy.clamp_hours(1), 24);
+            assert_eq!(policy.clamp_hours(168), 168);
+            assert_eq!(policy.clamp_hours(9999), 720);
+        }
+
+        #[test]
+        fn cert_policy_roundtrip() {
+            let policy = CertPolicy {
+                min_lifespan_hours: 12,
+                max_lifespan_hours: 4380,
+                default_lifespan_hours: 720,
+            };
+            let json = serde_json::to_string(&policy).expect("serialize");
+            let parsed: CertPolicy = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(policy, parsed);
+        }
+
+        #[test]
+        fn endpoints_with_cert_policy_validates() {
+            let mut spec = valid_endpoints();
+            spec.cert_policy = Some(CertPolicy::default());
+            assert!(spec.validate().is_ok());
+        }
+
+        #[test]
+        fn endpoints_with_invalid_cert_policy_fails() {
+            let mut spec = valid_endpoints();
+            spec.cert_policy = Some(CertPolicy {
+                min_lifespan_hours: 100,
+                max_lifespan_hours: 10,
+                default_lifespan_hours: 50,
+            });
+            assert!(spec.validate().is_err());
         }
 
         #[test]

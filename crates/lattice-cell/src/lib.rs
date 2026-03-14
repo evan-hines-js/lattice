@@ -10,6 +10,7 @@
 //! - **Move Sender**: gRPC-based move command sender for distributed pivot
 //! - **Resilient Tunnel**: K8s API tunneling with automatic reconnection
 
+pub mod blocklist;
 pub mod bootstrap;
 pub mod capi_proxy;
 pub mod cilium;
@@ -46,5 +47,5 @@ pub use move_sender::GrpcMoveCommandSender;
 pub use parent::{load_or_create_ca, CellServerError, ParentConfig, ParentServers};
 pub use resilient_tunnel::{tunnel_request_resilient, ResilientTunnelConfig, RECONNECT_TIMEOUT};
 pub use resources::{fetch_distributable_resources, ResourceError};
-pub use server::{AgentServer, SharedSubtreeRegistry};
+pub use server::{AgentServer, GrpcServerConfig, SharedSubtreeRegistry};
 pub use subtree_registry::{ClusterInfo, RouteInfo, SubtreeRegistry};

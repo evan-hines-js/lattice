@@ -9,7 +9,7 @@ use lattice_common::crd::{
     LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
     ServiceRef,
 };
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{LABEL_NAME, LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME};
 
 use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
 
@@ -42,7 +42,7 @@ pub fn generate_eso_mesh_members() -> Vec<LatticeMeshMember> {
             "external-secrets",
             LatticeMeshMemberSpec {
                 target: MeshMemberTarget::Selector(BTreeMap::from([(
-                    "app.kubernetes.io/name".to_string(),
+                    LABEL_NAME.to_string(),
                     "external-secrets-webhook".to_string(),
                 )])),
                 ports: vec![MeshMemberPort {
@@ -66,14 +66,14 @@ pub fn generate_eso_mesh_members() -> Vec<LatticeMeshMember> {
             "external-secrets",
             LatticeMeshMemberSpec {
                 target: MeshMemberTarget::Selector(BTreeMap::from([(
-                    "app.kubernetes.io/name".to_string(),
+                    LABEL_NAME.to_string(),
                     "external-secrets".to_string(),
                 )])),
                 ports: vec![],
                 allowed_callers: vec![],
                 dependencies: vec![ServiceRef::new(
                     LATTICE_SYSTEM_NAMESPACE,
-                    "lattice-operator",
+                    OPERATOR_NAME,
                 )],
                 egress: vec![kube_apiserver_egress()],
                 allow_peer_traffic: false,
@@ -88,7 +88,7 @@ pub fn generate_eso_mesh_members() -> Vec<LatticeMeshMember> {
             "external-secrets",
             LatticeMeshMemberSpec {
                 target: MeshMemberTarget::Selector(BTreeMap::from([(
-                    "app.kubernetes.io/name".to_string(),
+                    LABEL_NAME.to_string(),
                     "external-secrets-cert-controller".to_string(),
                 )])),
                 ports: vec![],

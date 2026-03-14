@@ -41,7 +41,7 @@ pub use addons::generate_for_provider;
 pub use bundle::generate_bootstrap_bundle;
 pub use errors::BootstrapError;
 pub use generator::DefaultManifestGenerator;
-pub use state::{BootstrapState, ClusterBootstrapInfo};
+pub use state::{BootstrapConfig, BootstrapState, ClusterBootstrapInfo};
 pub use token::BootstrapToken;
 pub use types::{BootstrapBundleConfig, BootstrapResponse, ClusterRegistration, ManifestGenerator};
 
@@ -54,6 +54,7 @@ use axum::routing::{get, post};
 use axum::Json;
 use tracing::{debug, info, warn};
 
+use lattice_common::crd::validate_dns_label;
 use lattice_common::CsrRequest;
 
 use crate::resources::fetch_distributable_resources;
@@ -83,6 +84,9 @@ pub async fn csr_handler<G: ManifestGenerator>(
     Path(cluster_id): Path<String>,
     Json(request): Json<CsrRequest>,
 ) -> Result<Json<lattice_common::CsrResponse>, BootstrapError> {
+    validate_dns_label(&cluster_id, "cluster_id")
+        .map_err(|_| BootstrapError::InvalidToken)?;
+
     debug!(cluster_id = %cluster_id, "CSR signing request received");
 
     // Sign the CSR (validates and consumes the one-time CSR token)
@@ -108,6 +112,9 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     Path(cluster_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, BootstrapError> {
+    validate_dns_label(&cluster_id, "cluster_id")
+        .map_err(|_| BootstrapError::InvalidToken)?;
+
     debug!(cluster_id = %cluster_id, "Bootstrap manifests request received");
 
     // Extract token

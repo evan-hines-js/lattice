@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use lattice_common::crd::{LatticeJob, LatticeJobSpec, RestartPolicy, VolcanoPolicy};
-
 use lattice_common::kube_utils::OwnerReference;
+use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 
 use crate::types::{
     self, VCCronJob, VCCronJobSpec, VCCronJobTemplate, VCJob, VCJobSpec, VCJobTask,
@@ -55,10 +55,10 @@ pub fn compile_vcjob(
             namespace: namespace.to_string(),
             labels: BTreeMap::from([
                 (
-                    "app.kubernetes.io/managed-by".to_string(),
-                    "lattice".to_string(),
+                    LABEL_MANAGED_BY.to_string(),
+                    LABEL_MANAGED_BY_LATTICE.to_string(),
                 ),
-                ("app.kubernetes.io/name".to_string(), name.to_string()),
+                (LABEL_NAME.to_string(), name.to_string()),
             ]),
             owner_references: vec![OwnerReference {
                 api_version: "lattice.dev/v1alpha1".to_string(),

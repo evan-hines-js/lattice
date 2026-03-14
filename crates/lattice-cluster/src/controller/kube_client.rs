@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 use mockall::automock;
 
 use lattice_common::crd::{LatticeCluster, LatticeClusterStatus};
-use lattice_common::{Error, CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{Error, CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME};
 
 use super::pure::{is_control_plane_node, is_node_ready};
 use super::FIELD_MANAGER;
@@ -601,7 +601,7 @@ impl KubeClient for KubeClientImpl {
         use k8s_openapi::api::apps::v1::Deployment;
 
         let api: Api<Deployment> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        let deploy = match get_optional(&api, "lattice-operator").await? {
+        let deploy = match get_optional(&api, OPERATOR_NAME).await? {
             Some(d) => d,
             None => return Ok(None),
         };
@@ -622,7 +622,7 @@ impl KubeClient for KubeClientImpl {
                 "template": {
                     "spec": {
                         "containers": [{
-                            "name": "lattice-operator",
+                            "name": OPERATOR_NAME,
                             "image": image
                         }]
                     }
@@ -630,7 +630,7 @@ impl KubeClient for KubeClientImpl {
             }
         });
         api.patch(
-            "lattice-operator",
+            OPERATOR_NAME,
             &PatchParams::apply(FIELD_MANAGER).force(),
             &Patch::Strategic(&patch),
         )

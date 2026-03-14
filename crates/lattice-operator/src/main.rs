@@ -44,7 +44,7 @@ use lattice_common::CrdRegistry;
 use lattice_common::SharedConfig;
 use lattice_common::{
     lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
-    DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME,
+    DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME, OPERATOR_NAME,
 };
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
@@ -133,7 +133,7 @@ fn init_crypto() {
 
 fn init_telemetry_global() -> Option<prometheus::Registry> {
     let config = TelemetryConfig {
-        service_name: "lattice-operator".to_string(),
+        service_name: OPERATOR_NAME.to_string(),
         ..Default::default()
     };
 
@@ -1150,7 +1150,7 @@ async fn report_running_image(client: &kube::Client, cluster_name: &str) {
 
     let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
-    let image = match deploy_api.get("lattice-operator").await {
+    let image = match deploy_api.get(OPERATOR_NAME).await {
         Ok(deploy) => deploy
             .spec
             .and_then(|s| s.template.spec)

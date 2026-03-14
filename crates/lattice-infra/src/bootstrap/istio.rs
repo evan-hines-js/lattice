@@ -12,7 +12,7 @@ use lattice_common::policy::istio::{
     MtlsConfig, OperationSpec, PeerAuthentication, PeerAuthenticationSpec, TargetRef,
     WorkloadSelector,
 };
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME};
 
 use super::split_yaml_documents;
 
@@ -166,7 +166,7 @@ impl IstioReconciler {
                 selector: Some(WorkloadSelector {
                     match_labels: BTreeMap::from([(
                         "app".to_string(),
-                        "lattice-operator".to_string(),
+                        OPERATOR_NAME.to_string(),
                     )]),
                 }),
                 action: "ALLOW".to_string(),

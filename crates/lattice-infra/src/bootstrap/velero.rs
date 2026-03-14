@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use lattice_common::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
+use lattice_common::LABEL_NAME;
 
 use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
 
@@ -35,7 +36,7 @@ pub fn generate_velero_mesh_members() -> Vec<LatticeMeshMember> {
         "velero",
         LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
-                "app.kubernetes.io/name".to_string(),
+                LABEL_NAME.to_string(),
                 "velero".to_string(),
             )])),
             ports: vec![],

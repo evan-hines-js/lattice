@@ -38,7 +38,7 @@ use lattice_common::crd::{
 use lattice_common::{
     DEFAULT_AUTH_PROXY_PORT, DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT,
     DEFAULT_WEBHOOK_PORT, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT, MONITORING_NAMESPACE,
-    VMAGENT_SA_NAME,
+    OPERATOR_NAME, VMAGENT_SA_NAME,
 };
 
 /// A single infrastructure component with its name, version, and manifests.
@@ -607,12 +607,12 @@ pub(crate) fn kube_apiserver_egress() -> EgressRule {
 /// PeerAuth because their callers lack mesh identity.
 pub fn generate_operator_mesh_member() -> LatticeMeshMember {
     lmm(
-        "lattice-operator",
+        OPERATOR_NAME,
         LATTICE_SYSTEM_NAMESPACE,
         LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
                 "app".to_string(),
-                "lattice-operator".to_string(),
+                OPERATOR_NAME.to_string(),
             )])),
             ports: vec![
                 MeshMemberPort {

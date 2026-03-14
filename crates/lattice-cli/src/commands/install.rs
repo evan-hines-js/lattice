@@ -48,7 +48,7 @@ use lattice_common::credentials::{
 use lattice_common::kube_utils;
 use lattice_common::{
     capi_namespace, kubeconfig_secret_name, AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE,
-    OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
+    OPENSTACK_CREDENTIALS_SECRET, OPERATOR_NAME, PROXMOX_CREDENTIALS_SECRET, SECRET_TYPE_SA_TOKEN,
 };
 
 use super::CommandErrorExt;
@@ -424,7 +424,7 @@ impl Installer {
         info!("Waiting for Lattice operator to be ready...");
         kube_utils::wait_for_deployment(
             client,
-            "lattice-operator",
+            OPERATOR_NAME,
             LATTICE_SYSTEM_NAMESPACE,
             OPERATOR_READY_TIMEOUT,
         )
@@ -785,7 +785,7 @@ impl Installer {
         // Wait for Lattice operator
         kube_utils::wait_for_deployment(
             mgmt_client,
-            "lattice-operator",
+            OPERATOR_NAME,
             LATTICE_SYSTEM_NAMESPACE,
             LATTICE_OPERATOR_TIMEOUT,
         )
@@ -1134,7 +1134,7 @@ impl Installer {
                 ),
                 ..Default::default()
             },
-            type_: Some("kubernetes.io/service-account-token".to_string()),
+            type_: Some(SECRET_TYPE_SA_TOKEN.to_string()),
             ..Default::default()
         };
         secret_api

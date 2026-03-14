@@ -130,7 +130,7 @@ mod tests {
         let agent_req =
             AgentCertRequest::new("test-cluster").expect("agent cert request should succeed");
         let agent_cert = ca
-            .sign_csr(agent_req.csr_pem(), "test-cluster")
+            .sign_csr(agent_req.csr_pem(), "test-cluster", crate::pki::DEFAULT_CERT_VALIDITY_HOURS)
             .expect("CSR signing should succeed");
         let agent_key = Zeroizing::new(agent_req.private_key_pem().to_string());
 

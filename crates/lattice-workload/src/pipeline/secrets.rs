@@ -10,6 +10,7 @@ use lattice_secret_provider::eso::{self, ExternalSecret, ExternalSecretData, Rem
 
 use crate::error::CompilationError;
 use lattice_common::crd::WorkloadSpec;
+use lattice_common::SECRET_TYPE_DOCKERCONFIG;
 
 // =============================================================================
 // Generated Secrets Container
@@ -193,7 +194,7 @@ impl SecretsCompiler {
             let secret_type = params.secret_type.as_deref().or_else(|| {
                 image_pull_secrets
                     .contains(resource_name)
-                    .then_some("kubernetes.io/dockerconfigjson")
+                    .then_some(SECRET_TYPE_DOCKERCONFIG)
             });
 
             let mut external_secret = eso::build_external_secret(

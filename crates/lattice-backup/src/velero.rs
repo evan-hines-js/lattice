@@ -9,7 +9,7 @@ use kube::api::{Api, DynamicObject, Patch, PatchParams};
 use serde::{Deserialize, Serialize};
 
 use lattice_common::kube_utils::{HasApiResource, ObjectMeta};
-use lattice_common::ReconcileError;
+use lattice_common::{ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 
 /// Velero namespace where Schedule/BSL/Restore resources are created
 pub(crate) const VELERO_NAMESPACE: &str = "velero";
@@ -369,12 +369,12 @@ pub fn build_service_schedule(
 
     let mut match_labels = BTreeMap::new();
     match_labels.insert(
-        "app.kubernetes.io/name".to_string(),
+        LABEL_NAME.to_string(),
         service_name.to_string(),
     );
     match_labels.insert(
-        "app.kubernetes.io/managed-by".to_string(),
-        "lattice".to_string(),
+        LABEL_MANAGED_BY.to_string(),
+        LABEL_MANAGED_BY_LATTICE.to_string(),
     );
 
     Schedule::new(

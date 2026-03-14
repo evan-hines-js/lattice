@@ -311,6 +311,14 @@ pub const TLS_CERT_KEY: &str = "tls.crt";
 /// Key for TLS private key in secrets
 pub const TLS_KEY_KEY: &str = "tls.key";
 
+// Kubernetes Secret types
+/// Kubernetes TLS secret type
+pub const SECRET_TYPE_TLS: &str = "kubernetes.io/tls";
+/// Kubernetes Docker config secret type (for image pull secrets)
+pub const SECRET_TYPE_DOCKERCONFIG: &str = "kubernetes.io/dockerconfigjson";
+/// Kubernetes service account token secret type
+pub const SECRET_TYPE_SA_TOKEN: &str = "kubernetes.io/service-account-token";
+
 // CA secret data keys
 /// Key for CA certificate in CA secrets
 pub const CA_CERT_KEY: &str = "ca.crt";

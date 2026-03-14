@@ -423,12 +423,12 @@ impl<'de> Deserialize<'de> for ResourceSpec {
                     if let Some(ref secret_type) = p.secret_type {
                         const VALID_SECRET_TYPES: &[&str] = &[
                             "Opaque",
-                            "kubernetes.io/tls",
-                            "kubernetes.io/dockerconfigjson",
+                            crate::SECRET_TYPE_TLS,
+                            crate::SECRET_TYPE_DOCKERCONFIG,
                             "kubernetes.io/dockercfg",
                             "kubernetes.io/basic-auth",
                             "kubernetes.io/ssh-auth",
-                            "kubernetes.io/service-account-token",
+                            crate::SECRET_TYPE_SA_TOKEN,
                             "bootstrap.kubernetes.io/token",
                         ];
                         if !VALID_SECRET_TYPES.contains(&secret_type.as_str()) {

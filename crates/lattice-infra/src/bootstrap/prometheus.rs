@@ -9,7 +9,7 @@ use lattice_common::crd::{
     LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
     ServiceRef,
 };
-use lattice_common::{LATTICE_SYSTEM_NAMESPACE, MONITORING_NAMESPACE, VMAGENT_SA_NAME};
+use lattice_common::{LABEL_NAME, LATTICE_SYSTEM_NAMESPACE, MONITORING_NAMESPACE, OPERATOR_NAME, VMAGENT_SA_NAME};
 
 use super::keda::{KEDA_NAMESPACE, VM_READ_TARGET_LMM_NAME};
 use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
@@ -117,7 +117,7 @@ pub fn generate_prometheus(ha: bool) -> &'static [String] {
 /// Build VM component label selector.
 fn vm_instance_labels(component: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
-        ("app.kubernetes.io/name".to_string(), component.to_string()),
+        (LABEL_NAME.to_string(), component.to_string()),
         (
             "app.kubernetes.io/instance".to_string(),
             VMCLUSTER_NAME.to_string(),
@@ -140,7 +140,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
 
     let vmagent_caller = ServiceRef::new(MONITORING_NAMESPACE, "vmagent");
     let keda_caller = ServiceRef::new(KEDA_NAMESPACE, "keda-operator");
-    let operator_caller = ServiceRef::new(LATTICE_SYSTEM_NAMESPACE, "lattice-operator");
+    let operator_caller = ServiceRef::new(LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME);
 
     if ha {
         // HA mode: separate write (vminsert) and read (vmselect) targets
@@ -246,7 +246,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
         MONITORING_NAMESPACE,
         LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
-                "app.kubernetes.io/name".to_string(),
+                LABEL_NAME.to_string(),
                 "victoria-metrics-operator".to_string(),
             )])),
             ports: vec![
@@ -280,7 +280,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
         MONITORING_NAMESPACE,
         LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
-                "app.kubernetes.io/name".to_string(),
+                LABEL_NAME.to_string(),
                 "kube-state-metrics".to_string(),
             )])),
             ports: vec![MeshMemberPort {
