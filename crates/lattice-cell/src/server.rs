@@ -113,10 +113,15 @@ fn extract_delta_changes(state: &SubtreeState) -> (Vec<ClusterInfo>, Vec<String>
     (added, removed)
 }
 
-/// Handle a cross-cluster service lookup by checking local LatticeClusterRoutes CRDs
+/// Handle a cross-cluster service lookup by checking local LatticeClusterRoutes CRDs.
+///
+/// Only returns routes where the requesting cluster is listed in `allowed_services`
+/// (or the route is open to all via `"*"`). This prevents a compromised agent from
+/// enumerating the full cross-cluster topology.
 async fn handle_service_lookup(
     client: &Client,
     req: &lattice_proto::ServiceLookupRequest,
+    requesting_cluster: &str,
 ) -> lattice_proto::ServiceLookupResponse {
     let api: Api<LatticeClusterRoutes> = Api::all(client.clone());
 
@@ -127,6 +132,22 @@ async fn handle_service_lookup(
                     if route.service_name == req.service_name
                         && route.service_namespace == req.service_namespace
                     {
+                        // Check that the requesting cluster is authorized to
+                        // discover this route (bilateral agreement check).
+                        let allowed = route.allowed_services.iter().any(|s| {
+                            s == "*"
+                                || s.starts_with(&format!("{requesting_cluster}/"))
+                        });
+                        if !allowed {
+                            debug!(
+                                service = %req.service_name,
+                                namespace = %req.service_namespace,
+                                requesting_cluster = %requesting_cluster,
+                                "service lookup denied: requesting cluster not in allowed_services"
+                            );
+                            continue;
+                        }
+
                         return lattice_proto::ServiceLookupResponse {
                             request_id: req.request_id.clone(),
                             found: true,
@@ -143,7 +164,7 @@ async fn handle_service_lookup(
                     }
                 }
             }
-            // Service not found in any route table
+            // Service not found in any route table (or not authorized)
             lattice_proto::ServiceLookupResponse {
                 request_id: req.request_id.clone(),
                 found: false,
@@ -170,29 +191,29 @@ async fn handle_service_lookup(
 }
 
 /// Maximum routes accepted from a single child. Prevents unbounded CRD/memory growth.
-/// Override with `LATTICE_MAX_ROUTES_PER_CLUSTER` env var.
+/// Override with `LATTICE_MAX_ROUTES_PER_CLUSTER` env var. Clamped to [1, 10000].
 static MAX_ROUTES_PER_CLUSTER: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("LATTICE_MAX_ROUTES_PER_CLUSTER")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1000)
+        .clamp(1, 10_000)
 });
 
 /// Maximum clusters accepted in a single SubtreeState. Prevents DashMap exhaustion.
-/// Override with `LATTICE_MAX_CLUSTERS_PER_SUBTREE` env var.
+/// Override with `LATTICE_MAX_CLUSTERS_PER_SUBTREE` env var. Clamped to [1, 5000].
 static MAX_CLUSTERS_PER_SUBTREE: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("LATTICE_MAX_CLUSTERS_PER_SUBTREE")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(500)
+        .clamp(1, 5_000)
 });
 
 /// Convert SubtreeState services to ClusterRoute CRD entries.
 ///
 /// Rejects the entire batch if it exceeds size limits (fail-closed).
 fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> {
-    use lattice_common::system_namespaces;
-
     if state.services.len() > *MAX_ROUTES_PER_CLUSTER {
         warn!(
             count = state.services.len(),
@@ -211,72 +232,25 @@ fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> 
                 warn!(service = %s.name, port = s.port, "rejecting: port > 65535");
                 return false;
             }
-            if s.address.is_empty() {
-                warn!(service = %s.name, "rejecting: empty address");
-                return false;
-            }
-            if s.hostname.is_empty() {
-                warn!(service = %s.name, "rejecting: empty hostname");
-                return false;
-            }
-            // Block hostnames that look like URLs or internal K8s service names
-            if s.hostname.contains("://")
-                || s.hostname.ends_with(".svc.cluster.local")
-                || s.hostname.contains(':')
-            {
-                warn!(
-                    service = %s.name,
-                    hostname = %s.hostname,
-                    "rejecting: invalid hostname (URL, internal K8s service, or contains port)"
-                );
-                return false;
-            }
-            // Block dangerous addresses (loopback, link-local/metadata, unspecified, multicast)
-            if let Ok(ip) = s.address.parse::<std::net::IpAddr>() {
-                let dangerous = match ip {
-                    std::net::IpAddr::V4(v4) => {
-                        v4.is_loopback()
-                            || v4.is_unspecified()
-                            || v4.is_link_local()
-                            || v4.is_multicast()
-                            || v4.is_broadcast()
-                    }
-                    std::net::IpAddr::V6(v6) => {
-                        v6.is_loopback()
-                            || v6.is_unspecified()
-                            || v6.is_multicast()
-                            || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local
-                    }
-                };
-                if dangerous {
-                    warn!(service = %s.name, address = %s.address, "rejecting: dangerous address");
-                    return false;
-                }
-            }
-            // Block system namespace hijacking — includes infra namespaces from
-            // the centralized registry plus lattice-system (operator/CA/credentials).
-            // lattice-system isn't in system_namespaces (it has MeshMember coverage)
-            // but children must never shadow services in it.
-            if system_namespaces::is_system_namespace(&s.namespace)
-                || s.namespace == lattice_common::LATTICE_SYSTEM_NAMESPACE
-            {
-                warn!(
-                    service = %s.name,
-                    namespace = %s.namespace,
-                    "rejecting: cannot advertise services in system namespaces"
-                );
-                return false;
-            }
             true
         })
-        .map(|s| ClusterRoute {
-            service_name: s.name.clone(),
-            service_namespace: s.namespace.clone(),
-            hostname: s.hostname.clone(),
-            address: s.address.clone(),
-            port: s.port as u16,
-            protocol: s.protocol.clone(),
-            allowed_services: s.allowed_services.clone(),
+        .filter_map(|s| {
+            let route = ClusterRoute {
+                service_name: s.name.clone(),
+                service_namespace: s.namespace.clone(),
+                hostname: s.hostname.clone(),
+                address: s.address.clone(),
+                port: s.port as u16,
+                protocol: s.protocol.clone(),
+                allowed_services: s.allowed_services.clone(),
+            };
+            match route.validate() {
+                Ok(()) => Some(route),
+                Err(reason) => {
+                    warn!(service = %s.name, reason = %reason, "rejecting route");
+                    None
+                }
+            }
         })
         .collect()
 }
@@ -894,7 +868,7 @@ async fn process_agent_message(
                 namespace = %req.service_namespace,
                 "Service lookup request"
             );
-            let response = handle_service_lookup(kube_client, req).await;
+            let response = handle_service_lookup(kube_client, req, cluster_name).await;
             let cmd = lattice_proto::CellCommand {
                 command_id: req.request_id.clone(),
                 command: Some(lattice_proto::cell_command::Command::ServiceLookupResponse(response)),
@@ -995,7 +969,7 @@ enum MtlsAuthError {
     EmptyChain,
     #[error("Failed to extract cluster ID from certificate: {0}")]
     InvalidCert(String),
-    #[error("Certificate is blocklisted (fingerprint: {0})")]
+    #[error("Certificate is blocklisted")]
     CertificateBlocked(String),
 }
 
@@ -1028,6 +1002,7 @@ fn authenticate_request<T>(
     // Check blocklist before extracting identity
     let fingerprint = crate::blocklist::CertificateBlocklist::fingerprint(&cert_der);
     if blocklist.is_blocked(&fingerprint) {
+        warn!(fingerprint = %fingerprint, "Rejecting blocklisted certificate");
         return Err(MtlsAuthError::CertificateBlocked(fingerprint));
     }
 

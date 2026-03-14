@@ -65,6 +65,66 @@ fn default_protocol() -> String {
     "HTTP".to_string()
 }
 
+impl ClusterRoute {
+    /// Validate a route for safety before it enters the route table.
+    ///
+    /// Returns `Err(reason)` if the route should be rejected. Used by both
+    /// the heartbeat ingestion path (server.rs) and the local discovery path
+    /// (route_reconciler.rs) to ensure identical validation regardless of source.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("port is 0".to_string());
+        }
+        if self.address.is_empty() {
+            return Err("empty address".to_string());
+        }
+        if self.hostname.is_empty() {
+            return Err("empty hostname".to_string());
+        }
+        // Block hostnames that look like URLs or internal K8s service names
+        if self.hostname.contains("://")
+            || self.hostname.ends_with(".svc.cluster.local")
+            || self.hostname.contains(':')
+        {
+            return Err(format!(
+                "invalid hostname '{}' (URL, internal K8s service, or contains port)",
+                self.hostname
+            ));
+        }
+        // Block dangerous IP addresses
+        if let Ok(ip) = self.address.parse::<std::net::IpAddr>() {
+            let dangerous = match ip {
+                std::net::IpAddr::V4(v4) => {
+                    v4.is_loopback()
+                        || v4.is_unspecified()
+                        || v4.is_link_local()
+                        || v4.is_multicast()
+                        || v4.is_broadcast()
+                }
+                std::net::IpAddr::V6(v6) => {
+                    v6.is_loopback()
+                        || v6.is_unspecified()
+                        || v6.is_multicast()
+                        || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local
+                }
+            };
+            if dangerous {
+                return Err(format!("dangerous address '{}'", self.address));
+            }
+        }
+        // Block system namespace hijacking
+        if crate::system_namespaces::is_system_namespace(&self.service_namespace)
+            || self.service_namespace == crate::LATTICE_SYSTEM_NAMESPACE
+        {
+            return Err(format!(
+                "cannot advertise in system namespace '{}'",
+                self.service_namespace
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Status for LatticeClusterRoutes
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]

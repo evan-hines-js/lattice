@@ -254,7 +254,7 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
             };
 
             for host in &route.hosts {
-                routes.push(ClusterRoute {
+                let cr = ClusterRoute {
                     service_name: svc_name.to_string(),
                     service_namespace: svc_ns.to_string(),
                     hostname: host.clone(),
@@ -262,7 +262,17 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                     port,
                     protocol: protocol.to_string(),
                     allowed_services: allowed_services.clone(),
-                });
+                };
+                if let Err(reason) = cr.validate() {
+                    warn!(
+                        service = svc_name,
+                        namespace = svc_ns,
+                        reason = %reason,
+                        "rejecting local route"
+                    );
+                    continue;
+                }
+                routes.push(cr);
             }
         }
     }
