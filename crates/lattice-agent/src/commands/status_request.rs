@@ -57,6 +57,7 @@ mod tests {
                     .build(),
             ),
             kube_provider: Arc::new(crate::kube_client::InClusterClientProvider),
+            pending_lookups: dashmap::DashMap::new(),
         };
 
         handle("req-123", &ctx).await;

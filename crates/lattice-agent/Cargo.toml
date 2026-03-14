@@ -59,6 +59,9 @@ tracing = { workspace = true }
 # Security
 zeroize = { workspace = true }
 
+# UUID
+uuid = { workspace = true }
+
 [dev-dependencies]
 tokio-test = { workspace = true }
 mockall = { workspace = true }

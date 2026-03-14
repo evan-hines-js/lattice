@@ -15,6 +15,7 @@ mod sync_resources;
 use std::sync::Arc;
 
 use moka::future::Cache;
+use dashmap::DashMap;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -60,6 +61,8 @@ pub struct CommandContext {
     pub forwarded_exec_sessions: Arc<Cache<String, StoredExecSession>>,
     /// Provider for creating Kubernetes clients
     pub kube_provider: Arc<dyn KubeClientProvider>,
+    /// Pending service lookup responses keyed by request_id
+    pub pending_lookups: DashMap<String, tokio::sync::oneshot::Sender<lattice_proto::ServiceLookupResponse>>,
 }
 
 impl CommandContext {
@@ -86,6 +89,48 @@ impl CommandContext {
             exec_forwarder,
             forwarded_exec_sessions,
             kube_provider,
+            pending_lookups: DashMap::new(),
+        }
+    }
+}
+
+impl CommandContext {
+    /// Send a service lookup request to the parent and wait for the response.
+    ///
+    /// Returns `None` if the parent doesn't know about the service or the
+    /// request times out.
+    pub async fn lookup_service(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Option<lattice_proto::ServiceLookupResponse> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        self.pending_lookups.insert(request_id.clone(), tx);
+
+        let msg = AgentMessage {
+            cluster_name: self.cluster_name.clone(),
+            payload: Some(lattice_proto::agent_message::Payload::ServiceLookupRequest(
+                lattice_proto::ServiceLookupRequest {
+                    request_id: request_id.clone(),
+                    service_name: name.to_string(),
+                    service_namespace: namespace.to_string(),
+                },
+            )),
+        };
+
+        if self.message_tx.send(msg).await.is_err() {
+            self.pending_lookups.remove(&request_id);
+            return None;
+        }
+
+        match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+            Ok(Ok(resp)) if resp.found => Some(resp),
+            _ => {
+                self.pending_lookups.remove(&request_id);
+                None
+            }
         }
     }
 }
@@ -129,6 +174,16 @@ pub async fn handle_command(command: &CellCommand, ctx: &CommandContext) {
         }
         Some(Command::StateSyncRequest(_)) => {
             state_sync::handle(&command.command_id, ctx).await;
+        }
+        Some(Command::ServiceLookupResponse(resp)) => {
+            tracing::debug!(
+                request_id = %resp.request_id,
+                found = resp.found,
+                "Received service lookup response"
+            );
+            if let Some((_, sender)) = ctx.pending_lookups.remove(&resp.request_id) {
+                let _ = sender.send(resp.clone());
+            }
         }
         None => {
             warn!(command_id = %command.command_id, "Received command with no payload");

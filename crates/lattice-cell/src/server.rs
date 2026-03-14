@@ -22,7 +22,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::{Api, Client};
-use lattice_common::crd::{ClusterRoute, LatticeCluster};
+use lattice_common::crd::{ClusterRoute, LatticeCluster, LatticeClusterRoutes};
 
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
 use lattice_proto::{
@@ -101,6 +101,51 @@ fn extract_delta_changes(state: &SubtreeState) -> (Vec<ClusterInfo>, Vec<String>
         .map(|c| c.name.clone())
         .collect();
     (added, removed)
+}
+
+/// Handle a cross-cluster service lookup by checking local LatticeClusterRoutes CRDs
+async fn handle_service_lookup(
+    client: &Client,
+    req: &lattice_proto::ServiceLookupRequest,
+) -> lattice_proto::ServiceLookupResponse {
+    let api: Api<LatticeClusterRoutes> = Api::all(client.clone());
+
+    match api.list(&kube::api::ListParams::default()).await {
+        Ok(list) => {
+            for table in &list.items {
+                for route in &table.spec.routes {
+                    if route.service_name == req.service_name
+                        && route.service_namespace == req.service_namespace
+                    {
+                        return lattice_proto::ServiceLookupResponse {
+                            request_id: req.request_id.clone(),
+                            found: true,
+                            address: route.address.clone(),
+                            port: route.port as u32,
+                            hostname: route.hostname.clone(),
+                            cluster: table
+                                .metadata
+                                .name
+                                .clone()
+                                .unwrap_or_default(),
+                        };
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to list LatticeClusterRoutes for service lookup");
+        }
+    }
+
+    lattice_proto::ServiceLookupResponse {
+        request_id: req.request_id.clone(),
+        found: false,
+        address: String::new(),
+        port: 0,
+        hostname: String::new(),
+        cluster: String::new(),
+    }
 }
 
 /// Convert SubtreeState services to ClusterRoute CRD entries
@@ -726,6 +771,29 @@ async fn process_agent_message(
             );
             state_sync::handle_state_sync_response(cluster_name, sync, kube_client).await;
         }
+        Some(Payload::ServiceLookupRequest(req)) => {
+            debug!(
+                cluster = %cluster_name,
+                service = %req.service_name,
+                namespace = %req.service_namespace,
+                "Service lookup request"
+            );
+            let response = handle_service_lookup(kube_client, req).await;
+            let cmd = lattice_proto::CellCommand {
+                command_id: req.request_id.clone(),
+                command: Some(lattice_proto::cell_command::Command::ServiceLookupResponse(response)),
+            };
+            if let Err(e) = command_tx.send(cmd).await {
+                warn!(
+                    cluster = %cluster_name,
+                    error = %e,
+                    "Failed to send service lookup response"
+                );
+            }
+        }
+        Some(Payload::ServiceLookupResponse(_)) => {
+            // Forwarded from a child's parent — not used on the cell side
+        }
         None => {
             warn!(cluster = %cluster_name, "Received message with no payload");
         }
@@ -1001,6 +1069,8 @@ mod tests {
             Some(Payload::ExecData(_)) => {}
             Some(Payload::Event(_)) => {}
             Some(Payload::StateSyncResponse(_)) => {}
+            Some(Payload::ServiceLookupRequest(_)) => {}
+            Some(Payload::ServiceLookupResponse(_)) => {}
             None => {}
         }
     }

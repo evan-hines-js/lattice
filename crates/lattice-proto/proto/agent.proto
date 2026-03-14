@@ -68,6 +68,10 @@ message AgentMessage {
     LatticeEvent event = 13;
     // Response to RequestStateSync with full spec + status
     StateSyncResponse state_sync_response = 14;
+    // Cross-cluster service lookup: ask parent where a service lives
+    ServiceLookupRequest service_lookup_request = 15;
+    // Response to a service lookup from parent
+    ServiceLookupResponse service_lookup_response = 16;
   }
 }
 
@@ -282,6 +286,8 @@ message CellCommand {
     ExecCancel exec_cancel = 11;
     // Request child to send full spec + status (triggered by hash mismatch)
     RequestStateSync state_sync_request = 12;
+    // Response to a child's service lookup request
+    ServiceLookupResponse service_lookup_response = 13;
   }
 }
 
@@ -666,4 +672,42 @@ message StateSyncResponse {
   bytes spec_json = 1;
   // Full LatticeClusterStatus as JSON
   bytes status_json = 2;
+}
+
+// =============================================================================
+// Cross-Cluster Service Lookup Messages
+// =============================================================================
+
+// Agent → Cell: Ask parent where a service lives
+//
+// Sent when local LatticeClusterRoutes doesn't contain a dependency.
+// The parent checks its own route table (which has all descendants' routes)
+// and responds. If not found, the parent can ask its own parent recursively.
+message ServiceLookupRequest {
+  // Unique request ID for correlation
+  string request_id = 1;
+  // Service name to resolve
+  string service_name = 2;
+  // Service namespace to resolve
+  string service_namespace = 3;
+}
+
+// Cell → Agent (or Agent → Cell): Service lookup response
+//
+// Used in both directions:
+// - Cell → Agent: parent responding to child's lookup request
+// - Agent → Cell: child forwarding a lookup response from its own parent
+message ServiceLookupResponse {
+  // Correlates to ServiceLookupRequest.request_id
+  string request_id = 1;
+  // Whether the service was found
+  bool found = 2;
+  // Gateway address (LoadBalancer IP)
+  string address = 3;
+  // Gateway port
+  uint32 port = 4;
+  // Ingress hostname
+  string hostname = 5;
+  // Cluster hosting the service
+  string cluster = 6;
 }
