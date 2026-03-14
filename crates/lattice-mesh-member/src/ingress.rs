@@ -314,15 +314,24 @@ impl IngressCompiler {
             // The policy uses notPrincipals: traffic from any principal NOT in the
             // allowed list is denied. Traffic from allowed principals passes through
             // to the normal ALLOW evaluation.
-            let principals: Vec<String> = ingress
+            // Check if any route has restricted (non-wildcard) advertise config.
+            // If so, generate a DENY policy — even if all allowedServices entries
+            // are malformed and parse to zero principals. An empty notPrincipals
+            // list in a DENY policy means "deny all" which is correct fail-closed.
+            let has_restricted_advertise = ingress
                 .routes
                 .values()
-                .filter_map(|r| r.advertise.as_ref())
-                .filter(|a| !a.is_open())
-                .flat_map(|a| a.to_spiffe_principals())
-                .collect();
+                .any(|r| r.advertise.as_ref().map(|a| !a.is_open()).unwrap_or(false));
 
-            if !principals.is_empty() {
+            if has_restricted_advertise {
+                let principals: Vec<String> = ingress
+                    .routes
+                    .values()
+                    .filter_map(|r| r.advertise.as_ref())
+                    .filter(|a| !a.is_open())
+                    .flat_map(|a| a.to_spiffe_principals())
+                    .collect();
+
                 output.cross_cluster_auth_policy =
                     Some(AuthorizationPolicy::new_deny_not_principals(
                         &format!("{}-cross-cluster-deny", service_name),
