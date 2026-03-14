@@ -91,3 +91,69 @@ pub enum ClusterRoutesPhase {
     /// Routes synced from heartbeat
     Ready,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cluster_route_roundtrip() {
+        let route = ClusterRoute {
+            service_name: "jellyfin".to_string(),
+            service_namespace: "media".to_string(),
+            hostname: "jellyfin.home.arpa".to_string(),
+            address: "10.0.0.217".to_string(),
+            port: 8096,
+            protocol: "HTTP".to_string(),
+        };
+
+        let json = serde_json::to_string(&route).unwrap();
+        let parsed: ClusterRoute = serde_json::from_str(&json).unwrap();
+        assert_eq!(route, parsed);
+    }
+
+    #[test]
+    fn cluster_route_protocol_defaults_to_http() {
+        let json = r#"{
+            "serviceName": "api",
+            "serviceNamespace": "default",
+            "hostname": "api.example.com",
+            "address": "10.0.0.1",
+            "port": 80
+        }"#;
+
+        let route: ClusterRoute = serde_json::from_str(json).unwrap();
+        assert_eq!(route.protocol, "HTTP");
+    }
+
+    #[test]
+    fn cluster_routes_spec_empty_routes_default() {
+        let json = r#"{}"#;
+        let spec: LatticeClusterRoutesSpec = serde_json::from_str(json).unwrap();
+        assert!(spec.routes.is_empty());
+    }
+
+    #[test]
+    fn cluster_routes_status_defaults() {
+        let status = LatticeClusterRoutesStatus::default();
+        assert_eq!(status.phase, ClusterRoutesPhase::Pending);
+        assert_eq!(status.route_count, 0);
+        assert!(status.last_updated.is_none());
+        assert!(status.observed_generation.is_none());
+    }
+
+    #[test]
+    fn cluster_routes_status_with_observed_generation() {
+        let status = LatticeClusterRoutesStatus {
+            phase: ClusterRoutesPhase::Ready,
+            route_count: 3,
+            last_updated: Some("2026-03-14T00:00:00Z".to_string()),
+            observed_generation: Some(5),
+        };
+
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("observedGeneration"));
+        let parsed: LatticeClusterRoutesStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.observed_generation, Some(5));
+    }
+}

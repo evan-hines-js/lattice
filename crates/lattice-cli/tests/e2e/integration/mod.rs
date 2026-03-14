@@ -47,6 +47,7 @@ pub mod multi_hop;
 pub mod observability;
 pub mod oidc;
 pub mod pivot;
+pub mod route_discovery;
 pub mod proxy;
 pub mod scaling;
 pub mod secrets;

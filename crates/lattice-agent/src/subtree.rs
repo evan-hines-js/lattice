@@ -483,4 +483,95 @@ mod tests {
         assert!(!state.is_full_sync);
         assert!(state.clusters[0].removed);
     }
+
+    fn make_gateway_object(ns: &str, name: &str, address: &str, port: u16) -> DynamicObject {
+        let mut obj = DynamicObject::new(name, &ApiResource::from_gvk(
+            &GroupVersionKind::gvk("gateway.networking.k8s.io", "v1", "Gateway"),
+        ));
+        obj.metadata.namespace = Some(ns.to_string());
+        obj.data = serde_json::json!({
+            "spec": {
+                "listeners": [{ "port": port }]
+            },
+            "status": {
+                "addresses": [{ "value": address }]
+            }
+        });
+        obj
+    }
+
+    #[test]
+    fn resolve_gateway_finds_address_in_namespace() {
+        let mut gateways = HashMap::new();
+        let gw = make_gateway_object("media", "istio-gateway", "10.0.0.217", 80);
+        gateways.insert("media/istio-gateway".to_string(), gw);
+
+        let (addr, port) = resolve_gateway_address("media", &gateways);
+        assert_eq!(addr, "10.0.0.217");
+        assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn resolve_gateway_ignores_other_namespaces() {
+        let mut gateways = HashMap::new();
+        let gw = make_gateway_object("webapp", "istio-gateway", "10.0.0.218", 8080);
+        gateways.insert("webapp/istio-gateway".to_string(), gw);
+
+        let (addr, port) = resolve_gateway_address("media", &gateways);
+        assert_eq!(addr, "");
+        assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn resolve_gateway_returns_empty_when_no_address() {
+        let mut gateways = HashMap::new();
+        let mut gw = make_gateway_object("media", "istio-gateway", "", 80);
+        gw.data = serde_json::json!({
+            "spec": { "listeners": [{ "port": 80 }] },
+            "status": { "addresses": [] }
+        });
+        gateways.insert("media/istio-gateway".to_string(), gw);
+
+        let (addr, port) = resolve_gateway_address("media", &gateways);
+        assert_eq!(addr, "");
+        assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn resolve_gateway_defaults_port_to_80() {
+        let mut gateways = HashMap::new();
+        let mut gw = make_gateway_object("media", "gw", "10.0.0.1", 80);
+        gw.data = serde_json::json!({
+            "spec": { "listeners": [] },
+            "status": { "addresses": [{ "value": "10.0.0.1" }] }
+        });
+        gateways.insert("media/gw".to_string(), gw);
+
+        let (addr, port) = resolve_gateway_address("media", &gateways);
+        assert_eq!(addr, "10.0.0.1");
+        assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn subtree_service_has_route_fields() {
+        let svc = SubtreeService {
+            name: "jellyfin".to_string(),
+            namespace: "media".to_string(),
+            cluster: "backend".to_string(),
+            removed: false,
+            hostname: "jellyfin.home.arpa".to_string(),
+            address: "10.0.0.217".to_string(),
+            port: 80,
+            protocol: "HTTP".to_string(),
+            labels: HashMap::from([
+                ("lattice.dev/environment".to_string(), "homelab".to_string()),
+            ]),
+        };
+
+        assert_eq!(svc.hostname, "jellyfin.home.arpa");
+        assert_eq!(svc.address, "10.0.0.217");
+        assert_eq!(svc.port, 80);
+        assert_eq!(svc.protocol, "HTTP");
+        assert!(!svc.removed);
+    }
 }

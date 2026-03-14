@@ -1363,4 +1363,87 @@ mod tests {
 
         assert!(!ctx.subtree_registry.contains("child-cluster").await);
     }
+
+    // =========================================================================
+    // Route conversion tests
+    // =========================================================================
+
+    #[test]
+    fn test_convert_subtree_to_cluster_routes_filters_removed() {
+        let state = SubtreeState {
+            clusters: vec![],
+            services: vec![
+                lattice_proto::SubtreeService {
+                    name: "jellyfin".to_string(),
+                    namespace: "media".to_string(),
+                    cluster: "backend".to_string(),
+                    removed: false,
+                    hostname: "jellyfin.home.arpa".to_string(),
+                    address: "10.0.0.217".to_string(),
+                    port: 80,
+                    protocol: "HTTP".to_string(),
+                    labels: std::collections::HashMap::new(),
+                },
+                lattice_proto::SubtreeService {
+                    name: "old-service".to_string(),
+                    namespace: "default".to_string(),
+                    cluster: "backend".to_string(),
+                    removed: true,
+                    hostname: "old.home.arpa".to_string(),
+                    address: "10.0.0.218".to_string(),
+                    port: 80,
+                    protocol: "HTTP".to_string(),
+                    labels: std::collections::HashMap::new(),
+                },
+            ],
+            is_full_sync: true,
+        };
+
+        let routes = convert_subtree_to_cluster_routes(&state);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].service_name, "jellyfin");
+        assert_eq!(routes[0].hostname, "jellyfin.home.arpa");
+        assert_eq!(routes[0].address, "10.0.0.217");
+        assert_eq!(routes[0].port, 80);
+    }
+
+    #[test]
+    fn test_convert_subtree_to_cluster_routes_empty() {
+        let state = SubtreeState {
+            clusters: vec![],
+            services: vec![],
+            is_full_sync: true,
+        };
+
+        let routes = convert_subtree_to_cluster_routes(&state);
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn test_convert_subtree_to_cluster_routes_preserves_fields() {
+        let state = SubtreeState {
+            clusters: vec![],
+            services: vec![lattice_proto::SubtreeService {
+                name: "api".to_string(),
+                namespace: "webapp".to_string(),
+                cluster: "backend".to_string(),
+                removed: false,
+                hostname: "api.example.com".to_string(),
+                address: "192.168.1.100".to_string(),
+                port: 8443,
+                protocol: "HTTPS".to_string(),
+                labels: std::collections::HashMap::new(),
+            }],
+            is_full_sync: false,
+        };
+
+        let routes = convert_subtree_to_cluster_routes(&state);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].service_name, "api");
+        assert_eq!(routes[0].service_namespace, "webapp");
+        assert_eq!(routes[0].hostname, "api.example.com");
+        assert_eq!(routes[0].address, "192.168.1.100");
+        assert_eq!(routes[0].port, 8443);
+        assert_eq!(routes[0].protocol, "HTTPS");
+    }
 }

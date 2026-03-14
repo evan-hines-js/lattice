@@ -704,4 +704,30 @@ mod tests {
         };
         assert!(spec.validate(&single_port()).is_ok());
     }
+
+    #[test]
+    fn advertise_defaults_to_false() {
+        let json = r#"{
+            "hosts": ["api.example.com"]
+        }"#;
+        let route: RouteSpec = serde_json::from_str(json).unwrap();
+        assert!(!route.advertise);
+    }
+
+    #[test]
+    fn advertise_true_roundtrips() {
+        let route = RouteSpec {
+            kind: RouteKind::HTTPRoute,
+            hosts: vec!["api.example.com".to_string()],
+            port: None,
+            listen_port: None,
+            rules: None,
+            tls: None,
+            advertise: true,
+        };
+        let json = serde_json::to_string(&route).unwrap();
+        assert!(json.contains("\"advertise\":true"));
+        let parsed: RouteSpec = serde_json::from_str(&json).unwrap();
+        assert!(parsed.advertise);
+    }
 }
