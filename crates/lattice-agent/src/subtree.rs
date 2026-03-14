@@ -127,6 +127,7 @@ impl SubtreeSender {
                 port: r.port as u32,
                 protocol: r.protocol.clone(),
                 labels: HashMap::new(),
+                allowed_services: r.allowed_services.clone(),
             })
             .collect()
     }
@@ -365,6 +366,7 @@ mod tests {
             labels: HashMap::from([
                 ("lattice.dev/environment".to_string(), "homelab".to_string()),
             ]),
+            allowed_services: vec![],
         };
 
         assert_eq!(svc.hostname, "jellyfin.home.arpa");

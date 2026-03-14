@@ -579,8 +579,11 @@ message SubtreeService {
   uint32 port = 7;
   // Protocol (HTTP, HTTPS, TCP, GRPC)
   string protocol = 8;
-  // Labels for policy matching and filtering (e.g., lattice.dev/edge-proxy: "true")
+  // Labels for policy matching and filtering
   map<string, string> labels = 9;
+  // Allowed callers (cluster/namespace/name format) from advertise config.
+  // Empty = open to all. Propagated up the hierarchy for bilateral agreement enforcement.
+  repeated string allowed_services = 10;
 }
 
 // =============================================================================

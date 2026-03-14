@@ -229,6 +229,12 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                 continue;
             }
 
+            let allowed_services = route
+                .advertise
+                .as_ref()
+                .map(|a| a.allowed_services.clone())
+                .unwrap_or_default();
+
             let protocol = match route.kind {
                 lattice_common::crd::RouteKind::HTTPRoute => {
                     if route.tls.is_some() { "HTTPS" } else { "HTTP" }
@@ -246,6 +252,7 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                     address: address.clone(),
                     port,
                     protocol: protocol.to_string(),
+                    allowed_services: allowed_services.clone(),
                 });
             }
         }

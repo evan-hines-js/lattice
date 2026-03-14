@@ -54,6 +54,11 @@ pub struct ClusterRoute {
     /// Protocol (HTTP, HTTPS, TCP, GRPC)
     #[serde(default = "default_protocol")]
     pub protocol: String,
+
+    /// Allowed callers (cluster/namespace/name) from the advertise config.
+    /// Empty = open to all. Used for compile-time bilateral agreement enforcement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_services: Vec<String>,
 }
 
 fn default_protocol() -> String {
@@ -105,6 +110,7 @@ mod tests {
             address: "10.0.0.217".to_string(),
             port: 8096,
             protocol: "HTTP".to_string(),
+            allowed_services: vec!["edge/edge/haproxy-fw".to_string()],
         };
 
         let json = serde_json::to_string(&route).unwrap();

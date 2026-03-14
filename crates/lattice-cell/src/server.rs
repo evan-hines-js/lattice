@@ -193,6 +193,7 @@ fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> 
             address: s.address.clone(),
             port: s.port as u16,
             protocol: s.protocol.clone(),
+            allowed_services: s.allowed_services.clone(),
         })
         .collect()
 }
@@ -1485,6 +1486,7 @@ mod tests {
                     port: 80,
                     protocol: "HTTP".to_string(),
                     labels: std::collections::HashMap::new(),
+                    allowed_services: vec![],
                 },
                 lattice_proto::SubtreeService {
                     name: "old-service".to_string(),
@@ -1496,6 +1498,7 @@ mod tests {
                     port: 80,
                     protocol: "HTTP".to_string(),
                     labels: std::collections::HashMap::new(),
+                    allowed_services: vec![],
                 },
             ],
             is_full_sync: true,
@@ -1535,6 +1538,7 @@ mod tests {
                 port: 8443,
                 protocol: "HTTPS".to_string(),
                 labels: std::collections::HashMap::new(),
+                allowed_services: vec![],
             }],
             is_full_sync: false,
         };
