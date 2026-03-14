@@ -346,7 +346,7 @@ async fn run_cluster_slice(
     let cedar = load_cedar_engine(client).await;
 
     let self_cluster_name = config.cluster_name.clone();
-    let (parent_servers, agent_token, auth_proxy_handle) =
+    let (parent_servers, agent_token, auth_proxy_handle, _route_update_tx) =
         setup_cell_infra(client, &self_cluster_name, cedar.clone(), config).await?;
 
     let mut controllers = controller_runner::build_cluster_controllers(
@@ -553,7 +553,7 @@ async fn run_all_slices(
     let cedar = load_cedar_engine(client).await;
 
     let self_cluster_name = config.cluster_name.clone();
-    let (parent_servers, agent_token, auth_proxy_handle) =
+    let (parent_servers, agent_token, auth_proxy_handle, _route_update_tx) =
         setup_cell_infra(client, &self_cluster_name, cedar.clone(), config).await?;
 
     let mut controllers = controller_runner::build_cluster_controllers(
@@ -695,12 +695,20 @@ async fn setup_cell_infra(
     Arc<ParentServers<DefaultManifestGenerator>>,
     tokio_util::sync::CancellationToken,
     Option<tokio::task::JoinHandle<()>>,
+    Option<lattice_cell::route_reconciler::RouteUpdateSender>,
 )> {
     let is_bootstrap = config.is_bootstrap_cluster;
 
     // Create cell servers (always — CA + registries needed by agent SubtreeForwarder)
     let parent_config = ParentConfig::from_config(config);
     let servers = Arc::new(ParentServers::new(parent_config, client).await?);
+
+    // Start route reconciler on ALL clusters (not just parents).
+    // Watches local LatticeServices with advertise: true, merges with child routes.
+    // On leaf clusters the child channel is unused but the local watcher still runs.
+    let route_update_tx = self_cluster_name.as_ref().map(|name| {
+        lattice_cell::route_reconciler::spawn_route_reconciler(name.clone(), client.clone())
+    });
 
     // Start agent connection to parent (if we have one)
     let agent_token = tokio_util::sync::CancellationToken::new();
@@ -726,6 +734,7 @@ async fn setup_cell_infra(
 
     let auth_proxy_handle = if is_cell {
         let extra_sans = get_cell_server_sans(client, self_cluster_name, is_bootstrap).await;
+        let tx = route_update_tx.clone().expect("route_update_tx required for cell");
         activate_cell_services(
             client,
             &servers,
@@ -733,6 +742,7 @@ async fn setup_cell_infra(
             &extra_sans,
             cedar,
             config.oidc_allow_insecure_http,
+            tx,
         )
         .await?
     } else {
@@ -744,6 +754,7 @@ async fn setup_cell_infra(
             let watcher_servers = servers.clone();
             let watcher_cedar = cedar;
             let watcher_oidc_insecure = config.oidc_allow_insecure_http;
+            let watcher_route_tx = route_update_tx.clone().expect("route_update_tx required for leaf");
             tokio::spawn(async move {
                 cell_activation_watcher(
                     watcher_client,
@@ -751,6 +762,7 @@ async fn setup_cell_infra(
                     watcher_servers,
                     watcher_cedar,
                     watcher_oidc_insecure,
+                    watcher_route_tx,
                 )
                 .await;
             });
@@ -758,7 +770,7 @@ async fn setup_cell_infra(
         None
     };
 
-    Ok((servers, agent_token, auth_proxy_handle))
+    Ok((servers, agent_token, auth_proxy_handle, route_update_tx))
 }
 
 /// Activate cell infrastructure: start servers, auth proxy, CA rotation, and crash recovery.
@@ -772,9 +784,10 @@ async fn activate_cell_services(
     extra_sans: &[String],
     cedar: Arc<PolicyEngine>,
     oidc_allow_insecure_http: bool,
+    route_update_tx: lattice_cell::route_reconciler::RouteUpdateSender,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     servers
-        .ensure_running(DefaultManifestGenerator::new(), extra_sans, client.clone())
+        .ensure_running(DefaultManifestGenerator::new(), extra_sans, client.clone(), route_update_tx)
         .await?;
     tracing::info!("Cell servers started");
 
@@ -810,6 +823,7 @@ async fn cell_activation_watcher(
     servers: Arc<ParentServers<DefaultManifestGenerator>>,
     cedar: Arc<PolicyEngine>,
     oidc_allow_insecure_http: bool,
+    route_update_tx: lattice_cell::route_reconciler::RouteUpdateSender,
 ) {
     use lattice_operator::startup::{
         discover_cell_host, ensure_cell_service_exists, LOAD_BALANCER_POLL_INTERVAL,
@@ -882,6 +896,7 @@ async fn cell_activation_watcher(
             &extra_sans,
             cedar.clone(),
             oidc_allow_insecure_http,
+            route_update_tx.clone(),
         )
         .await
         {

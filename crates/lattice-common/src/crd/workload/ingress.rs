@@ -63,12 +63,44 @@ pub struct RouteSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<IngressTls>,
 
-    /// Advertise this route to parent clusters for multi-cluster discovery.
-    /// When true, the route's hostname and gateway address are included in
-    /// the agent's subtree state heartbeat, making it visible to the parent
-    /// for DMZ proxy routing or cross-cluster service resolution.
-    #[serde(default)]
-    pub advertise: bool,
+    /// Advertise this route for multi-cluster discovery.
+    ///
+    /// When enabled, the route's hostname and gateway address are included in
+    /// the agent's subtree state heartbeat, making it resolvable by services
+    /// on other clusters. Use `allowedServices` to restrict which remote
+    /// services can depend on this route (cross-cluster bilateral agreement).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise: Option<AdvertiseConfig>,
+}
+
+/// Configuration for advertising a route across clusters.
+///
+/// Presence of this struct means the route is advertised. Use `allowedServices`
+/// to control which remote services can depend on it. `["*"]` allows all
+/// (same pattern as bilateral agreement wildcards).
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvertiseConfig {
+    /// Services allowed to resolve this route from other clusters.
+    ///
+    /// Each entry is "namespace/name" (e.g., "edge/haproxy-fw") or "*" for all.
+    pub allowed_services: Vec<String>,
+}
+
+impl AdvertiseConfig {
+    /// Returns true if all services are allowed (wildcard)
+    pub fn is_open(&self) -> bool {
+        self.allowed_services.iter().any(|s| s == "*")
+    }
+
+    /// Returns true if a specific service (namespace/name) is allowed
+    pub fn allows_service(&self, namespace: &str, name: &str) -> bool {
+        if self.is_open() {
+            return true;
+        }
+        let qualified = format!("{namespace}/{name}");
+        self.allowed_services.iter().any(|s| s == &qualified)
+    }
 }
 
 /// TLS configuration for ingress — mode is inferred from which fields are set.
@@ -411,7 +443,7 @@ mod tests {
             listen_port: None,
             rules: None,
             tls: None,
-            advertise: false,
+            advertise: None,
         }
     }
 
@@ -455,7 +487,7 @@ mod tests {
                     listen_port: None,
                     rules: None,
                     tls: None,
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         };
@@ -475,7 +507,7 @@ mod tests {
                     listen_port: Some(9090),
                     rules: None,
                     tls: None,
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         };
@@ -495,7 +527,7 @@ mod tests {
                     listen_port: Some(9090),
                     rules: None,
                     tls: None,
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         };
@@ -567,7 +599,7 @@ mod tests {
                             kind: None,
                         }),
                     }),
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         };
@@ -618,7 +650,7 @@ mod tests {
                         }],
                     }]),
                     tls: None,
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         };
@@ -706,16 +738,14 @@ mod tests {
     }
 
     #[test]
-    fn advertise_defaults_to_false() {
-        let json = r#"{
-            "hosts": ["api.example.com"]
-        }"#;
+    fn advertise_defaults_to_none() {
+        let json = r#"{ "hosts": ["api.example.com"] }"#;
         let route: RouteSpec = serde_json::from_str(json).unwrap();
-        assert!(!route.advertise);
+        assert!(route.advertise.is_none());
     }
 
     #[test]
-    fn advertise_true_roundtrips() {
+    fn advertise_wildcard_roundtrips() {
         let route = RouteSpec {
             kind: RouteKind::HTTPRoute,
             hosts: vec!["api.example.com".to_string()],
@@ -723,11 +753,31 @@ mod tests {
             listen_port: None,
             rules: None,
             tls: None,
-            advertise: true,
+            advertise: Some(AdvertiseConfig {
+                allowed_services: vec!["*".to_string()],
+            }),
         };
         let json = serde_json::to_string(&route).unwrap();
-        assert!(json.contains("\"advertise\":true"));
         let parsed: RouteSpec = serde_json::from_str(&json).unwrap();
-        assert!(parsed.advertise);
+        assert!(parsed.advertise.unwrap().is_open());
+    }
+
+    #[test]
+    fn advertise_restricted_allows_listed_service() {
+        let config = AdvertiseConfig {
+            allowed_services: vec!["edge/haproxy-fw".to_string()],
+        };
+        assert!(config.allows_service("edge", "haproxy-fw"));
+        assert!(!config.allows_service("other", "service"));
+        assert!(!config.is_open());
+    }
+
+    #[test]
+    fn advertise_wildcard_allows_all() {
+        let config = AdvertiseConfig {
+            allowed_services: vec!["*".to_string()],
+        };
+        assert!(config.is_open());
+        assert!(config.allows_service("any", "service"));
     }
 }

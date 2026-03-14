@@ -691,6 +691,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         manifest_generator: G,
         extra_sans: &[String],
         kube_client: Client,
+        route_update_tx: crate::route_reconciler::RouteUpdateSender,
     ) -> Result<bool, CellServerError> {
         // Use compare_exchange to atomically check and set
         if self
@@ -802,13 +803,6 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
                     "cannot start gRPC server without certificate blocklist: {e}"
                 ))
             })?;
-
-        // Start the route reconciler (single writer for LatticeClusterRoutes CRDs)
-        // Watches local LatticeServices with advertise: true and merges with child routes
-        let route_update_tx = crate::route_reconciler::spawn_route_reconciler(
-            self.config.cluster_name.clone(),
-            grpc_kube_client.clone(),
-        );
 
         info!(addr = %grpc_addr, "Starting gRPC server");
         let grpc_handle = tokio::spawn(async move {
@@ -1022,8 +1016,9 @@ mod tests {
         };
 
         // Start servers
+        let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
         let result = servers
-            .ensure_running(MockManifestGenerator, &[], client.clone())
+            .ensure_running(MockManifestGenerator, &[], client.clone(), route_tx.clone())
             .await;
         assert!(result.is_ok());
         assert!(result.expect("ensure_running should succeed")); // Should return true (started)
@@ -1031,7 +1026,7 @@ mod tests {
 
         // Second call should return false (already running)
         let result = servers
-            .ensure_running(MockManifestGenerator, &[], client)
+            .ensure_running(MockManifestGenerator, &[], client, route_tx)
             .await;
         assert!(result.is_ok());
         assert!(!result.expect("ensure_running should succeed")); // Should return false (was already running)
@@ -1053,8 +1048,9 @@ mod tests {
 
         // Start and shutdown (only if we have a client)
         if let Some(client) = try_test_client().await {
+            let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
             servers
-                .ensure_running(MockManifestGenerator, &[], client)
+                .ensure_running(MockManifestGenerator, &[], client, route_tx)
                 .await
                 .expect("ensure_running should succeed");
             servers.shutdown().await;
@@ -1083,8 +1079,9 @@ mod tests {
         assert!(servers.bootstrap_state().await.is_none());
 
         // After start, bootstrap state should be available
+        let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
         servers
-            .ensure_running(MockManifestGenerator, &[], client)
+            .ensure_running(MockManifestGenerator, &[], client, route_tx)
             .await
             .expect("ensure_running should succeed");
         assert!(servers.bootstrap_state().await.is_some());

@@ -67,7 +67,8 @@ spec:
       public:
         hosts:
           - sonarr.home.arpa
-        advertise: true
+        advertise:
+          allowedServices: ["*"]
         tls:
           issuerRef:
             name: e2e-selfsigned

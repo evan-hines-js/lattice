@@ -76,7 +76,8 @@ spec:
       public:
         hosts:
           - jellyfin.home.arpa
-        advertise: true
+        advertise:
+          allowedServices: ["*"]
         tls:
           issuerRef:
             name: e2e-selfsigned

@@ -405,7 +405,7 @@ mod tests {
                             kind: None,
                         }),
                     }),
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         });

@@ -214,7 +214,7 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
         };
 
         for route in ingress.routes.values() {
-            if !route.advertise {
+            if route.advertise.is_none() {
                 continue;
             }
 

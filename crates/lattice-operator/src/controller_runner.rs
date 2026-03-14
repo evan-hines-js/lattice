@@ -27,8 +27,8 @@ use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     BackupStore, CedarPolicy, ClusterConfig, InfraProvider, LatticeCluster, LatticeClusterBackup,
-    LatticeJob, LatticeMeshMember, LatticeModel, LatticeRestore, LatticeService, MonitoringConfig,
-    OIDCProvider, ProviderType, SecretProvider,
+    LatticeClusterRoutes, LatticeJob, LatticeMeshMember, LatticeModel, LatticeRestore,
+    LatticeService, MonitoringConfig, OIDCProvider, ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_cost::CostProvider;
@@ -545,6 +545,20 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
                 let role_full_name = format!("{}-{}", model_name, role_name);
                 graph.put_workload(&ns, &role_full_name, &role_spec.entry_workload, &callers);
             }
+        }
+    })
+    .await;
+
+    // Warm remote services from LatticeClusterRoutes (cross-cluster dependencies)
+    warmup_list::<LatticeClusterRoutes>(client, "LatticeClusterRoutes", |item| {
+        for route in &item.spec.routes {
+            graph.put_remote_service(
+                &route.service_namespace,
+                &route.service_name,
+                &route.address,
+                route.port,
+                &route.hostname,
+            );
         }
     })
     .await;

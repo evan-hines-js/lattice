@@ -133,4 +133,5 @@ spec:
       public:
         hosts:
           - webapp.home.arpa
-        advertise: true
+        advertise:
+          allowedServices: ["*"]

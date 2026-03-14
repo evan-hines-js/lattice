@@ -731,7 +731,7 @@ mod tests {
                     listen_port: None,
                     rules: None,
                     tls,
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         }
@@ -844,7 +844,7 @@ mod tests {
                         ],
                     }]),
                     tls: None,
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         };
@@ -891,7 +891,7 @@ mod tests {
                         }],
                     }]),
                     tls: None,
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         };
@@ -940,7 +940,7 @@ mod tests {
                         secret_name: Some("my-custom-cert".to_string()),
                         issuer_ref: None,
                     }),
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         };
@@ -967,7 +967,7 @@ mod tests {
                     listen_port: None,
                     rules: None,
                     tls: None,
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         };
@@ -996,7 +996,7 @@ mod tests {
                     listen_port: Some(9090),
                     rules: None,
                     tls: None,
-                    advertise: false,
+                    advertise: None,
                 },
             )]),
         };
@@ -1029,7 +1029,7 @@ mod tests {
                         listen_port: None,
                         rules: None,
                         tls: None,
-                    advertise: false,
+                    advertise: None,
                     },
                 ),
                 (
@@ -1041,7 +1041,7 @@ mod tests {
                         listen_port: None,
                         rules: None,
                         tls: None,
-                    advertise: false,
+                    advertise: None,
                     },
                 ),
                 (
@@ -1053,7 +1053,7 @@ mod tests {
                         listen_port: Some(9090),
                         rules: None,
                         tls: None,
-                    advertise: false,
+                    advertise: None,
                     },
                 ),
             ]),

@@ -52,7 +52,7 @@ pub fn create_backend_a() -> lattice_common::crd::LatticeService {
             listen_port: None,
             rules: None, // catch-all
             tls: None,
-            advertise: false,
+            advertise: None,
         },
     );
 
@@ -121,7 +121,7 @@ pub fn create_backend_b() -> lattice_common::crd::LatticeService {
                 },
             ]),
             tls: None,
-            advertise: false,
+            advertise: None,
         },
     );
 
@@ -163,7 +163,7 @@ pub fn create_backend_tls() -> lattice_common::crd::LatticeService {
                     kind: None,
                 }),
             }),
-            advertise: false,
+            advertise: None,
         },
     );
 
