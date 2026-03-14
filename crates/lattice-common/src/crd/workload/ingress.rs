@@ -83,7 +83,9 @@ pub struct RouteSpec {
 pub struct AdvertiseConfig {
     /// Services allowed to resolve this route from other clusters.
     ///
-    /// Each entry is "namespace/name" (e.g., "edge/haproxy-fw") or "*" for all.
+    /// Each entry is "cluster/namespace/name" (e.g., "edge/edge/haproxy-fw")
+    /// or "*" for all. The cluster/namespace/name format maps directly to a
+    /// SPIFFE principal: `lattice.{cluster}.local/ns/{namespace}/sa/{name}`.
     pub allowed_services: Vec<String>,
 }
 
@@ -93,13 +95,35 @@ impl AdvertiseConfig {
         self.allowed_services.iter().any(|s| s == "*")
     }
 
-    /// Returns true if a specific service (namespace/name) is allowed
-    pub fn allows_service(&self, namespace: &str, name: &str) -> bool {
+    /// Returns true if a specific service is allowed
+    pub fn allows_service(&self, cluster: &str, namespace: &str, name: &str) -> bool {
         if self.is_open() {
             return true;
         }
-        let qualified = format!("{namespace}/{name}");
+        let qualified = format!("{cluster}/{namespace}/{name}");
         self.allowed_services.iter().any(|s| s == &qualified)
+    }
+
+    /// Convert allowedServices to SPIFFE principals for AuthorizationPolicy.
+    ///
+    /// Each "cluster/namespace/name" entry becomes
+    /// `lattice.{cluster}.local/ns/{namespace}/sa/{name}`.
+    /// Wildcard entries are skipped (use is_open() to check).
+    pub fn to_spiffe_principals(&self) -> Vec<String> {
+        self.allowed_services
+            .iter()
+            .filter(|s| *s != "*")
+            .filter_map(|s| {
+                let parts: Vec<&str> = s.splitn(3, '/').collect();
+                if parts.len() == 3 {
+                    Some(crate::mesh::trust_domain::principal(
+                        parts[0], parts[1], parts[2],
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -765,10 +789,10 @@ mod tests {
     #[test]
     fn advertise_restricted_allows_listed_service() {
         let config = AdvertiseConfig {
-            allowed_services: vec!["edge/haproxy-fw".to_string()],
+            allowed_services: vec!["edge/edge/haproxy-fw".to_string()],
         };
-        assert!(config.allows_service("edge", "haproxy-fw"));
-        assert!(!config.allows_service("other", "service"));
+        assert!(config.allows_service("edge", "edge", "haproxy-fw"));
+        assert!(!config.allows_service("other", "ns", "service"));
         assert!(!config.is_open());
     }
 
@@ -778,6 +802,22 @@ mod tests {
             allowed_services: vec!["*".to_string()],
         };
         assert!(config.is_open());
-        assert!(config.allows_service("any", "service"));
+        assert!(config.allows_service("any", "ns", "service"));
+    }
+
+    #[test]
+    fn advertise_to_spiffe_principals() {
+        let config = AdvertiseConfig {
+            allowed_services: vec![
+                "edge/edge/haproxy-fw".to_string(),
+                "*".to_string(),
+            ],
+        };
+        let principals = config.to_spiffe_principals();
+        assert_eq!(principals.len(), 1); // wildcard skipped
+        assert_eq!(
+            principals[0],
+            "lattice.edge.local/ns/edge/sa/haproxy-fw"
+        );
     }
 }

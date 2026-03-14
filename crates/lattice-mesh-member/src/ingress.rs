@@ -17,7 +17,7 @@ use lattice_common::policy::cilium::{
 };
 use lattice_common::policy::istio::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
-    OperationSpec, WorkloadSelector,
+    AuthorizationSource, OperationSpec, SourceSpec, TargetRef, WorkloadSelector,
 };
 
 use crate::policy::cilium::{
@@ -56,6 +56,9 @@ pub struct GeneratedIngress {
     pub gateway: Option<Gateway>,
     pub gateway_policy: Option<CiliumNetworkPolicy>,
     pub gateway_auth_policy: Option<AuthorizationPolicy>,
+    /// AuthorizationPolicy restricting Gateway access to specific SPIFFE identities
+    /// for cross-cluster routes with allowedServices configured.
+    pub cross_cluster_auth_policy: Option<AuthorizationPolicy>,
     pub http_routes: Vec<HttpRoute>,
     pub grpc_routes: Vec<GrpcRoute>,
     pub tcp_routes: Vec<TcpRoute>,
@@ -300,6 +303,44 @@ impl IngressCompiler {
                     tls: frontend_tls,
                 },
             ));
+
+            // Generate AuthorizationPolicy for cross-cluster SPIFFE identity enforcement.
+            // Collects all non-wildcard allowedServices from advertised routes and builds
+            // an ALLOW policy with their SPIFFE principals targeting the Gateway.
+            let principals: Vec<String> = ingress
+                .routes
+                .values()
+                .filter_map(|r| r.advertise.as_ref())
+                .filter(|a| !a.is_open())
+                .flat_map(|a| a.to_spiffe_principals())
+                .collect();
+
+            if !principals.is_empty() {
+                output.cross_cluster_auth_policy = Some(AuthorizationPolicy::new(
+                    ObjectMeta::new(
+                        format!("{}-cross-cluster", service_name),
+                        namespace,
+                    ),
+                    AuthorizationPolicySpec {
+                        target_refs: vec![TargetRef {
+                            group: "gateway.networking.k8s.io".to_string(),
+                            kind: "Gateway".to_string(),
+                            name: gateway_name.clone(),
+                        }],
+                        selector: None,
+                        action: "ALLOW".to_string(),
+                        rules: vec![AuthorizationRule {
+                            from: vec![AuthorizationSource {
+                                source: SourceSpec {
+                                    principals: principals.clone(),
+                                },
+                            }],
+                            to: vec![],
+                        }],
+                    },
+                ));
+            }
+
             output.gateway_graph_registration = Some(GraphRegistration {
                 name: mesh::ingress_gateway_sa_name(namespace),
                 spec: LatticeMeshMemberSpec {
