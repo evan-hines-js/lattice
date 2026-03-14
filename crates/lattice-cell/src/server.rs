@@ -78,6 +78,15 @@ pub enum ImportError {
 
 /// Convert SubtreeState clusters to ClusterInfo, filtering out removed clusters
 fn convert_subtree_to_cluster_infos(state: &SubtreeState) -> Vec<ClusterInfo> {
+    if state.clusters.len() > MAX_CLUSTERS_PER_SUBTREE {
+        warn!(
+            count = state.clusters.len(),
+            max = MAX_CLUSTERS_PER_SUBTREE,
+            "rejecting SubtreeState: too many cluster entries"
+        );
+        return Vec::new();
+    }
+
     state
         .clusters
         .iter()
@@ -153,27 +162,31 @@ async fn handle_service_lookup(
                 port: 0,
                 hostname: String::new(),
                 cluster: String::new(),
-                error: format!("lookup failed: {e}"),
+                error: "lookup temporarily unavailable".to_string(),
             }
         }
     }
 }
 
+/// Maximum routes accepted from a single child. Prevents unbounded CRD/memory growth.
+const MAX_ROUTES_PER_CLUSTER: usize = 1000;
+/// Maximum clusters accepted in a single SubtreeState. Prevents DashMap exhaustion.
+const MAX_CLUSTERS_PER_SUBTREE: usize = 500;
+
 /// Convert SubtreeState services to ClusterRoute CRD entries.
 ///
-/// Skips services with invalid ports (> 65535) or empty addresses rather
-/// than silently truncating or propagating invalid routes.
+/// Rejects the entire batch if it exceeds size limits (fail-closed).
 fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> {
-    // System namespaces that children must not advertise services in
-    const BLOCKED_NAMESPACES: &[&str] = &[
-        "kube-system",
-        "kube-public",
-        "kube-node-lease",
-        "istio-system",
-        "cilium-system",
-        "cert-manager",
-        "lattice-system",
-    ];
+    use lattice_common::system_namespaces;
+
+    if state.services.len() > MAX_ROUTES_PER_CLUSTER {
+        warn!(
+            count = state.services.len(),
+            max = MAX_ROUTES_PER_CLUSTER,
+            "rejecting SubtreeState: too many service routes"
+        );
+        return Vec::new();
+    }
 
     state
         .services
@@ -192,15 +205,47 @@ fn convert_subtree_to_cluster_routes(state: &SubtreeState) -> Vec<ClusterRoute> 
                 warn!(service = %s.name, "rejecting: empty hostname");
                 return false;
             }
-            // Block loopback/link-local addresses
+            // Block hostnames that look like URLs or internal K8s service names
+            if s.hostname.contains("://")
+                || s.hostname.ends_with(".svc.cluster.local")
+                || s.hostname.contains(':')
+            {
+                warn!(
+                    service = %s.name,
+                    hostname = %s.hostname,
+                    "rejecting: invalid hostname (URL, internal K8s service, or contains port)"
+                );
+                return false;
+            }
+            // Block dangerous addresses (loopback, link-local/metadata, unspecified, multicast)
             if let Ok(ip) = s.address.parse::<std::net::IpAddr>() {
-                if ip.is_loopback() || ip.is_unspecified() {
-                    warn!(service = %s.name, address = %s.address, "rejecting: loopback/unspecified address");
+                let dangerous = match ip {
+                    std::net::IpAddr::V4(v4) => {
+                        v4.is_loopback()
+                            || v4.is_unspecified()
+                            || v4.is_link_local()
+                            || v4.is_multicast()
+                            || v4.is_broadcast()
+                    }
+                    std::net::IpAddr::V6(v6) => {
+                        v6.is_loopback()
+                            || v6.is_unspecified()
+                            || v6.is_multicast()
+                            || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local
+                    }
+                };
+                if dangerous {
+                    warn!(service = %s.name, address = %s.address, "rejecting: dangerous address");
                     return false;
                 }
             }
-            // Block system namespace hijacking
-            if BLOCKED_NAMESPACES.contains(&s.namespace.as_str()) {
+            // Block system namespace hijacking — includes infra namespaces from
+            // the centralized registry plus lattice-system (operator/CA/credentials).
+            // lattice-system isn't in system_namespaces (it has MeshMember coverage)
+            // but children must never shadow services in it.
+            if system_namespaces::is_system_namespace(&s.namespace)
+                || s.namespace == lattice_common::LATTICE_SYSTEM_NAMESPACE
+            {
                 warn!(
                     service = %s.name,
                     namespace = %s.namespace,

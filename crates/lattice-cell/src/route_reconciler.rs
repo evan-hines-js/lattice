@@ -323,16 +323,9 @@ fn resolve_gateway_address(
             .get("spec")
             .and_then(|s| serde_json::from_value(s.clone()).ok());
 
-        let port = match spec.and_then(|s| s.listeners.first().map(|l| l.port)) {
-            Some(p) => p,
-            None => {
-                warn!(
-                    namespace,
-                    "Gateway has no listeners, skipping"
-                );
-                continue;
-            }
-        };
+        let port = spec
+            .and_then(|s| s.listeners.first().map(|l| l.port))
+            .unwrap_or(443);
 
         return (address, port);
     }
@@ -462,9 +455,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_gateway_defaults_port_to_80() {
+    fn resolve_gateway_defaults_port_to_443() {
         let mut gateways = HashMap::new();
-        let mut gw = make_gateway_object("media", "gw", "10.0.0.1", 80);
+        let mut gw = make_gateway_object("media", "gw", "10.0.0.1", 443);
         gw.data = serde_json::json!({
             "spec": { "listeners": [] },
             "status": { "addresses": [{ "value": "10.0.0.1" }] }
@@ -473,6 +466,6 @@ mod tests {
 
         let (addr, port) = resolve_gateway_address("media", &gateways);
         assert_eq!(addr, "10.0.0.1");
-        assert_eq!(port, 80);
+        assert_eq!(port, 443);
     }
 }

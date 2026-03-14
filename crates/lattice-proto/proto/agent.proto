@@ -582,7 +582,8 @@ message SubtreeService {
   // Labels for policy matching and filtering
   map<string, string> labels = 9;
   // Allowed callers (cluster/namespace/name format) from advertise config.
-  // Empty = open to all. Propagated up the hierarchy for bilateral agreement enforcement.
+  // Empty = fail-closed (nobody allowed). Use "*" for wildcard.
+  // Propagated up the hierarchy for bilateral agreement enforcement.
   repeated string allowed_services = 10;
 }
 
