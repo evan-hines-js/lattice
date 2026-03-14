@@ -199,9 +199,8 @@ pub async fn build_service_controllers(
         })
         .watches(cluster_routes_for_svc, watcher_config(), move |routes| {
             let graph = graph_for_route_watch.clone();
-            // Sync all remote services from all LatticeClusterRoutes CRDs
-            graph.sync_remote_services(&routes.spec.routes);
-            // Re-reconcile all services since any of them might have cross-cluster deps
+            let source_cluster = routes.metadata.name.as_deref().unwrap_or("unknown");
+            graph.sync_remote_services(source_cluster, &routes.spec.routes);
             all_service_refs(&graph)
         })
         .shutdown_on_signal()
@@ -560,10 +559,12 @@ async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGra
 
     // Warm remote services from LatticeClusterRoutes (cross-cluster dependencies)
     warmup_list::<LatticeClusterRoutes>(client, "LatticeClusterRoutes", |item| {
+        let source_cluster = item.metadata.name.as_deref().unwrap_or("unknown");
         for route in &item.spec.routes {
             graph.put_remote_service(
                 &route.service_namespace,
                 &route.service_name,
+                source_cluster,
                 &route.address,
                 route.port,
                 &route.hostname,

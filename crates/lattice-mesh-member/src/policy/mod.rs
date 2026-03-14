@@ -247,6 +247,7 @@ impl<'a> PolicyCompiler<'a> {
                 ref address,
                 port,
                 ref hostname,
+                ..
             } = dep.type_
             else {
                 continue;

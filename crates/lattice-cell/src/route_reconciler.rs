@@ -229,6 +229,15 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                 continue;
             }
 
+            let protocol = match route.kind {
+                lattice_common::crd::RouteKind::HTTPRoute => {
+                    if route.tls.is_some() { "HTTPS" } else { "HTTP" }
+                }
+                lattice_common::crd::RouteKind::GRPCRoute => "GRPC",
+                lattice_common::crd::RouteKind::TCPRoute => "TCP",
+                _ => "HTTP",
+            };
+
             for host in &route.hosts {
                 routes.push(ClusterRoute {
                     service_name: svc_name.to_string(),
@@ -236,7 +245,7 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                     hostname: host.clone(),
                     address: address.clone(),
                     port,
-                    protocol: "HTTP".to_string(),
+                    protocol: protocol.to_string(),
                 });
             }
         }

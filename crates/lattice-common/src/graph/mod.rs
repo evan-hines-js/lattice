@@ -32,6 +32,8 @@ pub enum ServiceType {
     MeshMember,
     /// Remote service discovered via LatticeClusterRoutes (cross-cluster)
     Remote {
+        /// Source cluster name (from the LatticeClusterRoutes CRD name)
+        source_cluster: String,
         /// Gateway address (LoadBalancer IP on the remote cluster)
         address: String,
         /// Gateway port
@@ -725,6 +727,7 @@ impl ServiceGraph {
         &self,
         namespace: &str,
         name: &str,
+        source_cluster: &str,
         address: &str,
         port: u16,
         hostname: &str,
@@ -740,6 +743,7 @@ impl ServiceGraph {
             namespace: namespace.to_string(),
             name: name.to_string(),
             type_: ServiceType::Remote {
+                source_cluster: source_cluster.to_string(),
                 address: address.to_string(),
                 port,
                 hostname: hostname.to_string(),
@@ -760,20 +764,28 @@ impl ServiceGraph {
         self.put_node(NodeUpdate::Service(node));
     }
 
-    /// Remove all remote services from the graph and re-populate from routes.
+    /// Sync remote services for a specific source cluster.
     ///
-    /// Called when `LatticeClusterRoutes` changes. Clears all `Remote` nodes and
-    /// inserts the new set, ensuring the graph reflects the current route table.
-    pub fn sync_remote_services(&self, routes: &[crate::crd::ClusterRoute]) {
-        // Remove existing remote nodes
-        let remote_keys: Vec<QualifiedName> = self
+    /// Removes all `Remote` nodes that were sourced from `source_cluster` and
+    /// inserts the new routes. This is per-cluster, so updates from cluster A
+    /// don't affect routes from cluster B (no flapping).
+    pub fn sync_remote_services(
+        &self,
+        source_cluster: &str,
+        routes: &[crate::crd::ClusterRoute],
+    ) {
+        // Remove existing remote nodes from this source cluster only
+        let stale_keys: Vec<QualifiedName> = self
             .vertices
             .iter()
-            .filter(|entry| entry.value().type_.is_remote())
+            .filter(|entry| matches!(
+                &entry.value().type_,
+                ServiceType::Remote { source_cluster: ref sc, .. } if sc == source_cluster
+            ))
             .map(|entry| entry.key().clone())
             .collect();
 
-        for (ns, name) in &remote_keys {
+        for (ns, name) in &stale_keys {
             self.vertices.remove(&(ns.clone(), name.clone()));
             self.edges_out.remove(&(ns.clone(), name.clone()));
             self.edges_in.remove(&(ns.clone(), name.clone()));
@@ -787,6 +799,7 @@ impl ServiceGraph {
             self.put_remote_service(
                 &route.service_namespace,
                 &route.service_name,
+                source_cluster,
                 &route.address,
                 route.port,
                 &route.hostname,
