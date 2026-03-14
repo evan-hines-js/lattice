@@ -418,6 +418,11 @@ impl RouteSpec {
             }
         }
 
+        // Validate advertise config if present
+        if let Some(ref adv) = self.advertise {
+            adv.validate().map_err(|e| format!("route '{}': {}", route_name, e))?;
+        }
+
         Ok(())
     }
 }

@@ -101,6 +101,9 @@ pub fn collect_ingress_refs(
     if let Some(ref ap) = ingress.gateway_auth_policy {
         track(CrdKind::AuthorizationPolicy, &ap.metadata.name);
     }
+    if let Some(ref ap) = ingress.cross_cluster_auth_policy {
+        track(CrdKind::AuthorizationPolicy, &ap.metadata.name);
+    }
     for route in &ingress.http_routes {
         track(CrdKind::HttpRoute, &route.metadata.name);
     }
@@ -774,6 +777,18 @@ async fn apply_ingress(
         &mut items,
         &ingress
             .gateway_auth_policy
+            .as_ref()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        registry,
+        CrdKind::AuthorizationPolicy,
+        |ap| &ap.metadata.name,
+    )
+    .await?;
+    serialize_crd_batch(
+        &mut items,
+        &ingress
+            .cross_cluster_auth_policy
             .as_ref()
             .into_iter()
             .collect::<Vec<_>>(),
