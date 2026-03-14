@@ -12,7 +12,7 @@ use kube::{Api, Client};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{LatticeCluster, LatticeClusterRoutes, LatticeService};
+use lattice_common::crd::{LatticeCluster, LatticeClusterRoutes};
 use lattice_proto::{
     agent_message::Payload, AgentMessage, SubtreeCluster, SubtreeService, SubtreeState,
 };
@@ -158,17 +158,17 @@ impl SubtreeSender {
         })
     }
 
-    /// Watch for LatticeCluster and LatticeService changes and send deltas
+    /// Watch for LatticeCluster and LatticeClusterRoutes changes and send deltas
     async fn watch_and_send_deltas(&self, message_tx: mpsc::Sender<AgentMessage>) {
         let cluster_api: Api<LatticeCluster> = Api::all(self.client.clone());
-        let service_api: Api<LatticeService> = Api::all(self.client.clone());
+        let routes_api: Api<LatticeClusterRoutes> = Api::all(self.client.clone());
 
-        info!(cluster = %self.cluster_name, "Starting subtree watcher (clusters + services)");
+        info!(cluster = %self.cluster_name, "Starting subtree watcher (clusters + routes)");
 
         let mut cluster_stream =
             watcher::watcher(cluster_api, watcher::Config::default()).boxed();
-        let mut service_stream =
-            watcher::watcher(service_api, watcher::Config::default()).boxed();
+        let mut routes_stream =
+            watcher::watcher(routes_api, watcher::Config::default()).boxed();
 
         loop {
             tokio::select! {
@@ -192,12 +192,11 @@ impl SubtreeSender {
                         }
                     }
                 }
-                event = service_stream.try_next() => {
+                event = routes_stream.try_next() => {
                     match event {
                         Ok(Some(event)) => {
-                            // On any LatticeService change, re-read routes from the CRD
-                            // (route reconciler updates it from LatticeService changes)
-                            if self.is_service_change(&event) {
+                            // LatticeClusterRoutes changed — re-read and send to parent
+                            if matches!(event, Event::Apply(_) | Event::InitDone) {
                                 let services = self.read_cluster_routes().await;
                                 let delta = SubtreeState {
                                     clusters: vec![],
@@ -215,11 +214,11 @@ impl SubtreeSender {
                             }
                         }
                         Ok(None) => {
-                            warn!("Service watcher stream ended");
+                            warn!("Routes watcher stream ended");
                             break;
                         }
                         Err(e) => {
-                            warn!(error = %e, "Service watcher error");
+                            warn!(error = %e, "Routes watcher error");
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }
                     }
@@ -289,11 +288,6 @@ impl SubtreeSender {
             }
             Event::Init | Event::InitApply(_) | Event::InitDone => None,
         }
-    }
-
-    /// Check if a LatticeService watcher event represents a meaningful change
-    fn is_service_change(&self, event: &Event<LatticeService>) -> bool {
-        matches!(event, Event::Apply(_) | Event::Delete(_) | Event::InitDone)
     }
 }
 
