@@ -223,7 +223,7 @@ pub struct AgentRegistry {
     /// TTL evicts leaked entries when the agent dies mid-session.
     pending_exec_data: moka::sync::Cache<String, ExecDataSender>,
     /// Proxy configuration for kubeconfig patching
-    proxy_config: parking_lot::RwLock<Option<KubeconfigProxyConfig>>,
+    proxy_config: std::sync::OnceLock<KubeconfigProxyConfig>,
     /// Broadcast channel for agent reconnection notifications
     /// Allows waiting requests to retry when an agent reconnects
     connection_tx: broadcast::Sender<ConnectionNotification>,
@@ -263,7 +263,7 @@ impl Default for AgentRegistry {
             pending_exec_data: moka::sync::Cache::builder()
                 .time_to_live(PENDING_RESPONSE_TTL)
                 .build(),
-            proxy_config: parking_lot::RwLock::new(None),
+            proxy_config: std::sync::OnceLock::new(),
             connection_tx,
         }
     }
@@ -275,14 +275,14 @@ impl AgentRegistry {
         Self::default()
     }
 
-    /// Set the proxy configuration for kubeconfig patching
+    /// Set the proxy configuration for kubeconfig patching (can only be set once)
     pub fn set_proxy_config(&self, config: KubeconfigProxyConfig) {
-        *self.proxy_config.write() = Some(config);
+        let _ = self.proxy_config.set(config);
     }
 
     /// Get the proxy configuration
     pub fn get_proxy_config(&self) -> Option<KubeconfigProxyConfig> {
-        self.proxy_config.read().clone()
+        self.proxy_config.get().cloned()
     }
 
     /// Register an agent connection (new or reconnection)

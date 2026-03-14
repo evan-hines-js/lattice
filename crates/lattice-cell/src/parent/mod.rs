@@ -19,6 +19,7 @@ use k8s_openapi::ByteString;
 use kube::api::{Api, PostParams};
 use kube::runtime::watcher::{self, Event};
 use kube::Client;
+use parking_lot::Mutex;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -142,14 +143,14 @@ pub struct ParentServers<G: ManifestGenerator + Send + Sync + 'static = DefaultM
     ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
     /// Kubernetes client for CA persistence
     kube_client: Client,
-    /// Bootstrap state for cluster registration
-    bootstrap_state: Arc<RwLock<Option<Arc<BootstrapState<G>>>>>,
+    /// Bootstrap state for cluster registration (set once during ensure_running, cleared on shutdown)
+    bootstrap_state: Mutex<Option<Arc<BootstrapState<G>>>>,
     /// Agent registry for connected agents
     agent_registry: SharedAgentRegistry,
     /// Subtree registry for tracking cluster hierarchy
     subtree_registry: SharedSubtreeRegistry,
-    /// Server handles
-    handles: RwLock<Option<ServerHandles>>,
+    /// Server handles (set once during ensure_running, taken on shutdown)
+    handles: Mutex<Option<ServerHandles>>,
 }
 
 struct ServerHandles {
@@ -565,10 +566,10 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             config,
             ca_bundle,
             kube_client: client.clone(),
-            bootstrap_state: Arc::new(RwLock::new(None)),
+            bootstrap_state: Mutex::new(None),
             agent_registry: Arc::new(AgentRegistry::new()),
             subtree_registry,
-            handles: RwLock::new(None),
+            handles: Mutex::new(None),
         })
     }
 
@@ -582,10 +583,10 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             config,
             ca_bundle: Arc::new(RwLock::new(CertificateAuthorityBundle::new(ca))),
             kube_client: client,
-            bootstrap_state: Arc::new(RwLock::new(None)),
+            bootstrap_state: Mutex::new(None),
             agent_registry: Arc::new(AgentRegistry::new()),
             subtree_registry,
-            handles: RwLock::new(None),
+            handles: Mutex::new(None),
         }
     }
 
@@ -616,7 +617,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
     /// Get the bootstrap state (if servers are running)
     pub async fn bootstrap_state(&self) -> Option<Arc<BootstrapState<G>>> {
-        self.bootstrap_state.read().await.clone()
+        self.bootstrap_state.lock().clone()
     }
 
     /// Get the operator image from config
@@ -723,7 +724,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         }));
 
         // Store bootstrap state
-        *self.bootstrap_state.write().await = Some(bootstrap_state.clone());
+        *self.bootstrap_state.lock() = Some(bootstrap_state.clone());
 
         // Generate server certificates with default SANs + extra SANs (e.g., cell host IP)
         let mut all_sans: Vec<&str> = self.config.server_sans.iter().map(|s| s.as_str()).collect();
@@ -865,7 +866,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         });
 
         // Store handles
-        *self.handles.write().await = Some(ServerHandles {
+        *self.handles.lock() = Some(ServerHandles {
             bootstrap_handle,
             grpc_handle,
             secret_sync_handle,
@@ -886,7 +887,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         info!("Shutting down cell servers...");
 
-        if let Some(handles) = self.handles.write().await.take() {
+        if let Some(handles) = self.handles.lock().take() {
             handles.bootstrap_handle.abort();
             handles.grpc_handle.abort();
             handles.secret_sync_handle.abort();
@@ -894,7 +895,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             handles.agent_cleanup_handle.abort();
         }
 
-        *self.bootstrap_state.write().await = None;
+        *self.bootstrap_state.lock() = None;
 
         info!("Cell servers shut down");
     }
