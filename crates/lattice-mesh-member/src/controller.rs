@@ -330,9 +330,19 @@ async fn check_cedar_wildcards(
     ctx: &MeshMemberContext,
 ) -> Option<String> {
     let allows_all = spec.allowed_callers.iter().any(|c| c.name == "*");
+    let has_wildcard_advertise = spec
+        .ingress
+        .as_ref()
+        .map(|i| {
+            i.routes
+                .values()
+                .any(|r| r.advertise.as_ref().map(|a| a.is_open()).unwrap_or(false))
+        })
+        .unwrap_or(false);
     let checks = [
         (allows_all, WildcardDirection::Inbound),
         (spec.depends_all, WildcardDirection::Outbound),
+        (has_wildcard_advertise, WildcardDirection::Advertise),
     ];
     let sa_name = spec.service_account.as_deref().unwrap_or(name);
     for (active, direction) in checks {
@@ -403,8 +413,11 @@ async fn do_reconcile(
         .transpose()
         .map_err(|e| ReconcileError::Validation(format!("ingress compilation: {e}")))?
         .map(|mut compiled| {
-            // Stamp owner refs on ingress auth policy for crash-safe GC
+            // Stamp owner refs on auth policies for crash-safe GC
             if let Some(ref mut ap) = compiled.gateway_auth_policy {
+                ap.metadata.owner_references = owner_refs.clone();
+            }
+            if let Some(ref mut ap) = compiled.cross_cluster_auth_policy {
                 ap.metadata.owner_references = owner_refs.clone();
             }
             compiled

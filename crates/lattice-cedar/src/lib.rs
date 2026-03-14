@@ -14,6 +14,7 @@
 //! Lattice::Action::"AccessVolume"                   (action)
 //! Lattice::Action::"AccessExternalEndpoint"          (action)
 //! Lattice::Action::"OverrideSecurity"               (action)
+//! Lattice::Action::"AllowWildcard"                  (action — inbound, outbound, advertise)
 //! Lattice::Cluster::"prod"                          (resource)
 //! Lattice::ExternalEndpoint::"api.stripe.com:443"   (resource — host:port)
 //! Lattice::SecretPath::"vault-prod:db/creds"        (resource — provider:path)

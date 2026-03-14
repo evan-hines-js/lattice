@@ -26,14 +26,17 @@ pub enum WildcardDirection {
     Inbound,
     /// Wildcard outbound: depends on all services that allow it (`depends_all`)
     Outbound,
+    /// Wildcard advertise: route is discoverable by all clusters (`advertise: ["*"]`)
+    Advertise,
 }
 
 impl WildcardDirection {
-    /// Cedar resource id for this direction (used in `Mesh::"inbound"` / `Mesh::"outbound"`)
+    /// Cedar resource id for this direction
     pub fn resource_id(self) -> &'static str {
         match self {
             Self::Inbound => "inbound",
             Self::Outbound => "outbound",
+            Self::Advertise => "advertise",
         }
     }
 }
@@ -43,6 +46,7 @@ impl fmt::Display for WildcardDirection {
         match self {
             Self::Inbound => write!(f, "allows_all (wildcard inbound)"),
             Self::Outbound => write!(f, "depends_all (wildcard outbound)"),
+            Self::Advertise => write!(f, "advertise (wildcard cross-cluster)"),
         }
     }
 }

@@ -256,6 +256,31 @@ pub async fn apply_mesh_wildcard_inbound_policy(
     .await
 }
 
+/// Apply a Cedar policy permitting wildcard advertise for a service.
+///
+/// Required for services that use `advertise: { allowedServices: ["*"] }`.
+/// Without this, Cedar default-deny blocks the wildcard cross-cluster advertising.
+pub async fn apply_advertise_wildcard_policy(
+    kubeconfig: &str,
+    namespace: &str,
+    service_name: &str,
+) -> Result<(), String> {
+    apply_cedar_policy_crd(
+        kubeconfig,
+        &format!("permit-advertise-wildcard-{}", service_name),
+        "route-discovery",
+        50,
+        &format!(
+            r#"permit(
+  principal == Lattice::Service::"{namespace}/{service_name}",
+  action == Lattice::Action::"AllowWildcard",
+  resource == Lattice::Mesh::"advertise"
+);"#
+        ),
+    )
+    .await
+}
+
 /// Apply a Cedar policy permitting AppArmor Unconfined for all services.
 ///
 /// Docker KIND clusters don't have AppArmor enabled, so all e2e fixtures

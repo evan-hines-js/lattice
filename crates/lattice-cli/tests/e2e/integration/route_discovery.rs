@@ -26,9 +26,9 @@ use lattice_common::crd::{
 };
 
 use super::super::helpers::{
-    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
-    run_kubectl, setup_regcreds_infrastructure, wait_for_condition, wait_for_service_phase,
-    DEFAULT_TIMEOUT,
+    apply_advertise_wildcard_policy, client_from_kubeconfig, create_with_retry, delete_namespace,
+    ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
+    wait_for_service_phase, DEFAULT_TIMEOUT,
 };
 
 const ROUTE_TEST_NS: &str = "route-discovery-test";
@@ -357,6 +357,9 @@ pub async fn run_route_discovery_tests(
     // Setup namespace on workload cluster
     ensure_fresh_namespace(workload_kubeconfig, ROUTE_TEST_NS).await?;
     setup_regcreds_infrastructure(workload_kubeconfig).await?;
+
+    // Cedar: permit wildcard advertise for route-target
+    apply_advertise_wildcard_policy(workload_kubeconfig, ROUTE_TEST_NS, "route-target").await?;
 
     // Deploy an advertised service on the workload cluster (open to all)
     let svc = build_advertised_service(
