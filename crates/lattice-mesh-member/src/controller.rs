@@ -936,6 +936,19 @@ async fn apply_waypoint(
         .await?;
     }
 
+    if let Some(ref runtime) = waypoint.runtime_policy {
+        apply_resource(
+            client,
+            registry,
+            namespace,
+            params,
+            runtime,
+            &runtime.metadata.name,
+            CrdKind::TracingPolicyNamespaced,
+        )
+        .await?;
+    }
+
     Ok(())
 }
 

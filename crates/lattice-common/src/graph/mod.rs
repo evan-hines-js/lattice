@@ -995,6 +995,26 @@ impl ServiceGraph {
         self.vertices.get(&key).map(|v| v.clone())
     }
 
+    /// Find the endpoint address of a Remote node by its hostname.
+    ///
+    /// Used to stamp ServiceEntry endpoints when the Remote node is
+    /// referenced via FQDN egress (not just via dependency edges).
+    pub fn remote_address_for_hostname(&self, hostname: &str) -> Option<String> {
+        for entry in self.vertices.iter() {
+            if let ServiceType::Remote {
+                ref address,
+                hostname: ref h,
+                ..
+            } = entry.value().type_
+            {
+                if h == hostname {
+                    return Some(address.clone());
+                }
+            }
+        }
+        None
+    }
+
     /// Get all services this service depends on
     pub fn get_dependencies(&self, namespace: &str, name: &str) -> Vec<String> {
         let key = (namespace.to_string(), name.to_string());
@@ -2407,5 +2427,31 @@ mod tests {
             !node.allows_all,
             "put_workload with empty callers must not preserve allows_all"
         );
+    }
+
+    #[test]
+    fn remote_address_for_hostname_found() {
+        let graph = ServiceGraph::new();
+        let route = crate::crd::ClusterRoute {
+            service_name: "webapp".to_string(),
+            service_namespace: "prod".to_string(),
+            hostname: "webapp.example.com".to_string(),
+            address: "10.0.1.50".to_string(),
+            port: 443,
+            protocol: "HTTPS".to_string(),
+            allowed_services: vec!["*".to_string()],
+        };
+        graph.sync_remote_services("backend-cluster", &[route]);
+
+        assert_eq!(
+            graph.remote_address_for_hostname("webapp.example.com"),
+            Some("10.0.1.50".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_address_for_hostname_not_found() {
+        let graph = ServiceGraph::new();
+        assert_eq!(graph.remote_address_for_hostname("nonexistent.com"), None);
     }
 }

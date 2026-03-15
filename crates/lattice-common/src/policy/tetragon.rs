@@ -288,6 +288,18 @@ impl PodSelector {
             match_labels: labels,
         }
     }
+
+    /// Create a pod selector targeting a specific Gateway API proxy by name.
+    pub fn for_gateway(gateway_name: &str) -> Self {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert(
+            "gateway.networking.k8s.io/gateway-name".to_string(),
+            gateway_name.to_string(),
+        );
+        Self {
+            match_labels: labels,
+        }
+    }
 }
 
 /// Action to take when a selector matches
@@ -396,6 +408,17 @@ mod tests {
         assert_eq!(
             ps.match_labels.get("app.kubernetes.io/name").unwrap(),
             "my-app"
+        );
+    }
+
+    #[test]
+    fn pod_selector_for_gateway() {
+        let ps = PodSelector::for_gateway("prod-waypoint");
+        assert_eq!(
+            ps.match_labels
+                .get("gateway.networking.k8s.io/gateway-name")
+                .unwrap(),
+            "prod-waypoint"
         );
     }
 }

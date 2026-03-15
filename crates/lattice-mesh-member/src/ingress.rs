@@ -19,6 +19,10 @@ use lattice_common::policy::istio::{
     AuthorizationOperation, AuthorizationPolicy, AuthorizationPolicySpec, AuthorizationRule,
     OperationSpec, WorkloadSelector,
 };
+use lattice_common::policy::tetragon::{
+    KprobeArg, KprobeSpec, MatchArg, PodSelector, Selector, TracingPolicyNamespaced,
+    TracingPolicySpec,
+};
 
 use crate::policy::cilium::{
     build_tcp_port_rules, dns_egress_rule, hbone_egress_rule, hbone_ingress_rule,
@@ -96,15 +100,20 @@ impl GeneratedIngress {
 pub struct GeneratedWaypoint {
     pub gateway: Option<Gateway>,
     pub allow_to_waypoint_policy: Option<AuthorizationPolicy>,
+    pub runtime_policy: Option<TracingPolicyNamespaced>,
 }
 
 impl GeneratedWaypoint {
     pub fn is_empty(&self) -> bool {
-        self.gateway.is_none() && self.allow_to_waypoint_policy.is_none()
+        self.gateway.is_none()
+            && self.allow_to_waypoint_policy.is_none()
+            && self.runtime_policy.is_none()
     }
 
     pub fn total_count(&self) -> usize {
-        usize::from(self.gateway.is_some()) + usize::from(self.allow_to_waypoint_policy.is_some())
+        usize::from(self.gateway.is_some())
+            + usize::from(self.allow_to_waypoint_policy.is_some())
+            + usize::from(self.runtime_policy.is_some())
     }
 }
 
@@ -115,12 +124,18 @@ impl GeneratedWaypoint {
 /// Compiler for generating Istio-native waypoint Gateway and associated policies
 pub struct WaypointCompiler;
 
+/// Binaries allowed to execute in waypoint/ingress gateway pods.
+/// Istio's distroless image contains only these entrypoints.
+const ALLOWED_PROXY_BINARIES: &[&str] = &["/usr/local/bin/envoy", "/usr/local/bin/pilot-agent"];
+
 impl WaypointCompiler {
     /// Compile waypoint Gateway and policies for a namespace
     pub fn compile(namespace: &str) -> GeneratedWaypoint {
+        let gateway_name = mesh::waypoint_name(namespace);
         GeneratedWaypoint {
             gateway: Some(Self::compile_gateway(namespace)),
             allow_to_waypoint_policy: Some(Self::compile_allow_to_waypoint_policy(namespace)),
+            runtime_policy: Some(Self::compile_runtime_policy(namespace, &gateway_name)),
         }
     }
 
@@ -168,6 +183,43 @@ impl WaypointCompiler {
                         },
                     }],
                 }],
+            },
+        )
+    }
+
+    /// Tetragon runtime policy restricting waypoint pods to only Envoy/pilot-agent.
+    /// Kills any other binary execution via security_bprm_check kprobe.
+    fn compile_runtime_policy(
+        namespace: &str,
+        gateway_name: &str,
+    ) -> TracingPolicyNamespaced {
+        TracingPolicyNamespaced::new(
+            format!("waypoint-runtime-{}", derived_name("", &[namespace])),
+            namespace,
+            TracingPolicySpec {
+                pod_selector: Some(PodSelector::for_gateway(gateway_name)),
+                kprobes: vec![KprobeSpec::with_args(
+                    "security_bprm_check",
+                    vec![KprobeArg {
+                        index: 0,
+                        type_: "file".to_string(),
+                        label: Some("binary".to_string()),
+                    }],
+                    vec![Selector {
+                        match_args: vec![MatchArg {
+                            index: 0,
+                            operator: "NotEqual".to_string(),
+                            values: ALLOWED_PROXY_BINARIES
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect(),
+                        }],
+                        match_actions: vec![lattice_common::policy::tetragon::MatchAction {
+                            action: lattice_common::policy::tetragon::TracingAction::Sigkill,
+                        }],
+                        ..Default::default()
+                    }],
+                )],
             },
         )
     }
@@ -1224,11 +1276,50 @@ mod tests {
     }
 
     #[test]
-    fn waypoint_total_count_includes_both_resources() {
+    fn waypoint_total_count_includes_all_resources() {
         let output = WaypointCompiler::compile("mesh-test");
 
-        assert_eq!(output.total_count(), 2);
+        assert_eq!(output.total_count(), 3);
+        assert!(output.gateway.is_some());
+        assert!(output.allow_to_waypoint_policy.is_some());
+        assert!(output.runtime_policy.is_some());
         assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn waypoint_runtime_policy_targets_gateway_pods() {
+        let output = WaypointCompiler::compile("prod");
+        let policy = output.runtime_policy.unwrap();
+
+        assert_eq!(policy.metadata.namespace, "prod");
+        let ps = policy.spec.pod_selector.unwrap();
+        assert_eq!(
+            ps.match_labels
+                .get("gateway.networking.k8s.io/gateway-name")
+                .unwrap(),
+            "prod-waypoint"
+        );
+    }
+
+    #[test]
+    fn waypoint_runtime_policy_blocks_non_envoy_binaries() {
+        let output = WaypointCompiler::compile("test-ns");
+        let policy = output.runtime_policy.unwrap();
+
+        assert_eq!(policy.spec.kprobes.len(), 1);
+        let kprobe = &policy.spec.kprobes[0];
+        assert_eq!(kprobe.call, "security_bprm_check");
+
+        let selector = &kprobe.selectors[0];
+        let arg = &selector.match_args[0];
+        assert_eq!(arg.operator, "NotEqual");
+        assert!(arg.values.contains(&"/usr/local/bin/envoy".to_string()));
+        assert!(arg.values.contains(&"/usr/local/bin/pilot-agent".to_string()));
+
+        assert_eq!(
+            selector.match_actions[0].action,
+            lattice_common::policy::tetragon::TracingAction::Sigkill
+        );
     }
 
     // =========================================================================

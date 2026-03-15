@@ -33,6 +33,7 @@ use lattice_common::crd::{
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_cost::CostProvider;
 use lattice_mesh_member::controller as mesh_member_ctrl;
+use lattice_mesh_member::route_lmm;
 use lattice_secret_provider::controller as secrets_provider_ctrl;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{reconcile as service_reconcile, ServiceContext};
@@ -289,12 +290,30 @@ pub async fn build_service_controllers(
         )
         .for_each(log_reconcile_result("MeshMember"));
 
+    // ── Route LMM controller ──
+    // Auto-creates LatticeMeshMember resources from LatticeClusterRoutes so
+    // that cross-cluster ServiceEntries and waypoints are deployed even in
+    // namespaces with no user-defined LatticeService or LMM (e.g., DMZ clusters).
+    let route_lmm_ctx = Arc::new(route_lmm::RouteLmmContext {
+        client: client.clone(),
+    });
+    let route_lmm_ctrl = simple_controller(
+        Api::<LatticeClusterRoutes>::all(client.clone()),
+        route_lmm::reconcile,
+        route_lmm_ctx,
+        "RouteLMM",
+    );
+
     tracing::info!("- LatticeService controller");
     tracing::info!("- LatticeMeshMember controller");
+    tracing::info!("- RouteLMM controller");
 
     let graph = service_ctx.graph.clone();
 
-    (vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl)], graph)
+    (
+        vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl), route_lmm_ctrl],
+        graph,
+    )
 }
 
 /// Build job controller futures (LatticeJob)

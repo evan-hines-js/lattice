@@ -184,20 +184,17 @@ impl<'a> PolicyCompiler<'a> {
         self.compile_egress(&node_with_remote_egress, namespace, &mut output);
 
         // For cross-cluster ServiceEntries, add the endpoint IP so ztunnel can
-        // route without external DNS. The FQDN egress path uses resolution: DNS
-        // which needs either real DNS or an endpoint to resolve the hostname.
+        // route without external DNS. Looks up Remote nodes in the graph by
+        // hostname, which works for both dependency-based edges and auto-created
+        // route LMMs with FQDN egress rules.
         for se in &mut output.service_entries {
+            if !se.spec.endpoints.is_empty() {
+                continue;
+            }
             for host in &se.spec.hosts {
-                for edge in &outbound_edges {
-                    if let Some(dep) = self.graph.get_service(&edge.callee_namespace, &edge.callee_name) {
-                        if let lattice_common::graph::ServiceType::Remote { ref address, ref hostname, .. } = dep.type_ {
-                            if host == hostname && se.spec.endpoints.is_empty() {
-                                se.spec.endpoints.push(ServiceEntryEndpoint {
-                                    address: address.clone(),
-                                });
-                            }
-                        }
-                    }
+                if let Some(address) = self.graph.remote_address_for_hostname(host) {
+                    se.spec.endpoints.push(ServiceEntryEndpoint { address });
+                    break;
                 }
             }
         }
