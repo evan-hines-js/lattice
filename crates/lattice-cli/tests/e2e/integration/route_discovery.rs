@@ -259,29 +259,26 @@ pub async fn verify_cluster_routes_exist(kubeconfig: &str) -> Result<(), String>
 /// Wait for specific hostnames to appear in a cluster's route table
 pub async fn verify_child_routes(
     kubeconfig: &str,
-    cluster_name: &str,
+    _cluster_name: &str,
     expected_hostnames: &[&str],
 ) -> Result<(), String> {
-    info!(
-        "[RouteDiscovery] Waiting for routes from '{}'...",
-        cluster_name
-    );
+    info!("[RouteDiscovery] Waiting for routes across all LatticeClusterRoutes...");
 
     wait_for_condition(
-        &format!("routes for {cluster_name}"),
+        "routes across all LatticeClusterRoutes",
         DEFAULT_TIMEOUT,
         Duration::from_secs(10),
         || {
             let kc = kubeconfig.to_string();
-            let cluster = cluster_name.to_string();
             let hostnames: Vec<String> = expected_hostnames.iter().map(|h| h.to_string()).collect();
             async move {
+                // List all LatticeClusterRoutes — routes are now per-cluster CRDs,
+                // not merged into a single self-named CRD.
                 let output = match run_kubectl(&[
                     "--kubeconfig",
                     &kc,
                     "get",
                     "latticeclusterroutes",
-                    &cluster,
                     "-o",
                     "json",
                 ])
@@ -296,13 +293,20 @@ pub async fn verify_child_routes(
                     Err(_) => return Ok(false),
                 };
 
-                let routes = match parsed["spec"]["routes"].as_array() {
-                    Some(r) => r,
+                let items = match parsed["items"].as_array() {
+                    Some(items) => items,
                     None => return Ok(false),
                 };
 
+                // Collect all routes from all CRDs
+                let all_routes: Vec<&serde_json::Value> = items
+                    .iter()
+                    .filter_map(|item| item["spec"]["routes"].as_array())
+                    .flatten()
+                    .collect();
+
                 Ok(hostnames.iter().all(|h| {
-                    routes
+                    all_routes
                         .iter()
                         .any(|r| r["hostname"].as_str() == Some(h.as_str()))
                 }))
@@ -311,10 +315,7 @@ pub async fn verify_child_routes(
     )
     .await?;
 
-    info!(
-        "[RouteDiscovery] All expected routes found for '{}'",
-        cluster_name
-    );
+    info!("[RouteDiscovery] All expected routes found");
     Ok(())
 }
 
@@ -536,9 +537,7 @@ pub async fn run_route_discovery_tests(
     .await?;
     info!("[RouteDiscovery] Advertised service deployed on workload cluster");
 
-    // Verify routes propagate to parent's LatticeClusterRoutes CRD.
-    // The parent's CRD is named after itself (e.g., "e2e-mgmt") and contains
-    // the union of its own routes + all children's routes.
+    // Verify routes propagate to parent cluster as per-child LatticeClusterRoutes CRDs.
     let mgmt_cluster_name = super::super::helpers::MGMT_CLUSTER_NAME;
     verify_child_routes(
         mgmt_kubeconfig,

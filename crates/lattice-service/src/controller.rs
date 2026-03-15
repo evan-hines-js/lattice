@@ -909,9 +909,17 @@ async fn compile_and_apply(
     // Don't mark Ready until the MeshMember controller has fully reconciled
     if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
         debug!("mesh member not yet ready, staying in Compiling");
-        ServiceStatusUpdate::compiling()
-            .apply(ctx.kube.as_ref(), service)
-            .await?;
+        // Only write status if not already Compiling — avoids watch-event loop
+        let already_compiling = service
+            .status
+            .as_ref()
+            .map(|s| s.phase == ServicePhase::Compiling)
+            .unwrap_or(false);
+        if !already_compiling {
+            ServiceStatusUpdate::compiling()
+                .apply(ctx.kube.as_ref(), service)
+                .await?;
+        }
         return Ok(Action::requeue(REQUEUE_PENDING));
     }
 
