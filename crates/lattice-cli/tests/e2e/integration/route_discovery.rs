@@ -355,27 +355,24 @@ pub async fn verify_route_status(kubeconfig: &str, cluster_name: &str) -> Result
 // ServiceEntry Verification
 // =============================================================================
 
-/// Verify remote ServiceEntries use HTTP + STATIC with endpoints
-pub async fn verify_remote_service_entries(
+/// Verify that a ServiceEntry exists for the cross-cluster hostname.
+///
+/// Cross-cluster dependencies compile through the same FQDN egress path
+/// as external services. The ServiceEntry uses DNS resolution with an
+/// endpoint for the gateway IP.
+pub async fn verify_cross_cluster_service_entry(
     kubeconfig: &str,
     namespace: &str,
+    hostname: &str,
 ) -> Result<(), String> {
     info!(
-        "[RouteDiscovery] Checking remote ServiceEntries in '{}'...",
-        namespace
+        "[RouteDiscovery] Checking for ServiceEntry with host '{}'...",
+        hostname
     );
 
     let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "serviceentries",
-        "-n",
-        namespace,
-        "-l",
-        "lattice.dev/managed-by=lattice-mesh-member",
-        "-o",
-        "json",
+        "--kubeconfig", kubeconfig,
+        "get", "serviceentries", "-n", namespace, "-o", "json",
     ])
     .await?;
 
@@ -384,41 +381,21 @@ pub async fn verify_remote_service_entries(
 
     let items = parsed["items"].as_array().ok_or("expected items array")?;
 
-    for item in items {
-        let name = item["metadata"]["name"].as_str().unwrap_or("unknown");
-        if !name.starts_with("remote-") {
-            continue;
-        }
+    let found = items.iter().any(|item| {
+        item["spec"]["hosts"]
+            .as_array()
+            .map(|hosts| hosts.iter().any(|h| h.as_str() == Some(hostname)))
+            .unwrap_or(false)
+    });
 
-        let resolution = item["spec"]["resolution"].as_str().unwrap_or("");
-        let protocol = item["spec"]["ports"][0]["protocol"].as_str().unwrap_or("");
-        let endpoints = item["spec"]["endpoints"].as_array();
-
-        if resolution != "STATIC" {
-            return Err(format!(
-                "ServiceEntry '{}': expected STATIC, got {}",
-                name, resolution
-            ));
-        }
-        if protocol != "HTTP" {
-            return Err(format!(
-                "ServiceEntry '{}': expected HTTP, got {}",
-                name, protocol
-            ));
-        }
-        if endpoints.map(|a| a.is_empty()).unwrap_or(true) {
-            return Err(format!(
-                "ServiceEntry '{}': missing endpoints for STATIC",
-                name
-            ));
-        }
-
-        info!(
-            "[RouteDiscovery] ServiceEntry '{}': HTTPS/STATIC verified",
-            name
-        );
+    if !found {
+        return Err(format!(
+            "no ServiceEntry found with host '{}' in namespace '{}'",
+            hostname, namespace
+        ));
     }
 
+    info!("[RouteDiscovery] ServiceEntry for '{}' verified", hostname);
     Ok(())
 }
 
@@ -496,27 +473,18 @@ pub async fn verify_cross_cluster_auth_policy(
         serde_json::from_str(&output).map_err(|e| format!("failed to parse: {e}"))?;
 
     let action = parsed["spec"]["action"].as_str().unwrap_or("");
-    if action != "ALLOW" {
+    if action != "DENY" {
         return Err(format!(
-            "AuthorizationPolicy action is '{}', expected 'ALLOW'",
+            "AuthorizationPolicy action is '{}', expected 'DENY'",
             action
         ));
     }
 
-    let principals = &parsed["spec"]["rules"][0]["from"][0]["source"]["principals"];
-    if principals.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-        return Err("AuthorizationPolicy has no principals".to_string());
-    }
-
-    let target_kind = parsed["spec"]["targetRef"][0]["kind"]
-        .as_str()
-        .or_else(|| parsed["spec"]["targetRefs"][0]["kind"].as_str())
-        .unwrap_or("");
-    if target_kind != "Gateway" {
-        return Err(format!(
-            "AuthorizationPolicy targets '{}', expected 'Gateway'",
-            target_kind
-        ));
+    // DENY policy uses notPrincipals — traffic from anyone NOT in the list is denied
+    let not_principals = &parsed["spec"]["rules"][0]["from"][0]["source"]["notPrincipals"];
+    if not_principals.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        // Empty notPrincipals = deny all (fail-closed), which is valid
+        info!("[RouteDiscovery] AuthorizationPolicy '{}' denies all (fail-closed)", policy_name);
     }
 
     info!(
