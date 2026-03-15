@@ -518,10 +518,7 @@ impl CertificateAuthority {
         params.not_after = not_after;
 
         let intermediate_key = KeyPair::generate().map_err(|e| {
-            PkiError::KeyGenerationFailed(format!(
-                "failed to generate intermediate CA key: {}",
-                e
-            ))
+            PkiError::KeyGenerationFailed(format!("failed to generate intermediate CA key: {}", e))
         })?;
         let intermediate_key_pem = Zeroizing::new(intermediate_key.serialize_pem());
 

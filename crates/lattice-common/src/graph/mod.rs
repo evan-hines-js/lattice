@@ -1059,31 +1059,31 @@ impl ServiceGraph {
         // depends_all nodes: any local service with depends_all that this service allows.
         // Skip if the callee (this service) is remote — depends_all is local-only.
         if !service.type_.is_remote() {
-        for entry in self.depends_all_nodes.iter() {
-            let (da_ns, da_name) = entry.key();
-            // Skip self
-            if da_ns == namespace && da_name == name {
-                continue;
+            for entry in self.depends_all_nodes.iter() {
+                let (da_ns, da_name) = entry.key();
+                // Skip self
+                if da_ns == namespace && da_name == name {
+                    continue;
+                }
+                let caller_key = (da_ns.clone(), da_name.clone());
+                if seen.contains(&caller_key) {
+                    continue;
+                }
+                if !service.allows(da_ns, da_name) {
+                    continue;
+                }
+                match self.get_service(da_ns, da_name) {
+                    Some(c) if !c.type_.is_unknown() => {}
+                    _ => continue,
+                }
+                seen.insert(caller_key);
+                edges.push(ActiveEdge {
+                    caller_namespace: da_ns.clone(),
+                    caller_name: da_name.clone(),
+                    callee_namespace: namespace.to_string(),
+                    callee_name: name.to_string(),
+                });
             }
-            let caller_key = (da_ns.clone(), da_name.clone());
-            if seen.contains(&caller_key) {
-                continue;
-            }
-            if !service.allows(da_ns, da_name) {
-                continue;
-            }
-            match self.get_service(da_ns, da_name) {
-                Some(c) if !c.type_.is_unknown() => {}
-                _ => continue,
-            }
-            seen.insert(caller_key);
-            edges.push(ActiveEdge {
-                caller_namespace: da_ns.clone(),
-                caller_name: da_name.clone(),
-                callee_namespace: namespace.to_string(),
-                callee_name: name.to_string(),
-            });
-        }
         }
 
         edges
@@ -2454,5 +2454,4 @@ mod tests {
             "put_workload with empty callers must not preserve allows_all"
         );
     }
-
 }

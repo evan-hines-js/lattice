@@ -54,7 +54,7 @@ impl WebhookCredentials {
 /// Shared state for webhook handlers
 struct WebhookState {
     client: Client,
-    expected_auth: String,
+    expected_auth: zeroize::Zeroizing<String>,
 }
 
 /// Start the webhook HTTP server on `LOCAL_SECRETS_PORT`
@@ -65,7 +65,7 @@ pub async fn start_webhook_server(
     credentials: WebhookCredentials,
 ) -> Result<(), std::io::Error> {
     let state = Arc::new(WebhookState {
-        expected_auth: credentials.basic_auth_header(),
+        expected_auth: zeroize::Zeroizing::new(credentials.basic_auth_header()),
         client,
     });
     let app = Router::new()
@@ -119,8 +119,15 @@ async fn fetch_secret_data(
 
     if let Some(data) = secret.data {
         for (key, value) in data {
-            let decoded =
-                String::from_utf8(value.0.clone()).unwrap_or_else(|_| hex_encode(&value.0));
+            let decoded = String::from_utf8(value.0.clone()).map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "secret '{}' key '{}' contains binary data that is not valid UTF-8",
+                        name, key
+                    ),
+                )
+            })?;
             result.insert(key, decoded);
         }
     }
@@ -194,11 +201,6 @@ fn is_labeled_source(secret: &k8s_openapi::api::core::v1::Secret) -> bool {
         .is_some_and(|v| v == "true")
 }
 
-/// Fallback hex encoding for binary data that isn't valid UTF-8.
-fn hex_encode(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,11 +209,6 @@ mod tests {
     #[test]
     fn secret_source_label_constant() {
         assert_eq!(SECRET_SOURCE_LABEL, "lattice.dev/secret-source");
-    }
-
-    #[test]
-    fn hex_encode_fallback_produces_hex() {
-        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
     }
 
     #[test]

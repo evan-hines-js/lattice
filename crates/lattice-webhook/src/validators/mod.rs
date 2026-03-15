@@ -10,6 +10,7 @@ mod service;
 use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
 use lattice_common::system_namespaces;
+use serde::de::DeserializeOwned;
 
 /// Reject workload CRDs deployed in system namespaces.
 ///
@@ -28,6 +29,34 @@ pub(crate) fn reject_system_namespace(
         )))
     } else {
         None
+    }
+}
+
+/// Parse a DynamicObject from an admission request into a concrete CRD type.
+///
+/// Handles the serialize-then-deserialize roundtrip that every validator needs,
+/// with proper error handling (no `unwrap_or_default`). Returns the typed CRD
+/// and the response handle for chaining allow/deny decisions.
+#[allow(clippy::result_large_err)]
+pub(crate) fn parse_admission_object<T: DeserializeOwned>(
+    request: &AdmissionRequest<DynamicObject>,
+    type_name: &str,
+) -> Result<(AdmissionResponse, T), AdmissionResponse> {
+    let response = AdmissionResponse::from(request);
+
+    let obj = match &request.object {
+        Some(obj) => obj,
+        None => return Err(response.deny("no object in admission request")),
+    };
+
+    let raw = match serde_json::to_value(obj) {
+        Ok(v) => v,
+        Err(e) => return Err(response.deny(format!("failed to serialize admission object: {e}"))),
+    };
+
+    match serde_json::from_value(raw) {
+        Ok(crd) => Ok((response, crd)),
+        Err(e) => Err(response.deny(format!("failed to deserialize {type_name}: {e}"))),
     }
 }
 

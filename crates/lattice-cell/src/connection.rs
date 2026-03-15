@@ -644,22 +644,30 @@ impl AgentRegistry {
     /// Returns true if we successfully started (wasn't already in progress).
     /// Stale guards older than TEARDOWN_GUARD_TTL are cleared automatically
     /// to recover from agent crashes during teardown.
+    ///
+    /// Uses DashMap's entry API for atomic check-and-insert to prevent
+    /// concurrent callers from both returning true.
     pub fn start_teardown(&self, cluster_name: &str) -> bool {
-        if let Some(started_at) = self.teardown_in_progress.get(cluster_name) {
-            if started_at.elapsed() < TEARDOWN_GUARD_TTL {
-                return false;
+        use dashmap::mapref::entry::Entry;
+        match self.teardown_in_progress.entry(cluster_name.to_string()) {
+            Entry::Occupied(mut entry) => {
+                if entry.get().elapsed() < TEARDOWN_GUARD_TTL {
+                    false
+                } else {
+                    warn!(
+                        cluster = %cluster_name,
+                        age_secs = entry.get().elapsed().as_secs(),
+                        "clearing stale teardown guard"
+                    );
+                    entry.insert(Instant::now());
+                    true
+                }
             }
-            warn!(
-                cluster = %cluster_name,
-                age_secs = started_at.elapsed().as_secs(),
-                "clearing stale teardown guard"
-            );
-            drop(started_at);
-            self.teardown_in_progress.remove(cluster_name);
+            Entry::Vacant(entry) => {
+                entry.insert(Instant::now());
+                true
+            }
         }
-        self.teardown_in_progress
-            .insert(cluster_name.to_string(), Instant::now());
-        true
     }
 
     /// Clear teardown in progress for a cluster
@@ -907,7 +915,10 @@ mod tests {
         assert!(!conn.is_ready_for_pivot());
 
         conn.state = AgentState::Failed;
-        assert!(conn.is_ready_for_pivot());
+        assert!(
+            !conn.is_ready_for_pivot(),
+            "failed clusters must not be eligible for pivot"
+        );
     }
 
     #[tokio::test]
@@ -1148,10 +1159,13 @@ mod tests {
         conn.state = AgentState::Degraded;
         assert!(conn.is_ready_for_pivot());
 
-        conn.state = AgentState::Failed;
-        assert!(conn.is_ready_for_pivot());
-
         // Invalid states for pivot
+        conn.state = AgentState::Failed;
+        assert!(
+            !conn.is_ready_for_pivot(),
+            "failed clusters must not be eligible for pivot"
+        );
+
         conn.state = AgentState::Pivoting;
         assert!(!conn.is_ready_for_pivot());
 

@@ -259,7 +259,9 @@ where
     T: Resource<DynamicType = ()> + DeserializeOwned + Clone + std::fmt::Debug + serde::Serialize,
 {
     for bytes in resources_bytes {
-        let json_str = String::from_utf8_lossy(bytes);
+        let json_str = String::from_utf8(bytes.clone()).map_err(|e| {
+            PivotError::Internal(format!("{} contains invalid UTF-8: {}", resource_type, e))
+        })?;
         let value = lattice_common::yaml::parse_yaml(&json_str).map_err(|e| {
             PivotError::Internal(format!("failed to parse {} JSON: {}", resource_type, e))
         })?;

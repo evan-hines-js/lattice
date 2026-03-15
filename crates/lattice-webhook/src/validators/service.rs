@@ -4,7 +4,7 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
 use lattice_common::crd::LatticeService;
 
-use super::{reject_system_namespace, Validator};
+use super::{parse_admission_object, reject_system_namespace, Validator};
 
 /// Validates LatticeService CREATE and UPDATE requests
 pub struct ServiceValidator;
@@ -19,18 +19,11 @@ impl Validator for ServiceValidator {
             return denied;
         }
 
-        let response = AdmissionResponse::from(request);
-
-        let obj = match &request.object {
-            Some(obj) => obj,
-            None => return response.deny("no object in admission request"),
-        };
-
-        let raw = serde_json::to_value(obj).unwrap_or_default();
-        let service: LatticeService = match serde_json::from_value(raw) {
-            Ok(s) => s,
-            Err(e) => return response.deny(format!("failed to deserialize LatticeService: {e}")),
-        };
+        let (response, service) =
+            match parse_admission_object::<LatticeService>(request, "LatticeService") {
+                Ok(v) => v,
+                Err(denied) => return denied,
+            };
 
         if let Err(e) = service.spec.validate() {
             return response.deny(format!("{e}"));

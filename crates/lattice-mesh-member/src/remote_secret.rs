@@ -54,9 +54,9 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
-    let token = request_proxy_token(&ctx.client).await.map_err(|e| {
-        Error::internal(format!("failed to request proxy token: {e}"))
-    })?;
+    let token = request_proxy_token(&ctx.client)
+        .await
+        .map_err(|e| Error::internal(format!("failed to request proxy token: {e}")))?;
 
     let secret_name = format!("istio-remote-secret-{}", source_cluster);
     let kubeconfig = build_remote_kubeconfig(
@@ -104,7 +104,9 @@ pub async fn reconcile(
     );
 
     // Requeue at half the token lifetime to refresh before expiry
-    Ok(Action::requeue(Duration::from_secs(TOKEN_EXPIRATION_SECS as u64 / 2)))
+    Ok(Action::requeue(Duration::from_secs(
+        TOKEN_EXPIRATION_SECS as u64 / 2,
+    )))
 }
 
 async fn request_proxy_token(client: &Client) -> Result<String, kube::Error> {
@@ -172,7 +174,9 @@ async fn cleanup_remote_secret(client: &Client, source_cluster: &str) {
     match api.delete(&secret_name, &Default::default()).await {
         Ok(_) => info!(secret = %secret_name, "deleted remote secret"),
         Err(kube::Error::Api(e)) if e.code == 404 => {}
-        Err(e) => tracing::warn!(secret = %secret_name, error = %e, "failed to delete remote secret"),
+        Err(e) => {
+            tracing::warn!(secret = %secret_name, error = %e, "failed to delete remote secret")
+        }
     }
 }
 

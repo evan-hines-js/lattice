@@ -386,12 +386,16 @@ impl OidcValidator {
     }
 
     /// Extract groups from claims
+    ///
+    /// When a custom `groups_claim` is configured, only that claim is used.
+    /// No fallback to the standard `groups` claim — falling back could grant
+    /// unexpected group memberships from a claim the admin didn't intend.
     fn extract_groups(&self, claims: &JwtClaims) -> Vec<String> {
         if self.config.groups_claim == "groups" {
             return claims.groups.clone().into_vec();
         }
 
-        // Try to get from extra claims
+        // Custom claim configured — use only that claim, no fallback
         if let Some(value) = claims.extra.get(&self.config.groups_claim) {
             if let Some(arr) = value.as_array() {
                 return arr
@@ -405,8 +409,7 @@ impl OidcValidator {
             }
         }
 
-        // Fall back to standard groups claim
-        claims.groups.clone().into_vec()
+        vec![]
     }
 
     /// Get decoding key from JWKS cache, refreshing if needed.
@@ -685,6 +688,7 @@ async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<Val
         .ok_or_else(|| Error::Config(format!("Failed to parse host from issuer URL: {}", url)))?;
 
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        reject_private_ip(ip)?;
         let port = extract_port(url).unwrap_or(443);
         Ok(ValidatedIssuer {
             host: host.clone(),
@@ -709,11 +713,47 @@ async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<Val
             )));
         }
 
+        for addr in &resolved {
+            reject_private_ip(addr.ip())?;
+        }
+
         Ok(ValidatedIssuer {
             host,
             resolved_ips: resolved,
         })
     }
+}
+
+/// Reject IP addresses in private/reserved ranges to prevent SSRF.
+///
+/// Blocks RFC 1918 (10/8, 172.16/12, 192.168/16), loopback (127/8),
+/// link-local (169.254/16), cloud metadata (169.254.169.254),
+/// and IPv6 equivalents (::1, fc00::/7, fe80::/10).
+fn reject_private_ip(ip: std::net::IpAddr) -> Result<()> {
+    let is_private = match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()                             // 127.0.0.0/8
+            || v4.is_private()                           // 10/8, 172.16/12, 192.168/16
+            || v4.is_link_local()                        // 169.254.0.0/16 (includes metadata)
+            || v4.is_broadcast()                         // 255.255.255.255
+            || v4.is_unspecified()                       // 0.0.0.0
+            || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64 // 100.64.0.0/10 (CGNAT)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()                             // ::1
+            || v6.is_unspecified()                       // ::
+            || (v6.segments()[0] & 0xfe00) == 0xfc00     // fc00::/7 (ULA)
+            || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 (link-local)
+        }
+    };
+
+    if is_private {
+        return Err(Error::Config(format!(
+            "OIDC issuer URL resolves to private/reserved IP address: {}",
+            ip
+        )));
+    }
+    Ok(())
 }
 
 /// Extract the port from a URL, if present.
@@ -834,7 +874,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_issuer_url_accepts_https_ip_literals() {
-        // IP literals skip DNS resolution — these test the scheme + IP validation
+        // Public IP literals — should pass both scheme and private IP validation
         assert!(validate_issuer_url("https://8.8.8.8", false).await.is_ok());
         assert!(validate_issuer_url("https://1.1.1.1", false).await.is_ok());
     }
@@ -848,7 +888,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_issuer_url_allows_http_when_configured() {
-        // IP literal with HTTP allowed — no DNS resolution needed
+        // Public IP literal with HTTP allowed — no DNS resolution needed
         assert!(validate_issuer_url("http://8.8.8.8:8080/realms/test", true)
             .await
             .is_ok());
@@ -871,6 +911,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_validate_issuer_url_rejects_private_ips() {
+        // RFC 1918
+        let result = validate_issuer_url("https://10.0.0.1", false).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("private"));
+
+        let result = validate_issuer_url("https://172.16.0.1", false).await;
+        assert!(result.is_err());
+
+        let result = validate_issuer_url("https://192.168.1.1", false).await;
+        assert!(result.is_err());
+
+        // Loopback
+        let result = validate_issuer_url("https://127.0.0.1", false).await;
+        assert!(result.is_err());
+
+        // Link-local / cloud metadata
+        let result = validate_issuer_url("https://169.254.169.254", false).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reject_private_ip_blocks_all_ranges() {
+        use std::net::IpAddr;
+        // Private IPv4
+        assert!(reject_private_ip("10.0.0.1".parse::<IpAddr>().unwrap()).is_err());
+        assert!(reject_private_ip("172.16.0.1".parse::<IpAddr>().unwrap()).is_err());
+        assert!(reject_private_ip("192.168.0.1".parse::<IpAddr>().unwrap()).is_err());
+        // Loopback
+        assert!(reject_private_ip("127.0.0.1".parse::<IpAddr>().unwrap()).is_err());
+        // Link-local (includes cloud metadata)
+        assert!(reject_private_ip("169.254.169.254".parse::<IpAddr>().unwrap()).is_err());
+        // CGNAT
+        assert!(reject_private_ip("100.64.0.1".parse::<IpAddr>().unwrap()).is_err());
+        // Broadcast
+        assert!(reject_private_ip("255.255.255.255".parse::<IpAddr>().unwrap()).is_err());
+        // Unspecified
+        assert!(reject_private_ip("0.0.0.0".parse::<IpAddr>().unwrap()).is_err());
+        // IPv6
+        assert!(reject_private_ip("::1".parse::<IpAddr>().unwrap()).is_err());
+        assert!(reject_private_ip("fc00::1".parse::<IpAddr>().unwrap()).is_err());
+        assert!(reject_private_ip("fe80::1".parse::<IpAddr>().unwrap()).is_err());
+        // Public IPs should pass
+        assert!(reject_private_ip("8.8.8.8".parse::<IpAddr>().unwrap()).is_ok());
+        assert!(reject_private_ip("1.1.1.1".parse::<IpAddr>().unwrap()).is_ok());
+    }
+
     #[test]
     fn test_extract_host_various_formats() {
         assert_eq!(
@@ -886,8 +974,8 @@ mod tests {
             Some("example.com".to_string())
         );
         assert_eq!(
-            extract_host("https://10.0.0.1:8443/path"),
-            Some("10.0.0.1".to_string())
+            extract_host("https://203.0.113.1:8443/path"),
+            Some("203.0.113.1".to_string())
         );
     }
 }

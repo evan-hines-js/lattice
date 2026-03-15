@@ -63,7 +63,7 @@ pub async fn validate_handler(
                 resource = resource_name,
                 "No validator registered — denying request (fail-closed)"
             );
-            AdmissionResponse::invalid(format!(
+            AdmissionResponse::from(&request).deny(format!(
                 "no validator registered for {}/{} {}",
                 group, version, resource_name
             ))
@@ -210,7 +210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handler_allows_unknown_resource() {
+    async fn handler_denies_unknown_resource() {
         let app = test_app();
         let body = serde_json::to_string(&serde_json::json!({
             "apiVersion": "admission.k8s.io/v1",
@@ -256,8 +256,8 @@ mod tests {
         let review: AdmissionReview<DynamicObject> = serde_json::from_slice(&body).unwrap();
         let resp = review.response.unwrap();
         assert!(
-            resp.allowed,
-            "unknown resource should be allowed (no validator)"
+            !resp.allowed,
+            "unknown resource should be denied (fail-closed)"
         );
     }
 }

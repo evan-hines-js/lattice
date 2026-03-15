@@ -4,7 +4,7 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
 use lattice_common::crd::SecretProvider;
 
-use super::{reject_system_namespace, Validator};
+use super::{parse_admission_object, reject_system_namespace, Validator};
 
 /// Validates SecretProvider CREATE and UPDATE requests
 pub struct SecretProviderValidator;
@@ -19,21 +19,11 @@ impl Validator for SecretProviderValidator {
             return denied;
         }
 
-        let response = AdmissionResponse::from(request);
-
-        let obj = match &request.object {
-            Some(obj) => obj,
-            None => return response.deny("no object in admission request"),
-        };
-
-        let raw = match serde_json::to_value(obj) {
-            Ok(v) => v,
-            Err(e) => return response.deny(format!("failed to serialize admission object: {e}")),
-        };
-        let provider: SecretProvider = match serde_json::from_value(raw) {
-            Ok(p) => p,
-            Err(e) => return response.deny(format!("failed to deserialize SecretProvider: {e}")),
-        };
+        let (response, provider) =
+            match parse_admission_object::<SecretProvider>(request, "SecretProvider") {
+                Ok(v) => v,
+                Err(denied) => return denied,
+            };
 
         if let Err(e) = provider.spec.validate() {
             return response.deny(format!("{e}"));

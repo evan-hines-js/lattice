@@ -189,10 +189,7 @@ impl WaypointCompiler {
 
     /// Tetragon runtime policy restricting waypoint pods to only Envoy/pilot-agent.
     /// Kills any other binary execution via security_bprm_check kprobe.
-    fn compile_runtime_policy(
-        namespace: &str,
-        gateway_name: &str,
-    ) -> TracingPolicyNamespaced {
+    fn compile_runtime_policy(namespace: &str, gateway_name: &str) -> TracingPolicyNamespaced {
         TracingPolicyNamespaced::new(
             format!("waypoint-runtime-{}", derived_name("", &[namespace])),
             namespace,
@@ -1314,7 +1311,9 @@ mod tests {
         let arg = &selector.match_args[0];
         assert_eq!(arg.operator, "NotEqual");
         assert!(arg.values.contains(&"/usr/local/bin/envoy".to_string()));
-        assert!(arg.values.contains(&"/usr/local/bin/pilot-agent".to_string()));
+        assert!(arg
+            .values
+            .contains(&"/usr/local/bin/pilot-agent".to_string()));
 
         assert_eq!(
             selector.match_actions[0].action,

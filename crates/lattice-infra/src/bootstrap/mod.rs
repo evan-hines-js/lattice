@@ -542,7 +542,10 @@ pub async fn apply_all_phases(
 /// This enables cross-cluster mTLS when all clusters share the same root CA.
 fn generate_istio_manifests(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
     // istio-system needs topology.istio.io/network label for multi-cluster
-    let mut manifests = vec![namespace_yaml_with_network("istio-system", &config.cluster_name)];
+    let mut manifests = vec![namespace_yaml_with_network(
+        "istio-system",
+        &config.cluster_name,
+    )];
 
     // cacerts Secret with per-cluster intermediate CA (must be before istiod).
     // Only included when root_ca is Some — the caller is responsible for

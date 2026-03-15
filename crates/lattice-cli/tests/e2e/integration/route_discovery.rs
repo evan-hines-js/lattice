@@ -351,7 +351,10 @@ pub async fn verify_route_status(kubeconfig: &str, _cluster_name: &str) -> Resul
         let name = item["metadata"]["name"].as_str().unwrap_or("unknown");
         let phase = item["status"]["phase"].as_str().unwrap_or("unknown");
         if phase != "Ready" {
-            return Err(format!("CRD '{}' phase is '{}', expected 'Ready'", name, phase));
+            return Err(format!(
+                "CRD '{}' phase is '{}', expected 'Ready'",
+                name, phase
+            ));
         }
         let gen = item["metadata"]["generation"].as_i64();
         let observed = item["status"]["observedGeneration"].as_i64();
@@ -375,10 +378,7 @@ pub async fn verify_route_status(kubeconfig: &str, _cluster_name: &str) -> Resul
 /// Cross-cluster routing uses Istio native multi-cluster discovery via remote
 /// secrets. Each source cluster with advertised routes gets a remote secret
 /// in `istio-system` that tells istiod how to discover services on that cluster.
-pub async fn verify_remote_secret(
-    kubeconfig: &str,
-    source_cluster: &str,
-) -> Result<(), String> {
+pub async fn verify_remote_secret(kubeconfig: &str, source_cluster: &str) -> Result<(), String> {
     let secret_name = format!("istio-remote-secret-{}", source_cluster);
     info!(
         "[RouteDiscovery] Checking for remote secret '{}'...",
@@ -394,9 +394,18 @@ pub async fn verify_remote_secret(
             let name = secret_name.clone();
             async move {
                 let output = match run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "secret", &name, "-n", "istio-system", "-o", "json",
-                ]).await {
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "secret",
+                    &name,
+                    "-n",
+                    "istio-system",
+                    "-o",
+                    "json",
+                ])
+                .await
+                {
                     Ok(o) => o,
                     Err(_) => return Ok(false),
                 };
@@ -407,13 +416,14 @@ pub async fn verify_remote_secret(
                 };
 
                 // Verify it has the istio multiCluster label
-                let has_label = parsed["metadata"]["labels"]["istio/multiCluster"]
-                    .as_str() == Some("true");
+                let has_label =
+                    parsed["metadata"]["labels"]["istio/multiCluster"].as_str() == Some("true");
 
                 Ok(has_label)
             }
         },
-    ).await?;
+    )
+    .await?;
 
     info!("[RouteDiscovery] Remote secret '{}' verified", secret_name);
     Ok(())
@@ -435,10 +445,18 @@ pub async fn verify_eastwest_gateway(kubeconfig: &str) -> Result<(), String> {
             let kc = kubeconfig.to_string();
             async move {
                 let output = match run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "gateways.gateway.networking.k8s.io",
-                    "istio-eastwestgateway", "-n", "istio-system", "-o", "json",
-                ]).await {
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "gateways.gateway.networking.k8s.io",
+                    "istio-eastwestgateway",
+                    "-n",
+                    "istio-system",
+                    "-o",
+                    "json",
+                ])
+                .await
+                {
                     Ok(o) => o,
                     Err(_) => return Ok(false),
                 };
@@ -452,7 +470,8 @@ pub async fn verify_eastwest_gateway(kubeconfig: &str) -> Result<(), String> {
                 Ok(class == Some("istio-east-west"))
             }
         },
-    ).await?;
+    )
+    .await?;
 
     info!("[RouteDiscovery] East-west gateway verified");
     Ok(())
@@ -470,9 +489,18 @@ pub async fn verify_cacerts(kubeconfig: &str) -> Result<(), String> {
             let kc = kubeconfig.to_string();
             async move {
                 let output = match run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "secret", "cacerts", "-n", "istio-system", "-o", "json",
-                ]).await {
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "secret",
+                    "cacerts",
+                    "-n",
+                    "istio-system",
+                    "-o",
+                    "json",
+                ])
+                .await
+                {
                     Ok(o) => o,
                     Err(_) => return Ok(false),
                 };
@@ -482,18 +510,25 @@ pub async fn verify_cacerts(kubeconfig: &str) -> Result<(), String> {
                     Err(_) => return Ok(false),
                 };
 
-                let has_all_keys = parsed["data"].as_object()
+                let has_all_keys = parsed["data"]
+                    .as_object()
                     .map(|data| {
-                        ["ca-cert.pem", "ca-key.pem", "root-cert.pem", "cert-chain.pem"]
-                            .iter()
-                            .all(|k| data.contains_key(*k))
+                        [
+                            "ca-cert.pem",
+                            "ca-key.pem",
+                            "root-cert.pem",
+                            "cert-chain.pem",
+                        ]
+                        .iter()
+                        .all(|k| data.contains_key(*k))
                     })
                     .unwrap_or(false);
 
                 Ok(has_all_keys)
             }
         },
-    ).await?;
+    )
+    .await?;
 
     info!("[RouteDiscovery] cacerts Secret verified with all required keys");
     Ok(())
@@ -578,9 +613,16 @@ pub async fn verify_cross_cluster_auth_policy(
 
     // DENY policy uses notPrincipals — traffic from anyone NOT in the list is denied
     let not_principals = &parsed["spec"]["rules"][0]["from"][0]["source"]["notPrincipals"];
-    if not_principals.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+    if not_principals
+        .as_array()
+        .map(|a| a.is_empty())
+        .unwrap_or(true)
+    {
         // Empty notPrincipals = deny all (fail-closed), which is valid
-        info!("[RouteDiscovery] AuthorizationPolicy '{}' denies all (fail-closed)", policy_name);
+        info!(
+            "[RouteDiscovery] AuthorizationPolicy '{}' denies all (fail-closed)",
+            policy_name
+        );
     }
 
     info!(
@@ -667,12 +709,8 @@ pub async fn run_route_discovery_tests(
     ensure_fresh_namespace(mgmt_kubeconfig, consumer_ns).await?;
     setup_regcreds_infrastructure(mgmt_kubeconfig).await?;
 
-    let consumer = build_cross_cluster_consumer(
-        "consumer",
-        consumer_ns,
-        "route-target",
-        ROUTE_TEST_NS,
-    );
+    let consumer =
+        build_cross_cluster_consumer("consumer", consumer_ns, "route-target", ROUTE_TEST_NS);
 
     let mgmt_client = client_from_kubeconfig(mgmt_kubeconfig).await?;
     let consumer_api: Api<LatticeService> = Api::namespaced(mgmt_client, consumer_ns);

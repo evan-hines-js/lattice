@@ -4,7 +4,7 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
 use lattice_common::crd::LatticeJob;
 
-use super::{reject_system_namespace, Validator};
+use super::{parse_admission_object, reject_system_namespace, Validator};
 
 /// Validates LatticeJob CREATE and UPDATE requests
 pub struct JobValidator;
@@ -19,17 +19,9 @@ impl Validator for JobValidator {
             return denied;
         }
 
-        let response = AdmissionResponse::from(request);
-
-        let obj = match &request.object {
-            Some(obj) => obj,
-            None => return response.deny("no object in admission request"),
-        };
-
-        let raw = serde_json::to_value(obj).unwrap_or_default();
-        let job: LatticeJob = match serde_json::from_value(raw) {
-            Ok(j) => j,
-            Err(e) => return response.deny(format!("failed to deserialize LatticeJob: {e}")),
+        let (response, job) = match parse_admission_object::<LatticeJob>(request, "LatticeJob") {
+            Ok(v) => v,
+            Err(denied) => return denied,
         };
 
         if let Err(e) = job.spec.validate() {

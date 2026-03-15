@@ -121,11 +121,7 @@ impl SubtreeSender {
         list.items
             .iter()
             .flat_map(|crd| {
-                let source_cluster = crd
-                    .metadata
-                    .name
-                    .as_deref()
-                    .unwrap_or(&self.cluster_name);
+                let source_cluster = crd.metadata.name.as_deref().unwrap_or(&self.cluster_name);
                 crd.spec.routes.iter().map(move |r| SubtreeService {
                     name: r.service_name.clone(),
                     namespace: r.service_namespace.clone(),

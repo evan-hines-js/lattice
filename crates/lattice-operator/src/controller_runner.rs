@@ -277,9 +277,7 @@ pub async fn build_service_controllers(
             watcher_config(),
             {
                 let graph = service_ctx.graph.clone();
-                move |_routes| {
-                    all_mesh_member_refs(&graph)
-                }
+                move |_routes| all_mesh_member_refs(&graph)
             },
         )
         .shutdown_on_signal()
@@ -295,10 +293,7 @@ pub async fn build_service_controllers(
 
     let graph = service_ctx.graph.clone();
 
-    (
-        vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl)],
-        graph,
-    )
+    (vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl)], graph)
 }
 
 /// Spawn the remote secret controller for Istio multi-cluster discovery.

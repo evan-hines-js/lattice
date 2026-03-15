@@ -208,16 +208,18 @@ async fn cacerts_exists(client: &Client) -> bool {
 /// Returns `None` if the Secret doesn't exist yet (bootstrap cluster before CA init)
 /// or if the PEM data is invalid. This is not an error — the cacerts Secret for Istio
 /// will simply be skipped, and istiod will use a self-signed CA.
-async fn read_root_ca(
-    client: &Client,
-) -> Option<lattice_infra::pki::CertificateAuthority> {
+async fn read_root_ca(client: &Client) -> Option<lattice_infra::pki::CertificateAuthority> {
     let secrets: Api<k8s_openapi::api::core::v1::Secret> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let secret = secrets.get(CA_SECRET).await.ok()?;
     let data = secret.data?;
 
-    let cert_pem = data.get(CA_CERT_KEY).and_then(|b| String::from_utf8(b.0.clone()).ok())?;
-    let key_pem = data.get(CA_KEY_KEY).and_then(|b| String::from_utf8(b.0.clone()).ok())?;
+    let cert_pem = data
+        .get(CA_CERT_KEY)
+        .and_then(|b| String::from_utf8(b.0.clone()).ok())?;
+    let key_pem = data
+        .get(CA_KEY_KEY)
+        .and_then(|b| String::from_utf8(b.0.clone()).ok())?;
 
     match lattice_infra::pki::CertificateAuthority::from_pem(&cert_pem, &key_pem) {
         Ok(ca) => {

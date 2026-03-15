@@ -4,7 +4,7 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse, Operation};
 use kube::core::DynamicObject;
 use lattice_common::crd::LatticeCluster;
 
-use super::Validator;
+use super::{parse_admission_object, Validator};
 
 /// Validates LatticeCluster CREATE and UPDATE requests
 pub struct ClusterValidator;
@@ -15,18 +15,11 @@ impl Validator for ClusterValidator {
     }
 
     fn validate(&self, request: &AdmissionRequest<DynamicObject>) -> AdmissionResponse {
-        let response = AdmissionResponse::from(request);
-
-        let obj = match &request.object {
-            Some(obj) => obj,
-            None => return response.deny("no object in admission request"),
-        };
-
-        let raw = serde_json::to_value(obj).unwrap_or_default();
-        let cluster: LatticeCluster = match serde_json::from_value(raw) {
-            Ok(c) => c,
-            Err(e) => return response.deny(format!("failed to deserialize LatticeCluster: {e}")),
-        };
+        let (response, cluster) =
+            match parse_admission_object::<LatticeCluster>(request, "LatticeCluster") {
+                Ok(v) => v,
+                Err(denied) => return denied,
+            };
 
         if let Err(e) = cluster.spec.validate() {
             return response.deny(format!("{e}"));
@@ -35,37 +28,43 @@ impl Validator for ClusterValidator {
         // On UPDATE: enforce parent_config immutability
         if request.operation == Operation::Update {
             if let Some(ref old_obj) = request.old_object {
-                let old_raw = serde_json::to_value(old_obj).unwrap_or_default();
-                match serde_json::from_value::<LatticeCluster>(old_raw) {
-                    Ok(old_cluster) => {
-                        match (&old_cluster.spec.parent_config, &cluster.spec.parent_config) {
-                            // None → None or Some(A) → Some(A): no change, allow
-                            (None, None) => {}
-                            (Some(old), Some(new)) if old == new => {}
-                            // None → Some: promotion, allow
-                            (None, Some(_)) => {}
-                            // Some → None: demotion, deny
-                            (Some(_), None) => {
-                                return response.deny(
-                                    "spec.parentConfig cannot be removed once set. \
-                                     Delete and recreate the cluster.",
-                                );
-                            }
-                            // Some(A) → Some(B): modification, deny
-                            (Some(_), Some(_)) => {
-                                return response.deny(
-                                    "spec.parentConfig is immutable once set. \
-                                     Delete and recreate the cluster to change parent configuration.",
-                                );
-                            }
-                        }
+                let old_raw = match serde_json::to_value(old_obj) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return response
+                            .deny(format!("failed to serialize old admission object: {e}"))
                     }
+                };
+                let old_cluster: LatticeCluster = match serde_json::from_value(old_raw) {
+                    Ok(c) => c,
                     // Fail-closed: if old_object can't be deserialized, deny the update
                     // to prevent bypassing immutability checks with crafted objects
                     Err(e) => {
                         return response.deny(format!(
                             "failed to deserialize old LatticeCluster for immutability check: {e}"
                         ));
+                    }
+                };
+
+                match (&old_cluster.spec.parent_config, &cluster.spec.parent_config) {
+                    // None → None or Some(A) → Some(A): no change, allow
+                    (None, None) => {}
+                    (Some(old), Some(new)) if old == new => {}
+                    // None → Some: promotion, allow
+                    (None, Some(_)) => {}
+                    // Some → None: demotion, deny
+                    (Some(_), None) => {
+                        return response.deny(
+                            "spec.parentConfig cannot be removed once set. \
+                             Delete and recreate the cluster.",
+                        );
+                    }
+                    // Some(A) → Some(B): modification, deny
+                    (Some(_), Some(_)) => {
+                        return response.deny(
+                            "spec.parentConfig is immutable once set. \
+                             Delete and recreate the cluster to change parent configuration.",
+                        );
                     }
                 }
             }

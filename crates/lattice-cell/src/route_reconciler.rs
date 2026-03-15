@@ -168,13 +168,13 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
         // Write each child's routes to a per-child CRD
         for (child_name, routes) in &child_routes {
             let prev = last_written_children.get(child_name);
-            if prev.map(|p: &Vec<ClusterRoute>| p == routes).unwrap_or(false) {
+            if prev
+                .map(|p: &Vec<ClusterRoute>| p == routes)
+                .unwrap_or(false)
+            {
                 continue;
             }
-            if write_cluster_routes(&api, child_name, routes)
-                .await
-                .is_ok()
-            {
+            if write_cluster_routes(&api, child_name, routes).await.is_ok() {
                 last_written_children.insert(child_name.clone(), routes.clone());
             }
         }
@@ -537,7 +537,13 @@ mod tests {
         // Waypoint gateway on HBONE port — should be skipped
         gateways.insert(
             "media/media-waypoint".to_string(),
-            make_gateway_object_with_class("media", "media-waypoint", "10.0.0.200", 15008, "istio-waypoint"),
+            make_gateway_object_with_class(
+                "media",
+                "media-waypoint",
+                "10.0.0.200",
+                15008,
+                "istio-waypoint",
+            ),
         );
         // Ingress gateway on port 80 — should be selected
         gateways.insert(
@@ -555,7 +561,13 @@ mod tests {
         let mut gateways = HashMap::new();
         gateways.insert(
             "media/media-waypoint".to_string(),
-            make_gateway_object_with_class("media", "media-waypoint", "10.0.0.200", 15008, "istio-waypoint"),
+            make_gateway_object_with_class(
+                "media",
+                "media-waypoint",
+                "10.0.0.200",
+                15008,
+                "istio-waypoint",
+            ),
         );
 
         let (addr, port) = resolve_gateway_address("media", &gateways);

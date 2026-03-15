@@ -4,7 +4,7 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
 use lattice_common::crd::LatticeMeshMember;
 
-use super::{reject_system_namespace, Validator};
+use super::{parse_admission_object, reject_system_namespace, Validator};
 
 /// Validates LatticeMeshMember CREATE and UPDATE requests
 pub struct MeshMemberValidator;
@@ -19,20 +19,11 @@ impl Validator for MeshMemberValidator {
             return denied;
         }
 
-        let response = AdmissionResponse::from(request);
-
-        let obj = match &request.object {
-            Some(obj) => obj,
-            None => return response.deny("no object in admission request"),
-        };
-
-        let raw = serde_json::to_value(obj).unwrap_or_default();
-        let member: LatticeMeshMember = match serde_json::from_value(raw) {
-            Ok(m) => m,
-            Err(e) => {
-                return response.deny(format!("failed to deserialize LatticeMeshMember: {e}"))
-            }
-        };
+        let (response, member) =
+            match parse_admission_object::<LatticeMeshMember>(request, "LatticeMeshMember") {
+                Ok(v) => v,
+                Err(denied) => return denied,
+            };
 
         if let Err(e) = member.spec.validate() {
             return response.deny(format!("{e}"));
