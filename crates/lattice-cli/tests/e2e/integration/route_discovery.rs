@@ -205,7 +205,7 @@ async fn verify_cross_cluster_traffic(
                     "-n",
                     &ns,
                     "-l",
-                    &format!("lattice.dev/service={name}"),
+                    &format!("app.kubernetes.io/name={name}"),
                     "--tail=20",
                 ])
                 .await
