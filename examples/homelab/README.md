@@ -40,8 +40,11 @@ Internet / Home Network
 - Backend services set `advertise: { allowedServices: ["*"] }` on ingress routes
 - Route reconciler discovers these + resolves Gateway LB IPs
 - Agent reads LatticeClusterRoutes CRD and heartbeats routes to parent
-- Parent merges child routes into its own LatticeClusterRoutes CRD
-- route-adapter sidecar watches the CRD, renders haproxy.cfg, sends SIGUSR2
+- Parent merges child routes into per-child LatticeClusterRoutes CRDs
+- Istio multi-cluster: operator creates remote secrets + headless Service stubs
+  so istiod discovers backend services natively (HBONE mTLS end-to-end)
+- HAProxy north-south: route-adapter sidecar watches the CRD, renders haproxy.cfg,
+  and routes to backend ingress gateways via their LoadBalancer IPs
 
 ## Prerequisites
 

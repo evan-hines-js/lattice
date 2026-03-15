@@ -5,6 +5,10 @@
 //! source cluster) gets a corresponding `istio-remote-secret-{cluster}` Secret
 //! in `istio-system`.
 //!
+//! Also creates headless Service stubs on the local cluster for each advertised
+//! route so CoreDNS can resolve the remote service's DNS name. Istiod matches
+//! these stubs to remote endpoints discovered via the remote secret.
+//!
 //! Tokens are requested per-reconcile via the TokenRequest API against a
 //! dedicated `lattice-istiod-proxy` ServiceAccount with read-only RBAC.
 //! Tokens expire after 1 hour; reconcile requeues at half that interval
@@ -18,14 +22,17 @@ use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use lattice_common::crd::{validate_dns_label, LatticeClusterRoutes};
+use lattice_common::crd::{validate_dns_label, ClusterRoute, LatticeClusterRoutes};
 use lattice_common::Error;
 
 const FIELD_MANAGER: &str = "lattice-remote-secret";
 const ISTIO_MULTICLUSTER_LABEL: &str = "istio/multiCluster";
 const MANAGED_LABEL: &str = "lattice.dev/remote-secret-managed";
+
+/// Label on Service stubs so we can track and clean them up.
+const SERVICE_STUB_LABEL: &str = "lattice.dev/service-stub";
 
 /// ServiceAccount dedicated to istiod proxy access (read-only, scoped).
 pub const PROXY_SA_NAME: &str = "lattice-istiod-proxy";
@@ -51,9 +58,11 @@ pub async fn reconcile(
 
     if routes.spec.routes.is_empty() {
         cleanup_remote_secret(&ctx.client, &source_cluster).await;
+        cleanup_service_stubs(&ctx.client, &source_cluster).await;
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
+    // 1. Ensure remote secret for istiod endpoint discovery
     let token = request_proxy_token(&ctx.client)
         .await
         .map_err(|e| Error::internal(format!("failed to request proxy token: {e}")))?;
@@ -96,17 +105,130 @@ pub async fn reconcile(
         .await
         .map_err(|e| Error::internal(format!("failed to apply remote secret: {e}")))?;
 
+    // 2. Ensure Service stubs for DNS resolution on this cluster
+    ensure_service_stubs(&ctx.client, &source_cluster, &routes.spec.routes).await;
+
     info!(
         secret = %secret_name,
         source_cluster = %source_cluster,
         routes = routes.spec.routes.len(),
-        "ensured remote secret"
+        "ensured remote secret and service stubs"
     );
 
     // Requeue at half the token lifetime to refresh before expiry
     Ok(Action::requeue(Duration::from_secs(
         TOKEN_EXPIRATION_SECS as u64 / 2,
     )))
+}
+
+/// Create headless Service stubs so CoreDNS resolves remote service names.
+///
+/// For each advertised route, creates the target namespace (if needed) and a
+/// headless Service (ClusterIP: None, no selector) so that
+/// `{name}.{namespace}.svc.cluster.local` resolves. Istiod matches the Service
+/// to remote endpoints discovered via the remote secret.
+async fn ensure_service_stubs(client: &Client, source_cluster: &str, routes: &[ClusterRoute]) {
+    let params = PatchParams::apply(FIELD_MANAGER).force();
+
+    for route in routes {
+        // Ensure namespace exists
+        let ns = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": route.service_namespace,
+                "labels": {
+                    "app.kubernetes.io/managed-by": "lattice"
+                }
+            }
+        });
+        let ns_api = Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone());
+        if let Err(e) = ns_api
+            .patch(&route.service_namespace, &params, &Patch::Apply(&ns))
+            .await
+        {
+            warn!(
+                namespace = %route.service_namespace,
+                error = %e,
+                "failed to ensure namespace for service stub"
+            );
+            continue;
+        }
+
+        // Create headless Service stub (no selector, no endpoints)
+        let svc = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "name": route.service_name,
+                "namespace": route.service_namespace,
+                "labels": {
+                    SERVICE_STUB_LABEL: source_cluster,
+                    "app.kubernetes.io/managed-by": "lattice"
+                }
+            },
+            "spec": {
+                "clusterIP": "None",
+                "ports": [{
+                    "port": route.port,
+                    "protocol": "TCP",
+                    "name": "tcp"
+                }]
+            }
+        });
+
+        let svc_api = Api::<k8s_openapi::api::core::v1::Service>::namespaced(
+            client.clone(),
+            &route.service_namespace,
+        );
+        if let Err(e) = svc_api
+            .patch(&route.service_name, &params, &Patch::Apply(&svc))
+            .await
+        {
+            warn!(
+                service = %route.service_name,
+                namespace = %route.service_namespace,
+                error = %e,
+                "failed to ensure service stub"
+            );
+        } else {
+            debug!(
+                service = %route.service_name,
+                namespace = %route.service_namespace,
+                source = %source_cluster,
+                "ensured service stub for cross-cluster DNS"
+            );
+        }
+    }
+}
+
+/// Clean up Service stubs for a cluster that no longer has routes.
+async fn cleanup_service_stubs(client: &Client, source_cluster: &str) {
+    let label_selector = format!("{}={}", SERVICE_STUB_LABEL, source_cluster);
+    let svc_api =
+        Api::<k8s_openapi::api::core::v1::Service>::all(client.clone());
+    let list = match svc_api
+        .list(&kube::api::ListParams::default().labels(&label_selector))
+        .await
+    {
+        Ok(list) => list,
+        Err(e) => {
+            warn!(error = %e, "failed to list service stubs for cleanup");
+            return;
+        }
+    };
+
+    for svc in list {
+        let name = svc.metadata.name.as_deref().unwrap_or_default();
+        let ns = svc.metadata.namespace.as_deref().unwrap_or_default();
+        let ns_api =
+            Api::<k8s_openapi::api::core::v1::Service>::namespaced(client.clone(), ns);
+        match ns_api.delete(name, &Default::default()).await {
+            Ok(_) => info!(service = %name, namespace = %ns, "deleted service stub"),
+            Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(e) => warn!(service = %name, error = %e, "failed to delete service stub"),
+        }
+    }
 }
 
 async fn request_proxy_token(client: &Client) -> Result<String, kube::Error> {
@@ -175,7 +297,7 @@ async fn cleanup_remote_secret(client: &Client, source_cluster: &str) {
         Ok(_) => info!(secret = %secret_name, "deleted remote secret"),
         Err(kube::Error::Api(e)) if e.code == 404 => {}
         Err(e) => {
-            tracing::warn!(secret = %secret_name, error = %e, "failed to delete remote secret")
+            warn!(secret = %secret_name, error = %e, "failed to delete remote secret")
         }
     }
 }

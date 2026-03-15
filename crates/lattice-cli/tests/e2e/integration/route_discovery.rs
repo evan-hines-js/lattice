@@ -534,6 +534,57 @@ pub async fn verify_cacerts(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Verify a headless Service stub exists for DNS resolution of a remote service.
+pub async fn verify_service_stub(
+    kubeconfig: &str,
+    service_name: &str,
+    namespace: &str,
+) -> Result<(), String> {
+    info!(
+        "[RouteDiscovery] Checking for service stub '{}/{}'...",
+        namespace, service_name
+    );
+
+    wait_for_condition(
+        &format!("service stub {}/{}", namespace, service_name),
+        DEFAULT_TIMEOUT,
+        Duration::from_secs(10),
+        || {
+            let kc = kubeconfig.to_string();
+            let name = service_name.to_string();
+            let ns = namespace.to_string();
+            async move {
+                let output = match run_kubectl(&[
+                    "--kubeconfig", &kc,
+                    "get", "service", &name, "-n", &ns, "-o", "json",
+                ]).await {
+                    Ok(o) => o,
+                    Err(_) => return Ok(false),
+                };
+
+                let parsed: serde_json::Value = match serde_json::from_str(&output) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(false),
+                };
+
+                // Headless Service: clusterIP is "None"
+                let is_headless = parsed["spec"]["clusterIP"].as_str() == Some("None");
+                let has_label = parsed["metadata"]["labels"]["lattice.dev/service-stub"]
+                    .as_str()
+                    .is_some();
+
+                Ok(is_headless && has_label)
+            }
+        },
+    ).await?;
+
+    info!(
+        "[RouteDiscovery] Service stub '{}/{}' verified",
+        namespace, service_name
+    );
+    Ok(())
+}
+
 /// Verify Gateway has frontend mTLS when routes are advertised
 pub async fn verify_gateway_frontend_mtls(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     let output = run_kubectl(&[
@@ -700,10 +751,16 @@ pub async fn run_route_discovery_tests(
     verify_remote_secret(mgmt_kubeconfig, workload_cluster_name).await?;
     info!("[RouteDiscovery] Remote secret verified on parent cluster");
 
+    // Verify Service stub created on mgmt cluster for DNS resolution.
+    // The remote secret reconciler creates a headless Service so CoreDNS
+    // can resolve the remote service's DNS name on the consuming cluster.
+    verify_service_stub(mgmt_kubeconfig, "route-target", ROUTE_TEST_NS).await?;
+    info!("[RouteDiscovery] Service stub verified on parent cluster");
+
     // Deploy a consumer on the mgmt cluster that curls the remote service by its
-    // K8s Service DNS name. With Istio native multi-cluster, istiod discovers
-    // remote services under their real names via the remote secret, and ztunnel
-    // routes through the east-west gateway with HBONE mTLS end-to-end.
+    // K8s Service DNS name. istiod matches the headless Service stub to remote
+    // endpoints discovered via the remote secret, and ztunnel routes through
+    // the east-west gateway with HBONE mTLS end-to-end.
     info!("[RouteDiscovery] Deploying cross-cluster consumer on mgmt cluster...");
     let consumer_ns = "route-consumer-test";
     ensure_fresh_namespace(mgmt_kubeconfig, consumer_ns).await?;
