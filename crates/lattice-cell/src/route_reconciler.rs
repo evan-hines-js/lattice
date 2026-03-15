@@ -65,6 +65,8 @@ struct GatewayAddress {
 #[serde(rename_all = "camelCase")]
 struct GatewaySpec {
     #[serde(default)]
+    gateway_class_name: String,
+    #[serde(default)]
     listeners: Vec<GatewayListener>,
 }
 
@@ -313,7 +315,10 @@ async fn list_gateways(client: &Client) -> HashMap<String, DynamicObject> {
     }
 }
 
-/// Resolve a Gateway LoadBalancer address in a namespace
+/// Resolve a Gateway LoadBalancer address in a namespace.
+///
+/// Only considers ingress gateways (gatewayClassName "istio"), not waypoint
+/// gateways (gatewayClassName "istio-waypoint") which listen on HBONE port 15008.
 fn resolve_gateway_address(
     namespace: &str,
     gateways: &HashMap<String, DynamicObject>,
@@ -321,6 +326,18 @@ fn resolve_gateway_address(
     for (key, gw) in gateways {
         if !key.starts_with(&format!("{namespace}/")) {
             continue;
+        }
+
+        let spec: Option<GatewaySpec> = gw
+            .data
+            .get("spec")
+            .and_then(|s| serde_json::from_value(s.clone()).ok());
+
+        // Skip waypoint gateways — they use HBONE (port 15008), not application traffic
+        if let Some(ref s) = spec {
+            if s.gateway_class_name == lattice_common::mesh::WAYPOINT_GATEWAY_CLASS {
+                continue;
+            }
         }
 
         let status: Option<GatewayStatus> = gw
@@ -337,11 +354,6 @@ fn resolve_gateway_address(
         if address.is_empty() {
             continue;
         }
-
-        let spec: Option<GatewaySpec> = gw
-            .data
-            .get("spec")
-            .and_then(|s| serde_json::from_value(s.clone()).ok());
 
         let port = spec
             .and_then(|s| s.listeners.first().map(|l| l.port))
@@ -435,6 +447,16 @@ mod tests {
     use super::*;
 
     fn make_gateway_object(ns: &str, name: &str, address: &str, port: u16) -> DynamicObject {
+        make_gateway_object_with_class(ns, name, address, port, "istio")
+    }
+
+    fn make_gateway_object_with_class(
+        ns: &str,
+        name: &str,
+        address: &str,
+        port: u16,
+        gateway_class: &str,
+    ) -> DynamicObject {
         let mut obj = DynamicObject::new(
             name,
             &ApiResource::from_gvk(&GroupVersionKind::gvk(
@@ -445,7 +467,10 @@ mod tests {
         );
         obj.metadata.namespace = Some(ns.to_string());
         obj.data = serde_json::json!({
-            "spec": { "listeners": [{ "port": port }] },
+            "spec": {
+                "gatewayClassName": gateway_class,
+                "listeners": [{ "port": port }]
+            },
             "status": { "addresses": [{ "value": address }] }
         });
         obj
@@ -482,7 +507,7 @@ mod tests {
         let mut gateways = HashMap::new();
         let mut gw = make_gateway_object("media", "gw", "", 80);
         gw.data = serde_json::json!({
-            "spec": { "listeners": [{ "port": 80 }] },
+            "spec": { "gatewayClassName": "istio", "listeners": [{ "port": 80 }] },
             "status": { "addresses": [] }
         });
         gateways.insert("media/gw".to_string(), gw);
@@ -497,7 +522,7 @@ mod tests {
         let mut gateways = HashMap::new();
         let mut gw = make_gateway_object("media", "gw", "10.0.0.1", 443);
         gw.data = serde_json::json!({
-            "spec": { "listeners": [] },
+            "spec": { "gatewayClassName": "istio", "listeners": [] },
             "status": { "addresses": [{ "value": "10.0.0.1" }] }
         });
         gateways.insert("media/gw".to_string(), gw);
@@ -505,5 +530,37 @@ mod tests {
         let (addr, port) = resolve_gateway_address("media", &gateways);
         assert_eq!(addr, "10.0.0.1");
         assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn resolve_gateway_skips_waypoint_gateways() {
+        let mut gateways = HashMap::new();
+        // Waypoint gateway on HBONE port — should be skipped
+        gateways.insert(
+            "media/media-waypoint".to_string(),
+            make_gateway_object_with_class("media", "media-waypoint", "10.0.0.200", 15008, "istio-waypoint"),
+        );
+        // Ingress gateway on port 80 — should be selected
+        gateways.insert(
+            "media/istio-gateway".to_string(),
+            make_gateway_object_with_class("media", "istio-gateway", "10.0.0.217", 80, "istio"),
+        );
+
+        let (addr, port) = resolve_gateway_address("media", &gateways);
+        assert_eq!(addr, "10.0.0.217");
+        assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn resolve_gateway_returns_empty_when_only_waypoint() {
+        let mut gateways = HashMap::new();
+        gateways.insert(
+            "media/media-waypoint".to_string(),
+            make_gateway_object_with_class("media", "media-waypoint", "10.0.0.200", 15008, "istio-waypoint"),
+        );
+
+        let (addr, port) = resolve_gateway_address("media", &gateways);
+        assert_eq!(addr, "");
+        assert_eq!(port, 0);
     }
 }
