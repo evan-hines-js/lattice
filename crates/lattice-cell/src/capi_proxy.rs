@@ -54,10 +54,6 @@ pub enum CapiProxyError {
     #[error("agent not connected for cluster: {0}")]
     AgentNotConnected(String),
 
-    /// Cluster already pivoted
-    #[error("cluster already pivoted: {0}")]
-    AlreadyPivoted(String),
-
     /// Method not allowed (non-read operation)
     #[error("method not allowed: {0}")]
     MethodNotAllowed(String),
@@ -81,7 +77,6 @@ impl IntoResponse for CapiProxyError {
             CapiProxyError::AgentNotConnected(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
             }
-            CapiProxyError::AlreadyPivoted(_) => (StatusCode::GONE, self.to_string()),
             CapiProxyError::MethodNotAllowed(_) => {
                 (StatusCode::METHOD_NOT_ALLOWED, self.to_string())
             }
@@ -179,20 +174,13 @@ async fn proxy_handler(
         return Err(CapiProxyError::MethodNotAllowed(method.to_string()));
     }
 
-    // Look up agent in registry
+    // Look up agent in registry — forward whenever a tunnel exists,
+    // regardless of pivot state. CAPI needs ongoing access to child
+    // clusters even after pivot for reconciliation.
     let agent = state.registry.get(cluster_name).ok_or_else(|| {
         debug!(cluster = %cluster_name, "Agent not connected");
         CapiProxyError::AgentNotConnected(cluster_name.clone())
     })?;
-
-    // Check if pivot is already complete
-    if agent.pivot_complete {
-        warn!(
-            cluster = %cluster_name,
-            "Rejected proxy request for already-pivoted cluster"
-        );
-        return Err(CapiProxyError::AlreadyPivoted(cluster_name.clone()));
-    }
 
     let command_tx = agent.command_tx.clone();
     drop(agent);
@@ -254,10 +242,6 @@ mod tests {
         let error = CapiProxyError::AgentNotConnected("test".to_string());
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        let error = CapiProxyError::AlreadyPivoted("test".to_string());
-        let response = error.into_response();
-        assert_eq!(response.status(), StatusCode::GONE);
 
         let error = CapiProxyError::MethodNotAllowed("POST".to_string());
         let response = error.into_response();

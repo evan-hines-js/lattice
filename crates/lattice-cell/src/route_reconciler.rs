@@ -117,8 +117,6 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
 
     let api: Api<LatticeClusterRoutes> = Api::all(client.clone());
 
-    // Local service state
-    let mut local_routes: Vec<ClusterRoute> = Vec::new();
     // Child routes keyed by child cluster name
     let mut child_routes: HashMap<String, Vec<ClusterRoute>> = HashMap::new();
     // Last written state to skip no-op writes
@@ -128,7 +126,7 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
     info!(cluster = %cluster_name, "Route reconciler started");
 
     // Seed local routes on startup so peer route sync has data immediately
-    local_routes = discover_local_routes(&client).await;
+    let mut local_routes = discover_local_routes(&client).await;
     if !local_routes.is_empty() {
         let _ = local_routes_tx.send(local_routes.clone());
     }
