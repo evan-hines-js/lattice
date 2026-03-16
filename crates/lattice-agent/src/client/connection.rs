@@ -114,6 +114,18 @@ impl AgentClient {
         *self.state.write().await = ClientState::Connected;
         info!("Connected to cell");
 
+        // If pivot already completed (e.g., agent restarted after pivot), start in Ready
+        // so heartbeats report the correct state to the parent
+        if commands::move_complete::check_local_pivot_complete(
+            &self.config.cluster_name,
+            self.kube_provider.as_ref(),
+        )
+        .await
+        {
+            info!("Pivot already complete locally, starting in Ready state");
+            *self.agent_state.write().await = AgentState::Ready;
+        }
+
         // Send ready message first to establish connection
         // This registers the agent on the server side
         self.send_ready().await?;
