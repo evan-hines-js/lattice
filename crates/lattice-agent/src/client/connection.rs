@@ -126,6 +126,13 @@ impl AgentClient {
             *self.agent_state.write().await = AgentState::Ready;
         }
 
+        // Seed peer routes hash from existing CRDs so the first heartbeat
+        // includes the correct hash for the parent to compare against
+        if let Ok(client) = self.kube_provider.create().await {
+            let hash = commands::peer_routes::compute_initial_hash(&client).await;
+            let _ = self.peer_routes_hash_tx.send(hash);
+        }
+
         // Send ready message first to establish connection
         // This registers the agent on the server side
         self.send_ready().await?;
@@ -221,6 +228,7 @@ impl AgentClient {
         let cluster_name = self.config.cluster_name.clone();
         let start_time = self.start_time;
         let heartbeat_kube_provider = self.kube_provider.clone();
+        let heartbeat_peer_hash = self.peer_routes_hash_rx.clone();
 
         self.heartbeat_handle = Some(tokio::spawn(async move {
             let mut ticker = interval(heartbeat_interval);
@@ -268,6 +276,8 @@ impl AgentClient {
                     Err(_) => String::new(),
                 };
 
+                let peer_hash = heartbeat_peer_hash.borrow().clone();
+
                 let msg = AgentMessage {
                     cluster_name: cluster_name.clone(),
                     payload: Some(Payload::Heartbeat(Heartbeat {
@@ -279,6 +289,7 @@ impl AgentClient {
                         status_hash,
                         lattice_image,
                         kubernetes_version,
+                        peer_routes_hash: peer_hash,
                     })),
                 };
 
@@ -358,6 +369,7 @@ impl AgentClient {
             self.exec_forwarder.clone(),
             self.forwarded_exec_sessions.clone(),
             self.kube_provider.clone(),
+            self.peer_routes_hash_tx.clone(),
         );
 
         self.command_handler_handle = Some(tokio::spawn(async move {

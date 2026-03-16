@@ -151,6 +151,8 @@ pub struct ParentServers<G: ManifestGenerator + Send + Sync + 'static = DefaultM
     subtree_registry: SharedSubtreeRegistry,
     /// Server handles (set once during ensure_running, taken on shutdown)
     handles: Mutex<Option<ServerHandles>>,
+    /// Shared peer route config, populated after auth proxy starts
+    peer_config: crate::server::SharedPeerRouteConfig,
 }
 
 struct ServerHandles {
@@ -570,6 +572,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             agent_registry: Arc::new(AgentRegistry::new()),
             subtree_registry,
             handles: Mutex::new(None),
+            peer_config: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         })
     }
 
@@ -587,6 +590,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             agent_registry: Arc::new(AgentRegistry::new()),
             subtree_registry,
             handles: Mutex::new(None),
+            peer_config: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -613,6 +617,22 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// Get the CA trust bundle PEM (contains all trusted CA certificates)
     pub async fn ca_trust_bundle_pem(&self) -> String {
         self.ca_bundle.read().await.trust_bundle_pem()
+    }
+
+    /// Set the peer route config (called after auth proxy starts).
+    /// This enables the gRPC server to push peer routes to connected children.
+    pub async fn set_peer_config(
+        &self,
+        proxy_url: String,
+        ca_cert_pem: String,
+        local_routes: crate::route_reconciler::LocalRouteReceiver,
+    ) {
+        *self.peer_config.write().await = Some(crate::server::PeerRouteConfig {
+            proxy_url,
+            ca_cert_pem,
+            parent_cluster_name: self.config.cluster_name.clone(),
+            local_routes,
+        });
     }
 
     /// Get the bootstrap state (if servers are running)
@@ -806,6 +826,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             })?;
 
         info!(addr = %grpc_addr, "Starting gRPC server");
+        let peer_config = self.peer_config.clone();
         let grpc_handle = tokio::spawn(async move {
             if let Err(e) = AgentServer::serve_with_mtls(crate::server::GrpcServerConfig {
                 registry,
@@ -815,8 +836,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
                 kube_client: grpc_kube_client,
                 blocklist,
                 route_update_tx,
-                peer_proxy_url: None, // Set by operator after auth proxy starts
-                peer_ca_cert_pem: None,
+                peer_config,
             })
             .await
             {

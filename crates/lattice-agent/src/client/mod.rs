@@ -16,6 +16,7 @@ pub mod config;
 mod connection;
 mod deletion;
 
+use crate::commands;
 pub use config::{AgentClientConfig, AgentCredentials, CertificateError, ClientError, ClientState};
 
 use std::sync::Arc;
@@ -75,6 +76,10 @@ pub struct AgentClient {
     /// Optional forwarder for routing exec requests to child clusters.
     /// When None, exec requests targeting other clusters return an error.
     exec_forwarder: Option<SharedExecForwarder>,
+    /// Sender for peer routes hash (command handler writes)
+    peer_routes_hash_tx: commands::PeerRoutesHashSender,
+    /// Receiver for peer routes hash (heartbeat reads)
+    peer_routes_hash_rx: commands::PeerRoutesHashReceiver,
 }
 
 /// Builder for AgentClient with fluent configuration
@@ -123,6 +128,7 @@ impl AgentClientBuilder {
 
     /// Build the AgentClient
     pub fn build(self) -> AgentClient {
+        let (peer_hash_tx, peer_hash_rx) = tokio::sync::watch::channel(Vec::new());
         AgentClient {
             config: self.config,
             env_config: self.env_config,
@@ -146,6 +152,8 @@ impl AgentClientBuilder {
             ),
             forwarder: self.forwarder,
             exec_forwarder: self.exec_forwarder,
+            peer_routes_hash_tx: peer_hash_tx,
+            peer_routes_hash_rx: peer_hash_rx,
         }
     }
 }
@@ -814,6 +822,7 @@ mod tests {
                 status_hash: vec![],
                 lattice_image: String::new(),
                 kubernetes_version: String::new(),
+                peer_routes_hash: vec![],
             })),
         };
 

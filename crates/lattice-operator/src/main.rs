@@ -706,9 +706,16 @@ async fn setup_cell_infra(
     // Start route reconciler on ALL clusters (not just parents).
     // Watches local LatticeServices with advertise: true, merges with child routes.
     // On leaf clusters the child channel is unused but the local watcher still runs.
-    let route_update_tx = self_cluster_name.as_ref().map(|name| {
-        lattice_cell::route_reconciler::spawn_route_reconciler(name.clone(), client.clone())
-    });
+    let (route_update_tx, local_route_rx) = match self_cluster_name.as_ref() {
+        Some(name) => {
+            let (tx, rx) = lattice_cell::route_reconciler::spawn_route_reconciler(
+                name.clone(),
+                client.clone(),
+            );
+            (Some(tx), Some(rx))
+        }
+        None => (None, None),
+    };
 
     // Start agent connection to parent (if we have one)
     let agent_token = tokio_util::sync::CancellationToken::new();
@@ -745,6 +752,7 @@ async fn setup_cell_infra(
             cedar,
             config.oidc_allow_insecure_http,
             tx,
+            local_route_rx.clone(),
         )
         .await?
     } else {
@@ -759,6 +767,7 @@ async fn setup_cell_infra(
             let watcher_route_tx = route_update_tx
                 .clone()
                 .expect("route_update_tx required for leaf");
+            let watcher_local_rx = local_route_rx.clone();
             tokio::spawn(async move {
                 cell_activation_watcher(
                     watcher_client,
@@ -767,6 +776,7 @@ async fn setup_cell_infra(
                     watcher_cedar,
                     watcher_oidc_insecure,
                     watcher_route_tx,
+                    watcher_local_rx,
                 )
                 .await;
             });
@@ -789,6 +799,7 @@ async fn activate_cell_services(
     cedar: Arc<PolicyEngine>,
     oidc_allow_insecure_http: bool,
     route_update_tx: lattice_cell::route_reconciler::RouteUpdateSender,
+    local_route_rx: Option<lattice_cell::route_reconciler::LocalRouteReceiver>,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     servers
         .ensure_running(
@@ -807,6 +818,7 @@ async fn activate_cell_services(
         extra_sans,
         cedar,
         oidc_allow_insecure_http,
+        local_route_rx,
     )
     .await;
     start_ca_rotation(servers.clone());
@@ -833,6 +845,7 @@ async fn cell_activation_watcher(
     cedar: Arc<PolicyEngine>,
     oidc_allow_insecure_http: bool,
     route_update_tx: lattice_cell::route_reconciler::RouteUpdateSender,
+    local_route_rx: Option<lattice_cell::route_reconciler::LocalRouteReceiver>,
 ) {
     use lattice_operator::startup::{
         discover_cell_host, ensure_cell_service_exists, LOAD_BALANCER_POLL_INTERVAL,
@@ -906,6 +919,7 @@ async fn cell_activation_watcher(
             cedar.clone(),
             oidc_allow_insecure_http,
             route_update_tx.clone(),
+            local_route_rx.clone(),
         )
         .await
         {
@@ -1030,6 +1044,7 @@ async fn start_auth_proxy(
     extra_sans: &[String],
     cedar: Arc<PolicyEngine>,
     oidc_allow_insecure_http: bool,
+    local_route_rx: Option<lattice_cell::route_reconciler::LocalRouteReceiver>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     // Get cluster name (default to "unknown")
     let cluster_name = cluster_name
@@ -1092,6 +1107,9 @@ async fn start_auth_proxy(
     let proxy_base_url = format!("https://{}:{}", cell_dns, DEFAULT_AUTH_PROXY_PORT);
     let proxy_ca_cert = ca_cert_pem.clone();
 
+    // Clone base_url before it moves into config — needed for peer route sync
+    let peer_proxy_url = base_url.clone();
+
     let config = AuthProxyConfig {
         addr,
         cert_pem,
@@ -1115,8 +1133,16 @@ async fn start_auth_proxy(
     controller_runner::spawn_remote_secret_controller(
         client.clone(),
         proxy_base_url,
-        proxy_ca_cert,
+        proxy_ca_cert.clone(),
     );
+
+    // Enable peer route sync: the gRPC server will push sibling/parent routes
+    // to connected children using the external auth proxy URL.
+    if let Some(local_rx) = local_route_rx {
+        parent_servers
+            .set_peer_config(peer_proxy_url, proxy_ca_cert, local_rx)
+            .await;
+    }
 
     // Start OIDCProvider watcher to reload OIDC config when CRDs change
     start_oidc_provider_watcher(client.clone(), auth_chain.clone(), oidc_allow_insecure_http);

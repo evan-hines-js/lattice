@@ -45,6 +45,8 @@ pub struct RouteReconcilerConfig {
     pub client: Client,
     /// Channel for receiving child route updates (None on leaf clusters)
     pub child_routes_rx: mpsc::Receiver<RouteUpdate>,
+    /// Watch sender for local route changes (peer route sync reads this)
+    pub local_routes_tx: LocalRouteSender,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,18 +79,29 @@ struct GatewayListener {
     port: u16,
 }
 
+/// Channel sender for local route change notifications
+pub type LocalRouteSender = tokio::sync::watch::Sender<Vec<ClusterRoute>>;
+/// Channel receiver for local route change notifications
+pub type LocalRouteReceiver = tokio::sync::watch::Receiver<Vec<ClusterRoute>>;
+
 /// Spawn the route reconciler task.
 ///
-/// Returns a sender for submitting child route updates.
-pub fn spawn_route_reconciler(cluster_name: String, client: Client) -> RouteUpdateSender {
+/// Returns (child_route_sender, local_route_receiver).
+/// The local_route_receiver gets updated whenever the parent's own advertised routes change.
+pub fn spawn_route_reconciler(
+    cluster_name: String,
+    client: Client,
+) -> (RouteUpdateSender, LocalRouteReceiver) {
     let (tx, rx) = mpsc::channel::<RouteUpdate>(256);
+    let (local_tx, local_rx) = tokio::sync::watch::channel(Vec::new());
     let config = RouteReconcilerConfig {
         cluster_name,
         client,
         child_routes_rx: rx,
+        local_routes_tx: local_tx,
     };
     tokio::spawn(run_route_reconciler(config));
-    tx
+    (tx, local_rx)
 }
 
 /// Run the route reconciler loop.
@@ -100,6 +113,7 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
     let cluster_name = config.cluster_name;
     let client = config.client;
     let mut child_rx = config.child_routes_rx;
+    let local_routes_tx = config.local_routes_tx;
 
     let api: Api<LatticeClusterRoutes> = Api::all(client.clone());
 
@@ -112,6 +126,12 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
     let mut last_written_children: HashMap<String, Vec<ClusterRoute>> = HashMap::new();
 
     info!(cluster = %cluster_name, "Route reconciler started");
+
+    // Seed local routes on startup so peer route sync has data immediately
+    local_routes = discover_local_routes(&client).await;
+    if !local_routes.is_empty() {
+        let _ = local_routes_tx.send(local_routes.clone());
+    }
 
     let svc_api: Api<LatticeService> = Api::all(client.clone());
     let mut svc_stream = std::pin::pin!(resilient_watcher(svc_api, watcher::Config::default()));
@@ -163,6 +183,8 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
                 .is_ok()
         {
             last_written_local = local_routes.clone();
+            // Notify peer route broadcaster of local route changes
+            let _ = local_routes_tx.send(local_routes.clone());
         }
 
         // Write each child's routes to a per-child CRD

@@ -38,6 +38,11 @@ pub struct StoredExecSession {
     pub cancel_token: CancellationToken,
 }
 
+/// Sender for peer routes hash updates (written by peer_routes handler)
+pub type PeerRoutesHashSender = tokio::sync::watch::Sender<Vec<u8>>;
+/// Receiver for peer routes hash (read by heartbeat task)
+pub type PeerRoutesHashReceiver = tokio::sync::watch::Receiver<Vec<u8>>;
+
 /// Context for command execution.
 ///
 /// Bundles all dependencies needed by command handlers, reducing the
@@ -65,6 +70,8 @@ pub struct CommandContext {
     /// Pending service lookup responses keyed by request_id
     pub pending_lookups:
         DashMap<String, tokio::sync::oneshot::Sender<lattice_proto::ServiceLookupResponse>>,
+    /// Sender for peer routes hash (updated by peer_routes handler)
+    pub peer_routes_hash_tx: PeerRoutesHashSender,
 }
 
 impl CommandContext {
@@ -80,6 +87,7 @@ impl CommandContext {
         exec_forwarder: Option<SharedExecForwarder>,
         forwarded_exec_sessions: Arc<Cache<String, StoredExecSession>>,
         kube_provider: Arc<dyn KubeClientProvider>,
+        peer_routes_hash_tx: PeerRoutesHashSender,
     ) -> Self {
         Self {
             cluster_name,
@@ -92,6 +100,7 @@ impl CommandContext {
             forwarded_exec_sessions,
             kube_provider,
             pending_lookups: DashMap::new(),
+            peer_routes_hash_tx,
         }
     }
 }

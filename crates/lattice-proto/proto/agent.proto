@@ -154,6 +154,10 @@ message Heartbeat {
   string lattice_image = 7;
   // Kubernetes version running on this cluster (e.g. "v1.32")
   string kubernetes_version = 8;
+  // SHA-256 hash of peer routes this agent has received (empty if none)
+  // Parent compares this to its current peer routes hash for this child —
+  // mismatch triggers a PeerRouteSync.
+  bytes peer_routes_hash = 9;
 }
 
 // Cluster health information

@@ -33,6 +33,14 @@ pub async fn handle_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Res
     let name = cluster.name_any();
     let capi_namespace = capi_namespace(&name);
 
+    // Patch kubeconfig to use proxy as soon as the secret exists.
+    // CAPI needs this to reach the child cluster through the gRPC tunnel
+    // when clusters are on separate networks.
+    if !lattice_common::is_bootstrap_cluster() {
+        // Ignore errors — the secret may not exist yet, we'll retry next reconcile
+        let _ = patch_kubeconfig_for_proxy_access(cluster, ctx, &name, &capi_namespace).await;
+    }
+
     debug!("checking infrastructure status");
 
     let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
@@ -78,18 +86,6 @@ pub async fn handle_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Res
             Some("Infrastructure ready, starting pivot".to_string()),
         )
         .await;
-
-    // Patch kubeconfig to use proxy before pivoting
-    // Skip on bootstrap cluster - installer accesses cluster directly
-    if !lattice_common::is_bootstrap_cluster() {
-        if let Err(e) =
-            patch_kubeconfig_for_proxy_access(cluster, ctx, &name, &capi_namespace).await
-        {
-            return e;
-        }
-    } else {
-        debug!("Skipping kubeconfig proxy patch on bootstrap cluster");
-    }
 
     // Transition to Pivoting
     info!("infrastructure ready, transitioning to Pivoting phase");

@@ -58,6 +58,7 @@ mod tests {
             ),
             kube_provider: Arc::new(crate::kube_client::InClusterClientProvider),
             pending_lookups: dashmap::DashMap::new(),
+            peer_routes_hash_tx: tokio::sync::watch::channel(Vec::new()).0,
         };
 
         handle("req-123", &ctx).await;
