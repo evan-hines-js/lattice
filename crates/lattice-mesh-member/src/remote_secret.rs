@@ -155,7 +155,9 @@ async fn ensure_service_stubs(client: &Client, source_cluster: &str, routes: &[C
             continue;
         }
 
-        // Create headless Service stub (no selector, no endpoints)
+        // Create Service stub (no selector, no endpoints) with a ClusterIP
+        // so DNS resolves the service name. Headless services (clusterIP: None)
+        // don't get DNS A records, which breaks cross-cluster routing.
         let svc = serde_json::json!({
             "apiVersion": "v1",
             "kind": "Service",
@@ -168,7 +170,6 @@ async fn ensure_service_stubs(client: &Client, source_cluster: &str, routes: &[C
                 }
             },
             "spec": {
-                "clusterIP": "None",
                 "ports": [{
                     "port": route.port,
                     "protocol": "TCP",

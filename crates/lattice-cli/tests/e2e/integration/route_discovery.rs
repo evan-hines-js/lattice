@@ -576,13 +576,13 @@ pub async fn verify_service_stub(
                     Err(_) => return Ok(false),
                 };
 
-                // Headless Service: clusterIP is "None"
-                let is_headless = parsed["spec"]["clusterIP"].as_str() == Some("None");
+                // Service stub should have a ClusterIP (not headless) for DNS resolution
+                let has_cluster_ip = parsed["spec"]["clusterIP"].as_str().is_some_and(|ip| ip != "None");
                 let has_label = parsed["metadata"]["labels"]["lattice.dev/service-stub"]
                     .as_str()
                     .is_some();
 
-                Ok(is_headless && has_label)
+                Ok(has_cluster_ip && has_label)
             }
         },
     )
