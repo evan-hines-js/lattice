@@ -29,7 +29,6 @@ spec:
         controlPlaneEndpoint: "10.0.2.130"
         bridge: "vmbr2"
         # Node IPs on isolated network (vmbr2 — disconnected from mgmt and workload1)
-        # Each cluster must be on a different network for Istio ambient multi-cluster
         ipv4Pool:
           range: "10.0.2.131-140/24"
           gateway: "10.0.2.1"
