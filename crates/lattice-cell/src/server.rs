@@ -518,7 +518,7 @@ pub struct PeerRouteConfig {
     pub proxy_url: String,
     pub ca_cert_pem: String,
     pub parent_cluster_name: String,
-    pub local_routes: crate::route_reconciler::LocalRouteReceiver,
+    pub all_routes: crate::route_reconciler::AllRoutesReceiver,
 }
 
 /// Shared reference to peer route config, populated after auth proxy starts
@@ -866,22 +866,6 @@ async fn process_agent_message(
                             "failed to send route update to reconciler"
                         );
                     }
-                }
-
-                // Push peer routes to all connected children so they can
-                // discover each other's (and parent's) services via Istio
-                if let Some(pc) = peer_config {
-                    let child_routes: Vec<_> = state.services.to_vec();
-                    crate::peer_routes::broadcast_peer_routes(
-                        &registry,
-                        &child_routes,
-                        &pc.proxy_url,
-                        &pc.ca_cert_pem,
-                        kube_client,
-                        &pc.parent_cluster_name,
-                        &pc.local_routes,
-                    )
-                    .await;
                 }
             }
         }

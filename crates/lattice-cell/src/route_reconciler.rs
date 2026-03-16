@@ -45,8 +45,8 @@ pub struct RouteReconcilerConfig {
     pub client: Client,
     /// Channel for receiving child route updates (None on leaf clusters)
     pub child_routes_rx: mpsc::Receiver<RouteUpdate>,
-    /// Watch sender for local route changes (peer route sync reads this)
-    pub local_routes_tx: LocalRouteSender,
+    /// Watch sender for combined route state (local + children)
+    pub all_routes_tx: AllRoutesSender,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,29 +79,30 @@ struct GatewayListener {
     port: u16,
 }
 
-/// Channel sender for local route change notifications
-pub type LocalRouteSender = tokio::sync::watch::Sender<Vec<ClusterRoute>>;
-/// Channel receiver for local route change notifications
-pub type LocalRouteReceiver = tokio::sync::watch::Receiver<Vec<ClusterRoute>>;
+/// Watch channel for the combined route state (local + all children).
+/// Updated whenever any route changes. Read by the peer route broadcaster.
+pub type AllRoutesSender = tokio::sync::watch::Sender<Vec<ClusterRoute>>;
+pub type AllRoutesReceiver = tokio::sync::watch::Receiver<Vec<ClusterRoute>>;
 
 /// Spawn the route reconciler task.
 ///
-/// Returns (child_route_sender, local_route_receiver).
-/// The local_route_receiver gets updated whenever the parent's own advertised routes change.
+/// Returns (child_route_sender, all_routes_receiver).
+/// The all_routes_receiver publishes the union of local + child routes
+/// whenever either changes.
 pub fn spawn_route_reconciler(
     cluster_name: String,
     client: Client,
-) -> (RouteUpdateSender, LocalRouteReceiver) {
+) -> (RouteUpdateSender, AllRoutesReceiver) {
     let (tx, rx) = mpsc::channel::<RouteUpdate>(256);
-    let (local_tx, local_rx) = tokio::sync::watch::channel(Vec::new());
+    let (all_tx, all_rx) = tokio::sync::watch::channel(Vec::new());
     let config = RouteReconcilerConfig {
         cluster_name,
         client,
         child_routes_rx: rx,
-        local_routes_tx: local_tx,
+        all_routes_tx: all_tx,
     };
     tokio::spawn(run_route_reconciler(config));
-    (tx, local_rx)
+    (tx, all_rx)
 }
 
 /// Run the route reconciler loop.
@@ -113,7 +114,7 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
     let cluster_name = config.cluster_name;
     let client = config.client;
     let mut child_rx = config.child_routes_rx;
-    let local_routes_tx = config.local_routes_tx;
+    let all_routes_tx = config.all_routes_tx;
 
     let api: Api<LatticeClusterRoutes> = Api::all(client.clone());
 
@@ -128,7 +129,7 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
     // Seed local routes on startup so peer route sync has data immediately
     let mut local_routes = discover_local_routes(&client).await;
     if !local_routes.is_empty() {
-        let _ = local_routes_tx.send(local_routes.clone());
+        let _ = all_routes_tx.send(local_routes.clone());
     }
 
     let svc_api: Api<LatticeService> = Api::all(client.clone());
@@ -174,6 +175,8 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
             continue;
         }
 
+        let mut any_changed = false;
+
         // Write local routes to self-named CRD only (no merging)
         if local_routes != last_written_local
             && write_cluster_routes(&api, &cluster_name, &local_routes)
@@ -181,8 +184,7 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
                 .is_ok()
         {
             last_written_local = local_routes.clone();
-            // Notify peer route broadcaster of local route changes
-            let _ = local_routes_tx.send(local_routes.clone());
+            any_changed = true;
         }
 
         // Write each child's routes to a per-child CRD
@@ -196,6 +198,7 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
             }
             if write_cluster_routes(&api, child_name, routes).await.is_ok() {
                 last_written_children.insert(child_name.clone(), routes.clone());
+                any_changed = true;
             }
         }
 
@@ -208,7 +211,15 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
         for child_name in stale {
             if delete_cluster_routes(&api, &child_name).await.is_ok() {
                 last_written_children.remove(&child_name);
+                any_changed = true;
             }
+        }
+
+        // Publish combined route state for peer route sync
+        if any_changed {
+            let mut all: Vec<ClusterRoute> = local_routes.clone();
+            all.extend(child_routes.values().flatten().cloned());
+            let _ = all_routes_tx.send(all);
         }
     }
 

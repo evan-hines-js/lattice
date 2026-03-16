@@ -625,13 +625,13 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         &self,
         proxy_url: String,
         ca_cert_pem: String,
-        local_routes: crate::route_reconciler::LocalRouteReceiver,
+        all_routes: crate::route_reconciler::AllRoutesReceiver,
     ) {
         *self.peer_config.write().await = Some(crate::server::PeerRouteConfig {
             proxy_url,
             ca_cert_pem,
             parent_cluster_name: self.config.cluster_name.clone(),
-            local_routes,
+            all_routes,
         });
     }
 
