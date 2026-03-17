@@ -116,10 +116,10 @@ pub async fn build_service_controllers(
     registry: Arc<CrdRegistry>,
     metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
-) -> (
+) -> anyhow::Result<(
     Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
     Arc<lattice_common::graph::ServiceGraph>,
-) {
+)> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
     let cedar_for_mm = cedar.clone();
 
@@ -132,8 +132,11 @@ pub async fn build_service_controllers(
         "lattice-service-controller",
     ));
     // Compute trust domain from the root CA for SPIFFE principal generation.
-    // Falls back to "UNSET-TRUST-DOMAIN" if the CA secret doesn't exist yet.
-    let trust_domain = lattice_infra::bootstrap::read_trust_domain(&client).await;
+    // The operator MUST NOT start service controllers without a valid trust domain —
+    // doing so would generate incorrect SPIFFE principals and Istio policies.
+    let trust_domain = lattice_infra::bootstrap::read_trust_domain(&client)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("root CA secret not available — cannot compute trust domain for SPIFFE principals"))?;
 
     let mut service_ctx = ServiceContext::new(
         svc_kube_client,
@@ -297,7 +300,7 @@ pub async fn build_service_controllers(
 
     let graph = service_ctx.graph.clone();
 
-    (vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl)], graph)
+    Ok((vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl)], graph))
 }
 
 /// Spawn the remote secret controller for Istio multi-cluster discovery.

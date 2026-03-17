@@ -862,7 +862,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -888,7 +888,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -913,7 +913,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -943,7 +943,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -999,7 +999,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
         let route = &output.http_routes[0];
@@ -1053,7 +1053,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
         let route = &output.http_routes[0];
@@ -1075,7 +1075,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1115,7 +1115,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1149,7 +1149,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1181,7 +1181,7 @@ mod tests {
             )]),
         };
         let output =
-            IngressCompiler::compile("db", "prod", &ingress, &single_port(), "UNSET-TRUST-DOMAIN")
+            IngressCompiler::compile("db", "prod", &ingress, &single_port(), "lattice.abcd1234")
                 .unwrap();
 
         assert!(output.http_routes.is_empty());
@@ -1246,7 +1246,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1271,7 +1271,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1413,7 +1413,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1436,7 +1436,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1467,7 +1467,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1512,7 +1512,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1530,7 +1530,7 @@ mod tests {
             "prod",
             &ingress_a,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
         let out_b = IngressCompiler::compile(
@@ -1538,7 +1538,7 @@ mod tests {
             "prod",
             &ingress_b,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1559,7 +1559,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
-            "UNSET-TRUST-DOMAIN",
+            "lattice.abcd1234",
         )
         .unwrap();
 

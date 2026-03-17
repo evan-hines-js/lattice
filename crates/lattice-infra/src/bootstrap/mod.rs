@@ -109,7 +109,7 @@ pub struct InfrastructureConfig {
     pub provider: ProviderType,
     /// Bootstrap mechanism (kubeadm or rke2)
     pub bootstrap: BootstrapProvider,
-    /// Cluster name for trust domain (lattice.{cluster}.local)
+    /// Cluster name used for Istio clusterName / network identity.
     pub cluster_name: String,
     /// Skip Cilium policies (true for kind/bootstrap clusters without Cilium)
     pub skip_cilium_policies: bool,
@@ -134,8 +134,9 @@ pub struct InfrastructureConfig {
     /// Trust domain for Istio mTLS, derived from the root CA fingerprint.
     /// All clusters sharing the same root CA get the same trust domain,
     /// so cross-cluster mTLS works without trustDomainAliases.
-    /// Format: `lattice.{short_hash}.local`
-    pub trust_domain: String,
+    /// Format: `lattice.{sha256_hex_prefix}`
+    /// None = root CA not available yet; callers MUST skip Istio configuration.
+    pub trust_domain: Option<String>,
     /// Remote cluster names for Istio meshNetworks gateway mapping.
     /// None = don't touch meshNetworks (SSA preserves existing value).
     /// Some(vec![]) = explicitly clear meshNetworks.
@@ -158,31 +159,23 @@ impl Default for InfrastructureConfig {
             backups: BackupsConfig::default(),
             network_topology: None,
             root_ca: None,
-            trust_domain: "UNSET-TRUST-DOMAIN".to_string(),
+            trust_domain: None,
             remote_networks: None,
         }
     }
 }
 
 /// Read the trust domain from the root CA secret in lattice-system.
-/// Falls back to `"UNSET-TRUST-DOMAIN"` if the secret doesn't exist yet.
-pub async fn read_trust_domain(client: &kube::Client) -> String {
+/// Returns `None` if the CA secret doesn't exist yet — callers MUST
+/// skip Istio configuration rather than proceed with a wrong trust domain.
+pub async fn read_trust_domain(client: &kube::Client) -> Option<String> {
     use k8s_openapi::api::core::v1::Secret;
     use lattice_common::{CA_CERT_KEY, CA_SECRET, LATTICE_SYSTEM_NAMESPACE};
 
     let api: kube::Api<Secret> = kube::Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let secret = match api.get(CA_SECRET).await {
-        Ok(s) => s,
-        Err(_) => return "UNSET-TRUST-DOMAIN".to_string(),
-    };
-    let data = match secret.data {
-        Some(d) => d,
-        None => return "UNSET-TRUST-DOMAIN".to_string(),
-    };
-    let cert_bytes = match data.get(CA_CERT_KEY) {
-        Some(b) => b,
-        None => return "UNSET-TRUST-DOMAIN".to_string(),
-    };
+    let secret = api.get(CA_SECRET).await.ok()?;
+    let data = secret.data?;
+    let cert_bytes = data.get(CA_CERT_KEY)?;
     let cert_pem = String::from_utf8_lossy(&cert_bytes.0);
     trust_domain_from_ca(&cert_pem)
 }
@@ -192,19 +185,15 @@ pub async fn read_trust_domain(client: &kube::Client) -> String {
 /// of the DER-encoded certificate. Total: `lattice.` (8) + 54 = 62 chars,
 /// under Istio's 63-char trust domain limit.
 ///
+/// Returns `None` if the PEM cannot be parsed.
+///
 /// Verify with: `openssl x509 -in ca.crt -fingerprint -sha256 -noout`
-pub fn trust_domain_from_ca(ca_cert_pem: &str) -> String {
-    let der = match crate::pki::parse_pem(ca_cert_pem) {
-        Ok(d) if !d.is_empty() => d,
-        _ => {
-            tracing::error!("Failed to parse root CA PEM for trust domain — using fallback");
-            return "UNSET-TRUST-DOMAIN".to_string();
-        }
-    };
+pub fn trust_domain_from_ca(ca_cert_pem: &str) -> Option<String> {
+    let der = crate::pki::parse_pem(ca_cert_pem).ok().filter(|d| !d.is_empty())?;
     let hash = lattice_common::kube_utils::sha256(&der);
     // 27 bytes = 54 hex chars. Total: lattice.(54) = 62 chars (under 63 limit)
     let hex: String = hash.iter().take(27).map(|b| format!("{:02x}", b)).collect();
-    format!("lattice.{}", hex)
+    Some(format!("lattice.{}", hex))
 }
 
 impl From<&LatticeCluster> for InfrastructureConfig {
@@ -228,7 +217,7 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             backups: cluster.spec.backups.clone(),
             network_topology: cluster.spec.network_topology.clone(),
             root_ca: None, // Set by caller when CA is available
-            trust_domain: "UNSET-TRUST-DOMAIN".to_string(), // Set by caller from root CA
+            trust_domain: None, // Set by caller from root CA
             remote_networks: None, // Set by caller from LatticeClusterRoutes
         }
     }
@@ -641,9 +630,13 @@ fn generate_istio_manifests(config: &InfrastructureConfig) -> Result<Vec<String>
         );
     }
 
+    let trust_domain = config
+        .trust_domain
+        .clone()
+        .ok_or("cannot generate Istio manifests without a trust domain — root CA not available")?;
     let reconciler = istio::IstioReconciler::new(
         &config.cluster_name,
-        config.trust_domain.clone(),
+        trust_domain,
         config.remote_networks.clone(),
     );
     manifests.extend(reconciler.manifests().iter().cloned());
@@ -1248,7 +1241,7 @@ mod tests {
         // Generate a trust domain from a realistic CA cert PEM and verify
         // it fits within the 63-character DNS label limit that Istio enforces.
         let fake_pem = "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJALRiMLAh0TTDMA==\n-----END CERTIFICATE-----\n";
-        let domain = super::trust_domain_from_ca(fake_pem);
+        let domain = super::trust_domain_from_ca(fake_pem).expect("should parse test PEM");
         assert!(
             domain.len() <= 63,
             "trust domain '{}' is {} chars, exceeds 63-char limit",
