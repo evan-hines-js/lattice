@@ -226,15 +226,9 @@ pub async fn reconcile_infrastructure(
     }
 
     // Compute trust domain from root CA fingerprint.
-    // If the CA secret doesn't exist yet, skip this reconcile — we must never
-    // configure Istio without a valid trust domain.
-    config.trust_domain = match lattice_infra::bootstrap::read_trust_domain(client).await {
-        Some(td) => Some(td),
-        None => {
-            debug!("Skipping infrastructure reconcile — root CA not available for trust domain");
-            return Ok(());
-        }
-    };
+    // None = CA not available yet; Istio manifests will be skipped and
+    // applied on the next reconcile once the CA exists.
+    config.trust_domain = lattice_infra::bootstrap::read_trust_domain(client).await;
 
     // Populate remote networks for Istio meshNetworks.
     // If CRDs can't be listed, skip the entire reconcile — applying manifests

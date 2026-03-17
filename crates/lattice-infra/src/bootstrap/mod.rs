@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use kube::ResourceExt;
-use tracing::debug;
+use tracing::{debug, info};
 
 use lattice_common::crd::{
     BackupsConfig, BootstrapProvider, CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget,
@@ -288,23 +288,30 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
             health_namespace: None, // CRDs only, no deployments
         });
 
-        // Istio ambient mesh + policies
-        components.push(InfraComponent {
-            name: "istio",
-            version: env!("ISTIO_VERSION"),
-            manifests: generate_istio_manifests(config)?,
-            health_namespace: Some("istio-system"),
-        });
+        // Istio ambient mesh + policies (requires trust domain from root CA).
+        // On first bootstrap the CA doesn't exist yet — skip Istio and let the
+        // next reconcile apply it once the CA is available.
+        if let Some(ref trust_domain) = config.trust_domain {
+            components.push(InfraComponent {
+                name: "istio",
+                version: env!("ISTIO_VERSION"),
+                manifests: generate_istio_manifests(config, trust_domain)?,
+                health_namespace: Some("istio-system"),
+            });
 
-        // East-west gateway + istiod proxy RBAC for multi-cluster
-        let mut ew_manifests = vec![eastwest::generate_eastwest_gateway(&config.cluster_name)];
-        ew_manifests.extend(eastwest::generate_istiod_proxy_rbac());
-        components.push(InfraComponent {
-            name: "eastwest-gateway",
-            version: env!("ISTIO_VERSION"),
-            manifests: ew_manifests,
-            health_namespace: None, // Gateway controller creates deployment async
-        });
+            // East-west gateway + istiod proxy RBAC for multi-cluster
+            let mut ew_manifests =
+                vec![eastwest::generate_eastwest_gateway(&config.cluster_name)];
+            ew_manifests.extend(eastwest::generate_istiod_proxy_rbac());
+            components.push(InfraComponent {
+                name: "eastwest-gateway",
+                version: env!("ISTIO_VERSION"),
+                manifests: ew_manifests,
+                health_namespace: None, // Gateway controller creates deployment async
+            });
+        } else {
+            info!("Skipping Istio — trust domain not yet available (root CA pending)");
+        }
 
         // Cilium network policies
         if !config.skip_cilium_policies {
@@ -612,7 +619,10 @@ pub async fn apply_all_phases(
 /// a `cacerts` Secret in `istio-system`, it uses the intermediate CA from that
 /// Secret to sign workload certificates instead of generating a self-signed CA.
 /// This enables cross-cluster mTLS when all clusters share the same root CA.
-fn generate_istio_manifests(config: &InfrastructureConfig) -> Result<Vec<String>, String> {
+fn generate_istio_manifests(
+    config: &InfrastructureConfig,
+    trust_domain: &str,
+) -> Result<Vec<String>, String> {
     // istio-system needs topology.istio.io/network label for multi-cluster
     let mut manifests = vec![namespace_yaml_with_network(
         "istio-system",
@@ -630,13 +640,9 @@ fn generate_istio_manifests(config: &InfrastructureConfig) -> Result<Vec<String>
         );
     }
 
-    let trust_domain = config
-        .trust_domain
-        .clone()
-        .ok_or("cannot generate Istio manifests without a trust domain — root CA not available")?;
     let reconciler = istio::IstioReconciler::new(
         &config.cluster_name,
-        trust_domain,
+        trust_domain.to_string(),
         config.remote_networks.clone(),
     );
     manifests.extend(reconciler.manifests().iter().cloned());

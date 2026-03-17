@@ -151,8 +151,8 @@ async fn resolve_infra_config(
             if let Some(ref ca) = root_ca {
                 cfg.trust_domain = lattice_infra::bootstrap::trust_domain_from_ca(ca.ca_cert_pem());
             }
-            // trust_domain is None if root CA wasn't available — that's fine for
-            // startup; generate_istio_manifests will error if it needs one.
+            // trust_domain is None if root CA wasn't available — Istio manifests
+            // will be skipped and applied on the next reconcile once CA exists.
             cfg.root_ca = root_ca;
             if let Ok(Some(parent)) = ParentConnectionConfig::read(client).await {
                 cfg.parent_host = Some(parent.endpoint.host);
