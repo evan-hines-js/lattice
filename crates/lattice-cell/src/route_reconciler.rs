@@ -316,7 +316,10 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                 .service
                 .as_ref()
                 .map(|svc| {
-                    svc.ports.iter().map(|(name, ps)| (name.clone(), ps.port)).collect()
+                    svc.ports
+                        .iter()
+                        .map(|(name, ps)| (name.clone(), ps.port))
+                        .collect()
                 })
                 .unwrap_or_default();
 

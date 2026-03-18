@@ -138,7 +138,9 @@ pub async fn handle(sync: &PeerRouteSync, ctx: &CommandContext) {
                 port: svc.port as u16,
                 protocol: svc.protocol.clone(),
                 allowed_services: svc.allowed_services.clone(),
-                service_ports: svc.service_ports.iter()
+                service_ports: svc
+                    .service_ports
+                    .iter()
                     .filter(|(_, &v)| v > 0 && v <= u16::MAX as u32)
                     .map(|(k, &v)| (k.clone(), v as u16))
                     .collect(),

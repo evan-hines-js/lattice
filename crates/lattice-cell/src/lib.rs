@@ -35,8 +35,8 @@ pub use bootstrap::{
 };
 pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};
 pub use connection::{
-    AgentConnection, AgentRegistry, ConnectionNotification, K8sResponseRegistry,
-    KubeconfigProxyConfig, PivotSourceManifests, SendError, SharedAgentRegistry, UnpivotManifests,
+    AgentConnection, AgentRegistry, K8sResponseRegistry, KubeconfigProxyConfig,
+    PivotSourceManifests, SendError, SharedAgentRegistry, UnpivotManifests,
     HEARTBEAT_STALE_THRESHOLD,
 };
 pub use exec_tunnel::{
@@ -48,7 +48,7 @@ pub use k8s_tunnel::{
 pub use kubeconfig::patch_kubeconfig_for_proxy;
 pub use move_sender::GrpcMoveCommandSender;
 pub use parent::{load_or_create_ca, CellServerError, ParentConfig, ParentServers};
-pub use resilient_tunnel::{tunnel_request_resilient, ResilientTunnelConfig, RECONNECT_TIMEOUT};
+pub use resilient_tunnel::tunnel_request;
 pub use resources::{fetch_distributable_resources, ResourceError};
 pub use server::{
     AgentServer, GrpcServerConfig, PeerRouteConfig, SharedPeerRouteConfig, SharedSubtreeRegistry,

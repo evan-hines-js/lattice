@@ -28,9 +28,18 @@ struct ClusterRoutesSpec {
 #[serde(rename_all = "camelCase")]
 struct ClusterRoute {
     service_name: String,
+    service_namespace: String,
     hostname: String,
     address: String,
     port: u16,
+}
+
+impl ClusterRoute {
+    /// Namespace-qualified backend name for HAProxy config.
+    /// Prevents collisions when different namespaces have same-named services.
+    fn backend_name(&self) -> String {
+        format!("{}-{}", self.service_namespace, self.service_name)
+    }
 }
 
 fn render_haproxy_config(routes: &[ClusterRoute]) -> String {
@@ -73,7 +82,7 @@ fn render_haproxy_config(routes: &[ClusterRoute]) -> String {
     cfg.push_str("frontend http_in\n    bind *:80\n");
 
     for route in routes {
-        let acl = route.service_name.replace(['-', '.'], "_");
+        let acl = route.backend_name().replace(['-', '.'], "_");
         cfg.push_str(&format!(
             "    acl host_{acl} hdr(host) -i {}\n",
             route.hostname
@@ -82,10 +91,10 @@ fn render_haproxy_config(routes: &[ClusterRoute]) -> String {
     cfg.push('\n');
 
     for route in routes {
-        let acl = route.service_name.replace(['-', '.'], "_");
+        let acl = route.backend_name().replace(['-', '.'], "_");
         cfg.push_str(&format!(
             "    use_backend {} if host_{acl}\n",
-            route.service_name
+            route.backend_name()
         ));
     }
     cfg.push_str("    default_backend fallback\n\n");
@@ -93,7 +102,9 @@ fn render_haproxy_config(routes: &[ClusterRoute]) -> String {
     for route in routes {
         cfg.push_str(&format!(
             "backend {}\n    server gw {}:{}\n\n",
-            route.service_name, route.address, route.port
+            route.backend_name(),
+            route.address,
+            route.port
         ));
     }
 
@@ -162,7 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let gvk = GroupVersionKind::gvk("lattice.dev", "v1alpha1", "LatticeClusterRoutes");
     let ar = ApiResource::from_gvk(&gvk);
-    let api: Api<DynamicObject> = Api::all_with(client, &ar);
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
 
     let mut stream = watcher::watcher(api, watcher::Config::default()).boxed();
     let mut last_config = String::new();
@@ -175,20 +186,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Event::Apply(_) | Event::Delete(_) | Event::InitDone
                 );
 
-                if let Event::Apply(ref obj) | Event::InitApply(ref obj) = event {
-                    // Collect routes from all CRDs by re-listing
-                    let _ = obj; // trigger rebuild on next flag check
-                }
-
                 if !should_rebuild {
                     continue;
                 }
 
                 // Re-list all route tables to get full picture
-                let gvk = GroupVersionKind::gvk("lattice.dev", "v1alpha1", "LatticeClusterRoutes");
-                let ar = ApiResource::from_gvk(&gvk);
-                let list_api: Api<DynamicObject> =
-                    Api::all_with(Client::try_default().await.unwrap(), &ar);
+                let list_api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
 
                 let mut all_routes = Vec::new();
                 if let Ok(list) = list_api.list(&Default::default()).await {

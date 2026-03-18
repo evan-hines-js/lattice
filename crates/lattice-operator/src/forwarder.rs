@@ -2,17 +2,14 @@
 //!
 //! Implements the K8sRequestForwarder and ExecRequestForwarder traits to enable
 //! agents to forward requests to their child clusters via the gRPC tunnel.
-//!
-//! Uses `AgentRegistry::wait_for_connection()` to wait for child agents that
-//! haven't connected yet (e.g., clusters still provisioning), matching the
-//! resilient tunnel behavior used by the HTTP proxy path.
+//! Fails fast if the agent isn't connected — the client retries.
 
 use lattice_agent::{
     build_k8s_status_response, ExecRequestForwarder, ForwardedExecSession, K8sRequestForwarder,
 };
 use lattice_cell::{
     start_exec_session, tunnel_request_streaming, ExecRequestParams, K8sRequestParams,
-    SharedAgentRegistry, SharedSubtreeRegistry, TunnelError, RECONNECT_TIMEOUT,
+    SharedAgentRegistry, SharedSubtreeRegistry, TunnelError,
 };
 use lattice_common::routing::split_first_hop;
 use lattice_proto::{ExecRequest, KubernetesRequest, KubernetesResponse};
@@ -47,11 +44,11 @@ impl SubtreeForwarder {
         }
     }
 
-    /// Resolve the route to a target cluster, waiting for agent connection if needed.
+    /// Resolve the route to a target cluster, failing fast if agent isn't connected.
     ///
     /// `first_hop` is the direct child cluster name (first segment of the target path).
-    /// Checks the subtree registry for routing info, then waits up to 30 seconds
-    /// for the agent to be connected (handles clusters still provisioning).
+    /// Checks the subtree registry for routing info, then requires the agent to be
+    /// currently connected — returns 503 immediately if not.
     async fn resolve_route(&self, first_hop: &str) -> Result<ResolvedRoute, (u32, String)> {
         let route_info = self
             .subtree_registry
@@ -63,22 +60,10 @@ impl SubtreeForwarder {
             .agent_id
             .ok_or((502, "internal routing error: missing agent_id".to_string()))?;
 
-        // Wait for the agent to connect (up to 30s), handling both
-        // never-connected agents and temporarily disconnected ones
         let command_tx = self
             .agent_registry
-            .wait_for_connection(&agent_id, RECONNECT_TIMEOUT)
-            .await
-            .ok_or_else(|| {
-                (
-                    504,
-                    format!(
-                        "agent '{}' did not connect within {}s",
-                        agent_id,
-                        RECONNECT_TIMEOUT.as_secs()
-                    ),
-                )
-            })?;
+            .get_connected_command_tx(&agent_id)
+            .ok_or_else(|| (503, format!("agent '{}' not connected", agent_id)))?;
 
         Ok(ResolvedRoute {
             agent_id,

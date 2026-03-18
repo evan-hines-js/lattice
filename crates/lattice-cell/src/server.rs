@@ -253,7 +253,9 @@ fn group_subtree_routes_by_cluster(
             port: s.port as u16,
             protocol: s.protocol.clone(),
             allowed_services: s.allowed_services.clone(),
-            service_ports: s.service_ports.iter()
+            service_ports: s
+                .service_ports
+                .iter()
                 .filter(|(_, &v)| v > 0 && v <= u16::MAX as u32)
                 .map(|(k, &v)| (k.clone(), v as u16))
                 .collect(),
@@ -1668,8 +1670,8 @@ mod tests {
                     protocol: "HTTP".to_string(),
                     labels: std::collections::HashMap::new(),
                     allowed_services: vec![],
-                service_ports: Default::default(),
-                    },
+                    service_ports: Default::default(),
+                },
                 lattice_proto::SubtreeService {
                     name: "old-service".to_string(),
                     namespace: "default".to_string(),
@@ -1681,8 +1683,8 @@ mod tests {
                     protocol: "HTTP".to_string(),
                     labels: std::collections::HashMap::new(),
                     allowed_services: vec![],
-                service_ports: Default::default(),
-                    },
+                    service_ports: Default::default(),
+                },
             ],
             is_full_sync: true,
         };
@@ -1720,8 +1722,8 @@ mod tests {
                 protocol: "HTTPS".to_string(),
                 labels: std::collections::HashMap::new(),
                 allowed_services: vec![],
-            service_ports: Default::default(),
-                    }],
+                service_ports: Default::default(),
+            }],
             is_full_sync: false,
         };
 
@@ -1752,8 +1754,8 @@ mod tests {
                     protocol: "HTTPS".to_string(),
                     labels: std::collections::HashMap::new(),
                     allowed_services: vec![],
-                service_ports: Default::default(),
-                    },
+                    service_ports: Default::default(),
+                },
                 lattice_proto::SubtreeService {
                     name: "db".to_string(),
                     namespace: "data".to_string(),
@@ -1765,8 +1767,8 @@ mod tests {
                     protocol: "TCP".to_string(),
                     labels: std::collections::HashMap::new(),
                     allowed_services: vec![],
-                service_ports: Default::default(),
-                    },
+                    service_ports: Default::default(),
+                },
             ],
             is_full_sync: false,
         };
@@ -1794,8 +1796,8 @@ mod tests {
                 protocol: "HTTP".to_string(),
                 labels: std::collections::HashMap::new(),
                 allowed_services: vec![],
-            service_ports: Default::default(),
-                    }],
+                service_ports: Default::default(),
+            }],
             is_full_sync: false,
         };
 

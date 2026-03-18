@@ -18,14 +18,14 @@ flowchart TD
 
     subgraph Backend["Backend Cluster — vmbr1 (10.0.1.0/24)"]
         Agent[Lattice Agent]
-        EW[East-West Gateway\n:15008 HBONE mTLS]
+        GW[Istio Ingress Gateway\n10.0.1.216/28]
         Webapp[webapp]
         Media[media]
     end
 
-    HAProxy -->|HBONE mTLS| EW
-    EW --> Webapp
-    EW --> Media
+    HAProxy -->|HTTP via Host header| GW
+    GW --> Webapp
+    GW --> Media
     Agent -->|outbound gRPC\nheartbeats + routes| Edge
 ```
 
@@ -43,10 +43,10 @@ flowchart TD
 - Route reconciler discovers these + resolves Gateway LB IPs
 - Agent reads LatticeClusterRoutes CRD and heartbeats routes to parent
 - Parent merges child routes into per-child LatticeClusterRoutes CRDs
-- Istio multi-cluster: operator creates remote secrets + headless Service stubs
-  so istiod discovers backend services natively (HBONE mTLS end-to-end)
+- Istio multi-cluster: operator creates remote secrets + Service stubs
+  so istiod discovers backend services natively
 - HAProxy north-south: route-adapter sidecar watches the CRD, renders haproxy.cfg,
-  and routes to backend ingress gateways via their LoadBalancer IPs
+  and routes by Host header to backend ingress gateways via their LoadBalancer IPs
 
 ## Prerequisites
 

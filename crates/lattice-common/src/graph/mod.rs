@@ -162,7 +162,10 @@ impl ServiceNode {
             }
         }
 
-        node.advertised_open = spec.ingress.as_ref().is_some_and(|i| i.has_open_advertise());
+        node.advertised_open = spec
+            .ingress
+            .as_ref()
+            .is_some_and(|i| i.has_open_advertise());
 
         node
     }
@@ -301,7 +304,10 @@ impl ServiceNode {
             egress_rules: spec.egress.clone(),
             service_account: spec.service_account.clone(),
             ambient: spec.ambient,
-            advertised_open: spec.ingress.as_ref().is_some_and(|i| i.has_open_advertise()),
+            advertised_open: spec
+                .ingress
+                .as_ref()
+                .is_some_and(|i| i.has_open_advertise()),
         }
     }
 

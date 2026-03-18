@@ -12,10 +12,9 @@
 //! Updates the `meshNetworks` field in the `istio` ConfigMap so istiod knows
 //! how to reach endpoints on each remote network via the east-west gateway.
 //!
-//! Tokens are requested per-reconcile via the TokenRequest API against a
-//! dedicated `lattice-istiod-proxy` ServiceAccount with read-only RBAC.
-//! Tokens expire after 1 hour; reconcile requeues at half that interval
-//! to keep them fresh.
+//! Tokens are requested per-reconcile via the TokenRequest API against the
+//! `lattice-operator` ServiceAccount. Tokens expire after 24 hours;
+//! reconcile requeues at half that interval to keep them fresh.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -37,8 +36,7 @@ const MANAGED_LABEL: &str = "lattice.dev/remote-secret-managed";
 /// Label on Service stubs so we can track and clean them up.
 const SERVICE_STUB_LABEL: &str = "lattice.dev/service-stub";
 
-/// ServiceAccount dedicated to istiod proxy access (read-only, scoped).
-const TOKEN_EXPIRATION_SECS: i64 = 3600;
+use lattice_common::kube_utils::PROXY_TOKEN_REFRESH_SECS;
 
 /// Context for the remote secret reconciler.
 pub struct RemoteSecretContext {
@@ -129,9 +127,8 @@ pub async fn reconcile(
         "ensured remote secret, mesh network, and service stubs"
     );
 
-    // Requeue at half the token lifetime to refresh before expiry
     Ok(Action::requeue(Duration::from_secs(
-        TOKEN_EXPIRATION_SECS as u64 / 2,
+        PROXY_TOKEN_REFRESH_SECS,
     )))
 }
 

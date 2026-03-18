@@ -3,7 +3,7 @@
 //! Provides trait-based access to kube::Client creation,
 //! enabling dependency injection and mocking for tests.
 
-use lattice_common::kube_utils::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
+use lattice_common::kube_utils::DEFAULT_CONNECT_TIMEOUT;
 
 /// Trait for creating Kubernetes clients
 ///
@@ -16,7 +16,11 @@ pub trait KubeClientProvider: Send + Sync {
     async fn create(&self) -> Result<kube::Client, kube::Error>;
 }
 
-/// Default implementation that creates clients from in-cluster config
+/// Creates clients for proxied K8s API requests (watches + single requests).
+///
+/// No read timeout — watch streams are long-lived and can go minutes without
+/// data on a quiet cluster. A read timeout kills these streams prematurely,
+/// forcing istiod's informers to constantly re-initialize.
 #[derive(Clone, Default)]
 pub struct InClusterClientProvider;
 
@@ -27,7 +31,7 @@ impl KubeClientProvider for InClusterClientProvider {
             .await
             .map_err(kube::Error::InferConfig)?;
         config.connect_timeout = Some(DEFAULT_CONNECT_TIMEOUT);
-        config.read_timeout = Some(DEFAULT_READ_TIMEOUT);
+        config.read_timeout = None;
         kube::Client::try_from(config)
     }
 }

@@ -1,255 +1,51 @@
-//! Resilient K8s API tunneling with automatic reconnection
+//! K8s API tunnel proxy
 //!
-//! Wraps the basic k8s_tunnel functionality to provide:
-//! - Automatic retry on agent connection/reconnection
-//! - Client connection buffering during brief disconnections
-//! - Watch resumption using resourceVersion
-//!
-//! Uses `AgentRegistry::wait_for_connection()` as the single mechanism for
-//! waiting on agent availability — both for never-connected and disconnected agents.
-
-use std::time::Duration;
+//! Transparent proxy for K8s API requests through gRPC agent tunnels.
+//! Fails fast when the agent isn't connected — lets the client (istiod,
+//! CAPI controllers) handle retry with their own backoff logic.
 
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::Response;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use lattice_proto::KubernetesResponse;
 
-use crate::connection::{K8sResponseRegistry, SharedAgentRegistry};
+use crate::connection::SharedAgentRegistry;
 use crate::k8s_tunnel::{
     build_http_response, tunnel_request_streaming, K8sRequestParams, TunnelError, DEFAULT_TIMEOUT,
     RESPONSE_CHANNEL_SIZE,
 };
 
-/// Default timeout for waiting for agent connection
-pub const RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Configuration for resilient tunneling
-#[derive(Clone, Debug)]
-pub struct ResilientTunnelConfig {
-    /// How long to wait for agent connection before giving up
-    pub reconnect_timeout: Duration,
-    /// Whether to enable resilient mode (wait for connection vs fail fast)
-    pub enabled: bool,
-}
-
-impl Default for ResilientTunnelConfig {
-    fn default() -> Self {
-        Self {
-            reconnect_timeout: RECONNECT_TIMEOUT,
-            enabled: true,
-        }
-    }
-}
-
-/// Send a K8s request with automatic retry on agent connection.
+/// Proxy a K8s API request through the agent tunnel.
 ///
-/// For watch requests: Returns a streaming response that survives brief disconnections.
-/// For regular requests: Retries once if agent connects within timeout.
-///
-/// This provides a better user experience by buffering the client connection
-/// during temporary agent disconnections instead of immediately failing.
-pub async fn tunnel_request_resilient(
+/// Fails fast with 503 if the agent isn't connected. For watch requests,
+/// streams the response body directly. When the stream ends (for any
+/// reason), the HTTP response closes and the client reconnects.
+pub async fn tunnel_request(
     registry: &SharedAgentRegistry,
     cluster_name: &str,
     params: K8sRequestParams,
-    config: &ResilientTunnelConfig,
 ) -> Result<Response<Body>, TunnelError> {
+    let command_tx = require_connected_agent(registry, cluster_name)?;
+
     if lattice_proto::is_watch_query(&params.query) {
-        tunnel_watch_resilient(registry, cluster_name, params, config).await
+        tunnel_watch(registry, cluster_name, command_tx, params).await
     } else {
-        tunnel_single_resilient(registry, cluster_name, params, config).await
+        tunnel_single(registry, cluster_name, command_tx, params).await
     }
 }
 
-/// Handle a single (non-watch) request with connection retry
-async fn tunnel_single_resilient(
-    registry: &SharedAgentRegistry,
-    cluster_name: &str,
-    params: K8sRequestParams,
-    config: &ResilientTunnelConfig,
-) -> Result<Response<Body>, TunnelError> {
-    // Fail fast if agent isn't connected. Without this, the proxy accepts
-    // the TCP connection and holds it waiting for the backend — Go's
-    // net/http has no read deadline on the initial request, so reflectors
-    // (e.g. istiod informers) hang forever instead of retrying.
-    let command_tx = get_or_wait_for_connection(registry, cluster_name).await?;
-
-    // First attempt
-    let result = tunnel_and_receive(registry, cluster_name, command_tx, &params).await;
-
-    match result {
-        Ok(response) => Ok(response),
-        Err(e) if config.enabled && is_retryable(&e) => {
-            debug!(
-                cluster = %cluster_name,
-                error = %e,
-                "Request failed, waiting for agent reconnection"
-            );
-
-            // Agent disconnected mid-request — wait for reconnection and retry once
-            let command_tx = registry
-                .wait_for_connection(cluster_name, config.reconnect_timeout)
-                .await
-                .ok_or(TunnelError::Timeout)?;
-
-            info!(cluster = %cluster_name, "Agent reconnected, retrying request");
-            tunnel_and_receive(registry, cluster_name, command_tx, &params).await
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Handle a watch request with reconnection resilience
-///
-/// Creates a streaming response that survives brief disconnections by:
-/// 1. Extracting resourceVersion from each event
-/// 2. On disconnect, waiting for reconnect via `wait_for_connection`
-/// 3. Re-establishing watch from last known resourceVersion
-async fn tunnel_watch_resilient(
-    registry: &SharedAgentRegistry,
-    cluster_name: &str,
-    params: K8sRequestParams,
-    config: &ResilientTunnelConfig,
-) -> Result<Response<Body>, TunnelError> {
-    let (body_tx, body_rx) =
-        mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(RESPONSE_CHANNEL_SIZE);
-
-    // The spawned task sends back the content type from the first response chunk
-    // so we can set the correct Content-Type header (may be protobuf, not JSON).
-    let (ct_tx, ct_rx) = tokio::sync::oneshot::channel::<String>();
-
-    let registry = registry.clone();
-    let cluster_name = cluster_name.to_string();
-    let reconnect_timeout = config.reconnect_timeout;
-    let resilient_enabled = config.enabled;
-
-    tokio::spawn(async move {
-        let mut current_params = params;
-        let mut ct_tx = Some(ct_tx);
-        let mut is_first_attempt = true;
-
-        loop {
-            // On the first attempt, fail fast if agent isn't connected — the
-            // caller's TCP connection is already accepted, and holding it open
-            // while waiting causes Go reflectors to hang forever.
-            // On subsequent attempts (reconnect after stream break), wait.
-            let command_tx = if is_first_attempt {
-                is_first_attempt = false;
-                match registry.get_connected_command_tx(&cluster_name) {
-                    Some(tx) => tx,
-                    None => {
-                        warn!(cluster = %cluster_name, "Agent not connected, failing watch immediately");
-                        break;
-                    }
-                }
-            } else {
-                match registry
-                    .wait_for_connection(&cluster_name, reconnect_timeout)
-                    .await
-                {
-                    Some(tx) => tx,
-                    None => {
-                        warn!(cluster = %cluster_name, "Agent connection timeout, ending watch");
-                        break;
-                    }
-                }
-            };
-
-            // Start watch stream
-            let (request_id, response_rx) = match tunnel_request_streaming(
-                &registry,
-                &cluster_name,
-                command_tx,
-                current_params.clone(),
-            )
-            .await
-            {
-                Ok(pair) => pair,
-                Err(_) if !resilient_enabled => break,
-                Err(e) => {
-                    debug!(
-                        cluster = %cluster_name,
-                        error = %e,
-                        "Watch request failed, waiting for agent reconnection"
-                    );
-                    continue; // Loop back to wait_for_connection
-                }
-            };
-
-            // Stream responses to client, tracking resourceVersion.
-            // On the first chunk, send the content type back to the caller.
-            let disconnected =
-                stream_watch_responses(response_rx, &body_tx, &mut current_params, &mut ct_tx)
-                    .await;
-
-            // Clean up the stale pending_k8s_responses entry for this watch.
-            // When the agent disconnects mid-watch, the entry is orphaned — the
-            // receiver is dropped but the registry still holds the sender under
-            // the old request_id. Without this, entries accumulate on every
-            // reconnect cycle.
-            registry.take_pending_k8s_response(&request_id).await;
-
-            if !disconnected || !resilient_enabled {
-                break;
-            }
-
-            info!(
-                cluster = %cluster_name,
-                "Watch stream interrupted, waiting for agent reconnection"
-            );
-            // Loop back to wait_for_connection
-        }
-    });
-
-    // Wait for the content type from the first response chunk
-    let content_type = ct_rx
-        .await
-        .unwrap_or_else(|_| "application/json".to_string());
-
-    let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx));
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", content_type)
-        .body(body)
-        .map_err(|e| TunnelError::ResponseBuild(e.to_string()))
-}
-
-/// Get command channel, failing fast if agent isn't connected.
-///
-/// In resilient mode, returns the live channel if connected, or 503 if not.
-/// In non-resilient mode, also fails immediately.
-///
-/// This prevents the proxy from holding TCP connections open while waiting
-/// for a backend that isn't there — Go's net/http has no read deadline on
-/// initial requests, so holding the connection causes informer hangs.
-async fn get_or_wait_for_connection(
-    registry: &SharedAgentRegistry,
-    cluster_name: &str,
-) -> Result<mpsc::Sender<lattice_proto::CellCommand>, TunnelError> {
-    // Always fail fast on the initial request — don't hold the caller's
-    // TCP connection open waiting for a backend that may never arrive.
-    registry
-        .get_connected_command_tx(cluster_name)
-        .ok_or_else(|| {
-            debug!(cluster = %cluster_name, "Agent not connected, returning 503");
-            TunnelError::AgentNotConnected(cluster_name.to_string())
-        })
-}
-
-/// Execute tunnel request and receive single response
-async fn tunnel_and_receive(
+/// Handle a single (non-watch) request
+async fn tunnel_single(
     registry: &SharedAgentRegistry,
     cluster_name: &str,
     command_tx: mpsc::Sender<lattice_proto::CellCommand>,
-    params: &K8sRequestParams,
+    params: K8sRequestParams,
 ) -> Result<Response<Body>, TunnelError> {
     let (_request_id, mut response_rx) =
-        tunnel_request_streaming(registry, cluster_name, command_tx, params.clone()).await?;
+        tunnel_request_streaming(registry, cluster_name, command_tx, params).await?;
 
     match tokio::time::timeout(DEFAULT_TIMEOUT, response_rx.recv()).await {
         Ok(Some(response)) => build_http_response(&response),
@@ -258,102 +54,101 @@ async fn tunnel_and_receive(
     }
 }
 
-/// Check if an error is retryable (agent disconnected mid-request)
-fn is_retryable(e: &TunnelError) -> bool {
-    matches!(e, TunnelError::ChannelClosed | TunnelError::SendFailed(_))
+/// Handle a watch request — stream the response body directly.
+///
+/// Waits for the first chunk to extract status code and content type,
+/// then streams remaining chunks into the HTTP response body. When the
+/// agent stream ends (disconnect, error, or normal close), the body
+/// channel drops and the client sees EOF.
+async fn tunnel_watch(
+    registry: &SharedAgentRegistry,
+    cluster_name: &str,
+    command_tx: mpsc::Sender<lattice_proto::CellCommand>,
+    params: K8sRequestParams,
+) -> Result<Response<Body>, TunnelError> {
+    let (_request_id, mut response_rx) =
+        tunnel_request_streaming(registry, cluster_name, command_tx, params).await?;
+
+    // Wait for the first chunk to determine status + content type
+    let first = response_rx.recv().await.ok_or(TunnelError::ChannelClosed)?;
+
+    let status = if first.status_code != 0 {
+        first.status_code as u16
+    } else {
+        200
+    };
+    let content_type = if first.content_type.is_empty() {
+        "application/json".to_string()
+    } else {
+        first.content_type.clone()
+    };
+
+    let (body_tx, body_rx) =
+        mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(RESPONSE_CHANNEL_SIZE);
+
+    // Forward the first chunk's body
+    if !first.body.is_empty() {
+        let _ = body_tx.send(Ok(axum::body::Bytes::from(first.body))).await;
+    }
+
+    // Stream remaining chunks in the background
+    if !first.stream_end {
+        tokio::spawn(async move {
+            forward_watch_stream(response_rx, body_tx).await;
+        });
+    }
+
+    let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx));
+
+    Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
+        .header("Content-Type", content_type)
+        .body(body)
+        .map_err(|e| TunnelError::ResponseBuild(e.to_string()))
 }
 
-/// Stream watch responses to client, tracking resourceVersion.
-///
-/// On the first chunk, sends the content type through `ct_tx` so the
-/// caller can set the correct Content-Type header.
-///
-/// Returns true if disconnected (should retry), false if stream ended normally.
-async fn stream_watch_responses(
+/// Forward watch response chunks to the HTTP body channel.
+/// Returns when the stream ends (for any reason).
+async fn forward_watch_stream(
     mut response_rx: mpsc::Receiver<KubernetesResponse>,
-    body_tx: &mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
-    params: &mut K8sRequestParams,
-    ct_tx: &mut Option<tokio::sync::oneshot::Sender<String>>,
-) -> bool {
+    body_tx: mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
+) {
     while let Some(response) = response_rx.recv().await {
-        // Send content type from the first chunk (only once)
-        if let Some(tx) = ct_tx.take() {
-            let ct = if response.content_type.is_empty() {
-                "application/json".to_string()
-            } else {
-                response.content_type.clone()
-            };
-            let _ = tx.send(ct);
-        }
-        // Extract resourceVersion from watch events for resume
-        if let Some(rv) = extract_resource_version(&response.body) {
-            update_resource_version_in_query(&mut params.query, &rv);
+        if !response.error.is_empty() {
+            warn!(error = %response.error, "Watch error from agent");
         }
 
-        // Forward to client
         if !response.body.is_empty()
             && body_tx
                 .send(Ok(axum::body::Bytes::from(response.body)))
                 .await
                 .is_err()
         {
-            // Client disconnected
-            return false;
-        }
-
-        if !response.error.is_empty() {
-            warn!(error = %response.error, "Watch error from agent");
+            break; // Client disconnected
         }
 
         if response.stream_end {
-            return false; // Normal end
-        }
-    }
-
-    // Channel closed = agent disconnected
-    true
-}
-
-/// Extract resourceVersion from a watch event JSON
-///
-/// Watch events look like: {"type":"ADDED","object":{"metadata":{"resourceVersion":"12345",...},...}}
-fn extract_resource_version(body: &[u8]) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    v.get("object")?
-        .get("metadata")?
-        .get("resourceVersion")?
-        .as_str()
-        .map(|s| s.to_string())
-}
-
-/// Update resourceVersion in query string for watch resume
-fn update_resource_version_in_query(query: &mut String, resource_version: &str) {
-    let mut params: Vec<(String, String)> = query
-        .split('&')
-        .filter(|s| !s.is_empty())
-        .filter_map(|kv| {
-            let mut parts = kv.splitn(2, '=');
-            Some((parts.next()?.to_string(), parts.next()?.to_string()))
-        })
-        .collect();
-
-    let mut found = false;
-    for (k, v) in &mut params {
-        if k == "resourceVersion" {
-            *v = resource_version.to_string();
-            found = true;
             break;
         }
     }
-    if !found {
-        params.push(("resourceVersion".to_string(), resource_version.to_string()));
-    }
+    // body_tx drops here → client sees EOF → informer reconnects
+}
 
-    *query = params
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, v))
-        .collect::<Vec<_>>()
-        .join("&");
+/// Return the command channel if the agent is connected, or 503 immediately.
+///
+/// Never waits. Prevents the proxy from holding TCP connections open for a
+/// backend that isn't there — Go's net/http has no read deadline on initial
+/// requests, so holding the connection causes informer hangs.
+fn require_connected_agent(
+    registry: &SharedAgentRegistry,
+    cluster_name: &str,
+) -> Result<mpsc::Sender<lattice_proto::CellCommand>, TunnelError> {
+    registry
+        .get_connected_command_tx(cluster_name)
+        .ok_or_else(|| {
+            debug!(cluster = %cluster_name, "Agent not connected, returning 503");
+            TunnelError::AgentNotConnected(cluster_name.to_string())
+        })
 }
 
 #[cfg(test)]
@@ -361,54 +156,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_resource_version() {
-        let event =
-            br#"{"type":"ADDED","object":{"metadata":{"resourceVersion":"12345","name":"test"}}}"#;
-        assert_eq!(extract_resource_version(event), Some("12345".to_string()));
-    }
-
-    #[test]
-    fn test_extract_resource_version_no_rv() {
-        let event = br#"{"type":"ERROR","object":{}}"#;
-        assert_eq!(extract_resource_version(event), None);
-    }
-
-    #[test]
-    fn test_update_resource_version_in_query_existing() {
-        let mut query = "watch=true&resourceVersion=100".to_string();
-        update_resource_version_in_query(&mut query, "200");
-        assert!(query.contains("resourceVersion=200"));
-        assert!(!query.contains("resourceVersion=100"));
-    }
-
-    #[test]
-    fn test_update_resource_version_in_query_new() {
-        let mut query = "watch=true".to_string();
-        update_resource_version_in_query(&mut query, "300");
-        assert!(query.contains("resourceVersion=300"));
-        assert!(query.contains("watch=true"));
-    }
-
-    #[test]
-    fn test_update_resource_version_in_query_empty() {
-        let mut query = String::new();
-        update_resource_version_in_query(&mut query, "400");
-        assert_eq!(query, "resourceVersion=400");
-    }
-
-    #[test]
-    fn test_is_retryable() {
-        assert!(is_retryable(&TunnelError::ChannelClosed));
-        assert!(is_retryable(&TunnelError::SendFailed("test".into())));
-        assert!(!is_retryable(&TunnelError::UnknownCluster("test".into())));
-        assert!(!is_retryable(&TunnelError::Timeout));
-        assert!(!is_retryable(&TunnelError::AgentError("test".into())));
-    }
-
-    #[test]
-    fn test_resilient_config_default() {
-        let config = ResilientTunnelConfig::default();
-        assert_eq!(config.reconnect_timeout, RECONNECT_TIMEOUT);
-        assert!(config.enabled);
+    fn test_tunnel_error_status_codes() {
+        assert_eq!(
+            TunnelError::AgentNotConnected("test".into()).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            TunnelError::Timeout.status_code(),
+            StatusCode::GATEWAY_TIMEOUT
+        );
+        assert_eq!(
+            TunnelError::ChannelClosed.status_code(),
+            StatusCode::BAD_GATEWAY
+        );
     }
 }

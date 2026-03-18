@@ -136,7 +136,11 @@ pub async fn build_service_controllers(
     // doing so would generate incorrect SPIFFE principals and Istio policies.
     let trust_domain = lattice_infra::bootstrap::read_trust_domain(&client)
         .await
-        .ok_or_else(|| anyhow::anyhow!("root CA secret not available — cannot compute trust domain for SPIFFE principals"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "root CA secret not available — cannot compute trust domain for SPIFFE principals"
+            )
+        })?;
 
     let mut service_ctx = ServiceContext::new(
         svc_kube_client,
@@ -288,8 +292,7 @@ pub async fn build_service_controllers(
                     // Sync remote services to graph BEFORE triggering re-reconcile.
                     // Without this, MeshMember reconcile runs with stale graph state
                     // and generates CNPs missing cross-cluster HBONE egress rules.
-                    let source_cluster =
-                        routes.metadata.name.as_deref().unwrap_or("unknown");
+                    let source_cluster = routes.metadata.name.as_deref().unwrap_or("unknown");
                     graph.sync_remote_services(source_cluster, &routes.spec.routes);
                     all_mesh_member_refs(&graph)
                 }

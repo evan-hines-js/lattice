@@ -29,7 +29,11 @@ fn tagged_to_proto(routes: &[TaggedRoute]) -> Vec<SubtreeService> {
             protocol: r.protocol.clone(),
             labels: Default::default(),
             allowed_services: r.allowed_services.clone(),
-            service_ports: r.service_ports.iter().map(|(k, &v)| (k.clone(), v as u32)).collect(),
+            service_ports: r
+                .service_ports
+                .iter()
+                .map(|(k, &v)| (k.clone(), v as u32))
+                .collect(),
         })
         .collect()
 }

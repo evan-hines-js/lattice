@@ -538,44 +538,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cilium_hbone_ingress_and_egress_for_mesh_service() {
+    fn ambient_service_always_has_hbone_egress() {
         let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
+        // api has no outbound deps — should still get HBONE egress
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
         graph.put_service(ns, "api", &api_spec);
 
-        let gateway_spec = make_service_spec(vec!["api"], vec![]);
-        graph.put_service(ns, "gateway", &gateway_spec);
-
         let compiler = PolicyCompiler::new(&graph, vec![]);
-
-        // Check api (has inbound callers, no outbound)
         let api_cnp = &compiler.compile("api", ns).cilium_policies[0];
-        assert_eq!(
-            api_cnp.spec.ingress.len(),
-            1,
-            "api should have HBONE ingress"
-        );
-        let ingress = &api_cnp.spec.ingress[0];
-        assert!(ingress.from_entities.contains(&"cluster".to_string()));
-        assert!(ingress.to_ports[0].ports[0].port == mesh::HBONE_PORT.to_string());
-        assert!(
-            !api_cnp
-                .spec
-                .egress
-                .iter()
-                .any(|e| e.to_ports.iter().any(|pr| pr
-                    .ports
-                    .iter()
-                    .any(|p| p.port == mesh::HBONE_PORT.to_string()))),
-            "api should not have HBONE egress (no outbound deps)"
-        );
 
-        // Check gateway (has outbound deps, no inbound callers)
-        let gw_cnp = &compiler.compile("gateway", ns).cilium_policies[0];
-        assert!(gw_cnp.spec.ingress.is_empty(), "gateway has no callers");
-        let hbone_egress = gw_cnp.spec.egress.iter().find(|e| {
+        let has_hbone_egress = api_cnp.spec.egress.iter().any(|e| {
             e.to_ports.iter().any(|pr| {
                 pr.ports
                     .iter()
@@ -583,8 +557,8 @@ pub(crate) mod tests {
             })
         });
         assert!(
-            hbone_egress.is_some(),
-            "gateway should have HBONE egress for local deps"
+            has_hbone_egress,
+            "ambient service should always have HBONE egress"
         );
     }
 
@@ -1167,7 +1141,7 @@ pub(crate) mod tests {
     // =========================================================================
 
     #[test]
-    fn ambient_to_non_ambient_produces_direct_egress_no_hbone() {
+    fn ambient_to_non_ambient_produces_direct_egress() {
         use lattice_common::crd::PeerAuth;
 
         let graph = ServiceGraph::new("lattice.test");
@@ -1200,19 +1174,6 @@ pub(crate) mod tests {
 
         let compiler = PolicyCompiler::new(&graph, vec![]);
         let cnp = &compiler.compile("kthena-router", ns).cilium_policies[0];
-
-        let hbone_port = mesh::HBONE_PORT.to_string();
-
-        // No HBONE egress (only callee is non-ambient)
-        let has_hbone_egress = cnp.spec.egress.iter().any(|e| {
-            e.to_ports
-                .iter()
-                .any(|pr| pr.ports.iter().any(|p| p.port == hbone_port))
-        });
-        assert!(
-            !has_hbone_egress,
-            "should not have HBONE egress when only callee is non-ambient"
-        );
 
         // Direct egress rule to serving's port 8000 with label selector
         let direct_egress = cnp

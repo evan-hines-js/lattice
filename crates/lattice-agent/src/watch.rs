@@ -375,7 +375,8 @@ mod tests {
 
     #[test]
     fn test_build_stream_chunk_response() {
-        let resp = build_stream_chunk_response("req-123", b"test data".to_vec(), "application/json");
+        let resp =
+            build_stream_chunk_response("req-123", b"test data".to_vec(), "application/json");
 
         assert_eq!(resp.request_id, "req-123");
         assert_eq!(resp.status_code, 200);

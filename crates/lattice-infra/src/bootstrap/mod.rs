@@ -189,7 +189,9 @@ pub async fn read_trust_domain(client: &kube::Client) -> Option<String> {
 ///
 /// Verify with: `openssl x509 -in ca.crt -fingerprint -sha256 -noout`
 pub fn trust_domain_from_ca(ca_cert_pem: &str) -> Option<String> {
-    let der = crate::pki::parse_pem(ca_cert_pem).ok().filter(|d| !d.is_empty())?;
+    let der = crate::pki::parse_pem(ca_cert_pem)
+        .ok()
+        .filter(|d| !d.is_empty())?;
     let hash = lattice_common::kube_utils::sha256(&der);
     // 27 bytes = 54 hex chars. Total: lattice.(54) = 62 chars (under 63 limit)
     let hex: String = hash.iter().take(27).map(|b| format!("{:02x}", b)).collect();
@@ -216,8 +218,8 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             monitoring: cluster.spec.monitoring.clone(),
             backups: cluster.spec.backups.clone(),
             network_topology: cluster.spec.network_topology.clone(),
-            root_ca: None, // Set by caller when CA is available
-            trust_domain: None, // Set by caller from root CA
+            root_ca: None,         // Set by caller when CA is available
+            trust_domain: None,    // Set by caller from root CA
             remote_networks: None, // Set by caller from LatticeClusterRoutes
         }
     }
@@ -300,8 +302,7 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
             });
 
             // East-west gateway + istiod proxy RBAC for multi-cluster
-            let mut ew_manifests =
-                vec![eastwest::generate_eastwest_gateway(&config.cluster_name)];
+            let mut ew_manifests = vec![eastwest::generate_eastwest_gateway(&config.cluster_name)];
             ew_manifests.extend(eastwest::generate_istiod_proxy_rbac());
             components.push(InfraComponent {
                 name: "eastwest-gateway",

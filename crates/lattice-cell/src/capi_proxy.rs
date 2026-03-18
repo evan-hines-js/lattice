@@ -28,7 +28,8 @@ use axum_server::tls_rustls::RustlsConfig;
 use tracing::{debug, info, warn};
 
 use crate::connection::SharedAgentRegistry;
-use crate::k8s_tunnel::{tunnel_request, K8sRequestParams, TunnelError};
+use crate::k8s_tunnel::{K8sRequestParams, TunnelError};
+use crate::resilient_tunnel::tunnel_request;
 
 /// Proxy server configuration
 #[derive(Clone)]
@@ -50,10 +51,6 @@ struct ProxyState {
 /// Error type for proxy operations
 #[derive(Debug, thiserror::Error)]
 pub enum CapiProxyError {
-    /// Agent not connected
-    #[error("agent not connected for cluster: {0}")]
-    AgentNotConnected(String),
-
     /// Method not allowed (non-read operation)
     #[error("method not allowed: {0}")]
     MethodNotAllowed(String),
@@ -74,9 +71,6 @@ pub enum CapiProxyError {
 impl IntoResponse for CapiProxyError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            CapiProxyError::AgentNotConnected(_) => {
-                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
-            }
             CapiProxyError::MethodNotAllowed(_) => {
                 (StatusCode::METHOD_NOT_ALLOWED, self.to_string())
             }
@@ -175,17 +169,6 @@ async fn proxy_handler(
         return Err(CapiProxyError::MethodNotAllowed(method.to_string()));
     }
 
-    // Look up agent in registry — forward whenever a tunnel exists,
-    // regardless of pivot state. CAPI needs ongoing access to child
-    // clusters even after pivot for reconciliation.
-    let agent = state.registry.get(cluster_name).ok_or_else(|| {
-        debug!(cluster = %cluster_name, "Agent not connected");
-        CapiProxyError::AgentNotConnected(cluster_name.clone())
-    })?;
-
-    let command_tx = agent.command_tx.clone();
-    drop(agent);
-
     // Build the API path
     let api_path = if params.path.is_empty() {
         "/".to_string()
@@ -195,12 +178,9 @@ async fn proxy_handler(
         format!("/{}", params.path)
     };
 
-    // Use shared tunnel logic
-    // Source identity is the system (CAPI controller) since this is the pre-pivot proxy
     let result = tunnel_request(
         &state.registry,
         cluster_name,
-        command_tx,
         K8sRequestParams {
             method: method.to_string(),
             path: api_path,
@@ -240,13 +220,14 @@ mod tests {
 
     #[test]
     fn test_proxy_error_response() {
-        let error = CapiProxyError::AgentNotConnected("test".to_string());
-        let response = error.into_response();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-
         let error = CapiProxyError::MethodNotAllowed("POST".to_string());
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        // AgentNotConnected flows through as TunnelError → 503
+        let error = CapiProxyError::Tunnel(TunnelError::AgentNotConnected("test".to_string()));
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]

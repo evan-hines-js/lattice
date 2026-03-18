@@ -122,6 +122,77 @@ pub(crate) fn build_tcp_port_rules(ports: &[u16]) -> Vec<CiliumPortRule> {
     }
 }
 
+/// Ingress rule for permissive ports (any in-cluster source).
+///
+/// Uses `fromEntities: [cluster]` because empty endpoint selectors in
+/// namespaced CNPs only match same-namespace pods. Permissive ports accept
+/// traffic from non-mesh callers in other namespaces.
+fn permissive_port_ingress(ports: &[u16]) -> Option<CiliumIngressRule> {
+    if ports.is_empty() {
+        return None;
+    }
+    Some(CiliumIngressRule {
+        from_entities: vec!["cluster".to_string()],
+        to_ports: build_tcp_port_rules(ports),
+        ..Default::default()
+    })
+}
+
+/// Ingress rule for webhook ports (kube-apiserver + external callers).
+///
+/// kube-apiserver webhook calls go through kube-proxy DNAT, so Cilium sees
+/// the source identity as remote-node (cross-node) or host (same-node).
+/// "world" is needed for child cluster nodes connecting over real networks.
+/// "cluster" covers in-cluster cross-namespace callers.
+fn webhook_port_ingress(ports: &[u16]) -> Option<CiliumIngressRule> {
+    if ports.is_empty() {
+        return None;
+    }
+    Some(CiliumIngressRule {
+        from_entities: vec![
+            "cluster".to_string(),
+            "remote-node".to_string(),
+            "kube-apiserver".to_string(),
+            "host".to_string(),
+            "world".to_string(),
+        ],
+        to_ports: build_tcp_port_rules(ports),
+        ..Default::default()
+    })
+}
+
+/// Convert spec egress rules (entity, CIDR, FQDN) to Cilium egress rules.
+fn spec_egress_rules(service: &ServiceNode) -> Vec<CiliumEgressRule> {
+    service
+        .egress_rules
+        .iter()
+        .filter_map(|rule| {
+            let to_ports = build_tcp_port_rules(&rule.ports);
+            match &rule.target {
+                EgressTarget::Entity(entity) => Some(CiliumEgressRule {
+                    to_entities: vec![entity.clone()],
+                    to_ports,
+                    ..Default::default()
+                }),
+                EgressTarget::Cidr(cidr) => Some(CiliumEgressRule {
+                    to_cidr: vec![cidr.clone()],
+                    to_ports,
+                    ..Default::default()
+                }),
+                EgressTarget::Fqdn(fqdn) => Some(CiliumEgressRule {
+                    to_fqdns: vec![FqdnSelector {
+                        match_name: Some(fqdn.clone()),
+                        match_pattern: None,
+                    }],
+                    to_ports,
+                    ..Default::default()
+                }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 // =============================================================================
 // PolicyCompiler — Cilium policy for mesh members
 // =============================================================================
@@ -143,47 +214,17 @@ impl<'a> PolicyCompiler<'a> {
 
         let mut ingress_rules = Vec::new();
 
-        // Direct TCP ingress for broadly permissive ports (any source).
-        // Uses `fromEntities: [cluster]` instead of `fromEndpoints: [{}]` because
-        // empty endpoint selectors in namespaced CNPs only match same-namespace pods.
-        // Permissive ports accept traffic from non-mesh callers in other namespaces
-        // (e.g., CAPI controllers in capi-system reaching the proxy on port 8081).
-        let broad_ports = service.permissive_port_numbers();
-        if !broad_ports.is_empty() {
-            ingress_rules.push(CiliumIngressRule {
-                from_entities: vec!["cluster".to_string()],
-                to_ports: build_tcp_port_rules(&broad_ports),
-                ..Default::default()
-            });
-        }
-
-        // Direct TCP ingress for webhook ports.
-        // kube-apiserver webhook calls go through kube-proxy DNAT, so Cilium sees
-        // the source identity as remote-node (cross-node) or host (same-node),
-        // not kube-apiserver. "world" is needed for child cluster nodes connecting
-        // over real networks (Proxmox, AWS, OpenStack).
-        // "cluster" covers in-cluster cross-namespace callers (e.g., CAPI controllers
-        // in capi-system reaching the proxy on port 8081, istiod reaching the auth
-        // proxy for multi-cluster service discovery).
-        let webhook_ports = service.webhook_port_numbers();
-        if !webhook_ports.is_empty() {
-            ingress_rules.push(CiliumIngressRule {
-                from_entities: vec![
-                    "cluster".to_string(),
-                    "remote-node".to_string(),
-                    "kube-apiserver".to_string(),
-                    "host".to_string(),
-                    "world".to_string(),
-                ],
-                to_ports: build_tcp_port_rules(&webhook_ports),
-                ..Default::default()
-            });
-        }
+        ingress_rules.extend(permissive_port_ingress(&service.permissive_port_numbers()));
+        ingress_rules.extend(webhook_port_ingress(&service.webhook_port_numbers()));
 
         // HBONE ingress: ztunnel wraps all inbound traffic on port 15008 in ambient mesh.
         // Required whenever this pod accepts any inbound traffic (mesh callers, webhooks,
         // permissive ports, or peer traffic).
-        if !inbound_edges.is_empty() || !ingress_rules.is_empty() || service.allow_peer_traffic || service.advertised_open {
+        if !inbound_edges.is_empty()
+            || !ingress_rules.is_empty()
+            || service.allow_peer_traffic
+            || service.advertised_open
+        {
             ingress_rules.insert(0, hbone_ingress_rule());
         }
 
@@ -208,14 +249,10 @@ impl<'a> PolicyCompiler<'a> {
         };
         egress_rules.push(dns_egress_rule(fqdn_rules));
 
-        // HBONE egress for outbound mesh dependencies to ambient callees,
-        // external FQDN egress, or peer traffic
-        let has_ambient_outbound = outbound_edges.iter().any(|e| {
-            self.graph
-                .get_service(&e.callee_namespace, &e.callee_name)
-                .is_some_and(|c| c.ambient)
-        });
-        if has_ambient_outbound || has_fqdn_egress || service.allow_peer_traffic {
+        // HBONE egress: always allow for ambient services. HBONE is mTLS on
+        // port 15008 — gating it on graph state causes flapping when remote
+        // services are transiently removed. Istio enforces identity at L7.
+        if service.ambient {
             egress_rules.push(hbone_egress_rule());
         }
 
@@ -250,38 +287,7 @@ impl<'a> PolicyCompiler<'a> {
             }
         }
 
-        // Non-mesh egress rules from spec (entity, CIDR, FQDN)
-        for rule in &service.egress_rules {
-            let to_ports = build_tcp_port_rules(&rule.ports);
-
-            match &rule.target {
-                EgressTarget::Entity(entity) => {
-                    egress_rules.push(CiliumEgressRule {
-                        to_entities: vec![entity.clone()],
-                        to_ports,
-                        ..Default::default()
-                    });
-                }
-                EgressTarget::Cidr(cidr) => {
-                    egress_rules.push(CiliumEgressRule {
-                        to_cidr: vec![cidr.clone()],
-                        to_ports,
-                        ..Default::default()
-                    });
-                }
-                EgressTarget::Fqdn(fqdn) => {
-                    egress_rules.push(CiliumEgressRule {
-                        to_fqdns: vec![FqdnSelector {
-                            match_name: Some(fqdn.clone()),
-                            match_pattern: None,
-                        }],
-                        to_ports,
-                        ..Default::default()
-                    });
-                }
-                _ => {}
-            }
-        }
+        egress_rules.extend(spec_egress_rules(service));
 
         CiliumNetworkPolicy::new(
             ObjectMeta::new(
@@ -317,36 +323,8 @@ impl<'a> PolicyCompiler<'a> {
             });
         }
 
-        // Direct TCP ingress for broadly permissive ports (any source).
-        // Uses `fromEntities: [cluster]` instead of `fromEndpoints: [{}]` because
-        // empty endpoint selectors in namespaced CNPs only match same-namespace pods.
-        // Permissive ports accept traffic from non-mesh callers in other namespaces
-        // (e.g., CAPI controllers in capi-system reaching the proxy on port 8081).
-        let broad_ports = service.permissive_port_numbers();
-        if !broad_ports.is_empty() {
-            ingress_rules.push(CiliumIngressRule {
-                from_entities: vec!["cluster".to_string()],
-                to_ports: build_tcp_port_rules(&broad_ports),
-                ..Default::default()
-            });
-        }
-
-        // Direct TCP ingress for webhook ports (external + in-cluster).
-        // Single rule with all entities — "cluster" for cross-namespace in-cluster callers.
-        let webhook_ports = service.webhook_port_numbers();
-        if !webhook_ports.is_empty() {
-            ingress_rules.push(CiliumIngressRule {
-                from_entities: vec![
-                    "cluster".to_string(),
-                    "remote-node".to_string(),
-                    "kube-apiserver".to_string(),
-                    "host".to_string(),
-                    "world".to_string(),
-                ],
-                to_ports: build_tcp_port_rules(&webhook_ports),
-                ..Default::default()
-            });
-        }
+        ingress_rules.extend(permissive_port_ingress(&service.permissive_port_numbers()));
+        ingress_rules.extend(webhook_port_ingress(&service.webhook_port_numbers()));
 
         // Bilateral agreement callers: label-based ingress with port restrictions
         let inbound_edges = self
@@ -387,37 +365,7 @@ impl<'a> PolicyCompiler<'a> {
             });
         }
 
-        // Non-mesh egress rules (entity, CIDR, FQDN)
-        for rule in &service.egress_rules {
-            let to_ports = build_tcp_port_rules(&rule.ports);
-            match &rule.target {
-                EgressTarget::Entity(entity) => {
-                    egress_rules.push(CiliumEgressRule {
-                        to_entities: vec![entity.clone()],
-                        to_ports,
-                        ..Default::default()
-                    });
-                }
-                EgressTarget::Cidr(cidr) => {
-                    egress_rules.push(CiliumEgressRule {
-                        to_cidr: vec![cidr.clone()],
-                        to_ports,
-                        ..Default::default()
-                    });
-                }
-                EgressTarget::Fqdn(fqdn) => {
-                    egress_rules.push(CiliumEgressRule {
-                        to_fqdns: vec![FqdnSelector {
-                            match_name: Some(fqdn.clone()),
-                            match_pattern: None,
-                        }],
-                        to_ports,
-                        ..Default::default()
-                    });
-                }
-                _ => {}
-            }
-        }
+        egress_rules.extend(spec_egress_rules(service));
 
         CiliumNetworkPolicy::new(
             ObjectMeta::new(

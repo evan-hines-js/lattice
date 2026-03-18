@@ -9,16 +9,14 @@ use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::Response;
 use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
-use lattice_common::metrics::{ProxyStatus, ProxyTimer};
 use lattice_proto::{
     cell_command, is_watch_query, CellCommand, KubernetesRequest, KubernetesResponse,
 };
 
 use crate::connection::{K8sResponseRegistry, SharedAgentRegistry};
-use crate::resilient_tunnel::RECONNECT_TIMEOUT;
 
 /// Default timeout for non-watch requests
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -66,39 +64,6 @@ pub async fn tunnel_request_streaming(
     send_request(registry, cluster_name, command_tx, params, is_watch).await
 }
 
-/// Send a K8s API request through the gRPC tunnel and wait for HTTP response.
-///
-/// For watch requests, returns a streaming HTTP response body.
-/// For regular requests, returns a single HTTP response.
-pub async fn tunnel_request(
-    registry: &SharedAgentRegistry,
-    cluster_name: &str,
-    command_tx: mpsc::Sender<CellCommand>,
-    params: K8sRequestParams,
-) -> Result<Response<Body>, TunnelError> {
-    let timer = ProxyTimer::start(cluster_name, &params.method);
-    let is_watch = is_watch_query(&params.query);
-    let (_request_id, response_rx) =
-        send_request(registry, cluster_name, command_tx, params, is_watch).await?;
-
-    let result = if is_watch {
-        build_streaming_http_response(response_rx).await
-    } else {
-        receive_single_response(cluster_name, response_rx).await
-    };
-
-    match &result {
-        Ok(response) => {
-            timer.complete(ProxyStatus::from_status_code(response.status().as_u16()));
-        }
-        Err(_) => {
-            timer.complete(ProxyStatus::ServerError);
-        }
-    }
-
-    result
-}
-
 /// Send request to agent and return request_id + response channel
 async fn send_request(
     registry: &SharedAgentRegistry,
@@ -142,41 +107,42 @@ async fn send_request(
         command: Some(cell_command::Command::KubernetesRequest(k8s_request)),
     };
 
-    if let Err(e) = command_tx.send(command).await {
-        // Channel is stale — wait for the agent to reconnect and retry once
+    // Timeout the channel send — if the agent's command buffer is full (zombie
+    // gRPC stream), send() blocks forever. A healthy agent drains commands in
+    // milliseconds, so 5 seconds is generous.
+    const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let send_result = tokio::time::timeout(SEND_TIMEOUT, command_tx.send(command)).await;
+
+    let send_err = match send_result {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(e.0),
+        Err(_elapsed) => {
+            // Channel full — agent is alive but not reading. Mark it stale
+            // so subsequent requests fail fast instead of also blocking.
+            warn!(
+                cluster = %cluster_name,
+                request_id = %request_id,
+                "Command channel full (agent not reading), treating as disconnected"
+            );
+            registry.take_pending_k8s_response(&request_id).await;
+            return Err(TunnelError::AgentNotConnected(format!(
+                "{cluster_name}: command channel full"
+            )));
+        }
+    };
+
+    if send_err.is_some() {
+        // Channel closed — agent disconnected, fail immediately.
+        // Don't wait for reconnect: the caller (resilient_tunnel) handles
+        // retry policy. Waiting here blocks the proxy thread.
         warn!(
             cluster = %cluster_name,
             request_id = %request_id,
-            "Send failed on stale channel, waiting for agent reconnection"
+            "Send failed on closed channel"
         );
-
-        let command = e.0; // recover the unsent command
-        let new_tx = registry
-            .wait_for_connection(cluster_name, RECONNECT_TIMEOUT)
-            .await;
-        let Some(new_tx) = new_tx else {
-            registry.take_pending_k8s_response(&request_id).await;
-            return Err(TunnelError::SendFailed(
-                "agent did not reconnect".to_string(),
-            ));
-        };
-
-        if let Err(e) = new_tx.send(command).await {
-            registry.take_pending_k8s_response(&request_id).await;
-            error!(
-                cluster = %cluster_name,
-                request_id = %request_id,
-                error = %e,
-                "Failed to send K8s request after reconnection"
-            );
-            return Err(TunnelError::SendFailed(e.to_string()));
-        }
-
-        debug!(
-            cluster = %cluster_name,
-            request_id = %request_id,
-            "Successfully sent K8s request after agent reconnection"
-        );
+        registry.take_pending_k8s_response(&request_id).await;
+        return Err(TunnelError::SendFailed("agent channel closed".to_string()));
     }
 
     debug!(
@@ -187,94 +153,6 @@ async fn send_request(
     );
 
     Ok((request_id, response_rx))
-}
-
-/// Receive a single response and convert to HTTP
-async fn receive_single_response(
-    cluster_name: &str,
-    mut response_rx: mpsc::Receiver<KubernetesResponse>,
-) -> Result<Response<Body>, TunnelError> {
-    match tokio::time::timeout(DEFAULT_TIMEOUT, response_rx.recv()).await {
-        Ok(Some(response)) => {
-            debug!(
-                cluster = %cluster_name,
-                status_code = response.status_code,
-                body_len = response.body.len(),
-                "Received K8s API response"
-            );
-            build_http_response(&response)
-        }
-        Ok(None) => {
-            error!(cluster = %cluster_name, "Response channel closed unexpectedly");
-            Err(TunnelError::ChannelClosed)
-        }
-        Err(_) => {
-            warn!(cluster = %cluster_name, "K8s API request timed out");
-            Err(TunnelError::Timeout)
-        }
-    }
-}
-
-/// Build streaming HTTP response from response channel.
-///
-/// Peeks at the first chunk to extract the Content-Type from the actual
-/// K8s API response (may be `application/json` or `application/vnd.kubernetes.protobuf`).
-async fn build_streaming_http_response(
-    mut response_rx: mpsc::Receiver<KubernetesResponse>,
-) -> Result<Response<Body>, TunnelError> {
-    // Wait for the first chunk to determine content type and status
-    let first = response_rx.recv().await.ok_or(TunnelError::ChannelClosed)?;
-
-    let content_type = if first.content_type.is_empty() {
-        "application/json".to_string()
-    } else {
-        first.content_type.clone()
-    };
-    let status = if first.status_code != 0 {
-        first.status_code as u16
-    } else {
-        200
-    };
-
-    let (body_tx, body_rx) =
-        mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(RESPONSE_CHANNEL_SIZE);
-
-    // Forward the first chunk
-    if !first.body.is_empty() {
-        let _ = body_tx.send(Ok(axum::body::Bytes::from(first.body))).await;
-    }
-
-    let done = first.stream_end;
-    if !done {
-        tokio::spawn(async move {
-            while let Some(response) = response_rx.recv().await {
-                if !response.body.is_empty()
-                    && body_tx
-                        .send(Ok(axum::body::Bytes::from(response.body)))
-                        .await
-                        .is_err()
-                {
-                    break;
-                }
-
-                if !response.error.is_empty() {
-                    warn!(error = %response.error, "Watch error from agent");
-                }
-
-                if response.stream_end {
-                    break;
-                }
-            }
-        });
-    }
-
-    let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx));
-
-    Response::builder()
-        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
-        .header("Content-Type", content_type)
-        .body(body)
-        .map_err(|e| TunnelError::ResponseBuild(e.to_string()))
 }
 
 /// Build HTTP response from KubernetesResponse

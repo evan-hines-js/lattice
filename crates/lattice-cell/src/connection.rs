@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use lattice_proto::{AgentState, CellCommand, ExecData, KubernetesResponse};
 use moka::future::Cache;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use lattice_move::{BatchAck, CompleteAck};
@@ -41,21 +41,11 @@ pub trait K8sResponseRegistry: Send + Sync {
     fn has_pending_k8s_response(&self, request_id: &str) -> bool;
 }
 
-/// Notification sent when an agent connects (new or reconnection)
-#[derive(Clone, Debug)]
-pub struct ConnectionNotification {
-    /// The cluster that connected
-    pub cluster_name: String,
-    /// Command channel for the connected agent
-    pub command_tx: mpsc::Sender<CellCommand>,
-}
-
 /// Represents an agent (connected or disconnected)
 ///
 /// Agents stay in the registry after disconnection to:
 /// - Detect reconnections (vs first-time connections)
 /// - Preserve state like pivot_complete across brief disconnections
-/// - Allow resilient tunnels to wait for known agents to reconnect
 pub struct AgentConnection {
     /// Cluster name this agent manages
     pub cluster_name: String,
@@ -231,13 +221,7 @@ pub struct AgentRegistry {
     pending_exec_data: moka::sync::Cache<String, ExecDataSender>,
     /// Proxy configuration for kubeconfig patching
     proxy_config: std::sync::OnceLock<KubeconfigProxyConfig>,
-    /// Broadcast channel for agent reconnection notifications
-    /// Allows waiting requests to retry when an agent reconnects
-    connection_tx: broadcast::Sender<ConnectionNotification>,
 }
-
-/// Channel capacity for connection notifications
-const CONNECTION_CHANNEL_CAPACITY: usize = 64;
 
 /// Maximum age of a teardown guard before it's considered stale.
 /// If an agent crashes mid-teardown, this prevents the guard from blocking forever.
@@ -271,7 +255,6 @@ fn register_pending<T>(map: &DashMap<String, T>, request_id: &str, sender: T, la
 
 impl Default for AgentRegistry {
     fn default() -> Self {
-        let (connection_tx, _) = broadcast::channel(CONNECTION_CHANNEL_CAPACITY);
         Self {
             agents: DashMap::new(),
             unpivot_manifests: DashMap::new(),
@@ -284,7 +267,6 @@ impl Default for AgentRegistry {
                 .time_to_live(PENDING_RESPONSE_TTL)
                 .build(),
             proxy_config: std::sync::OnceLock::new(),
-            connection_tx,
         }
     }
 }
@@ -307,13 +289,10 @@ impl AgentRegistry {
 
     /// Register an agent connection (new or reconnection).
     ///
-    /// Notifies waiting requests via the connection broadcast channel so both
-    /// the resilient tunnel and SubtreeForwarder can pick up new agents.
     /// Returns the generation number — pass it to `unregister()` so stale
     /// tasks don't stomp newer connections.
     pub fn register(&self, mut connection: AgentConnection) -> u64 {
         let cluster_name = connection.cluster_name.clone();
-        let command_tx = connection.command_tx.clone();
         connection.connected = true;
 
         // Atomic read-modify-write: preserve pivot_complete from any existing
@@ -341,13 +320,6 @@ impl AgentRegistry {
         } else {
             info!(cluster = %cluster_name, "Agent connected (first time)");
         }
-
-        // Always notify waiting requests — handles both initial connections
-        // and reconnections. Ignore send errors (no receivers is fine).
-        let _ = self.connection_tx.send(ConnectionNotification {
-            cluster_name,
-            command_tx,
-        });
 
         generation
     }
@@ -419,53 +391,6 @@ impl AgentRegistry {
     /// Check if a cluster is known (has connected at least once)
     pub fn is_known(&self, cluster_name: &str) -> bool {
         self.agents.contains_key(cluster_name)
-    }
-
-    /// Wait for an agent to be connected, returning its command channel.
-    ///
-    /// If the agent is already connected, returns immediately.
-    /// Otherwise, subscribes to connection notifications and waits up to `timeout`.
-    /// Works for both never-connected agents and disconnected agents.
-    pub async fn wait_for_connection(
-        &self,
-        cluster_name: &str,
-        timeout: std::time::Duration,
-    ) -> Option<mpsc::Sender<CellCommand>> {
-        // Fast path: already connected with a live channel
-        if let Some(agent) = self.get(cluster_name) {
-            if agent.connected && !agent.command_tx.is_closed() {
-                return Some(agent.command_tx.clone());
-            }
-        }
-
-        // Subscribe before checking again (avoid race between check and subscribe)
-        let mut rx = self.subscribe_connections();
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        // Check again after subscribing (agent may have connected between our check and subscribe)
-        if let Some(agent) = self.get(cluster_name) {
-            if agent.connected && !agent.command_tx.is_closed() {
-                return Some(agent.command_tx.clone());
-            }
-        }
-
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => {
-                    warn!(cluster = %cluster_name, "Timed out waiting for agent connection");
-                    return None;
-                }
-                result = rx.recv() => {
-                    match result {
-                        Ok(notification) if notification.cluster_name == cluster_name => {
-                            return Some(notification.command_tx);
-                        }
-                        Ok(_) => continue,
-                        Err(_) => return None,
-                    }
-                }
-            }
-        }
     }
 
     /// Update agent state
@@ -820,11 +745,6 @@ impl K8sResponseRegistry for AgentRegistry {
 }
 
 impl AgentRegistry {
-    /// Subscribe to agent connection notifications (both new and reconnections)
-    pub fn subscribe_connections(&self) -> broadcast::Receiver<ConnectionNotification> {
-        self.connection_tx.subscribe()
-    }
-
     /// Check if an agent is connected
     pub fn is_connected(&self, cluster_name: &str) -> bool {
         self.agents
@@ -835,7 +755,10 @@ impl AgentRegistry {
 
     /// Get command channel only if agent is currently connected with a live channel.
     /// Returns None immediately if not connected — never waits.
-    pub fn get_connected_command_tx(&self, cluster_name: &str) -> Option<mpsc::Sender<CellCommand>> {
+    pub fn get_connected_command_tx(
+        &self,
+        cluster_name: &str,
+    ) -> Option<mpsc::Sender<CellCommand>> {
         let agent = self.agents.get(cluster_name)?;
         if agent.connected && !agent.command_tx.is_closed() {
             Some(agent.command_tx.clone())
@@ -871,8 +794,8 @@ impl AgentRegistry {
     /// The `command_tx` buffer fills up and all proxy requests hang.
     ///
     /// This method detects the stale heartbeat and marks the agent disconnected,
-    /// which causes `wait_for_connection` to wait for a fresh reconnect instead
-    /// of returning the dead channel.
+    /// which causes `get_connected_command_tx` to return None so proxy requests
+    /// fail fast with 503 instead of blocking on the dead channel.
     ///
     /// Returns the names of agents that were disconnected.
     pub fn disconnect_stale_agents(&self, threshold: Duration) -> Vec<String> {
@@ -1414,36 +1337,6 @@ mod tests {
         let retrieved = registry.get_proxy_config().expect("config should exist");
         assert_eq!(retrieved.url, "https://proxy.example.com:8082");
         assert!(retrieved.ca_cert_pem.contains("BEGIN CERTIFICATE"));
-    }
-
-    #[test]
-    fn test_connection_notification() {
-        let registry = AgentRegistry::new();
-        let mut rx = registry.subscribe_connections();
-
-        // First connection — broadcasts notification
-        let (conn1, _rx1) = create_test_connection("test-cluster");
-        registry.register(conn1);
-        let notification = rx
-            .try_recv()
-            .expect("should receive notification on first connection");
-        assert_eq!(notification.cluster_name, "test-cluster");
-        assert!(registry.is_connected("test-cluster"));
-        assert!(registry.is_known("test-cluster"));
-
-        // Disconnect
-        registry.unregister("test-cluster", 0);
-        assert!(!registry.is_connected("test-cluster"));
-        assert!(registry.is_known("test-cluster"));
-
-        // Reconnection — also broadcasts notification
-        let (conn2, _rx2) = create_test_connection("test-cluster");
-        registry.register(conn2);
-        let notification = rx
-            .try_recv()
-            .expect("should receive notification on reconnection");
-        assert_eq!(notification.cluster_name, "test-cluster");
-        assert!(registry.is_connected("test-cluster"));
     }
 
     #[test]

@@ -3,8 +3,11 @@
 use kube::api::Api;
 use kube::Client;
 
-/// Token lifetime in seconds (1 hour).
-pub const PROXY_TOKEN_EXPIRATION_SECS: i64 = 3600;
+/// Token lifetime in seconds (24 hours).
+pub const PROXY_TOKEN_EXPIRATION_SECS: i64 = 86400;
+
+/// How often to refresh the token (30 minutes).
+pub const PROXY_TOKEN_REFRESH_SECS: u64 = 1800;
 
 /// Audience for proxy tokens. The auth proxy validates this audience
 /// via TokenReview, preventing token reuse against the K8s API directly.
