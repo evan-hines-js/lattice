@@ -141,62 +141,17 @@ pub(crate) fn preserve_unknown_fields(
     obj.into()
 }
 
-/// Validate a DNS-style identifier (lowercase alphanumeric with hyphens).
-///
-/// Rules:
-/// - Must not be empty
-/// - Must start with a lowercase letter
-/// - May contain lowercase letters, digits, and hyphens
-/// - Must not end with a hyphen (if `allow_trailing_hyphen` is false)
-///
-/// Used for pool IDs, custom resource types, and other identifiers.
-pub fn validate_dns_identifier(s: &str, allow_trailing_hyphen: bool) -> Result<(), String> {
-    if s.is_empty() {
-        return Err("identifier cannot be empty".to_string());
-    }
-
-    let mut chars = s.chars();
-
-    // First char must be a lowercase letter
-    match chars.next() {
-        Some(c) if c.is_ascii_lowercase() => {}
-        _ => {
-            return Err(format!(
-                "identifier must start with lowercase letter: {}",
-                s
-            ))
-        }
-    }
-
-    // Rest must be lowercase alphanumeric or hyphen
-    for c in chars {
-        if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-' {
-            return Err(format!(
-                "identifier must be lowercase alphanumeric with hyphens: {}",
-                s
-            ));
-        }
-    }
-
-    // Check trailing hyphen
-    if !allow_trailing_hyphen && s.ends_with('-') {
-        return Err(format!("identifier cannot end with hyphen: {}", s));
-    }
-
-    Ok(())
-}
-
 /// Validate that a string is a valid K8s DNS label.
 ///
-/// Combines format validation (via [`validate_dns_identifier`]) with the
-/// 63-character length limit. `field` is used in error messages to identify
+/// Sanitizes the input via [`sanitize_dns_label`] and checks that the result
+/// matches the original. `field` is used in error messages to identify
 /// what kind of name failed (e.g. "container name", "port name").
 pub fn validate_dns_label(name: &str, field: &str) -> Result<(), String> {
-    if name.len() > 63 {
-        return Err(format!(
-            "{} '{}' exceeds 63 character DNS label limit",
+    match crate::sanitize_dns_label(name) {
+        Some(ref sanitized) if sanitized == name => Ok(()),
+        _ => Err(format!(
+            "{} '{}' is not a valid DNS label (must be lowercase alphanumeric with hyphens, max 63 chars)",
             field, name
-        ));
+        )),
     }
-    validate_dns_identifier(name, false).map_err(|e| format!("{} '{}': {}", field, name, e))
 }

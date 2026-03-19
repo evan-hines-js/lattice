@@ -412,11 +412,12 @@ pub fn is_local_resource(metadata: &kube::api::ObjectMeta) -> bool {
     !is_inherited_resource(metadata)
 }
 
-/// Sanitize a string into a valid DNS label (`[a-z0-9]([-a-z0-9]*[a-z0-9])?`).
+/// Sanitize a string into a valid DNS label (`[a-z]([-a-z0-9]*[a-z0-9])?`).
 ///
-/// Replaces non-alphanumeric characters with `-`, lowercases, trims leading/trailing
-/// dashes, and truncates to 63 characters. Use this for any K8s resource name,
-/// volume name, or label value that must conform to RFC 1123.
+/// Replaces non-alphanumeric characters with `-`, lowercases, strips leading
+/// digits/dashes (must start with a letter), trims trailing dashes, and
+/// truncates to 63 characters. Use this for any K8s resource name, volume
+/// name, or label value that must conform to RFC 1123.
 pub fn sanitize_dns_label(s: &str) -> Option<String> {
     let sanitized: String = s
         .chars()
@@ -428,7 +429,9 @@ pub fn sanitize_dns_label(s: &str) -> Option<String> {
             }
         })
         .collect();
-    let trimmed = sanitized.trim_matches('-');
+    // Must start with a lowercase letter
+    let trimmed = sanitized.trim_start_matches(|c: char| !c.is_ascii_lowercase());
+    let trimmed = trimmed.trim_end_matches('-');
     if trimmed.is_empty() {
         return None;
     }
@@ -436,5 +439,73 @@ pub fn sanitize_dns_label(s: &str) -> Option<String> {
         Some(trimmed[..63].trim_end_matches('-').to_string())
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn simple_passthrough() {
+        assert_eq!(sanitize_dns_label("hello").unwrap(), "hello");
+    }
+
+    #[test]
+    fn lowercases() {
+        assert_eq!(sanitize_dns_label("Hello").unwrap(), "hello");
+    }
+
+    #[test]
+    fn replaces_underscores_and_dots() {
+        assert_eq!(sanitize_dns_label("wg_confs.conf").unwrap(), "wg-confs-conf");
+    }
+
+    #[test]
+    fn strips_leading_digits() {
+        assert_eq!(sanitize_dns_label("123abc").unwrap(), "abc");
+    }
+
+    #[test]
+    fn strips_leading_dashes_and_digits() {
+        assert_eq!(sanitize_dns_label("--1-abc").unwrap(), "abc");
+    }
+
+    #[test]
+    fn trims_trailing_dashes() {
+        assert_eq!(sanitize_dns_label("abc--").unwrap(), "abc");
+    }
+
+    #[test]
+    fn empty_returns_none() {
+        assert!(sanitize_dns_label("").is_none());
+    }
+
+    #[test]
+    fn all_digits_returns_none() {
+        assert!(sanitize_dns_label("12345").is_none());
+    }
+
+    #[test]
+    fn truncates_to_63() {
+        let long = format!("a{}", "b".repeat(100));
+        let result = sanitize_dns_label(&long).unwrap();
+        assert!(result.len() <= 63);
+        assert!(result.starts_with('a'));
+    }
+
+    #[test]
+    fn valid_label_roundtrips() {
+        for s in ["default", "gpu-large-v2", "a1b2c3"] {
+            assert_eq!(sanitize_dns_label(s).unwrap(), s);
+        }
+    }
+
+    #[test]
+    fn real_world_file_path() {
+        assert_eq!(
+            sanitize_dns_label("nzbget-wireguard-file-config-wg_confs-wg0.conf").unwrap(),
+            "nzbget-wireguard-file-config-wg-confs-wg0-conf"
+        );
     }
 }

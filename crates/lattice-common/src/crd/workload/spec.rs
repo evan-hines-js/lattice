@@ -226,8 +226,8 @@ impl WorkloadSpec {
                             name, id
                         )));
                     }
-                    super::super::validate_dns_identifier(id, false).map_err(|e| {
-                        crate::Error::validation(format!("resource '{}': id: {}", name, e))
+                    super::super::validate_dns_label(id, "resource id").map_err(|e| {
+                        crate::Error::validation(format!("resource '{}': {}", name, e))
                     })?;
                 }
             }
@@ -478,7 +478,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("exceeds 63 character"));
+            .contains("is not a valid DNS label"));
     }
 
     #[test]
@@ -498,7 +498,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("exceeds 63 character"));
+            .contains("is not a valid DNS label"));
     }
 
     #[test]
@@ -541,7 +541,7 @@ mod tests {
             },
         );
         let err = spec.validate().unwrap_err().to_string();
-        assert!(err.contains("resource 'vol': id"));
+        assert!(err.contains("is not a valid DNS label"));
     }
 
     #[test]
@@ -611,7 +611,7 @@ mod tests {
         };
         let err = spec.validate().unwrap_err().to_string();
         assert!(err.contains("container name"));
-        assert!(err.contains("start with lowercase letter"));
+        assert!(err.contains("is not a valid DNS label"));
     }
 
     #[test]

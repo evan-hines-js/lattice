@@ -602,11 +602,8 @@ impl NodeSpec {
 
         // Validate pool identifiers and autoscaling config
         for (pool_id, pool_spec) in &self.worker_pools {
-            if !is_valid_pool_id(pool_id) {
-                return Err(crate::Error::validation(format!(
-                    "invalid worker pool id '{}': must be lowercase alphanumeric with hyphens, starting with a letter",
-                    pool_id
-                )));
+            if let Err(e) = super::validate_dns_label(pool_id, "worker pool id") {
+                return Err(crate::Error::validation(e));
             }
             if let Err(e) = pool_spec.validate() {
                 return Err(crate::Error::validation(format!(
@@ -620,10 +617,6 @@ impl NodeSpec {
     }
 }
 
-/// Check if a pool ID is valid (lowercase alphanumeric + hyphens, starts with letter)
-fn is_valid_pool_id(id: &str) -> bool {
-    super::validate_dns_identifier(id, false).is_ok()
-}
 
 // =============================================================================
 // Secret Reference
@@ -1282,7 +1275,7 @@ mod tests {
             assert!(result
                 .unwrap_err()
                 .to_string()
-                .contains("invalid worker pool id"));
+                .contains("is not a valid DNS label"));
         }
 
         #[test]
@@ -1699,64 +1692,46 @@ mod tests {
         }
     }
 
-    mod pool_id_validation {
-        use super::*;
-
+    mod dns_label_validation {
         #[test]
-        fn test_valid_simple() {
-            assert!(is_valid_pool_id("default"));
-            assert!(is_valid_pool_id("general"));
-            assert!(is_valid_pool_id("gpu"));
+        fn valid_simple() {
+            for s in ["default", "general", "gpu"] {
+                assert!(crate::crd::validate_dns_label(s, "test").is_ok(), "{s}");
+            }
         }
 
         #[test]
-        fn test_valid_with_numbers() {
-            assert!(is_valid_pool_id("gpu1"));
-            assert!(is_valid_pool_id("pool123"));
-            assert!(is_valid_pool_id("a1b2c3"));
+        fn valid_with_numbers() {
+            for s in ["gpu1", "pool123", "a1b2c3"] {
+                assert!(crate::crd::validate_dns_label(s, "test").is_ok(), "{s}");
+            }
         }
 
         #[test]
-        fn test_valid_with_hyphens() {
-            assert!(is_valid_pool_id("high-memory"));
-            assert!(is_valid_pool_id("general-purpose"));
-            assert!(is_valid_pool_id("gpu-large-v2"));
+        fn valid_with_hyphens() {
+            for s in ["high-memory", "general-purpose", "gpu-large-v2"] {
+                assert!(crate::crd::validate_dns_label(s, "test").is_ok(), "{s}");
+            }
         }
 
         #[test]
-        fn test_invalid_empty() {
-            assert!(!is_valid_pool_id(""));
-        }
-
-        #[test]
-        fn test_invalid_starts_with_number() {
-            assert!(!is_valid_pool_id("1pool"));
-            assert!(!is_valid_pool_id("2gpu"));
-        }
-
-        #[test]
-        fn test_invalid_starts_with_hyphen() {
-            assert!(!is_valid_pool_id("-pool"));
-        }
-
-        #[test]
-        fn test_invalid_ends_with_hyphen() {
-            assert!(!is_valid_pool_id("pool-"));
-            assert!(!is_valid_pool_id("general-"));
-        }
-
-        #[test]
-        fn test_invalid_uppercase() {
-            assert!(!is_valid_pool_id("GPU"));
-            assert!(!is_valid_pool_id("Pool"));
-            assert!(!is_valid_pool_id("highMemory"));
-        }
-
-        #[test]
-        fn test_invalid_special_chars() {
-            assert!(!is_valid_pool_id("pool_name"));
-            assert!(!is_valid_pool_id("pool.name"));
-            assert!(!is_valid_pool_id("pool@name"));
+        fn invalid() {
+            for s in [
+                "",           // empty
+                "1pool",      // starts with number
+                "2gpu",       // starts with number
+                "-pool",      // starts with hyphen
+                "pool-",      // ends with hyphen
+                "general-",   // ends with hyphen
+                "GPU",        // uppercase
+                "Pool",       // uppercase
+                "highMemory", // mixed case
+                "pool_name",  // underscore
+                "pool.name",  // dot
+                "pool@name",  // special char
+            ] {
+                assert!(crate::crd::validate_dns_label(s, "test").is_err(), "{s}");
+            }
         }
     }
 

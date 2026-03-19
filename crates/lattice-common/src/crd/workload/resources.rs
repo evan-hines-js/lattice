@@ -149,11 +149,6 @@ impl ResourceType {
     }
 }
 
-/// Validate custom type: lowercase alphanumeric with hyphens, starts with letter
-fn validate_custom_type(s: &str) -> Result<(), String> {
-    crate::crd::validate_dns_identifier(s, true)
-        .map_err(|e| e.replace("identifier", "resource type"))
-}
 
 impl<'de> Deserialize<'de> for ResourceType {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -170,7 +165,8 @@ impl<'de> Deserialize<'de> for ResourceType {
             "secret" => Ok(Self::Secret),
             "gpu" => Ok(Self::Gpu),
             _ => {
-                validate_custom_type(&s).map_err(serde::de::Error::custom)?;
+                crate::crd::validate_dns_label(&s, "resource type")
+                    .map_err(serde::de::Error::custom)?;
                 Ok(Self::Custom(s))
             }
         }
