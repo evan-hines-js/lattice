@@ -166,29 +166,13 @@ pub(crate) fn image_pull_policy(image: &str) -> String {
 
 /// Sanitize a string into a valid K8s DNS label.
 ///
-/// DNS labels: `[a-z0-9]([-a-z0-9]*[a-z0-9])?`, max 63 chars.
-/// Returns an error if the input produces an empty label after sanitization.
+/// Delegates to `lattice_common::sanitize_dns_label` and converts `None` to
+/// a compilation error.
 pub(crate) fn sanitize_dns_label(s: &str) -> Result<String, crate::error::CompilationError> {
-    let sanitized: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = sanitized.trim_matches('-');
-    if trimmed.is_empty() {
-        return Err(crate::error::CompilationError::file_compilation(format!(
+    lattice_common::sanitize_dns_label(s).ok_or_else(|| {
+        crate::error::CompilationError::file_compilation(format!(
             "input '{}' produces empty DNS label after sanitization",
             s
-        )));
-    }
-    if trimmed.len() > 63 {
-        Ok(trimmed[..63].trim_end_matches('-').to_string())
-    } else {
-        Ok(trimmed.to_string())
-    }
+        ))
+    })
 }

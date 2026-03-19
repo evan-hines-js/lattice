@@ -1,4 +1,28 @@
 apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: jellyfin-security
+  namespace: lattice-system
+spec:
+  description: Allow jellyfin security overrides for linuxserver.io image
+  policies: |
+    permit(
+      principal == Lattice::Service::"media/jellyfin",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"runAsRoot"
+    );
+    permit(
+      principal == Lattice::Service::"media/jellyfin",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"apparmor:Unconfined"
+    );
+    permit(
+      principal == Lattice::Service::"media/jellyfin",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"allowedBinary:*"
+    );
+---
+apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
 metadata:
   name: jellyfin
@@ -71,7 +95,7 @@ spec:
         direction: inbound
   replicas: 1
   ingress:
-    gateway_class: istio
+    gatewayClass: istio
     routes:
       public:
         hosts:

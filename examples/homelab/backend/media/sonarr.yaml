@@ -1,4 +1,38 @@
 apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: sonarr-security
+  namespace: lattice-system
+spec:
+  description: Allow sonarr security overrides for linuxserver.io image
+  policies: |
+    permit(
+      principal == Lattice::Service::"media/sonarr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:SETUID"
+    );
+    permit(
+      principal == Lattice::Service::"media/sonarr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:SETGID"
+    );
+    permit(
+      principal == Lattice::Service::"media/sonarr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"runAsRoot"
+    );
+    permit(
+      principal == Lattice::Service::"media/sonarr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"apparmor:Unconfined"
+    );
+    permit(
+      principal == Lattice::Service::"media/sonarr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"allowedBinary:*"
+    );
+---
+apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
 metadata:
   name: sonarr
@@ -62,7 +96,7 @@ spec:
         direction: outbound
   replicas: 1
   ingress:
-    gateway_class: istio
+    gatewayClass: istio
     routes:
       public:
         hosts:

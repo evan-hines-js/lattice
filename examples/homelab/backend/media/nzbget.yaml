@@ -135,7 +135,7 @@ spec:
         params:
           provider: lattice-local
           refreshInterval: 1h
-        keys: [private_key, public_key, endpoint, address]
+          keys: [private_key, public_key, endpoint, address]
       sonarr:
         type: service
         direction: inbound
@@ -178,7 +178,7 @@ spec:
           memory: 256Mi
   replicas: 1
   ingress:
-    gateway_class: istio
+    gatewayClass: istio
     routes:
       public:
         hosts:

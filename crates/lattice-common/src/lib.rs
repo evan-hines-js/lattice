@@ -411,3 +411,30 @@ pub fn is_inherited_resource(metadata: &kube::api::ObjectMeta) -> bool {
 pub fn is_local_resource(metadata: &kube::api::ObjectMeta) -> bool {
     !is_inherited_resource(metadata)
 }
+
+/// Sanitize a string into a valid DNS label (`[a-z0-9]([-a-z0-9]*[a-z0-9])?`).
+///
+/// Replaces non-alphanumeric characters with `-`, lowercases, trims leading/trailing
+/// dashes, and truncates to 63 characters. Use this for any K8s resource name,
+/// volume name, or label value that must conform to RFC 1123.
+pub fn sanitize_dns_label(s: &str) -> Option<String> {
+    let sanitized: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() > 63 {
+        Some(trimmed[..63].trim_end_matches('-').to_string())
+    } else {
+        Some(trimmed.to_string())
+    }
+}

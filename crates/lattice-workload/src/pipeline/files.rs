@@ -175,9 +175,8 @@ fn compile_secret_files(
             &format!("file '{}'", key),
         )?;
 
-        let es_name = format!("{}-file-{}", base_name, key);
-        // Volume names must be DNS labels (no dots/underscores/etc).
-        let vol_name = crate::helpers::sanitize_dns_label(&es_name)?;
+        let es_name = crate::helpers::sanitize_dns_label(&format!("{}-file-{}", base_name, key))?;
+        let vol_name = es_name.clone();
 
         let eso_data = resolve_eso_data(file_refs, secret_refs, &format!("file '{}'", key))?;
 
@@ -352,7 +351,7 @@ mod tests {
         assert_eq!(result.file_external_secrets.len(), 1);
 
         let es = &result.file_external_secrets[0];
-        assert_eq!(es.metadata.name, "api-main-file-etc-app-config.yaml");
+        assert_eq!(es.metadata.name, "api-main-file-etc-app-config-yaml");
         assert_eq!(es.metadata.namespace, "prod");
 
         // Should have template data

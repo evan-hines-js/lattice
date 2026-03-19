@@ -71,7 +71,7 @@ spec:
         direction: inbound
   replicas: 1
   ingress:
-    gateway_class: istio
+    gatewayClass: istio
     routes:
       public:
         hosts:
