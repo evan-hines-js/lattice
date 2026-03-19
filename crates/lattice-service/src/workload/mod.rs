@@ -503,7 +503,7 @@ impl WorkloadCompiler {
                     },
                     spec: PodSpec {
                         service_account_name: pod_template.service_account_name,
-                        automount_service_account_token: Some(false),
+                        automount_service_account_token: Some(pod_template.automount_service_account_token),
                         containers: pod_template.containers,
                         init_containers: pod_template.init_containers,
                         volumes: pod_template.volumes,

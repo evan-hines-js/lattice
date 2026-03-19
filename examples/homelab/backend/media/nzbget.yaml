@@ -7,40 +7,70 @@ metadata:
 spec:
   description: Allow nzbget security overrides for VPN sidecar and linuxserver.io entrypoint
   policies: |
-    // wireguard sidecar: tunnel setup requires NET_ADMIN + SYS_MODULE
+    // wireguard sidecar: tunnel setup
     permit(
       principal == Lattice::Service::"media/nzbget",
       action == Lattice::Action::"OverrideSecurity",
-      resource in [
-        Lattice::SecurityOverride::"capability:NET_ADMIN",
-        Lattice::SecurityOverride::"capability:SYS_MODULE",
-        Lattice::SecurityOverride::"apparmor:Unconfined",
-        Lattice::SecurityOverride::"allowedBinary:*"
-      ]
-    ) when { resource.category == "capability" || resource.category == "profile" || resource.category == "binary" };
+      resource == Lattice::SecurityOverride::"capability:NET_ADMIN"
+    );
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:SYS_MODULE"
+    );
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"apparmor:Unconfined"
+    );
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"allowedBinary:*"
+    );
 
     // both containers run as root (linuxserver.io images require it)
     permit(
       principal == Lattice::Service::"media/nzbget",
       action == Lattice::Action::"OverrideSecurity",
-      resource in [
-        Lattice::SecurityOverride::"runAsRoot",
-        Lattice::SecurityOverride::"readWriteRootFilesystem"
-      ]
+      resource == Lattice::SecurityOverride::"runAsRoot"
     );
-
-    // nzbget main container needs default capabilities for linuxserver.io init
     permit(
       principal == Lattice::Service::"media/nzbget",
       action == Lattice::Action::"OverrideSecurity",
-      resource in [
-        Lattice::SecurityOverride::"capability:CHOWN",
-        Lattice::SecurityOverride::"capability:DAC_OVERRIDE",
-        Lattice::SecurityOverride::"capability:FOWNER",
-        Lattice::SecurityOverride::"capability:KILL",
-        Lattice::SecurityOverride::"capability:SETUID",
-        Lattice::SecurityOverride::"capability:SETGID"
-      ]
+      resource == Lattice::SecurityOverride::"readWriteRootFilesystem"
+    );
+
+    // nzbget main container capabilities for linuxserver.io init
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:CHOWN"
+    );
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:DAC_OVERRIDE"
+    );
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:FOWNER"
+    );
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:KILL"
+    );
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:SETUID"
+    );
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:SETGID"
     );
 ---
 apiVersion: lattice.dev/v1alpha1

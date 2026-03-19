@@ -10,10 +10,12 @@ spec:
     permit(
       principal == Lattice::Service::"edge/haproxy-fw",
       action == Lattice::Action::"OverrideSecurity",
-      resource in [
-        Lattice::SecurityOverride::"shareProcessNamespace",
-        Lattice::SecurityOverride::"automountServiceAccountToken"
-      ]
+      resource == Lattice::SecurityOverride::"shareProcessNamespace"
+    );
+    permit(
+      principal == Lattice::Service::"edge/haproxy-fw",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"automountServiceAccountToken"
     );
 ---
 # RBAC: allow haproxy-fw SA to watch LatticeClusterRoutes CRDs
