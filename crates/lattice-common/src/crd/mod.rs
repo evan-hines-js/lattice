@@ -54,7 +54,7 @@ pub use job::{
 pub use mesh_member::{
     derived_name, AppliedResourceRef, EgressRule, EgressTarget, LatticeMeshMember,
     LatticeMeshMemberSpec, LatticeMeshMemberStatus, MeshMemberPhase, MeshMemberPort,
-    MeshMemberScope, MeshMemberTarget, PeerAuth,
+    MeshMemberScope, MeshMemberTarget, NetworkProtocol, PeerAuth,
 };
 pub use model_serving::{
     HeaderMatchValue, InferenceEngine, KvConnector, KvConnectorType, LatticeModel,

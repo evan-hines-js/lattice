@@ -210,7 +210,7 @@ pub async fn execute_watch(
         .unwrap_or("application/json")
         .to_string();
 
-    // Stream the response body
+    // Stream the response body.
     let mut body = response.into_body();
     let mut chunk_count: u64 = 0;
     let mut total_bytes: u64 = 0;

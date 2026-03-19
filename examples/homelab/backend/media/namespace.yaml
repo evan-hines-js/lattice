@@ -4,3 +4,20 @@ metadata:
   name: media
   labels:
     istio.io/dataplane-mode: ambient
+---
+# Allow media namespace services to advertise routes cross-cluster
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: media-advertise-wildcard
+  namespace: lattice-system
+spec:
+  description: Allow media services to advertise routes with wildcard allowedServices
+  policies: |
+    permit(
+      principal,
+      action == Lattice::Action::"AllowWildcard",
+      resource == Lattice::Mesh::"advertise"
+    ) when {
+      principal.namespace == "media"
+    };

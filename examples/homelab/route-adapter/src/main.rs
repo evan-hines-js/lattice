@@ -31,8 +31,9 @@ struct ClusterRoute {
     service_name: String,
     service_namespace: String,
     hostname: String,
-    address: String,
     port: u16,
+    #[serde(default)]
+    service_ports: std::collections::BTreeMap<String, u16>,
 }
 
 impl ClusterRoute {
@@ -47,6 +48,15 @@ impl ClusterRoute {
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect()
+    }
+
+    /// The actual service port to connect to (first service_port, or gateway port).
+    fn service_port(&self) -> u16 {
+        self.service_ports
+            .values()
+            .next()
+            .copied()
+            .unwrap_or(self.port)
     }
 }
 
@@ -115,14 +125,20 @@ backend empty
     }
     cfg.push_str("    default_backend fallback\n\n");
 
-    // Backends
+    // Backends — connect to the local service stub (ClusterIP) and let
+    // ztunnel handle cross-cluster HBONE tunneling transparently.
     for route in routes {
+        let svc_host = format!(
+            "{}.{}.svc.cluster.local",
+            route.service_name, route.service_namespace
+        );
+        let svc_port = route.service_port();
         let _ = writeln!(
             cfg,
             "backend {}\n    server gw {}:{}\n",
             route.backend_name(),
-            route.address,
-            route.port
+            svc_host,
+            svc_port
         );
     }
 

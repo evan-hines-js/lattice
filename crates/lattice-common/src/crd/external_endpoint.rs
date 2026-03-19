@@ -42,6 +42,15 @@ pub struct ParsedEndpoint {
 }
 
 impl ParsedEndpoint {
+    /// Network-level protocol for Cilium policy generation.
+    pub fn network_protocol(&self) -> crate::crd::NetworkProtocol {
+        if self.protocol == "udp" {
+            crate::crd::NetworkProtocol::Udp
+        } else {
+            crate::crd::NetworkProtocol::Tcp
+        }
+    }
+
     /// Returns true if the host is a cluster-local Kubernetes address.
     ///
     /// Cluster-local addresses (ending in `.svc` or `.svc.cluster.local`) resolve
@@ -52,6 +61,9 @@ impl ParsedEndpoint {
 
     /// Parse an endpoint URL into its components
     pub fn parse(url: &str) -> Option<Self> {
+        if let Some(stripped) = url.strip_prefix("udp://") {
+            return Self::parse_host_port(stripped, "udp");
+        }
         if let Some(stripped) = url.strip_prefix("tcp://") {
             return Self::parse_host_port(stripped, "tcp");
         }
@@ -216,6 +228,28 @@ mod tests {
         assert_eq!(endpoint.protocol, "tcp");
         assert_eq!(endpoint.host, "10.0.0.5");
         assert_eq!(endpoint.port, 5432);
+    }
+
+    #[test]
+    fn test_parse_udp_url() {
+        let endpoint =
+            ParsedEndpoint::parse("udp://vpn.example.com:51820").expect("should parse UDP URL");
+        assert_eq!(endpoint.protocol, "udp");
+        assert_eq!(endpoint.host, "vpn.example.com");
+        assert_eq!(endpoint.port, 51820);
+        assert_eq!(
+            endpoint.network_protocol(),
+            crate::crd::NetworkProtocol::Udp
+        );
+    }
+
+    #[test]
+    fn test_tcp_network_protocol() {
+        let endpoint = ParsedEndpoint::parse("https://api.stripe.com").unwrap();
+        assert_eq!(
+            endpoint.network_protocol(),
+            crate::crd::NetworkProtocol::Tcp
+        );
     }
 
     #[test]

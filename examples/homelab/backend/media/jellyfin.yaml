@@ -82,14 +82,6 @@ spec:
           allowedConsumers:
             - sonarr
             - nzbget
-      # External service dependencies (inline endpoints)
-      jellyfin-repo:
-        type: external-service
-        direction: outbound
-        params:
-          endpoints:
-            repo: https://repo.jellyfin.org
-      # Service dependencies (bilateral agreement)
       sonarr:
         type: service
         direction: inbound

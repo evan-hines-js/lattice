@@ -149,7 +149,6 @@ impl ResourceType {
     }
 }
 
-
 impl<'de> Deserialize<'de> for ResourceType {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

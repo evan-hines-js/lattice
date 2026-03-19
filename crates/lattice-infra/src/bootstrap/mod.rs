@@ -396,6 +396,10 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
                 serde_json::to_string_pretty(&generate_kthena_autoscaler_cedar_policy())
                     .map_err(|e| format!("Failed to serialize CedarPolicy: {e}"))?,
             );
+            mesh_manifests.push(
+                serde_json::to_string_pretty(&generate_cluster_access_cedar_policy())
+                    .map_err(|e| format!("Failed to serialize CedarPolicy: {e}"))?,
+            );
             components.push(InfraComponent {
                 name: "core-mesh-policies",
                 version: "1",
@@ -767,10 +771,10 @@ pub(crate) fn namespace_yaml_with_network(name: &str, network: &str) -> String {
 /// reach the Kubernetes API from within the ambient mesh.
 /// Port 6443 is the actual endpoint port after DNAT from the ClusterIP (443).
 pub(crate) fn kube_apiserver_egress() -> EgressRule {
-    EgressRule {
-        target: EgressTarget::Entity("kube-apiserver".to_string()),
-        ports: vec![6443],
-    }
+    EgressRule::tcp(
+        EgressTarget::Entity("kube-apiserver".to_string()),
+        vec![6443],
+    )
 }
 
 /// Generate a LatticeMeshMember for the lattice-operator itself.
@@ -831,10 +835,10 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
             egress: vec![
                 kube_apiserver_egress(),
                 // Agent connects outbound to parent cell's gRPC and bootstrap ports
-                EgressRule {
-                    target: EgressTarget::Entity("world".to_string()),
-                    ports: vec![DEFAULT_GRPC_PORT, DEFAULT_BOOTSTRAP_PORT],
-                },
+                EgressRule::tcp(
+                    EgressTarget::Entity("world".to_string()),
+                    vec![DEFAULT_GRPC_PORT, DEFAULT_BOOTSTRAP_PORT],
+                ),
             ],
             allow_peer_traffic: false,
             depends_all: false,
@@ -937,6 +941,56 @@ fn generate_kthena_autoscaler_cedar_policy() -> CedarPolicy {
                 lattice_common::KTHENA_NAMESPACE,
                 lattice_common::KTHENA_AUTOSCALER_SA,
             ),
+            priority: 0,
+            enabled: true,
+            propagate: true,
+        },
+    );
+    policy.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+    policy
+}
+
+/// Generate the CedarPolicy that grants cluster access to istiod proxy and
+/// lattice-operator service accounts for multi-cluster remote secret proxy.
+pub fn generate_cluster_access_cedar_policy() -> CedarPolicy {
+    let mut policy = CedarPolicy::new(
+        "istiod-proxy-cluster-access",
+        CedarPolicySpec {
+            description: Some(
+                "Cluster access for istiod remote secret proxy and lattice-operator".to_string(),
+            ),
+            policies: r#"permit(
+    principal == Lattice::User::"system:serviceaccount:istio-system:lattice-istiod-proxy",
+    action == Lattice::Action::"AccessCluster",
+    resource
+);
+permit(
+    principal == Lattice::User::"system:serviceaccount:lattice-system:lattice-operator",
+    action == Lattice::Action::"AccessCluster",
+    resource
+);"#
+            .to_string(),
+            priority: 0,
+            enabled: true,
+            propagate: true,
+        },
+    );
+    policy.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+    policy
+}
+
+/// Generate the CedarPolicy that grants full admin access to the lattice-admin SA.
+pub fn generate_admin_access_cedar_policy() -> CedarPolicy {
+    let mut policy = CedarPolicy::new(
+        "lattice-admin-access",
+        CedarPolicySpec {
+            description: Some("Full admin access for lattice-admin SA".to_string()),
+            policies: r#"permit(
+    principal == Lattice::User::"system:serviceaccount:lattice-system:lattice-admin",
+    action,
+    resource
+);"#
+            .to_string(),
             priority: 0,
             enabled: true,
             propagate: true,

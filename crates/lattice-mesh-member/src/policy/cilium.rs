@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{derived_name, EgressTarget};
+use lattice_common::crd::{derived_name, EgressTarget, NetworkProtocol};
 use lattice_common::graph::{ActiveEdge, ServiceNode};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::policy::cilium::{
@@ -102,10 +102,10 @@ pub(crate) fn dns_egress_rule(dns_rules: Option<DnsRules>) -> CiliumEgressRule {
     }
 }
 
-/// Build a CiliumPortRule list from a slice of port numbers (TCP only).
+/// Build a CiliumPortRule list from a slice of port numbers and protocol.
 ///
 /// Returns an empty vec if no ports are given, otherwise a single rule with all ports.
-pub(crate) fn build_tcp_port_rules(ports: &[u16]) -> Vec<CiliumPortRule> {
+pub(crate) fn build_port_rules(ports: &[u16], protocol: NetworkProtocol) -> Vec<CiliumPortRule> {
     if ports.is_empty() {
         vec![]
     } else {
@@ -114,7 +114,7 @@ pub(crate) fn build_tcp_port_rules(ports: &[u16]) -> Vec<CiliumPortRule> {
                 .iter()
                 .map(|p| CiliumPort {
                     port: p.to_string(),
-                    protocol: "TCP".to_string(),
+                    protocol: protocol.as_str().to_string(),
                 })
                 .collect(),
             rules: None,
@@ -133,7 +133,7 @@ fn permissive_port_ingress(ports: &[u16]) -> Option<CiliumIngressRule> {
     }
     Some(CiliumIngressRule {
         from_entities: vec!["cluster".to_string()],
-        to_ports: build_tcp_port_rules(ports),
+        to_ports: build_port_rules(ports, NetworkProtocol::Tcp),
         ..Default::default()
     })
 }
@@ -156,7 +156,7 @@ fn webhook_port_ingress(ports: &[u16]) -> Option<CiliumIngressRule> {
             "host".to_string(),
             "world".to_string(),
         ],
-        to_ports: build_tcp_port_rules(ports),
+        to_ports: build_port_rules(ports, NetworkProtocol::Tcp),
         ..Default::default()
     })
 }
@@ -167,7 +167,7 @@ fn spec_egress_rules(service: &ServiceNode) -> Vec<CiliumEgressRule> {
         .egress_rules
         .iter()
         .filter_map(|rule| {
-            let to_ports = build_tcp_port_rules(&rule.ports);
+            let to_ports = build_port_rules(&rule.ports, rule.protocol);
             match &rule.target {
                 EgressTarget::Entity(entity) => Some(CiliumEgressRule {
                     to_entities: vec![entity.clone()],
@@ -281,7 +281,7 @@ impl<'a> PolicyCompiler<'a> {
             if !port_numbers.is_empty() {
                 egress_rules.push(CiliumEgressRule {
                     to_endpoints: vec![EndpointSelector::from_labels(labels)],
-                    to_ports: build_tcp_port_rules(&port_numbers),
+                    to_ports: build_port_rules(&port_numbers, NetworkProtocol::Tcp),
                     ..Default::default()
                 });
             }
@@ -348,7 +348,7 @@ impl<'a> PolicyCompiler<'a> {
             let port_numbers: Vec<u16> = service.ports.values().map(|pm| pm.target_port).collect();
             ingress_rules.push(CiliumIngressRule {
                 from_endpoints: vec![EndpointSelector::from_labels(labels)],
-                to_ports: build_tcp_port_rules(&port_numbers),
+                to_ports: build_port_rules(&port_numbers, NetworkProtocol::Tcp),
                 ..Default::default()
             });
         }

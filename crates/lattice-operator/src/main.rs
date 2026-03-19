@@ -1126,10 +1126,8 @@ async fn start_auth_proxy(
     let base_host = extra_sans.first().map(|s| s.as_str()).unwrap_or(&cell_dns);
     let base_url = format!("https://{}:{}", base_host, DEFAULT_AUTH_PROXY_PORT);
 
-    // Clone values needed for the remote secret controller before they move into config
-    let proxy_base_url = format!("https://{}:{}", cell_dns, DEFAULT_AUTH_PROXY_PORT);
+    // Clone values needed for peer route sync before they move into config
     let proxy_ca_cert = ca_cert_pem.clone();
-
     // Clone base_url before it moves into config — needed for peer route sync
     let peer_proxy_url = base_url.clone();
 
@@ -1151,13 +1149,8 @@ async fn start_auth_proxy(
     tracing::info!(addr = %addr, cluster = %cluster_name, "Starting auth proxy server");
 
     // Start remote secret controller for Istio multi-cluster discovery.
-    // Tokens are requested per-reconcile via TokenRequest API against the
-    // dedicated lattice-istiod-proxy SA — no static token embedding.
-    controller_runner::spawn_remote_secret_controller(
-        client.clone(),
-        proxy_base_url,
-        proxy_ca_cert.clone(),
-    );
+    // Uses the direct API server kubeconfig copied pre-pivot.
+    controller_runner::spawn_remote_secret_controller(client.clone());
 
     // Enable peer route sync: the gRPC server will push sibling/parent routes
     // to connected children using the external auth proxy URL.

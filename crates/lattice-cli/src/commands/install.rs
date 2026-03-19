@@ -1179,21 +1179,21 @@ impl Installer {
         info!("Created lattice-admin-token Secret");
 
         // Create Cedar policies for admin and istiod proxy access
-        apply_cedar_policy(
-            &mgmt_client,
-            "lattice-admin-access",
-            "Full admin access for lattice-admin SA",
-            "permit(\n  principal == Lattice::User::\"system:serviceaccount:lattice-system:lattice-admin\",\n  action,\n  resource\n);\n",
-        )
-        .await?;
+        let admin_policy = lattice_infra::bootstrap::generate_admin_access_cedar_policy();
+        let admin_json = serde_json::to_string(&admin_policy)
+            .map_err(|e| Error::command_failed(format!("failed to serialize CedarPolicy: {e}")))?;
+        kube_utils::apply_manifests(&mgmt_client, &[&admin_json], &Default::default())
+            .await
+            .cmd_err()?;
+        info!("Created lattice-admin-access CedarPolicy");
 
-        apply_cedar_policy(
-            &mgmt_client,
-            "istiod-proxy-cluster-access",
-            "Cluster access for istiod remote secret proxy",
-            "permit(\n  principal == Lattice::User::\"system:serviceaccount:istio-system:lattice-istiod-proxy\",\n  action == Lattice::Action::\"AccessCluster\",\n  resource\n);\n",
-        )
-        .await?;
+        let cluster_policy = lattice_infra::bootstrap::generate_cluster_access_cedar_policy();
+        let cluster_json = serde_json::to_string(&cluster_policy)
+            .map_err(|e| Error::command_failed(format!("failed to serialize CedarPolicy: {e}")))?;
+        kube_utils::apply_manifests(&mgmt_client, &[&cluster_json], &Default::default())
+            .await
+            .cmd_err()?;
+        info!("Created istiod-proxy-cluster-access CedarPolicy");
 
         // Wait for token controller to populate the Secret
         info!("Waiting for admin token to be populated...");
@@ -1345,33 +1345,6 @@ impl Installer {
 /// Get LatticeCluster phase using dynamic API
 ///
 /// Returns the phase string, or "Unknown" for transient network errors.
-/// Apply a CedarPolicy CRD to the cluster.
-async fn apply_cedar_policy(
-    client: &Client,
-    name: &str,
-    description: &str,
-    policies: &str,
-) -> Result<()> {
-    let yaml = serde_json::json!({
-        "apiVersion": "lattice.dev/v1alpha1",
-        "kind": "CedarPolicy",
-        "metadata": {
-            "name": name,
-            "namespace": LATTICE_SYSTEM_NAMESPACE
-        },
-        "spec": {
-            "description": description,
-            "policies": policies
-        }
-    });
-    let json = serde_json::to_string(&yaml)
-        .map_err(|e| Error::command_failed(format!("failed to serialize CedarPolicy: {}", e)))?;
-    kube_utils::apply_manifests(client, &[&json], &Default::default())
-        .await
-        .cmd_err()?;
-    info!("Created {} CedarPolicy", name);
-    Ok(())
-}
 
 /// The caller should continue polling on "Unknown" - only "Failed" phase
 /// indicates a terminal failure.

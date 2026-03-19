@@ -131,7 +131,15 @@ async fn forward_watch_stream(
             break;
         }
     }
-    // body_tx drops here → client sees EOF → informer reconnects
+    // Channel closed without stream_end — agent disconnected unexpectedly.
+    // Send an IO error so the client (istiod) treats this as a transient failure
+    // and retries, rather than interpreting a clean EOF as authoritative empty state.
+    let _ = body_tx
+        .send(Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "agent disconnected",
+        )))
+        .await;
 }
 
 /// Return the command channel if the agent is connected, or 503 immediately.

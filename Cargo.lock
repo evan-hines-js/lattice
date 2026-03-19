@@ -2709,7 +2709,6 @@ dependencies = [
  "lattice-move",
  "lattice-proto",
  "mockall",
- "moka",
  "parking_lot",
  "pem",
  "rstest",

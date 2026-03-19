@@ -25,7 +25,7 @@ use lattice_common::policy::tetragon::{
 };
 
 use crate::policy::cilium::{
-    build_tcp_port_rules, dns_egress_rule, hbone_egress_rule, hbone_ingress_rule,
+    build_port_rules, dns_egress_rule, hbone_egress_rule, hbone_ingress_rule,
 };
 
 /// K8s label for the gateway name on gateway proxy pods (raw, without Cilium `k8s:` prefix).
@@ -437,7 +437,10 @@ impl IngressCompiler {
         let listener_ports = unique_listener_ports(listeners);
         if !listener_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
-                to_ports: build_tcp_port_rules(&listener_ports),
+                to_ports: build_port_rules(
+                    &listener_ports,
+                    lattice_common::crd::NetworkProtocol::Tcp,
+                ),
                 ..Default::default()
             });
         }

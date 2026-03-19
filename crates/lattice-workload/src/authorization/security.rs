@@ -92,7 +92,10 @@ fn collect_security_overrides(
     for (flag, id) in [
         (runtime.host_network, "hostNetwork"),
         (runtime.share_process_namespace, "shareProcessNamespace"),
-        (runtime.automount_service_account_token, "automountServiceAccountToken"),
+        (
+            runtime.automount_service_account_token,
+            "automountServiceAccountToken",
+        ),
     ] {
         if flag == Some(true) {
             overrides.push(SecurityOverrideRequest {

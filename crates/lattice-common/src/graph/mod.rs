@@ -2335,10 +2335,10 @@ mod tests {
             }],
             allowed_callers: vec![],
             dependencies: vec![],
-            egress: vec![EgressRule {
-                target: EgressTarget::Fqdn("example.com".to_string()),
-                ports: vec![443],
-            }],
+            egress: vec![EgressRule::tcp(
+                EgressTarget::Fqdn("example.com".to_string()),
+                vec![443],
+            )],
             allow_peer_traffic: false,
             depends_all: false,
             ingress: None,
@@ -2399,10 +2399,10 @@ mod tests {
                 name: "api".to_string(),
                 namespace: None,
             }],
-            egress: vec![EgressRule {
-                target: EgressTarget::Fqdn("example.com".to_string()),
-                ports: vec![443],
-            }],
+            egress: vec![EgressRule::tcp(
+                EgressTarget::Fqdn("example.com".to_string()),
+                vec![443],
+            )],
             allow_peer_traffic: false,
             depends_all: false,
             ingress: None,

@@ -20,7 +20,9 @@ use crate::constants::{
     DEFAULT_DNS_SERVERS, DEFAULT_VIP_INTERFACE_PROXMOX, INFRASTRUCTURE_API_GROUP,
     PROXMOX_API_VERSION,
 };
-use lattice_common::crd::{LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig};
+use lattice_common::crd::{
+    InstanceType, Ipv4PoolConfig, LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig,
+};
 use lattice_common::{Error, Result, CAPMOX_NAMESPACE, PROXMOX_CREDENTIALS_SECRET};
 
 /// VM sizing parameters for ProxmoxMachineTemplate
@@ -29,6 +31,44 @@ struct MachineSizing {
     memory_mib: u32,
     disk_size_gb: u32,
     sockets: u32,
+}
+
+impl MachineSizing {
+    fn from_instance_type(instance_type: &Option<InstanceType>, default_disk_gb: u32) -> Self {
+        instance_type
+            .as_ref()
+            .and_then(|it| it.as_resources())
+            .map(|r| Self {
+                cores: r.cores,
+                memory_mib: r.memory_gib * 1024,
+                disk_size_gb: r.disk_gib,
+                sockets: r.sockets,
+            })
+            .unwrap_or(Self {
+                cores: 4,
+                memory_mib: 8192,
+                disk_size_gb: default_disk_gb,
+                sockets: 1,
+            })
+    }
+}
+
+/// Canonical name for a cluster's shared additional-network IP pool.
+/// Used by both the InClusterIPPool resource and the machine template ipv4PoolRef.
+fn additional_network_pool_name(cluster_name: &str, network_index: usize) -> String {
+    format!("{}-net{}", cluster_name, network_index + 1)
+}
+
+/// Parse an Ipv4PoolConfig into the (address_range, prefix) tuple needed by CAPI manifests.
+fn parse_ipv4_pool(pool: &Ipv4PoolConfig, context: &str) -> Result<(String, u8)> {
+    pool.parse_range()
+        .map(|(start, end, prefix)| (format!("{}-{}", start, end), prefix))
+        .ok_or_else(|| {
+            Error::validation(format!(
+                "invalid {} ipv4Pool range: '{}'",
+                context, pool.range
+            ))
+        })
 }
 
 /// Proxmox VE infrastructure provider
@@ -70,17 +110,7 @@ impl ProxmoxProvider {
             .unwrap_or_else(|| DEFAULT_DNS_SERVERS.iter().map(|s| s.to_string()).collect());
         let allowed_nodes = cfg.allowed_nodes.clone().unwrap_or_default();
 
-        // Parse ipv4_pool range to get start-end and prefix
-        let (ip_range, prefix) = cfg
-            .ipv4_pool
-            .parse_range()
-            .map(|(start, end, prefix)| (format!("{}-{}", start, end), prefix))
-            .ok_or_else(|| {
-                Error::validation(format!(
-                    "invalid ipv4Pool range format: '{}', expected format like '10.0.0.101-102/24'",
-                    cfg.ipv4_pool.range
-                ))
-            })?;
+        let (ip_range, prefix) = parse_ipv4_pool(&cfg.ipv4_pool, "cluster")?;
 
         // Use credentials_secret_ref from ProviderSpec if set, otherwise default
         let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
@@ -214,14 +244,14 @@ impl ProxmoxProvider {
         }
 
         // Attach additional network bridges for direct L2 reachability.
-        // Each entry becomes a CAPMOX additionalDevice with its own IP pool.
+        // Each entry becomes a CAPMOX additionalDevice referencing a cluster-wide
+        // shared IP pool (not per-template) so that CP and workers get unique IPs.
         if let Some(networks) = &cfg.additional_networks {
             if !networks.is_empty() {
                 let devices: Vec<serde_json::Value> = networks
                     .iter()
                     .enumerate()
                     .map(|(i, net)| {
-                        let pool_name = format!("{}-{}-net{}", name, suffix, i + 1);
                         serde_json::json!({
                             "name": format!("net{}", i + 1),
                             "bridge": &net.bridge,
@@ -229,7 +259,7 @@ impl ProxmoxProvider {
                             "ipv4PoolRef": {
                                 "apiGroup": "ipam.cluster.x-k8s.io",
                                 "kind": "InClusterIPPool",
-                                "name": pool_name
+                                "name": additional_network_pool_name(name, i)
                             }
                         })
                     })
@@ -247,12 +277,15 @@ impl ProxmoxProvider {
         .with_spec(serde_json::json!({ "template": { "spec": spec } }))
     }
 
-    /// Generate InClusterIPPool resources for additional networks on a machine template.
+    /// Generate shared InClusterIPPool resources for additional networks.
+    ///
+    /// One pool per additional network, shared across all machine templates (CP
+    /// and workers). This ensures IP addresses are unique across all nodes in the
+    /// cluster instead of each template independently allocating from the same range.
     fn generate_additional_network_pools(
         &self,
         name: &str,
         cfg: &ProxmoxConfig,
-        suffix: &str,
         manifests: &mut Vec<CAPIManifest>,
     ) -> Result<()> {
         let networks = match &cfg.additional_networks {
@@ -261,17 +294,8 @@ impl ProxmoxProvider {
         };
 
         for (i, net) in networks.iter().enumerate() {
-            let pool_name = format!("{}-{}-net{}", name, suffix, i + 1);
-            let (ip_range, prefix) = net
-                .ipv4_pool
-                .parse_range()
-                .map(|(start, end, prefix)| (format!("{}-{}", start, end), prefix))
-                .ok_or_else(|| {
-                    Error::validation(format!(
-                        "invalid additionalNetwork ipv4Pool range: '{}'",
-                        net.ipv4_pool.range
-                    ))
-                })?;
+            let pool_name = additional_network_pool_name(name, i);
+            let (ip_range, prefix) = parse_ipv4_pool(&net.ipv4_pool, "additionalNetwork")?;
 
             manifests.push(
                 CAPIManifest::new(
@@ -347,26 +371,8 @@ impl Provider for ProxmoxProvider {
 
         let infra = self.infra_ref();
 
-        // Read CP sizing from node spec (ResourceSpec uses GiB; Proxmox needs MiB for memory)
-        let cp_resources = spec
-            .nodes
-            .control_plane
-            .instance_type
-            .as_ref()
-            .and_then(|it| it.as_resources());
-        let cp_sizing = cp_resources
-            .map(|r| MachineSizing {
-                cores: r.cores,
-                memory_mib: r.memory_gib * 1024,
-                disk_size_gb: r.disk_gib,
-                sockets: r.sockets,
-            })
-            .unwrap_or(MachineSizing {
-                cores: 4,
-                memory_mib: 8192,
-                disk_size_gb: 50,
-                sockets: 1,
-            });
+        let cp_sizing =
+            MachineSizing::from_instance_type(&spec.nodes.control_plane.instance_type, 50);
 
         let mut manifests = vec![
             generate_cluster(&config, &infra),
@@ -375,8 +381,9 @@ impl Provider for ProxmoxProvider {
             self.generate_machine_template(name, cfg, cp_sizing, "control-plane"),
         ];
 
-        // Generate InClusterIPPool resources for additional networks (CP)
-        self.generate_additional_network_pools(name, cfg, "control-plane", &mut manifests)?;
+        // Generate shared InClusterIPPool resources for additional networks (one
+        // pool per network, shared by CP and all worker templates so IPs are unique).
+        self.generate_additional_network_pools(name, cfg, &mut manifests)?;
 
         // Generate worker pool resources
         for (pool_id, pool_spec) in &spec.nodes.worker_pools {
@@ -386,24 +393,7 @@ impl Provider for ProxmoxProvider {
             };
             let suffix = pool_resource_suffix(pool_id);
 
-            // Read per-pool sizing from worker pool spec
-            let worker_resources = pool_spec
-                .instance_type
-                .as_ref()
-                .and_then(|it| it.as_resources());
-            let worker_sizing = worker_resources
-                .map(|r| MachineSizing {
-                    cores: r.cores,
-                    memory_mib: r.memory_gib * 1024,
-                    disk_size_gb: r.disk_gib,
-                    sockets: r.sockets,
-                })
-                .unwrap_or(MachineSizing {
-                    cores: 4,
-                    memory_mib: 8192,
-                    disk_size_gb: 100,
-                    sockets: 1,
-                });
+            let worker_sizing = MachineSizing::from_instance_type(&pool_spec.instance_type, 100);
 
             manifests.push(generate_machine_deployment_for_pool(
                 &config,
@@ -411,7 +401,6 @@ impl Provider for ProxmoxProvider {
                 &pool_config,
             ));
             manifests.push(self.generate_machine_template(name, cfg, worker_sizing, &suffix));
-            self.generate_additional_network_pools(name, cfg, &suffix, &mut manifests)?;
             manifests.push(generate_bootstrap_config_template_for_pool(
                 &config,
                 &pool_config,
@@ -434,10 +423,10 @@ impl Provider for ProxmoxProvider {
 mod tests {
     use super::*;
     use kube::api::ObjectMeta;
-    use lattice_common::crd::{AdditionalNetwork, Ipv4PoolConfig, LatticeClusterSpec};
     use lattice_common::crd::{
-        BackupsConfig, BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec,
-        MonitoringConfig, NodeResourceSpec, NodeSpec, ProviderConfig, ProviderSpec, WorkerPoolSpec,
+        AdditionalNetwork, BackupsConfig, BootstrapProvider, ControlPlaneSpec, KubernetesSpec,
+        LatticeClusterSpec, MonitoringConfig, NodeResourceSpec, NodeSpec, ProviderConfig,
+        WorkerPoolSpec,
     };
 
     fn test_proxmox_config() -> ProxmoxConfig {
@@ -631,7 +620,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn additional_networks_generate_pools_for_cp_and_workers() {
+    async fn additional_networks_generate_shared_pool() {
         let provider = ProxmoxProvider::with_namespace("capi-system");
         let mut cluster = test_cluster("e2e-mgmt");
         // Add additional networks
@@ -661,15 +650,48 @@ mod tests {
             .map(|m| m.metadata.name.as_str())
             .collect();
 
+        // One shared pool per additional network, NOT per machine template
         assert!(
-            pool_names.contains(&"e2e-mgmt-control-plane-net1"),
-            "should have CP pool, got: {:?}",
+            pool_names.contains(&"e2e-mgmt-net1"),
+            "should have shared pool, got: {:?}",
+            pool_names
+        );
+        assert_eq!(
+            pool_names.iter().filter(|n| **n == "e2e-mgmt-net1").count(),
+            1,
+            "shared pool should appear exactly once, got: {:?}",
+            pool_names
+        );
+        // Per-template pools should NOT exist
+        assert!(
+            !pool_names.contains(&"e2e-mgmt-control-plane-net1"),
+            "should not have per-template CP pool, got: {:?}",
             pool_names
         );
         assert!(
-            pool_names.contains(&"e2e-mgmt-pool-default-net1"),
-            "should have worker pool, got: {:?}",
+            !pool_names.contains(&"e2e-mgmt-pool-default-net1"),
+            "should not have per-template worker pool, got: {:?}",
             pool_names
         );
+
+        // Both CP and worker machine templates should reference the shared pool
+        let machine_templates: Vec<_> = manifests
+            .iter()
+            .filter(|m| m.kind == "ProxmoxMachineTemplate")
+            .collect();
+        for mt in &machine_templates {
+            let devices = mt.spec.as_ref().unwrap()["template"]["spec"]["network"]
+                ["additionalDevices"]
+                .as_array()
+                .expect("should have additionalDevices");
+            for dev in devices {
+                let pool_ref = &dev["ipv4PoolRef"]["name"];
+                assert_eq!(
+                    pool_ref.as_str().unwrap(),
+                    "e2e-mgmt-net1",
+                    "machine template should reference shared pool"
+                );
+            }
+        }
     }
 }

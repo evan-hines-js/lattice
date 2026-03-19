@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use lattice_proto::{AgentState, CellCommand, ExecData, KubernetesResponse};
-use moka::future::Cache;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -213,12 +212,11 @@ pub struct AgentRegistry {
     pending_complete_acks: DashMap<String, oneshot::Sender<CompleteAck>>,
     /// Pending K8s API proxy responses keyed by request_id
     /// Uses mpsc::Sender to support streaming responses (watches).
-    /// TTL evicts leaked entries when the agent dies mid-request.
-    pending_k8s_responses: Cache<String, K8sResponseSender>,
+    /// Entries are removed on completion or agent disconnect.
+    pending_k8s_responses: DashMap<String, K8sResponseSender>,
     /// Pending exec data responses keyed by request_id.
     /// Routes stdout/stderr from agent exec sessions to proxy handlers.
-    /// TTL evicts leaked entries when the agent dies mid-session.
-    pending_exec_data: moka::sync::Cache<String, ExecDataSender>,
+    pending_exec_data: DashMap<String, ExecDataSender>,
     /// Proxy configuration for kubeconfig patching
     proxy_config: std::sync::OnceLock<KubeconfigProxyConfig>,
 }
@@ -234,11 +232,6 @@ pub const HEARTBEAT_STALE_THRESHOLD: Duration = Duration::from_secs(90);
 /// Maximum number of pending batch/complete acks.
 /// Prevents unbounded memory growth if agents disconnect mid-pivot.
 const MAX_PENDING_ACKS: usize = 1000;
-
-/// TTL for pending K8s API responses and exec data in the cache.
-/// Entries older than this are evicted to prevent unbounded memory growth
-/// from unmatched request/response pairs.
-const PENDING_RESPONSE_TTL: Duration = Duration::from_secs(300);
 
 /// Register a pending ack in a capacity-bounded DashMap.
 /// Evicts one entry if at capacity to prevent unbounded memory growth.
@@ -262,10 +255,8 @@ impl Default for AgentRegistry {
             teardown_in_progress: DashMap::new(),
             pending_batch_acks: DashMap::new(),
             pending_complete_acks: DashMap::new(),
-            pending_k8s_responses: Cache::builder().time_to_live(PENDING_RESPONSE_TTL).build(),
-            pending_exec_data: moka::sync::Cache::builder()
-                .time_to_live(PENDING_RESPONSE_TTL)
-                .build(),
+            pending_k8s_responses: DashMap::new(),
+            pending_exec_data: DashMap::new(),
             proxy_config: std::sync::OnceLock::new(),
         }
     }
@@ -341,16 +332,19 @@ impl AgentRegistry {
                 );
                 return;
             }
-            Self::mark_disconnected(&mut agent);
+            self.disconnect_agent(&mut agent);
             info!(cluster = %cluster_name, "Agent disconnected");
         }
     }
 
-    /// Mark an agent as disconnected (sets `connected = false` and records
-    /// the disconnection timestamp). Single source of truth for disconnection.
-    fn mark_disconnected(agent: &mut AgentConnection) {
+    /// Disconnect an agent: mark as disconnected and drop all pending response
+    /// senders so watch streams close immediately. Single point of disconnection
+    /// logic — called by both `unregister()` and `disconnect_stale_agents()`.
+    fn disconnect_agent(&self, agent: &mut AgentConnection) {
         agent.connected = false;
         agent.disconnected_at = Some(Instant::now());
+        self.pending_k8s_responses.clear();
+        self.pending_exec_data.clear();
     }
 
     /// Get an agent connection by cluster name
@@ -697,24 +691,19 @@ impl AgentRegistry {
     ///
     /// Returns a clone of the sender for streaming responses.
     pub fn get_pending_exec_data(&self, request_id: &str) -> Option<ExecDataSender> {
-        self.pending_exec_data.get(request_id)
+        self.pending_exec_data.get(request_id).map(|r| r.clone())
     }
 
     /// Remove and return the pending exec data sender
     ///
     /// Use this when the stream ends or on cancellation.
-    /// Safe to call from sync contexts (e.g. Drop impls).
     pub fn take_pending_exec_data(&self, request_id: &str) -> Option<ExecDataSender> {
-        let value = self.pending_exec_data.get(request_id);
-        if value.is_some() {
-            self.pending_exec_data.invalidate(request_id);
-        }
-        value
+        self.pending_exec_data.remove(request_id).map(|(_, v)| v)
     }
 
     /// Check if an exec session is pending
     pub fn has_pending_exec_data(&self, request_id: &str) -> bool {
-        self.pending_exec_data.get(request_id).is_some()
+        self.pending_exec_data.contains_key(request_id)
     }
 }
 
@@ -726,17 +715,20 @@ impl AgentRegistry {
 impl K8sResponseRegistry for AgentRegistry {
     async fn register_pending_k8s_response(&self, request_id: &str, sender: K8sResponseSender) {
         self.pending_k8s_responses
-            .insert(request_id.to_string(), sender)
-            .await;
+            .insert(request_id.to_string(), sender);
         debug!(request_id = %request_id, "Registered pending K8s API response");
     }
 
     async fn get_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
-        self.pending_k8s_responses.get(request_id).await
+        self.pending_k8s_responses
+            .get(request_id)
+            .map(|r| r.clone())
     }
 
     async fn take_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
-        self.pending_k8s_responses.remove(request_id).await
+        self.pending_k8s_responses
+            .remove(request_id)
+            .map(|(_, v)| v)
     }
 
     fn has_pending_k8s_response(&self, request_id: &str) -> bool {
@@ -815,7 +807,7 @@ impl AgentRegistry {
 
         for name in &stale {
             if let Some(mut agent) = self.agents.get_mut(name) {
-                Self::mark_disconnected(&mut agent);
+                self.disconnect_agent(&mut agent);
                 warn!(
                     cluster = %name,
                     "Forcibly disconnected agent: heartbeat stale for {:?}",

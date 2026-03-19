@@ -147,10 +147,10 @@ async fn ensure_oidc_egress_lmm(
             ports: vec![],
             allowed_callers: vec![],
             dependencies: vec![],
-            egress: vec![EgressRule {
-                target: EgressTarget::for_host(&ep.host),
-                ports: vec![ep.port],
-            }],
+            egress: vec![EgressRule::tcp(
+                EgressTarget::for_host(&ep.host),
+                vec![ep.port],
+            )],
             allow_peer_traffic: false,
             depends_all: false,
             ingress: None,

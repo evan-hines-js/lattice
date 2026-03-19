@@ -434,7 +434,10 @@ impl OidcValidator {
         // from triggering unbounded outbound requests (SSRF amplification).
         let kid_str = kid.unwrap_or("none").to_string();
         {
-            let mut refreshed = self.refreshed_kids.lock().unwrap_or_else(|e| e.into_inner());
+            let mut refreshed = self
+                .refreshed_kids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if refreshed.contains(&kid_str) {
                 // Already refreshed for this kid — don't hit the OIDC provider again
                 return Err(Error::Unauthorized(format!(

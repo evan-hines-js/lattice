@@ -164,11 +164,17 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
                             "received child route update"
                         );
                         if update.routes.is_empty() {
-                            child_routes.remove(&update.cluster_name);
+                            // Ignore empty updates — the child's watcher may be
+                            // restarting. Keep the last known good routes until
+                            // the child sends real data again.
+                            debug!(
+                                child = %update.cluster_name,
+                                "ignoring empty route update, keeping last known routes"
+                            );
                         } else {
                             child_routes.insert(update.cluster_name, update.routes);
+                            should_reconcile = true;
                         }
-                        should_reconcile = true;
                     }
                     None => {
                         // Channel closed — no more child updates (leaf cluster or shutdown)

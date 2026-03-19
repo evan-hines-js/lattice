@@ -84,7 +84,6 @@ mod tests {
         assert!(combined.contains("kind: ServiceAccount"));
         assert!(combined.contains("lattice-istiod-proxy"));
         assert!(combined.contains("kind: ClusterRole"));
-        assert!(combined.contains("endpointslices"));
         assert!(combined.contains("kind: ClusterRoleBinding"));
     }
 }

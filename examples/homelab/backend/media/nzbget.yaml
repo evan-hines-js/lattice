@@ -161,12 +161,10 @@ spec:
             PublicKey = ${secret.vpn-credentials.public_key}
             Endpoint = ${secret.vpn-credentials.endpoint}
             AllowedIPs = 0.0.0.0/0
-      volumes:
-        /tmp: {}
-        /run: {}
       security:
         runAsUser: 0
-        capabilities: [NET_ADMIN, SYS_MODULE]
+        readOnlyRootFilesystem: false
+        capabilities: [NET_ADMIN, SYS_MODULE, CHOWN, FOWNER, DAC_OVERRIDE]
         apparmorProfile: Unconfined
         allowedBinaries: ["*"]
       resources:

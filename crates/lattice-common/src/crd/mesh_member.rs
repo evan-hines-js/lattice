@@ -123,6 +123,28 @@ pub enum PeerAuth {
     Webhook,
 }
 
+/// Network protocol for egress rules.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+#[non_exhaustive]
+pub enum NetworkProtocol {
+    /// TCP (default)
+    #[default]
+    Tcp,
+    /// UDP
+    Udp,
+}
+
+impl NetworkProtocol {
+    /// Returns the protocol name as used in Cilium/K8s ("TCP" or "UDP").
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Tcp => "TCP",
+            Self::Udp => "UDP",
+        }
+    }
+}
+
 /// Non-mesh egress rule
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +154,9 @@ pub struct EgressRule {
     /// Allowed ports
     #[serde(default)]
     pub ports: Vec<u16>,
+    /// Protocol (defaults to TCP)
+    #[serde(default)]
+    pub protocol: NetworkProtocol,
 }
 
 /// Target for egress rules
@@ -161,6 +186,24 @@ impl EgressTarget {
 }
 
 impl EgressRule {
+    /// Create a TCP egress rule (the common case).
+    pub fn tcp(target: EgressTarget, ports: Vec<u16>) -> Self {
+        Self {
+            target,
+            ports,
+            protocol: NetworkProtocol::Tcp,
+        }
+    }
+
+    /// Create a UDP egress rule.
+    pub fn udp(target: EgressTarget, ports: Vec<u16>) -> Self {
+        Self {
+            target,
+            ports,
+            protocol: NetworkProtocol::Udp,
+        }
+    }
+
     /// Parse an entity egress reference from an external-service resource id.
     ///
     /// Format: `entity:<name>` or `entity:<name>:<port>`
@@ -185,10 +228,7 @@ impl EgressRule {
         if name.is_empty() {
             return None;
         }
-        Some(EgressRule {
-            target: EgressTarget::Entity(name),
-            ports: vec![port],
-        })
+        Some(EgressRule::tcp(EgressTarget::Entity(name), vec![port]))
     }
 }
 
@@ -392,10 +432,10 @@ mod tests {
         let mut spec = valid_spec();
         spec.ports.clear();
         spec.dependencies.clear();
-        spec.egress.push(EgressRule {
-            target: EgressTarget::Entity("world".to_string()),
-            ports: vec![443],
-        });
+        spec.egress.push(EgressRule::tcp(
+            EgressTarget::Entity("world".to_string()),
+            vec![443],
+        ));
         assert!(spec.validate().is_ok());
     }
 

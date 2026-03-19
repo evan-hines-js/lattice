@@ -406,10 +406,7 @@ async fn ensure_external_egress_lmm(
 
     let egress_rules: Vec<EgressRule> = endpoints
         .iter()
-        .map(|ep| EgressRule {
-            target: EgressTarget::for_host(&ep.host),
-            ports: vec![ep.port],
-        })
+        .map(|ep| EgressRule::tcp(EgressTarget::for_host(&ep.host), vec![ep.port]))
         .collect();
 
     let mut lmm = LatticeMeshMember::new(

@@ -362,11 +362,14 @@ pub fn run_id() -> &'static str {
 }
 
 /// Generate a unique kubeconfig path for a cluster.
+/// Returns the path where the installer writes the root kubeconfig.
 ///
-/// The path includes the run ID as a suffix to allow parallel test execution.
-/// Example: `/tmp/e2e-mgmt-kubeconfig-8156-965202`
-pub fn kubeconfig_path(cluster_name: &str) -> String {
-    format!("/tmp/{}-kubeconfig-{}", cluster_name, run_id())
+/// This is `~/.lattice/kubeconfig.root` — the same path used by `lattice install`.
+pub fn kubeconfig_path(_cluster_name: &str) -> String {
+    lattice_cli::config::kubeconfig_root_path()
+        .expect("failed to determine kubeconfig root path")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Generate a unique localhost-patched kubeconfig path for a cluster.

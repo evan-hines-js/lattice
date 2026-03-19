@@ -460,7 +460,10 @@ mod sanitize_tests {
 
     #[test]
     fn replaces_underscores_and_dots() {
-        assert_eq!(sanitize_dns_label("wg_confs.conf").unwrap(), "wg-confs-conf");
+        assert_eq!(
+            sanitize_dns_label("wg_confs.conf").unwrap(),
+            "wg-confs-conf"
+        );
     }
 
     #[test]

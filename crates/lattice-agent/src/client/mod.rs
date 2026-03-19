@@ -322,20 +322,26 @@ impl AgentClient {
         info!("Agent client disconnected and cleaned up");
     }
 
-    /// Send the ready message to cell
+    /// Send the ready message to cell.
+    ///
+    /// Waits for the local K8s API to be reachable before announcing readiness.
+    /// This prevents the cell from routing requests to us before we can serve
+    /// them, which would cause empty list responses that break istiod's
+    /// multi-cluster endpoint tracking.
     async fn send_ready(&self) -> Result<(), ClientError> {
-        // Get K8s version from in-cluster client
-        let k8s_version = if let Some(client) = self.create_client_logged("version check").await {
-            match client.apiserver_version().await {
-                Ok(info) => format!("v{}.{}", info.major, info.minor),
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to get K8s API server version");
-                    "unknown".to_string()
+        // Wait for K8s API to be reachable before announcing readiness
+        let k8s_version = loop {
+            if let Some(client) = self.create_client_logged("readiness check").await {
+                match client.apiserver_version().await {
+                    Ok(info) => break format!("v{}.{}", info.major, info.minor),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "K8s API not ready, retrying in 2s");
+                    }
                 }
+            } else {
+                tracing::warn!("K8s client unavailable, retrying in 2s");
             }
-        } else {
-            tracing::warn!("K8s client unavailable, cannot determine API server version");
-            "unknown".to_string()
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         };
 
         let msg = AgentMessage {

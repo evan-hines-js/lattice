@@ -427,10 +427,16 @@ impl WorkloadCompiler {
 
         // Generate Service if ports are defined
         if workload.service.is_some() {
+            let has_advertise = spec
+                .ingress
+                .as_ref()
+                .map(|i| i.routes.values().any(|r| r.advertise.is_some()))
+                .unwrap_or(false);
             output.service = Some(Self::compile_service(
                 name,
                 namespace,
                 workload,
+                has_advertise,
                 &owner_refs,
             ));
         }
@@ -503,7 +509,9 @@ impl WorkloadCompiler {
                     },
                     spec: PodSpec {
                         service_account_name: pod_template.service_account_name,
-                        automount_service_account_token: Some(pod_template.automount_service_account_token),
+                        automount_service_account_token: Some(
+                            pod_template.automount_service_account_token,
+                        ),
                         containers: pod_template.containers,
                         init_containers: pod_template.init_containers,
                         volumes: pod_template.volumes,
@@ -573,6 +581,7 @@ impl WorkloadCompiler {
         name: &str,
         namespace: &str,
         workload: &WorkloadSpec,
+        has_advertise: bool,
         owner_refs: &[OwnerReference],
     ) -> Service {
         let mut selector = BTreeMap::new();
@@ -594,9 +603,13 @@ impl WorkloadCompiler {
             })
             .unwrap_or_default();
 
-        // Waypoint label is applied conditionally by the service compiler
-        // when L7 enforcement is needed (e.g., external dependencies).
-        let metadata = ObjectMeta::new(name, namespace).with_owner_references(owner_refs.to_vec());
+        let mut metadata =
+            ObjectMeta::new(name, namespace).with_owner_references(owner_refs.to_vec());
+        if has_advertise {
+            metadata
+                .labels
+                .insert("istio.io/global".to_string(), "true".to_string());
+        }
 
         Service {
             api_version: "v1".to_string(),

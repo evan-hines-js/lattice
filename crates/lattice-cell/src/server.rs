@@ -1194,20 +1194,11 @@ impl LatticeAgent for AgentServer {
                 .handle_agent_disconnect(&cert_cluster_id)
                 .await;
 
-            // Send empty route update to purge this child's routes from the
-            // reconciler. Without this, a disconnected child's routes would
-            // persist in the LatticeClusterRoutes CRD indefinitely.
-            let cleanup = crate::route_reconciler::RouteUpdate {
-                cluster_name: cert_cluster_id.to_string(),
-                routes: vec![],
-            };
-            if let Err(e) = msg_ctx.route_update_tx.send(cleanup).await {
-                warn!(
-                    cluster = %cert_cluster_id,
-                    error = %e,
-                    "failed to send route cleanup on disconnect"
-                );
-            }
+            // Routes are intentionally NOT deleted on disconnect. Temporarily
+            // disconnected agents will reconnect and re-advertise. Deleting here
+            // cascades: stubs cleaned up → remote secret removed → istiod loses
+            // endpoints → cross-cluster 502/503. Permanent cleanup happens via
+            // the LatticeCluster deletion handler.
         });
 
         // Return stream of commands to send to agent

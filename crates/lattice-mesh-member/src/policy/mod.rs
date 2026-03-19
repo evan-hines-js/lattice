@@ -443,10 +443,10 @@ pub(crate) mod tests {
 
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
         let mut spec = make_mesh_member_spec(labels, vec![], vec![], vec![]);
-        spec.egress = vec![EgressRule {
-            target: EgressTarget::Fqdn("api.stripe.com".to_string()),
-            ports: vec![443],
-        }];
+        spec.egress = vec![EgressRule::tcp(
+            EgressTarget::Fqdn("api.stripe.com".to_string()),
+            vec![443],
+        )];
         graph.put_mesh_member(ns, "api", &spec);
 
         let compiler = PolicyCompiler::new(&graph, vec![]);
@@ -470,10 +470,10 @@ pub(crate) mod tests {
             vec!["gateway"],
             vec![],
         );
-        spec.egress = vec![EgressRule {
-            target: EgressTarget::Fqdn("api.stripe.com".to_string()),
-            ports: vec![443],
-        }];
+        spec.egress = vec![EgressRule::tcp(
+            EgressTarget::Fqdn("api.stripe.com".to_string()),
+            vec![443],
+        )];
         graph.put_mesh_member(ns, "api", &spec);
 
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
@@ -574,10 +574,10 @@ pub(crate) mod tests {
             vec!["gateway"],
             vec![],
         );
-        spec.egress = vec![EgressRule {
-            target: EgressTarget::Fqdn("api.stripe.com".to_string()),
-            ports: vec![443],
-        }];
+        spec.egress = vec![EgressRule::tcp(
+            EgressTarget::Fqdn("api.stripe.com".to_string()),
+            vec![443],
+        )];
         graph.put_mesh_member(ns, "api", &spec);
 
         let gateway_spec = make_service_spec(vec!["api"], vec![]);
@@ -946,10 +946,10 @@ pub(crate) mod tests {
             }],
             allowed_callers: vec![],
             dependencies: vec![],
-            egress: vec![EgressRule {
-                target: EgressTarget::Fqdn("api.stripe.com".to_string()),
-                ports: vec![443],
-            }],
+            egress: vec![EgressRule::tcp(
+                EgressTarget::Fqdn("api.stripe.com".to_string()),
+                vec![443],
+            )],
             allow_peer_traffic: false,
             ingress: None,
             service_account: None,
@@ -1017,10 +1017,10 @@ pub(crate) mod tests {
             }],
             allowed_callers: vec![],
             dependencies: vec![],
-            egress: vec![EgressRule {
-                target: EgressTarget::Fqdn("example.com".to_string()),
-                ports: vec![],
-            }],
+            egress: vec![EgressRule::tcp(
+                EgressTarget::Fqdn("example.com".to_string()),
+                vec![],
+            )],
             allow_peer_traffic: false,
             ingress: None,
             service_account: None,
@@ -1063,10 +1063,10 @@ pub(crate) mod tests {
             }],
             allowed_callers: vec![],
             dependencies: vec![],
-            egress: vec![EgressRule {
-                target: EgressTarget::Fqdn("external.example.com".to_string()),
-                ports: vec![443],
-            }],
+            egress: vec![EgressRule::tcp(
+                EgressTarget::Fqdn("external.example.com".to_string()),
+                vec![443],
+            )],
             allow_peer_traffic: false,
             ingress: None,
             service_account: None,
@@ -1775,14 +1775,8 @@ pub(crate) mod tests {
         let mut spec = make_mesh_member_spec(labels, vec![], vec![], vec![]);
         spec.ambient = false;
         spec.egress = vec![
-            EgressRule {
-                target: EgressTarget::Cidr("10.0.0.0/8".to_string()),
-                ports: vec![443],
-            },
-            EgressRule {
-                target: EgressTarget::Entity("world".to_string()),
-                ports: vec![80],
-            },
+            EgressRule::tcp(EgressTarget::Cidr("10.0.0.0/8".to_string()), vec![443]),
+            EgressRule::tcp(EgressTarget::Entity("world".to_string()), vec![80]),
         ];
         graph.put_mesh_member(ns, "worker", &spec);
 

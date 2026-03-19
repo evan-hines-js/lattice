@@ -674,10 +674,9 @@ fn finalize_mesh(
 
         if let Some(source) = model_source {
             for fqdn in download_egress_fqdns(source) {
-                mm.spec.egress.push(EgressRule {
-                    target: EgressTarget::Fqdn(fqdn),
-                    ports: vec![443],
-                });
+                mm.spec
+                    .egress
+                    .push(EgressRule::tcp(EgressTarget::Fqdn(fqdn), vec![443]));
             }
         }
     }

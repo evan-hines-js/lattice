@@ -24,9 +24,9 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use std::sync::{Arc, OnceLock};
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::auth::UserIdentity;
 use crate::backend::{K8sTunnelRequest, ProxyError};
@@ -35,14 +35,6 @@ use crate::routing::{parse_cluster_path, strip_cluster_prefix};
 use crate::server::AppState;
 use lattice_common::routing::split_first_hop;
 use lattice_proto::is_watch_query;
-
-/// Default timeout for local K8s API requests (30 seconds)
-const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Maximum duration for watch/streaming requests (30 minutes)
-/// Prevents indefinitely-held streaming connections from exhausting resources.
-/// Clients should reconnect with a resourceVersion to resume watching.
-const MAX_WATCH_DURATION: std::time::Duration = std::time::Duration::from_secs(1800);
 
 // ============================================================================
 // Constants
@@ -132,6 +124,8 @@ pub struct K8sHttpRequest {
     pub identity: UserIdentity,
     /// Content-Type header
     pub content_type: Option<String>,
+    /// Accept header
+    pub accept: Option<String>,
     /// Request body
     pub body: Vec<u8>,
 }
@@ -176,6 +170,10 @@ impl ReqwestK8sClient {
 
         if let Some(ct) = &req.content_type {
             builder = builder.header("Content-Type", ct);
+        }
+
+        if let Some(accept) = &req.accept {
+            builder = builder.header("Accept", accept);
         }
 
         if !req.body.is_empty() {
@@ -260,7 +258,6 @@ async fn get_or_init_client() -> Result<&'static reqwest::Client, Error> {
 
     let client = reqwest::Client::builder()
         .add_root_certificate(cert)
-        .timeout(DEFAULT_TIMEOUT)
         .build()
         .map_err(|e| Error::Internal(format!("Failed to create HTTP client: {}", e)))?;
 
@@ -404,6 +401,12 @@ async fn forward_to_k8s_api(
         "Proxying to local K8s API with impersonation"
     );
 
+    if tracing::enabled!(tracing::Level::TRACE) {
+        for (name, value) in request.headers() {
+            trace!(header = %name, value = ?value, "incoming request header");
+        }
+    }
+
     let target_url = match query {
         Some(q) => format!("{}{}?{}", k8s_api_url, path, q),
         None => format!("{}{}", k8s_api_url, path),
@@ -417,6 +420,12 @@ async fn forward_to_k8s_api(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    let accept = request
+        .headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let body = axum::body::to_bytes(request.into_body(), MAX_BODY_SIZE)
         .await
         .map_err(|e| Error::Internal(format!("Failed to read request body: {}", e)))?;
@@ -427,6 +436,7 @@ async fn forward_to_k8s_api(
         token: zeroize::Zeroizing::new(sa_token),
         identity: identity.clone(),
         content_type,
+        accept,
         body: body.to_vec(),
     };
 
@@ -511,18 +521,17 @@ fn build_response_base(status: u16, content_type: String) -> axum::http::respons
         .header("Content-Type", content_type)
 }
 
-/// Build a streaming response for watch/follow queries
+/// Build a streaming response for watch/follow queries.
 ///
-/// The stream is bounded by `MAX_WATCH_DURATION` to prevent indefinitely-held
-/// connections. Clients should reconnect with a resourceVersion to resume.
+/// The stream runs until the upstream closes it (K8s API servers periodically
+/// close watches and clients reconnect with resourceVersion). No artificial
+/// deadline — adding one causes silent EOF that clients interpret as
+/// authoritative empty state.
 fn build_streaming_response(response: StreamingHttpResponse) -> Result<Response<Body>, Error> {
     debug!(status = response.status, "Starting streaming response");
 
-    let deadline = tokio::time::sleep(MAX_WATCH_DURATION);
-    let bounded_stream = response.stream.take_until(deadline);
-
     build_response_base(response.status, response.content_type)
-        .body(Body::from_stream(bounded_stream))
+        .body(Body::from_stream(response.stream))
         .map_err(|e| Error::Internal(format!("Failed to build streaming response: {}", e)))
 }
 
