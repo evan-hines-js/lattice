@@ -72,6 +72,13 @@ spec:
       action == Lattice::Action::"OverrideSecurity",
       resource == Lattice::SecurityOverride::"capability:SETGID"
     );
+
+    // secret access for VPN credentials
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"AccessSecret",
+      resource == Lattice::SecretPath::"lattice-local:vpn-credentials"
+    );
 ---
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
@@ -122,6 +129,13 @@ spec:
       media-storage:
         type: volume
         id: media-storage
+      vpn-credentials:
+        type: secret
+        id: vpn-credentials
+        params:
+          provider: lattice-local
+          refreshInterval: 1h
+        keys: [private_key, public_key, endpoint, address]
       sonarr:
         type: service
         direction: inbound
@@ -136,16 +150,16 @@ spec:
         /config/wg_confs/wg0.conf:
           content: |
             [Interface]
-            PrivateKey = <YOUR_PRIVATE_KEY>
-            Address = 10.0.0.2/32
+            PrivateKey = ${secret.vpn-credentials.private_key}
+            Address = ${secret.vpn-credentials.address}
             DNS = 1.1.1.1
 
             PostUp = iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
             PostDown = iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE
 
             [Peer]
-            PublicKey = <SERVER_PUBLIC_KEY>
-            Endpoint = <VPN_SERVER>:51820
+            PublicKey = ${secret.vpn-credentials.public_key}
+            Endpoint = ${secret.vpn-credentials.endpoint}
             AllowedIPs = 0.0.0.0/0
       volumes:
         /tmp: {}

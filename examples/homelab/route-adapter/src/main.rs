@@ -11,7 +11,7 @@ use std::fmt::Write;
 use std::path::PathBuf;
 
 use futures::TryStreamExt;
-use kube::api::{Api, DynamicObject, GroupVersionKind};
+use kube::api::{Api, DynamicObject};
 use kube::discovery::ApiResource;
 use kube::runtime::watcher::{self, Event};
 use kube::Client;
@@ -260,8 +260,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&config_path, render_haproxy_config(&[]))?;
 
     let client = Client::try_default().await?;
-    let gvk = GroupVersionKind::gvk("lattice.dev", "v1alpha1", "LatticeClusterRoutes");
-    let ar = ApiResource::from_gvk(&gvk);
+    let ar = ApiResource {
+        group: "lattice.dev".into(),
+        version: "v1alpha1".into(),
+        api_version: "lattice.dev/v1alpha1".into(),
+        kind: "LatticeClusterRoutes".into(),
+        plural: "latticeclusterroutes".into(),
+    };
 
     // Reconnect on watcher errors — the K8s API closes watches periodically
     loop {
