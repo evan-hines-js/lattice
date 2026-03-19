@@ -317,11 +317,16 @@ pub async fn build_service_controllers(
 /// Spawn the remote secret controller for Istio multi-cluster discovery.
 ///
 /// Watches `LatticeClusterRoutes` and creates Istio remote secrets so istiod
-/// can discover services on remote clusters. Uses the direct API server
-/// kubeconfig copied pre-pivot (not the auth proxy).
-pub fn spawn_remote_secret_controller(client: Client) -> tokio::task::JoinHandle<()> {
+/// can discover services on remote clusters via the auth proxy.
+pub fn spawn_remote_secret_controller(
+    client: Client,
+    proxy_base_url: String,
+    ca_cert_pem: String,
+) -> tokio::task::JoinHandle<()> {
     let ctx = Arc::new(remote_secret::RemoteSecretContext {
         client: client.clone(),
+        proxy_base_url,
+        ca_cert_pem,
     });
 
     tracing::info!("- RemoteSecret controller");

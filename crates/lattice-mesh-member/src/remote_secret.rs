@@ -14,7 +14,7 @@
 //!
 //! Tokens are requested per-reconcile via the TokenRequest API against the
 //! `lattice-operator` ServiceAccount. Tokens expire after 24 hours;
-//! reconcile requeues at half that interval to keep them fresh.
+//! reconcile requeues every 6 hours to keep them fresh.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -39,6 +39,8 @@ const SERVICE_STUB_LABEL: &str = "lattice.dev/service-stub";
 /// Context for the remote secret reconciler.
 pub struct RemoteSecretContext {
     pub client: Client,
+    pub proxy_base_url: String,
+    pub ca_cert_pem: String,
 }
 
 pub async fn reconcile(
@@ -58,8 +60,8 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
-    // Determine kubeconfig source: peer routes (from parent) use parent's proxy,
-    // local child routes use the direct API server kubeconfig copied pre-pivot.
+    // Determine proxy credentials: peer routes (from parent) use parent's proxy,
+    // local child routes use this cluster's own proxy.
     let is_peer = routes
         .metadata
         .labels
@@ -67,13 +69,17 @@ pub async fn reconcile(
         .and_then(|l| l.get(lattice_common::PEER_ROUTES_LABEL))
         .is_some_and(|v| v == "true");
 
-    let secret_name = format!("istio-remote-secret-{}", source_cluster);
-    let kubeconfig = if is_peer {
-        let (proxy_url, ca_cert, token) = load_peer_proxy_credentials(&ctx.client).await?;
-        build_remote_kubeconfig(&source_cluster, &proxy_url, &ca_cert, &token)
+    let (proxy_url, ca_cert, token) = if is_peer {
+        load_peer_proxy_credentials(&ctx.client).await?
     } else {
-        load_direct_kubeconfig(&ctx.client, &source_cluster).await?
+        let token = request_proxy_token(&ctx.client)
+            .await
+            .map_err(|e| Error::internal(format!("failed to request proxy token: {e}")))?;
+        (ctx.proxy_base_url.clone(), ctx.ca_cert_pem.clone(), token)
     };
+
+    let secret_name = format!("istio-remote-secret-{}", source_cluster);
+    let kubeconfig = build_remote_kubeconfig(&source_cluster, &proxy_url, &ca_cert, &token);
 
     let mut labels = BTreeMap::new();
     labels.insert(ISTIO_MULTICLUSTER_LABEL.to_string(), "true".to_string());
@@ -118,10 +124,9 @@ pub async fn reconcile(
         "ensured remote secret, mesh network, and service stubs"
     );
 
-    // Requeue every 60 seconds to recreate deleted service stubs and
-    // refresh the remote secret token. Short interval ensures self-healing
-    // without waiting for the full token refresh cycle.
-    Ok(Action::requeue(Duration::from_secs(60)))
+    // Requeue to refresh the proxy token and recreate any deleted service stubs.
+    // Token lifetime is 24h; reconciling every 6h keeps it fresh.
+    Ok(Action::requeue(Duration::from_secs(6 * 3600)))
 }
 
 /// Create headless Service stubs so CoreDNS resolves remote service names.
@@ -278,38 +283,8 @@ async fn load_peer_proxy_credentials(client: &Client) -> Result<(String, String,
     ))
 }
 
-/// Load the direct API server kubeconfig for a child cluster.
-///
-/// Reads the `istiod-direct-kubeconfig-{cluster}` secret from istio-system,
-/// which was copied from the CAPI kubeconfig pre-pivot.
-async fn load_direct_kubeconfig(client: &Client, cluster_name: &str) -> Result<String, Error> {
-    let secret_name = format!("istiod-direct-kubeconfig-{}", cluster_name);
-    let api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
-
-    let secret = api.get(&secret_name).await.map_err(|e| {
-        Error::internal(format!(
-            "direct kubeconfig secret '{}' not found in istio-system \
-             (copied pre-pivot by cluster controller): {e}",
-            secret_name
-        ))
-    })?;
-
-    let data = secret.data.as_ref().ok_or_else(|| {
-        Error::internal(format!(
-            "direct kubeconfig secret '{}' has no data",
-            secret_name
-        ))
-    })?;
-
-    let kc_bytes = data.get("kubeconfig").ok_or_else(|| {
-        Error::internal(format!(
-            "direct kubeconfig secret '{}' missing 'kubeconfig' key",
-            secret_name
-        ))
-    })?;
-
-    String::from_utf8(kc_bytes.0.clone())
-        .map_err(|e| Error::internal(format!("direct kubeconfig is not valid UTF-8: {e}")))
+async fn request_proxy_token(client: &Client) -> Result<String, kube::Error> {
+    lattice_common::kube_utils::request_istiod_proxy_token(client).await
 }
 
 /// Build kubeconfig as JSON (not string interpolation) to prevent injection.
