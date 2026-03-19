@@ -113,6 +113,10 @@ impl Merge for RuntimeSpec {
             &mut self.share_process_namespace,
             &defaults.share_process_namespace,
         );
+        merge_option(
+            &mut self.automount_service_account_token,
+            &defaults.automount_service_account_token,
+        );
         // lists (atomic replace)
         merge_vec(&mut self.image_pull_secrets, &defaults.image_pull_secrets);
     }

@@ -103,6 +103,13 @@ fn collect_security_overrides(
             container: None,
         });
     }
+    if runtime.automount_service_account_token == Some(true) {
+        overrides.push(SecurityOverrideRequest {
+            override_id: "automountServiceAccountToken".into(),
+            category: "pod".into(),
+            container: None,
+        });
+    }
 
     // Container-level overrides
     for (name, container) in &workload.containers {
@@ -219,33 +226,17 @@ fn collect_container_overrides(
             container: cname.clone(),
         });
     }
-    if s.seccomp_profile.as_deref() == Some("Unconfined") {
-        overrides.push(SecurityOverrideRequest {
-            override_id: "unconfined:seccomp".into(),
-            category: "profile".into(),
-            container: cname.clone(),
-        });
-    }
-    if s.seccomp_profile.as_deref() == Some("Localhost") {
-        overrides.push(SecurityOverrideRequest {
-            override_id: "localhost:seccomp".into(),
-            category: "profile".into(),
-            container: cname.clone(),
-        });
-    }
-    if s.apparmor_profile.as_deref() == Some("Unconfined") {
-        overrides.push(SecurityOverrideRequest {
-            override_id: "unconfined:apparmor".into(),
-            category: "profile".into(),
-            container: cname.clone(),
-        });
-    }
-    if s.apparmor_profile.as_deref() == Some("Localhost") {
-        overrides.push(SecurityOverrideRequest {
-            override_id: "localhost:apparmor".into(),
-            category: "profile".into(),
-            container: cname.clone(),
-        });
+    for (kind, profile) in [
+        ("seccomp", s.seccomp_profile.as_deref()),
+        ("apparmor", s.apparmor_profile.as_deref()),
+    ] {
+        if let Some(value @ ("Unconfined" | "Localhost")) = profile {
+            overrides.push(SecurityOverrideRequest {
+                override_id: format!("{kind}:{value}"),
+                category: "profile".into(),
+                container: cname.clone(),
+            });
+        }
     }
 
     for binary in &s.allowed_binaries {
@@ -457,7 +448,7 @@ mod tests {
         let overrides = collect_security_overrides(&workload, &runtime);
         assert!(overrides
             .iter()
-            .any(|o| o.override_id == "localhost:seccomp" && o.category == "profile"));
+            .any(|o| o.override_id == "seccomp:Localhost" && o.category == "profile"));
     }
 
     #[test]
@@ -485,7 +476,7 @@ mod tests {
         let overrides = collect_security_overrides(&workload, &runtime);
         assert!(overrides
             .iter()
-            .any(|o| o.override_id == "localhost:apparmor" && o.category == "profile"));
+            .any(|o| o.override_id == "apparmor:Localhost" && o.category == "profile"));
     }
 
     #[test]
@@ -512,5 +503,55 @@ mod tests {
 
         let overrides = collect_security_overrides(&workload, &runtime);
         assert!(!overrides.iter().any(|o| o.category == "profile"));
+    }
+
+    #[test]
+    fn automount_sa_token_generates_override() {
+        let workload = WorkloadSpec {
+            containers: BTreeMap::from([(
+                "main".to_string(),
+                ContainerSpec {
+                    image: "test:latest".to_string(),
+                    command: Some(vec!["/app".to_string()]),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec {
+            automount_service_account_token: Some(true),
+            ..Default::default()
+        };
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        assert!(overrides
+            .iter()
+            .any(|o| o.override_id == "automountServiceAccountToken"
+                && o.category == "pod"
+                && o.container.is_none()));
+    }
+
+    #[test]
+    fn automount_sa_token_false_no_override() {
+        let workload = WorkloadSpec {
+            containers: BTreeMap::from([(
+                "main".to_string(),
+                ContainerSpec {
+                    image: "test:latest".to_string(),
+                    command: Some(vec!["/app".to_string()]),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let runtime = RuntimeSpec {
+            automount_service_account_token: Some(false),
+            ..Default::default()
+        };
+
+        let overrides = collect_security_overrides(&workload, &runtime);
+        assert!(!overrides
+            .iter()
+            .any(|o| o.override_id == "automountServiceAccountToken"));
     }
 }

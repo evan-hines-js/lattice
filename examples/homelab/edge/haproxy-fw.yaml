@@ -1,18 +1,43 @@
-# Cedar policy: allow haproxy-fw to use shareProcessNamespace
-# (sidecar needs to send SIGUSR2 to HAProxy for config reloads)
+# Cedar policy: allow haproxy-fw shared PID namespace and SA token
 apiVersion: lattice.dev/v1alpha1
 kind: CedarPolicy
 metadata:
   name: haproxy-fw-security
-  namespace: edge
+  namespace: lattice-system
 spec:
-  description: Allow haproxy-fw to share process namespace for sidecar reload
+  description: Allow haproxy-fw shared PID namespace and SA token for sidecar K8s API access
   policies: |
     permit(
       principal == Lattice::Service::"edge/haproxy-fw",
       action == Lattice::Action::"OverrideSecurity",
-      resource == Lattice::SecurityOverride::"shareProcessNamespace"
+      resource in [
+        Lattice::SecurityOverride::"shareProcessNamespace",
+        Lattice::SecurityOverride::"automountServiceAccountToken"
+      ]
     );
+---
+# RBAC: allow haproxy-fw SA to watch LatticeClusterRoutes CRDs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lattice-route-watcher
+rules:
+  - apiGroups: ["lattice.dev"]
+    resources: ["latticeclusterroutes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: haproxy-fw-route-watcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lattice-route-watcher
+subjects:
+  - kind: ServiceAccount
+    name: haproxy-fw
+    namespace: edge
 ---
 # HAProxy firewall - single entry point for all traffic into the backend cluster
 #
@@ -83,6 +108,7 @@ spec:
       security:
         runAsUser: 1000
   shareProcessNamespace: true
+  automountServiceAccountToken: true
   ingress:
     routes:
       http:

@@ -1035,7 +1035,7 @@ pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), Strin
                 cedar_text: r#"permit(
   principal,
   action == Lattice::Action::"OverrideSecurity",
-  resource == Lattice::SecurityOverride::"unconfined:apparmor"
+  resource == Lattice::SecurityOverride::"apparmor:Unconfined"
 );"#
                 .to_string(),
             },

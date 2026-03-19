@@ -295,7 +295,7 @@ pub async fn apply_apparmor_override_policy(kubeconfig: &str) -> Result<(), Stri
         r#"permit(
   principal,
   action == Lattice::Action::"OverrideSecurity",
-  resource == Lattice::SecurityOverride::"unconfined:apparmor"
+  resource == Lattice::SecurityOverride::"apparmor:Unconfined"
 );"#,
     )
     .await

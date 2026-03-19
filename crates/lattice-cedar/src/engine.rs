@@ -74,7 +74,7 @@ pub enum DenialReason {
 impl fmt::Display for DenialReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoPermitPolicy => write!(f, "no permit policy for this service and secret path"),
+            Self::NoPermitPolicy => write!(f, "no permit policy for this service and resource"),
             Self::ExplicitForbid => write!(f, "access explicitly forbidden by policy"),
             Self::InternalError(msg) => write!(f, "internal authorization error: {}", msg),
         }

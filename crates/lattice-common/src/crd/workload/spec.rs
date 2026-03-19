@@ -60,6 +60,11 @@ pub struct RuntimeSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_process_namespace: Option<bool>,
 
+    /// Mount the service account token into the pod (default: false).
+    /// Required when sidecars or containers need K8s API access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automount_service_account_token: Option<bool>,
+
     /// Image pull secrets — resource names referencing `type: secret` resources
     ///
     /// Each entry is a resource name from `resources` that must have `type: secret`.

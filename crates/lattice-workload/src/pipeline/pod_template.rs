@@ -34,6 +34,7 @@ pub struct CompiledPodTemplate {
     pub security_context: Option<PodSecurityContext>,
     pub host_network: Option<bool>,
     pub share_process_namespace: Option<bool>,
+    pub automount_service_account_token: bool,
     pub topology_spread_constraints: Vec<TopologySpreadConstraint>,
     pub node_selector: Option<BTreeMap<String, String>>,
     pub tolerations: Vec<crate::k8s::Toleration>,
@@ -125,6 +126,9 @@ impl PodTemplateCompiler {
             security_context,
             host_network: runtime.host_network,
             share_process_namespace: runtime.share_process_namespace,
+            automount_service_account_token: runtime
+                .automount_service_account_token
+                .unwrap_or(false),
             topology_spread_constraints: vec![TopologySpreadConstraint {
                 max_skew: 1,
                 topology_key: provider_type.topology_spread_key().to_string(),

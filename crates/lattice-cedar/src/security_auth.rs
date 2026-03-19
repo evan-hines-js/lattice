@@ -430,6 +430,7 @@ mod tests {
             vec![
                 ("hostNetwork", "pod", None),
                 ("shareProcessNamespace", "pod", None),
+                ("automountServiceAccountToken", "pod", None),
             ],
         );
 

@@ -1,3 +1,48 @@
+# Cedar policy: allow nzbget security overrides for VPN sidecar
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: nzbget-security
+  namespace: lattice-system
+spec:
+  description: Allow nzbget security overrides for VPN sidecar and linuxserver.io entrypoint
+  policies: |
+    // wireguard sidecar: tunnel setup requires NET_ADMIN + SYS_MODULE
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource in [
+        Lattice::SecurityOverride::"capability:NET_ADMIN",
+        Lattice::SecurityOverride::"capability:SYS_MODULE",
+        Lattice::SecurityOverride::"apparmor:Unconfined",
+        Lattice::SecurityOverride::"allowedBinary:*"
+      ]
+    ) when { resource.category == "capability" || resource.category == "profile" || resource.category == "binary" };
+
+    // both containers run as root (linuxserver.io images require it)
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource in [
+        Lattice::SecurityOverride::"runAsRoot",
+        Lattice::SecurityOverride::"readWriteRootFilesystem"
+      ]
+    );
+
+    // nzbget main container needs default capabilities for linuxserver.io init
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"OverrideSecurity",
+      resource in [
+        Lattice::SecurityOverride::"capability:CHOWN",
+        Lattice::SecurityOverride::"capability:DAC_OVERRIDE",
+        Lattice::SecurityOverride::"capability:FOWNER",
+        Lattice::SecurityOverride::"capability:KILL",
+        Lattice::SecurityOverride::"capability:SETUID",
+        Lattice::SecurityOverride::"capability:SETGID"
+      ]
+    );
+---
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
 metadata:
@@ -44,17 +89,49 @@ spec:
         type: volume
         params:
           size: 1Gi
-      # Shared media storage (REFERENCE - no size, authorized via jellyfin's allowedConsumers)
       media-storage:
         type: volume
         id: media-storage
-      # Service dependencies (bilateral agreement)
       sonarr:
         type: service
         direction: inbound
-      egress-vpn:
-        type: service
-        direction: outbound
+  sidecars:
+    wireguard:
+      image: docker.io/linuxserver/wireguard:latest
+      command: ["/init"]
+      variables:
+        PUID: "1000"
+        PGID: "1000"
+      files:
+        /config/wg_confs/wg0.conf:
+          content: |
+            [Interface]
+            PrivateKey = <YOUR_PRIVATE_KEY>
+            Address = 10.0.0.2/32
+            DNS = 1.1.1.1
+
+            PostUp = iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
+            PostDown = iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE
+
+            [Peer]
+            PublicKey = <SERVER_PUBLIC_KEY>
+            Endpoint = <VPN_SERVER>:51820
+            AllowedIPs = 0.0.0.0/0
+      volumes:
+        /tmp: {}
+        /run: {}
+      security:
+        runAsUser: 0
+        capabilities: [NET_ADMIN, SYS_MODULE]
+        apparmorProfile: Unconfined
+        allowedBinaries: ["*"]
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
   replicas: 1
   ingress:
     gateway_class: istio

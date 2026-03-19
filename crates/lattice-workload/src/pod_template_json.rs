@@ -32,7 +32,7 @@ pub fn pod_template_to_json(
 
     let mut spec = serde_json::json!({
         "serviceAccountName": pt.service_account_name,
-        "automountServiceAccountToken": false,
+        "automountServiceAccountToken": pt.automount_service_account_token,
         "containers": pt.containers,
     });
 
