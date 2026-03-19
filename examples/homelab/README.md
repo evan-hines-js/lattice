@@ -195,7 +195,7 @@ curl http://webapp.home.arpa
 
 ## Customization
 
-- **VPN egress**: Edit `backend/media/egress-vpn.yaml` with your WireGuard credentials
+- **VPN egress**: Edit the wireguard sidecar config in `backend/media/nzbget.yaml` with your WireGuard credentials
 - **Storage sizes**: Adjust `size` in volume resources
 - **VM sizing**: Edit `instanceType` in cluster YAMLs
 - **Restrict access**: Change `allowedServices: ["*"]` to specific callers like `["edge/edge/haproxy-fw"]`

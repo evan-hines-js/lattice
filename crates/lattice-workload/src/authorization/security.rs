@@ -89,26 +89,18 @@ fn collect_security_overrides(
     let mut overrides = Vec::new();
 
     // Pod-level overrides (from RuntimeSpec)
-    if runtime.host_network == Some(true) {
-        overrides.push(SecurityOverrideRequest {
-            override_id: "hostNetwork".into(),
-            category: "pod".into(),
-            container: None,
-        });
-    }
-    if runtime.share_process_namespace == Some(true) {
-        overrides.push(SecurityOverrideRequest {
-            override_id: "shareProcessNamespace".into(),
-            category: "pod".into(),
-            container: None,
-        });
-    }
-    if runtime.automount_service_account_token == Some(true) {
-        overrides.push(SecurityOverrideRequest {
-            override_id: "automountServiceAccountToken".into(),
-            category: "pod".into(),
-            container: None,
-        });
+    for (flag, id) in [
+        (runtime.host_network, "hostNetwork"),
+        (runtime.share_process_namespace, "shareProcessNamespace"),
+        (runtime.automount_service_account_token, "automountServiceAccountToken"),
+    ] {
+        if flag == Some(true) {
+            overrides.push(SecurityOverrideRequest {
+                override_id: id.into(),
+                category: "pod".into(),
+                container: None,
+            });
+        }
     }
 
     // Container-level overrides
