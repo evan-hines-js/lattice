@@ -13,8 +13,8 @@
 //! how to reach endpoints on each remote network via the east-west gateway.
 //!
 //! Tokens are requested per-reconcile via the TokenRequest API against the
-//! `lattice-operator` ServiceAccount. Tokens expire after 24 hours;
-//! reconcile requeues every 6 hours to keep them fresh.
+//! read-only `lattice-istiod-proxy` ServiceAccount. Tokens expire after 24
+//! hours; reconcile requeues every hour to keep them fresh.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -125,8 +125,9 @@ pub async fn reconcile(
     );
 
     // Requeue to refresh the proxy token and recreate any deleted service stubs.
-    // Token lifetime is 24h; reconciling every 6h keeps it fresh.
-    Ok(Action::requeue(Duration::from_secs(6 * 3600)))
+    // Token lifetime is 24h; reconciling every hour keeps it fresh while
+    // tolerating extended disconnects (up to ~23h before token expires).
+    Ok(Action::requeue(Duration::from_secs(3600)))
 }
 
 /// Create headless Service stubs so CoreDNS resolves remote service names.

@@ -12,15 +12,16 @@ pub const PROXY_TOKEN_AUDIENCE: &str = "lattice-proxy";
 
 /// Request a short-lived token for the istiod multi-cluster proxy.
 ///
-/// Uses lattice-operator SA (cluster-admin) to give istiod full visibility
-/// for cross-cluster service discovery via the auth proxy.
+/// Uses the dedicated `lattice-istiod-proxy` SA in `istio-system` which has
+/// read-only RBAC (get/list/watch). This gives istiod the minimum permissions
+/// needed for cross-cluster service discovery.
 pub async fn request_istiod_proxy_token(client: &Client) -> Result<String, kube::Error> {
     use k8s_openapi::api::authentication::v1::{TokenRequest, TokenRequestSpec};
     use k8s_openapi::api::core::v1::ServiceAccount;
     use kube::api::PostParams;
 
-    const SA_NAME: &str = "lattice-operator";
-    const SA_NAMESPACE: &str = "lattice-system";
+    const SA_NAME: &str = "lattice-istiod-proxy";
+    const SA_NAMESPACE: &str = "istio-system";
 
     let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), SA_NAMESPACE);
     let token_request = TokenRequest {

@@ -950,22 +950,17 @@ fn generate_kthena_autoscaler_cedar_policy() -> CedarPolicy {
     policy
 }
 
-/// Generate the CedarPolicy that grants cluster access to istiod proxy and
-/// lattice-operator service accounts for multi-cluster remote secret proxy.
+/// Generate the CedarPolicy that grants cluster access to the read-only
+/// istiod proxy SA for multi-cluster service discovery.
 pub fn generate_cluster_access_cedar_policy() -> CedarPolicy {
     let mut policy = CedarPolicy::new(
         "istiod-proxy-cluster-access",
         CedarPolicySpec {
             description: Some(
-                "Cluster access for istiod remote secret proxy and lattice-operator".to_string(),
+                "Read-only cluster access for istiod remote secret proxy".to_string(),
             ),
             policies: r#"permit(
     principal == Lattice::User::"system:serviceaccount:istio-system:lattice-istiod-proxy",
-    action == Lattice::Action::"AccessCluster",
-    resource
-);
-permit(
-    principal == Lattice::User::"system:serviceaccount:lattice-system:lattice-operator",
     action == Lattice::Action::"AccessCluster",
     resource
 );"#
