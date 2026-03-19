@@ -435,10 +435,12 @@ pub fn sanitize_dns_label(s: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.len() > 63 {
-        Some(trimmed[..63].trim_end_matches('-').to_string())
+    let truncated: String = trimmed.chars().take(63).collect();
+    let truncated = truncated.trim_end_matches('-');
+    if truncated.is_empty() {
+        None
     } else {
-        Some(trimmed.to_string())
+        Some(truncated.to_string())
     }
 }
 
