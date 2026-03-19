@@ -1,14 +1,15 @@
 //! Lattice CLI configuration stored at `~/.lattice/`.
 //!
-//! Manages persistent state for `lattice login` and `lattice use`:
+//! Manages persistent state for `lattice login` and `lattice install`:
 //! - `~/.lattice/config.json` — login metadata and current cluster
-//! - `~/.lattice/kubeconfig` — proxy kubeconfig fetched during login
+//! - `~/.lattice/kubeconfig.proxy` — proxy kubeconfig (through Lattice auth proxy)
+//! - `~/.lattice/kubeconfig.root` — root kubeconfig (direct API server access)
 //!
 //! The kubeconfig resolution chain (highest priority first):
-//! 1. Explicit `--kubeconfig` flag
-//! 2. `LATTICE_KUBECONFIG` environment variable
-//! 3. `~/.lattice/kubeconfig` (from `lattice login`)
-//! 4. Fall back to kube default (`KUBECONFIG` env / `~/.kube/config`)
+//! - Explicit `--kubeconfig` flag
+//! - `LATTICE_KUBECONFIG` environment variable
+//! - `~/.lattice/kubeconfig.proxy` (from `lattice login` / `lattice install`)
+//! - Fall back to kube default (`KUBECONFIG` env / `~/.kube/config`)
 
 use std::path::PathBuf;
 
@@ -18,7 +19,8 @@ use crate::{Error, Result};
 
 const CONFIG_DIR_NAME: &str = ".lattice";
 const CONFIG_FILE_NAME: &str = "config.json";
-const KUBECONFIG_FILE_NAME: &str = "kubeconfig";
+const KUBECONFIG_PROXY_FILE_NAME: &str = "kubeconfig.proxy";
+const KUBECONFIG_ROOT_FILE_NAME: &str = "kubeconfig.root";
 const LATTICE_KUBECONFIG_ENV: &str = "LATTICE_KUBECONFIG";
 
 /// Persistent CLI configuration.
@@ -50,33 +52,20 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(lattice_dir()?.join(CONFIG_FILE_NAME))
 }
 
-/// Path to `~/.lattice/kubeconfig`.
-pub fn kubeconfig_path() -> Result<PathBuf> {
-    Ok(lattice_dir()?.join(KUBECONFIG_FILE_NAME))
+/// Path to `~/.lattice/kubeconfig.proxy`.
+pub fn kubeconfig_proxy_path() -> Result<PathBuf> {
+    Ok(lattice_dir()?.join(KUBECONFIG_PROXY_FILE_NAME))
 }
 
-/// Save config to `~/.lattice/config.json`.
-pub fn save_config(config: &LatticeConfig) -> Result<()> {
-    let path = config_path()?;
-    let data = serde_json::to_string_pretty(config)
-        .map_err(|e| Error::command_failed(format!("failed to serialize config: {}", e)))?;
-    std::fs::write(&path, &data)
+/// Path to `~/.lattice/kubeconfig.root`.
+pub fn kubeconfig_root_path() -> Result<PathBuf> {
+    Ok(lattice_dir()?.join(KUBECONFIG_ROOT_FILE_NAME))
+}
+
+/// Write a file with 0600 permissions.
+fn write_secure(path: &std::path::Path, content: &str) -> Result<()> {
+    std::fs::write(path, content)
         .map_err(|e| Error::command_failed(format!("failed to write {}: {}", path.display(), e)))?;
-    set_file_permissions_0600(&path)?;
-    Ok(())
-}
-
-/// Save proxy kubeconfig JSON to `~/.lattice/kubeconfig`.
-pub fn save_kubeconfig(json: &str) -> Result<PathBuf> {
-    let path = kubeconfig_path()?;
-    std::fs::write(&path, json)
-        .map_err(|e| Error::command_failed(format!("failed to write {}: {}", path.display(), e)))?;
-    set_file_permissions_0600(&path)?;
-    Ok(path)
-}
-
-/// Set file permissions to owner-only read/write (0600).
-fn set_file_permissions_0600(path: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let perms = std::fs::Permissions::from_mode(0o600);
     std::fs::set_permissions(path, perms).map_err(|e| {
@@ -88,15 +77,37 @@ fn set_file_permissions_0600(path: &std::path::Path) -> Result<()> {
     })
 }
 
+/// Save config to `~/.lattice/config.json`.
+pub fn save_config(config: &LatticeConfig) -> Result<()> {
+    let path = config_path()?;
+    let data = serde_json::to_string_pretty(config)
+        .map_err(|e| Error::command_failed(format!("failed to serialize config: {}", e)))?;
+    write_secure(&path, &data)
+}
+
+/// Save proxy kubeconfig to `~/.lattice/kubeconfig.proxy`.
+pub fn save_proxy_kubeconfig(json: &str) -> Result<PathBuf> {
+    let path = kubeconfig_proxy_path()?;
+    write_secure(&path, json)?;
+    Ok(path)
+}
+
+/// Save root (direct API server) kubeconfig to `~/.lattice/kubeconfig.root`.
+pub fn save_root_kubeconfig(yaml: &str) -> Result<PathBuf> {
+    let path = kubeconfig_root_path()?;
+    write_secure(&path, yaml)?;
+    Ok(path)
+}
+
 /// Resolve a kubeconfig path using the priority chain.
 ///
 /// Returns `Some(path)` if a kubeconfig is found, `None` to use kube defaults.
 ///
 /// Priority:
-/// 1. `explicit` — the `--kubeconfig` CLI flag
-/// 2. `LATTICE_KUBECONFIG` env var
-/// 3. `~/.lattice/kubeconfig` (from `lattice login`)
-/// 4. `None` — fall back to `kube::Client::try_default()`
+/// - `explicit` — the `--kubeconfig` CLI flag
+/// - `LATTICE_KUBECONFIG` env var
+/// - `~/.lattice/kubeconfig.proxy` (from `lattice login`)
+/// - `None` — fall back to `kube::Client::try_default()`
 pub fn resolve_kubeconfig(explicit: Option<&str>) -> Option<String> {
     if let Some(path) = explicit {
         return Some(path.to_string());
@@ -108,7 +119,7 @@ pub fn resolve_kubeconfig(explicit: Option<&str>) -> Option<String> {
         }
     }
 
-    if let Ok(path) = kubeconfig_path() {
+    if let Ok(path) = kubeconfig_proxy_path() {
         if path.exists() {
             return Some(path.to_string_lossy().into_owned());
         }
@@ -153,11 +164,8 @@ mod tests {
 
     #[test]
     fn resolve_kubeconfig_none_when_nothing_set() {
-        // With no explicit path, no env, and no saved kubeconfig, returns None
-        // (we can't fully test env/file without side effects, but at least test the explicit case)
         let result = resolve_kubeconfig(None);
-        // This may or may not be None depending on whether ~/.lattice/kubeconfig exists
-        // on the test machine, so we just verify it doesn't panic
+        // May or may not be None depending on whether ~/.lattice/kubeconfig.proxy exists
         let _ = result;
     }
 }

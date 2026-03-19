@@ -46,7 +46,7 @@ pub async fn run(args: LoginArgs) -> Result<()> {
 
     let cluster_names = extract_cluster_names(&kubeconfig_json)?;
 
-    let kc_path = config::save_kubeconfig(&kubeconfig_json)?;
+    let kc_path = config::save_proxy_kubeconfig(&kubeconfig_json)?;
 
     let cfg = LatticeConfig {
         proxy_server: Some(args.server),

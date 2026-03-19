@@ -1,6 +1,5 @@
 # Edge cluster - HAProxy firewall/DMZ layer (Parent)
-# Proxmox node 1 - lightweight, runs only the haproxy-fw LatticeService
-# Nodes live on vmbr0 VLAN 100 (isolated from LAN), LB VIPs on vmbr0 (LAN-reachable)
+# Uses the same Proxmox config as E2E fixtures
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeCluster
 metadata:
@@ -27,20 +26,29 @@ spec:
         templateId: 9000
         controlPlaneEndpoint: "10.0.0.100"
         bridge: "vmbr0"
-        vlan: 100
         ipv4Pool:
-          range: "10.0.100.101-103/24"
-          gateway: "10.0.100.1"
+          range: "10.0.0.101-105/24"
+          gateway: "10.0.0.1"
         dnsServers:
           - "10.0.0.1"
         virtualIpNetworkInterface: "ens18"
         lbCidr: "10.0.0.200/28"
+        additionalNetworks:
+          - bridge: "vmbr1"
+            ipv4Pool:
+              range: "10.0.1.201-210/24"
+              gateway: "10.0.1.1"
+  registryMirrors:
+    - upstream: docker.io
+      mirror: "http://10.0.0.131:5555"
+    - upstream: ghcr.io
+      mirror: "http://10.0.0.131:5556"
   nodes:
     controlPlane:
       replicas: 1
       instanceType:
         cores: 4
-        memoryGib: 16
+        memoryGib: 8
         diskGib: 50
     workerPools:
       default:

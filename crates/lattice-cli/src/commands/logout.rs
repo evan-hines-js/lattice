@@ -32,7 +32,11 @@ fn remove_config_file(path: &std::path::Path) -> Result<bool> {
 pub async fn run(_args: LogoutArgs) -> Result<()> {
     let mut removed = false;
 
-    if let Ok(path) = crate::config::kubeconfig_path() {
+    if let Ok(path) = crate::config::kubeconfig_proxy_path() {
+        removed |= remove_config_file(&path)?;
+    }
+
+    if let Ok(path) = crate::config::kubeconfig_root_path() {
         removed |= remove_config_file(&path)?;
     }
 

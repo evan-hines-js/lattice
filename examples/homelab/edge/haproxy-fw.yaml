@@ -1,3 +1,19 @@
+# Cedar policy: allow haproxy-fw to use shareProcessNamespace
+# (sidecar needs to send SIGUSR2 to HAProxy for config reloads)
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: haproxy-fw-security
+  namespace: edge
+spec:
+  description: Allow haproxy-fw to share process namespace for sidecar reload
+  policies: |
+    permit(
+      principal == Lattice::Service::"edge/haproxy-fw",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"shareProcessNamespace"
+    );
+---
 # HAProxy firewall - single entry point for all traffic into the backend cluster
 #
 # The route-adapter sidecar watches LatticeClusterRoutes CRDs, renders
@@ -14,7 +30,7 @@ spec:
     containers:
       main:
         image: haproxy:lts-alpine
-        command: ["haproxy", "-W", "-f", "/config/haproxy.cfg"]
+        command: ["/usr/local/sbin/haproxy", "-W", "-f", "/config/haproxy.cfg"]
         volumes:
           /config:
             source: ${resources.haproxy-config}
@@ -31,10 +47,13 @@ spec:
             port: 8405
           initialDelaySeconds: 5
           periodSeconds: 10
+        security:
+          runAsUser: 1000
     service:
       ports:
         http:
           port: 80
+          targetPort: 8080
           protocol: TCP
         stats:
           port: 8405
@@ -47,6 +66,7 @@ spec:
   sidecars:
     route-adapter:
       image: "ghcr.io/evan-hines-js/lattice-route-adapter:latest"
+      command: ["/usr/local/bin/lattice-route-adapter"]
       variables:
         CONFIG_PATH: "/config/haproxy.cfg"
         HAPROXY_PROCESS_NAME: "haproxy"
@@ -61,7 +81,7 @@ spec:
           cpu: 200m
           memory: 128Mi
       security:
-        allowedBinaries: ["*"]
+        runAsUser: 1000
   shareProcessNamespace: true
   ingress:
     routes:

@@ -231,15 +231,12 @@ impl Installer {
         std::env::temp_dir().join(format!("{}-kubeconfig", self.bootstrap_cluster_name()))
     }
 
-    /// Returns the path where the management cluster kubeconfig is stored
+    /// Returns the path where the root (direct API server) kubeconfig is stored.
     ///
-    /// Format: `/tmp/{cluster_name}-kubeconfig-{run_id}`
-    /// Example: `/tmp/my-cluster-kubeconfig-a1b2c3`
+    /// Path: `~/.lattice/kubeconfig.root`
     pub fn kubeconfig_path(&self) -> PathBuf {
-        PathBuf::from(format!(
-            "/tmp/{}-kubeconfig-{}",
-            self.cluster_name, self.run_id
-        ))
+        crate::config::kubeconfig_root_path()
+            .unwrap_or_else(|_| PathBuf::from("/tmp/lattice-kubeconfig-root"))
     }
 
     fn provider(&self) -> ProviderType {
@@ -533,20 +530,8 @@ impl Installer {
     async fn apply_bootstrap_to_management(&self, bootstrap_client: &Client) -> Result<()> {
         info!("Fetching management cluster kubeconfig...");
         let kubeconfig = self.fetch_management_kubeconfig(bootstrap_client).await?;
-        let kubeconfig_path = self.kubeconfig_path();
-        info!("Writing kubeconfig to {:?}", kubeconfig_path);
-        // Write kubeconfig with owner-only permissions from the start
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&kubeconfig_path)?;
-            file.write_all(kubeconfig.as_bytes())?;
-        }
+        let root_path = crate::config::save_root_kubeconfig(&kubeconfig)?;
+        info!("Root kubeconfig saved to {:?}", root_path);
 
         info!("Waiting for management cluster API server...");
         self.wait_for_api_server().await?;
@@ -1105,6 +1090,7 @@ impl Installer {
     /// full admin access. Store it securely as the root recovery credential.
     async fn setup_admin_access(&self) -> Result<()> {
         use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
+        use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
         use kube::api::{Api, ObjectMeta, PostParams};
 
         let mgmt_client = self.management_client().await?;
@@ -1127,6 +1113,36 @@ impl Installer {
                 Error::command_failed(format!("failed to create lattice-admin SA: {}", e))
             })?;
         info!("Created lattice-admin ServiceAccount");
+
+        // Bind lattice-admin to cluster-admin for full K8s RBAC access
+        let crb_api: Api<ClusterRoleBinding> = Api::all(mgmt_client.clone());
+        let crb = ClusterRoleBinding {
+            metadata: ObjectMeta {
+                name: Some("lattice-admin-binding".to_string()),
+                ..Default::default()
+            },
+            role_ref: RoleRef {
+                api_group: "rbac.authorization.k8s.io".to_string(),
+                kind: "ClusterRole".to_string(),
+                name: "cluster-admin".to_string(),
+            },
+            subjects: Some(vec![Subject {
+                kind: "ServiceAccount".to_string(),
+                name: "lattice-admin".to_string(),
+                namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+                ..Default::default()
+            }]),
+        };
+        crb_api
+            .create(&PostParams::default(), &crb)
+            .await
+            .map_err(|e| {
+                Error::command_failed(format!(
+                    "failed to create lattice-admin ClusterRoleBinding: {}",
+                    e
+                ))
+            })?;
+        info!("Created lattice-admin ClusterRoleBinding");
 
         // Create break-glass long-lived SA token (no expiration)
         let secret_api: Api<Secret> =
@@ -1215,7 +1231,7 @@ impl Installer {
             .await?;
 
         // Save kubeconfig
-        let kc_path = crate::config::save_kubeconfig(&kubeconfig_json)?;
+        let kc_path = crate::config::save_proxy_kubeconfig(&kubeconfig_json)?;
 
         let cfg = crate::config::LatticeConfig {
             proxy_server: Some(proxy_endpoint),
@@ -1228,10 +1244,15 @@ impl Installer {
 
         eprintln!();
         eprintln!("=======================================================");
-        eprintln!("IMPORTANT: Proxy kubeconfig saved to {}", kc_path.display());
-        eprintln!("This kubeconfig contains the lattice-admin token.");
-        eprintln!("Store it securely — it is the root credential and");
-        eprintln!("cannot be recovered without cluster access.");
+        eprintln!("Proxy kubeconfig:  {}", kc_path.display());
+        eprintln!(
+            "Root kubeconfig:   {}",
+            crate::config::kubeconfig_root_path()?.display()
+        );
+        eprintln!();
+        eprintln!("Proxy kubeconfig routes through the Lattice auth proxy.");
+        eprintln!("Root kubeconfig connects directly to the API server.");
+        eprintln!("Both contain the lattice-admin token — store securely.");
         eprintln!();
         eprintln!("To re-login from another machine:");
         eprintln!("  lattice login --server <proxy-url> --token <admin-token>");
@@ -1594,7 +1615,7 @@ pub async fn run(args: InstallArgs) -> Result<()> {
 
     // Copy kubeconfig to additional output path if specified
     if let Some(out) = &args.kubeconfig_out {
-        let src = crate::config::kubeconfig_path()?;
+        let src = crate::config::kubeconfig_proxy_path()?;
         tokio::fs::copy(&src, out).await?;
         info!("Kubeconfig also written to: {}", out.display());
     }

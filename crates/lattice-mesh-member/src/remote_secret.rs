@@ -80,7 +80,6 @@ pub async fn reconcile(
         (ctx.proxy_base_url.clone(), ctx.ca_cert_pem.clone(), token)
     };
 
-    // 1. Ensure remote secret for istiod endpoint discovery
     let secret_name = format!("istio-remote-secret-{}", source_cluster);
     let kubeconfig = build_remote_kubeconfig(&source_cluster, &proxy_url, &ca_cert, &token);
 
@@ -114,10 +113,10 @@ pub async fn reconcile(
         .await
         .map_err(|e| Error::internal(format!("failed to apply remote secret: {e}")))?;
 
-    // 2. Update meshNetworks so istiod knows how to route to this remote network
+    // Update meshNetworks so istiod knows how to route to this remote network
     ensure_mesh_network(&ctx.client, &source_cluster).await;
 
-    // 3. Ensure Service stubs for DNS resolution on this cluster
+    // Ensure Service stubs for DNS resolution on this cluster
     ensure_service_stubs(&ctx.client, &source_cluster, &routes.spec.routes).await;
 
     info!(

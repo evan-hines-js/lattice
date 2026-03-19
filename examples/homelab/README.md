@@ -10,7 +10,7 @@ automatically via heartbeats — no manual IP management.
 flowchart TD
     Client[LAN Clients] --> LB[Cilium LB\n10.0.0.200/28\nvmbr0]
 
-    subgraph Edge["Edge Cluster — vmbr0 VLAN 100 (10.0.100.0/24)"]
+    subgraph Edge["Edge Cluster — vmbr0 (10.0.0.0/24)"]
         LB --> HAProxy[haproxy-fw]
         HAProxy --> RA[route-adapter sidecar]
         RA -->|watches| CRD[LatticeClusterRoutes]
@@ -74,14 +74,14 @@ Default IP allocation:
 
 | Resource | Network | IP |
 |----------|---------|-----|
-| Edge VIP (kube-vip) | vmbr0 (LAN) | 10.0.0.100 |
-| Edge nodes | vmbr0 VLAN 100 | 10.0.100.101-103 |
-| Edge LB (Cilium) | vmbr0 (LAN) | 10.0.0.200/28 |
+| Edge VIP (kube-vip) | vmbr0 | 10.0.0.100 |
+| Edge nodes | vmbr0 | 10.0.0.101-105 |
+| Edge LB (Cilium) | vmbr0 | 10.0.0.200/28 |
 | Backend VIP (kube-vip) | vmbr1 | 10.0.1.110 |
-| Backend nodes | vmbr1 | 10.0.1.111-115 |
+| Backend nodes | vmbr1 | 10.0.1.111-120 |
 | Backend LB (Cilium) | vmbr1 | 10.0.1.216/28 |
 
-Run `scripts/infra/proxmox-network-setup.sh` on the Proxmox host first to create the bridges and VLANs.
+These match the E2E test fixtures. Run `scripts/infra/proxmox-network-setup.sh` on the Proxmox host first to create the bridges.
 
 ## Step 1: Create the InfraProvider
 

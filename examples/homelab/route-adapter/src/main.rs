@@ -7,9 +7,10 @@
 //! write an adapter for their preferred data plane (nginx, envoy, etc.)
 //! by watching the same CRD.
 
+use std::fmt::Write;
 use std::path::PathBuf;
 
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use kube::api::{Api, DynamicObject, GroupVersionKind};
 use kube::discovery::ApiResource;
 use kube::runtime::watcher::{self, Event};
@@ -36,96 +37,117 @@ struct ClusterRoute {
 
 impl ClusterRoute {
     /// Namespace-qualified backend name for HAProxy config.
-    /// Prevents collisions when different namespaces have same-named services.
     fn backend_name(&self) -> String {
         format!("{}-{}", self.service_namespace, self.service_name)
+    }
+
+    /// Sanitized ACL name (alphanumeric + underscores only).
+    fn acl_name(&self) -> String {
+        self.backend_name()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
     }
 }
 
 fn render_haproxy_config(routes: &[ClusterRoute]) -> String {
-    let mut cfg = String::from(
-        "global\n\
-         \x20   log stdout format raw local0\n\
-         \x20   master-worker\n\
-         \n\
-         defaults\n\
-         \x20   log     global\n\
-         \x20   mode    http\n\
-         \x20   option  httplog\n\
-         \x20   option  dontlognull\n\
-         \x20   option  forwardfor\n\
-         \x20   timeout connect 5s\n\
-         \x20   timeout client  30s\n\
-         \x20   timeout server  30s\n\
-         \x20   retries 3\n\
-         \n\
-         frontend stats\n\
-         \x20   bind *:8405\n\
-         \x20   http-request return status 200 content-type text/plain string \"ok\" if { path /healthz }\n\
-         \x20   stats enable\n\
-         \x20   stats uri /stats\n\
-         \n",
+    let mut cfg = String::with_capacity(4096);
+
+    // Global + defaults
+    cfg.push_str(
+        r#"global
+    log stdout format raw local0
+    master-worker
+
+defaults
+    log     global
+    mode    http
+    option  httplog
+    option  dontlognull
+    option  forwardfor
+    timeout connect 5s
+    timeout client  30s
+    timeout server  30s
+    retries 3
+
+frontend stats
+    bind *:8405
+    http-request return status 200 content-type text/plain string "ok" if { path /healthz }
+    stats enable
+    stats uri /stats
+
+"#,
     );
 
     if routes.is_empty() {
         cfg.push_str(
-            "frontend http_in\n\
-             \x20   bind *:80\n\
-             \x20   default_backend empty\n\
-             \n\
-             backend empty\n\
-             \x20   http-request return status 503 content-type text/plain string \"no backends configured\"\n",
+            r#"frontend http_in
+    bind *:8080
+    default_backend empty
+
+backend empty
+    http-request return status 503 content-type text/plain string "no backends configured"
+"#,
         );
         return cfg;
     }
 
-    cfg.push_str("frontend http_in\n    bind *:80\n");
+    // Frontend: ACLs + routing
+    cfg.push_str("frontend http_in\n    bind *:8080\n");
 
     for route in routes {
-        let acl = route.backend_name().replace(['-', '.'], "_");
-        cfg.push_str(&format!(
-            "    acl host_{acl} hdr(host) -i {}\n",
+        let _ = writeln!(
+            cfg,
+            "    acl host_{} hdr(host) -i {}",
+            route.acl_name(),
             route.hostname
-        ));
+        );
     }
     cfg.push('\n');
 
     for route in routes {
-        let acl = route.backend_name().replace(['-', '.'], "_");
-        cfg.push_str(&format!(
-            "    use_backend {} if host_{acl}\n",
-            route.backend_name()
-        ));
+        let _ = writeln!(
+            cfg,
+            "    use_backend {} if host_{}",
+            route.backend_name(),
+            route.acl_name()
+        );
     }
     cfg.push_str("    default_backend fallback\n\n");
 
+    // Backends
     for route in routes {
-        cfg.push_str(&format!(
-            "backend {}\n    server gw {}:{}\n\n",
+        let _ = writeln!(
+            cfg,
+            "backend {}\n    server gw {}:{}\n",
             route.backend_name(),
             route.address,
             route.port
-        ));
+        );
     }
 
     cfg.push_str(
-        "backend fallback\n\
-         \x20   http-request return status 404 content-type text/plain string \"unknown host\"\n",
+        r#"backend fallback
+    http-request return status 404 content-type text/plain string "unknown host"
+"#,
     );
 
     cfg
 }
 
 fn find_pid(process_name: &str) -> Option<i32> {
-    let proc_dir = std::fs::read_dir("/proc").ok()?;
-    for entry in proc_dir.flatten() {
-        let pid_str = entry.file_name();
-        let pid_str = pid_str.to_str().unwrap_or("");
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let name = entry.file_name();
+        let pid_str = name.to_str().unwrap_or("");
         if pid_str.is_empty() || !pid_str.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
         if let Ok(cmdline) = std::fs::read_to_string(entry.path().join("cmdline")) {
-            if cmdline.split('\0').next().map_or(false, |a| a.contains(process_name)) {
+            if cmdline
+                .split('\0')
+                .next()
+                .map_or(false, |a| a.contains(process_name))
+            {
                 return pid_str.parse().ok();
             }
         }
@@ -145,6 +167,74 @@ fn reload_haproxy(process_name: &str) {
             }
         }
         None => warn!("haproxy process not found, skipping reload"),
+    }
+}
+
+/// Collect all routes from all LatticeClusterRoutes CRDs.
+async fn list_all_routes(client: &Client, ar: &ApiResource) -> Vec<ClusterRoute> {
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), ar);
+    let list = match api.list(&Default::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            error!(%e, "failed to list LatticeClusterRoutes");
+            return Vec::new();
+        }
+    };
+
+    let mut routes = Vec::new();
+    for item in &list.items {
+        if let Some(spec) = item.data.get("spec") {
+            if let Ok(parsed) = serde_json::from_value::<ClusterRoutesSpec>(spec.clone()) {
+                routes.extend(parsed.routes);
+            }
+        }
+    }
+    routes
+}
+
+/// Run the watch loop. Returns when the stream ends or errors.
+async fn run_watcher(
+    client: &Client,
+    ar: &ApiResource,
+    config_path: &PathBuf,
+    process_name: &str,
+) {
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), ar);
+    let mut stream = std::pin::pin!(watcher::watcher(api, watcher::Config::default()));
+    let mut last_config = String::new();
+
+    loop {
+        match stream.try_next().await {
+            Ok(Some(event)) => {
+                if !matches!(event, Event::Apply(_) | Event::Delete(_) | Event::InitDone) {
+                    continue;
+                }
+
+                let all_routes = list_all_routes(client, ar).await;
+                let config = render_haproxy_config(&all_routes);
+
+                if config == last_config {
+                    continue;
+                }
+
+                match std::fs::write(config_path, &config) {
+                    Ok(()) => {
+                        info!(routes = all_routes.len(), "wrote haproxy.cfg");
+                        reload_haproxy(process_name);
+                        last_config = config;
+                    }
+                    Err(e) => error!(%e, "failed to write haproxy.cfg"),
+                }
+            }
+            Ok(None) => {
+                warn!("watcher stream ended");
+                break;
+            }
+            Err(e) => {
+                error!(%e, "watcher error");
+                break;
+            }
+        }
     }
 }
 
@@ -170,67 +260,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&config_path, render_haproxy_config(&[]))?;
 
     let client = Client::try_default().await?;
-
     let gvk = GroupVersionKind::gvk("lattice.dev", "v1alpha1", "LatticeClusterRoutes");
     let ar = ApiResource::from_gvk(&gvk);
-    let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
 
-    let mut stream = watcher::watcher(api, watcher::Config::default()).boxed();
-    let mut last_config = String::new();
-
+    // Reconnect on watcher errors — the K8s API closes watches periodically
     loop {
-        match stream.try_next().await {
-            Ok(Some(event)) => {
-                let should_rebuild = matches!(
-                    event,
-                    Event::Apply(_) | Event::Delete(_) | Event::InitDone
-                );
-
-                if !should_rebuild {
-                    continue;
-                }
-
-                // Re-list all route tables to get full picture
-                let list_api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
-
-                let mut all_routes = Vec::new();
-                if let Ok(list) = list_api.list(&Default::default()).await {
-                    for item in &list.items {
-                        if let Some(spec) = item.data.get("spec") {
-                            if let Ok(parsed) =
-                                serde_json::from_value::<ClusterRoutesSpec>(spec.clone())
-                            {
-                                all_routes.extend(parsed.routes);
-                            }
-                        }
-                    }
-                }
-
-                let config = render_haproxy_config(&all_routes);
-
-                if config == last_config {
-                    continue;
-                }
-
-                match std::fs::write(&config_path, &config) {
-                    Ok(()) => {
-                        info!(routes = all_routes.len(), "wrote haproxy.cfg");
-                        reload_haproxy(&process_name);
-                        last_config = config;
-                    }
-                    Err(e) => error!(%e, "failed to write haproxy.cfg"),
-                }
-            }
-            Ok(None) => {
-                warn!("watcher stream ended");
-                break;
-            }
-            Err(e) => {
-                error!(%e, "watcher error");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-        }
+        run_watcher(&client, &ar, &config_path, &process_name).await;
+        info!("reconnecting watcher in 5s...");
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
-
-    Ok(())
 }
