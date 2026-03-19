@@ -6,8 +6,11 @@ use kube::Client;
 /// Token lifetime in seconds (24 hours).
 pub const PROXY_TOKEN_EXPIRATION_SECS: i64 = 86400;
 
-/// How often to refresh the token (30 minutes).
-pub const PROXY_TOKEN_REFRESH_SECS: u64 = 1800;
+/// How often to refresh the token (6 hours).
+/// Designed for partially-connected edge clusters that may only connect
+/// a few times per day. The 24-hour token lifetime provides a full day
+/// of headroom even if multiple refresh cycles are missed.
+pub const PROXY_TOKEN_REFRESH_SECS: u64 = 21600;
 
 /// Audience for proxy tokens. The auth proxy validates this audience
 /// via TokenReview, preventing token reuse against the K8s API directly.

@@ -9,7 +9,7 @@
 //! - Local providers only take effect if `allow_child_override: true` on the inherited provider
 //! - This ensures authentication cannot be bypassed by child clusters
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -148,10 +148,12 @@ struct JwkKey {
     y: Option<String>,
 }
 
-/// Maximum number of force-refresh attempts from unknown `kid` values per
-/// refresh interval. Prevents unauthenticated users from triggering unbounded
+/// Maximum number of distinct unknown `kid` values that trigger a JWKS refresh
+/// per refresh interval. Prevents unauthenticated users from triggering unbounded
 /// outbound HTTP requests to the OIDC provider (SSRF amplification).
-const MAX_UNKNOWN_KID_REFRESHES: u32 = 3;
+/// Tracked per-kid so legitimate key rotation (one new kid) isn't blocked by
+/// concurrent requests.
+const MAX_UNKNOWN_KIDS: usize = 5;
 
 /// OIDC token validator
 pub struct OidcValidator {
@@ -161,9 +163,10 @@ pub struct OidcValidator {
     jwks_cache: Arc<RwLock<Option<JwksCache>>>,
     /// Serializes JWKS refresh attempts to prevent thundering herd
     refresh_lock: tokio::sync::Mutex<()>,
-    /// Counter for force-refresh attempts triggered by unknown `kid` values.
-    /// Reset on each successful scheduled refresh.
-    unknown_kid_refresh_count: std::sync::atomic::AtomicU32,
+    /// Set of unknown `kid` values that have already triggered a JWKS refresh.
+    /// Cleared on each scheduled refresh. Per-kid tracking prevents legitimate
+    /// key rotation from being blocked by concurrent requests with the same new kid.
+    refreshed_kids: std::sync::Mutex<HashSet<String>>,
     /// Whether HTTP issuer URLs are allowed (for dev/testing)
     allow_insecure_http: bool,
 }
@@ -175,7 +178,7 @@ impl OidcValidator {
             config: OidcConfig::default(),
             jwks_cache: Arc::new(RwLock::new(None)),
             refresh_lock: tokio::sync::Mutex::new(()),
-            unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
+            refreshed_kids: std::sync::Mutex::new(HashSet::new()),
             allow_insecure_http: false,
         }
     }
@@ -268,7 +271,7 @@ impl OidcValidator {
             config,
             jwks_cache: Arc::new(RwLock::new(None)),
             refresh_lock: tokio::sync::Mutex::new(()),
-            unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
+            refreshed_kids: std::sync::Mutex::new(HashSet::new()),
             allow_insecure_http,
         })
     }
@@ -279,7 +282,7 @@ impl OidcValidator {
             config,
             jwks_cache: Arc::new(RwLock::new(None)),
             refresh_lock: tokio::sync::Mutex::new(()),
-            unknown_kid_refresh_count: std::sync::atomic::AtomicU32::new(0),
+            refreshed_kids: std::sync::Mutex::new(HashSet::new()),
             allow_insecure_http: false,
         }
     }
@@ -427,17 +430,26 @@ impl OidcValidator {
         }
 
         // Key not found — could be a legitimate key rotation. Force refresh
-        // once and retry, but rate-limit to prevent unauthenticated users from
-        // triggering unbounded outbound requests (SSRF amplification).
-        let attempts = self
-            .unknown_kid_refresh_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if attempts >= MAX_UNKNOWN_KID_REFRESHES {
-            warn!(kid = ?kid, attempts, max = MAX_UNKNOWN_KID_REFRESHES, "Rate-limiting JWKS refresh for unknown kid");
-            return Err(Error::Unauthorized(format!(
-                "No matching key found in JWKS for kid: {:?}",
-                kid
-            )));
+        // once and retry, but rate-limit per-kid to prevent unauthenticated users
+        // from triggering unbounded outbound requests (SSRF amplification).
+        let kid_str = kid.unwrap_or("none").to_string();
+        {
+            let mut refreshed = self.refreshed_kids.lock().unwrap_or_else(|e| e.into_inner());
+            if refreshed.contains(&kid_str) {
+                // Already refreshed for this kid — don't hit the OIDC provider again
+                return Err(Error::Unauthorized(format!(
+                    "No matching key found in JWKS for kid: {:?}",
+                    kid
+                )));
+            }
+            if refreshed.len() >= MAX_UNKNOWN_KIDS {
+                warn!(kid = ?kid, max = MAX_UNKNOWN_KIDS, "Rate-limiting JWKS refresh: too many distinct unknown kids");
+                return Err(Error::Unauthorized(format!(
+                    "No matching key found in JWKS for kid: {:?}",
+                    kid
+                )));
+            }
+            refreshed.insert(kid_str);
         }
         debug!(kid = ?kid, "Key not found in JWKS cache, forcing refresh for possible key rotation");
         self.force_refresh_jwks().await?;
@@ -482,11 +494,12 @@ impl OidcValidator {
 
         if needs_refresh {
             self.force_refresh_jwks().await?;
-            // Reset the unknown-kid refresh counter on scheduled refresh,
-            // since the cache is now fresh and any previous unknown kids
-            // may now be present after key rotation.
-            self.unknown_kid_refresh_count
-                .store(0, std::sync::atomic::Ordering::Relaxed);
+            // Clear the unknown-kid set on scheduled refresh, since the cache
+            // is now fresh and any previous unknown kids may now be present.
+            self.refreshed_kids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
         }
         Ok(())
     }
