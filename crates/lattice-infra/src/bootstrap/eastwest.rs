@@ -1,19 +1,8 @@
-//! East-west gateway and multi-cluster infrastructure for Istio ambient.
+//! East-west gateway infrastructure for Istio ambient.
 //!
-//! Generates:
-//! - East-west Gateway (HBONE port 15008, `istio-east-west` class)
-//! - Dedicated ServiceAccount + RBAC for istiod remote secret proxy access
-//!   (loaded from `manifests/` directory)
+//! Generates the east-west Gateway resource (HBONE port 15008, `istio-east-west` class).
 
 use lattice_common::mesh::HBONE_PORT;
-
-use super::split_yaml_documents;
-
-/// Static SA manifest for the istiod proxy identity.
-static ISTIOD_PROXY_SA: &str = include_str!("../../manifests/istiod-proxy-sa.yaml");
-
-/// Static RBAC manifests (ClusterRole + ClusterRoleBinding) for istiod proxy.
-static ISTIOD_PROXY_RBAC: &str = include_str!("../../manifests/istiod-proxy-rbac.yaml");
 
 /// Generate the east-west Gateway resource for cross-cluster traffic.
 pub fn generate_eastwest_gateway(cluster_name: &str) -> String {
@@ -46,13 +35,6 @@ pub fn generate_eastwest_gateway(cluster_name: &str) -> String {
     .expect("serialize eastwest gateway")
 }
 
-/// Load ServiceAccount + RBAC manifests for the istiod proxy identity.
-pub fn generate_istiod_proxy_rbac() -> Vec<String> {
-    let mut manifests = split_yaml_documents(ISTIOD_PROXY_SA);
-    manifests.extend(split_yaml_documents(ISTIOD_PROXY_RBAC));
-    manifests
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,16 +56,5 @@ mod tests {
             parsed["spec"]["listeners"][0]["tls"]["options"]["gateway.istio.io/tls-terminate-mode"],
             "ISTIO_MUTUAL"
         );
-    }
-
-    #[test]
-    fn test_istiod_proxy_rbac_loads() {
-        let manifests = generate_istiod_proxy_rbac();
-        assert_eq!(manifests.len(), 3, "SA + ClusterRole + ClusterRoleBinding");
-        let combined = manifests.join("\n");
-        assert!(combined.contains("kind: ServiceAccount"));
-        assert!(combined.contains("lattice-istiod-proxy"));
-        assert!(combined.contains("kind: ClusterRole"));
-        assert!(combined.contains("kind: ClusterRoleBinding"));
     }
 }

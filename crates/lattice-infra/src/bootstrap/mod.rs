@@ -301,9 +301,8 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
                 health_namespace: Some("istio-system"),
             });
 
-            // East-west gateway + istiod proxy RBAC for multi-cluster
-            let mut ew_manifests = vec![eastwest::generate_eastwest_gateway(&config.cluster_name)];
-            ew_manifests.extend(eastwest::generate_istiod_proxy_rbac());
+            // East-west gateway for multi-cluster HBONE traffic
+            let ew_manifests = vec![eastwest::generate_eastwest_gateway(&config.cluster_name)];
             components.push(InfraComponent {
                 name: "eastwest-gateway",
                 version: env!("ISTIO_VERSION"),

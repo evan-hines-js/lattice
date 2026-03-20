@@ -605,13 +605,13 @@ message SubtreeService {
 // through gRPC tunnels to siblings.
 //
 // proxy_token is a short-lived ServiceAccount token from the parent's
-// lattice-istiod-proxy SA (read-only: get/list/watch services, endpoints, pods).
+// lattice-operator SA, scoped to the lattice-proxy audience.
 message PeerRouteSync {
   // Parent's external auth proxy URL (e.g., "https://172.18.0.5:8082")
   string proxy_url = 1;
   // CA certificate PEM for verifying the auth proxy TLS
   string ca_cert_pem = 2;
-  // Short-lived ServiceAccount token for the parent's lattice-istiod-proxy SA
+  // Short-lived ServiceAccount token for the parent's auth proxy
   string proxy_token = 3;
   // Routes from parent and sibling clusters (excludes the receiving child's own)
   repeated SubtreeService peer_routes = 4;
