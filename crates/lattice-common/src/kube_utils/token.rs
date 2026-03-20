@@ -10,12 +10,12 @@ pub const PROXY_TOKEN_EXPIRATION_SECS: i64 = 86400;
 /// via TokenReview, preventing token reuse against the K8s API directly.
 pub const PROXY_TOKEN_AUDIENCE: &str = "lattice-proxy";
 
-/// Request a short-lived token for the istiod multi-cluster proxy.
+/// Request a short-lived proxy token for peer route sync.
 ///
-/// Uses the dedicated `lattice-istiod-proxy` SA in `istio-system` which has
-/// read-only RBAC (get/list/watch). This gives istiod the minimum permissions
-/// needed for cross-cluster service discovery.
-pub async fn request_istiod_proxy_token(client: &Client) -> Result<String, kube::Error> {
+/// Used by the cell to generate tokens that child clusters embed in their
+/// peer proxy credentials secret. The token is scoped to the `lattice-proxy`
+/// audience so it can only be used against the auth proxy, not the K8s API.
+pub async fn request_proxy_token(client: &Client) -> Result<String, kube::Error> {
     use k8s_openapi::api::authentication::v1::{TokenRequest, TokenRequestSpec};
     use k8s_openapi::api::core::v1::ServiceAccount;
     use kube::api::PostParams;

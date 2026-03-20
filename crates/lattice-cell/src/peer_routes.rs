@@ -5,7 +5,7 @@
 //! routes the child doesn't own (parent + siblings).
 
 use kube::Client;
-use lattice_common::kube_utils::{request_istiod_proxy_token, sha256};
+use lattice_common::kube_utils::{request_proxy_token, sha256};
 use tracing::{debug, error, info, warn};
 
 use lattice_proto::cell_command::Command;
@@ -127,7 +127,7 @@ pub async fn check_and_sync_peer_routes(
         debug!(cluster = %child_cluster, "Refreshing peer proxy token");
     }
 
-    let proxy_token = match request_istiod_proxy_token(client).await {
+    let proxy_token = match request_proxy_token(client).await {
         Ok(t) => t,
         Err(e) => {
             error!(error = %e, "Failed to request proxy token for peer route sync");
