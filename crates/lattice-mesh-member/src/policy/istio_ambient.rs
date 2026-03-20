@@ -27,7 +27,9 @@ use lattice_common::policy::istio::{
     AuthorizationSource, OperationSpec, PeerAuthentication, SourceSpec, TargetRef,
     WorkloadSelector,
 };
-use lattice_common::policy::service_entry::{ServiceEntry, ServiceEntryPort, ServiceEntrySpec};
+use lattice_common::policy::service_entry::{
+    ServiceEntry, ServiceEntryEndpoint, ServiceEntryPort, ServiceEntrySpec,
+};
 use lattice_common::LABEL_NAME;
 
 use super::PolicyCompiler;
@@ -178,18 +180,21 @@ impl<'a> PolicyCompiler<'a> {
         ))
     }
 
-    /// Compile a ServiceEntry for an inline FQDN egress target.
+    /// Compile a ServiceEntry for an egress target (FQDN or IP).
     ///
-    /// ServiceEntry names are derived from (namespace, fqdn) only — NOT per-service.
+    /// ServiceEntry names are derived from (namespace, host) only — NOT per-service.
     /// This ensures one ServiceEntry per unique host per namespace, preventing Istio
     /// from merging duplicate hosts and losing AuthorizationPolicy targetRef bindings.
     /// Each service creates its own AuthorizationPolicy targeting the shared SE.
-    pub(super) fn compile_fqdn_egress_service_entry(
+    ///
+    /// For IPs: uses `resolution: STATIC` with explicit endpoints (Istio rejects
+    /// bare IPs with DNS resolution). For FQDNs: uses `resolution: DNS`.
+    pub(super) fn compile_egress_service_entry(
         &self,
-        _service_name: &str,
         namespace: &str,
-        fqdn: &str,
+        host: &str,
         ports: &[u16],
+        is_ip: bool,
     ) -> ServiceEntry {
         let se_ports: Vec<ServiceEntryPort> = ports
             .iter()
@@ -207,17 +212,28 @@ impl<'a> PolicyCompiler<'a> {
             })
             .collect();
 
-        let metadata = ObjectMeta::new(derived_name("se-auto-", &[namespace, fqdn]), namespace)
+        let metadata = ObjectMeta::new(derived_name("se-auto-", &[namespace, host]), namespace)
             .with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
+
+        let (resolution, endpoints) = if is_ip {
+            (
+                "STATIC".to_string(),
+                vec![ServiceEntryEndpoint {
+                    address: host.to_string(),
+                }],
+            )
+        } else {
+            ("DNS".to_string(), vec![])
+        };
 
         ServiceEntry::new(
             metadata,
             ServiceEntrySpec {
-                hosts: vec![fqdn.to_string()],
-                endpoints: vec![],
+                hosts: vec![host.to_string()],
+                endpoints,
                 ports: se_ports,
                 location: "MESH_EXTERNAL".to_string(),
-                resolution: "DNS".to_string(),
+                resolution,
             },
         )
     }

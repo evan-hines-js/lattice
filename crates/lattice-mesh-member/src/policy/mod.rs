@@ -177,24 +177,27 @@ impl<'a> PolicyCompiler<'a> {
         output: &mut GeneratedPolicies,
     ) {
         for rule in &service_node.egress_rules {
-            if let EgressTarget::Fqdn(ref fqdn) = rule.target {
-                output
-                    .service_entries
-                    .push(self.compile_fqdn_egress_service_entry(
-                        &service_node.name,
-                        namespace,
-                        fqdn,
-                        &rule.ports,
-                    ));
-                output
-                    .authorization_policies
-                    .push(self.compile_fqdn_egress_access_policy(
-                        service_node,
-                        namespace,
-                        fqdn,
-                        &rule.ports,
-                    ));
-            }
+            let (host, is_ip) = match &rule.target {
+                EgressTarget::Fqdn(fqdn) => (fqdn.as_str(), false),
+                EgressTarget::Cidr(cidr) => {
+                    // Strip /32 suffix for ServiceEntry host
+                    let ip = cidr.strip_suffix("/32").unwrap_or(cidr);
+                    (ip, true)
+                }
+                EgressTarget::Entity(_) | _ => continue,
+            };
+
+            output
+                .service_entries
+                .push(self.compile_egress_service_entry(namespace, host, &rule.ports, is_ip));
+            output
+                .authorization_policies
+                .push(self.compile_fqdn_egress_access_policy(
+                    service_node,
+                    namespace,
+                    host,
+                    &rule.ports,
+                ));
         }
 
         // Waypoint: if any ServiceEntries were generated, need ztunnel allow for waypoint→pod
