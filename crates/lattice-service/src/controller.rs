@@ -671,7 +671,7 @@ const INPUTS_HASH_ANNOTATION: &str = "lattice.dev/inputs-hash";
 /// watch event.
 fn is_reconcile_current(service: &LatticeService, current_inputs_hash: &str) -> bool {
     let status = match service.status.as_ref() {
-        Some(s) if s.phase == ServicePhase::Ready || s.phase == ServicePhase::Failed => s,
+        Some(s) if s.phase == ServicePhase::Ready => s,
         _ => return false,
     };
 
