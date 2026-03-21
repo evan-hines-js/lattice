@@ -440,6 +440,15 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("SUCCESS: Workload deleted and unpivoted!");
 
     // =========================================================================
+    // Phase 8b: Delete-recreate workload cluster
+    // =========================================================================
+    info!("[Phase 8b] Verifying delete-recreate lifecycle...");
+
+    integration::recreate::delete_and_recreate_workload(&ctx.mgmt_kubeconfig).await?;
+
+    info!("SUCCESS: Delete-recreate verified!");
+
+    // =========================================================================
     // Phase 9: Uninstall management cluster
     // =========================================================================
     // Stop chaos entirely before teardown to avoid retries against disappearing clusters
