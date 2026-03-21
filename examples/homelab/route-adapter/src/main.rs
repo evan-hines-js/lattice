@@ -80,6 +80,7 @@ defaults
     timeout server  30s
     timeout http-keep-alive 5s
     retries 3
+    retry-on 502 conn-failure empty-response response-timeout
 
 frontend stats
     bind *:8405

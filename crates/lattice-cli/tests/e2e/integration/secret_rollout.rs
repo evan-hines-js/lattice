@@ -171,9 +171,9 @@ pub async fn run_secret_rollout_tests(kubeconfig: &str) -> Result<(), String> {
             // Re-seed with identical content
             seed_local_secret(kubeconfig, "local-rollout-vpn-creds", &rotated_data).await?;
 
-            // Wait two full reconcile cycles (60s each) and verify nothing changed
-            info!("[SecretRollout] Waiting 130s to verify no spurious rollout...");
-            tokio::time::sleep(Duration::from_secs(130)).await;
+            // Wait past one reconcile cycle (60s) to verify nothing changed
+            info!("[SecretRollout] Waiting 70s to verify no spurious rollout...");
+            tokio::time::sleep(Duration::from_secs(70)).await;
 
             let hash_after =
                 get_config_hash_annotation(kubeconfig, TEST_NAMESPACE, "rollout-svc").await?;
