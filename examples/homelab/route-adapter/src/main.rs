@@ -78,6 +78,7 @@ defaults
     timeout connect 5s
     timeout client  30s
     timeout server  30s
+    timeout http-keep-alive 5s
     retries 3
 
 frontend stats
