@@ -246,7 +246,7 @@ async fn get_pod_uids(
         "-n",
         namespace,
         "-l",
-        &format!("lattice.dev/name={}", service_name),
+        &format!("app.kubernetes.io/name={}", service_name),
         "--field-selector=status.phase=Running",
         "-o",
         "jsonpath={.items[*].metadata.uid}",
