@@ -99,7 +99,7 @@ struct SliceHandle {
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     agent_token: Option<tokio_util::sync::CancellationToken>,
     graph_auditor_token: Option<tokio_util::sync::CancellationToken>,
-    auth_proxy_handle: Option<lattice_api::ProxyHandle>,
+    auth_proxy_supervisor: Option<tokio::task::JoinHandle<()>>,
     infra_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
@@ -249,7 +249,7 @@ async fn run_controller(
         parent_servers,
         agent_token,
         graph_auditor_token,
-        auth_proxy_handle,
+        auth_proxy_supervisor,
         infra_handle,
     } = handle;
 
@@ -319,11 +319,8 @@ async fn run_controller(
     if let Some(servers) = parent_servers {
         servers.shutdown().await;
     }
-    if let Some(handle) = auth_proxy_handle {
-        // Send GOAWAY to all HTTP/2 connections and wait for drain (up to 10s).
-        handle
-            .graceful_shutdown(std::time::Duration::from_secs(10))
-            .await;
+    if let Some(handle) = auth_proxy_supervisor {
+        handle.abort();
     }
     tracing::info!("Shutdown complete");
     Ok(())
@@ -357,7 +354,7 @@ async fn run_cluster_slice(
     let cedar = load_cedar_engine(client).await;
 
     let self_cluster_name = config.cluster_name.clone();
-    let (parent_servers, agent_token, auth_proxy_handle, _route_update_tx) =
+    let (parent_servers, agent_token, auth_proxy_supervisor, _route_update_tx) =
         setup_cell_infra(client, &self_cluster_name, cedar.clone(), config).await?;
 
     let mut controllers = controller_runner::build_cluster_controllers(
@@ -378,7 +375,7 @@ async fn run_cluster_slice(
         parent_servers: Some(parent_servers),
         agent_token: Some(agent_token),
         graph_auditor_token: None,
-        auth_proxy_handle,
+        auth_proxy_supervisor,
         infra_handle: Some(infra_handle),
     })
 }
@@ -480,7 +477,7 @@ async fn run_service_slice(
         parent_servers: None,
         agent_token: None,
         graph_auditor_token: Some(auditor_token),
-        auth_proxy_handle: None,
+        auth_proxy_supervisor: None,
         infra_handle: Some(infra_handle),
     })
 }
@@ -564,7 +561,7 @@ async fn run_all_slices(
     let cedar = load_cedar_engine(client).await;
 
     let self_cluster_name = config.cluster_name.clone();
-    let (parent_servers, agent_token, auth_proxy_handle, _route_update_tx) =
+    let (parent_servers, agent_token, auth_proxy_supervisor, _route_update_tx) =
         setup_cell_infra(client, &self_cluster_name, cedar.clone(), config).await?;
 
     let mut controllers = controller_runner::build_cluster_controllers(
@@ -650,7 +647,7 @@ async fn run_all_slices(
         parent_servers: Some(parent_servers),
         agent_token: Some(agent_token),
         graph_auditor_token: Some(auditor_token),
-        auth_proxy_handle,
+        auth_proxy_supervisor,
         infra_handle: Some(infra_handle),
     })
 }
@@ -696,7 +693,7 @@ async fn has_parent_config(client: &kube::Client) -> bool {
 /// For leaf clusters: spawns a background `cell_activation_watcher` that polls the
 /// self-cluster CRD every 30s and promotes to cell when `parent_config` appears.
 ///
-/// Returns (parent_servers, agent_cancellation_token, auth_proxy_handle)
+/// Returns (parent_servers, agent_cancellation_token, auth_proxy_supervisor)
 async fn setup_cell_infra(
     client: &kube::Client,
     self_cluster_name: &Option<String>,
@@ -705,7 +702,7 @@ async fn setup_cell_infra(
 ) -> anyhow::Result<(
     Arc<ParentServers<DefaultManifestGenerator>>,
     tokio_util::sync::CancellationToken,
-    Option<lattice_api::ProxyHandle>,
+    Option<tokio::task::JoinHandle<()>>,
     Option<lattice_cell::route_reconciler::RouteUpdateSender>,
 )> {
     let is_bootstrap = config.is_bootstrap_cluster;
@@ -750,7 +747,7 @@ async fn setup_cell_infra(
 
     let is_cell = is_bootstrap || has_parent_config(client).await;
 
-    let auth_proxy_handle = if is_cell {
+    let auth_proxy_supervisor = if is_cell {
         let extra_sans = get_cell_server_sans(client, self_cluster_name, is_bootstrap).await;
         let tx = route_update_tx
             .clone()
@@ -794,7 +791,7 @@ async fn setup_cell_infra(
         None
     };
 
-    Ok((servers, agent_token, auth_proxy_handle, route_update_tx))
+    Ok((servers, agent_token, auth_proxy_supervisor, route_update_tx))
 }
 
 /// Activate cell infrastructure: start servers, auth proxy, CA rotation, and crash recovery.
@@ -814,7 +811,7 @@ async fn activate_cell_services(
     servers: &Arc<ParentServers<DefaultManifestGenerator>>,
     cluster_name: &Option<String>,
     params: CellActivationParams,
-) -> anyhow::Result<Option<lattice_api::ProxyHandle>> {
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     let CellActivationParams {
         extra_sans,
         cedar,
@@ -1072,7 +1069,7 @@ async fn start_auth_proxy(
     extra_sans: &[String],
     cedar: Arc<PolicyEngine>,
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
-) -> Option<lattice_api::ProxyHandle> {
+) -> Option<tokio::task::JoinHandle<()>> {
     // Get cluster name (default to "unknown")
     let cluster_name = cluster_name
         .clone()
@@ -1173,12 +1170,67 @@ async fn start_auth_proxy(
     // Start OIDCProvider watcher to reload OIDC config when CRDs change
     start_oidc_provider_watcher(client.clone(), auth_chain.clone());
 
-    let proxy_handle = lattice_api::start_server(config, auth_chain, cedar, backend)
-        .await
-        .map_err(|e| tracing::error!(error = %e, "Failed to start auth proxy"))
-        .ok();
+    // Start with supervised restart — if the HTTPS listener crashes, restart
+    // with capped exponential backoff. The operator and cluster self-management
+    // continue regardless of proxy state.
+    let proxy_handle = match lattice_api::start_server(
+        config.clone(),
+        auth_chain.clone(),
+        cedar.clone(),
+        backend.clone(),
+    )
+    .await
+    {
+        Ok(handle) => handle,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to start auth proxy");
+            return None;
+        }
+    };
 
-    proxy_handle
+    // Spawn supervisor that restarts on crash
+    let supervisor = tokio::spawn(async move {
+        let mut backoff = Duration::from_secs(1);
+        let max_backoff = Duration::from_secs(30);
+
+        // Wait for initial proxy to exit
+        proxy_handle
+            .graceful_shutdown(Duration::from_secs(0))
+            .await;
+
+        loop {
+            tracing::warn!(
+                restart_in = ?backoff,
+                "Auth proxy exited, restarting..."
+            );
+            tokio::time::sleep(backoff).await;
+
+            match lattice_api::start_server(
+                config.clone(),
+                auth_chain.clone(),
+                cedar.clone(),
+                backend.clone(),
+            )
+            .await
+            {
+                Ok(handle) => {
+                    tracing::info!("Auth proxy restarted");
+                    backoff = Duration::from_secs(1);
+                    handle
+                        .graceful_shutdown(Duration::from_secs(0))
+                        .await;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Auth proxy restart failed");
+                }
+            }
+
+            backoff = std::cmp::min(backoff * 2, max_backoff);
+        }
+    });
+
+    // Return the supervisor handle. On shutdown, abort it.
+    Some(supervisor)
 }
 
 /// Start a background task to watch for OIDCProvider CRD changes and reload the OIDC validator.
