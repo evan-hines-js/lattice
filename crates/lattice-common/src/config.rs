@@ -43,8 +43,6 @@ pub struct LatticeConfig {
     pub monitoring_ha: bool,
     /// Directory containing bootstrap scripts (`LATTICE_SCRIPTS_DIR`).
     pub scripts_dir: String,
-    /// Allow HTTP OIDC issuer URLs (`LATTICE_OIDC_ALLOW_INSECURE_HTTP`).
-    pub oidc_allow_insecure_http: bool,
     /// Whether this is a bootstrap cluster (`LATTICE_BOOTSTRAP_CLUSTER`).
     pub is_bootstrap_cluster: bool,
     /// Maximum gRPC message size in bytes (`LATTICE_GRPC_MAX_MESSAGE_SIZE`).
@@ -86,7 +84,6 @@ impl LatticeConfig {
             monitoring_enabled: parse_bool_env("LATTICE_MONITORING", true),
             monitoring_ha: parse_bool_env("LATTICE_MONITORING_HA", true),
             scripts_dir,
-            oidc_allow_insecure_http: parse_bool_env("LATTICE_OIDC_ALLOW_INSECURE_HTTP", false),
             is_bootstrap_cluster: parse_bool_env("LATTICE_BOOTSTRAP_CLUSTER", false),
             grpc_max_message_size,
         })
@@ -192,7 +189,6 @@ mod tests {
             monitoring_enabled: true,
             monitoring_ha: true,
             scripts_dir: DEFAULT_SCRIPTS_DIR.to_string(),
-            oidc_allow_insecure_http: false,
             is_bootstrap_cluster: false,
             grpc_max_message_size: DEFAULT_GRPC_MAX_MESSAGE_SIZE,
         }

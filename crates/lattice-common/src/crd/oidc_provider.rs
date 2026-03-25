@@ -97,6 +97,12 @@ pub struct OIDCProviderSpec {
     /// When false (default), children must use inherited provider
     #[serde(default)]
     pub allow_child_override: bool,
+
+    /// Allow insecure HTTP connections to the OIDC issuer.
+    /// Enable when the IdP is behind a VPN or on a private network
+    /// that doesn't require TLS.
+    #[serde(default)]
+    pub allow_insecure_http: bool,
 }
 
 fn default_username_claim() -> String {

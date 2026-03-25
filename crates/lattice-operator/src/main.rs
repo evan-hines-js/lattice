@@ -762,7 +762,6 @@ async fn setup_cell_infra(
             CellActivationParams {
                 extra_sans,
                 cedar,
-                oidc_allow_insecure_http: config.oidc_allow_insecure_http,
                 route_update_tx: tx,
                 all_routes_rx: all_routes_rx.clone(),
             },
@@ -776,7 +775,6 @@ async fn setup_cell_infra(
             let watcher_name = name.clone();
             let watcher_servers = servers.clone();
             let watcher_cedar = cedar;
-            let watcher_oidc_insecure = config.oidc_allow_insecure_http;
             let watcher_route_tx = route_update_tx
                 .clone()
                 .expect("route_update_tx required for leaf");
@@ -787,7 +785,6 @@ async fn setup_cell_infra(
                     watcher_name,
                     watcher_servers,
                     watcher_cedar,
-                    watcher_oidc_insecure,
                     watcher_route_tx,
                     watcher_all_rx,
                 )
@@ -808,7 +805,6 @@ async fn setup_cell_infra(
 struct CellActivationParams {
     extra_sans: Vec<String>,
     cedar: Arc<PolicyEngine>,
-    oidc_allow_insecure_http: bool,
     route_update_tx: lattice_cell::route_reconciler::RouteUpdateSender,
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
 }
@@ -822,7 +818,6 @@ async fn activate_cell_services(
     let CellActivationParams {
         extra_sans,
         cedar,
-        oidc_allow_insecure_http,
         route_update_tx,
         all_routes_rx,
     } = params;
@@ -842,7 +837,6 @@ async fn activate_cell_services(
         cluster_name,
         &extra_sans,
         cedar,
-        oidc_allow_insecure_http,
         all_routes_rx,
     )
     .await;
@@ -868,7 +862,6 @@ async fn cell_activation_watcher(
     self_cluster_name: String,
     servers: Arc<ParentServers<DefaultManifestGenerator>>,
     cedar: Arc<PolicyEngine>,
-    oidc_allow_insecure_http: bool,
     route_update_tx: lattice_cell::route_reconciler::RouteUpdateSender,
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
 ) {
@@ -945,7 +938,6 @@ async fn cell_activation_watcher(
             CellActivationParams {
                 extra_sans,
                 cedar: cedar.clone(),
-                oidc_allow_insecure_http,
                 route_update_tx: route_update_tx.clone(),
                 all_routes_rx: all_routes_rx.clone(),
             },
@@ -1079,7 +1071,6 @@ async fn start_auth_proxy(
     cluster_name: &Option<String>,
     extra_sans: &[String],
     cedar: Arc<PolicyEngine>,
-    oidc_allow_insecure_http: bool,
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
 ) -> Option<lattice_api::ProxyHandle> {
     // Get cluster name (default to "unknown")
@@ -1098,7 +1089,7 @@ async fn start_auth_proxy(
     ]));
 
     // Try to load OIDC provider from CRD
-    let oidc_validator = match OidcValidator::from_crd(client, oidc_allow_insecure_http).await {
+    let oidc_validator = match OidcValidator::from_crd(client).await {
         Ok(v) => {
             tracing::info!(issuer = %v.config().issuer_url, "OIDC authentication enabled");
             Some(Arc::new(v))
@@ -1180,7 +1171,7 @@ async fn start_auth_proxy(
     }
 
     // Start OIDCProvider watcher to reload OIDC config when CRDs change
-    start_oidc_provider_watcher(client.clone(), auth_chain.clone(), oidc_allow_insecure_http);
+    start_oidc_provider_watcher(client.clone(), auth_chain.clone());
 
     let proxy_handle = lattice_api::start_server(config, auth_chain, cedar, backend)
         .await
@@ -1194,11 +1185,7 @@ async fn start_auth_proxy(
 ///
 /// On any change (create/update/delete), re-loads from CRD. If no providers remain,
 /// clears OIDC so SA auth is the only active validator.
-fn start_oidc_provider_watcher(
-    client: kube::Client,
-    auth_chain: Arc<AuthChain>,
-    allow_insecure_http: bool,
-) {
+fn start_oidc_provider_watcher(client: kube::Client, auth_chain: Arc<AuthChain>) {
     tokio::spawn(async move {
         let api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
@@ -1215,7 +1202,7 @@ fn start_oidc_provider_watcher(
                 | Some(Ok(Event::InitApply(_)))
                 | Some(Ok(Event::Delete(_))) => {
                     tracing::info!("OIDCProvider changed, reloading...");
-                    match OidcValidator::from_crd(&client, allow_insecure_http).await {
+                    match OidcValidator::from_crd(&client).await {
                         Ok(v) => {
                             tracing::info!(issuer = %v.config().issuer_url, "OIDC validator reloaded");
                             auth_chain.set_oidc(Some(Arc::new(v))).await;

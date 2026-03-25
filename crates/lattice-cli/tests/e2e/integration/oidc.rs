@@ -102,6 +102,7 @@ async fn get_keycloak_token(username: &str, password: &str) -> Result<String, St
 /// Apply OIDCProvider CRD pointing to Keycloak
 async fn apply_oidc_provider(kubeconfig: &str) -> Result<(), String> {
     let issuer_url = format!("{}/realms/{}", keycloak_internal_url(), KEYCLOAK_REALM);
+    let allow_insecure = keycloak_internal_url().starts_with("http://");
 
     let yaml = format!(
         r#"apiVersion: lattice.dev/v1alpha1
@@ -115,10 +116,12 @@ spec:
   issuerUrl: "{issuer_url}"
   clientId: "{client_id}"
   usernameClaim: email
-  groupsClaim: groups"#,
+  groupsClaim: groups
+  allowInsecureHttp: {allow_insecure}"#,
         namespace = LATTICE_SYSTEM_NAMESPACE,
         issuer_url = issuer_url,
         client_id = KEYCLOAK_CLIENT_ID,
+        allow_insecure = allow_insecure,
     );
 
     apply_yaml(kubeconfig, &yaml).await?;
@@ -209,12 +212,7 @@ pub async fn run_oidc_auth_test(
     let (proxy_url, _port_forward) =
         get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
 
-    // Allow HTTP issuer URLs when Keycloak uses HTTP (dev/test)
-    if keycloak_internal_url().starts_with("http://") {
-        ensure_operator_env(parent_kubeconfig, "LATTICE_OIDC_ALLOW_INSECURE_HTTP").await?;
-    }
-
-    // 1. Apply OIDCProvider CRD
+    // 1. Apply OIDCProvider CRD (allowInsecureHttp is set in the spec if needed)
     //    The OIDC controller creates an egress LMM which the mesh compiler turns
     //    into a ServiceEntry (MESH_EXTERNAL, resolution: DNS). Istio assigns a
     //    virtual IP so the operator pod can resolve the hostname without a K8s

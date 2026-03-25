@@ -189,7 +189,7 @@ impl OidcValidator {
     /// respecting inheritance rules:
     /// - Inherited providers take precedence by default
     /// - Local providers only used if inherited provider has `allow_child_override: true`
-    pub async fn from_crd(client: &Client, allow_insecure_http: bool) -> Result<Self> {
+    pub async fn from_crd(client: &Client) -> Result<Self> {
         let api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         // Fetch all providers in one call, partition into inherited and local
@@ -241,6 +241,7 @@ impl OidcValidator {
         // Validate issuer URL to prevent SSRF via CRD manipulation.
         // We discard the resolved IPs here — they'll be re-resolved and pinned
         // on each JWKS refresh to avoid stale DNS.
+        let allow_insecure_http = spec.allow_insecure_http;
         validate_issuer_url(&spec.issuer_url, allow_insecure_http).await?;
 
         let audiences = if spec.audiences.is_empty() {
@@ -675,7 +676,7 @@ struct ValidatedIssuer {
 
 /// Validate that an OIDC issuer URL is safe to fetch from.
 ///
-/// Requires HTTPS (unless `allow_insecure_http` is set for dev/testing).
+/// Requires HTTPS (unless `allow_insecure_http` is set on the OIDCProvider spec).
 /// Resolves hostnames via DNS and returns the resolved IPs so callers can
 /// pin them in the HTTP client, preventing DNS rebinding between validation
 /// and fetch.
@@ -683,7 +684,7 @@ async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<Val
     if !url.starts_with("https://") {
         if url.starts_with("http://") && allow_insecure_http {
             warn!(
-                "OIDC issuer URL uses HTTP (allowed via LATTICE_OIDC_ALLOW_INSECURE_HTTP): {}",
+                "OIDC issuer URL uses HTTP (allowed via spec.allowInsecureHttp): {}",
                 url
             );
         } else {

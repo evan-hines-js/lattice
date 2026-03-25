@@ -115,7 +115,6 @@ impl Context {
                 monitoring_enabled: false,
                 monitoring_ha: false,
                 scripts_dir: "/scripts".to_string(),
-                oidc_allow_insecure_http: false,
                 is_bootstrap_cluster: false,
                 grpc_max_message_size: 16 * 1024 * 1024,
             }),
