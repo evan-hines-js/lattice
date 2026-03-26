@@ -85,15 +85,16 @@ pub(crate) async fn handle_deletion(
 
 /// Handle deletion of a child cluster from the parent side.
 ///
-/// For pivoted clusters (CAPI resources on child), sends `DeleteCluster`
-/// via gRPC to instruct the child to self-delete. The child's existing
-/// unpivot flow then sends CAPI resources back, and this handler's
-/// requeue loop picks up once CAPI appears locally.
+/// Two paths depending on whether CAPI resources have been pivoted:
 ///
-/// Falls through to direct CAPI delete when:
-/// - Cluster hasn't pivoted yet (CAPI still on parent)
-/// - Agent is disconnected
-/// - Send fails (channel closed)
+/// - **Pre-pivot** (`pivot_complete` is false): CAPI resources are still on
+///   this (parent) cluster. Delete the CAPI Cluster directly.
+/// - **Post-pivot** (`pivot_complete` is true): CAPI resources live on the
+///   child. Send `DeleteCluster` via gRPC to tell the child to self-delete
+///   and unpivot. If the agent is disconnected, requeue and wait for
+///   reconnection — we cannot delete CAPI resources we don't have.
+///   Once unpivot completes and CAPI resources arrive back on the parent,
+///   `pivot_complete` is cleared and the direct CAPI delete path takes over.
 async fn handle_non_self_deletion(
     cluster: &LatticeCluster,
     ctx: &Context,
@@ -112,51 +113,19 @@ async fn handle_non_self_deletion(
         ctx.kube.patch_status(&name, &status).await?;
     }
 
-    // For pivoted clusters, tell the child to self-delete via gRPC.
-    // The child will initiate its own deletion → unpivot → send CAPI back.
+    // For pivoted clusters, CAPI resources are on the child — we must tell
+    // the child to self-delete via gRPC. There is no fallback: without the
+    // agent connection we cannot reach the CAPI resources.
     let pivot_complete = cluster
         .status
         .as_ref()
         .map_or(false, |s| s.pivot_complete);
 
     if pivot_complete {
-        if let Some(ref servers) = ctx.parent_servers {
-            let registry = servers.agent_registry();
-            if registry.is_connected(&name) {
-                let cmd = CellCommand {
-                    command_id: uuid::Uuid::new_v4().to_string(),
-                    command: Some(Command::DeleteCluster(DeleteCluster {
-                        cluster_name: name.clone(),
-                    })),
-                };
-                match registry.send_command(&name, cmd).await {
-                    Ok(()) => {
-                        info!(cluster = %name, "Sent DeleteCluster to child agent");
-                        let status = cluster
-                            .status
-                            .clone()
-                            .unwrap_or_default()
-                            .phase(ClusterPhase::Deleting)
-                            .message("Waiting for child to unpivot CAPI resources");
-                        ctx.kube.patch_status(&name, &status).await?;
-                        return Ok(Action::requeue(Duration::from_secs(10)));
-                    }
-                    Err(e) => {
-                        warn!(
-                            cluster = %name,
-                            error = %e,
-                            "Failed to send DeleteCluster, falling through to direct CAPI delete"
-                        );
-                    }
-                }
-            } else {
-                debug!(cluster = %name, "Agent not connected, falling through to direct CAPI delete");
-            }
-        }
+        return handle_pivoted_child_deletion(cluster, ctx, &name).await;
     }
 
-    // Direct CAPI delete path: handles pre-pivot clusters, disconnected agents,
-    // and post-unpivot (CAPI resources moved back to parent).
+    // Pre-pivot or post-unpivot: CAPI resources are on this cluster.
     let capi_exists = match ctx.capi.capi_cluster_exists(&name, &capi_namespace).await {
         Ok(exists) => exists,
         Err(e) => {
@@ -217,6 +186,65 @@ async fn handle_non_self_deletion(
     info!(cluster = %name, "Infrastructure cleanup complete, removing finalizer");
     remove_finalizer(cluster, ctx).await?;
     Ok(Action::await_change())
+}
+
+/// Send `DeleteCluster` to a pivoted child via gRPC.
+///
+/// After pivot, CAPI resources live on the child. The only way to delete
+/// is to tell the child to self-delete, triggering the unpivot flow that
+/// sends CAPI resources back. If the agent is disconnected, we requeue
+/// and wait — there is no fallback since we don't have the CAPI resources.
+async fn handle_pivoted_child_deletion(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+    name: &str,
+) -> Result<Action, Error> {
+    if let Some(ref servers) = ctx.parent_servers {
+        let registry = servers.agent_registry();
+        if registry.is_connected(name) {
+            let cmd = CellCommand {
+                command_id: uuid::Uuid::new_v4().to_string(),
+                command: Some(Command::DeleteCluster(DeleteCluster {
+                    cluster_name: name.to_string(),
+                })),
+            };
+            match registry.send_command(name, cmd).await {
+                Ok(()) => {
+                    info!(cluster = %name, "Sent DeleteCluster to child agent");
+                    let status = cluster
+                        .status
+                        .clone()
+                        .unwrap_or_default()
+                        .phase(ClusterPhase::Deleting)
+                        .message("Waiting for child to unpivot CAPI resources");
+                    ctx.kube.patch_status(name, &status).await?;
+                    return Ok(Action::requeue(Duration::from_secs(10)));
+                }
+                Err(e) => {
+                    warn!(
+                        cluster = %name,
+                        error = %e,
+                        "Failed to send DeleteCluster, will retry on next reconcile"
+                    );
+                }
+            }
+        } else {
+            info!(
+                cluster = %name,
+                "Agent not connected, waiting for reconnection to send DeleteCluster"
+            );
+        }
+    }
+
+    // Requeue — agent will reconnect and we'll retry sending DeleteCluster
+    let status = cluster
+        .status
+        .clone()
+        .unwrap_or_default()
+        .phase(ClusterPhase::Deleting)
+        .message("Waiting for child agent to reconnect for unpivot");
+    ctx.kube.patch_status(name, &status).await?;
+    Ok(Action::requeue(Duration::from_secs(10)))
 }
 
 /// Handle deletion of a self-managed cluster (running on itself).
