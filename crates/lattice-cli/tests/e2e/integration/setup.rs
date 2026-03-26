@@ -313,11 +313,13 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     // Start chaos monkey if configured (uses provider-appropriate intervals)
     let (chaos, chaos_targets) = if config.enable_chaos {
+        info!("[Setup] Chaos monkey ENABLED (set LATTICE_ENABLE_CHAOS=false to disable)");
         let targets = Arc::new(ChaosTargets::new(super::super::helpers::run_id()));
         let config = ChaosConfig::for_provider(mgmt_provider);
         let monkey = ChaosMonkey::start_with_config(targets.clone(), config);
         (Some(monkey), Some(targets))
     } else {
+        info!("[Setup] Chaos monkey disabled (set LATTICE_ENABLE_CHAOS=true to enable)");
         (None, None)
     };
 
@@ -614,11 +616,13 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
 
     // Start chaos monkey if configured (uses provider-appropriate intervals)
     let (chaos, chaos_targets) = if config.enable_chaos {
+        info!("[Setup] Chaos monkey ENABLED (set LATTICE_ENABLE_CHAOS=false to disable)");
         let targets = Arc::new(ChaosTargets::new(super::super::helpers::run_id()));
         let config = ChaosConfig::for_provider(mgmt_provider);
         let monkey = ChaosMonkey::start_with_config(targets.clone(), config);
         (Some(monkey), Some(targets))
     } else {
+        info!("[Setup] Chaos monkey disabled (set LATTICE_ENABLE_CHAOS=true to enable)");
         (None, None)
     };
 
