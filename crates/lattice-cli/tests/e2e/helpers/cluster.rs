@@ -901,7 +901,44 @@ pub async fn delete_cluster_and_wait(
     .await?;
     info!("LatticeCluster deletion initiated (async)");
 
-    // Wait for the LatticeCluster to be fully deleted from parent
+    wait_for_cluster_fully_deleted(parent_kubeconfig, cluster_name, provider).await
+}
+
+/// Delete a cluster from the PARENT side and wait for full cleanup.
+///
+/// Unlike `delete_cluster_and_wait` which initiates deletion on the child,
+/// this deletes the LatticeCluster from the parent. The parent's controller
+/// sends a `DeleteCluster` command via gRPC, the child self-deletes and
+/// unpivots CAPI resources back, then the parent tears down infrastructure.
+pub async fn delete_cluster_from_parent(
+    parent_kubeconfig: &str,
+    cluster_name: &str,
+    provider: InfraProvider,
+) -> Result<(), String> {
+    info!("Deleting cluster {} from parent...", cluster_name);
+
+    run_kubectl(&[
+        "--kubeconfig",
+        parent_kubeconfig,
+        "delete",
+        "latticecluster",
+        cluster_name,
+        "--wait=false",
+    ])
+    .await?;
+    info!("LatticeCluster deletion initiated on parent");
+
+    wait_for_cluster_fully_deleted(parent_kubeconfig, cluster_name, provider).await
+}
+
+/// Wait for a LatticeCluster to be fully deleted from the parent and
+/// infrastructure cleaned up. Shared by child-initiated and parent-initiated
+/// deletion paths.
+async fn wait_for_cluster_fully_deleted(
+    parent_kubeconfig: &str,
+    cluster_name: &str,
+    provider: InfraProvider,
+) -> Result<(), String> {
     info!("Waiting for LatticeCluster to be deleted from parent...");
     wait_for_condition(
         &format!("{} CR deletion from parent", cluster_name),
@@ -930,7 +967,6 @@ pub async fn delete_cluster_and_wait(
     )
     .await?;
 
-    // For Docker, verify containers are cleaned up
     if provider == InfraProvider::Docker {
         info!("Waiting for Docker containers to be cleaned up...");
         wait_for_condition(

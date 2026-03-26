@@ -2,6 +2,15 @@
 //!
 //! This module handles the deletion lifecycle for LatticeCluster resources,
 //! including unpivot logic, CAPI infrastructure cleanup, and finalizer management.
+//!
+//! Deletion has three paths depending on cluster role:
+//!
+//! - **Non-self (parent deleting child)**: For pivoted clusters, sends
+//!   `DeleteCluster` via gRPC to tell the child to self-delete and unpivot.
+//!   For pre-pivot or disconnected agents, deletes CAPI directly.
+//! - **Self with parent**: Pauses CAPI, waits for stability, sets phase to
+//!   Unpivoting. Agent detects deletion and sends CAPI resources to parent.
+//! - **Root (no parent)**: Just removes the finalizer.
 
 use std::time::Duration;
 
@@ -14,6 +23,8 @@ use lattice_common::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, Error, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_SECRET};
 use lattice_move::{pause_cluster, unpause_cluster};
+use lattice_proto::cell_command::Command;
+use lattice_proto::{CellCommand, DeleteCluster};
 
 use super::context::Context;
 
@@ -45,17 +56,10 @@ async fn remove_finalizer(cluster: &LatticeCluster, ctx: &Context) -> Result<(),
         .await
 }
 
-/// Handle cluster deletion with unpivot logic
+/// Handle cluster deletion with unpivot logic.
 ///
-/// For cell clusters (has parent_config): blocks deletion if child clusters exist.
-/// This prevents orphaning clusters. Remove finalizer manually for break-glass.
-///
-/// For self clusters with a parent: unpivot CAPI resources back to parent.
-///
-/// For root clusters (no parent): just remove the finalizer.
-///
-/// For non-self clusters (child clusters being deleted from parent):
-/// delete CAPI Cluster to trigger infrastructure cleanup.
+/// Dispatches to the appropriate handler based on whether this is a self
+/// cluster (running on itself) or a non-self cluster (child managed by parent).
 pub(crate) async fn handle_deletion(
     cluster: &LatticeCluster,
     ctx: &Context,
@@ -72,90 +76,163 @@ pub(crate) async fn handle_deletion(
         return Ok(Action::await_change());
     }
 
-    // For non-self clusters (we're the parent), delete CAPI infrastructure
-    if !is_self {
-        let capi_namespace = capi_namespace(&name);
+    if is_self {
+        handle_self_deletion(cluster, ctx).await
+    } else {
+        handle_non_self_deletion(cluster, ctx).await
+    }
+}
 
-        // Set phase to Deleting if not already
-        let current_phase = cluster.status.as_ref().map(|s| &s.phase);
-        if current_phase != Some(&ClusterPhase::Deleting) {
-            let status = cluster
-                .status
-                .clone()
-                .unwrap_or_default()
-                .phase(ClusterPhase::Deleting);
-            ctx.kube.patch_status(&name, &status).await?;
-        }
+/// Handle deletion of a child cluster from the parent side.
+///
+/// For pivoted clusters (CAPI resources on child), sends `DeleteCluster`
+/// via gRPC to instruct the child to self-delete. The child's existing
+/// unpivot flow then sends CAPI resources back, and this handler's
+/// requeue loop picks up once CAPI appears locally.
+///
+/// Falls through to direct CAPI delete when:
+/// - Cluster hasn't pivoted yet (CAPI still on parent)
+/// - Agent is disconnected
+/// - Send fails (channel closed)
+async fn handle_non_self_deletion(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+) -> Result<Action, Error> {
+    let name = cluster.name_any();
+    let capi_namespace = capi_namespace(&name);
 
-        // Check if CAPI Cluster still exists
-        let capi_exists = match ctx.capi.capi_cluster_exists(&name, &capi_namespace).await {
-            Ok(exists) => exists,
-            Err(e) => {
-                // Assume exists on error to avoid premature deletion
-                warn!(cluster = %name, error = %e, "Failed to check CAPI cluster existence, assuming exists");
-                true
-            }
-        };
-
-        if capi_exists {
-            // Only check stability before the first delete attempt (prevents race
-            // with provisioning). Once we've already set the phase to Deleting,
-            // skip the check and keep retrying the delete — under CPU overload the
-            // stability API call can fail repeatedly, which would block deletion
-            // forever if we gate on it every time.
-            let already_deleting = current_phase == Some(&ClusterPhase::Deleting);
-            if !already_deleting {
-                let is_stable = match ctx.capi.is_cluster_stable(&name, &capi_namespace).await {
-                    Ok(stable) => stable,
-                    Err(e) => {
-                        debug!(cluster = %name, error = %e, "Failed to check CAPI stability, assuming unstable");
-                        false
-                    }
-                };
-
-                if !is_stable {
-                    info!(cluster = %name, "Waiting for CAPI to stabilize before deletion");
-                    let status = cluster
-                        .status
-                        .clone()
-                        .unwrap_or_default()
-                        .phase(ClusterPhase::Deleting)
-                        .message("Waiting for CAPI to stabilize before cleanup");
-                    ctx.kube.patch_status(&name, &status).await?;
-                    return Ok(Action::requeue(Duration::from_secs(10)));
-                }
-            }
-
-            // Delete CAPI Cluster to trigger infrastructure cleanup
-            info!(cluster = %name, "Deleting CAPI Cluster to trigger infrastructure cleanup");
-            ctx.events
-                .publish(
-                    &cluster.object_ref(&()),
-                    EventType::Normal,
-                    reasons::DELETION_STARTED,
-                    actions::DELETE,
-                    Some("Deleting CAPI cluster".to_string()),
-                )
-                .await;
-            if let Err(e) = ctx.capi.delete_capi_cluster(&name, &capi_namespace).await {
-                warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster");
-            }
-            // Requeue to wait for deletion
-            return Ok(Action::requeue(Duration::from_secs(10)));
-        }
-
-        // CAPI Cluster is gone — clean up bootstrap state and remove finalizer
-        if let Some(ref servers) = ctx.parent_servers {
-            if let Some(state) = servers.bootstrap_state().await {
-                state.deregister(&name);
-            }
-        }
-        info!(cluster = %name, "Infrastructure cleanup complete, removing finalizer");
-        remove_finalizer(cluster, ctx).await?;
-        return Ok(Action::await_change());
+    // Set phase to Deleting if not already
+    let current_phase = cluster.status.as_ref().map(|s| &s.phase);
+    if current_phase != Some(&ClusterPhase::Deleting) {
+        let status = cluster
+            .status
+            .clone()
+            .unwrap_or_default()
+            .phase(ClusterPhase::Deleting);
+        ctx.kube.patch_status(&name, &status).await?;
     }
 
-    // If this cluster is a cell (has parent_config), block deletion if children exist
+    // For pivoted clusters, tell the child to self-delete via gRPC.
+    // The child will initiate its own deletion → unpivot → send CAPI back.
+    let pivot_complete = cluster
+        .status
+        .as_ref()
+        .map_or(false, |s| s.pivot_complete);
+
+    if pivot_complete {
+        if let Some(ref servers) = ctx.parent_servers {
+            let registry = servers.agent_registry();
+            if registry.is_connected(&name) {
+                let cmd = CellCommand {
+                    command_id: uuid::Uuid::new_v4().to_string(),
+                    command: Some(Command::DeleteCluster(DeleteCluster {
+                        cluster_name: name.clone(),
+                    })),
+                };
+                match registry.send_command(&name, cmd).await {
+                    Ok(()) => {
+                        info!(cluster = %name, "Sent DeleteCluster to child agent");
+                        let status = cluster
+                            .status
+                            .clone()
+                            .unwrap_or_default()
+                            .phase(ClusterPhase::Deleting)
+                            .message("Waiting for child to unpivot CAPI resources");
+                        ctx.kube.patch_status(&name, &status).await?;
+                        return Ok(Action::requeue(Duration::from_secs(10)));
+                    }
+                    Err(e) => {
+                        warn!(
+                            cluster = %name,
+                            error = %e,
+                            "Failed to send DeleteCluster, falling through to direct CAPI delete"
+                        );
+                    }
+                }
+            } else {
+                debug!(cluster = %name, "Agent not connected, falling through to direct CAPI delete");
+            }
+        }
+    }
+
+    // Direct CAPI delete path: handles pre-pivot clusters, disconnected agents,
+    // and post-unpivot (CAPI resources moved back to parent).
+    let capi_exists = match ctx.capi.capi_cluster_exists(&name, &capi_namespace).await {
+        Ok(exists) => exists,
+        Err(e) => {
+            warn!(cluster = %name, error = %e, "Failed to check CAPI cluster existence, assuming exists");
+            true
+        }
+    };
+
+    if capi_exists {
+        // Only check stability before the first delete attempt. Once Deleting,
+        // skip — under CPU overload the stability API can fail repeatedly,
+        // which would block deletion forever.
+        let already_deleting = current_phase == Some(&ClusterPhase::Deleting);
+        if !already_deleting {
+            let is_stable = match ctx.capi.is_cluster_stable(&name, &capi_namespace).await {
+                Ok(stable) => stable,
+                Err(e) => {
+                    debug!(cluster = %name, error = %e, "Failed to check CAPI stability, assuming unstable");
+                    false
+                }
+            };
+
+            if !is_stable {
+                info!(cluster = %name, "Waiting for CAPI to stabilize before deletion");
+                let status = cluster
+                    .status
+                    .clone()
+                    .unwrap_or_default()
+                    .phase(ClusterPhase::Deleting)
+                    .message("Waiting for CAPI to stabilize before cleanup");
+                ctx.kube.patch_status(&name, &status).await?;
+                return Ok(Action::requeue(Duration::from_secs(10)));
+            }
+        }
+
+        info!(cluster = %name, "Deleting CAPI Cluster to trigger infrastructure cleanup");
+        ctx.events
+            .publish(
+                &cluster.object_ref(&()),
+                EventType::Normal,
+                reasons::DELETION_STARTED,
+                actions::DELETE,
+                Some("Deleting CAPI cluster".to_string()),
+            )
+            .await;
+        if let Err(e) = ctx.capi.delete_capi_cluster(&name, &capi_namespace).await {
+            warn!(cluster = %name, error = %e, "Failed to delete CAPI Cluster");
+        }
+        return Ok(Action::requeue(Duration::from_secs(10)));
+    }
+
+    // CAPI Cluster is gone — clean up bootstrap state and remove finalizer
+    if let Some(ref servers) = ctx.parent_servers {
+        if let Some(state) = servers.bootstrap_state().await {
+            state.deregister(&name);
+        }
+    }
+    info!(cluster = %name, "Infrastructure cleanup complete, removing finalizer");
+    remove_finalizer(cluster, ctx).await?;
+    Ok(Action::await_change())
+}
+
+/// Handle deletion of a self-managed cluster (running on itself).
+///
+/// For cell clusters with children: blocks deletion until children are deleted.
+/// For clusters with a parent: pauses CAPI, waits for stability, sets phase
+/// to Unpivoting. The agent detects deletion_timestamp and sends CAPI
+/// resources to the parent via the unpivot retry loop.
+/// For root clusters: removes finalizer immediately.
+async fn handle_self_deletion(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+) -> Result<Action, Error> {
+    let name = cluster.name_any();
+
+    // Block deletion if this cell has active children
     if cluster.spec.parent_config.is_some() {
         let child_names: Vec<String> = ctx
             .kube
@@ -178,7 +255,7 @@ pub(crate) async fn handle_deletion(
         }
     }
 
-    // For self clusters, check if we have a parent to unpivot to
+    // Check if we have a parent to unpivot to
     let has_parent = ctx
         .kube
         .get_secret(PARENT_CONFIG_SECRET, LATTICE_SYSTEM_NAMESPACE)
@@ -186,7 +263,6 @@ pub(crate) async fn handle_deletion(
         .is_some();
 
     if !has_parent {
-        // Root cluster - no unpivot needed, just remove finalizer
         info!(cluster = %name, "Root cluster deletion - no unpivot needed");
         remove_finalizer(cluster, ctx).await?;
         return Ok(Action::await_change());
@@ -204,8 +280,7 @@ pub(crate) async fn handle_deletion(
         return Ok(Action::requeue(Duration::from_secs(10)));
     }
 
-    // Wait for cluster to be stable before unpivoting (no scaling in progress)
-    // Check 1: CAPI resources are stable (no machines provisioning/deleting)
+    // Wait for CAPI resources to stabilize (no machines provisioning/deleting)
     let capi_stable = match ctx.capi.is_cluster_stable(&name, &capi_namespace).await {
         Ok(stable) => stable,
         Err(e) => {
@@ -226,9 +301,9 @@ pub(crate) async fn handle_deletion(
         return Ok(Action::requeue(Duration::from_secs(10)));
     }
 
-    // Check 2: Actual node count matches LatticeCluster spec (prevents TOCTOU with scaling)
-    // Query live node counts — status.ready_workers may be stale because handle_ready
-    // (which normally refreshes it) is bypassed during deletion.
+    // Verify node counts match spec (prevents TOCTOU with scaling).
+    // Query live counts — status.ready_workers may be stale since handle_ready
+    // is bypassed during deletion.
     let desired_workers: u32 = cluster
         .spec
         .nodes
@@ -259,14 +334,8 @@ pub(crate) async fn handle_deletion(
         return Ok(Action::requeue(Duration::from_secs(10)));
     }
 
-    // Self cluster with parent - agent handles unpivot automatically
-    // The agent detects deletion_timestamp on connect and starts an unpivot retry loop
-    // that keeps sending ClusterDeleting to parent until parent's CAPI deletes us.
-    // We just need to:
-    // - Delete cell service (free up the LoadBalancer IP)
-    // - Set phase to Unpivoting
-    // - Wait — finalizer keeps the resource around until CAPI deletes the infrastructure
-
+    // Agent handles unpivot automatically: detects deletion_timestamp and starts
+    // sending ClusterDeleting to parent until parent's CAPI deletes us.
     let current_phase = cluster
         .status
         .as_ref()
@@ -288,7 +357,6 @@ pub(crate) async fn handle_deletion(
         // Delete the cell LoadBalancer service to free the IP
         ctx.kube.delete_cell_service().await?;
 
-        // Set phase to Unpivoting
         let status = cluster
             .status
             .clone()
@@ -298,8 +366,7 @@ pub(crate) async fn handle_deletion(
         ctx.kube.patch_status(&name, &status).await?;
     }
 
-    // Keep waiting - agent is sending manifests, parent will delete us via CAPI
-    // Finalizer never explicitly removed; CAPI deletes the entire infrastructure
+    // Finalizer keeps the resource around until CAPI deletes the infrastructure
     debug!(cluster = %name, "Unpivoting - waiting for parent to delete via CAPI");
     Ok(Action::requeue(Duration::from_secs(30)))
 }

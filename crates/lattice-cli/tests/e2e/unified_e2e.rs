@@ -449,6 +449,20 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("SUCCESS: Delete-recreate verified!");
 
     // =========================================================================
+    // Phase 8c: Delete workload from parent (parent-initiated deletion)
+    // =========================================================================
+    info!("[Phase 8c] Deleting workload cluster from parent (parent-initiated deletion)...");
+
+    integration::parent_delete::delete_from_parent_and_verify(
+        &ctx.mgmt_kubeconfig,
+        WORKLOAD_CLUSTER_NAME,
+        ctx.provider,
+    )
+    .await?;
+
+    info!("SUCCESS: Parent-initiated deletion verified!");
+
+    // =========================================================================
     // Phase 9: Uninstall management cluster
     // =========================================================================
     // Stop chaos entirely before teardown to avoid retries against disappearing clusters

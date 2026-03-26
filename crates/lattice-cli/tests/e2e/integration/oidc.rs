@@ -26,7 +26,7 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_policy_crd, apply_yaml, dev_service_reachable, dev_service_url,
-    ensure_operator_env, get_or_create_proxy, http_get_with_retry, proxy_service_exists,
+    get_or_create_proxy, http_get_with_retry, proxy_service_exists,
     run_kubectl, wait_for_condition, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::cedar::apply_cedar_policy_allow_group;

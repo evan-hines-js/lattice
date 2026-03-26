@@ -46,6 +46,7 @@ pub mod model;
 pub mod multi_hop;
 pub mod observability;
 pub mod oidc;
+pub mod parent_delete;
 pub mod pivot;
 pub mod recreate;
 pub mod proxy;

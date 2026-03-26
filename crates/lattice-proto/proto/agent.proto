@@ -294,6 +294,8 @@ message CellCommand {
     ServiceLookupResponse service_lookup_response = 13;
     // Push parent/sibling routes and proxy credentials to child for multi-cluster Istio
     PeerRouteSync peer_route_sync = 14;
+    // Instruct child to delete itself (parent-initiated deletion)
+    DeleteCluster delete_cluster = 15;
   }
 }
 
@@ -335,6 +337,19 @@ message StatusRequest {
   bool include_nodes = 1;
   // Whether to include CAPI resource status
   bool include_capi = 2;
+}
+
+// Cell → Agent: Instruct child to delete its own LatticeCluster
+//
+// Sent when a user deletes a LatticeCluster from the parent cluster.
+// After pivot, CAPI resources live on the child, so the parent can't
+// delete CAPI directly. This command tells the child to initiate
+// self-deletion, triggering the existing unpivot flow (agent detects
+// deletion → sends ClusterDeleting → parent imports CAPI → parent
+// deletes CAPI Cluster via normal infrastructure cleanup).
+message DeleteCluster {
+  // Name of the cluster to delete
+  string cluster_name = 1;
 }
 
 // =============================================================================

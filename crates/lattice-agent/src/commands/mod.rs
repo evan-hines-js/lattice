@@ -4,6 +4,7 @@
 //! enabling unit testing of individual command types.
 
 pub mod apply_manifests;
+mod delete_cluster;
 mod exec;
 mod kubernetes;
 mod move_batch;
@@ -188,6 +189,9 @@ pub async fn handle_command(command: &CellCommand, ctx: &CommandContext) {
         }
         Some(Command::PeerRouteSync(sync)) => {
             peer_routes::handle(sync, ctx).await;
+        }
+        Some(Command::DeleteCluster(cmd)) => {
+            delete_cluster::handle(cmd, ctx).await;
         }
         Some(Command::ServiceLookupResponse(resp)) => {
             tracing::debug!(
