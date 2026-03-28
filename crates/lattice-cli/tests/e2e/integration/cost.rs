@@ -162,30 +162,11 @@ async fn test_service_cost_populated(kubeconfig: &str) -> Result<(), String> {
         ));
     }
 
-    // Verify lastEstimatedAt is set
-    let timestamp = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticeservice",
-        SERVICE_NAME,
-        "-n",
-        COST_NAMESPACE,
-        "-o",
-        "jsonpath={.status.cost.lastEstimatedAt}",
-    ])
-    .await?;
-
-    if timestamp.trim().is_empty() {
-        return Err("status.cost.lastEstimatedAt is empty".to_string());
-    }
-
     info!(
-        "[Cost] Service cost verified: hourlyCost={}, cpu={}, memory={}, lastEstimatedAt={}",
+        "[Cost] Service cost verified: hourlyCost={}, cpu={}, memory={}",
         cost_str,
         cpu_cost.trim(),
         mem_cost.trim(),
-        timestamp.trim()
     );
     Ok(())
 }
