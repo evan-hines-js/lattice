@@ -95,7 +95,10 @@ pub fn determine_scaling_action(
     current_replicas: Option<u32>,
 ) -> ScalingAction {
     if pool_spec.is_autoscaling_enabled() {
-        // Autoscaling: use current replicas or fall back to min
+        // MachineDeployment must exist before the autoscaler can manage it
+        if current_replicas.is_none() {
+            return ScalingAction::WaitForMachineDeployment;
+        }
         let desired = current_replicas.unwrap_or_else(|| pool_spec.min.unwrap_or(0));
         return ScalingAction::NoOp {
             desired,
@@ -459,12 +462,11 @@ mod tests {
     }
 
     #[test]
-    fn scaling_action_autoscaling_falls_back_to_min() {
+    fn scaling_action_autoscaling_waits_when_deployment_missing() {
         let spec = pool_spec(3, Some(2), Some(10));
         let action = determine_scaling_action(&spec, None);
 
-        assert_eq!(action.desired_replicas(), 2); // Falls back to min
-        assert!(action.is_autoscaling());
+        assert_eq!(action, ScalingAction::WaitForMachineDeployment);
     }
 
     #[test]

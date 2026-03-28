@@ -1,8 +1,7 @@
 //! CRD installation utilities
 //!
 //! Provides functions for installing Lattice CRDs on startup using server-side apply.
-//! CRDs are organized into per-mode sets so each ControllerMode only installs
-//! the CRDs it needs.
+//! CRDs are organized into common (all modes) and per-mode sets.
 
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{Api, Patch, PatchParams};
@@ -20,9 +19,26 @@ struct CrdDef {
     crd: CustomResourceDefinition,
 }
 
-/// CRDs needed by Cluster mode:
-/// LatticeCluster, InfraProvider, SecretProvider, CedarPolicy, OIDCProvider
-fn cluster_crds() -> Vec<CrdDef> {
+/// CRDs needed by all modes
+fn common_crds() -> Vec<CrdDef> {
+    vec![
+        CrdDef {
+            name: "cedarpolicies.lattice.dev",
+            crd: CedarPolicy::crd(),
+        },
+        CrdDef {
+            name: "dnsproviders.lattice.dev",
+            crd: DNSProvider::crd(),
+        },
+        CrdDef {
+            name: "certissuers.lattice.dev",
+            crd: CertIssuer::crd(),
+        },
+    ]
+}
+
+/// CRDs needed only by Cluster mode
+fn cluster_only_crds() -> Vec<CrdDef> {
     vec![
         CrdDef {
             name: "latticeclusters.lattice.dev",
@@ -37,10 +53,6 @@ fn cluster_crds() -> Vec<CrdDef> {
             crd: SecretProvider::crd(),
         },
         CrdDef {
-            name: "cedarpolicies.lattice.dev",
-            crd: CedarPolicy::crd(),
-        },
-        CrdDef {
             name: "oidcproviders.lattice.dev",
             crd: OIDCProvider::crd(),
         },
@@ -48,21 +60,11 @@ fn cluster_crds() -> Vec<CrdDef> {
             name: "latticeclusterroutes.lattice.dev",
             crd: LatticeClusterRoutes::crd(),
         },
-        CrdDef {
-            name: "dnsproviders.lattice.dev",
-            crd: DNSProvider::crd(),
-        },
-        CrdDef {
-            name: "certissuers.lattice.dev",
-            crd: CertIssuer::crd(),
-        },
     ]
 }
 
-/// CRDs needed by Service mode:
-/// LatticeService, BackupStore, LatticeClusterBackup, LatticeRestore,
-/// CedarPolicy, LatticeMeshMember, LatticeJob, LatticeModel
-fn service_crds() -> Vec<CrdDef> {
+/// CRDs needed only by Service mode
+fn service_only_crds() -> Vec<CrdDef> {
     vec![
         CrdDef {
             name: "latticeservices.lattice.dev",
@@ -79,10 +81,6 @@ fn service_crds() -> Vec<CrdDef> {
         CrdDef {
             name: "latticerestores.lattice.dev",
             crd: LatticeRestore::crd(),
-        },
-        CrdDef {
-            name: "cedarpolicies.lattice.dev",
-            crd: CedarPolicy::crd(),
         },
         CrdDef {
             name: "latticemeshmembers.lattice.dev",
@@ -117,7 +115,9 @@ async fn install_crds(client: &Client, crds_to_install: Vec<CrdDef>) -> anyhow::
 /// Ensure CRDs needed by Cluster mode are installed
 pub async fn ensure_cluster_crds(client: &Client) -> anyhow::Result<()> {
     tracing::info!("Installing Cluster mode CRDs...");
-    install_crds(client, cluster_crds()).await?;
+    let mut all = common_crds();
+    all.extend(cluster_only_crds());
+    install_crds(client, all).await?;
     tracing::info!("Cluster mode CRDs installed/updated");
     Ok(())
 }
@@ -125,7 +125,9 @@ pub async fn ensure_cluster_crds(client: &Client) -> anyhow::Result<()> {
 /// Ensure CRDs needed by Service mode are installed
 pub async fn ensure_service_crds(client: &Client) -> anyhow::Result<()> {
     tracing::info!("Installing Service mode CRDs...");
-    install_crds(client, service_crds()).await?;
+    let mut all = common_crds();
+    all.extend(service_only_crds());
+    install_crds(client, all).await?;
     tracing::info!("Service mode CRDs installed/updated");
     Ok(())
 }

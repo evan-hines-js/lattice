@@ -457,172 +457,22 @@ pub async fn build_model_controllers(
     vec![Box::pin(model_ctrl)]
 }
 
-/// Build cluster-slice provider controllers (InfraProvider, SecretProvider, CedarPolicy, OIDCProvider)
-///
-/// These manage infrastructure-level provider configuration (cloud credentials,
-/// secret backends, OIDC endpoints). CRDs are registered in `cluster_crds()`.
-pub fn build_cluster_provider_controllers(
-    client: Client,
-    cedar: Arc<PolicyEngine>,
-    config: lattice_common::SharedConfig,
+/// Controllers that run in all modes (CedarPolicy, DNSProvider, CertIssuer)
+fn common_provider_controllers(
+    client: &Client,
+    ctx: &Arc<ControllerContext>,
+    cedar_ctx: Arc<cedar_validation_ctrl::CedarValidationContext>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
-    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
-        client: client.clone(),
-        cedar,
-    });
-
-    tracing::info!("- InfraProvider controller");
-    tracing::info!("- SecretProvider controller");
     tracing::info!("- CedarPolicy controller");
-    tracing::info!("- OIDCProvider controller");
     tracing::info!("- DNSProvider controller");
     tracing::info!("- CertIssuer controller");
 
     vec![
         simple_controller(
-            Api::<InfraProvider>::all(client.clone()),
-            cloud_provider_ctrl::reconcile,
-            ctx.clone(),
-            "InfraProvider",
-        ),
-        simple_controller(
-            Api::<SecretProvider>::all(client.clone()),
-            secrets_provider_ctrl::reconcile,
-            ctx.clone(),
-            "SecretProvider",
-        ),
-        simple_controller(
             Api::<CedarPolicy>::all(client.clone()),
             cedar_validation_ctrl::reconcile,
             cedar_ctx,
             "CedarPolicy",
-        ),
-        simple_controller(
-            Api::<OIDCProvider>::all(client.clone()),
-            oidc_provider_ctrl::reconcile,
-            ctx.clone(),
-            "OIDCProvider",
-        ),
-        simple_controller(
-            Api::<DNSProvider>::all(client.clone()),
-            lattice_dns_provider::reconcile,
-            ctx.clone(),
-            "DNSProvider",
-        ),
-        simple_controller(
-            Api::<CertIssuer>::all(client),
-            lattice_cert_issuer::reconcile,
-            ctx,
-            "CertIssuer",
-        ),
-    ]
-}
-
-/// Build service-slice provider controllers (BackupStore, ClusterBackup, Restore, ServiceBackup, CedarPolicy)
-///
-/// These manage application-level backup/restore and Cedar policy validation.
-/// CRDs are registered in `service_crds()`.
-pub fn build_service_provider_controllers(
-    client: Client,
-    cedar: Arc<PolicyEngine>,
-    config: lattice_common::SharedConfig,
-) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
-    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
-        client: client.clone(),
-        cedar,
-    });
-
-    tracing::info!("- CedarPolicy controller");
-    tracing::info!("- BackupStore controller");
-    tracing::info!("- LatticeClusterBackup controller");
-    tracing::info!("- LatticeRestore controller");
-    tracing::info!("- ServiceBackupSchedule controller");
-
-    vec![
-        simple_controller(
-            Api::<CedarPolicy>::all(client.clone()),
-            cedar_validation_ctrl::reconcile,
-            cedar_ctx,
-            "CedarPolicy",
-        ),
-        simple_controller(
-            Api::<BackupStore>::all(client.clone()),
-            backup_store_ctrl::reconcile,
-            ctx.clone(),
-            "BackupStore",
-        ),
-        simple_controller(
-            Api::<LatticeClusterBackup>::all(client.clone()),
-            cluster_backup_ctrl::reconcile,
-            ctx.clone(),
-            "ClusterBackup",
-        ),
-        simple_controller(
-            Api::<LatticeRestore>::all(client.clone()),
-            restore_ctrl::reconcile,
-            ctx.clone(),
-            "Restore",
-        ),
-        simple_controller(
-            Api::<LatticeService>::all(client),
-            service_backup_ctrl::reconcile,
-            ctx,
-            "ServiceBackup",
-        ),
-    ]
-}
-
-/// Build ALL provider controllers (union of cluster + service slices, CedarPolicy deduplicated)
-///
-/// Used by `run_all_slices()` to avoid running the CedarPolicy controller twice.
-pub fn build_all_provider_controllers(
-    client: Client,
-    cedar: Arc<PolicyEngine>,
-    config: lattice_common::SharedConfig,
-) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
-    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
-        client: client.clone(),
-        cedar,
-    });
-
-    tracing::info!("- InfraProvider controller");
-    tracing::info!("- SecretProvider controller");
-    tracing::info!("- CedarPolicy controller");
-    tracing::info!("- OIDCProvider controller");
-    tracing::info!("- DNSProvider controller");
-    tracing::info!("- CertIssuer controller");
-    tracing::info!("- BackupStore controller");
-    tracing::info!("- LatticeClusterBackup controller");
-    tracing::info!("- LatticeRestore controller");
-    tracing::info!("- ServiceBackupSchedule controller");
-
-    vec![
-        simple_controller(
-            Api::<InfraProvider>::all(client.clone()),
-            cloud_provider_ctrl::reconcile,
-            ctx.clone(),
-            "InfraProvider",
-        ),
-        simple_controller(
-            Api::<SecretProvider>::all(client.clone()),
-            secrets_provider_ctrl::reconcile,
-            ctx.clone(),
-            "SecretProvider",
-        ),
-        simple_controller(
-            Api::<CedarPolicy>::all(client.clone()),
-            cedar_validation_ctrl::reconcile,
-            cedar_ctx,
-            "CedarPolicy",
-        ),
-        simple_controller(
-            Api::<OIDCProvider>::all(client.clone()),
-            oidc_provider_ctrl::reconcile,
-            ctx.clone(),
-            "OIDCProvider",
         ),
         simple_controller(
             Api::<DNSProvider>::all(client.clone()),
@@ -636,6 +486,74 @@ pub fn build_all_provider_controllers(
             ctx.clone(),
             "CertIssuer",
         ),
+    ]
+}
+
+/// Build cluster-slice provider controllers.
+///
+/// Cluster-only: InfraProvider, SecretProvider, OIDCProvider.
+/// Common (all modes): CedarPolicy, DNSProvider, CertIssuer.
+pub fn build_cluster_provider_controllers(
+    client: Client,
+    cedar: Arc<PolicyEngine>,
+    config: lattice_common::SharedConfig,
+) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
+    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
+        client: client.clone(),
+        cedar,
+    });
+
+    tracing::info!("- InfraProvider controller");
+    tracing::info!("- SecretProvider controller");
+    tracing::info!("- OIDCProvider controller");
+
+    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx);
+    controllers.extend([
+        simple_controller(
+            Api::<InfraProvider>::all(client.clone()),
+            cloud_provider_ctrl::reconcile,
+            ctx.clone(),
+            "InfraProvider",
+        ),
+        simple_controller(
+            Api::<SecretProvider>::all(client.clone()),
+            secrets_provider_ctrl::reconcile,
+            ctx.clone(),
+            "SecretProvider",
+        ),
+        simple_controller(
+            Api::<OIDCProvider>::all(client),
+            oidc_provider_ctrl::reconcile,
+            ctx,
+            "OIDCProvider",
+        ),
+    ]);
+    controllers
+}
+
+/// Build service-slice provider controllers.
+///
+/// Service-only: BackupStore, ClusterBackup, Restore, ServiceBackup.
+/// Common (all modes): CedarPolicy, DNSProvider, CertIssuer.
+pub fn build_service_provider_controllers(
+    client: Client,
+    cedar: Arc<PolicyEngine>,
+    config: lattice_common::SharedConfig,
+) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
+    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
+        client: client.clone(),
+        cedar,
+    });
+
+    tracing::info!("- BackupStore controller");
+    tracing::info!("- LatticeClusterBackup controller");
+    tracing::info!("- LatticeRestore controller");
+    tracing::info!("- ServiceBackupSchedule controller");
+
+    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx);
+    controllers.extend([
         simple_controller(
             Api::<BackupStore>::all(client.clone()),
             backup_store_ctrl::reconcile,
@@ -660,7 +578,85 @@ pub fn build_all_provider_controllers(
             ctx,
             "ServiceBackup",
         ),
-    ]
+    ]);
+    controllers
+}
+
+/// Build ALL provider controllers (union of cluster + service, common controllers deduplicated).
+///
+/// Used by `run_all_slices()`.
+pub fn build_all_provider_controllers(
+    client: Client,
+    cedar: Arc<PolicyEngine>,
+    config: lattice_common::SharedConfig,
+) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
+    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
+        client: client.clone(),
+        cedar,
+    });
+
+    // Common controllers (CedarPolicy, DNSProvider, CertIssuer)
+    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx);
+
+    // Cluster-only
+    tracing::info!("- InfraProvider controller");
+    tracing::info!("- SecretProvider controller");
+    tracing::info!("- OIDCProvider controller");
+    controllers.extend([
+        simple_controller(
+            Api::<InfraProvider>::all(client.clone()),
+            cloud_provider_ctrl::reconcile,
+            ctx.clone(),
+            "InfraProvider",
+        ),
+        simple_controller(
+            Api::<SecretProvider>::all(client.clone()),
+            secrets_provider_ctrl::reconcile,
+            ctx.clone(),
+            "SecretProvider",
+        ),
+        simple_controller(
+            Api::<OIDCProvider>::all(client.clone()),
+            oidc_provider_ctrl::reconcile,
+            ctx.clone(),
+            "OIDCProvider",
+        ),
+    ]);
+
+    // Service-only
+    tracing::info!("- BackupStore controller");
+    tracing::info!("- LatticeClusterBackup controller");
+    tracing::info!("- LatticeRestore controller");
+    tracing::info!("- ServiceBackupSchedule controller");
+    controllers.extend([
+        simple_controller(
+            Api::<BackupStore>::all(client.clone()),
+            backup_store_ctrl::reconcile,
+            ctx.clone(),
+            "BackupStore",
+        ),
+        simple_controller(
+            Api::<LatticeClusterBackup>::all(client.clone()),
+            cluster_backup_ctrl::reconcile,
+            ctx.clone(),
+            "ClusterBackup",
+        ),
+        simple_controller(
+            Api::<LatticeRestore>::all(client.clone()),
+            restore_ctrl::reconcile,
+            ctx.clone(),
+            "Restore",
+        ),
+        simple_controller(
+            Api::<LatticeService>::all(client),
+            service_backup_ctrl::reconcile,
+            ctx,
+            "ServiceBackup",
+        ),
+    ]);
+
+    controllers
 }
 
 /// Resolve provider type from the first LatticeCluster CRD
