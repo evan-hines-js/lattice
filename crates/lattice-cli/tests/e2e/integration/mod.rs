@@ -45,6 +45,7 @@ pub mod mesh;
 pub mod mesh_onboarding;
 pub mod model;
 pub mod multi_hop;
+pub mod node_autoscaling;
 pub mod observability;
 pub mod oidc;
 pub mod parent_delete;
