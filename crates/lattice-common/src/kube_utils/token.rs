@@ -38,12 +38,12 @@ pub async fn request_proxy_token(client: &Client) -> Result<String, kube::Error>
         .await?;
 
     let status = response.status.ok_or_else(|| {
-        kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
+        kube::Error::Api(Box::new(kube::core::Status {
             message: "TokenRequest response missing status".to_string(),
             reason: "MissingStatus".to_string(),
             code: 500,
-        })
+            ..Default::default()
+        }))
     })?;
     Ok(status.token)
 }

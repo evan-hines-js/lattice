@@ -996,8 +996,8 @@ async fn compile_and_apply(
     }
 
     let spec = &service.spec;
-    let cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates, ts| {
-        lattice_cost::estimate_service_cost(spec, rates, ts)
+    let cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates| {
+        lattice_cost::estimate_service_cost(spec, rates)
     })
     .await;
 

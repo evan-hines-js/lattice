@@ -727,24 +727,24 @@ mod tests {
 
     #[test]
     fn reconcile_error_from_kube_error() {
-        let kube_err = kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
+        let kube_err = kube::Error::Api(Box::new(kube::core::Status {
             message: "not found".to_string(),
             reason: "NotFound".to_string(),
             code: 404,
-        });
+            ..Default::default()
+        }));
         let err: ReconcileError = kube_err.into();
         assert!(err.is_crd_not_found());
     }
 
     #[test]
     fn reconcile_error_is_crd_not_found_false_for_non_404() {
-        let kube_err = kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
+        let kube_err = kube::Error::Api(Box::new(kube::core::Status {
             message: "connection refused".to_string(),
             reason: "ServiceUnavailable".to_string(),
             code: 503,
-        });
+            ..Default::default()
+        }));
         let err: ReconcileError = kube_err.into();
         assert!(!err.is_crd_not_found());
     }
@@ -755,12 +755,12 @@ mod tests {
 
     #[test]
     fn reconcile_error_retryable_kube() {
-        let kube_err = kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
+        let kube_err = kube::Error::Api(Box::new(kube::core::Status {
             message: "connection refused".to_string(),
             reason: "ServiceUnavailable".to_string(),
             code: 503,
-        });
+            ..Default::default()
+        }));
         let err: ReconcileError = kube_err.into();
         assert!(Retryable::is_retryable(&err));
     }
@@ -798,12 +798,12 @@ mod tests {
             ..Default::default()
         });
         let ctx: Arc<()> = Arc::new(());
-        let err = ReconcileError::Kube(kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
+        let err = ReconcileError::Kube(kube::Error::Api(Box::new(kube::core::Status {
             message: "transient".to_string(),
             reason: "ServiceUnavailable".to_string(),
             code: 503,
-        }));
+            ..Default::default()
+        })));
 
         let action = default_error_policy(resource, &err, ctx);
         assert_eq!(action, Action::requeue(Duration::from_secs(30)));

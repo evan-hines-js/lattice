@@ -16,17 +16,15 @@ const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 pub fn estimate_service_cost(
     spec: &LatticeServiceSpec,
     rates: &CostRates,
-    timestamp: &str,
 ) -> Result<CostEstimate, CostError> {
     let (cpu, mem, gpu) = workload_cost(&spec.workload, rates, spec.replicas as f64)?;
-    Ok(build_estimate(cpu, mem, gpu, timestamp))
+    Ok(build_estimate(cpu, mem, gpu))
 }
 
 /// Estimate hourly cost for a LatticeJob (sum across all tasks).
 pub fn estimate_job_cost(
     spec: &LatticeJobSpec,
     rates: &CostRates,
-    timestamp: &str,
 ) -> Result<CostEstimate, CostError> {
     let mut total_cpu = 0.0;
     let mut total_mem = 0.0;
@@ -39,14 +37,13 @@ pub fn estimate_job_cost(
         total_gpu += gpu;
     }
 
-    Ok(build_estimate(total_cpu, total_mem, total_gpu, timestamp))
+    Ok(build_estimate(total_cpu, total_mem, total_gpu))
 }
 
 /// Estimate hourly cost for a LatticeModel (sum across all roles, entry + worker).
 pub fn estimate_model_cost(
     spec: &LatticeModelSpec,
     rates: &CostRates,
-    timestamp: &str,
 ) -> Result<CostEstimate, CostError> {
     let mut total_cpu = 0.0;
     let mut total_mem = 0.0;
@@ -69,7 +66,7 @@ pub fn estimate_model_cost(
         }
     }
 
-    Ok(build_estimate(total_cpu, total_mem, total_gpu, timestamp))
+    Ok(build_estimate(total_cpu, total_mem, total_gpu))
 }
 
 /// Sum CPU millis and memory bytes across all containers in a WorkloadSpec.
@@ -137,7 +134,7 @@ fn format_rate(amount: f64) -> String {
     format!("{:.4}", amount)
 }
 
-fn build_estimate(cpu: f64, memory: f64, gpu: f64, timestamp: &str) -> CostEstimate {
+fn build_estimate(cpu: f64, memory: f64, gpu: f64) -> CostEstimate {
     let total = cpu + memory + gpu;
     CostEstimate {
         hourly_cost: format_rate(total),
@@ -150,7 +147,6 @@ fn build_estimate(cpu: f64, memory: f64, gpu: f64, timestamp: &str) -> CostEstim
                 None
             },
         },
-        last_estimated_at: Some(timestamp.to_string()),
     }
 }
 
@@ -199,7 +195,6 @@ mod tests {
         }
     }
 
-    const TEST_TS: &str = "2026-01-01T00:00:00Z";
 
     #[test]
     fn test_service_cost_cpu_only() {
@@ -216,7 +211,7 @@ mod tests {
             ..Default::default()
         };
 
-        let est = estimate_service_cost(&spec, &rates, TEST_TS).unwrap();
+        let est = estimate_service_cost(&spec, &rates).unwrap();
         // CPU: 0.5 cores × $0.031 × 2 replicas = $0.031
         // Mem: 1 GiB × $0.004 × 2 replicas = $0.008
         // Total: $0.039
@@ -241,7 +236,7 @@ mod tests {
             ..Default::default()
         };
 
-        let est = estimate_service_cost(&spec, &rates, TEST_TS).unwrap();
+        let est = estimate_service_cost(&spec, &rates).unwrap();
         // CPU: 4 cores × $0.031 = $0.124
         // Mem: 32 GiB × $0.004 = $0.128
         // GPU: 8 × $3.50 = $28.00
@@ -270,7 +265,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = estimate_service_cost(&spec, &rates, TEST_TS).unwrap_err();
+        let err = estimate_service_cost(&spec, &rates).unwrap_err();
         assert!(matches!(err, CostError::MissingGpuRate(_)));
     }
 
@@ -323,7 +318,7 @@ mod tests {
             ..Default::default()
         };
 
-        let est = estimate_job_cost(&spec, &rates, TEST_TS).unwrap();
+        let est = estimate_job_cost(&spec, &rates).unwrap();
         // Coordinator: CPU 2×0.031 + Mem 8×0.004 = 0.062+0.032 = 0.094 × 1 replica
         // Worker: CPU 4×0.031 + Mem 16×0.004 + GPU 8×3.50 = 0.124+0.064+28.0 = 28.188 × 4 replicas = 112.752
         // Total: 0.094 + 112.752 = 112.846
@@ -369,7 +364,7 @@ mod tests {
             ..Default::default()
         };
 
-        let est = estimate_model_cost(&spec, &rates, TEST_TS).unwrap();
+        let est = estimate_model_cost(&spec, &rates).unwrap();
         // Entry: (4×0.031 + 32×0.004 + 4×3.50) × 2 = (0.124+0.128+14.0) × 2 = 28.504
         // Worker: (2×0.031 + 16×0.004 + 1×0.81) × 4 = (0.062+0.064+0.81) × 4 = 3.744
         // Total: 28.504 + 3.744 = 32.248
@@ -392,7 +387,7 @@ mod tests {
             ..Default::default()
         };
 
-        let est = estimate_service_cost(&spec, &rates, TEST_TS).unwrap();
+        let est = estimate_service_cost(&spec, &rates).unwrap();
         let total: f64 = est.hourly_cost.parse().unwrap();
         assert!((total - 0.0).abs() < f64::EPSILON);
     }
@@ -416,7 +411,7 @@ mod tests {
             ..Default::default()
         };
 
-        let est = estimate_service_cost(&spec, &rates, TEST_TS).unwrap();
+        let est = estimate_service_cost(&spec, &rates).unwrap();
         let total: f64 = est.hourly_cost.parse().unwrap();
         assert!((total - 0.0).abs() < f64::EPSILON);
     }

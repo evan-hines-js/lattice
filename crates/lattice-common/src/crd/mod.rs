@@ -137,17 +137,12 @@ pub(crate) fn default_true() -> bool {
 ///
 /// Used via `#[schemars(schema_with = "crate::crd::preserve_unknown_fields")]`.
 pub(crate) fn preserve_unknown_fields(
-    _gen: &mut schemars::gen::SchemaGenerator,
-) -> schemars::schema::Schema {
-    let mut obj = schemars::schema::SchemaObject {
-        instance_type: Some(schemars::schema::InstanceType::Object.into()),
-        ..Default::default()
-    };
-    obj.extensions.insert(
-        "x-kubernetes-preserve-unknown-fields".to_string(),
-        serde_json::json!(true),
-    );
-    obj.into()
+    _gen: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "x-kubernetes-preserve-unknown-fields": true
+    })
 }
 
 /// Validate that a string is a valid K8s DNS label.

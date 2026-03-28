@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use k8s_openapi::jiff;
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
@@ -155,7 +155,7 @@ impl LeaderElector {
     /// - Update with resourceVersion - fails if lease changed since read
     async fn try_acquire_or_renew(&self) -> Result<bool, LeaderElectionError> {
         let api: Api<Lease> = Api::namespaced(self.client.clone(), &self.namespace);
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
 
         // Try to get existing lease
         let existing = match api.get(&self.lease_name).await {
@@ -184,7 +184,7 @@ impl LeaderElector {
                 let duration_secs = spec.and_then(|s| s.lease_duration_seconds);
                 let is_expired = match (renew_time, duration_secs) {
                     (Some(rt), Some(duration)) => {
-                        now > rt.0 + chrono::Duration::seconds(duration as i64)
+                        now > rt.0 + jiff::Span::new().seconds(duration as i64)
                     }
                     _ => true,
                 };
@@ -205,7 +205,7 @@ impl LeaderElector {
     async fn create_lease(
         &self,
         api: &Api<Lease>,
-        now: chrono::DateTime<Utc>,
+        now: jiff::Timestamp,
     ) -> Result<bool, LeaderElectionError> {
         let lease = Lease {
             metadata: ObjectMeta {
@@ -242,15 +242,15 @@ impl LeaderElector {
         &self,
         api: &Api<Lease>,
         existing: &Lease,
-        now: chrono::DateTime<Utc>,
+        now: jiff::Timestamp,
     ) -> Result<bool, LeaderElectionError> {
         let resource_version = existing.metadata.resource_version.as_ref().ok_or_else(|| {
-            LeaderElectionError::Kube(kube::Error::Api(kube::error::ErrorResponse {
-                status: "Failed".to_string(),
+            LeaderElectionError::Kube(kube::Error::Api(Box::new(kube::core::Status {
                 message: "Lease missing resourceVersion".to_string(),
                 reason: "Invalid".to_string(),
                 code: 500,
-            }))
+                ..Default::default()
+            })))
         })?;
 
         // Build updated lease with same resourceVersion for atomic update
@@ -282,16 +282,16 @@ impl LeaderElector {
         &self,
         api: &Api<Lease>,
         resource_version: Option<String>,
-        now: chrono::DateTime<Utc>,
+        now: jiff::Timestamp,
         transitions: i32,
     ) -> Result<bool, LeaderElectionError> {
         let rv = resource_version.ok_or_else(|| {
-            LeaderElectionError::Kube(kube::Error::Api(kube::error::ErrorResponse {
-                status: "Failed".to_string(),
+            LeaderElectionError::Kube(kube::Error::Api(Box::new(kube::core::Status {
                 message: "Lease missing resourceVersion".to_string(),
                 reason: "Invalid".to_string(),
                 code: 500,
-            }))
+                ..Default::default()
+            })))
         })?;
 
         let lease = Lease {
@@ -442,11 +442,11 @@ impl LeaderElector {
         }
 
         // Clear the holder and set renew_time to past so it's immediately acquirable
-        let past = Utc::now() - chrono::Duration::seconds(60);
+        let past = jiff::Timestamp::now() - jiff::Span::new().seconds(60);
         let patch = json!({
             "spec": {
                 "holderIdentity": null,
-                "renewTime": past.to_rfc3339()
+                "renewTime": past.to_string()
             }
         });
 

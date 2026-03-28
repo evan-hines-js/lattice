@@ -97,9 +97,17 @@ impl PodTemplateCompiler {
         // Build pod volumes from PVCs and emptyDir
         let mut pod_volumes: Vec<Volume> = volumes.volumes.clone();
 
-        // Add SHM volume for GPU pods
-        if let Some((shm_vol, _)) = gpu_shm_volume(gpu_ref) {
-            pod_volumes.push(shm_vol);
+        // Add SHM volume for GPU pods (skip if user already declared /dev/shm)
+        let has_shm_volume = pod_volumes.iter().any(|v| {
+            v.empty_dir
+                .as_ref()
+                .is_some_and(|ed| ed.medium.as_deref() == Some("Memory"))
+                && v.name.contains("shm")
+        });
+        if !has_shm_volume {
+            if let Some((shm_vol, _)) = gpu_shm_volume(gpu_ref) {
+                pod_volumes.push(shm_vol);
+            }
         }
 
         // Add file volumes from files::compile (deduplicate by name)
@@ -266,10 +274,14 @@ impl PodTemplateCompiler {
                     volume_mounts.extend(file_mounts.iter().cloned());
                 }
 
-                // Add SHM volume mount for GPU pods (first container only)
+                // Add SHM volume mount for GPU pods (first container only, skip if already mounted)
                 if idx == 0 {
-                    if let Some((_, shm_mount)) = gpu_shm_volume(gpu) {
-                        volume_mounts.push(shm_mount);
+                    let has_shm_mount =
+                        volume_mounts.iter().any(|m| m.mount_path == "/dev/shm");
+                    if !has_shm_mount {
+                        if let Some((_, shm_mount)) = gpu_shm_volume(gpu) {
+                            volume_mounts.push(shm_mount);
+                        }
                     }
                 }
 

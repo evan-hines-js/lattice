@@ -189,7 +189,7 @@ mod tests {
 
         let mut meta = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some("test".to_string()),
-            creation_timestamp: Some(Time(chrono::Utc::now())),
+            creation_timestamp: Some(Time(k8s_openapi::jiff::Timestamp::now())),
             ..Default::default()
         };
 

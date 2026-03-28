@@ -763,12 +763,12 @@ mod tests {
     // =========================================================================
 
     fn kube_api_error(code: u16, message: &str) -> ReconcileError {
-        ReconcileError::Kube(kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
+        ReconcileError::Kube(kube::Error::Api(Box::new(kube::core::Status {
             message: message.to_string(),
             reason: "".to_string(),
             code,
-        }))
+            ..Default::default()
+        })))
     }
 
     #[test]

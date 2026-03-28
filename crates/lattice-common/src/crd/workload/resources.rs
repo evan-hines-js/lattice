@@ -3,6 +3,7 @@
 //! Contains the resource system: `ResourceType`, `ResourceSpec`, `DependencyDirection`,
 //! and parameter types for volumes and secrets.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
@@ -70,23 +71,14 @@ impl std::fmt::Display for ResourceType {
 }
 
 impl JsonSchema for ResourceType {
-    fn schema_name() -> String {
-        "ResourceType".to_string()
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("ResourceType")
     }
 
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        // Accept any string - built-in values are "service", "external-service", "volume", "secret"
-        // Custom types are validated at parse time
-        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(
-                    "Resource type: 'service', 'external-service', 'volume', 'secret', 'gpu', or custom type"
-                        .to_string(),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Resource type: 'service', 'external-service', 'volume', 'secret', 'gpu', or custom type"
         })
     }
 }
@@ -250,31 +242,15 @@ impl ResourceParams {
 }
 
 impl JsonSchema for ResourceParams {
-    fn schema_name() -> String {
-        "ResourceParams".to_string()
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("ResourceParams")
     }
 
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        // Accept any object — the actual validation is done by the custom Deserialize
-        // on ResourceSpec which reads `type` first and then parses params.
-        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::Object.into()),
-            extensions: {
-                let mut ext = schemars::Map::new();
-                ext.insert(
-                    "x-kubernetes-preserve-unknown-fields".to_string(),
-                    serde_json::json!(true),
-                );
-                ext
-            },
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(
-                    "Resource parameters, interpreted based on the sibling 'type' field"
-                        .to_string(),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "description": "Resource parameters, interpreted based on the sibling 'type' field",
+            "x-kubernetes-preserve-unknown-fields": true
         })
     }
 }

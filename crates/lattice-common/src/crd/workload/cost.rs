@@ -20,9 +20,6 @@ pub struct CostEstimate {
 
     /// Per-resource-type cost breakdown
     pub breakdown: CostBreakdown,
-
-    /// Timestamp when this estimate was last computed (RFC 3339)
-    pub last_estimated_at: Option<String>,
 }
 
 /// Per-resource-type cost breakdown (all values are $/hour).

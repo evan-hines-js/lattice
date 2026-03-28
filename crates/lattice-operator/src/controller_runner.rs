@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use kube::runtime::reflector::ObjectRef;
-use kube::runtime::watcher::Config as WatcherConfig;
-use kube::runtime::Controller;
+use kube::runtime::watcher::{self, Config as WatcherConfig};
+use kube::runtime::{predicates, reflector, Controller, WatchStreamExt};
 use kube::{Api, Client};
 
 use lattice_api::auth::oidc_controller as oidc_provider_ctrl;
@@ -173,7 +173,13 @@ pub async fn build_service_controllers(
     let cluster_routes_for_svc: Api<LatticeClusterRoutes> = Api::all(client.clone());
     let graph_for_route_watch = service_ctx.graph.clone();
 
-    let svc_ctrl = Controller::new(services, watcher_config())
+    let (reader, writer) = reflector::store();
+    let svc_stream = reflector(writer, watcher::watcher(services, watcher_config()))
+        .default_backoff()
+        .applied_objects()
+        .predicate_filter(predicates::generation, Default::default());
+
+    let svc_ctrl = Controller::for_stream(svc_stream, reader)
         .watches(services_for_watch, watcher_config(), move |service| {
             let graph = graph_for_dep_watch.clone();
             let namespace = match service.metadata.namespace.as_deref() {
@@ -377,8 +383,13 @@ pub async fn build_job_controllers(
     let ctx = Arc::new(job_ctx);
 
     let jobs: Api<LatticeJob> = Api::all(client);
+    let (reader, writer) = reflector::store();
+    let job_stream = reflector(writer, watcher::watcher(jobs, watcher_config()))
+        .default_backoff()
+        .applied_objects()
+        .predicate_filter(predicates::generation, Default::default());
 
-    let job_ctrl = Controller::new(jobs, watcher_config())
+    let job_ctrl = Controller::for_stream(job_stream, reader)
         .shutdown_on_signal()
         .run(
             lattice_job::controller::reconcile,
@@ -425,8 +436,13 @@ pub async fn build_model_controllers(
     let ctx = Arc::new(model_ctx);
 
     let models: Api<LatticeModel> = Api::all(client);
+    let (reader, writer) = reflector::store();
+    let model_stream = reflector(writer, watcher::watcher(models, watcher_config()))
+        .default_backoff()
+        .applied_objects()
+        .predicate_filter(predicates::generation, Default::default());
 
-    let model_ctrl = Controller::new(models, watcher_config())
+    let model_ctrl = Controller::for_stream(model_stream, reader)
         .shutdown_on_signal()
         .run(
             lattice_model::controller::reconcile,

@@ -457,23 +457,35 @@ fn inject_into_template(
         "volumes",
         serde_json::json!({"name": SCRATCH_VOLUME_NAME, "emptyDir": {}}),
     );
-    // /dev/shm memory volume for NCCL multi-GPU communication
-    json_array_push(
-        spec,
-        "volumes",
-        serde_json::json!({"name": DSHM_VOLUME_NAME, "emptyDir": {"medium": "Memory"}}),
-    );
+    // /dev/shm memory volume for NCCL multi-GPU communication (skip if already present)
+    let has_dshm_volume = spec
+        .get("volumes")
+        .and_then(|v| v.as_array())
+        .is_some_and(|vols| vols.iter().any(|v| v["name"] == DSHM_VOLUME_NAME));
+    if !has_dshm_volume {
+        json_array_push(
+            spec,
+            "volumes",
+            serde_json::json!({"name": DSHM_VOLUME_NAME, "emptyDir": {"medium": "Memory"}}),
+        );
+    }
     json_array_push(spec, "initContainers", init_container.clone());
 
     // Add read-only mount, dshm mount, and (for HF models) HF_HUB_OFFLINE=1 to all serving containers
     if let Some(containers) = spec.get_mut("containers").and_then(|v| v.as_array_mut()) {
         for container in containers {
             json_array_push(container, "volumeMounts", read_only_mount.clone());
-            json_array_push(
-                container,
-                "volumeMounts",
-                serde_json::json!({"name": DSHM_VOLUME_NAME, "mountPath": "/dev/shm"}),
-            );
+            let has_dshm_mount = container
+                .get("volumeMounts")
+                .and_then(|v| v.as_array())
+                .is_some_and(|mounts| mounts.iter().any(|m| m["mountPath"] == "/dev/shm"));
+            if !has_dshm_mount {
+                json_array_push(
+                    container,
+                    "volumeMounts",
+                    serde_json::json!({"name": DSHM_VOLUME_NAME, "mountPath": "/dev/shm"}),
+                );
+            }
             if is_hf {
                 json_array_push(
                     container,
@@ -1960,5 +1972,229 @@ mod tests {
             has_router,
             "kthena-router should be an allowed caller on prefill"
         );
+    }
+
+    #[test]
+    fn inject_into_template_skips_duplicate_dshm() {
+        // Simulate a template that already has dshm volume and mount (e.g. from GPU workload compilation)
+        let mut template = serde_json::json!({
+            "spec": {
+                "volumes": [
+                    {"name": "dshm", "emptyDir": {"medium": "Memory"}}
+                ],
+                "containers": [
+                    {
+                        "name": "main",
+                        "image": "test:latest",
+                        "volumeMounts": [
+                            {"name": "dshm", "mountPath": "/dev/shm"}
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let cache_volume = serde_json::json!({"name": "model-cache", "emptyDir": {}});
+        let init_container =
+            serde_json::json!({"name": "model-downloader", "image": "downloader:latest"});
+        let read_only_mount =
+            serde_json::json!({"name": "model-cache", "mountPath": "/models", "readOnly": true});
+
+        inject_into_template(
+            &mut template,
+            &cache_volume,
+            &init_container,
+            &read_only_mount,
+            false,
+        );
+
+        // Should have exactly one dshm volume (not duplicated)
+        let volumes = template["spec"]["volumes"].as_array().unwrap();
+        let dshm_count = volumes.iter().filter(|v| v["name"] == "dshm").count();
+        assert_eq!(dshm_count, 1, "dshm volume should not be duplicated");
+
+        // Should have exactly one /dev/shm mount per container
+        let containers = template["spec"]["containers"].as_array().unwrap();
+        for c in containers {
+            let mounts = c["volumeMounts"].as_array().unwrap();
+            let shm_count = mounts
+                .iter()
+                .filter(|m| m["mountPath"] == "/dev/shm")
+                .count();
+            assert_eq!(
+                shm_count, 1,
+                "container should have exactly one /dev/shm mount"
+            );
+        }
+    }
+
+    #[test]
+    fn inject_into_template_adds_dshm_when_absent() {
+        let mut template = serde_json::json!({
+            "spec": {
+                "containers": [
+                    {
+                        "name": "main",
+                        "image": "test:latest"
+                    }
+                ]
+            }
+        });
+
+        let cache_volume = serde_json::json!({"name": "model-cache", "emptyDir": {}});
+        let init_container =
+            serde_json::json!({"name": "model-downloader", "image": "downloader:latest"});
+        let read_only_mount =
+            serde_json::json!({"name": "model-cache", "mountPath": "/models", "readOnly": true});
+
+        inject_into_template(
+            &mut template,
+            &cache_volume,
+            &init_container,
+            &read_only_mount,
+            false,
+        );
+
+        let volumes = template["spec"]["volumes"].as_array().unwrap();
+        assert!(
+            volumes
+                .iter()
+                .any(|v| v["name"] == "dshm" && v["emptyDir"]["medium"] == "Memory"),
+            "dshm volume should be injected when not present"
+        );
+
+        let containers = template["spec"]["containers"].as_array().unwrap();
+        let mounts = containers[0]["volumeMounts"].as_array().unwrap();
+        assert!(
+            mounts
+                .iter()
+                .any(|m| m["name"] == "dshm" && m["mountPath"] == "/dev/shm"),
+            "/dev/shm mount should be injected when not present"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_model_with_source_no_duplicate_dshm() {
+        use lattice_common::crd::workload::resources::{
+            GpuParams, ResourceParams, ResourceSpec, ResourceType,
+        };
+        use lattice_common::crd::DependencyDirection;
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "vllm:latest".to_string(),
+                ..Default::default()
+            },
+        );
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "inference".to_string(),
+            PortSpec {
+                port: 8000,
+                target_port: None,
+                protocol: None,
+            },
+        );
+
+        // Add GPU resource so pod_template.rs injects dshm
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "gpu".to_string(),
+            ResourceSpec {
+                type_: ResourceType::Gpu,
+                class: None,
+                id: None,
+                metadata: None,
+                params: ResourceParams::Gpu(GpuParams {
+                    count: 1,
+                    model: Some("H100".to_string()),
+                    ..Default::default()
+                }),
+                direction: DependencyDirection::default(),
+                namespace: None,
+            },
+        );
+
+        let role = ModelRoleSpec {
+            replicas: Some(1),
+            entry_workload: WorkloadSpec {
+                containers,
+                service: Some(ServicePortsSpec { ports }),
+                resources,
+                ..Default::default()
+            },
+            entry_runtime: RuntimeSpec::default(),
+            worker_replicas: None,
+            worker_workload: None,
+            worker_runtime: None,
+            autoscaling: None,
+        };
+
+        let mut roles = BTreeMap::new();
+        roles.insert("serving".to_string(), role);
+
+        // Add model_source so inject_into_template runs (which also tries to add dshm)
+        let spec = LatticeModelSpec {
+            roles,
+            model_source: Some(ModelSourceSpec {
+                uri: "hf://test/model".to_string(),
+                cache_uri: None,
+                cache_size: Some("50Gi".to_string()),
+                mount_path: None,
+                token_secret: None,
+                downloader_image: None,
+                egress: vec![],
+            }),
+            ..Default::default()
+        };
+        let mut model = LatticeModel::new("test-gpu-model", spec);
+        model.metadata.namespace = Some("default".to_string());
+        model.metadata.uid = Some("uid-789".to_string());
+
+        let graph = ServiceGraph::new("lattice.test");
+        let cedar = permit_all_cedar();
+
+        let compiled = compile_model(
+            &model,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        let role = &compiled.model_serving.spec.template.roles[0];
+        let volumes = role.entry_template["spec"]["volumes"]
+            .as_array()
+            .expect("volumes should be set");
+
+        let dshm_count = volumes.iter().filter(|v| v["name"] == "dshm").count();
+        assert_eq!(
+            dshm_count, 1,
+            "GPU model with model_source should have exactly one dshm volume, got {}",
+            dshm_count
+        );
+
+        let containers = role.entry_template["spec"]["containers"]
+            .as_array()
+            .expect("containers should be set");
+        for c in containers {
+            let mounts = c["volumeMounts"]
+                .as_array()
+                .expect("volumeMounts should exist");
+            let shm_mount_count = mounts
+                .iter()
+                .filter(|m| m["mountPath"] == "/dev/shm")
+                .count();
+            assert_eq!(
+                shm_mount_count, 1,
+                "container should have exactly one /dev/shm mount, got {}",
+                shm_mount_count
+            );
+        }
     }
 }

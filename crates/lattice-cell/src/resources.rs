@@ -238,9 +238,7 @@ mod tests {
         cp.metadata.resource_version = Some("123456".to_string());
         cp.metadata.creation_timestamp =
             Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-                    .unwrap()
-                    .into(),
+                "2024-01-01T00:00:00Z".parse().unwrap(),
             ));
         cp
     }

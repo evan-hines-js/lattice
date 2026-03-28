@@ -392,8 +392,8 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
 
     // Compute cost once per reconcile — always fresh, no stale preservation.
     let job_spec = &job.spec;
-    let cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates, ts| {
-        lattice_cost::estimate_job_cost(job_spec, rates, ts)
+    let cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates| {
+        lattice_cost::estimate_job_cost(job_spec, rates)
     })
     .await;
 
@@ -910,16 +910,19 @@ async fn check_vcjob_status_impl(
                 }
                 Some("Running" | "Completing") => VCJobPhase::Running,
                 Some("Pending" | "Inqueue") | None => {
-                    let age = obj.creation_timestamp().map(|ts| chrono::Utc::now() - ts.0);
-                    let timeout = chrono::Duration::from_std(PENDING_TIMEOUT)
-                        .unwrap_or(chrono::Duration::seconds(300));
-                    if age.map(|a| a > timeout).unwrap_or(false) {
+                    let now = k8s_openapi::jiff::Timestamp::now();
+                    let age_secs = obj.creation_timestamp()
+                        .and_then(|ts| now.since(ts.0).ok())
+                        .map(|s| s.get_seconds())
+                        .unwrap_or(0);
+                    let timeout_secs = PENDING_TIMEOUT.as_secs() as i64;
+                    if age_secs > timeout_secs {
                         warn!(
                             job = %name,
-                            age_secs = age.map(|a| a.num_seconds()).unwrap_or(0),
+                            age_secs,
                             "VCJob stuck in Pending for {}s (timeout {}s), treating as Failed",
-                            age.map(|a| a.num_seconds()).unwrap_or(0),
-                            PENDING_TIMEOUT.as_secs()
+                            age_secs,
+                            timeout_secs
                         );
                         VCJobPhase::Failed
                     } else {

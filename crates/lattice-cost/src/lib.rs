@@ -16,7 +16,6 @@ pub mod rates;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use lattice_common::crd::CostEstimate;
 use tracing::warn;
 
@@ -47,7 +46,7 @@ pub async fn try_estimate<F>(
     compute: F,
 ) -> Option<CostEstimate>
 where
-    F: FnOnce(&CostRates, &str) -> Result<CostEstimate, CostError>,
+    F: FnOnce(&CostRates) -> Result<CostEstimate, CostError>,
 {
     let provider = provider.as_ref()?;
     let rates = match provider.load_rates().await {
@@ -57,8 +56,7 @@ where
             return None;
         }
     };
-    let timestamp = Utc::now().to_rfc3339();
-    match compute(&rates, &timestamp) {
+    match compute(&rates) {
         Ok(est) => Some(est),
         Err(e) => {
             warn!(error = %e, "failed to compute cost estimate");

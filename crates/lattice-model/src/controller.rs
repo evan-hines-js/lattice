@@ -295,8 +295,8 @@ pub async fn reconcile(
 
     // Compute cost once per reconcile — always fresh, no stale preservation.
     let model_spec = &model.spec;
-    let cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates, ts| {
-        lattice_cost::estimate_model_cost(model_spec, rates, ts)
+    let cost = lattice_cost::try_estimate(&ctx.cost_provider, |rates| {
+        lattice_cost::estimate_model_cost(model_spec, rates)
     })
     .await;
 
