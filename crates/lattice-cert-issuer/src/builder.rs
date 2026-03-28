@@ -199,11 +199,11 @@ fn build_dns01_solver(dp: &DNSProviderSpec) -> Result<Value, String> {
                 }
             }))
         }
-        DNSProviderType::Pihole => {
-            Err("Pi-hole cannot be used for ACME DNS-01 challenges".to_string())
-        }
-        DNSProviderType::Designate => {
-            Err("Designate DNS-01 challenges require a cert-manager webhook solver — not yet supported".to_string())
+        DNSProviderType::Pihole | DNSProviderType::Designate => {
+            Err(format!(
+                "{} DNS-01 challenges require a cert-manager webhook solver — not yet supported",
+                dp.provider_type
+            ))
         }
         _ => Err(format!(
             "unsupported DNS provider type for ACME DNS-01: {}",
@@ -599,7 +599,7 @@ mod tests {
             resolver: None,
         };
         let err = build_dns01_solver(&dp).unwrap_err();
-        assert!(err.contains("Pi-hole cannot be used"));
+        assert!(err.contains("webhook solver"));
     }
 
     // =========================================================================
