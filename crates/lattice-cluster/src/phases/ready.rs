@@ -15,8 +15,8 @@ use tracing::{debug, info, warn};
 use lattice_capi::provider::{format_capi_version, pool_resource_suffix};
 use lattice_cert_issuer::builder::{self, MANAGED_BY_LABEL, MANAGED_BY_VALUE};
 use lattice_common::crd::{
-    CertIssuer, CertIssuerPhase, DNSProvider, LatticeCluster, LatticeClusterStatus,
-    WorkerPoolStatus,
+    CertIssuer, CertIssuerPhase, DNSProvider, DNSProviderPhase, LatticeCluster,
+    LatticeClusterStatus, WorkerPoolStatus,
 };
 use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, Error, LATTICE_SYSTEM_NAMESPACE};
@@ -523,7 +523,19 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
         let dns_provider = if let Some(ref acme) = issuer_crd.spec.acme {
             if let Some(ref dns_ref) = acme.dns_provider_ref {
                 match dns_provider_api.get(dns_ref).await {
-                    Ok(dp) => Some(dp),
+                    Ok(dp) => {
+                        let dp_phase = dp.status.as_ref().map(|s| &s.phase).unwrap_or(&DNSProviderPhase::Pending);
+                        if *dp_phase != DNSProviderPhase::Ready {
+                            warn!(
+                                issuer = %cert_issuer_name,
+                                dns_provider = %dns_ref,
+                                phase = %dp_phase,
+                                "DNSProvider not Ready, skipping issuer"
+                            );
+                            continue;
+                        }
+                        Some(dp)
+                    }
                     Err(e) => {
                         warn!(
                             issuer = %cert_issuer_name,

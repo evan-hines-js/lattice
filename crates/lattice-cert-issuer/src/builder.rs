@@ -217,12 +217,27 @@ mod tests {
     use super::*;
     use lattice_common::crd::{
         AcmeIssuerSpec, AzureDnsConfig, CaIssuerSpec, CloudflareConfig, GoogleDnsConfig,
-        Route53Config, SecretRef, VaultIssuerSpec,
+        PiholeConfig, Route53Config, SecretRef, VaultIssuerSpec,
     };
 
     // =========================================================================
     // Helpers
     // =========================================================================
+
+    fn make_dns_spec(provider_type: DNSProviderType, zone: &str) -> DNSProviderSpec {
+        DNSProviderSpec {
+            provider_type,
+            zone: zone.to_string(),
+            resolver: None,
+            credentials_secret_ref: None,
+            pihole: None,
+            route53: None,
+            cloudflare: None,
+            google: None,
+            azure: None,
+            designate: None,
+        }
+    }
 
     fn assert_metadata(val: &Value, expected_name: &str) {
         assert_eq!(val["apiVersion"], "cert-manager.io/v1");
@@ -348,22 +363,15 @@ mod tests {
             vault: None,
         };
         let dp = DNSProviderSpec {
-            provider_type: DNSProviderType::Route53,
-            zone: "example.com".to_string(),
             credentials_secret_ref: Some(SecretRef {
                 name: "aws-dns-creds".to_string(),
                 namespace: "lattice-system".to_string(),
             }),
-            pihole: None,
             route53: Some(Route53Config {
                 region: Some("us-east-1".to_string()),
                 hosted_zone_id: Some("Z1234567890".to_string()),
             }),
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Route53, "example.com")
         };
 
         let result = build_cluster_issuer("public", &spec, Some(&dp)).unwrap();
@@ -396,19 +404,12 @@ mod tests {
             vault: None,
         };
         let dp = DNSProviderSpec {
-            provider_type: DNSProviderType::Cloudflare,
-            zone: "example.com".to_string(),
             credentials_secret_ref: Some(SecretRef {
                 name: "cf-api-token".to_string(),
                 namespace: "lattice-system".to_string(),
             }),
-            pihole: None,
-            route53: None,
             cloudflare: Some(CloudflareConfig { proxied: false }),
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Cloudflare, "example.com")
         };
 
         let result = build_cluster_issuer("cf", &spec, Some(&dp)).unwrap();
@@ -420,18 +421,7 @@ mod tests {
 
     #[test]
     fn cloudflare_missing_creds_errors() {
-        let dp = DNSProviderSpec {
-            provider_type: DNSProviderType::Cloudflare,
-            zone: "example.com".to_string(),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
-        };
+        let dp = make_dns_spec(DNSProviderType::Cloudflare, "example.com");
         let err = build_dns01_solver(&dp).unwrap_err();
         assert!(err.contains("credentials_secret_ref required"));
     }
@@ -453,21 +443,14 @@ mod tests {
             vault: None,
         };
         let dp = DNSProviderSpec {
-            provider_type: DNSProviderType::Google,
-            zone: "example.com".to_string(),
             credentials_secret_ref: Some(SecretRef {
                 name: "gcp-sa-key".to_string(),
                 namespace: "lattice-system".to_string(),
             }),
-            pihole: None,
-            route53: None,
-            cloudflare: None,
             google: Some(GoogleDnsConfig {
                 project: "my-project".to_string(),
             }),
-            azure: None,
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Google, "example.com")
         };
 
         let result = build_cluster_issuer("gcp", &spec, Some(&dp)).unwrap();
@@ -481,19 +464,11 @@ mod tests {
     #[test]
     fn google_missing_config_errors() {
         let dp = DNSProviderSpec {
-            provider_type: DNSProviderType::Google,
-            zone: "example.com".to_string(),
             credentials_secret_ref: Some(SecretRef {
                 name: "gcp-sa-key".to_string(),
                 namespace: "lattice-system".to_string(),
             }),
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Google, "example.com")
         };
         let err = build_dns01_solver(&dp).unwrap_err();
         assert!(err.contains("google config required"));
@@ -502,18 +477,10 @@ mod tests {
     #[test]
     fn google_missing_creds_errors() {
         let dp = DNSProviderSpec {
-            provider_type: DNSProviderType::Google,
-            zone: "example.com".to_string(),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
             google: Some(GoogleDnsConfig {
                 project: "my-project".to_string(),
             }),
-            azure: None,
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Google, "example.com")
         };
         let err = build_dns01_solver(&dp).unwrap_err();
         assert!(err.contains("credentials_secret_ref required"));
@@ -536,19 +503,11 @@ mod tests {
             vault: None,
         };
         let dp = DNSProviderSpec {
-            provider_type: DNSProviderType::Azure,
-            zone: "example.com".to_string(),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
             azure: Some(AzureDnsConfig {
                 subscription_id: "sub-123".to_string(),
                 resource_group: "rg-dns".to_string(),
             }),
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Azure, "example.com")
         };
 
         let result = build_cluster_issuer("az", &spec, Some(&dp)).unwrap();
@@ -562,18 +521,7 @@ mod tests {
 
     #[test]
     fn azure_missing_config_errors() {
-        let dp = DNSProviderSpec {
-            provider_type: DNSProviderType::Azure,
-            zone: "example.com".to_string(),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
-        };
+        let dp = make_dns_spec(DNSProviderType::Azure, "example.com");
         let err = build_dns01_solver(&dp).unwrap_err();
         assert!(err.contains("azure config required"));
     }
@@ -585,18 +533,10 @@ mod tests {
     #[test]
     fn pihole_dns01_rejected() {
         let dp = DNSProviderSpec {
-            provider_type: DNSProviderType::Pihole,
-            zone: "home.local".to_string(),
-            credentials_secret_ref: None,
-            pihole: Some(lattice_common::crd::PiholeConfig {
+            pihole: Some(PiholeConfig {
                 url: "http://pihole.local".to_string(),
             }),
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Pihole, "home.local")
         };
         let err = build_dns01_solver(&dp).unwrap_err();
         assert!(err.contains("webhook solver"));
@@ -674,19 +614,11 @@ mod tests {
     #[test]
     fn route53_minimal_no_region_no_zone() {
         let dp = DNSProviderSpec {
-            provider_type: DNSProviderType::Route53,
-            zone: "example.com".to_string(),
             credentials_secret_ref: Some(SecretRef {
                 name: "aws-creds".to_string(),
                 namespace: "lattice-system".to_string(),
             }),
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Route53, "example.com")
         };
         let solver = build_dns01_solver(&dp).unwrap();
         let r53 = &solver["dns01"]["route53"];

@@ -2718,7 +2718,6 @@ dependencies = [
 name = "lattice-cert-issuer"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "k8s-openapi",
  "kube",
  "lattice-common",
@@ -2903,7 +2902,6 @@ dependencies = [
 name = "lattice-dns-provider"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "k8s-openapi",
  "kube",
  "lattice-common",

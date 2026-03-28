@@ -155,10 +155,6 @@ pub struct CertIssuerStatus {
     #[serde(default)]
     pub message: Option<String>,
 
-    /// Last time the issuer was validated
-    #[serde(default)]
-    pub last_validated: Option<String>,
-
     /// Generation of the spec that was last reconciled
     #[serde(default)]
     pub observed_generation: Option<i64>,

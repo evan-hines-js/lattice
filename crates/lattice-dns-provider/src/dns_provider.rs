@@ -156,7 +156,6 @@ async fn update_status(
     let status = DNSProviderStatus {
         phase,
         message,
-        last_validated: Some(chrono::Utc::now().to_rfc3339()),
         cluster_count: 0,
         observed_generation,
     };
@@ -177,19 +176,33 @@ async fn update_status(
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        AzureDnsConfig, CloudflareConfig, GoogleDnsConfig, PiholeConfig, Route53Config, SecretRef,
+        AzureDnsConfig, CloudflareConfig, DNSProviderSpec, GoogleDnsConfig, PiholeConfig,
+        Route53Config, SecretRef,
     };
 
     // =========================================================================
     // Test Helpers
     // =========================================================================
 
+    fn make_dns_spec(provider_type: DNSProviderType, zone: &str) -> DNSProviderSpec {
+        DNSProviderSpec {
+            provider_type,
+            zone: zone.to_string(),
+            resolver: None,
+            credentials_secret_ref: None,
+            pihole: None,
+            route53: None,
+            cloudflare: None,
+            google: None,
+            azure: None,
+            designate: None,
+        }
+    }
+
     fn sample_pihole_provider() -> DNSProvider {
         DNSProvider::new(
             "pihole-local",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Pihole,
-                zone: "home.local".to_string(),
+            DNSProviderSpec {
                 credentials_secret_ref: Some(SecretRef {
                     name: "pihole-api-key".to_string(),
                     namespace: "lattice-system".to_string(),
@@ -197,12 +210,7 @@ mod tests {
                 pihole: Some(PiholeConfig {
                     url: "http://pihole.local".to_string(),
                 }),
-                route53: None,
-                cloudflare: None,
-                google: None,
-                azure: None,
-                designate: None,
-                resolver: None,
+                ..make_dns_spec(DNSProviderType::Pihole, "home.local")
             },
         )
     }
@@ -210,23 +218,16 @@ mod tests {
     fn sample_route53_provider() -> DNSProvider {
         DNSProvider::new(
             "route53-prod",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Route53,
-                zone: "example.com".to_string(),
+            DNSProviderSpec {
                 credentials_secret_ref: Some(SecretRef {
                     name: "aws-dns-creds".to_string(),
                     namespace: "lattice-system".to_string(),
                 }),
-                pihole: None,
                 route53: Some(Route53Config {
                     region: Some("us-east-1".to_string()),
                     hosted_zone_id: Some("Z1234567890".to_string()),
                 }),
-                cloudflare: None,
-                google: None,
-                azure: None,
-                designate: None,
-                resolver: None,
+                ..make_dns_spec(DNSProviderType::Route53, "example.com")
             },
         )
     }
@@ -234,20 +235,13 @@ mod tests {
     fn sample_cloudflare_provider() -> DNSProvider {
         DNSProvider::new(
             "cloudflare-prod",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Cloudflare,
-                zone: "example.com".to_string(),
+            DNSProviderSpec {
                 credentials_secret_ref: Some(SecretRef {
                     name: "cf-api-token".to_string(),
                     namespace: "lattice-system".to_string(),
                 }),
-                pihole: None,
-                route53: None,
                 cloudflare: Some(CloudflareConfig { proxied: true }),
-                google: None,
-                azure: None,
-                designate: None,
-                resolver: None,
+                ..make_dns_spec(DNSProviderType::Cloudflare, "example.com")
             },
         )
     }
@@ -278,18 +272,7 @@ mod tests {
     async fn empty_zone_fails() {
         let provider = DNSProvider::new(
             "bad",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Route53,
-                zone: String::new(),
-                credentials_secret_ref: None,
-                pihole: None,
-                route53: None,
-                cloudflare: None,
-                google: None,
-                azure: None,
-                designate: None,
-                resolver: None,
-            },
+            make_dns_spec(DNSProviderType::Route53, ""),
         );
         assert!(provider.spec.validate().is_err());
     }
@@ -298,18 +281,7 @@ mod tests {
     async fn pihole_missing_config_fails() {
         let provider = DNSProvider::new(
             "bad-pihole",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Pihole,
-                zone: "home.local".to_string(),
-                credentials_secret_ref: None,
-                pihole: None,
-                route53: None,
-                cloudflare: None,
-                google: None,
-                azure: None,
-                designate: None,
-                resolver: None,
-            },
+            make_dns_spec(DNSProviderType::Pihole, "home.local"),
         );
         assert!(provider.spec.validate().is_err());
     }
@@ -318,19 +290,11 @@ mod tests {
     async fn pihole_empty_url_fails() {
         let provider = DNSProvider::new(
             "bad-pihole",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Pihole,
-                zone: "home.local".to_string(),
-                credentials_secret_ref: None,
+            DNSProviderSpec {
                 pihole: Some(PiholeConfig {
                     url: String::new(),
                 }),
-                route53: None,
-                cloudflare: None,
-                google: None,
-                azure: None,
-                designate: None,
-                resolver: None,
+                ..make_dns_spec(DNSProviderType::Pihole, "home.local")
             },
         );
         assert!(provider.spec.validate().is_err());
@@ -340,18 +304,7 @@ mod tests {
     async fn google_missing_config_fails() {
         let provider = DNSProvider::new(
             "bad-google",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Google,
-                zone: "example.com".to_string(),
-                credentials_secret_ref: None,
-                pihole: None,
-                route53: None,
-                cloudflare: None,
-                google: None,
-                azure: None,
-                designate: None,
-                resolver: None,
-            },
+            make_dns_spec(DNSProviderType::Google, "example.com"),
         );
         assert!(provider.spec.validate().is_err());
     }
@@ -360,18 +313,7 @@ mod tests {
     async fn azure_missing_config_fails() {
         let provider = DNSProvider::new(
             "bad-azure",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Azure,
-                zone: "example.com".to_string(),
-                credentials_secret_ref: None,
-                pihole: None,
-                route53: None,
-                cloudflare: None,
-                google: None,
-                azure: None,
-                designate: None,
-                resolver: None,
-            },
+            make_dns_spec(DNSProviderType::Azure, "example.com"),
         );
         assert!(provider.spec.validate().is_err());
     }
@@ -392,18 +334,7 @@ mod tests {
     async fn route53_requires_credentials_secret_ref() {
         let provider = DNSProvider::new(
             "route53-no-creds",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Route53,
-                zone: "example.com".to_string(),
-                credentials_secret_ref: None,
-                pihole: None,
-                route53: None,
-                cloudflare: None,
-                google: None,
-                azure: None,
-                designate: None,
-                resolver: None,
-            },
+            make_dns_spec(DNSProviderType::Route53, "example.com"),
         );
         // Spec validation passes (credentialsSecretRef is not checked there)
         assert!(provider.spec.validate().is_ok());
@@ -429,7 +360,6 @@ mod tests {
         provider.status = Some(DNSProviderStatus {
             phase: DNSProviderPhase::Ready,
             message: None,
-            last_validated: Some("2024-01-01T00:00:00Z".to_string()),
             cluster_count: 0,
             observed_generation: Some(1),
         });
@@ -459,14 +389,12 @@ mod tests {
         let status = DNSProviderStatus {
             phase: DNSProviderPhase::Failed,
             message: Some("credentials not found".to_string()),
-            last_validated: Some(chrono::Utc::now().to_rfc3339()),
             cluster_count: 3,
             observed_generation: Some(2),
         };
 
         assert_eq!(status.phase, DNSProviderPhase::Failed);
         assert!(status.message.is_some());
-        assert!(status.last_validated.is_some());
         assert_eq!(status.cluster_count, 3);
         assert_eq!(status.observed_generation, Some(2));
     }
@@ -511,22 +439,15 @@ mod tests {
     async fn google_with_config_valid() {
         let provider = DNSProvider::new(
             "google-prod",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Google,
-                zone: "example.com".to_string(),
+            DNSProviderSpec {
                 credentials_secret_ref: Some(SecretRef {
                     name: "gcp-dns-creds".to_string(),
                     namespace: "lattice-system".to_string(),
                 }),
-                pihole: None,
-                route53: None,
-                cloudflare: None,
                 google: Some(GoogleDnsConfig {
                     project: "my-project".to_string(),
                 }),
-                azure: None,
-                designate: None,
-                resolver: None,
+                ..make_dns_spec(DNSProviderType::Google, "example.com")
             },
         );
         assert!(provider.spec.validate().is_ok());
@@ -536,23 +457,16 @@ mod tests {
     async fn azure_with_config_valid() {
         let provider = DNSProvider::new(
             "azure-prod",
-            lattice_common::crd::DNSProviderSpec {
-                provider_type: DNSProviderType::Azure,
-                zone: "example.com".to_string(),
+            DNSProviderSpec {
                 credentials_secret_ref: Some(SecretRef {
                     name: "azure-dns-creds".to_string(),
                     namespace: "lattice-system".to_string(),
                 }),
-                pihole: None,
-                route53: None,
-                cloudflare: None,
-                google: None,
                 azure: Some(AzureDnsConfig {
                     subscription_id: "sub-123".to_string(),
                     resource_group: "rg-dns".to_string(),
                 }),
-                designate: None,
-                resolver: None,
+                ..make_dns_spec(DNSProviderType::Azure, "example.com")
             },
         );
         assert!(provider.spec.validate().is_ok());

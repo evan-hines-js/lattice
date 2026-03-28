@@ -211,7 +211,6 @@ async fn update_status(
     let status = CertIssuerStatus {
         phase,
         message,
-        last_validated: Some(chrono::Utc::now().to_rfc3339()),
         observed_generation,
     };
 
@@ -478,7 +477,6 @@ mod tests {
         issuer.status = Some(CertIssuerStatus {
             phase: CertIssuerPhase::Ready,
             message: None,
-            last_validated: Some("2024-01-01T00:00:00Z".to_string()),
             observed_generation: Some(1),
         });
 
@@ -507,13 +505,11 @@ mod tests {
         let status = CertIssuerStatus {
             phase: CertIssuerPhase::Failed,
             message: Some("secret not found".to_string()),
-            last_validated: Some(chrono::Utc::now().to_rfc3339()),
             observed_generation: Some(2),
         };
 
         assert_eq!(status.phase, CertIssuerPhase::Failed);
         assert!(status.message.is_some());
-        assert!(status.last_validated.is_some());
         assert_eq!(status.observed_generation, Some(2));
     }
 

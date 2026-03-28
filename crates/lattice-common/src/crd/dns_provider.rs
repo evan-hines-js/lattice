@@ -209,10 +209,6 @@ pub struct DNSProviderStatus {
     #[serde(default)]
     pub message: Option<String>,
 
-    /// Last time credentials were validated
-    #[serde(default)]
-    pub last_validated: Option<String>,
-
     /// Number of clusters referencing this provider
     #[serde(default)]
     pub cluster_count: u32,
@@ -295,6 +291,21 @@ impl DNSProviderSpec {
 mod tests {
     use super::*;
 
+    fn make_dns_spec(provider_type: DNSProviderType, zone: &str) -> DNSProviderSpec {
+        DNSProviderSpec {
+            provider_type,
+            zone: zone.to_string(),
+            resolver: None,
+            credentials_secret_ref: None,
+            pihole: None,
+            route53: None,
+            cloudflare: None,
+            google: None,
+            azure: None,
+            designate: None,
+        }
+    }
+
     #[test]
     fn pihole_provider_yaml() {
         let yaml = r#"
@@ -323,36 +334,17 @@ spec:
 
     #[test]
     fn pihole_requires_config() {
-        let spec = DNSProviderSpec {
-            provider_type: DNSProviderType::Pihole,
-            zone: "home.local".to_string(),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
-        };
+        let spec = make_dns_spec(DNSProviderType::Pihole, "home.local");
         assert!(spec.validate().is_err());
     }
 
     #[test]
     fn pihole_empty_url_fails() {
         let spec = DNSProviderSpec {
-            provider_type: DNSProviderType::Pihole,
-            zone: "home.local".to_string(),
-            credentials_secret_ref: None,
             pihole: Some(PiholeConfig {
                 url: String::new(),
             }),
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Pihole, "home.local")
         };
         assert!(spec.validate().is_err());
     }
@@ -404,71 +396,30 @@ spec:
 
     #[test]
     fn google_provider_requires_config() {
-        let spec = DNSProviderSpec {
-            provider_type: DNSProviderType::Google,
-            zone: "example.com".to_string(),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
-        };
+        let spec = make_dns_spec(DNSProviderType::Google, "example.com");
         assert!(spec.validate().is_err());
     }
 
     #[test]
     fn azure_provider_requires_config() {
-        let spec = DNSProviderSpec {
-            provider_type: DNSProviderType::Azure,
-            zone: "example.com".to_string(),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
-        };
+        let spec = make_dns_spec(DNSProviderType::Azure, "example.com");
         assert!(spec.validate().is_err());
     }
 
     #[test]
     fn empty_zone_fails_validation() {
-        let spec = DNSProviderSpec {
-            provider_type: DNSProviderType::Route53,
-            zone: String::new(),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
-        };
+        let spec = make_dns_spec(DNSProviderType::Route53, "");
         assert!(spec.validate().is_err());
     }
 
     #[test]
     fn route53_minimal_valid() {
         let spec = DNSProviderSpec {
-            provider_type: DNSProviderType::Route53,
-            zone: "example.com".to_string(),
             credentials_secret_ref: Some(SecretRef {
                 name: "aws-creds".to_string(),
                 namespace: "lattice-system".to_string(),
             }),
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Route53, "example.com")
         };
         assert!(spec.validate().is_ok());
     }
@@ -476,18 +427,10 @@ spec:
     #[test]
     fn google_with_config_valid() {
         let spec = DNSProviderSpec {
-            provider_type: DNSProviderType::Google,
-            zone: "example.com".to_string(),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
             google: Some(GoogleDnsConfig {
                 project: "my-project".to_string(),
             }),
-            azure: None,
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Google, "example.com")
         };
         assert!(spec.validate().is_ok());
     }
@@ -495,19 +438,11 @@ spec:
     #[test]
     fn azure_with_config_valid() {
         let spec = DNSProviderSpec {
-            provider_type: DNSProviderType::Azure,
-            zone: "example.com".to_string(),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
             azure: Some(AzureDnsConfig {
                 subscription_id: "sub-123".to_string(),
                 resource_group: "rg-dns".to_string(),
             }),
-            designate: None,
-            resolver: None,
+            ..make_dns_spec(DNSProviderType::Azure, "example.com")
         };
         assert!(spec.validate().is_ok());
     }
@@ -531,16 +466,8 @@ spec:
     #[test]
     fn designate_requires_config() {
         let spec = DNSProviderSpec {
-            provider_type: DNSProviderType::Designate,
-            zone: "internal.cloud".to_string(),
             resolver: Some("10.0.0.53:53".to_string()),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
+            ..make_dns_spec(DNSProviderType::Designate, "internal.cloud")
         };
         assert!(spec.validate().is_err());
     }
@@ -548,19 +475,12 @@ spec:
     #[test]
     fn designate_with_config_valid() {
         let spec = DNSProviderSpec {
-            provider_type: DNSProviderType::Designate,
-            zone: "internal.cloud".to_string(),
             resolver: Some("10.0.0.53:53".to_string()),
-            credentials_secret_ref: None,
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
             designate: Some(DesignateConfig {
                 zone_id: Some("zone-123".to_string()),
                 region: Some("RegionOne".to_string()),
             }),
+            ..make_dns_spec(DNSProviderType::Designate, "internal.cloud")
         };
         assert!(spec.validate().is_ok());
     }
