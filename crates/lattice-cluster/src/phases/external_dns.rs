@@ -242,176 +242,249 @@ fn common_args(cluster_name: &str) -> Vec<String> {
     ]
 }
 
+/// Provider-specific container configuration for an external-dns Deployment.
+struct ProviderConfig {
+    args: Vec<String>,
+    env: Vec<Value>,
+    volume_mounts: Vec<Value>,
+    volumes: Vec<Value>,
+}
+
 /// Build provider-specific args, env vars, and volume mounts for the container.
-fn provider_config(spec: &DNSProviderSpec) -> (Vec<String>, Vec<Value>, Vec<Value>, Vec<Value>) {
-    let mut args = Vec::new();
+fn provider_config(spec: &DNSProviderSpec) -> ProviderConfig {
+    match spec.provider_type {
+        DNSProviderType::Pihole => pihole_config(spec),
+        DNSProviderType::Route53 => route53_config(spec),
+        DNSProviderType::Cloudflare => cloudflare_config(spec),
+        DNSProviderType::Google => google_config(spec),
+        DNSProviderType::Azure => azure_config(spec),
+        DNSProviderType::Designate => designate_config(spec),
+        _ => fallback_config(spec),
+    }
+}
+
+fn pihole_config(spec: &DNSProviderSpec) -> ProviderConfig {
+    let url = spec
+        .pihole
+        .as_ref()
+        .map(|p| p.url.as_str())
+        .unwrap_or("http://pihole.local");
+
+    let mut env = Vec::new();
+    if let Some(ref secret_ref) = spec.credentials_secret_ref {
+        env.push(json!({
+            "name": "EXTERNAL_DNS_PIHOLE_PASSWORD",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": secret_ref.name,
+                    "key": "EXTERNAL_DNS_PIHOLE_PASSWORD"
+                }
+            }
+        }));
+    }
+
+    ProviderConfig {
+        args: vec![
+            "--provider=pihole".to_string(),
+            format!("--pihole-server={url}"),
+            "--pihole-password=$(EXTERNAL_DNS_PIHOLE_PASSWORD)".to_string(),
+        ],
+        env,
+        volume_mounts: Vec::new(),
+        volumes: Vec::new(),
+    }
+}
+
+fn route53_config(spec: &DNSProviderSpec) -> ProviderConfig {
+    let mut env = Vec::new();
+    if let Some(ref secret_ref) = spec.credentials_secret_ref {
+        env.push(json!({
+            "name": "AWS_ACCESS_KEY_ID",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": secret_ref.name,
+                    "key": "AWS_ACCESS_KEY_ID"
+                }
+            }
+        }));
+        env.push(json!({
+            "name": "AWS_SECRET_ACCESS_KEY",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": secret_ref.name,
+                    "key": "AWS_SECRET_ACCESS_KEY"
+                }
+            }
+        }));
+    }
+
+    ProviderConfig {
+        args: vec![
+            "--provider=aws".to_string(),
+            "--aws-zone-type=public".to_string(),
+            format!("--domain-filter={}", spec.zone),
+        ],
+        env,
+        volume_mounts: Vec::new(),
+        volumes: Vec::new(),
+    }
+}
+
+fn cloudflare_config(spec: &DNSProviderSpec) -> ProviderConfig {
+    let proxied = spec
+        .cloudflare
+        .as_ref()
+        .map(|c| c.proxied)
+        .unwrap_or(false);
+
+    let mut env = Vec::new();
+    if let Some(ref secret_ref) = spec.credentials_secret_ref {
+        env.push(json!({
+            "name": "CF_API_TOKEN",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": secret_ref.name,
+                    "key": "CF_API_TOKEN"
+                }
+            }
+        }));
+    }
+
+    ProviderConfig {
+        args: vec![
+            "--provider=cloudflare".to_string(),
+            format!("--cloudflare-proxied={proxied}"),
+            format!("--domain-filter={}", spec.zone),
+        ],
+        env,
+        volume_mounts: Vec::new(),
+        volumes: Vec::new(),
+    }
+}
+
+fn google_config(spec: &DNSProviderSpec) -> ProviderConfig {
+    let project = spec
+        .google
+        .as_ref()
+        .map(|g| g.project.as_str())
+        .unwrap_or("");
+
+    let env = vec![json!({
+        "name": "GOOGLE_APPLICATION_CREDENTIALS",
+        "value": "/etc/google/credentials.json"
+    })];
+
+    let mut volume_mounts = Vec::new();
+    let mut volumes = Vec::new();
+    if let Some(ref secret_ref) = spec.credentials_secret_ref {
+        volume_mounts.push(json!({
+            "name": "google-credentials",
+            "mountPath": "/etc/google",
+            "readOnly": true
+        }));
+        volumes.push(json!({
+            "name": "google-credentials",
+            "secret": {
+                "secretName": secret_ref.name
+            }
+        }));
+    }
+
+    ProviderConfig {
+        args: vec![
+            "--provider=google".to_string(),
+            format!("--google-project={project}"),
+            format!("--domain-filter={}", spec.zone),
+        ],
+        env,
+        volume_mounts,
+        volumes,
+    }
+}
+
+fn azure_config(spec: &DNSProviderSpec) -> ProviderConfig {
+    let (sub_id, rg) = spec
+        .azure
+        .as_ref()
+        .map(|a| (a.subscription_id.as_str(), a.resource_group.as_str()))
+        .unwrap_or(("", ""));
+
     let mut env = Vec::new();
     let mut volume_mounts = Vec::new();
     let mut volumes = Vec::new();
-
-    match spec.provider_type {
-        DNSProviderType::Pihole => {
-            let url = spec
-                .pihole
-                .as_ref()
-                .map(|p| p.url.as_str())
-                .unwrap_or("http://pihole.local");
-            args.push("--provider=pihole".to_string());
-            args.push(format!("--pihole-server={url}"));
-            args.push("--pihole-password=$(PIHOLE_PASSWORD)".to_string());
-
-            if let Some(ref secret_ref) = spec.credentials_secret_ref {
-                env.push(json!({
-                    "name": "EXTERNAL_DNS_PIHOLE_PASSWORD",
-                    "valueFrom": {
-                        "secretKeyRef": {
-                            "name": secret_ref.name,
-                            "key": "EXTERNAL_DNS_PIHOLE_PASSWORD"
-                        }
-                    }
-                }));
+    if let Some(ref secret_ref) = spec.credentials_secret_ref {
+        volume_mounts.push(json!({
+            "name": "azure-config",
+            "mountPath": "/etc/kubernetes",
+            "readOnly": true
+        }));
+        volumes.push(json!({
+            "name": "azure-config",
+            "secret": {
+                "secretName": secret_ref.name
             }
-        }
-        DNSProviderType::Route53 => {
-            args.push("--provider=aws".to_string());
-            args.push("--aws-zone-type=public".to_string());
-            args.push(format!("--domain-filter={}", spec.zone));
+        }));
+        env.push(json!({
+            "name": "AZURE_AUTH_LOCATION",
+            "value": "/etc/kubernetes/azure.json"
+        }));
+    }
 
-            if let Some(ref secret_ref) = spec.credentials_secret_ref {
-                env.push(json!({
-                    "name": "AWS_ACCESS_KEY_ID",
-                    "valueFrom": {
-                        "secretKeyRef": {
-                            "name": secret_ref.name,
-                            "key": "AWS_ACCESS_KEY_ID"
-                        }
-                    }
-                }));
-                env.push(json!({
-                    "name": "AWS_SECRET_ACCESS_KEY",
-                    "valueFrom": {
-                        "secretKeyRef": {
-                            "name": secret_ref.name,
-                            "key": "AWS_SECRET_ACCESS_KEY"
-                        }
-                    }
-                }));
-            }
-        }
-        DNSProviderType::Cloudflare => {
-            let proxied = spec
-                .cloudflare
-                .as_ref()
-                .map(|c| c.proxied)
-                .unwrap_or(false);
-            args.push("--provider=cloudflare".to_string());
-            args.push(format!("--cloudflare-proxied={proxied}"));
-            args.push(format!("--domain-filter={}", spec.zone));
+    ProviderConfig {
+        args: vec![
+            "--provider=azure".to_string(),
+            format!("--azure-subscription-id={sub_id}"),
+            format!("--azure-resource-group={rg}"),
+            format!("--domain-filter={}", spec.zone),
+        ],
+        env,
+        volume_mounts,
+        volumes,
+    }
+}
 
-            if let Some(ref secret_ref) = spec.credentials_secret_ref {
-                env.push(json!({
-                    "name": "CF_API_TOKEN",
-                    "valueFrom": {
-                        "secretKeyRef": {
-                            "name": secret_ref.name,
-                            "key": "CF_API_TOKEN"
-                        }
-                    }
-                }));
-            }
-        }
-        DNSProviderType::Google => {
-            let project = spec
-                .google
-                .as_ref()
-                .map(|g| g.project.as_str())
-                .unwrap_or("");
-            args.push("--provider=google".to_string());
-            args.push(format!("--google-project={project}"));
-            args.push(format!("--domain-filter={}", spec.zone));
-
-            // Mount the service account key file
+fn designate_config(spec: &DNSProviderSpec) -> ProviderConfig {
+    let mut env = Vec::new();
+    if let Some(ref secret_ref) = spec.credentials_secret_ref {
+        for key in &[
+            "OS_AUTH_URL",
+            "OS_USERNAME",
+            "OS_PASSWORD",
+            "OS_PROJECT_NAME",
+            "OS_USER_DOMAIN_NAME",
+            "OS_PROJECT_DOMAIN_NAME",
+        ] {
             env.push(json!({
-                "name": "GOOGLE_APPLICATION_CREDENTIALS",
-                "value": "/etc/google/credentials.json"
-            }));
-
-            if let Some(ref secret_ref) = spec.credentials_secret_ref {
-                volume_mounts.push(json!({
-                    "name": "google-credentials",
-                    "mountPath": "/etc/google",
-                    "readOnly": true
-                }));
-                volumes.push(json!({
-                    "name": "google-credentials",
-                    "secret": {
-                        "secretName": secret_ref.name
+                "name": key,
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": secret_ref.name,
+                        "key": key
                     }
-                }));
-            }
-        }
-        DNSProviderType::Azure => {
-            let (sub_id, rg) = spec
-                .azure
-                .as_ref()
-                .map(|a| (a.subscription_id.as_str(), a.resource_group.as_str()))
-                .unwrap_or(("", ""));
-            args.push("--provider=azure".to_string());
-            args.push(format!("--azure-subscription-id={sub_id}"));
-            args.push(format!("--azure-resource-group={rg}"));
-            args.push(format!("--domain-filter={}", spec.zone));
-
-            // Mount azure.json from secret
-            if let Some(ref secret_ref) = spec.credentials_secret_ref {
-                volume_mounts.push(json!({
-                    "name": "azure-config",
-                    "mountPath": "/etc/kubernetes",
-                    "readOnly": true
-                }));
-                volumes.push(json!({
-                    "name": "azure-config",
-                    "secret": {
-                        "secretName": secret_ref.name
-                    }
-                }));
-                env.push(json!({
-                    "name": "AZURE_AUTH_LOCATION",
-                    "value": "/etc/kubernetes/azure.json"
-                }));
-            }
-        }
-        DNSProviderType::Designate => {
-            args.push("--provider=designate".to_string());
-            args.push(format!("--domain-filter={}", spec.zone));
-
-            if let Some(ref secret_ref) = spec.credentials_secret_ref {
-                for key in &[
-                    "OS_AUTH_URL",
-                    "OS_USERNAME",
-                    "OS_PASSWORD",
-                    "OS_PROJECT_NAME",
-                    "OS_USER_DOMAIN_NAME",
-                    "OS_PROJECT_DOMAIN_NAME",
-                ] {
-                    env.push(json!({
-                        "name": key,
-                        "valueFrom": {
-                            "secretKeyRef": {
-                                "name": secret_ref.name,
-                                "key": key
-                            }
-                        }
-                    }));
                 }
-            }
-        }
-        _ => {
-            // Future provider types — add args as needed
-            args.push(format!("--domain-filter={}", spec.zone));
+            }));
         }
     }
 
-    (args, env, volume_mounts, volumes)
+    ProviderConfig {
+        args: vec![
+            "--provider=designate".to_string(),
+            format!("--domain-filter={}", spec.zone),
+        ],
+        env,
+        volume_mounts: Vec::new(),
+        volumes: Vec::new(),
+    }
+}
+
+/// Fallback for future provider types.
+fn fallback_config(spec: &DNSProviderSpec) -> ProviderConfig {
+    ProviderConfig {
+        args: vec![format!("--domain-filter={}", spec.zone)],
+        env: Vec::new(),
+        volume_mounts: Vec::new(),
+        volumes: Vec::new(),
+    }
 }
 
 fn build_deployment(
@@ -421,7 +494,7 @@ fn build_deployment(
     cluster_name: &str,
 ) -> Value {
     let mut all_args = common_args(cluster_name);
-    let (provider_args, env, volume_mounts, volumes) = provider_config(spec);
+    let ProviderConfig { args: provider_args, env, volume_mounts, volumes } = provider_config(spec);
     all_args.extend(provider_args);
 
     let mut container = json!({
@@ -544,7 +617,7 @@ mod tests {
         let args = deployment_args(dep);
         assert!(args.contains(&"--provider=pihole"));
         assert!(args.contains(&"--pihole-server=http://pihole.home"));
-        assert!(args.contains(&"--pihole-password=$(PIHOLE_PASSWORD)"));
+        assert!(args.contains(&"--pihole-password=$(EXTERNAL_DNS_PIHOLE_PASSWORD)"));
         assert!(args.contains(&"--policy=upsert-only"));
         assert!(args.contains(&"--txt-owner-id=lattice-test-cluster"));
         assert!(args.contains(&"--source=service"));

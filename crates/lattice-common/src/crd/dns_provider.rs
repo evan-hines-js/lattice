@@ -288,11 +288,10 @@ impl DNSProviderSpec {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_dns_spec(provider_type: DNSProviderType, zone: &str) -> DNSProviderSpec {
-        DNSProviderSpec {
+impl DNSProviderSpec {
+    /// Create a minimal spec for testing. All provider-specific fields default to None.
+    pub fn test(provider_type: DNSProviderType, zone: &str) -> Self {
+        Self {
             provider_type,
             zone: zone.to_string(),
             resolver: None,
@@ -305,6 +304,11 @@ mod tests {
             designate: None,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn pihole_provider_yaml() {
@@ -334,7 +338,7 @@ spec:
 
     #[test]
     fn pihole_requires_config() {
-        let spec = make_dns_spec(DNSProviderType::Pihole, "home.local");
+        let spec = DNSProviderSpec::test(DNSProviderType::Pihole, "home.local");
         assert!(spec.validate().is_err());
     }
 
@@ -344,7 +348,7 @@ spec:
             pihole: Some(PiholeConfig {
                 url: String::new(),
             }),
-            ..make_dns_spec(DNSProviderType::Pihole, "home.local")
+            ..DNSProviderSpec::test(DNSProviderType::Pihole, "home.local")
         };
         assert!(spec.validate().is_err());
     }
@@ -396,19 +400,19 @@ spec:
 
     #[test]
     fn google_provider_requires_config() {
-        let spec = make_dns_spec(DNSProviderType::Google, "example.com");
+        let spec = DNSProviderSpec::test(DNSProviderType::Google, "example.com");
         assert!(spec.validate().is_err());
     }
 
     #[test]
     fn azure_provider_requires_config() {
-        let spec = make_dns_spec(DNSProviderType::Azure, "example.com");
+        let spec = DNSProviderSpec::test(DNSProviderType::Azure, "example.com");
         assert!(spec.validate().is_err());
     }
 
     #[test]
     fn empty_zone_fails_validation() {
-        let spec = make_dns_spec(DNSProviderType::Route53, "");
+        let spec = DNSProviderSpec::test(DNSProviderType::Route53, "");
         assert!(spec.validate().is_err());
     }
 
@@ -419,7 +423,7 @@ spec:
                 name: "aws-creds".to_string(),
                 namespace: "lattice-system".to_string(),
             }),
-            ..make_dns_spec(DNSProviderType::Route53, "example.com")
+            ..DNSProviderSpec::test(DNSProviderType::Route53, "example.com")
         };
         assert!(spec.validate().is_ok());
     }
@@ -430,7 +434,7 @@ spec:
             google: Some(GoogleDnsConfig {
                 project: "my-project".to_string(),
             }),
-            ..make_dns_spec(DNSProviderType::Google, "example.com")
+            ..DNSProviderSpec::test(DNSProviderType::Google, "example.com")
         };
         assert!(spec.validate().is_ok());
     }
@@ -442,7 +446,7 @@ spec:
                 subscription_id: "sub-123".to_string(),
                 resource_group: "rg-dns".to_string(),
             }),
-            ..make_dns_spec(DNSProviderType::Azure, "example.com")
+            ..DNSProviderSpec::test(DNSProviderType::Azure, "example.com")
         };
         assert!(spec.validate().is_ok());
     }
@@ -467,7 +471,7 @@ spec:
     fn designate_requires_config() {
         let spec = DNSProviderSpec {
             resolver: Some("10.0.0.53:53".to_string()),
-            ..make_dns_spec(DNSProviderType::Designate, "internal.cloud")
+            ..DNSProviderSpec::test(DNSProviderType::Designate, "internal.cloud")
         };
         assert!(spec.validate().is_err());
     }
@@ -480,7 +484,7 @@ spec:
                 zone_id: Some("zone-123".to_string()),
                 region: Some("RegionOne".to_string()),
             }),
-            ..make_dns_spec(DNSProviderType::Designate, "internal.cloud")
+            ..DNSProviderSpec::test(DNSProviderType::Designate, "internal.cloud")
         };
         assert!(spec.validate().is_ok());
     }

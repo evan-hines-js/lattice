@@ -28,7 +28,9 @@ use super::super::helpers::cedar::apply_yaml;
 use super::super::helpers::docker::run_kubectl;
 use super::super::helpers::{wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT};
 
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_common::{
+    LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE, LATTICE_SYSTEM_NAMESPACE,
+};
 
 // =============================================================================
 // Constants
@@ -49,9 +51,9 @@ const ACME_HTTP_ISSUER: &str = "e2e-acme-http";
 /// Name that the operator generates for the ClusterIssuer: `lattice-{key}`
 const EXPECTED_CLUSTER_ISSUER: &str = "lattice-dev";
 
-/// Managed-by label applied to operator-created ClusterIssuers
-const MANAGED_BY_LABEL: &str = "lattice.dev/managed-by";
-const MANAGED_BY_VALUE: &str = "lattice-operator";
+// Must match lattice_common::LATTICE_MANAGED_BY_*
+const LATTICE_MANAGED_BY_LABEL: &str = "lattice.dev/managed-by";
+const LATTICE_MANAGED_BY_VALUE: &str = "lattice-operator";
 
 // =============================================================================
 // Main Test Runner
@@ -338,7 +340,7 @@ async fn test_cluster_issuer_materialization(kubeconfig: &str) -> Result<(), Str
     // The label key contains dots and slashes, so use bracket notation in jsonpath
     let label_jsonpath = format!(
         "jsonpath={{.metadata.labels['{}']}}",
-        MANAGED_BY_LABEL
+        LATTICE_MANAGED_BY_LABEL
     );
     let label_output = run_kubectl(&[
         "--kubeconfig",
@@ -351,16 +353,16 @@ async fn test_cluster_issuer_materialization(kubeconfig: &str) -> Result<(), Str
     ])
     .await?;
 
-    if label_output.trim() != MANAGED_BY_VALUE {
+    if label_output.trim() != LATTICE_MANAGED_BY_VALUE {
         return Err(format!(
             "ClusterIssuer '{}' missing or wrong managed-by label: expected '{}', got '{}'",
-            EXPECTED_CLUSTER_ISSUER, MANAGED_BY_VALUE, label_output
+            EXPECTED_CLUSTER_ISSUER, LATTICE_MANAGED_BY_VALUE, label_output
         ));
     }
 
     info!(
         "[CertManager] ClusterIssuer '{}' has correct {} label",
-        EXPECTED_CLUSTER_ISSUER, MANAGED_BY_LABEL
+        EXPECTED_CLUSTER_ISSUER, LATTICE_MANAGED_BY_LABEL
     );
 
     Ok(())
