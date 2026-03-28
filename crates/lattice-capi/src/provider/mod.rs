@@ -562,6 +562,62 @@ pub fn generate_machine_deployment_for_pool(
     if let (Some(min), Some(max)) = (pool.spec.min, pool.spec.max) {
         annotations.insert(AUTOSCALER_MIN_SIZE.to_string(), min.to_string());
         annotations.insert(AUTOSCALER_MAX_SIZE.to_string(), max.to_string());
+
+        // Capacity annotations for scale-from-zero: tell the autoscaler what
+        // resources a new node would have before any nodes exist.
+        if let Some(ref capacity) = pool.spec.capacity {
+            annotations.insert(
+                "cluster-autoscaler.kubernetes.io/node-template/resources/cpu".to_string(),
+                capacity.cpu.clone(),
+            );
+            annotations.insert(
+                "cluster-autoscaler.kubernetes.io/node-template/resources/memory".to_string(),
+                capacity.memory.clone(),
+            );
+        } else if let Some(ref it) = pool.spec.instance_type {
+            // Derive capacity from resource-based instance types (Proxmox)
+            if let Some(res) = it.as_resources() {
+                annotations.insert(
+                    "cluster-autoscaler.kubernetes.io/node-template/resources/cpu".to_string(),
+                    res.cores.to_string(),
+                );
+                annotations.insert(
+                    "cluster-autoscaler.kubernetes.io/node-template/resources/memory".to_string(),
+                    format!("{}Gi", res.memory_gib),
+                );
+            }
+        }
+
+        // GPU capacity annotations
+        if let Some(gpu) = pool
+            .spec
+            .instance_type
+            .as_ref()
+            .and_then(|it| it.gpu.as_ref())
+        {
+            annotations.insert(
+                "cluster-autoscaler.kubernetes.io/node-template/resources/nvidia.com/gpu"
+                    .to_string(),
+                gpu.count.to_string(),
+            );
+            annotations.insert(
+                "cluster-autoscaler.kubernetes.io/node-template/label/nvidia.com/gpu.product"
+                    .to_string(),
+                gpu.model.clone(),
+            );
+        }
+
+        // Taint annotations so the autoscaler knows about node taints at scale-from-zero
+        for taint in &pool.spec.effective_taints() {
+            let value = taint.value.as_deref().unwrap_or("");
+            annotations.insert(
+                format!(
+                    "cluster-autoscaler.kubernetes.io/node-template/taint/{}",
+                    taint.key
+                ),
+                format!("{}:{}", value, taint.effect),
+            );
+        }
     }
 
     let mut manifest = CAPIManifest::new(
@@ -767,11 +823,10 @@ fn generate_kubeadm_config_template_for_pool(
             .push(serde_json::json!({"name": "node-labels", "value": labels_str.join(",")}));
     }
 
-    // Add pool taints to kubelet args
-    if !pool.spec.taints.is_empty() {
-        let taints_str: Vec<String> = pool
-            .spec
-            .taints
+    // Add pool taints to kubelet args (includes auto-injected GPU taint)
+    let effective_taints = pool.spec.effective_taints();
+    if !effective_taints.is_empty() {
+        let taints_str: Vec<String> = effective_taints
             .iter()
             .map(|t| {
                 if let Some(ref v) = t.value {
@@ -845,11 +900,10 @@ fn generate_rke2_config_template_for_pool(
         kubelet_extra_args.push(format!("node-labels={}", labels_str.join(",")));
     }
 
-    // Add pool taints
-    if !pool.spec.taints.is_empty() {
-        let taints_str: Vec<String> = pool
-            .spec
-            .taints
+    // Add pool taints (includes auto-injected GPU taint)
+    let effective_taints = pool.spec.effective_taints();
+    if !effective_taints.is_empty() {
+        let taints_str: Vec<String> = effective_taints
             .iter()
             .map(|t| {
                 if let Some(ref v) = t.value {

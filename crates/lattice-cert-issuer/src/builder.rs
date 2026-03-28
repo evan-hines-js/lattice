@@ -5,9 +5,7 @@
 
 use serde_json::{json, Value};
 
-use lattice_common::crd::{
-    CertIssuerSpec, DNSProviderSpec, DNSProviderType, IssuerType,
-};
+use lattice_common::crd::{CertIssuerSpec, DNSProviderSpec, DNSProviderType, IssuerType};
 
 use lattice_common::{LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE};
 
@@ -52,9 +50,8 @@ pub fn build_cluster_issuer(
                     json!({ "http01": { "ingress": { "class": "istio" } } })
                 }
                 Some(_dns_ref) => {
-                    let dp = dns_provider.ok_or(
-                        "dns_provider must be provided when acme.dnsProviderRef is set",
-                    )?;
+                    let dp = dns_provider
+                        .ok_or("dns_provider must be provided when acme.dnsProviderRef is set")?;
                     build_dns01_solver(dp)?
                 }
             };

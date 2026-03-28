@@ -102,14 +102,14 @@ impl PolicyEngine {
         };
         let service_entity =
             match build_service_entity(&request.namespace, &request.service_name, &request.kind) {
-            Ok(e) => e,
-            Err(e) => {
-                return deny(DenialReason::InternalError(format!(
-                    "service entity: {}",
-                    e
-                )))
-            }
-        };
+                Ok(e) => e,
+                Err(e) => {
+                    return deny(DenialReason::InternalError(format!(
+                        "service entity: {}",
+                        e
+                    )))
+                }
+            };
         let resource_entity = match build_mesh_wildcard_entity(request.direction.resource_id()) {
             Ok(e) => e,
             Err(e) => {

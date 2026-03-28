@@ -15,9 +15,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{
-    DNSProvider, DNSProviderPhase, DNSProviderStatus, DNSProviderType,
-};
+use lattice_common::crd::{DNSProvider, DNSProviderPhase, DNSProviderStatus, DNSProviderType};
 use lattice_common::status_check;
 use lattice_common::{
     ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
@@ -102,12 +100,16 @@ async fn validate_provider(client: &Client, provider: &DNSProvider) -> Result<()
         }
         _ => {
             // All other providers require credentials
-            let secret_ref = provider.spec.credentials_secret_ref.as_ref().ok_or_else(|| {
-                ReconcileError::Validation(format!(
-                    "{} provider requires credentialsSecretRef",
-                    provider.spec.provider_type
-                ))
-            })?;
+            let secret_ref = provider
+                .spec
+                .credentials_secret_ref
+                .as_ref()
+                .ok_or_else(|| {
+                    ReconcileError::Validation(format!(
+                        "{} provider requires credentialsSecretRef",
+                        provider.spec.provider_type
+                    ))
+                })?;
 
             let ns = &secret_ref.namespace;
             let secret_name = &secret_ref.name;
@@ -255,10 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_zone_fails() {
-        let provider = DNSProvider::new(
-            "bad",
-            DNSProviderSpec::new(DNSProviderType::Route53, ""),
-        );
+        let provider = DNSProvider::new("bad", DNSProviderSpec::new(DNSProviderType::Route53, ""));
         assert!(provider.spec.validate().is_err());
     }
 
@@ -276,9 +275,7 @@ mod tests {
         let provider = DNSProvider::new(
             "bad-pihole",
             DNSProviderSpec {
-                pihole: Some(PiholeConfig {
-                    url: String::new(),
-                }),
+                pihole: Some(PiholeConfig { url: String::new() }),
                 ..DNSProviderSpec::new(DNSProviderType::Pihole, "home.local")
             },
         );

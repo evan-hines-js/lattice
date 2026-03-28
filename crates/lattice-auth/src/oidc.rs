@@ -422,9 +422,9 @@ impl OidcValidator {
         for addr in &validated.resolved_ips {
             client_builder = client_builder.resolve(&validated.host, *addr);
         }
-        let pinned_client = client_builder
-            .build()
-            .map_err(|e| AuthError::Config(format!("Failed to create pinned HTTP client: {}", e)))?;
+        let pinned_client = client_builder.build().map_err(|e| {
+            AuthError::Config(format!("Failed to create pinned HTTP client: {}", e))
+        })?;
 
         // Fetch OIDC discovery document
         let discovery_url = format!(
@@ -441,9 +441,7 @@ impl OidcValidator {
             .map_err(|e| AuthError::Internal(format!("Failed to fetch OIDC discovery: {}", e)))?
             .json()
             .await
-            .map_err(|e| {
-                AuthError::Internal(format!("Invalid OIDC discovery response: {}", e))
-            })?;
+            .map_err(|e| AuthError::Internal(format!("Invalid OIDC discovery response: {}", e)))?;
 
         if discovery.issuer != self.config.issuer_url {
             return Err(AuthError::Config(format!(
@@ -555,10 +553,7 @@ struct ValidatedIssuer {
 async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<ValidatedIssuer> {
     if !url.starts_with("https://") {
         if url.starts_with("http://") && allow_insecure_http {
-            warn!(
-                "OIDC issuer URL uses HTTP (allowed via config): {}",
-                url
-            );
+            warn!("OIDC issuer URL uses HTTP (allowed via config): {}", url);
         } else {
             return Err(AuthError::Config(format!(
                 "OIDC issuer URL must use HTTPS: {}",
@@ -567,8 +562,9 @@ async fn validate_issuer_url(url: &str, allow_insecure_http: bool) -> Result<Val
         }
     }
 
-    let host = extract_host(url)
-        .ok_or_else(|| AuthError::Config(format!("Failed to parse host from issuer URL: {}", url)))?;
+    let host = extract_host(url).ok_or_else(|| {
+        AuthError::Config(format!("Failed to parse host from issuer URL: {}", url))
+    })?;
 
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         let port = extract_port(url).unwrap_or(443);

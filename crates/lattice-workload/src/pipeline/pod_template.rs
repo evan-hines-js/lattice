@@ -276,8 +276,7 @@ impl PodTemplateCompiler {
 
                 // Add SHM volume mount for GPU pods (first container only, skip if already mounted)
                 if idx == 0 {
-                    let has_shm_mount =
-                        volume_mounts.iter().any(|m| m.mount_path == "/dev/shm");
+                    let has_shm_mount = volume_mounts.iter().any(|m| m.mount_path == "/dev/shm");
                     if !has_shm_mount {
                         if let Some((_, shm_mount)) = gpu_shm_volume(gpu) {
                             volume_mounts.push(shm_mount);

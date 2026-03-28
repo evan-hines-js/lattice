@@ -25,7 +25,7 @@ use tracing::info;
 
 use super::super::helpers::cedar::apply_yaml;
 use super::super::helpers::docker::run_kubectl;
-use super::super::helpers::pihole::{pihole_url, pihole_resolver, PIHOLE_PASSWORD};
+use super::super::helpers::pihole::{pihole_resolver, pihole_url, PIHOLE_PASSWORD};
 use super::super::helpers::{wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT};
 
 // =============================================================================
@@ -115,7 +115,10 @@ spec:
     );
 
     apply_yaml(kubeconfig, &dns_yaml).await?;
-    info!("[DNS] DNSProvider '{}' created, waiting for Ready...", PIHOLE_DNS_PROVIDER);
+    info!(
+        "[DNS] DNSProvider '{}' created, waiting for Ready...",
+        PIHOLE_DNS_PROVIDER
+    );
 
     wait_for_resource_phase(
         kubeconfig,
@@ -158,7 +161,10 @@ spec:
         DEFAULT_TIMEOUT,
     )
     .await?;
-    info!("[Cert] CertIssuer '{}' (selfSigned) is Ready", SELF_SIGNED_ISSUER);
+    info!(
+        "[Cert] CertIssuer '{}' (selfSigned) is Ready",
+        SELF_SIGNED_ISSUER
+    );
 
     let acme_yaml = format!(
         r#"apiVersion: lattice.dev/v1alpha1
@@ -183,7 +189,10 @@ spec:
         DEFAULT_TIMEOUT,
     )
     .await?;
-    info!("[Cert] CertIssuer '{}' (ACME HTTP-01) is Ready", ACME_HTTP_ISSUER);
+    info!(
+        "[Cert] CertIssuer '{}' (ACME HTTP-01) is Ready",
+        ACME_HTTP_ISSUER
+    );
 
     Ok(())
 }
@@ -196,19 +205,25 @@ async fn test_cluster_issuer_materialization(kubeconfig: &str) -> Result<(), Str
     info!("[Cert] Testing ClusterIssuer materialization...");
 
     let cluster_name = super::super::helpers::get_workload_cluster_name();
-    let patch = format!(
-        r#"{{"spec":{{"issuers":{{"dev":"{SELF_SIGNED_ISSUER}"}}}}}}"#
-    );
+    let patch = format!(r#"{{"spec":{{"issuers":{{"dev":"{SELF_SIGNED_ISSUER}"}}}}}}"#);
 
     run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "patch", "latticecluster", &cluster_name,
-        "--type=merge", "-p", &patch,
+        "--kubeconfig",
+        kubeconfig,
+        "patch",
+        "latticecluster",
+        &cluster_name,
+        "--type=merge",
+        "-p",
+        &patch,
     ])
     .await
     .map_err(|e| format!("Failed to patch LatticeCluster: {e}"))?;
 
-    info!("[Cert] Patched cluster '{}' with issuers.dev='{}'", cluster_name, SELF_SIGNED_ISSUER);
+    info!(
+        "[Cert] Patched cluster '{}' with issuers.dev='{}'",
+        cluster_name, SELF_SIGNED_ISSUER
+    );
 
     // Wait for ClusterIssuer to appear
     let kc = kubeconfig.to_string();
@@ -220,9 +235,16 @@ async fn test_cluster_issuer_materialization(kubeconfig: &str) -> Result<(), Str
             let kc = kc.clone();
             async move {
                 Ok(run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "clusterissuer", EXPECTED_CLUSTER_ISSUER, "-o", "name",
-                ]).await.is_ok())
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "clusterissuer",
+                    EXPECTED_CLUSTER_ISSUER,
+                    "-o",
+                    "name",
+                ])
+                .await
+                .is_ok())
             }
         },
     )
@@ -230,9 +252,15 @@ async fn test_cluster_issuer_materialization(kubeconfig: &str) -> Result<(), Str
 
     // Verify selfSigned spec
     let spec = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "clusterissuer", EXPECTED_CLUSTER_ISSUER, "-o", "jsonpath={.spec}",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "clusterissuer",
+        EXPECTED_CLUSTER_ISSUER,
+        "-o",
+        "jsonpath={.spec}",
+    ])
+    .await?;
 
     if !spec.contains("selfSigned") {
         return Err(format!("ClusterIssuer spec missing selfSigned: {spec}"));
@@ -241,15 +269,28 @@ async fn test_cluster_issuer_materialization(kubeconfig: &str) -> Result<(), Str
     // Verify managed-by label
     let label_path = format!("jsonpath={{.metadata.labels['{MANAGED_BY_LABEL}']}}");
     let label = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "clusterissuer", EXPECTED_CLUSTER_ISSUER, "-o", &label_path,
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "clusterissuer",
+        EXPECTED_CLUSTER_ISSUER,
+        "-o",
+        &label_path,
+    ])
+    .await?;
 
     if label.trim() != MANAGED_BY_VALUE {
-        return Err(format!("Wrong managed-by label: expected '{}', got '{}'", MANAGED_BY_VALUE, label.trim()));
+        return Err(format!(
+            "Wrong managed-by label: expected '{}', got '{}'",
+            MANAGED_BY_VALUE,
+            label.trim()
+        ));
     }
 
-    info!("[Cert] ClusterIssuer '{}' materialized correctly", EXPECTED_CLUSTER_ISSUER);
+    info!(
+        "[Cert] ClusterIssuer '{}' materialized correctly",
+        EXPECTED_CLUSTER_ISSUER
+    );
     Ok(())
 }
 
@@ -289,10 +330,17 @@ spec:
             let kc = kc.clone();
             async move {
                 let status = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "certificate", "e2e-test-cert", "-n", CERT_TEST_NAMESPACE,
-                    "-o", "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}",
-                ]).await;
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "certificate",
+                    "e2e-test-cert",
+                    "-n",
+                    CERT_TEST_NAMESPACE,
+                    "-o",
+                    "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}",
+                ])
+                .await;
                 Ok(status.map(|s| s.trim() == "True").unwrap_or(false))
             }
         },
@@ -301,10 +349,17 @@ spec:
 
     // Verify TLS secret
     let secret_type = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "secret", "e2e-test-cert-tls", "-n", CERT_TEST_NAMESPACE,
-        "-o", "jsonpath={.type}",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "secret",
+        "e2e-test-cert-tls",
+        "-n",
+        CERT_TEST_NAMESPACE,
+        "-o",
+        "jsonpath={.type}",
+    ])
+    .await?;
 
     if secret_type.trim() != "kubernetes.io/tls" {
         return Err(format!("TLS secret wrong type: {}", secret_type.trim()));
@@ -326,19 +381,26 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
     // when we added the dns config to the cluster. First, patch the cluster
     // to reference the PiHole DNSProvider.
     let cluster_name = super::super::helpers::get_workload_cluster_name();
-    let patch = format!(
-        r#"{{"spec":{{"dns":{{"providers":{{"local":"{PIHOLE_DNS_PROVIDER}"}}}}}}}}"#
-    );
+    let patch =
+        format!(r#"{{"spec":{{"dns":{{"providers":{{"local":"{PIHOLE_DNS_PROVIDER}"}}}}}}}}"#);
 
     run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "patch", "latticecluster", &cluster_name,
-        "--type=merge", "-p", &patch,
+        "--kubeconfig",
+        kubeconfig,
+        "patch",
+        "latticecluster",
+        &cluster_name,
+        "--type=merge",
+        "-p",
+        &patch,
     ])
     .await
     .map_err(|e| format!("Failed to patch LatticeCluster with dns: {e}"))?;
 
-    info!("[DNS] Patched cluster with dns.providers.local='{}'", PIHOLE_DNS_PROVIDER);
+    info!(
+        "[DNS] Patched cluster with dns.providers.local='{}'",
+        PIHOLE_DNS_PROVIDER
+    );
 
     // Wait for external-dns deployment to appear
     let kc = kubeconfig.to_string();
@@ -350,12 +412,17 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
             let kc = kc.clone();
             async move {
                 let result = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "deployment",
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "deployment",
                     &format!("external-dns-{PIHOLE_DNS_PROVIDER}"),
-                    "-n", "external-dns",
-                    "-o", "jsonpath={.status.availableReplicas}",
-                ]).await;
+                    "-n",
+                    "external-dns",
+                    "-o",
+                    "jsonpath={.status.availableReplicas}",
+                ])
+                .await;
                 Ok(result.map(|s| s.trim() == "1").unwrap_or(false))
             }
         },
@@ -364,15 +431,22 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
 
     // Verify the deployment has correct PiHole args
     let args = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "deployment",
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "deployment",
         &format!("external-dns-{PIHOLE_DNS_PROVIDER}"),
-        "-n", "external-dns",
-        "-o", "jsonpath={.spec.template.spec.containers[0].args}",
-    ]).await?;
+        "-n",
+        "external-dns",
+        "-o",
+        "jsonpath={.spec.template.spec.containers[0].args}",
+    ])
+    .await?;
 
     if !args.contains("--provider=pihole") {
-        return Err(format!("external-dns missing --provider=pihole in args: {args}"));
+        return Err(format!(
+            "external-dns missing --provider=pihole in args: {args}"
+        ));
     }
     if !args.contains(&format!("--pihole-server={pihole}")) {
         return Err(format!("external-dns missing pihole-server arg: {args}"));
@@ -395,14 +469,24 @@ async fn test_coredns_forwarding(kubeconfig: &str) -> Result<(), String> {
     // The operator should have created a coredns-custom ConfigMap with a
     // forward block for the e2e.local zone pointing at PiHole.
     let cm_data = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "configmap", "coredns-custom", "-n", "kube-system",
-        "-o", "jsonpath={.data}",
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "configmap",
+        "coredns-custom",
+        "-n",
+        "kube-system",
+        "-o",
+        "jsonpath={.data}",
+    ])
+    .await;
 
     match cm_data {
         Ok(data) if data.contains(TEST_ZONE) && data.contains(&resolver) => {
-            info!("[DNS] CoreDNS custom ConfigMap has forward block for {} -> {}", TEST_ZONE, resolver);
+            info!(
+                "[DNS] CoreDNS custom ConfigMap has forward block for {} -> {}",
+                TEST_ZONE, resolver
+            );
         }
         Ok(data) => {
             return Err(format!(
@@ -428,10 +512,16 @@ async fn test_coredns_forwarding(kubeconfig: &str) -> Result<(), String> {
 
     match add_record_result {
         Ok(code) if code.trim() == "200" => {
-            info!("[DNS] Added test record test-svc.{} -> 10.99.99.99 in PiHole", TEST_ZONE);
+            info!(
+                "[DNS] Added test record test-svc.{} -> 10.99.99.99 in PiHole",
+                TEST_ZONE
+            );
         }
         Ok(code) => {
-            info!("[DNS] PiHole API returned {}, record may already exist", code.trim());
+            info!(
+                "[DNS] PiHole API returned {}, record may already exist",
+                code.trim()
+            );
         }
         Err(e) => {
             info!("[DNS] Could not add PiHole record (non-fatal): {e}");
@@ -440,20 +530,33 @@ async fn test_coredns_forwarding(kubeconfig: &str) -> Result<(), String> {
 
     // Now test resolution from within the cluster
     let resolve_result = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "run", "dns-resolve-test", "--rm", "-i", "--restart=Never",
+        "--kubeconfig",
+        kubeconfig,
+        "run",
+        "dns-resolve-test",
+        "--rm",
+        "-i",
+        "--restart=Never",
         "--image=busybox:1.36",
-        "--", "nslookup", &format!("test-svc.{TEST_ZONE}"),
-    ]).await;
+        "--",
+        "nslookup",
+        &format!("test-svc.{TEST_ZONE}"),
+    ])
+    .await;
 
     match resolve_result {
         Ok(output) if output.contains("10.99.99.99") => {
-            info!("[DNS] CoreDNS resolved test-svc.{} -> 10.99.99.99 successfully", TEST_ZONE);
+            info!(
+                "[DNS] CoreDNS resolved test-svc.{} -> 10.99.99.99 successfully",
+                TEST_ZONE
+            );
         }
         Ok(output) => {
             // Non-fatal — CoreDNS may need time to pick up the custom config
-            info!("[DNS] DNS resolution returned unexpected result (may need time): {}",
-                super::super::helpers::truncate(&output, 200));
+            info!(
+                "[DNS] DNS resolution returned unexpected result (may need time): {}",
+                super::super::helpers::truncate(&output, 200)
+            );
         }
         Err(e) => {
             info!("[DNS] DNS resolution test inconclusive (non-fatal): {e}");
@@ -473,9 +576,14 @@ async fn test_cluster_issuer_cleanup(kubeconfig: &str) -> Result<(), String> {
     let cluster_name = super::super::helpers::get_workload_cluster_name();
 
     run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "patch", "latticecluster", &cluster_name,
-        "--type=merge", "-p", r#"{"spec":{"issuers":{}}}"#,
+        "--kubeconfig",
+        kubeconfig,
+        "patch",
+        "latticecluster",
+        &cluster_name,
+        "--type=merge",
+        "-p",
+        r#"{"spec":{"issuers":{}}}"#,
     ])
     .await
     .map_err(|e| format!("Failed to remove issuers: {e}"))?;
@@ -489,15 +597,25 @@ async fn test_cluster_issuer_cleanup(kubeconfig: &str) -> Result<(), String> {
             let kc = kc.clone();
             async move {
                 Ok(run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "clusterissuer", EXPECTED_CLUSTER_ISSUER, "-o", "name",
-                ]).await.is_err())
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "clusterissuer",
+                    EXPECTED_CLUSTER_ISSUER,
+                    "-o",
+                    "name",
+                ])
+                .await
+                .is_err())
             }
         },
     )
     .await?;
 
-    info!("[Cert] ClusterIssuer '{}' garbage collected", EXPECTED_CLUSTER_ISSUER);
+    info!(
+        "[Cert] ClusterIssuer '{}' garbage collected",
+        EXPECTED_CLUSTER_ISSUER
+    );
     Ok(())
 }
 
@@ -511,10 +629,16 @@ async fn cleanup_test_resources(kubeconfig: &str) {
     // Remove DNS config from cluster
     let cluster_name = super::super::helpers::get_workload_cluster_name();
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "patch", "latticecluster", &cluster_name,
-        "--type=merge", "-p", r#"{"spec":{"dns":null,"issuers":{}}}"#,
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "patch",
+        "latticecluster",
+        &cluster_name,
+        "--type=merge",
+        "-p",
+        r#"{"spec":{"dns":null,"issuers":{}}}"#,
+    ])
+    .await;
 
     super::super::helpers::delete_namespace(kubeconfig, CERT_TEST_NAMESPACE).await;
 
@@ -524,15 +648,27 @@ async fn cleanup_test_resources(kubeconfig: &str) {
         ("dnsprovider", PIHOLE_DNS_PROVIDER),
     ] {
         let _ = run_kubectl(&[
-            "--kubeconfig", kubeconfig,
-            "delete", kind, name, "-n", LATTICE_NS, "--ignore-not-found",
-        ]).await;
+            "--kubeconfig",
+            kubeconfig,
+            "delete",
+            kind,
+            name,
+            "-n",
+            LATTICE_NS,
+            "--ignore-not-found",
+        ])
+        .await;
     }
 
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "delete", "clusterissuer", EXPECTED_CLUSTER_ISSUER, "--ignore-not-found",
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "clusterissuer",
+        EXPECTED_CLUSTER_ISSUER,
+        "--ignore-not-found",
+    ])
+    .await;
 
     // Clean up PiHole test record
     let pihole = pihole_url();

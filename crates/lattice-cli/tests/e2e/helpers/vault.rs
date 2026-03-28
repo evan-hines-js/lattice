@@ -181,7 +181,7 @@ spec:
           key: token"#,
         store_name = VAULT_STORE_NAME,
         namespace = LATTICE_SYSTEM_NAMESPACE,
-        vault_url = vault_internal_url(),
+        vault_url = vault_url(),
         kv_mount = VAULT_KV_MOUNT,
         token_secret = VAULT_TOKEN_SECRET_NAME,
     );

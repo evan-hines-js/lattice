@@ -21,10 +21,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::jiff;
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
+use k8s_openapi::jiff;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::Client;
 use serde_json::json;

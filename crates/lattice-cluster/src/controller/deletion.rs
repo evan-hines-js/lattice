@@ -195,10 +195,7 @@ async fn handle_non_self_deletion(
 /// is to tell the child to self-delete, triggering the unpivot flow that
 /// sends CAPI resources back. If the agent is disconnected, we requeue
 /// and wait — there is no fallback since we don't have the CAPI resources.
-async fn handle_pivoted_child_deletion(
-    ctx: &Context,
-    name: &str,
-) -> Result<Action, Error> {
+async fn handle_pivoted_child_deletion(ctx: &Context, name: &str) -> Result<Action, Error> {
     if let Some(ref servers) = ctx.parent_servers {
         let registry = servers.agent_registry();
         if registry.is_connected(name) {
@@ -240,10 +237,7 @@ async fn handle_pivoted_child_deletion(
 /// to Unpivoting. The agent detects deletion_timestamp and sends CAPI
 /// resources to the parent via the unpivot retry loop.
 /// For root clusters: removes finalizer immediately.
-async fn handle_self_deletion(
-    cluster: &LatticeCluster,
-    ctx: &Context,
-) -> Result<Action, Error> {
+async fn handle_self_deletion(cluster: &LatticeCluster, ctx: &Context) -> Result<Action, Error> {
     let name = cluster.name_any();
 
     // Block deletion if this cell has active children

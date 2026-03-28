@@ -911,7 +911,8 @@ async fn check_vcjob_status_impl(
                 Some("Running" | "Completing") => VCJobPhase::Running,
                 Some("Pending" | "Inqueue") | None => {
                     let now = k8s_openapi::jiff::Timestamp::now();
-                    let age_secs = obj.creation_timestamp()
+                    let age_secs = obj
+                        .creation_timestamp()
                         .and_then(|ts| now.since(ts.0).ok())
                         .map(|s| s.get_seconds())
                         .unwrap_or(0);

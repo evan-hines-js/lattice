@@ -32,10 +32,7 @@ pub async fn handle(cmd: &DeleteCluster, ctx: &CommandContext) {
 
     let api: kube::Api<LatticeCluster> = kube::Api::all(client);
 
-    match api
-        .delete(&cmd.cluster_name, &Default::default())
-        .await
-    {
+    match api.delete(&cmd.cluster_name, &Default::default()).await {
         Ok(_) => {
             info!(
                 cluster = %cmd.cluster_name,

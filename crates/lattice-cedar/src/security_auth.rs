@@ -115,8 +115,8 @@ struct SecurityEvalContext<'a> {
 
 impl SecurityEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), SecurityDenial> {
-        let service_entity =
-            build_service_entity(self.namespace, self.service_name, self.kind).map_err(|e| {
+        let service_entity = build_service_entity(self.namespace, self.service_name, self.kind)
+            .map_err(|e| {
                 self.denial(DenialReason::InternalError(format!(
                     "service entity: {}",
                     e

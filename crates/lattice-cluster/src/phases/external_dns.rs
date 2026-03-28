@@ -10,7 +10,9 @@ use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{DNSProvider, DNSProviderSpec, DNSProviderType, LatticeCluster};
-use lattice_common::{Error, LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    Error, LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE, LATTICE_SYSTEM_NAMESPACE,
+};
 
 /// Container image for external-dns deployments.
 const EXTERNAL_DNS_IMAGE: &str = "registry.k8s.io/external-dns/external-dns:v0.15.1";
@@ -93,7 +95,9 @@ async fn apply_manifest(client: &Client, manifest: &Value) -> Result<(), Error> 
                 Api::namespaced(client.clone(), namespace.unwrap_or(EXTERNAL_DNS_NAMESPACE));
             api.patch(name, &patch_params, &Patch::Apply(manifest))
                 .await
-                .map_err(|e| Error::internal(format!("failed to apply ServiceAccount {name}: {e}")))?;
+                .map_err(|e| {
+                    Error::internal(format!("failed to apply ServiceAccount {name}: {e}"))
+                })?;
         }
         "ClusterRole" => {
             let api: Api<k8s_openapi::api::rbac::v1::ClusterRole> = Api::all(client.clone());
@@ -102,8 +106,7 @@ async fn apply_manifest(client: &Client, manifest: &Value) -> Result<(), Error> 
                 .map_err(|e| Error::internal(format!("failed to apply ClusterRole {name}: {e}")))?;
         }
         "ClusterRoleBinding" => {
-            let api: Api<k8s_openapi::api::rbac::v1::ClusterRoleBinding> =
-                Api::all(client.clone());
+            let api: Api<k8s_openapi::api::rbac::v1::ClusterRoleBinding> = Api::all(client.clone());
             api.patch(name, &patch_params, &Patch::Apply(manifest))
                 .await
                 .map_err(|e| {
@@ -331,11 +334,7 @@ fn route53_config(spec: &DNSProviderSpec) -> ProviderConfig {
 }
 
 fn cloudflare_config(spec: &DNSProviderSpec) -> ProviderConfig {
-    let proxied = spec
-        .cloudflare
-        .as_ref()
-        .map(|c| c.proxied)
-        .unwrap_or(false);
+    let proxied = spec.cloudflare.as_ref().map(|c| c.proxied).unwrap_or(false);
 
     let mut env = Vec::new();
     if let Some(ref secret_ref) = spec.credentials_secret_ref {
@@ -494,7 +493,12 @@ fn build_deployment(
     cluster_name: &str,
 ) -> Value {
     let mut all_args = common_args(cluster_name);
-    let ProviderConfig { args: provider_args, env, volume_mounts, volumes } = provider_config(spec);
+    let ProviderConfig {
+        args: provider_args,
+        env,
+        volume_mounts,
+        volumes,
+    } = provider_config(spec);
     all_args.extend(provider_args);
 
     let mut container = json!({
@@ -552,8 +556,7 @@ fn build_deployment(
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        AzureDnsConfig, CloudflareConfig, DesignateConfig, GoogleDnsConfig, PiholeConfig,
-        SecretRef,
+        AzureDnsConfig, CloudflareConfig, DesignateConfig, GoogleDnsConfig, PiholeConfig, SecretRef,
     };
 
     fn make_spec(provider_type: DNSProviderType, zone: &str) -> DNSProviderSpec {

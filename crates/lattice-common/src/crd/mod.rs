@@ -29,11 +29,6 @@ pub use backup_store::{
     BackupStoreSpec, BackupStoreStatus, GcsStorageConfig, S3StorageConfig,
 };
 pub use cedar_policy::{CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus};
-pub use dns_provider::{
-    AzureDnsConfig, CloudflareConfig, DNSProvider, DNSProviderPhase, DNSProviderSpec,
-    DNSProviderStatus, DNSProviderType, DesignateConfig, GoogleDnsConfig, PiholeConfig,
-    Route53Config,
-};
 pub use cluster::{
     BackupsConfig, ChildClusterHealth, InfraComponentPhase, InfraComponentStatus, LatticeCluster,
     LatticeClusterSpec, LatticeClusterStatus, MonitoringConfig, PoolResourceSummary,
@@ -48,14 +43,19 @@ pub use cluster_routes::{
     ClusterRoute, ClusterRoutesPhase, LatticeClusterRoutes, LatticeClusterRoutesSpec,
     LatticeClusterRoutesStatus,
 };
-pub use external_endpoint::{ParsedEndpoint, Resolution};
-pub use issuer::{
-    AcmeIssuerSpec, CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerSpec, CertIssuerStatus,
-    DnsConfig, IssuerType, VaultIssuerSpec,
+pub use dns_provider::{
+    AzureDnsConfig, CloudflareConfig, DNSProvider, DNSProviderPhase, DNSProviderSpec,
+    DNSProviderStatus, DNSProviderType, DesignateConfig, GoogleDnsConfig, PiholeConfig,
+    Route53Config,
 };
+pub use external_endpoint::{ParsedEndpoint, Resolution};
 pub use infra_provider::{
     AwsProviderConfig, InfraProvider, InfraProviderPhase, InfraProviderSpec, InfraProviderStatus,
     InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
+};
+pub use issuer::{
+    AcmeIssuerSpec, CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerSpec, CertIssuerStatus,
+    DnsConfig, IssuerType, VaultIssuerSpec,
 };
 pub use job::{
     ConcurrencyPolicy, JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus,
@@ -138,9 +138,7 @@ pub(crate) fn default_true() -> bool {
 /// `additionalProperties` fields (e.g., `endpoints: {"default": "https://..."}` → `{}`).
 ///
 /// Used via `#[schemars(schema_with = "crate::crd::preserve_unknown_fields")]`.
-pub(crate) fn preserve_unknown_fields(
-    _gen: &mut schemars::SchemaGenerator,
-) -> schemars::Schema {
+pub(crate) fn preserve_unknown_fields(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "object",
         "x-kubernetes-preserve-unknown-fields": true

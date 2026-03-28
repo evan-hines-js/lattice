@@ -954,14 +954,18 @@ mod tests {
         let action_uid = build_entity_uid("Action", "ReadEndpoint").unwrap();
         let resource_uid = build_entity_uid("ApiRoute", "GET:/api/v1/endpoints").unwrap();
 
-        let principal =
-            Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
-        let resource =
-            Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let principal = Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let resource = Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
         let entities = Entities::from_entities(vec![principal, resource], None).unwrap();
 
         assert!(engine
-            .authorize(&principal_uid, &action_uid, &resource_uid, Context::empty(), entities)
+            .authorize(
+                &principal_uid,
+                &action_uid,
+                &resource_uid,
+                Context::empty(),
+                entities
+            )
             .await
             .is_ok());
     }
@@ -977,14 +981,18 @@ mod tests {
         let action_uid = build_entity_uid("Action", "ReadEndpoint").unwrap();
         let resource_uid = build_entity_uid("ApiRoute", "GET:/api/v1/endpoints").unwrap();
 
-        let principal =
-            Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
-        let resource =
-            Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let principal = Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let resource = Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
         let entities = Entities::from_entities(vec![principal, resource], None).unwrap();
 
         let err = engine
-            .authorize(&principal_uid, &action_uid, &resource_uid, Context::empty(), entities)
+            .authorize(
+                &principal_uid,
+                &action_uid,
+                &resource_uid,
+                Context::empty(),
+                entities,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Forbidden(_)));
@@ -1004,14 +1012,18 @@ mod tests {
         let action_uid = build_entity_uid("Action", "ReadEndpoint").unwrap();
         let resource_uid = build_entity_uid("ApiRoute", "GET:/api/v1/endpoints").unwrap();
 
-        let principal =
-            Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
-        let resource =
-            Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let principal = Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let resource = Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
         let entities = Entities::from_entities(vec![principal, resource], None).unwrap();
 
         let err = engine
-            .authorize(&principal_uid, &action_uid, &resource_uid, Context::empty(), entities)
+            .authorize(
+                &principal_uid,
+                &action_uid,
+                &resource_uid,
+                Context::empty(),
+                entities,
+            )
             .await
             .unwrap_err();
         match err {

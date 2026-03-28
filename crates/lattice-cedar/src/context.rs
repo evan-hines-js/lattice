@@ -31,12 +31,7 @@ pub struct AuthContext {
 
 impl AuthContext {
     /// Create an AuthContext with all fields specified explicitly.
-    pub fn new(
-        now: String,
-        hour: i64,
-        weekday: String,
-        source_ip: String,
-    ) -> Self {
+    pub fn new(now: String, hour: i64, weekday: String, source_ip: String) -> Self {
         Self {
             now,
             hour,
@@ -86,8 +81,7 @@ impl AuthContext {
             ));
         }
 
-        Context::from_pairs(pairs)
-            .map_err(|e| Error::Internal(format!("cedar context: {}", e)))
+        Context::from_pairs(pairs).map_err(|e| Error::Internal(format!("cedar context: {}", e)))
     }
 }
 
@@ -99,7 +93,11 @@ impl AuthContext {
 mod tests {
     use super::*;
 
-    fn test_context(break_glass: bool, expires: Option<&str>, incident: Option<&str>) -> AuthContext {
+    fn test_context(
+        break_glass: bool,
+        expires: Option<&str>,
+        incident: Option<&str>,
+    ) -> AuthContext {
         AuthContext {
             now: "2024-01-15T10:30:00Z".to_string(),
             hour: 10,

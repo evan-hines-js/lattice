@@ -530,7 +530,11 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
             if let Some(ref dns_ref) = acme.dns_provider_ref {
                 match dns_provider_api.get(dns_ref).await {
                     Ok(dp) => {
-                        let dp_phase = dp.status.as_ref().map(|s| &s.phase).unwrap_or(&DNSProviderPhase::Pending);
+                        let dp_phase = dp
+                            .status
+                            .as_ref()
+                            .map(|s| &s.phase)
+                            .unwrap_or(&DNSProviderPhase::Pending);
                         if *dp_phase != DNSProviderPhase::Ready {
                             warn!(
                                 issuer = %cert_issuer_name,
@@ -616,10 +620,7 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
                 if let Some(name) = item.metadata.name.as_deref() {
                     if !expected_names.contains(name) {
                         info!(cluster_issuer = %name, "Deleting stale ClusterIssuer");
-                        if let Err(e) = cluster_issuer_api
-                            .delete(name, &Default::default())
-                            .await
-                        {
+                        if let Err(e) = cluster_issuer_api.delete(name, &Default::default()).await {
                             warn!(
                                 cluster_issuer = %name,
                                 error = %e,
@@ -647,10 +648,7 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
 ///
 /// Cloud providers (Route53, Cloudflare, etc.) don't need CoreDNS forwarding —
 /// they're authoritative DNS managed by external-dns, resolved via public DNS.
-async fn reconcile_dns_forwarding(
-    client: &Client,
-    cluster: &LatticeCluster,
-) -> Result<(), Error> {
+async fn reconcile_dns_forwarding(client: &Client, cluster: &LatticeCluster) -> Result<(), Error> {
     let dns_config = match &cluster.spec.dns {
         Some(dns) if !dns.providers.is_empty() => dns,
         _ => return Ok(()),

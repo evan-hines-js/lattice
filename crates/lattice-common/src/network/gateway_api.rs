@@ -57,8 +57,7 @@ impl HasApiResource for Gateway {
 impl_api_defaults!(Gateway);
 
 /// external-dns annotation key for automatic DNS record creation
-pub const EXTERNAL_DNS_HOSTNAME_ANNOTATION: &str =
-    "external-dns.alpha.kubernetes.io/hostname";
+pub const EXTERNAL_DNS_HOSTNAME_ANNOTATION: &str = "external-dns.alpha.kubernetes.io/hostname";
 
 impl Gateway {
     /// Create a new Gateway

@@ -344,9 +344,7 @@ spec:
     #[test]
     fn pihole_empty_url_fails() {
         let spec = DNSProviderSpec {
-            pihole: Some(PiholeConfig {
-                url: String::new(),
-            }),
+            pihole: Some(PiholeConfig { url: String::new() }),
             ..DNSProviderSpec::new(DNSProviderType::Pihole, "home.local")
         };
         assert!(spec.validate().is_err());

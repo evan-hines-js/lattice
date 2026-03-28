@@ -108,8 +108,8 @@ struct SecretEvalContext<'a> {
 
 impl SecretEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), SecretDenial> {
-        let service_entity =
-            build_service_entity(self.namespace, self.service_name, self.kind).map_err(|e| {
+        let service_entity = build_service_entity(self.namespace, self.service_name, self.kind)
+            .map_err(|e| {
                 self.denial(DenialReason::InternalError(format!(
                     "service entity: {}",
                     e

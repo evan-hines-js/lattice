@@ -400,11 +400,31 @@ fn is_default_sockets(v: &u32) -> bool {
     *v == 1
 }
 
+/// GPU capacity declaration for a machine type.
+///
+/// Required on `InstanceType` when the machine has GPUs and the pool uses
+/// scale-from-zero (`min: 0`). The `model` must match the `nvidia.com/gpu.product`
+/// label value that NFD would report on the node.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuCapacity {
+    /// Number of GPUs per node
+    pub count: u32,
+
+    /// GPU product name as reported by NFD (e.g., "NVIDIA-H100-SXM")
+    pub model: String,
+
+    /// Per-GPU memory in GiB (informational)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_gib: Option<u32>,
+}
+
 /// Instance type specification — either a named type (AWS/OpenStack) or explicit resources (Proxmox)
 ///
 /// YAML examples:
 /// - `instanceType: { name: m5.xlarge }` → named cloud instance
 /// - `instanceType: { cores: 16, memoryGib: 32, diskGib: 50 }` → explicit resources
+/// - `instanceType: { name: p5.48xlarge, gpu: { count: 8, model: NVIDIA-H100-SXM } }` → GPU instance
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceType {
@@ -427,6 +447,10 @@ pub struct InstanceType {
     /// Number of CPU sockets (default: 1)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sockets: Option<u32>,
+
+    /// GPU capacity for this machine type
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuCapacity>,
 }
 
 impl InstanceType {
@@ -496,6 +520,20 @@ pub struct ControlPlaneSpec {
     pub root_volume: Option<RootVolume>,
 }
 
+/// Node capacity hints for the cluster autoscaler's scale-from-zero.
+///
+/// Required when `min: 0` with named instance types (cloud). For resource-based
+/// types (Proxmox), capacity is derived from `cores`/`memoryGib` automatically.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeCapacityHint {
+    /// Allocatable CPU (e.g., "192" for cores, or "192000m" for millicores)
+    pub cpu: String,
+
+    /// Allocatable memory (e.g., "2048Gi")
+    pub memory: String,
+}
+
 /// Worker pool specification for named worker pools
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -524,7 +562,7 @@ pub struct WorkerPoolSpec {
     pub taints: Vec<NodeTaint>,
 
     /// Minimum number of nodes for cluster autoscaler.
-    /// When both min and max are set, the cluster autoscaler manages this pool.
+    /// Set to 0 for scale-from-zero (requires `capacity` hints for named instance types).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<u32>,
 
@@ -532,12 +570,43 @@ pub struct WorkerPoolSpec {
     /// When both min and max are set, the cluster autoscaler manages this pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<u32>,
+
+    /// Node capacity hints for scale-from-zero.
+    /// Required when `min: 0` with named instance types so the autoscaler knows
+    /// what resources a new node would provide before any nodes exist.
+    /// Not needed for resource-based types (capacity derived from cores/memoryGib).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<NodeCapacityHint>,
 }
 
 impl WorkerPoolSpec {
     /// Returns true if autoscaling is enabled for this pool (both min and max are set)
     pub fn is_autoscaling_enabled(&self) -> bool {
         self.min.is_some() && self.max.is_some()
+    }
+
+    /// Returns effective taints including auto-injected GPU taint.
+    /// When the instance type has GPUs and no `nvidia.com/gpu` taint is explicitly
+    /// configured, injects `nvidia.com/gpu=present:NoSchedule` automatically.
+    pub fn effective_taints(&self) -> Vec<NodeTaint> {
+        let has_gpu = self
+            .instance_type
+            .as_ref()
+            .and_then(|it| it.gpu.as_ref())
+            .is_some();
+        let has_gpu_taint = self.taints.iter().any(|t| t.key == "nvidia.com/gpu");
+
+        if has_gpu && !has_gpu_taint {
+            let mut taints = self.taints.clone();
+            taints.push(NodeTaint {
+                key: "nvidia.com/gpu".to_string(),
+                value: Some("present".to_string()),
+                effect: TaintEffect::NoSchedule,
+            });
+            taints
+        } else {
+            self.taints.clone()
+        }
     }
 
     /// Validate autoscaling configuration
@@ -548,7 +617,24 @@ impl WorkerPoolSpec {
                     return Err(format!("min ({}) cannot exceed max ({})", min, max));
                 }
                 if min == 0 {
-                    return Err("scale-from-zero not supported (min must be >= 1)".into());
+                    // Scale-from-zero: instance_type required so we know what to provision
+                    if self.instance_type.is_none() {
+                        return Err(
+                            "scale-from-zero (min=0) requires instance_type to be set".into()
+                        );
+                    }
+                    // Named instance types need explicit capacity hints
+                    if let Some(ref it) = self.instance_type {
+                        if it.as_named().is_some()
+                            && it.as_resources().is_none()
+                            && self.capacity.is_none()
+                        {
+                            return Err(
+                                "scale-from-zero with named instance types requires capacity hints"
+                                    .into(),
+                            );
+                        }
+                    }
                 }
             }
             (Some(_), None) | (None, Some(_)) => {
@@ -1374,6 +1460,7 @@ mod tests {
                 }],
                 min: Some(1),
                 max: Some(10),
+                capacity: None,
             };
             let json =
                 serde_json::to_string(&pool).expect("WorkerPoolSpec serialization should succeed");
@@ -1426,16 +1513,130 @@ mod tests {
         }
 
         #[test]
-        fn test_validate_min_zero() {
+        fn test_validate_min_zero_requires_instance_type() {
             let pool = WorkerPoolSpec {
-                replicas: 3,
                 min: Some(0),
                 max: Some(10),
                 ..Default::default()
             };
-            let result = pool.validate();
-            assert!(result.is_err());
-            assert!(result.unwrap_err().contains("scale-from-zero"));
+            let err = pool.validate().unwrap_err();
+            assert!(err.contains("instance_type"));
+        }
+
+        #[test]
+        fn test_validate_min_zero_named_requires_capacity() {
+            let pool = WorkerPoolSpec {
+                min: Some(0),
+                max: Some(10),
+                instance_type: Some(InstanceType::named("p5.48xlarge")),
+                ..Default::default()
+            };
+            let err = pool.validate().unwrap_err();
+            assert!(err.contains("capacity"));
+        }
+
+        #[test]
+        fn test_validate_min_zero_named_with_capacity_ok() {
+            let pool = WorkerPoolSpec {
+                min: Some(0),
+                max: Some(10),
+                instance_type: Some(InstanceType::named("p5.48xlarge")),
+                capacity: Some(NodeCapacityHint {
+                    cpu: "192".to_string(),
+                    memory: "2048Gi".to_string(),
+                }),
+                ..Default::default()
+            };
+            assert!(pool.validate().is_ok());
+        }
+
+        #[test]
+        fn test_validate_min_zero_resource_based_ok() {
+            let pool = WorkerPoolSpec {
+                min: Some(0),
+                max: Some(10),
+                instance_type: Some(InstanceType::resources(NodeResourceSpec {
+                    cores: 64,
+                    memory_gib: 512,
+                    disk_gib: 200,
+                    sockets: 2,
+                })),
+                ..Default::default()
+            };
+            assert!(pool.validate().is_ok());
+        }
+
+        #[test]
+        fn test_gpu_capacity_serde() {
+            let it = InstanceType {
+                name: Some("p5.48xlarge".to_string()),
+                gpu: Some(GpuCapacity {
+                    count: 8,
+                    model: "NVIDIA-H100-SXM".to_string(),
+                    memory_gib: Some(80),
+                }),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&it).unwrap();
+            let parsed: InstanceType = serde_json::from_str(&json).unwrap();
+            assert_eq!(it, parsed);
+            assert_eq!(parsed.gpu.unwrap().count, 8);
+        }
+
+        #[test]
+        fn test_effective_taints_auto_injects_gpu() {
+            let pool = WorkerPoolSpec {
+                instance_type: Some(InstanceType {
+                    gpu: Some(GpuCapacity {
+                        count: 8,
+                        model: "NVIDIA-H100-SXM".to_string(),
+                        memory_gib: None,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let taints = pool.effective_taints();
+            assert_eq!(taints.len(), 1);
+            assert_eq!(taints[0].key, "nvidia.com/gpu");
+            assert_eq!(taints[0].effect, TaintEffect::NoSchedule);
+        }
+
+        #[test]
+        fn test_effective_taints_no_duplicate_gpu() {
+            let pool = WorkerPoolSpec {
+                instance_type: Some(InstanceType {
+                    gpu: Some(GpuCapacity {
+                        count: 8,
+                        model: "NVIDIA-H100-SXM".to_string(),
+                        memory_gib: None,
+                    }),
+                    ..Default::default()
+                }),
+                taints: vec![NodeTaint {
+                    key: "nvidia.com/gpu".to_string(),
+                    value: Some("present".to_string()),
+                    effect: TaintEffect::NoSchedule,
+                }],
+                ..Default::default()
+            };
+            let taints = pool.effective_taints();
+            assert_eq!(taints.len(), 1); // no duplicate
+        }
+
+        #[test]
+        fn test_effective_taints_no_gpu_unchanged() {
+            let pool = WorkerPoolSpec {
+                taints: vec![NodeTaint {
+                    key: "dedicated".to_string(),
+                    value: Some("ml".to_string()),
+                    effect: TaintEffect::NoSchedule,
+                }],
+                ..Default::default()
+            };
+            let taints = pool.effective_taints();
+            assert_eq!(taints.len(), 1);
+            assert_eq!(taints[0].key, "dedicated");
         }
 
         #[test]

@@ -380,13 +380,13 @@ pub(crate) fn owner_reference(name: &str, uid: &str) -> OwnerReference {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_common::crd::workload::ingress::{CertIssuerRef, IngressTls};
     use lattice_common::crd::{
         HeaderMatchValue, InferenceEngine, KvConnector, KvConnectorType, LatticeModelSpec,
         ModelIngressSpec, ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule,
         ModelRouteSpec, ModelRoutingSpec, RateLimit, RateLimitUnit, RuntimeSpec, TargetModel,
         TrafficPolicy, WorkloadSpec,
     };
-    use lattice_common::crd::workload::ingress::{CertIssuerRef, IngressTls};
 
     fn test_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
         let spec = LatticeModelSpec {
@@ -902,15 +902,17 @@ mod tests {
         let routing = basic_routing();
         let ingress = basic_ingress();
 
-        let compiled =
-            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
         let gateway = compiled.gateway.as_ref().expect("gateway should be set");
         assert_eq!(gateway.spec.gateway_class_name, "istio");
         assert_eq!(gateway.spec.listeners.len(), 1);
 
         let listener = &gateway.spec.listeners[0];
-        assert_eq!(listener.hostname, Some("llama-70b.us-east.lattice.gpu".to_string()));
+        assert_eq!(
+            listener.hostname,
+            Some("llama-70b.us-east.lattice.gpu".to_string())
+        );
         assert_eq!(listener.port, 443);
         assert_eq!(listener.protocol, "HTTPS");
         assert!(listener.tls.is_some());
@@ -922,10 +924,12 @@ mod tests {
         let routing = basic_routing();
         let ingress = basic_ingress();
 
-        let compiled =
-            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
-        let cert = compiled.certificate.as_ref().expect("certificate should be set");
+        let cert = compiled
+            .certificate
+            .as_ref()
+            .expect("certificate should be set");
         assert_eq!(cert.spec.dns_names, vec!["llama-70b.us-east.lattice.gpu"]);
         assert_eq!(cert.spec.issuer_ref.name, "letsencrypt-prod");
         assert_eq!(cert.spec.issuer_ref.kind, "ClusterIssuer");
@@ -946,8 +950,7 @@ mod tests {
             listen_port: None,
         };
 
-        let compiled =
-            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
         assert!(compiled.gateway.is_some());
         assert!(compiled.certificate.is_none());
@@ -963,8 +966,7 @@ mod tests {
         let routing = basic_routing();
         let ingress = basic_ingress();
 
-        let compiled =
-            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
         let refs = compiled.model_routes[0].spec.parent_refs.as_ref().unwrap();
         assert_eq!(refs.len(), 1);
@@ -977,8 +979,7 @@ mod tests {
         let routing = basic_routing();
         let ingress = basic_ingress();
 
-        let compiled =
-            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
         let gw = compiled.gateway.as_ref().unwrap();
         let annotation = gw

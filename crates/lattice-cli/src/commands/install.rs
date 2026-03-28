@@ -1202,9 +1202,13 @@ impl Installer {
         let cluster_json = serde_json::to_string(&cluster_policy)
             .map_err(|e| Error::command_failed(format!("failed to serialize CedarPolicy: {e}")))?;
 
-        apply_with_retry(&mgmt_client, &[&admin_json, &cluster_json], "Cedar policies")
-            .await
-            .cmd_err()?;
+        apply_with_retry(
+            &mgmt_client,
+            &[&admin_json, &cluster_json],
+            "Cedar policies",
+        )
+        .await
+        .cmd_err()?;
         info!("Created Cedar access policies");
 
         // Wait for token controller to populate the Secret

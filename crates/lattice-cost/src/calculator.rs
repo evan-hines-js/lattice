@@ -195,7 +195,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_service_cost_cpu_only() {
         let rates = test_rates();

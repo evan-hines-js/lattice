@@ -27,8 +27,7 @@ use super::super::helpers::{
 pub async fn delete_and_recreate_workload(mgmt_kubeconfig: &str) -> Result<(), String> {
     info!("[Recreate] Verifying GC cleaned up istiod kubeconfig secret...");
 
-    let istiod_secret_name =
-        lattice_common::istiod_kubeconfig_secret_name(WORKLOAD_CLUSTER_NAME);
+    let istiod_secret_name = lattice_common::istiod_kubeconfig_secret_name(WORKLOAD_CLUSTER_NAME);
 
     // Verify the ownerReference GC deleted the istiod kubeconfig secret
     wait_for_condition(
@@ -82,13 +81,14 @@ pub async fn delete_and_recreate_workload(mgmt_kubeconfig: &str) -> Result<(), S
                     Api::namespaced(client, "istio-system");
                 match api.get_opt(&secret_name).await {
                     Ok(Some(secret)) => {
-                        let has_owner = secret
-                            .metadata
-                            .owner_references
-                            .as_ref()
-                            .is_some_and(|refs| {
-                                refs.iter().any(|r| r.name == WORKLOAD_CLUSTER_NAME)
-                            });
+                        let has_owner =
+                            secret
+                                .metadata
+                                .owner_references
+                                .as_ref()
+                                .is_some_and(|refs| {
+                                    refs.iter().any(|r| r.name == WORKLOAD_CLUSTER_NAME)
+                                });
                         Ok(has_owner)
                     }
                     Ok(None) => Ok(false),

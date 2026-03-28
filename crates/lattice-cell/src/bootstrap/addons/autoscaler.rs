@@ -203,6 +203,7 @@ fn deployment(capi_namespace: &str) -> Deployment {
                             ),
                             "--scale-down-delay-after-add=5m".to_string(),
                             "--scale-down-unneeded-time=5m".to_string(),
+                            "--max-node-provision-time=15m".to_string(),
                             "--skip-nodes-with-local-storage=false".to_string(),
                             "--v=2".to_string(),
                         ]),
