@@ -43,12 +43,15 @@ pub async fn reconcile_capacity(
         .map_err(|e| format!("failed to get LatticeCluster '{cluster_name}': {e}"))?;
 
     let demand = aggregate_quotas(&quotas.items);
-    let default_rates = CostRates::uniform();
-    let result = solve(
-        &cluster.spec.nodes.worker_pools,
-        &demand,
-        rates.unwrap_or(&default_rates),
-    );
+    let fallback;
+    let effective_rates = match rates {
+        Some(r) => r,
+        None => {
+            fallback = CostRates::uniform();
+            &fallback
+        }
+    };
+    let result = solve(&cluster.spec.nodes.worker_pools, &demand, effective_rates);
 
     if result.plans.is_empty() {
         debug!("Solver produced no plans (no pools with capacity info)");

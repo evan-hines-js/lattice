@@ -1,15 +1,17 @@
 //! Capacity solver — translates aggregate quota demands into pool node counts.
 //!
-//! Uses integer linear programming (ILP) to find the minimum-cost node
-//! allocation that satisfies all quota constraints.
+//! Uses LP relaxation with ceiling rounding to find the minimum-cost node
+//! allocation that satisfies all quota constraints. Solves in microseconds
+//! even with hundreds of pool types.
 //!
 //! # Architecture
 //!
 //! The solver is a pipeline:
 //! 1. Build pool shapes from specs + cost rates
 //! 2. Collect constraints from demand (each resource type = one constraint)
-//! 3. Feed constraints into the ILP
-//! 4. Clamp results by pool spec min/max
+//! 3. Feed constraints into the LP solver
+//! 4. Ceil fractional results to whole nodes
+//! 5. Clamp by pool spec min/max
 //!
 //! New constraint types (taints, priority classes, affinity) are added by
 //! implementing `SolverConstraint` — no changes to the core solver needed.
