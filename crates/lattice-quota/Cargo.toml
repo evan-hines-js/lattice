@@ -7,6 +7,7 @@ description = "Quota controller for Lattice - enforces resource limits and drive
 
 [dependencies]
 lattice-common = { workspace = true }
+lattice-cost = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }
@@ -17,6 +18,9 @@ tokio = { workspace = true }
 
 # Serialization
 serde_json = { workspace = true }
+
+# Optimization
+good_lp = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
