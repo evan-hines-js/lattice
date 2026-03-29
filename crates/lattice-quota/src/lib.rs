@@ -15,6 +15,7 @@
 
 mod controller;
 mod enforcement;
+pub mod solver;
 
 pub use controller::reconcile;
 pub use enforcement::{enforce_quotas, QuotaError};
