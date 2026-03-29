@@ -23,9 +23,8 @@ use crate::solver::{aggregate_quotas, solve, PoolCapacityPlan};
 pub async fn reconcile_capacity(
     client: &Client,
     cluster_name: &str,
-    rates: &CostRates,
+    rates: Option<&CostRates>,
 ) -> Result<(), String> {
-    // List all quotas in lattice-system
     let quota_api: Api<LatticeQuota> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let quotas = quota_api
         .list(&Default::default())
@@ -37,7 +36,6 @@ pub async fn reconcile_capacity(
         return Ok(());
     }
 
-    // Get the self-cluster's LatticeCluster (cluster-scoped)
     let cluster_api: Api<LatticeCluster> = Api::all(client.clone());
     let cluster = cluster_api
         .get(cluster_name)
@@ -45,7 +43,12 @@ pub async fn reconcile_capacity(
         .map_err(|e| format!("failed to get LatticeCluster '{cluster_name}': {e}"))?;
 
     let demand = aggregate_quotas(&quotas.items);
-    let result = solve(&cluster.spec.nodes.worker_pools, &demand, rates);
+    let default_rates = CostRates::uniform();
+    let result = solve(
+        &cluster.spec.nodes.worker_pools,
+        &demand,
+        rates.unwrap_or(&default_rates),
+    );
 
     if result.plans.is_empty() {
         debug!("Solver produced no plans (no pools with capacity info)");
@@ -55,13 +58,21 @@ pub async fn reconcile_capacity(
     let capi_ns = capi_namespace(cluster_name);
     apply_plans(client, cluster_name, &capi_ns, &result.plans).await?;
 
-    info!(
-        cluster = %cluster_name,
-        plans = result.plans.len(),
-        min_cost_hr = format!("${:.2}", result.min_hourly_cost),
-        max_cost_hr = format!("${:.2}", result.max_hourly_cost),
-        "Applied capacity plans from quota solver"
-    );
+    if rates.is_some() {
+        info!(
+            cluster = %cluster_name,
+            plans = result.plans.len(),
+            min_cost_hr = format!("${:.2}", result.min_hourly_cost),
+            max_cost_hr = format!("${:.2}", result.max_hourly_cost),
+            "Applied capacity plans from quota solver"
+        );
+    } else {
+        info!(
+            cluster = %cluster_name,
+            plans = result.plans.len(),
+            "Applied capacity plans (no cost rates configured)"
+        );
+    }
     Ok(())
 }
 

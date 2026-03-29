@@ -115,7 +115,9 @@ pub async fn reconcile(
     // Reconcile cluster capacity
     if let Some(ref cluster_name) = ctx.cluster_name {
         let rates = load_rates(&ctx.cost_provider).await;
-        if let Err(e) = crate::capacity::reconcile_capacity(client, cluster_name, &rates).await {
+        if let Err(e) =
+            crate::capacity::reconcile_capacity(client, cluster_name, rates.as_ref()).await
+        {
             warn!(error = %e, "Capacity reconciliation failed, will retry");
         }
     }
@@ -123,13 +125,18 @@ pub async fn reconcile(
     Ok(Action::requeue(Duration::from_secs(REQUEUE_SECS)))
 }
 
-async fn load_rates(provider: &Option<Arc<dyn CostProvider>>) -> lattice_cost::CostRates {
+async fn load_rates(
+    provider: &Option<Arc<dyn CostProvider>>,
+) -> Option<lattice_cost::CostRates> {
     match provider {
-        Some(p) => p.load_rates().await.unwrap_or_else(|e| {
-            warn!(error = %e, "Cost rates unavailable, using uniform costs");
-            lattice_cost::CostRates::uniform()
-        }),
-        None => lattice_cost::CostRates::uniform(),
+        Some(p) => match p.load_rates().await {
+            Ok(r) => Some(r),
+            Err(e) => {
+                debug!(error = %e, "Cost rates unavailable, skipping cost optimization");
+                None
+            }
+        },
+        None => None,
     }
 }
 
