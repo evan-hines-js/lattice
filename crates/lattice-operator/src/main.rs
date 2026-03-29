@@ -165,6 +165,14 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
     // ── Shared state ──
 
     let cedar = load_cedar_engine(&client).await;
+
+    // Cedar policy reloader — runs on ALL pods (not behind leader election).
+    // With per-controller leases the CedarPolicy controller may run on a
+    // different pod than the auth proxy. This ensures every pod's PolicyEngine
+    // stays current by watching CedarPolicy CRDs and reloading on changes,
+    // with a periodic fallback for missed events during reconnects.
+    spawn_cedar_policy_reloader(client.clone(), cedar.clone(), cancel.clone());
+
     let capi_installer: Arc<dyn CapiInstaller> = Arc::new(NativeInstaller::new());
 
     // Report running operator image in status.latticeImage
@@ -236,26 +244,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 let parent_servers_tx = parent_servers_tx.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
-                    // Reload Cedar policies — the CedarPolicy controller may run
-                    // on a different pod, so our startup-loaded engine could be stale.
-                    if let Err(e) = cedar.reload(&client).await {
-                        tracing::warn!(error = %e, "Cedar reload before cell startup failed, using startup policies");
-                    }
                     let self_cluster_name = config.cluster_name.clone();
-                    match setup_cell_infra(&client, &self_cluster_name, cedar.clone(), &config).await {
+                    match setup_cell_infra(&client, &self_cluster_name, cedar, &config).await {
                         Ok((servers, _agent_token, _auth_proxy, _route_tx)) => {
                             let _ = parent_servers_tx.send(Some(servers));
-                            // Periodically reload Cedar policies so the auth proxy
-                            // stays current even if the CedarPolicy controller runs
-                            // on a different pod.
-                            let mut interval = tokio::time::interval(Duration::from_secs(30));
-                            interval.tick().await; // skip first immediate tick
-                            loop {
-                                interval.tick().await;
-                                if let Err(e) = cedar.reload(&client).await {
-                                    tracing::debug!(error = %e, "Periodic Cedar reload failed");
-                                }
-                            }
+                            std::future::pending::<()>().await;
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Cell infrastructure setup failed");
@@ -531,6 +524,69 @@ async fn load_cedar_engine(client: &kube::Client) -> Arc<PolicyEngine> {
             Arc::new(PolicyEngine::new())
         }
     }
+}
+
+/// Reload Cedar policies on every pod via watcher + periodic fallback.
+///
+/// Runs on ALL pods (not behind leader election) so every pod's
+/// PolicyEngine stays current — critical for the auth proxy which
+/// may run on a different pod than the CedarPolicy controller.
+///
+/// Uses a K8s watcher for instant reaction to policy changes, with a
+/// periodic reload every 60s as a safety net for missed events during
+/// watch reconnects or startup races.
+fn spawn_cedar_policy_reloader(
+    client: kube::Client,
+    cedar: Arc<PolicyEngine>,
+    cancel: CancellationToken,
+) {
+    const PERIODIC_RELOAD_INTERVAL: Duration = Duration::from_secs(60);
+
+    tokio::spawn(async move {
+        wait_for_api_ready_for::<CedarPolicy>(&client).await;
+
+        // Initial reload to pick up any policies created before this task started
+        if let Err(e) = cedar.reload(&client).await {
+            tracing::warn!(error = %e, "Initial Cedar policy reload failed");
+        }
+
+        let api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let watcher_config = watcher::Config::default().timeout(25);
+        let mut stream = std::pin::pin!(watcher::watcher(api, watcher_config));
+        let mut periodic = tokio::time::interval(PERIODIC_RELOAD_INTERVAL);
+        periodic.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                // Watcher: reload immediately on any CedarPolicy change
+                event = stream.next() => {
+                    match event {
+                        Some(Ok(Event::Apply(_) | Event::Delete(_))) => {
+                            if let Err(e) = cedar.reload(&client).await {
+                                tracing::warn!(error = %e, "Cedar policy reload failed");
+                            }
+                        }
+                        Some(Ok(_)) => {} // Init, InitApply, InitDone
+                        Some(Err(e)) => {
+                            tracing::warn!(error = %e, "Cedar policy watcher error");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                        None => {
+                            tracing::warn!("Cedar policy watcher stream ended, restarting");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+                // Periodic fallback: catch anything the watcher missed
+                _ = periodic.tick() => {
+                    if let Err(e) = cedar.reload(&client).await {
+                        tracing::debug!(error = %e, "Periodic Cedar reload failed");
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Check whether the self-cluster CRD has `parent_config` set.
