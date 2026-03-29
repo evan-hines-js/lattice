@@ -236,11 +236,26 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 let parent_servers_tx = parent_servers_tx.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
+                    // Reload Cedar policies — the CedarPolicy controller may run
+                    // on a different pod, so our startup-loaded engine could be stale.
+                    if let Err(e) = cedar.reload(&client).await {
+                        tracing::warn!(error = %e, "Cedar reload before cell startup failed, using startup policies");
+                    }
                     let self_cluster_name = config.cluster_name.clone();
-                    match setup_cell_infra(&client, &self_cluster_name, cedar, &config).await {
+                    match setup_cell_infra(&client, &self_cluster_name, cedar.clone(), &config).await {
                         Ok((servers, _agent_token, _auth_proxy, _route_tx)) => {
                             let _ = parent_servers_tx.send(Some(servers));
-                            std::future::pending::<()>().await;
+                            // Periodically reload Cedar policies so the auth proxy
+                            // stays current even if the CedarPolicy controller runs
+                            // on a different pod.
+                            let mut interval = tokio::time::interval(Duration::from_secs(30));
+                            interval.tick().await; // skip first immediate tick
+                            loop {
+                                interval.tick().await;
+                                if let Err(e) = cedar.reload(&client).await {
+                                    tracing::debug!(error = %e, "Periodic Cedar reload failed");
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Cell infrastructure setup failed");
