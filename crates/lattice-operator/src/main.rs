@@ -216,11 +216,8 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
-    // Shared between cell infra and cluster controller — cell sets it,
-    // cluster controller reads it to register children in the subtree.
-    let parent_servers_holder: Arc<
-        OnceLock<Arc<ParentServers<DefaultManifestGenerator>>>,
-    > = Arc::new(OnceLock::new());
+    // Watch channel for parent_servers — cell infra sends, cluster controller receives.
+    let (parent_servers_tx, parent_servers_rx) = tokio::sync::watch::channel(None);
 
     // Cell infrastructure (gRPC server, bootstrap webhook, auth proxy)
     let _h_cell = tokio::spawn(controller_runner::leader_controller(
@@ -233,18 +230,18 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
             let client = client.clone();
             let config = config.clone();
             let cedar = cedar.clone();
-            let parent_servers_holder = parent_servers_holder.clone();
+            let parent_servers_tx = parent_servers_tx.clone();
             move || {
                 let client = client.clone();
                 let config = config.clone();
                 let cedar = cedar.clone();
-                let parent_servers_holder = parent_servers_holder.clone();
+                let parent_servers_tx = parent_servers_tx.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
                     let self_cluster_name = config.cluster_name.clone();
                     match setup_cell_infra(&client, &self_cluster_name, cedar, &config).await {
                         Ok((servers, _agent_token, _auth_proxy, _route_tx)) => {
-                            let _ = parent_servers_holder.set(servers);
+                            let _ = parent_servers_tx.send(Some(servers));
                             std::future::pending::<()>().await;
                         }
                         Err(e) => {
@@ -267,21 +264,23 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
             let client = client.clone();
             let config = config.clone();
             let capi_installer = capi_installer.clone();
-            let parent_servers_holder = parent_servers_holder.clone();
+            let parent_servers_rx = parent_servers_rx.clone();
             move || {
                 let client = client.clone();
                 let config = config.clone();
                 let capi_installer = capi_installer.clone();
-                let parent_servers_holder = parent_servers_holder.clone();
+                let mut parent_servers_rx = parent_servers_rx.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
                     let self_cluster_name = config.cluster_name.clone();
                     // Wait for cell infra to publish parent_servers
                     let parent_servers = loop {
-                        if let Some(ps) = parent_servers_holder.get() {
+                        if let Some(ref ps) = *parent_servers_rx.borrow_and_update() {
                             break Some(ps.clone());
                         }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        if parent_servers_rx.changed().await.is_err() {
+                            break None; // sender dropped
+                        }
                     };
                     controller_runner::build_cluster_controller(
                         client,
