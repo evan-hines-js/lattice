@@ -3,11 +3,14 @@
 //! A DNSProvider represents a named DNS provider account that clusters can reference
 //! for external-dns record management and cert-manager ACME DNS-01 challenges.
 
-use kube::CustomResource;
+use std::collections::BTreeMap;
+
+use kube::{CustomResource, ResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::SecretRef;
+use super::workload::resources::ResourceSpec;
 
 /// DNSProvider defines a DNS provider configuration for managing DNS records.
 ///
@@ -71,9 +74,24 @@ pub struct DNSProviderSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolver: Option<String>,
 
-    /// Reference to secret containing provider credentials
+    /// Reference to secret containing provider credentials.
+    /// Manual mode: operator creates a K8s Secret and references it here.
+    /// Mutually exclusive with `credentials`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_secret_ref: Option<SecretRef>,
+
+    /// ESO-managed credential source. Same ResourceSpec as LatticeService secrets.
+    /// The controller creates an ExternalSecret that syncs credentials from a
+    /// ClusterSecretStore. Mutually exclusive with `credentialsSecretRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<ResourceSpec>,
+
+    /// Template data for shaping credentials using `${secret.*}` syntax.
+    /// Each key becomes a key in the resulting K8s Secret.
+    /// Values can use `${secret.credentials.KEY}` to inject secret values.
+    /// Only valid when `credentials` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_data: Option<BTreeMap<String, String>>,
 
     /// Pi-hole-specific configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,6 +313,8 @@ impl DNSProviderSpec {
             zone: zone.to_string(),
             resolver: None,
             credentials_secret_ref: None,
+            credentials: None,
+            credential_data: None,
             pihole: None,
             route53: None,
             cloudflare: None,
@@ -305,9 +325,33 @@ impl DNSProviderSpec {
     }
 }
 
+/// Namespace where external-dns pods run. ESO-synced secrets must land here.
+const EXTERNAL_DNS_NAMESPACE: &str = "external-dns";
+
+impl DNSProvider {
+    /// Resolve the K8s Secret that contains provider credentials.
+    ///
+    /// - ESO mode (`credentials` set): returns a synthetic ref pointing to the
+    ///   ESO-synced secret `{name}-credentials` in `external-dns` namespace
+    ///   (where external-dns pods run).
+    /// - Manual mode (`credentialsSecretRef` set): returns the user-provided ref.
+    /// - Neither set: returns `None`.
+    pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
+        if self.spec.credentials.is_some() {
+            Some(SecretRef {
+                name: format!("{}-credentials", self.name_any()),
+                namespace: EXTERNAL_DNS_NAMESPACE.to_string(),
+            })
+        } else {
+            self.spec.credentials_secret_ref.clone()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crd::{ResourceParams, ResourceType, SecretParams};
 
     #[test]
     fn pihole_provider_yaml() {
@@ -484,5 +528,164 @@ spec:
             ..DNSProviderSpec::new(DNSProviderType::Designate, "internal.cloud")
         };
         assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn k8s_secret_ref_manual_mode() {
+        let provider = DNSProvider::new(
+            "route53-prod",
+            DNSProviderSpec {
+                credentials_secret_ref: Some(SecretRef {
+                    name: "aws-dns-creds".to_string(),
+                    namespace: "lattice-system".to_string(),
+                }),
+                ..DNSProviderSpec::new(DNSProviderType::Route53, "example.com")
+            },
+        );
+
+        let secret_ref = provider.k8s_secret_ref().expect("should have secret ref");
+        assert_eq!(secret_ref.name, "aws-dns-creds");
+        assert_eq!(secret_ref.namespace, "lattice-system");
+    }
+
+    #[test]
+    fn k8s_secret_ref_eso_mode() {
+        let provider = DNSProvider::new(
+            "route53-prod",
+            DNSProviderSpec {
+                credentials: Some(ResourceSpec {
+                    type_: ResourceType::Secret,
+                    id: Some("dns/aws/prod".to_string()),
+                    params: ResourceParams::Secret(SecretParams {
+                        provider: "vault-prod".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..DNSProviderSpec::new(DNSProviderType::Route53, "example.com")
+            },
+        );
+
+        let secret_ref = provider.k8s_secret_ref().expect("should have secret ref");
+        assert_eq!(secret_ref.name, "route53-prod-credentials");
+        assert_eq!(secret_ref.namespace, EXTERNAL_DNS_NAMESPACE);
+    }
+
+    #[test]
+    fn k8s_secret_ref_none() {
+        let provider = DNSProvider::new(
+            "pihole-local",
+            DNSProviderSpec {
+                pihole: Some(PiholeConfig {
+                    url: "http://pihole.local".to_string(),
+                }),
+                ..DNSProviderSpec::new(DNSProviderType::Pihole, "home.local")
+            },
+        );
+
+        assert!(provider.k8s_secret_ref().is_none());
+    }
+
+    #[test]
+    fn eso_credentials_take_priority_over_manual() {
+        let provider = DNSProvider::new(
+            "route53-test",
+            DNSProviderSpec {
+                credentials_secret_ref: Some(SecretRef {
+                    name: "manual".to_string(),
+                    namespace: "default".to_string(),
+                }),
+                credentials: Some(ResourceSpec {
+                    type_: ResourceType::Secret,
+                    id: Some("dns/aws/prod".to_string()),
+                    params: ResourceParams::Secret(SecretParams {
+                        provider: "vault".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..DNSProviderSpec::new(DNSProviderType::Route53, "example.com")
+            },
+        );
+
+        let secret_ref = provider.k8s_secret_ref().unwrap();
+        assert_eq!(secret_ref.name, "route53-test-credentials");
+    }
+
+    #[test]
+    fn eso_credentials_yaml_parsing() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: DNSProvider
+metadata:
+  name: route53-prod
+  namespace: lattice-system
+spec:
+  type: route53
+  zone: example.com
+  credentials:
+    type: secret
+    id: dns/aws/prod
+    params:
+      provider: vault-prod
+      keys:
+        - AWS_ACCESS_KEY_ID
+        - AWS_SECRET_ACCESS_KEY
+  route53:
+    region: us-east-1
+    hostedZoneId: Z1234567890
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: DNSProvider = serde_json::from_value(value).expect("parse");
+
+        assert_eq!(provider.spec.provider_type, DNSProviderType::Route53);
+        assert!(provider.spec.credentials.is_some());
+        assert!(provider.spec.credentials_secret_ref.is_none());
+
+        let creds = provider.spec.credentials.as_ref().unwrap();
+        assert!(creds.type_.is_secret());
+        assert_eq!(creds.id, Some("dns/aws/prod".to_string()));
+
+        let secret_ref = provider.k8s_secret_ref().expect("should have secret ref");
+        assert_eq!(secret_ref.name, "route53-prod-credentials");
+        assert_eq!(secret_ref.namespace, EXTERNAL_DNS_NAMESPACE);
+    }
+
+    #[test]
+    fn credential_data_yaml_parsing() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: DNSProvider
+metadata:
+  name: designate-prod
+  namespace: lattice-system
+spec:
+  type: designate
+  zone: internal.cloud
+  credentials:
+    type: secret
+    id: dns/openstack/prod
+    params:
+      provider: vault-prod
+      keys:
+        - username
+        - password
+        - auth_url
+  credentialData:
+    openstack-env: |
+      OS_USERNAME="${secret.credentials.username}"
+      OS_PASSWORD="${secret.credentials.password}"
+  designate:
+    region: RegionOne
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: DNSProvider = serde_json::from_value(value).expect("parse");
+
+        assert!(provider.spec.credentials.is_some());
+        assert!(provider.spec.credential_data.is_some());
+
+        let data = provider.spec.credential_data.as_ref().unwrap();
+        assert!(data.contains_key("openstack-env"));
+        assert!(data["openstack-env"].contains("${secret.credentials.username}"));
     }
 }

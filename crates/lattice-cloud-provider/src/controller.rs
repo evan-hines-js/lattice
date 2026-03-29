@@ -6,16 +6,15 @@
 //!
 //! InfraProvider supports three mutually exclusive credential modes:
 //!
-//! 1. **ESO mode** (`credentials` field): The controller creates an ESO ExternalSecret
-//!    that syncs credentials from a ClusterSecretStore. Optionally shaped with
-//!    `credentialData` templates.
+//! - **ESO mode** (`credentials` field): The controller creates an ESO ExternalSecret
+//!   that syncs credentials from a ClusterSecretStore. Optionally shaped with
+//!   `credentialData` templates.
 //!
-//! 2. **Manual mode** (`credentialsSecretRef` field): Operator manages the K8s Secret
-//!    directly. The controller only validates the reference is present.
+//! - **Manual mode** (`credentialsSecretRef` field): Operator manages the K8s Secret
+//!   directly. The controller only validates the reference is present.
 //!
-//! 3. **No credentials** (Docker provider): No credentials required.
+//! - **No credentials** (Docker provider): No credentials required.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,16 +26,16 @@ use lattice_common::crd::{
     InfraProvider, InfraProviderPhase, InfraProviderStatus, InfraProviderType,
 };
 use lattice_common::status_check;
-use lattice_common::template::extract_secret_refs;
 use lattice_common::{
     ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
     REQUEUE_SUCCESS_SECS,
 };
+use lattice_secret_provider::credentials::{
+    reconcile_credentials as reconcile_eso_credentials, validate_credential_fields,
+    ProviderCredentialConfig,
+};
 
 const FIELD_MANAGER: &str = "lattice-cloud-provider-controller";
-use lattice_secret_provider::eso::{
-    apply_external_secret, build_external_secret, build_templated_external_secret,
-};
 
 /// Reconcile a InfraProvider
 ///
@@ -106,17 +105,11 @@ pub async fn reconcile(
 /// - **Manual mode**: Validates `credentialsSecretRef` is present
 /// - **Docker**: No credentials required
 async fn reconcile_credentials(client: &Client, cp: &InfraProvider) -> Result<(), ReconcileError> {
-    // Mutual exclusion validation
-    if cp.spec.credentials.is_some() && cp.spec.credentials_secret_ref.is_some() {
-        return Err(ReconcileError::Validation(
-            "credentials and credentialsSecretRef are mutually exclusive".into(),
-        ));
-    }
-    if cp.spec.credential_data.is_some() && cp.spec.credentials.is_none() {
-        return Err(ReconcileError::Validation(
-            "credentialData requires credentials to be set".into(),
-        ));
-    }
+    validate_credential_fields(
+        cp.spec.credentials.is_some(),
+        cp.spec.credentials_secret_ref.is_some(),
+        cp.spec.credential_data.is_some(),
+    )?;
 
     match cp.spec.provider_type {
         InfraProviderType::Docker => {
@@ -124,63 +117,20 @@ async fn reconcile_credentials(client: &Client, cp: &InfraProvider) -> Result<()
             Ok(())
         }
         provider_type => {
-            if let Some(ref resource) = cp.spec.credentials {
-                // ESO mode: create ExternalSecret
-                let params = resource.params.as_secret().ok_or_else(|| {
-                    ReconcileError::Validation(
-                        "credentials must have type: secret with params.provider".into(),
-                    )
-                })?;
-
-                let remote_key = resource.secret_remote_key().ok_or_else(|| {
-                    ReconcileError::Validation(
-                        "credentials: missing 'id' field (remote key)".into(),
-                    )
-                })?;
-
-                let secret_name = format!("{}-credentials", cp.name_any());
-
-                let es = if let Some(ref data) = cp.spec.credential_data {
-                    // Templated mode: extract ${secret.*} refs, build templated ExternalSecret
-                    let mut template_data = BTreeMap::new();
-                    let mut all_refs = Vec::new();
-                    for (key, value) in data {
-                        let (rendered, refs) = extract_secret_refs(value, false);
-                        template_data.insert(key.clone(), rendered);
-                        all_refs.extend(refs);
-                    }
-                    build_templated_external_secret(
-                        &secret_name,
-                        LATTICE_SYSTEM_NAMESPACE,
-                        &params.provider,
-                        remote_key,
-                        params.keys.as_deref(),
-                        template_data,
-                        &all_refs,
-                    )
-                    .map_err(ReconcileError::Validation)?
-                } else {
-                    // Simple mode: sync all keys directly
-                    build_external_secret(
-                        &secret_name,
-                        LATTICE_SYSTEM_NAMESPACE,
-                        &params.provider,
-                        remote_key,
-                        params.keys.as_deref(),
-                        None,
-                    )
-                };
-
-                apply_external_secret(client, &es, FIELD_MANAGER).await?;
-
-                debug!(
-                    cloud_provider = %cp.name_any(),
-                    provider = ?provider_type,
-                    "ESO ExternalSecret applied for credentials"
-                );
+            if let Some(ref credentials) = cp.spec.credentials {
+                reconcile_eso_credentials(
+                    client,
+                    &ProviderCredentialConfig {
+                        provider_name: &cp.name_any(),
+                        credentials,
+                        credential_data: cp.spec.credential_data.as_ref(),
+                        target_namespace: LATTICE_SYSTEM_NAMESPACE,
+                        field_manager: FIELD_MANAGER,
+                    },
+                )
+                .await?;
                 Ok(())
             } else if cp.spec.credentials_secret_ref.is_some() {
-                // Manual mode: credentials managed externally
                 debug!(
                     cloud_provider = %cp.name_any(),
                     provider = ?provider_type,
@@ -247,7 +197,10 @@ mod tests {
     use lattice_common::crd::{
         InfraProviderSpec, ResourceParams, ResourceSpec, ResourceType, SecretParams, SecretRef,
     };
+    use lattice_common::template::extract_secret_refs;
     use lattice_common::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE};
+    use lattice_secret_provider::eso::{build_external_secret, build_templated_external_secret};
+    use std::collections::BTreeMap;
 
     // =========================================================================
     // Test Helpers

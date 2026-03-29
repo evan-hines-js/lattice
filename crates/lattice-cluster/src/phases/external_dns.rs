@@ -9,7 +9,7 @@ use kube::{Client, ResourceExt};
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{DNSProvider, DNSProviderSpec, DNSProviderType, LatticeCluster};
+use lattice_common::crd::{DNSProvider, DNSProviderSpec, DNSProviderType, LatticeCluster, SecretRef};
 use lattice_common::{
     Error, LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE, LATTICE_SYSTEM_NAMESPACE,
 };
@@ -63,7 +63,9 @@ pub async fn reconcile_external_dns(
             }
         };
 
-        let manifests = build_external_dns_manifests(&provider.spec, provider_name, &cluster_name);
+        let resolved_secret_ref = provider.k8s_secret_ref();
+        let manifests =
+            build_external_dns_manifests(&provider.spec, provider_name, &cluster_name, resolved_secret_ref.as_ref());
 
         for manifest in &manifests {
             apply_manifest(client, manifest).await?;
@@ -146,15 +148,14 @@ fn build_namespace() -> Value {
 
 /// Build all Kubernetes resource manifests for a single external-dns provider instance.
 ///
-/// Returns a Vec of `serde_json::Value` containing:
-/// - ServiceAccount
-/// - ClusterRole (read access to services, ingresses, nodes, endpoints)
-/// - ClusterRoleBinding
-/// - Deployment with provider-specific args and credential env vars / mounts
+/// `secret_ref` is the resolved credential reference — either from ESO (`k8s_secret_ref()`)
+/// or manual (`credentialsSecretRef`). This ensures the secret name and namespace are
+/// always correct regardless of credential mode.
 pub fn build_external_dns_manifests(
     spec: &DNSProviderSpec,
     provider_name: &str,
     cluster_name: &str,
+    secret_ref: Option<&SecretRef>,
 ) -> Vec<Value> {
     let sa_name = format!("external-dns-{provider_name}");
     let deployment_name = format!("external-dns-{provider_name}");
@@ -164,7 +165,7 @@ pub fn build_external_dns_manifests(
     let sa = build_service_account(&sa_name);
     let cr = build_cluster_role(&cr_name);
     let crb = build_cluster_role_binding(&crb_name, &cr_name, &sa_name);
-    let deployment = build_deployment(spec, &deployment_name, &sa_name, cluster_name);
+    let deployment = build_deployment(spec, &deployment_name, &sa_name, cluster_name, secret_ref);
 
     vec![sa, cr, crb, deployment]
 }
@@ -253,38 +254,58 @@ struct ProviderConfig {
     volumes: Vec<Value>,
 }
 
+/// Build a secretKeyRef env var entry.
+fn secret_env(name: &str, secret_name: &str, key: &str) -> Value {
+    json!({
+        "name": name,
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": secret_name,
+                "key": key
+            }
+        }
+    })
+}
+
+/// Build a volume + volume mount pair from a secret.
+fn secret_volume(volume_name: &str, secret_name: &str, mount_path: &str) -> (Value, Value) {
+    let volume = json!({
+        "name": volume_name,
+        "secret": {
+            "secretName": secret_name
+        }
+    });
+    let mount = json!({
+        "name": volume_name,
+        "mountPath": mount_path,
+        "readOnly": true
+    });
+    (volume, mount)
+}
+
 /// Build provider-specific args, env vars, and volume mounts for the container.
-fn provider_config(spec: &DNSProviderSpec) -> ProviderConfig {
+fn provider_config(spec: &DNSProviderSpec, secret_ref: Option<&SecretRef>) -> ProviderConfig {
     match spec.provider_type {
-        DNSProviderType::Pihole => pihole_config(spec),
-        DNSProviderType::Route53 => route53_config(spec),
-        DNSProviderType::Cloudflare => cloudflare_config(spec),
-        DNSProviderType::Google => google_config(spec),
-        DNSProviderType::Azure => azure_config(spec),
-        DNSProviderType::Designate => designate_config(spec),
+        DNSProviderType::Pihole => pihole_config(spec, secret_ref),
+        DNSProviderType::Route53 => route53_config(spec, secret_ref),
+        DNSProviderType::Cloudflare => cloudflare_config(spec, secret_ref),
+        DNSProviderType::Google => google_config(spec, secret_ref),
+        DNSProviderType::Azure => azure_config(spec, secret_ref),
+        DNSProviderType::Designate => designate_config(spec, secret_ref),
         _ => fallback_config(spec),
     }
 }
 
-fn pihole_config(spec: &DNSProviderSpec) -> ProviderConfig {
+fn pihole_config(spec: &DNSProviderSpec, secret_ref: Option<&SecretRef>) -> ProviderConfig {
     let url = spec
         .pihole
         .as_ref()
         .map(|p| p.url.as_str())
         .unwrap_or("http://pihole.local");
 
-    let mut env = Vec::new();
-    if let Some(ref secret_ref) = spec.credentials_secret_ref {
-        env.push(json!({
-            "name": "EXTERNAL_DNS_PIHOLE_PASSWORD",
-            "valueFrom": {
-                "secretKeyRef": {
-                    "name": secret_ref.name,
-                    "key": "EXTERNAL_DNS_PIHOLE_PASSWORD"
-                }
-            }
-        }));
-    }
+    let env = secret_ref
+        .map(|sr| vec![secret_env("EXTERNAL_DNS_PIHOLE_PASSWORD", &sr.name, "EXTERNAL_DNS_PIHOLE_PASSWORD")])
+        .unwrap_or_default();
 
     ProviderConfig {
         args: vec![
@@ -298,28 +319,15 @@ fn pihole_config(spec: &DNSProviderSpec) -> ProviderConfig {
     }
 }
 
-fn route53_config(spec: &DNSProviderSpec) -> ProviderConfig {
-    let mut env = Vec::new();
-    if let Some(ref secret_ref) = spec.credentials_secret_ref {
-        env.push(json!({
-            "name": "AWS_ACCESS_KEY_ID",
-            "valueFrom": {
-                "secretKeyRef": {
-                    "name": secret_ref.name,
-                    "key": "AWS_ACCESS_KEY_ID"
-                }
-            }
-        }));
-        env.push(json!({
-            "name": "AWS_SECRET_ACCESS_KEY",
-            "valueFrom": {
-                "secretKeyRef": {
-                    "name": secret_ref.name,
-                    "key": "AWS_SECRET_ACCESS_KEY"
-                }
-            }
-        }));
-    }
+fn route53_config(spec: &DNSProviderSpec, secret_ref: Option<&SecretRef>) -> ProviderConfig {
+    let env = secret_ref
+        .map(|sr| {
+            vec![
+                secret_env("AWS_ACCESS_KEY_ID", &sr.name, "AWS_ACCESS_KEY_ID"),
+                secret_env("AWS_SECRET_ACCESS_KEY", &sr.name, "AWS_SECRET_ACCESS_KEY"),
+            ]
+        })
+        .unwrap_or_default();
 
     ProviderConfig {
         args: vec![
@@ -333,21 +341,12 @@ fn route53_config(spec: &DNSProviderSpec) -> ProviderConfig {
     }
 }
 
-fn cloudflare_config(spec: &DNSProviderSpec) -> ProviderConfig {
+fn cloudflare_config(spec: &DNSProviderSpec, secret_ref: Option<&SecretRef>) -> ProviderConfig {
     let proxied = spec.cloudflare.as_ref().map(|c| c.proxied).unwrap_or(false);
 
-    let mut env = Vec::new();
-    if let Some(ref secret_ref) = spec.credentials_secret_ref {
-        env.push(json!({
-            "name": "CF_API_TOKEN",
-            "valueFrom": {
-                "secretKeyRef": {
-                    "name": secret_ref.name,
-                    "key": "CF_API_TOKEN"
-                }
-            }
-        }));
-    }
+    let env = secret_ref
+        .map(|sr| vec![secret_env("CF_API_TOKEN", &sr.name, "CF_API_TOKEN")])
+        .unwrap_or_default();
 
     ProviderConfig {
         args: vec![
@@ -361,7 +360,7 @@ fn cloudflare_config(spec: &DNSProviderSpec) -> ProviderConfig {
     }
 }
 
-fn google_config(spec: &DNSProviderSpec) -> ProviderConfig {
+fn google_config(spec: &DNSProviderSpec, secret_ref: Option<&SecretRef>) -> ProviderConfig {
     let project = spec
         .google
         .as_ref()
@@ -375,18 +374,10 @@ fn google_config(spec: &DNSProviderSpec) -> ProviderConfig {
 
     let mut volume_mounts = Vec::new();
     let mut volumes = Vec::new();
-    if let Some(ref secret_ref) = spec.credentials_secret_ref {
-        volume_mounts.push(json!({
-            "name": "google-credentials",
-            "mountPath": "/etc/google",
-            "readOnly": true
-        }));
-        volumes.push(json!({
-            "name": "google-credentials",
-            "secret": {
-                "secretName": secret_ref.name
-            }
-        }));
+    if let Some(sr) = secret_ref {
+        let (vol, mount) = secret_volume("google-credentials", &sr.name, "/etc/google");
+        volumes.push(vol);
+        volume_mounts.push(mount);
     }
 
     ProviderConfig {
@@ -401,7 +392,7 @@ fn google_config(spec: &DNSProviderSpec) -> ProviderConfig {
     }
 }
 
-fn azure_config(spec: &DNSProviderSpec) -> ProviderConfig {
+fn azure_config(spec: &DNSProviderSpec, secret_ref: Option<&SecretRef>) -> ProviderConfig {
     let (sub_id, rg) = spec
         .azure
         .as_ref()
@@ -411,18 +402,10 @@ fn azure_config(spec: &DNSProviderSpec) -> ProviderConfig {
     let mut env = Vec::new();
     let mut volume_mounts = Vec::new();
     let mut volumes = Vec::new();
-    if let Some(ref secret_ref) = spec.credentials_secret_ref {
-        volume_mounts.push(json!({
-            "name": "azure-config",
-            "mountPath": "/etc/kubernetes",
-            "readOnly": true
-        }));
-        volumes.push(json!({
-            "name": "azure-config",
-            "secret": {
-                "secretName": secret_ref.name
-            }
-        }));
+    if let Some(sr) = secret_ref {
+        let (vol, mount) = secret_volume("azure-config", &sr.name, "/etc/kubernetes");
+        volumes.push(vol);
+        volume_mounts.push(mount);
         env.push(json!({
             "name": "AZURE_AUTH_LOCATION",
             "value": "/etc/kubernetes/azure.json"
@@ -442,28 +425,15 @@ fn azure_config(spec: &DNSProviderSpec) -> ProviderConfig {
     }
 }
 
-fn designate_config(spec: &DNSProviderSpec) -> ProviderConfig {
-    let mut env = Vec::new();
-    if let Some(ref secret_ref) = spec.credentials_secret_ref {
-        for key in &[
-            "OS_AUTH_URL",
-            "OS_USERNAME",
-            "OS_PASSWORD",
-            "OS_PROJECT_NAME",
-            "OS_USER_DOMAIN_NAME",
-            "OS_PROJECT_DOMAIN_NAME",
-        ] {
-            env.push(json!({
-                "name": key,
-                "valueFrom": {
-                    "secretKeyRef": {
-                        "name": secret_ref.name,
-                        "key": key
-                    }
-                }
-            }));
-        }
-    }
+fn designate_config(spec: &DNSProviderSpec, secret_ref: Option<&SecretRef>) -> ProviderConfig {
+    let env = secret_ref
+        .map(|sr| {
+            ["OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD", "OS_PROJECT_NAME", "OS_USER_DOMAIN_NAME", "OS_PROJECT_DOMAIN_NAME"]
+                .iter()
+                .map(|key| secret_env(key, &sr.name, key))
+                .collect()
+        })
+        .unwrap_or_default();
 
     ProviderConfig {
         args: vec![
@@ -491,6 +461,7 @@ fn build_deployment(
     name: &str,
     sa_name: &str,
     cluster_name: &str,
+    secret_ref: Option<&SecretRef>,
 ) -> Value {
     let mut all_args = common_args(cluster_name);
     let ProviderConfig {
@@ -498,7 +469,7 @@ fn build_deployment(
         env,
         volume_mounts,
         volumes,
-    } = provider_config(spec);
+    } = provider_config(spec, secret_ref);
     all_args.extend(provider_args);
 
     let mut container = json!({
@@ -556,25 +527,18 @@ fn build_deployment(
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        AzureDnsConfig, CloudflareConfig, DesignateConfig, GoogleDnsConfig, PiholeConfig, SecretRef,
+        AzureDnsConfig, CloudflareConfig, DesignateConfig, GoogleDnsConfig, PiholeConfig,
     };
 
-    fn make_spec(provider_type: DNSProviderType, zone: &str) -> DNSProviderSpec {
-        DNSProviderSpec {
-            provider_type,
-            zone: zone.to_string(),
-            resolver: None,
-            credentials_secret_ref: Some(SecretRef {
-                name: "test-creds".to_string(),
-                namespace: "lattice-system".to_string(),
-            }),
-            pihole: None,
-            route53: None,
-            cloudflare: None,
-            google: None,
-            azure: None,
-            designate: None,
+    fn test_secret_ref() -> SecretRef {
+        SecretRef {
+            name: "test-creds".to_string(),
+            namespace: "external-dns".to_string(),
         }
+    }
+
+    fn make_spec(provider_type: DNSProviderType, zone: &str) -> DNSProviderSpec {
+        DNSProviderSpec::new(provider_type, zone)
     }
 
     fn find_deployment(manifests: &[Value]) -> &Value {
@@ -608,7 +572,8 @@ mod tests {
             }),
             ..make_spec(DNSProviderType::Pihole, "home.local")
         };
-        let manifests = build_external_dns_manifests(&spec, "pihole-local", "test-cluster");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "pihole-local", "test-cluster", Some(&sr));
 
         assert_eq!(manifests.len(), 4);
         assert_eq!(manifests[0]["kind"], "ServiceAccount");
@@ -633,7 +598,8 @@ mod tests {
     #[test]
     fn route53_manifests() {
         let spec = make_spec(DNSProviderType::Route53, "example.com");
-        let manifests = build_external_dns_manifests(&spec, "route53-prod", "prod-cluster");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "route53-prod", "prod-cluster", Some(&sr));
 
         let dep = find_deployment(&manifests);
         let args = deployment_args(dep);
@@ -654,7 +620,8 @@ mod tests {
             cloudflare: Some(CloudflareConfig { proxied: true }),
             ..make_spec(DNSProviderType::Cloudflare, "example.com")
         };
-        let manifests = build_external_dns_manifests(&spec, "cf-prod", "prod-cluster");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "cf-prod", "prod-cluster", Some(&sr));
 
         let dep = find_deployment(&manifests);
         let args = deployment_args(dep);
@@ -672,7 +639,8 @@ mod tests {
             cloudflare: Some(CloudflareConfig { proxied: false }),
             ..make_spec(DNSProviderType::Cloudflare, "example.com")
         };
-        let manifests = build_external_dns_manifests(&spec, "cf-prod", "prod-cluster");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "cf-prod", "prod-cluster", Some(&sr));
 
         let dep = find_deployment(&manifests);
         let args = deployment_args(dep);
@@ -687,7 +655,8 @@ mod tests {
             }),
             ..make_spec(DNSProviderType::Google, "example.com")
         };
-        let manifests = build_external_dns_manifests(&spec, "google-prod", "prod-cluster");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "google-prod", "prod-cluster", Some(&sr));
 
         let dep = find_deployment(&manifests);
         let args = deployment_args(dep);
@@ -717,7 +686,8 @@ mod tests {
             }),
             ..make_spec(DNSProviderType::Azure, "example.com")
         };
-        let manifests = build_external_dns_manifests(&spec, "azure-prod", "prod-cluster");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "azure-prod", "prod-cluster", Some(&sr));
 
         let dep = find_deployment(&manifests);
         let args = deployment_args(dep);
@@ -744,7 +714,8 @@ mod tests {
             }),
             ..make_spec(DNSProviderType::Designate, "internal.cloud")
         };
-        let manifests = build_external_dns_manifests(&spec, "designate-prod", "prod-cluster");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "designate-prod", "prod-cluster", Some(&sr));
 
         let dep = find_deployment(&manifests);
         let args = deployment_args(dep);
@@ -763,7 +734,8 @@ mod tests {
     #[test]
     fn managed_by_labels_on_all_resources() {
         let spec = make_spec(DNSProviderType::Route53, "example.com");
-        let manifests = build_external_dns_manifests(&spec, "route53-prod", "test");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "route53-prod", "test", Some(&sr));
 
         for manifest in &manifests {
             let label = manifest["metadata"]["labels"][LATTICE_MANAGED_BY_LABEL]
@@ -780,7 +752,8 @@ mod tests {
     #[test]
     fn service_account_names_match() {
         let spec = make_spec(DNSProviderType::Route53, "example.com");
-        let manifests = build_external_dns_manifests(&spec, "my-provider", "cluster");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "my-provider", "cluster", Some(&sr));
 
         let sa_name = manifests[0]["metadata"]["name"].as_str().unwrap();
         assert_eq!(sa_name, "external-dns-my-provider");
@@ -794,7 +767,8 @@ mod tests {
     #[test]
     fn cluster_role_has_correct_rules() {
         let spec = make_spec(DNSProviderType::Route53, "example.com");
-        let manifests = build_external_dns_manifests(&spec, "test", "cluster");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "test", "cluster", Some(&sr));
 
         let cr = &manifests[1];
         let rules = cr["rules"].as_array().unwrap();
@@ -821,11 +795,8 @@ mod tests {
 
     #[test]
     fn no_credentials_omits_env() {
-        let spec = DNSProviderSpec {
-            credentials_secret_ref: None,
-            ..make_spec(DNSProviderType::Route53, "example.com")
-        };
-        let manifests = build_external_dns_manifests(&spec, "test", "cluster");
+        let spec = make_spec(DNSProviderType::Route53, "example.com");
+        let manifests = build_external_dns_manifests(&spec, "test", "cluster", None);
 
         let dep = find_deployment(&manifests);
         // env key should not exist (no credentials)
@@ -835,7 +806,8 @@ mod tests {
     #[test]
     fn deployment_image_is_correct() {
         let spec = make_spec(DNSProviderType::Route53, "example.com");
-        let manifests = build_external_dns_manifests(&spec, "test", "cluster");
+        let sr = test_secret_ref();
+        let manifests = build_external_dns_manifests(&spec, "test", "cluster", Some(&sr));
 
         let dep = find_deployment(&manifests);
         let image = dep["spec"]["template"]["spec"]["containers"][0]["image"]

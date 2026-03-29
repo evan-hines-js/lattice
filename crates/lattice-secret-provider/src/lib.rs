@@ -7,5 +7,6 @@
 #![deny(missing_docs)]
 
 pub mod controller;
+pub mod credentials;
 pub mod eso;
 pub mod webhook;

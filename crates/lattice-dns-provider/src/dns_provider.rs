@@ -21,8 +21,15 @@ use lattice_common::{
     ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
     REQUEUE_SUCCESS_SECS,
 };
+use lattice_secret_provider::credentials::{
+    reconcile_credentials as reconcile_eso_credentials, validate_credential_fields,
+    ProviderCredentialConfig,
+};
 
 const FIELD_MANAGER: &str = "lattice-dns-provider-controller";
+
+/// Namespace where external-dns pods run. ESO-synced secrets must land here.
+const EXTERNAL_DNS_NAMESPACE: &str = "external-dns";
 
 /// Reconcile a DNSProvider
 ///
@@ -92,6 +99,13 @@ async fn validate_provider(client: &Client, provider: &DNSProvider) -> Result<()
         .validate()
         .map_err(|e| ReconcileError::Validation(e.to_string()))?;
 
+    // Validate mutual exclusion of credential modes
+    validate_credential_fields(
+        provider.spec.credentials.is_some(),
+        provider.spec.credentials_secret_ref.is_some(),
+        provider.spec.credential_data.is_some(),
+    )?;
+
     match provider.spec.provider_type {
         DNSProviderType::Pihole => {
             // Pi-hole only needs spec validation (URL presence), no secret check
@@ -99,35 +113,43 @@ async fn validate_provider(client: &Client, provider: &DNSProvider) -> Result<()
             Ok(())
         }
         _ => {
-            // All other providers require credentials
-            let secret_ref = provider
-                .spec
-                .credentials_secret_ref
-                .as_ref()
-                .ok_or_else(|| {
-                    ReconcileError::Validation(format!(
-                        "{} provider requires credentialsSecretRef",
-                        provider.spec.provider_type
-                    ))
-                })?;
+            if let Some(ref credentials) = provider.spec.credentials {
+                reconcile_eso_credentials(
+                    client,
+                    &ProviderCredentialConfig {
+                        provider_name: &provider.name_any(),
+                        credentials,
+                        credential_data: provider.spec.credential_data.as_ref(),
+                        target_namespace: EXTERNAL_DNS_NAMESPACE,
+                        field_manager: FIELD_MANAGER,
+                    },
+                )
+                .await?;
+                Ok(())
+            } else if let Some(ref secret_ref) = provider.spec.credentials_secret_ref {
+                // Manual mode: verify the referenced secret exists
+                let ns = &secret_ref.namespace;
+                let secret_name = &secret_ref.name;
 
-            let ns = &secret_ref.namespace;
-            let secret_name = &secret_ref.name;
+                let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+                secrets
+                    .get(secret_name)
+                    .await
+                    .map_err(ReconcileError::Kube)?;
 
-            let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
-            secrets
-                .get(secret_name)
-                .await
-                .map_err(ReconcileError::Kube)?;
-
-            debug!(
-                dns_provider = %provider.name_any(),
-                secret = %secret_name,
-                namespace = %ns,
-                "Credentials secret verified"
-            );
-
-            Ok(())
+                debug!(
+                    dns_provider = %provider.name_any(),
+                    secret = %secret_name,
+                    namespace = %ns,
+                    "Credentials secret verified"
+                );
+                Ok(())
+            } else {
+                Err(ReconcileError::Validation(format!(
+                    "{} provider requires credentials or credentialsSecretRef",
+                    provider.spec.provider_type
+                )))
+            }
         }
     }
 }
@@ -179,7 +201,7 @@ mod tests {
     use super::*;
     use lattice_common::crd::{
         AzureDnsConfig, CloudflareConfig, DNSProviderSpec, GoogleDnsConfig, PiholeConfig,
-        Route53Config, SecretRef,
+        ResourceParams, ResourceSpec, ResourceType, Route53Config, SecretParams, SecretRef,
     };
 
     // =========================================================================
@@ -313,15 +335,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route53_requires_credentials_secret_ref() {
+    async fn route53_requires_some_credentials() {
         let provider = DNSProvider::new(
             "route53-no-creds",
             DNSProviderSpec::new(DNSProviderType::Route53, "example.com"),
         );
-        // Spec validation passes (credentialsSecretRef is not checked there)
+        // Spec validation passes (credentials are not checked there)
         assert!(provider.spec.validate().is_ok());
-        // But the provider has no credentials_secret_ref, so the controller would reject it
+        // But the provider has neither credentials mode set
         assert!(provider.spec.credentials_secret_ref.is_none());
+        assert!(provider.spec.credentials.is_none());
+    }
+
+    #[tokio::test]
+    async fn mutual_exclusion_validation() {
+        // Both credentials and credentialsSecretRef set — should fail
+        assert!(validate_credential_fields(true, true, false).is_err());
+    }
+
+    #[tokio::test]
+    async fn credential_data_without_credentials_is_invalid() {
+        assert!(validate_credential_fields(false, false, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn eso_credentials_fields_present() {
+        let provider = DNSProvider::new(
+            "route53-eso",
+            DNSProviderSpec {
+                credentials: Some(ResourceSpec {
+                    type_: ResourceType::Secret,
+                    id: Some("dns/aws/prod".to_string()),
+                    params: ResourceParams::Secret(SecretParams {
+                        provider: "vault-prod".to_string(),
+                        keys: Some(vec![
+                            "AWS_ACCESS_KEY_ID".to_string(),
+                            "AWS_SECRET_ACCESS_KEY".to_string(),
+                        ]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..DNSProviderSpec::new(DNSProviderType::Route53, "example.com")
+            },
+        );
+
+        assert!(provider.spec.credentials.is_some());
+        assert!(provider.spec.credentials_secret_ref.is_none());
+        let secret_ref = provider.k8s_secret_ref().unwrap();
+        assert_eq!(secret_ref.name, "route53-eso-credentials");
+        assert_eq!(secret_ref.namespace, EXTERNAL_DNS_NAMESPACE);
     }
 
     #[tokio::test]

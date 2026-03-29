@@ -2931,6 +2931,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "lattice-common",
+ "lattice-secret-provider",
  "serde_json",
  "tokio",
  "tracing",
