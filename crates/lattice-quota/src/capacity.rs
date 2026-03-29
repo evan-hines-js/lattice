@@ -45,19 +45,21 @@ pub async fn reconcile_capacity(
         .map_err(|e| format!("failed to get LatticeCluster '{cluster_name}': {e}"))?;
 
     let demand = aggregate_quotas(&quotas.items);
-    let plans = solve(&cluster.spec.nodes.worker_pools, &demand, rates);
+    let result = solve(&cluster.spec.nodes.worker_pools, &demand, rates);
 
-    if plans.is_empty() {
+    if result.plans.is_empty() {
         debug!("Solver produced no plans (no pools with capacity info)");
         return Ok(());
     }
 
     let capi_ns = capi_namespace(cluster_name);
-    apply_plans(client, cluster_name, &capi_ns, &plans).await?;
+    apply_plans(client, cluster_name, &capi_ns, &result.plans).await?;
 
     info!(
         cluster = %cluster_name,
-        plans = plans.len(),
+        plans = result.plans.len(),
+        min_cost_hr = format!("${:.2}", result.min_hourly_cost),
+        max_cost_hr = format!("${:.2}", result.max_hourly_cost),
         "Applied capacity plans from quota solver"
     );
     Ok(())
