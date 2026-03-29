@@ -216,6 +216,12 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
+    // Shared between cell infra and cluster controller — cell sets it,
+    // cluster controller reads it to register children in the subtree.
+    let parent_servers_holder: Arc<
+        OnceLock<Arc<ParentServers<DefaultManifestGenerator>>>,
+    > = Arc::new(OnceLock::new());
+
     // Cell infrastructure (gRPC server, bootstrap webhook, auth proxy)
     let _h_cell = tokio::spawn(controller_runner::leader_controller(
         client.clone(),
@@ -227,23 +233,25 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
             let client = client.clone();
             let config = config.clone();
             let cedar = cedar.clone();
+            let parent_servers_holder = parent_servers_holder.clone();
             move || {
                 let client = client.clone();
                 let config = config.clone();
                 let cedar = cedar.clone();
+                let parent_servers_holder = parent_servers_holder.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
                     let self_cluster_name = config.cluster_name.clone();
                     match setup_cell_infra(&client, &self_cluster_name, cedar, &config).await {
-                        Ok((_servers, _agent_token, _auth_proxy, _route_tx)) => {
-                            // Hold the lease while cell infra is running
+                        Ok((servers, _agent_token, _auth_proxy, _route_tx)) => {
+                            let _ = parent_servers_holder.set(servers);
                             std::future::pending::<()>().await;
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Cell infrastructure setup failed");
                         }
                     }
-                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
             }
         },
     ));
@@ -259,24 +267,31 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
             let client = client.clone();
             let config = config.clone();
             let capi_installer = capi_installer.clone();
+            let parent_servers_holder = parent_servers_holder.clone();
             move || {
                 let client = client.clone();
                 let config = config.clone();
                 let capi_installer = capi_installer.clone();
+                let parent_servers_holder = parent_servers_holder.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
                     let self_cluster_name = config.cluster_name.clone();
-                    // parent_servers is None — children connect via the K8s
-                    // Service to whichever pod holds the cell lease
+                    // Wait for cell infra to publish parent_servers
+                    let parent_servers = loop {
+                        if let Some(ps) = parent_servers_holder.get() {
+                            break Some(ps.clone());
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    };
                     controller_runner::build_cluster_controller(
                         client,
                         self_cluster_name,
-                        None,
+                        parent_servers,
                         capi_installer,
                         config,
                     )
                     .await;
-                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
             }
         },
     ));
