@@ -17,6 +17,7 @@ mod model_serving;
 mod observability;
 mod oidc_provider;
 mod providers;
+mod quota;
 mod restore;
 mod secrets_provider;
 mod service;
@@ -78,6 +79,10 @@ pub use model_serving::{
 pub use observability::{
     scrape_metrics, MetricsConfig, MetricsScraper, MetricsSnapshot, NoopMetricsScraper,
     ObservabilitySpec,
+};
+pub use quota::{
+    LatticeQuota, LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus, QuotaPrincipal,
+    QuotaPrincipalError, QUOTA_GROUP_LABEL, QUOTA_OWNER_ANNOTATION,
 };
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,

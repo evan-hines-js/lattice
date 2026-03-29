@@ -169,6 +169,7 @@ impl CAPIClientImpl {
             &manifest.metadata.name,
             namespace,
             &manifest.metadata.labels,
+            &manifest.metadata.annotations,
             owner_ref.as_ref(),
         );
 
@@ -690,6 +691,7 @@ fn build_manifest_metadata(
     name: &str,
     namespace: &str,
     labels: &Option<std::collections::BTreeMap<String, String>>,
+    annotations: &Option<std::collections::BTreeMap<String, String>>,
     owner_ref: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     let mut metadata = serde_json::json!({
@@ -697,6 +699,10 @@ fn build_manifest_metadata(
         "namespace": namespace,
         "labels": labels,
     });
+
+    if let Some(ann) = annotations {
+        metadata["annotations"] = serde_json::to_value(ann).unwrap_or_default();
+    }
 
     if let Some(owner) = owner_ref {
         metadata["ownerReferences"] = serde_json::json!([owner]);
@@ -734,12 +740,14 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        let metadata = build_manifest_metadata("my-resource", "my-namespace", &labels, None);
+        let metadata =
+            build_manifest_metadata("my-resource", "my-namespace", &labels, &None, None);
 
         assert_eq!(metadata["name"], "my-resource");
         assert_eq!(metadata["namespace"], "my-namespace");
         assert_eq!(metadata["labels"]["app"], "test");
         assert!(metadata.get("ownerReferences").is_none());
+        assert!(metadata.get("annotations").is_none());
     }
 
     #[test]
@@ -749,7 +757,8 @@ mod tests {
             "parent-uid",
             "infrastructure.cluster.x-k8s.io/v1beta1",
         );
-        let metadata = build_manifest_metadata("my-resource", "my-namespace", &None, Some(&owner));
+        let metadata =
+            build_manifest_metadata("my-resource", "my-namespace", &None, &None, Some(&owner));
 
         assert_eq!(metadata["name"], "my-resource");
         assert_eq!(metadata["namespace"], "my-namespace");
@@ -760,10 +769,23 @@ mod tests {
 
     #[test]
     fn build_metadata_with_no_labels() {
-        let metadata = build_manifest_metadata("resource", "ns", &None, None);
+        let metadata = build_manifest_metadata("resource", "ns", &None, &None, None);
 
         assert_eq!(metadata["name"], "resource");
         assert_eq!(metadata["namespace"], "ns");
         assert!(metadata["labels"].is_null());
+    }
+
+    #[test]
+    fn build_metadata_with_annotations() {
+        let annotations: Option<std::collections::BTreeMap<String, String>> = Some(
+            [("cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size".to_string(), "0".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let metadata =
+            build_manifest_metadata("my-md", "my-namespace", &None, &annotations, None);
+
+        assert_eq!(metadata["annotations"]["cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size"], "0");
     }
 }

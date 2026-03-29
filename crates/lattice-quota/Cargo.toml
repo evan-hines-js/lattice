@@ -1,0 +1,25 @@
+[package]
+name = "lattice-quota"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Quota controller for Lattice - enforces resource limits and drives CAPI autoscaling"
+
+[dependencies]
+lattice-common = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Serialization
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

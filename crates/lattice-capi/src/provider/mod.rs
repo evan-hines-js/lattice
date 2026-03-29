@@ -563,27 +563,27 @@ pub fn generate_machine_deployment_for_pool(
         annotations.insert(AUTOSCALER_MIN_SIZE.to_string(), min.to_string());
         annotations.insert(AUTOSCALER_MAX_SIZE.to_string(), max.to_string());
 
-        // Capacity annotations for scale-from-zero: tell the autoscaler what
-        // resources a new node would have before any nodes exist.
+        // Capacity annotations for scale-from-zero (CAPI v1.12+ format).
+        // See: https://cluster-api.sigs.k8s.io/tasks/automated-machine-management/autoscaling#scale-from-zero-support
         if let Some(ref capacity) = pool.spec.capacity {
             annotations.insert(
-                "cluster-autoscaler.kubernetes.io/node-template/resources/cpu".to_string(),
+                "capacity.cluster-autoscaler.kubernetes.io/cpu".to_string(),
                 capacity.cpu.clone(),
             );
             annotations.insert(
-                "cluster-autoscaler.kubernetes.io/node-template/resources/memory".to_string(),
+                "capacity.cluster-autoscaler.kubernetes.io/memory".to_string(),
                 capacity.memory.clone(),
             );
         } else if let Some(ref it) = pool.spec.instance_type {
             // Derive capacity from resource-based instance types (Proxmox)
             if let Some(res) = it.as_resources() {
                 annotations.insert(
-                    "cluster-autoscaler.kubernetes.io/node-template/resources/cpu".to_string(),
+                    "capacity.cluster-autoscaler.kubernetes.io/cpu".to_string(),
                     res.cores.to_string(),
                 );
                 annotations.insert(
-                    "cluster-autoscaler.kubernetes.io/node-template/resources/memory".to_string(),
-                    format!("{}Gi", res.memory_gib),
+                    "capacity.cluster-autoscaler.kubernetes.io/memory".to_string(),
+                    format!("{}G", res.memory_gib),
                 );
             }
         }
@@ -596,26 +596,33 @@ pub fn generate_machine_deployment_for_pool(
             .and_then(|it| it.gpu.as_ref())
         {
             annotations.insert(
-                "cluster-autoscaler.kubernetes.io/node-template/resources/nvidia.com/gpu"
-                    .to_string(),
+                "capacity.cluster-autoscaler.kubernetes.io/gpu-type".to_string(),
+                "nvidia.com/gpu".to_string(),
+            );
+            annotations.insert(
+                "capacity.cluster-autoscaler.kubernetes.io/gpu-count".to_string(),
                 gpu.count.to_string(),
             );
             annotations.insert(
-                "cluster-autoscaler.kubernetes.io/node-template/label/nvidia.com/gpu.product"
-                    .to_string(),
-                gpu.model.clone(),
+                "capacity.cluster-autoscaler.kubernetes.io/labels".to_string(),
+                format!("nvidia.com/gpu.product={}", gpu.model),
             );
         }
 
         // Taint annotations so the autoscaler knows about node taints at scale-from-zero
-        for taint in &pool.spec.effective_taints() {
-            let value = taint.value.as_deref().unwrap_or("");
+        let taints: Vec<String> = pool
+            .spec
+            .effective_taints()
+            .iter()
+            .map(|t| {
+                let value = t.value.as_deref().unwrap_or("");
+                format!("{}={}:{}", t.key, value, t.effect)
+            })
+            .collect();
+        if !taints.is_empty() {
             annotations.insert(
-                format!(
-                    "cluster-autoscaler.kubernetes.io/node-template/taint/{}",
-                    taint.key
-                ),
-                format!("{}:{}", value, taint.effect),
+                "capacity.cluster-autoscaler.kubernetes.io/taints".to_string(),
+                taints.join(","),
             );
         }
     }

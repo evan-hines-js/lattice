@@ -330,6 +330,60 @@ fn sum_container_requests(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Workload resource demand (for quota enforcement)
+// ---------------------------------------------------------------------------
+
+/// Total resource demand for a workload (all containers × replicas).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkloadResourceDemand {
+    /// Total CPU in millicores
+    pub cpu_millis: i64,
+    /// Total memory in bytes
+    pub memory_bytes: i64,
+    /// Total GPU count
+    pub gpu_count: u32,
+}
+
+/// Compute the total resource demand of a workload spec multiplied by replicas.
+///
+/// Sums CPU and memory from all container `requests`, and GPU count from
+/// `type: gpu` resource entries. The result is multiplied by `replicas`.
+pub fn compute_workload_demand(
+    workload: &crate::crd::workload::spec::WorkloadSpec,
+    replicas: u32,
+) -> Result<WorkloadResourceDemand, QuantityParseError> {
+    let mut cpu_millis: i64 = 0;
+    let mut memory_bytes: i64 = 0;
+
+    for container in workload.containers.values() {
+        if let Some(ref resources) = container.resources {
+            if let Some(ref requests) = resources.requests {
+                if let Some(ref cpu) = requests.cpu {
+                    cpu_millis += parse_cpu_millis_str(cpu)?;
+                }
+                if let Some(ref mem) = requests.memory {
+                    memory_bytes += parse_memory_bytes_str(mem)?;
+                }
+            }
+        }
+    }
+
+    let mut gpu_count: u32 = 0;
+    for resource in workload.resources.values() {
+        if let Some(gpu) = resource.params.as_gpu() {
+            gpu_count += gpu.count;
+        }
+    }
+
+    let r = replicas as i64;
+    Ok(WorkloadResourceDemand {
+        cpu_millis: cpu_millis * r,
+        memory_bytes: memory_bytes * r,
+        gpu_count: gpu_count * replicas,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +476,55 @@ mod tests {
     #[test]
     fn gpu_invalid() {
         assert!(parse_quantity_int(Some(&Quantity("abc".into()))).is_err());
+    }
+
+    #[test]
+    fn workload_demand_basic() {
+        use crate::crd::workload::container::ContainerSpec;
+        use crate::crd::workload::resources::{ResourceQuantity, ResourceRequirements};
+        use crate::crd::workload::spec::WorkloadSpec;
+        use std::collections::BTreeMap;
+
+        let mut containers = BTreeMap::new();
+        containers.insert(
+            "main".to_string(),
+            ContainerSpec {
+                image: "test:latest".to_string(),
+                resources: Some(ResourceRequirements {
+                    requests: Some(ResourceQuantity {
+                        cpu: Some("500m".to_string()),
+                        memory: Some("1Gi".to_string()),
+                        ..Default::default()
+                    }),
+                    limits: Some(ResourceQuantity {
+                        cpu: Some("1".to_string()),
+                        memory: Some("2Gi".to_string()),
+                        ..Default::default()
+                    }),
+                }),
+                ..Default::default()
+            },
+        );
+
+        let workload = WorkloadSpec {
+            containers,
+            ..Default::default()
+        };
+
+        let demand = compute_workload_demand(&workload, 3).unwrap();
+        assert_eq!(demand.cpu_millis, 1500); // 500m * 3
+        assert_eq!(demand.memory_bytes, 3 * 1024 * 1024 * 1024); // 1Gi * 3
+        assert_eq!(demand.gpu_count, 0);
+    }
+
+    #[test]
+    fn workload_demand_empty() {
+        use crate::crd::workload::spec::WorkloadSpec;
+
+        let workload = WorkloadSpec::default();
+        let demand = compute_workload_demand(&workload, 1).unwrap();
+        assert_eq!(demand.cpu_millis, 0);
+        assert_eq!(demand.memory_bytes, 0);
+        assert_eq!(demand.gpu_count, 0);
     }
 }

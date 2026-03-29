@@ -3154,6 +3154,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-quota"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-secret-provider"
 version = "0.1.0"
 dependencies = [

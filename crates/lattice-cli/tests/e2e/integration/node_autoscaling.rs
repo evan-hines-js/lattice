@@ -54,17 +54,13 @@ pub async fn run_node_autoscaling_tests(kubeconfig: &str) -> Result<(), String> 
 
     ensure_fresh_namespace(kubeconfig, TEST_NAMESPACE).await?;
 
-    let result = async {
-        test_add_autoscaling_pool(kubeconfig).await?;
-        test_verify_md_annotations(kubeconfig).await?;
-        test_scale_from_zero(kubeconfig).await?;
-        test_scale_down_to_zero(kubeconfig).await?;
-        Ok(())
-    }
-    .await;
+    test_add_autoscaling_pool(kubeconfig).await?;
+    test_verify_md_annotations(kubeconfig).await?;
+    test_scale_from_zero(kubeconfig).await?;
+    test_scale_down_to_zero(kubeconfig).await?;
 
     cleanup(kubeconfig).await;
-    result
+    Ok(())
 }
 
 // =============================================================================
@@ -183,11 +179,11 @@ async fn test_verify_md_annotations(kubeconfig: &str) -> Result<(), String> {
         return Err(format!("MD missing max-size annotation: {annotations}"));
     }
 
-    // Verify capacity annotations (derived from resource-based instance type)
-    if !annotations.contains("node-template/resources/cpu") {
+    // Verify capacity annotations (CAPI v1.12+ format, derived from resource-based instance type)
+    if !annotations.contains("capacity.cluster-autoscaler.kubernetes.io/cpu") {
         return Err(format!("MD missing cpu capacity annotation: {annotations}"));
     }
-    if !annotations.contains("node-template/resources/memory") {
+    if !annotations.contains("capacity.cluster-autoscaler.kubernetes.io/memory") {
         return Err(format!(
             "MD missing memory capacity annotation: {annotations}"
         ));

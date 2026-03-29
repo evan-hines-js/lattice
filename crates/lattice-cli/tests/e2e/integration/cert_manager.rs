@@ -58,20 +58,27 @@ pub async fn run_cert_manager_tests(kubeconfig: &str) -> Result<(), String> {
 
     super::super::helpers::ensure_fresh_namespace(kubeconfig, CERT_TEST_NAMESPACE).await?;
 
-    let result = async {
-        test_dns_provider_lifecycle(kubeconfig).await?;
-        test_cert_issuer_lifecycle(kubeconfig).await?;
-        test_cluster_issuer_materialization(kubeconfig).await?;
-        test_certificate_issuance(kubeconfig).await?;
-        test_external_dns_deployment(kubeconfig).await?;
-        test_coredns_forwarding(kubeconfig).await?;
-        test_cluster_issuer_cleanup(kubeconfig).await?;
-        Ok(())
-    }
+    // Delete stale ClusterIssuer from previous failed runs
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "clusterissuer",
+        EXPECTED_CLUSTER_ISSUER,
+        "--ignore-not-found",
+    ])
     .await;
 
+    test_dns_provider_lifecycle(kubeconfig).await?;
+    test_cert_issuer_lifecycle(kubeconfig).await?;
+    test_cluster_issuer_materialization(kubeconfig).await?;
+    test_certificate_issuance(kubeconfig).await?;
+    test_external_dns_deployment(kubeconfig).await?;
+    test_coredns_forwarding(kubeconfig).await?;
+    test_cluster_issuer_cleanup(kubeconfig).await?;
+
     cleanup_test_resources(kubeconfig).await;
-    result
+    Ok(())
 }
 
 // =============================================================================
@@ -269,7 +276,9 @@ async fn test_cluster_issuer_materialization(kubeconfig: &str) -> Result<(), Str
     }
 
     // Verify managed-by label
-    let label_path = format!("jsonpath={{.metadata.labels['{MANAGED_BY_LABEL}']}}");
+    // Dots in label keys must be escaped in jsonpath expressions
+    let escaped_label = MANAGED_BY_LABEL.replace('.', r"\.");
+    let label_path = format!("jsonpath={{.metadata.labels.{escaped_label}}}");
     let label = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,

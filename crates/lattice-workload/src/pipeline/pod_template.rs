@@ -97,7 +97,7 @@ impl PodTemplateCompiler {
         // Build pod volumes from PVCs and emptyDir
         let mut pod_volumes: Vec<Volume> = volumes.volumes.clone();
 
-        // Add SHM volume for GPU pods (skip if user already declared /dev/shm)
+        // Add SHM volume for GPU pods (skip if already declared)
         let has_shm_volume = pod_volumes.iter().any(|v| {
             v.empty_dir
                 .as_ref()

@@ -961,32 +961,143 @@ mod tests {
     }
 
     #[test]
-    fn ingress_auto_injects_parent_refs() {
+    fn ingress_auto_injects_parent_refs_on_model_routes() {
         let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
         let routing = basic_routing();
         let ingress = basic_ingress();
 
         let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
-        let refs = compiled.model_routes[0].spec.parent_refs.as_ref().unwrap();
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].kind, Some("Gateway".to_string()));
+        let route = &compiled.model_routes[0];
+        let parent_refs = route.spec.parent_refs.as_ref().expect("parentRefs should be set");
+        assert_eq!(parent_refs.len(), 1);
+        assert_eq!(parent_refs[0].name, "default-ingress");
+        assert_eq!(parent_refs[0].kind, Some("Gateway".to_string()));
     }
 
     #[test]
-    fn ingress_external_dns_annotation() {
+    fn ingress_does_not_override_explicit_parent_refs() {
+        let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
+        let mut routing = basic_routing();
+
+        // Set explicit parentRefs on the route
+        routing
+            .routes
+            .get_mut("default")
+            .unwrap()
+            .parent_refs = Some(vec![ModelParentRef {
+            name: "custom-gateway".to_string(),
+            namespace: Some("custom-ns".to_string()),
+            kind: None,
+        }]);
+
+        let ingress = basic_ingress();
+
+        let compiled =
+            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+
+        let route = &compiled.model_routes[0];
+        let parent_refs = route.spec.parent_refs.as_ref().unwrap();
+        assert_eq!(parent_refs.len(), 1);
+        assert_eq!(parent_refs[0].name, "custom-gateway");
+    }
+
+    #[test]
+    fn ingress_external_dns_annotation_on_gateway() {
         let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
         let routing = basic_routing();
-        let ingress = basic_ingress();
+        let ingress = ModelIngressSpec {
+            hosts: vec![
+                "llama.lattice.gpu".to_string(),
+                "llama.us-east.lattice.gpu".to_string(),
+            ],
+            tls: None,
+            gateway_class: None,
+            listen_port: None,
+        };
 
         let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
         let gw = compiled.gateway.as_ref().unwrap();
-        let annotation = gw
+        let dns_annotation = gw
             .metadata
             .annotations
             .get("external-dns.alpha.kubernetes.io/hostname")
-            .unwrap();
-        assert_eq!(annotation, "llama-70b.us-east.lattice.gpu");
+            .expect("external-dns annotation should be set");
+        assert_eq!(dns_annotation, "llama.lattice.gpu,llama.us-east.lattice.gpu");
+    }
+
+    #[test]
+    fn ingress_multiple_hosts_create_multiple_listeners() {
+        let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
+        let routing = basic_routing();
+        let ingress = ModelIngressSpec {
+            hosts: vec![
+                "a.lattice.gpu".to_string(),
+                "b.lattice.gpu".to_string(),
+                "c.lattice.gpu".to_string(),
+            ],
+            tls: Some(IngressTls {
+                secret_name: None,
+                issuer_ref: Some(CertIssuerRef {
+                    name: "letsencrypt".to_string(),
+                    kind: None,
+                }),
+            }),
+            gateway_class: None,
+            listen_port: None,
+        };
+
+        let compiled =
+            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+
+        let gw = compiled.gateway.as_ref().unwrap();
+        assert_eq!(gw.spec.listeners.len(), 3);
+        assert_eq!(gw.spec.listeners[0].hostname, Some("a.lattice.gpu".to_string()));
+        assert_eq!(gw.spec.listeners[1].hostname, Some("b.lattice.gpu".to_string()));
+        assert_eq!(gw.spec.listeners[2].hostname, Some("c.lattice.gpu".to_string()));
+
+        let cert = compiled.certificate.as_ref().unwrap();
+        assert_eq!(cert.spec.dns_names.len(), 3);
+    }
+
+    #[test]
+    fn ingress_custom_gateway_class_and_port() {
+        let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
+        let routing = basic_routing();
+        let ingress = ModelIngressSpec {
+            hosts: vec!["model.example.com".to_string()],
+            tls: None,
+            gateway_class: Some("nginx".to_string()),
+            listen_port: Some(8443),
+        };
+
+        let compiled =
+            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+
+        let gw = compiled.gateway.as_ref().unwrap();
+        assert_eq!(gw.spec.gateway_class_name, "nginx");
+        assert_eq!(gw.spec.listeners[0].port, 8443);
+        assert_eq!(gw.spec.listeners[0].protocol, "HTTP");
+    }
+
+    #[test]
+    fn ingress_no_tls_uses_http_protocol() {
+        let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
+        let routing = basic_routing();
+        let ingress = ModelIngressSpec {
+            hosts: vec!["model.internal".to_string()],
+            tls: None,
+            gateway_class: None,
+            listen_port: None,
+        };
+
+        let compiled =
+            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+
+        let listener = &compiled.gateway.as_ref().unwrap().spec.listeners[0];
+        assert_eq!(listener.protocol, "HTTP");
+        assert!(listener.tls.is_none());
+        assert!(compiled.certificate.is_none());
     }
 }
