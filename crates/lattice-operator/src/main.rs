@@ -40,8 +40,8 @@ use lattice_common::telemetry::init_telemetry;
 use lattice_common::CrdRegistry;
 use lattice_common::SharedConfig;
 use lattice_common::{
-    lattice_svc_dns, DEFAULT_AUTH_PROXY_PORT, DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE,
-    OPERATOR_NAME,
+    lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT, DEFAULT_HEALTH_PORT,
+    LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME,
 };
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
@@ -54,8 +54,6 @@ use lattice_operator::startup::{
 
 mod controller_runner;
 mod metrics;
-
-use lattice_common::CELL_SERVICE_NAME;
 
 #[derive(Parser, Debug)]
 #[command(name = "lattice", version, about, long_about = None)]
@@ -179,7 +177,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
     tracing::info!("Spawning controllers with per-controller leader election...");
 
     // Infrastructure controller (CRD install, CAPI, Istio, ESO)
-    let _h_infra = tokio::spawn(controller_runner::leader_controller(
+    tokio::spawn(controller_runner::leader_controller(
         client.clone(),
         pod_name.clone(),
         "infra",
@@ -211,7 +209,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                         tracing::error!(error = ?e, "General infrastructure task failed");
                     }
                     std::future::pending::<()>().await;
-                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
             }
         },
     ));
@@ -220,7 +218,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
     let (parent_servers_tx, parent_servers_rx) = tokio::sync::watch::channel(None);
 
     // Cell infrastructure (gRPC server, bootstrap webhook, auth proxy)
-    let _h_cell = tokio::spawn(controller_runner::leader_controller(
+    tokio::spawn(controller_runner::leader_controller(
         client.clone(),
         pod_name.clone(),
         "cell",
@@ -254,7 +252,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
     ));
 
     // LatticeCluster controller
-    let _h_cluster = tokio::spawn(controller_runner::leader_controller(
+    tokio::spawn(controller_runner::leader_controller(
         client.clone(),
         pod_name.clone(),
         "cluster",
