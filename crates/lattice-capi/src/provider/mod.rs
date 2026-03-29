@@ -601,9 +601,29 @@ pub fn generate_machine_deployment_for_pool(
                 "capacity.cluster-autoscaler.kubernetes.io/gpu-count".to_string(),
                 gpu.count.to_string(),
             );
+        }
+
+        // Label annotations so the autoscaler knows what labels new nodes will have.
+        // Required for scale-from-zero when pods use nodeSelector.
+        let mut capacity_labels = pool.spec.labels.clone();
+        capacity_labels.insert("lattice.dev/pool".to_string(), pool.pool_id.to_string());
+        if let Some(gpu) = pool
+            .spec
+            .instance_type
+            .as_ref()
+            .and_then(|it| it.gpu.as_ref())
+        {
+            capacity_labels
+                .insert("nvidia.com/gpu.product".to_string(), gpu.model.clone());
+        }
+        let labels_str: Vec<String> = capacity_labels
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        if !labels_str.is_empty() {
             annotations.insert(
                 "capacity.cluster-autoscaler.kubernetes.io/labels".to_string(),
-                format!("nvidia.com/gpu.product={}", gpu.model),
+                labels_str.join(","),
             );
         }
 
