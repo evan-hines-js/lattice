@@ -257,7 +257,6 @@ impl CompilationError {
                 | Self::SecurityOverrideDenied { .. }
                 | Self::VolumeAccessDenied { .. }
                 | Self::ExternalEndpointAccessDenied { .. }
-                | Self::QuotaExceeded { .. }
         )
     }
 }

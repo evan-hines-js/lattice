@@ -14,27 +14,28 @@
 #![deny(missing_docs)]
 
 mod controller;
-pub mod enforcement;
+mod enforcement;
 
 pub use controller::reconcile;
+pub use enforcement::{enforce_quotas, QuotaError};
 
 use std::collections::BTreeMap;
 
-use lattice_common::resources::{WorkloadResourceDemand, GPU_RESOURCE};
+use lattice_common::resources::{
+    WorkloadResourceDemand, CPU_RESOURCE, GPU_RESOURCE, MEMORY_RESOURCE,
+};
 
 /// Format a raw resource value for human-readable display.
-///
-/// Shared by the controller (status formatting) and enforcement (error messages).
 pub fn format_resource_value(key: &str, value: i64) -> String {
     match key {
-        "cpu" => {
+        CPU_RESOURCE => {
             if value % 1000 == 0 {
                 format!("{}", value / 1000)
             } else {
                 format!("{}m", value)
             }
         }
-        "memory" => {
+        MEMORY_RESOURCE => {
             if value % (1024 * 1024 * 1024) == 0 {
                 format!("{}Gi", value / (1024 * 1024 * 1024))
             } else if value % (1024 * 1024) == 0 {
@@ -48,17 +49,18 @@ pub fn format_resource_value(key: &str, value: i64) -> String {
 }
 
 /// Convert a `WorkloadResourceDemand` into a human-readable resource map.
-///
-/// Used for `LatticeQuotaStatus.used` and error messages.
 pub fn format_demand_map(demand: &WorkloadResourceDemand) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     if demand.cpu_millis > 0 {
-        map.insert("cpu".to_string(), format_resource_value("cpu", demand.cpu_millis));
+        map.insert(
+            CPU_RESOURCE.to_string(),
+            format_resource_value(CPU_RESOURCE, demand.cpu_millis),
+        );
     }
     if demand.memory_bytes > 0 {
         map.insert(
-            "memory".to_string(),
-            format_resource_value("memory", demand.memory_bytes),
+            MEMORY_RESOURCE.to_string(),
+            format_resource_value(MEMORY_RESOURCE, demand.memory_bytes),
         );
     }
     if demand.gpu_count > 0 {

@@ -115,6 +115,7 @@ async fn compute_usage(
     let mut total = WorkloadResourceDemand::default();
     let mut count: u32 = 0;
     let mut ns_cache: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    let empty = BTreeMap::new();
 
     // Sum across LatticeServices
     if let Ok(services) = Api::<LatticeService>::all(client.clone())
@@ -123,15 +124,15 @@ async fn compute_usage(
     {
         for svc in &services.items {
             let ns = svc.namespace().unwrap_or_default();
-            let annotations = svc.metadata.annotations.as_ref().cloned().unwrap_or_default();
             let ns_labels = cached_ns_labels(client, &ns, &mut ns_cache).await;
+            let annotations = svc.metadata.annotations.as_ref().unwrap_or(&empty);
 
-            if !principal.matches_workload(&ns, &svc.name_any(), ns_labels, &annotations) {
+            if !principal.matches_workload(&ns, &svc.name_any(), ns_labels, annotations) {
                 continue;
             }
 
             if let Ok(demand) = compute_workload_demand(&svc.spec.workload, svc.spec.replicas) {
-                add_demand(&mut total, &demand);
+                total += &demand;
                 count += 1;
             }
         }
@@ -144,17 +145,17 @@ async fn compute_usage(
     {
         for job in &jobs.items {
             let ns = job.namespace().unwrap_or_default();
-            let annotations = job.metadata.annotations.as_ref().cloned().unwrap_or_default();
             let ns_labels = cached_ns_labels(client, &ns, &mut ns_cache).await;
+            let annotations = job.metadata.annotations.as_ref().unwrap_or(&empty);
 
-            if !principal.matches_workload(&ns, &job.name_any(), ns_labels, &annotations) {
+            if !principal.matches_workload(&ns, &job.name_any(), ns_labels, annotations) {
                 continue;
             }
 
             for task in job.spec.tasks.values() {
                 let replicas = task.replicas.unwrap_or(1);
                 if let Ok(demand) = compute_workload_demand(&task.workload, replicas) {
-                    add_demand(&mut total, &demand);
+                    total += &demand;
                 }
             }
             count += 1;
@@ -168,15 +169,10 @@ async fn compute_usage(
     {
         for model in &models.items {
             let ns = model.namespace().unwrap_or_default();
-            let annotations = model
-                .metadata
-                .annotations
-                .as_ref()
-                .cloned()
-                .unwrap_or_default();
             let ns_labels = cached_ns_labels(client, &ns, &mut ns_cache).await;
+            let annotations = model.metadata.annotations.as_ref().unwrap_or(&empty);
 
-            if !principal.matches_workload(&ns, &model.name_any(), ns_labels, &annotations) {
+            if !principal.matches_workload(&ns, &model.name_any(), ns_labels, annotations) {
                 continue;
             }
 
@@ -185,13 +181,13 @@ async fn compute_usage(
                 if let Ok(demand) =
                     compute_workload_demand(&role.entry_workload, entry_replicas)
                 {
-                    add_demand(&mut total, &demand);
+                    total += &demand;
                 }
                 if let (Some(ref worker_workload), Some(worker_replicas)) =
                     (&role.worker_workload, role.worker_replicas)
                 {
                     if let Ok(demand) = compute_workload_demand(worker_workload, worker_replicas) {
-                        add_demand(&mut total, &demand);
+                        total += &demand;
                     }
                 }
             }
@@ -202,15 +198,9 @@ async fn compute_usage(
     (total, count)
 }
 
-fn add_demand(total: &mut WorkloadResourceDemand, demand: &WorkloadResourceDemand) {
-    total.cpu_millis += demand.cpu_millis;
-    total.memory_bytes += demand.memory_bytes;
-    total.gpu_count += demand.gpu_count;
-}
-
 /// Check if usage exceeds any soft limit using the shared resource parser.
 fn is_exceeded(usage: &WorkloadResourceDemand, soft: &BTreeMap<String, String>) -> bool {
-    let raw = demand_to_raw(usage);
+    let raw = usage.to_raw_map();
     for (key, limit_str) in soft {
         if let Ok(limit) = parse_resource_by_key(key, limit_str) {
             let actual = raw.get(key.as_str()).copied().unwrap_or(0);
@@ -220,15 +210,6 @@ fn is_exceeded(usage: &WorkloadResourceDemand, soft: &BTreeMap<String, String>) 
         }
     }
     false
-}
-
-/// Map demand fields to raw i64 values keyed by resource name.
-fn demand_to_raw(demand: &WorkloadResourceDemand) -> BTreeMap<&'static str, i64> {
-    BTreeMap::from([
-        ("cpu", demand.cpu_millis),
-        ("memory", demand.memory_bytes),
-        ("nvidia.com/gpu", demand.gpu_count as i64),
-    ])
 }
 
 /// Get namespace labels, caching across lookups within one reconcile.

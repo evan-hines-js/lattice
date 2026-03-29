@@ -20,6 +20,12 @@ pub struct QuantityParseError(pub String);
 /// Label key that identifies which worker pool a node belongs to.
 pub const POOL_LABEL: &str = "lattice.dev/pool";
 
+/// CPU resource key for quota maps.
+pub const CPU_RESOURCE: &str = "cpu";
+
+/// Memory resource key for quota maps.
+pub const MEMORY_RESOURCE: &str = "memory";
+
 /// GPU resource name in Kubernetes.
 pub const GPU_RESOURCE: &str = "nvidia.com/gpu";
 
@@ -389,6 +395,27 @@ pub struct WorkloadResourceDemand {
     pub gpu_count: u32,
 }
 
+impl WorkloadResourceDemand {
+    /// Map demand fields to raw i64 values keyed by resource name.
+    ///
+    /// Used by quota enforcement to compare against limit maps.
+    pub fn to_raw_map(&self) -> std::collections::BTreeMap<&'static str, i64> {
+        std::collections::BTreeMap::from([
+            (CPU_RESOURCE, self.cpu_millis),
+            (MEMORY_RESOURCE, self.memory_bytes),
+            (GPU_RESOURCE, self.gpu_count as i64),
+        ])
+    }
+}
+
+impl std::ops::AddAssign<&WorkloadResourceDemand> for WorkloadResourceDemand {
+    fn add_assign(&mut self, rhs: &WorkloadResourceDemand) {
+        self.cpu_millis += rhs.cpu_millis;
+        self.memory_bytes += rhs.memory_bytes;
+        self.gpu_count += rhs.gpu_count;
+    }
+}
+
 /// Compute the total resource demand of a workload spec multiplied by replicas.
 ///
 /// Sums CPU and memory from all container `requests`, and GPU count from
@@ -404,7 +431,7 @@ pub fn compute_workload_demand(
     Ok(WorkloadResourceDemand {
         cpu_millis: cpu_millis * r,
         memory_bytes: memory_bytes * r,
-        gpu_count: gpu_count * (replicas as u32),
+        gpu_count: gpu_count * replicas,
     })
 }
 
@@ -420,8 +447,8 @@ pub fn compute_workload_demand(
 /// - everything else → plain integer (i64)
 pub fn parse_resource_by_key(key: &str, value: &str) -> Result<i64, QuantityParseError> {
     match key {
-        "cpu" => parse_cpu_millis_str(value),
-        "memory" => parse_memory_bytes_str(value),
+        CPU_RESOURCE => parse_cpu_millis_str(value),
+        MEMORY_RESOURCE => parse_memory_bytes_str(value),
         _ => value
             .parse::<i64>()
             .map_err(|_| QuantityParseError(format!("{key}: {value}"))),

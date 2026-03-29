@@ -58,8 +58,7 @@ pub struct WorkloadCompiler<'a> {
     eso_content_hash: String,
     quotas: &'a [lattice_common::crd::LatticeQuota],
     replicas: u32,
-    namespace_labels: std::collections::BTreeMap<String, String>,
-    workload_annotations: std::collections::BTreeMap<String, String>,
+    namespace_labels: BTreeMap<String, String>,
 }
 
 impl<'a> WorkloadCompiler<'a> {
@@ -97,8 +96,7 @@ impl<'a> WorkloadCompiler<'a> {
             eso_content_hash: String::new(),
             quotas: &[],
             replicas: 1,
-            namespace_labels: std::collections::BTreeMap::new(),
-            workload_annotations: std::collections::BTreeMap::new(),
+            namespace_labels: BTreeMap::new(),
         }
     }
 
@@ -160,18 +158,20 @@ impl<'a> WorkloadCompiler<'a> {
         self
     }
 
-    /// Set quota list and workload identity for quota enforcement.
+    /// Set quota list for enforcement during compilation.
     pub fn with_quotas(
         mut self,
         quotas: &'a [lattice_common::crd::LatticeQuota],
         replicas: u32,
-        namespace_labels: std::collections::BTreeMap<String, String>,
-        workload_annotations: std::collections::BTreeMap<String, String>,
     ) -> Self {
         self.quotas = quotas;
         self.replicas = replicas;
-        self.namespace_labels = namespace_labels;
-        self.workload_annotations = workload_annotations;
+        self
+    }
+
+    /// Set namespace labels for quota principal matching.
+    pub fn with_namespace_labels(mut self, labels: BTreeMap<String, String>) -> Self {
+        self.namespace_labels = labels;
         self
     }
 
@@ -233,12 +233,12 @@ impl<'a> WorkloadCompiler<'a> {
 
         // Quota enforcement — check resource limits before authorization
         if !self.quotas.is_empty() {
-            lattice_quota::enforcement::enforce_quotas(
+            lattice_quota::enforce_quotas(
                 self.quotas,
                 self.name,
                 self.namespace,
                 &self.namespace_labels,
-                &self.workload_annotations,
+                &self.annotations,
                 self.workload,
                 self.replicas,
             )

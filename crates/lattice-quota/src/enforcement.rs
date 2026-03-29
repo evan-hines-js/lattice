@@ -7,9 +7,7 @@ use std::collections::BTreeMap;
 
 use lattice_common::crd::workload::spec::WorkloadSpec;
 use lattice_common::crd::{LatticeQuota, QuotaPrincipal};
-use lattice_common::resources::{
-    compute_workload_demand, parse_resource_by_key, WorkloadResourceDemand,
-};
+use lattice_common::resources::{compute_workload_demand, parse_resource_by_key};
 
 /// Quota enforcement error.
 #[derive(Debug, thiserror::Error)]
@@ -91,8 +89,10 @@ pub fn enforce_quotas(
             continue;
         }
 
+        let demand_raw = demand.to_raw_map();
+
         if let Some(ref max) = quota.spec.max_per_workload {
-            check_per_workload_limit(&demand, max, quota_name)?;
+            check_per_workload_limit(&demand_raw, max, quota_name)?;
         }
 
         let used = quota
@@ -102,25 +102,23 @@ pub fn enforce_quotas(
             .cloned()
             .unwrap_or_default();
 
-        check_soft_limit(&demand, &used, &quota.spec.soft, quota_name)?;
+        check_soft_limit(&demand_raw, &used, &quota.spec.soft, quota_name)?;
     }
 
     Ok(())
 }
 
 fn check_per_workload_limit(
-    demand: &WorkloadResourceDemand,
+    demand_raw: &BTreeMap<&'static str, i64>,
     max: &BTreeMap<String, String>,
     quota_name: &str,
 ) -> Result<(), QuotaError> {
-    let demand_map = demand_to_raw(demand);
-
     for (key, limit_str) in max {
-        let limit = match parse_resource_by_key(key, limit_str) {
-            Ok(v) => v,
-            Err(_) => continue, // Invalid limits caught by CRD validation
-        };
-        let actual = demand_map.get(key.as_str()).copied().unwrap_or(0);
+        let limit = parse_resource_by_key(key, limit_str).map_err(|e| QuotaError::InvalidPrincipal {
+            quota: quota_name.to_string(),
+            reason: format!("invalid maxPerWorkload quantity: {e}"),
+        })?;
+        let actual = demand_raw.get(key.as_str()).copied().unwrap_or(0);
         if actual > limit {
             return Err(QuotaError::PerWorkloadExceeded {
                 quota: quota_name.to_string(),
@@ -134,23 +132,21 @@ fn check_per_workload_limit(
 }
 
 fn check_soft_limit(
-    demand: &WorkloadResourceDemand,
+    demand_raw: &BTreeMap<&'static str, i64>,
     used: &BTreeMap<String, String>,
     soft: &BTreeMap<String, String>,
     quota_name: &str,
 ) -> Result<(), QuotaError> {
-    let demand_map = demand_to_raw(demand);
-
     for (key, limit_str) in soft {
-        let limit = match parse_resource_by_key(key, limit_str) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+        let limit = parse_resource_by_key(key, limit_str).map_err(|e| QuotaError::InvalidPrincipal {
+            quota: quota_name.to_string(),
+            reason: format!("invalid soft limit quantity: {e}"),
+        })?;
         let current = used
             .get(key)
             .and_then(|v| parse_resource_by_key(key, v).ok())
             .unwrap_or(0);
-        let requested = demand_map.get(key.as_str()).copied().unwrap_or(0);
+        let requested = demand_raw.get(key.as_str()).copied().unwrap_or(0);
 
         if current + requested > limit {
             return Err(QuotaError::SoftLimitExceeded {
@@ -163,15 +159,6 @@ fn check_soft_limit(
         }
     }
     Ok(())
-}
-
-/// Map demand fields to raw i64 values keyed by resource name.
-fn demand_to_raw(demand: &WorkloadResourceDemand) -> BTreeMap<&'static str, i64> {
-    let mut map = BTreeMap::new();
-    map.insert("cpu", demand.cpu_millis);
-    map.insert("memory", demand.memory_bytes);
-    map.insert("nvidia.com/gpu", demand.gpu_count as i64);
-    map
 }
 
 #[cfg(test)]
