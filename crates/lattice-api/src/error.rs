@@ -82,12 +82,6 @@ impl IntoResponse for Error {
     }
 }
 
-impl From<jsonwebtoken::errors::Error> for Error {
-    fn from(e: jsonwebtoken::errors::Error) -> Self {
-        Error::Unauthorized(e.to_string())
-    }
-}
-
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Self {
         Error::Proxy(e.to_string())

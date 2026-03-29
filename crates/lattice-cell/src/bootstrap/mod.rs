@@ -61,16 +61,10 @@ use crate::resources::fetch_distributable_resources;
 
 /// Extract bearer token from headers
 fn extract_bearer_token(headers: &HeaderMap) -> Result<String, BootstrapError> {
-    let auth_header = headers
-        .get("authorization")
-        .ok_or(BootstrapError::MissingAuth)?;
-
-    let auth_str = auth_header
-        .to_str()
-        .map_err(|_| BootstrapError::InvalidToken)?;
-
-    auth_str
-        .strip_prefix("Bearer ")
+    if !headers.contains_key("authorization") {
+        return Err(BootstrapError::MissingAuth);
+    }
+    lattice_auth::extract_bearer_token(headers)
         .map(|s| s.to_string())
         .ok_or(BootstrapError::InvalidToken)
 }

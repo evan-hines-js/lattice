@@ -11,9 +11,8 @@ use tracing::debug;
 use crate::auth::UserIdentity;
 use crate::auth_chain::AuthChain;
 use crate::error::{Error, Result};
+use lattice_auth::extract_bearer_token;
 use lattice_cedar::{ClusterAttributes, PolicyEngine};
-
-pub use lattice_auth::extract_bearer_token;
 
 /// Authenticate and authorize a request in one call
 ///
@@ -57,36 +56,4 @@ pub async fn authenticate(auth: &Arc<AuthChain>, headers: &HeaderMap) -> Result<
         .ok_or_else(|| Error::Unauthorized("Missing Authorization header".into()))?;
 
     auth.validate(token).await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_bearer_token() {
-        let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "Bearer abc123".parse().unwrap());
-        assert_eq!(extract_bearer_token(&headers), Some("abc123"));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_missing() {
-        let headers = HeaderMap::new();
-        assert_eq!(extract_bearer_token(&headers), None);
-    }
-
-    #[test]
-    fn test_extract_bearer_token_wrong_scheme() {
-        let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "Basic abc123".parse().unwrap());
-        assert_eq!(extract_bearer_token(&headers), None);
-    }
-
-    #[test]
-    fn test_extract_bearer_token_no_space() {
-        let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "Bearerabc123".parse().unwrap());
-        assert_eq!(extract_bearer_token(&headers), None);
-    }
 }
