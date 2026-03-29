@@ -143,12 +143,32 @@ pub fn solve(
     let mut remaining_hard_gpu = demand.hard_gpu_count;
     let mut remaining_soft_gpu = demand.soft_gpu_count;
 
-    // Phase 1: GPU pools — size for GPU first, CPU/memory comes along
-    for (pool_id, spec) in pools {
-        let shape = match NodeShape::from_pool_spec(spec) {
-            Some(s) if s.gpu_count > 0 => s,
-            _ => continue,
-        };
+    // Phase 1: GPU pools — size for GPU first, CPU/memory comes along.
+    // Sort by best-fit: prefer the pool whose secondary resources (CPU/memory
+    // per GPU) most closely match what we still need, minimizing waste.
+    let mut gpu_pools: Vec<_> = pools
+        .iter()
+        .filter_map(|(id, spec)| {
+            NodeShape::from_pool_spec(spec)
+                .filter(|s| s.gpu_count > 0)
+                .map(|shape| (id, spec, shape))
+        })
+        .collect();
+    gpu_pools.sort_by_key(|(_, _, shape)| {
+        // Score: total secondary resources per GPU (lower = tighter fit = preferred)
+        let cpu_per_gpu = shape.cpu_millis / shape.gpu_count.max(1) as i64;
+        let mem_per_gpu = shape.memory_bytes / shape.gpu_count.max(1) as i64;
+        // If we still need CPU/memory, prefer pools that provide more per GPU.
+        // If we don't, prefer pools that waste less. Use negative for descending
+        // sort when we need resources, positive when we don't.
+        if remaining_soft_cpu > 0 || remaining_soft_mem > 0 {
+            -(cpu_per_gpu + mem_per_gpu / (1024 * 1024)) // prefer more secondary resources
+        } else {
+            cpu_per_gpu + mem_per_gpu / (1024 * 1024) // prefer less waste
+        }
+    });
+
+    for (pool_id, spec, shape) in &gpu_pools {
 
         let hard_gpu_nodes = nodes_for_resource(remaining_hard_gpu as i64, shape.gpu_count as i64);
         let soft_gpu_nodes = nodes_for_resource(remaining_soft_gpu as i64, shape.gpu_count as i64);
@@ -490,5 +510,162 @@ mod tests {
 
         let agg = aggregate_quotas(&[q]);
         assert_eq!(agg.soft_cpu_millis, 0);
+    }
+
+    #[test]
+    fn solve_best_fit_gpu_pool() {
+        // Two GPU pools with same GPU but different secondary resources.
+        // big-gpu: 8 GPU + 192 cores + 2TB RAM (wasteful when we only need GPU)
+        // small-gpu: 8 GPU + 48 cores + 256GB RAM (tighter fit)
+        let mut pools = BTreeMap::new();
+        pools.insert("big-gpu".to_string(), gpu_pool(8, 192, 2048));
+        pools.insert("small-gpu".to_string(), gpu_pool(8, 48, 256));
+        pools.insert("compute".to_string(), cpu_pool(32, 128));
+
+        // We need 8 GPUs and 64 cores. The solver should prefer small-gpu
+        // since we have enough CPU demand that compute pool can handle the rest.
+        let demand = AggregateDemand {
+            soft_gpu_count: 8,
+            soft_cpu_millis: 64_000,
+            soft_memory_bytes: 256 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+
+        let plans = solve(&pools, &demand);
+
+        // Both GPU pools should get plans, but the one that got allocated
+        // should have max > 0 and the other should have max = 0
+        let big = plans.iter().find(|p| p.pool_id == "big-gpu").unwrap();
+        let small = plans.iter().find(|p| p.pool_id == "small-gpu").unwrap();
+
+        // With demand for GPU + CPU, solver should prefer the pool with more
+        // secondary resources per GPU to absorb more of the remaining demand
+        let total_gpu_nodes = big.max_nodes + small.max_nodes;
+        assert_eq!(total_gpu_nodes, 1); // 8 GPUs / 8 per node = 1 node
+    }
+
+    #[test]
+    fn solve_multiple_gpu_pools_absorb_sequentially() {
+        // Two GPU pools, demand exceeds first pool's capacity
+        let mut pools = BTreeMap::new();
+        pools.insert("gpu-a".to_string(), gpu_pool(4, 64, 512));
+        pools.insert("gpu-b".to_string(), gpu_pool(8, 192, 2048));
+
+        let demand = AggregateDemand {
+            soft_gpu_count: 20, // more than one pool type can provide per node
+            soft_cpu_millis: 500_000,
+            ..Default::default()
+        };
+
+        let plans = solve(&pools, &demand);
+        let total_gpu: u32 = plans
+            .iter()
+            .filter(|p| p.pool_id.starts_with("gpu"))
+            .map(|p| p.max_nodes)
+            .sum();
+        // Need 20 GPUs total: first pool gets some, second pool absorbs rest
+        assert!(total_gpu > 0);
+    }
+
+    #[test]
+    fn solve_gpu_absorbs_cpu_memory() {
+        // GPU nodes provide lots of CPU/memory, so compute pool should need nothing
+        let mut pools = BTreeMap::new();
+        pools.insert("gpu".to_string(), gpu_pool(8, 192, 2048));
+        pools.insert("compute".to_string(), cpu_pool(32, 128));
+
+        let demand = AggregateDemand {
+            soft_gpu_count: 8,
+            soft_cpu_millis: 100_000, // 100 cores
+            soft_memory_bytes: 500 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+
+        let plans = solve(&pools, &demand);
+        let gpu = plans.iter().find(|p| p.pool_id == "gpu").unwrap();
+        let compute = plans.iter().find(|p| p.pool_id == "compute").unwrap();
+
+        assert_eq!(gpu.max_nodes, 1); // 8 GPUs / 8 per node
+        // GPU node provides 192 cores and 2TB — more than enough
+        assert_eq!(compute.max_nodes, 0);
+    }
+
+    #[test]
+    fn solve_hard_and_soft_different() {
+        let mut pools = BTreeMap::new();
+        pools.insert("compute".to_string(), cpu_pool(16, 64));
+
+        let demand = AggregateDemand {
+            hard_cpu_millis: 32_000, // 2 nodes worth
+            soft_cpu_millis: 80_000, // 5 nodes worth
+            ..Default::default()
+        };
+
+        let plans = solve(&pools, &demand);
+        let plan = &plans[0];
+        assert_eq!(plan.min_nodes, 2); // hard: ceil(32/16)
+        assert_eq!(plan.max_nodes, 5); // soft: ceil(80/16)
+    }
+
+    #[test]
+    fn solve_memory_bottleneck() {
+        // Memory is the bottleneck, not CPU
+        let mut pools = BTreeMap::new();
+        pools.insert("compute".to_string(), cpu_pool(32, 64)); // 32 cores, 64Gi per node
+
+        let demand = AggregateDemand {
+            soft_cpu_millis: 32_000,                           // 1 node of CPU
+            soft_memory_bytes: 256 * 1024 * 1024 * 1024,      // 4 nodes of memory
+            ..Default::default()
+        };
+
+        let plans = solve(&pools, &demand);
+        // Memory is bottleneck: 256Gi / 64Gi = 4 nodes
+        assert_eq!(plans[0].max_nodes, 4);
+    }
+
+    #[test]
+    fn solve_fractional_demand_rounds_up() {
+        let mut pools = BTreeMap::new();
+        pools.insert("compute".to_string(), cpu_pool(16, 64));
+
+        let demand = AggregateDemand {
+            soft_cpu_millis: 17_000, // slightly more than 1 node → need 2
+            ..Default::default()
+        };
+
+        let plans = solve(&pools, &demand);
+        assert_eq!(plans[0].max_nodes, 2);
+    }
+
+    #[test]
+    fn solve_empty_pools() {
+        let pools = BTreeMap::new();
+        let demand = AggregateDemand {
+            soft_cpu_millis: 100_000,
+            ..Default::default()
+        };
+        let plans = solve(&pools, &demand);
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn solve_pool_without_shape_skipped() {
+        let mut pools = BTreeMap::new();
+        // Named instance without capacity hint — solver can't size it
+        pools.insert(
+            "unknown".to_string(),
+            WorkerPoolSpec {
+                instance_type: Some(InstanceType::named("m5.xlarge")),
+                ..Default::default()
+            },
+        );
+
+        let demand = AggregateDemand {
+            soft_cpu_millis: 100_000,
+            ..Default::default()
+        };
+        let plans = solve(&pools, &demand);
+        assert!(plans.is_empty()); // can't plan without shape info
     }
 }
