@@ -22,7 +22,6 @@
 #![cfg(feature = "provider-e2e")]
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use futures::future::try_join_all;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -37,7 +36,7 @@ use tracing::info;
 use super::super::helpers::{
     client_from_kubeconfig, create_with_retry, delete_namespace, ensure_fresh_namespace,
     run_kubectl, setup_regcreds_infrastructure, wait_for_condition, with_diagnostics,
-    DiagnosticContext, DEFAULT_TIMEOUT, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    DiagnosticContext, DEFAULT_TIMEOUT, POLL_INTERVAL, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 use super::super::mesh_fixtures::{
     build_lattice_service, curl_container, inbound_allow, outbound_dep, redis_container, redis_port,
@@ -272,7 +271,7 @@ async fn verify_redis_ready(kubeconfig: &str) -> Result<(), String> {
     wait_for_condition(
         "redis PING/PONG",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             let result = run_kubectl(&[
                 "--kubeconfig",
@@ -310,7 +309,7 @@ async fn verify_env_vars(kubeconfig: &str) -> Result<(), String> {
             wait_for_condition(
                 "web-api CELERY_BROKER_URL",
                 DEFAULT_TIMEOUT,
-                Duration::from_secs(5),
+                POLL_INTERVAL,
                 || async move {
                     let result = run_kubectl(&[
                         "--kubeconfig",
@@ -338,7 +337,7 @@ async fn verify_env_vars(kubeconfig: &str) -> Result<(), String> {
             wait_for_condition(
                 "worker-default WORKER_QUEUES",
                 DEFAULT_TIMEOUT,
-                Duration::from_secs(5),
+                POLL_INTERVAL,
                 || async move {
                     let result = run_kubectl(&[
                         "--kubeconfig",
@@ -366,7 +365,7 @@ async fn verify_env_vars(kubeconfig: &str) -> Result<(), String> {
             wait_for_condition(
                 "worker-priority WORKER_QUEUES",
                 DEFAULT_TIMEOUT,
-                Duration::from_secs(5),
+                POLL_INTERVAL,
                 || async move {
                     let result = run_kubectl(&[
                         "--kubeconfig",

@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use base64::Engine;
 
 use super::docker::{docker_containers_deleted, run_cmd, run_kubectl};
-use super::{run_id, wait_for_condition, DEFAULT_TIMEOUT, OPERATOR_LABEL};
+use super::{run_id, wait_for_condition, DEFAULT_TIMEOUT, OPERATOR_LABEL, POLL_INTERVAL};
 use crate::providers::InfraProvider;
 
 use lattice_cli::commands::port_forward::PortForward as ResilientPortForward;
@@ -515,7 +515,7 @@ pub async fn wait_for_operator_ready(
     wait_for_condition(
         &format!("operator on {} to be ready", cluster_name),
         timeout_secs.map_or(DEFAULT_TIMEOUT, Duration::from_secs),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             if let Ok(output) = run_kubectl(&[
                 "--kubeconfig",
@@ -737,7 +737,7 @@ async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> 
     wait_for_condition(
         "LoadBalancer IP to be assigned",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             let result = run_kubectl(
                 &[
@@ -852,7 +852,7 @@ pub async fn delete_cluster_and_wait(
     wait_for_condition(
         &format!("{} deletion initiated", cluster_name),
         Duration::from_secs(120),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let cluster_kubeconfig = cluster_kubeconfig.to_string();
             let parent_kubeconfig = parent_kubeconfig.to_string();
@@ -972,7 +972,7 @@ async fn wait_for_cluster_fully_deleted(
         wait_for_condition(
             &format!("{} Docker container cleanup", cluster_name),
             DEFAULT_TIMEOUT,
-            Duration::from_secs(5),
+            POLL_INTERVAL,
             || async move {
                 let deleted = docker_containers_deleted(cluster_name).await;
                 if deleted {
@@ -1150,7 +1150,7 @@ impl ProxySession {
         wait_for_condition(
             &format!("cluster '{}' to appear in subtree", cluster_name),
             DEFAULT_TIMEOUT,
-            Duration::from_secs(5),
+            POLL_INTERVAL,
             || {
                 let client = &client;
                 let url = &url;
@@ -1328,7 +1328,7 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
         wait_for_condition(
             &format!("namespace {} deletion", namespace),
             NS_DELETION_TIMEOUT,
-            Duration::from_secs(5),
+            POLL_INTERVAL,
             || async move {
                 let deleted = match run_kubectl(&[
                     "--kubeconfig",
@@ -1375,7 +1375,7 @@ pub async fn ensure_fresh_namespace(kubeconfig_path: &str, namespace: &str) -> R
     wait_for_condition(
         &format!("namespace {} creation", namespace),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             // Attempt to create (may get AlreadyExists if still Terminating)
             let _ = run_kubectl(&[

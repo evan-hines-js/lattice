@@ -17,7 +17,7 @@ use tracing::info;
 
 use super::super::helpers::{
     client_from_kubeconfig, create_with_retry, load_cluster_config, wait_for_condition,
-    watch_cluster_phases, WORKLOAD_CLUSTER_NAME,
+    watch_cluster_phases, POLL_INTERVAL, WORKLOAD_CLUSTER_NAME,
 };
 
 /// Delete a workload cluster and recreate it, verifying the full lifecycle.
@@ -33,7 +33,7 @@ pub async fn delete_and_recreate_workload(mgmt_kubeconfig: &str) -> Result<(), S
     wait_for_condition(
         "istiod kubeconfig secret deleted by GC",
         Duration::from_secs(60),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = mgmt_kubeconfig.to_string();
             let secret_name = istiod_secret_name.clone();
@@ -71,7 +71,7 @@ pub async fn delete_and_recreate_workload(mgmt_kubeconfig: &str) -> Result<(), S
     wait_for_condition(
         "istiod kubeconfig secret recreated with ownerReference",
         Duration::from_secs(120),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = mgmt_kubeconfig.to_string();
             let secret_name = istiod_secret_name.clone();

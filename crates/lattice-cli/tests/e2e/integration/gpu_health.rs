@@ -23,7 +23,9 @@ use lattice_common::gpu::{
     ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_HEARTBEAT, HEARTBEAT_STALENESS_SECS,
 };
 
-use super::super::helpers::{run_kubectl, wait_for_condition, with_diagnostics, DiagnosticContext};
+use super::super::helpers::{
+    run_kubectl, wait_for_condition, with_diagnostics, DiagnosticContext, POLL_INTERVAL,
+};
 
 // =============================================================================
 // Helpers
@@ -172,7 +174,7 @@ async fn wait_for_cordon(
     let kc = kubeconfig.to_string();
     let n = node.to_string();
 
-    wait_for_condition(&desc, timeout, Duration::from_secs(5), || {
+    wait_for_condition(&desc, timeout, POLL_INTERVAL, || {
         let kc = kc.clone();
         let n = n.clone();
         async move {

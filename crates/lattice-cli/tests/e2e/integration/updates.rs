@@ -38,7 +38,7 @@ use super::super::helpers::{
     ensure_fresh_namespace, load_fixture_config, resolve_model_serving_name, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase,
     wait_for_service_phase, with_diagnostics, DiagnosticContext, TestHarness, BUSYBOX_IMAGE,
-    DEFAULT_TIMEOUT,
+    DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 
 // =============================================================================
@@ -581,7 +581,7 @@ async fn wait_for_generation_advance_generic(
     wait_for_condition(
         &format!("{kind} {namespace}/{name} observed_generation > {previous_gen}"),
         Duration::from_secs(180),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kind_ref = kind_owned.clone();
             async move {

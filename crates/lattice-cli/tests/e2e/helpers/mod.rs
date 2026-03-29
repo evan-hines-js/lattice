@@ -46,12 +46,19 @@ pub fn env_enabled(var: &str) -> bool {
     )
 }
 
-/// Read a URL from an environment variable, falling back to a default.
+/// Read a URL from an environment variable. Panics if not set.
 ///
-/// Used for docker-compose dev services (Vault, Keycloak) that have different
-/// addresses depending on the environment (Docker localhost vs Proxmox LAN).
-pub fn dev_service_url(env_var: &str, default: &str) -> String {
-    std::env::var(env_var).unwrap_or_else(|_| default.to_string())
+/// Dev services (Vault, Keycloak, PiHole) run at addresses that vary by
+/// environment. The env var MUST be set explicitly — silent defaults mask
+/// bugs where pods inside the cluster can't reach the configured address.
+pub fn dev_service_url(env_var: &str) -> String {
+    std::env::var(env_var).unwrap_or_else(|_| {
+        panic!(
+            "{env_var} is not set. Set it to the address reachable from both \
+             the test runner and cluster pods (e.g. http://10.0.0.131:PORT). \
+             See .env.example for all required variables."
+        )
+    })
 }
 
 /// Check if a dev service is reachable by hitting its health endpoint.
@@ -164,7 +171,7 @@ pub async fn wait_for_resource_phase(
             resource_kind, namespace, name, phase
         ),
         timeout,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let kind = kind.clone();
@@ -242,6 +249,9 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 /// Standard timeout for waiting on conditions (pod readiness, phase transitions,
 /// policy propagation, etc.). Generous to avoid flakes on CPU-starved machines.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Standard poll interval for `wait_for_condition` loops.
+pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Velero namespace — used by cluster backup tests.
 pub const VELERO_NAMESPACE: &str = "velero";

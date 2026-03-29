@@ -30,7 +30,7 @@ use super::super::helpers::{
     deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_no_cedar_policies_with_label,
     wait_for_pod_running, with_diagnostics, DiagnosticContext, TestHarness, BUSYBOX_IMAGE,
-    DEFAULT_TIMEOUT, NGINX_IMAGE, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    DEFAULT_TIMEOUT, NGINX_IMAGE, POLL_INTERVAL, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 
 const NS_DEFAULT: &str = "tetragon-t1";
@@ -282,7 +282,7 @@ async fn wait_for_policies(
     wait_for_condition(
         &format!("TracingPolicy for {service_name} in {namespace}"),
         timeout,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             let all = list_tracing_policies(kubeconfig, namespace).await?;
             let matching: Vec<String> = all

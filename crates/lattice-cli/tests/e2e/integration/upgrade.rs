@@ -13,12 +13,10 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::time::Duration;
-
 use tracing::info;
 
 use super::super::helpers::{
-    run_kubectl, wait_for_condition, DEFAULT_LATTICE_IMAGE, DEFAULT_TIMEOUT,
+    run_kubectl, wait_for_condition, DEFAULT_LATTICE_IMAGE, DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 
 /// Verify that `status.latticeImage` is set on the self-cluster's LatticeCluster.
@@ -31,7 +29,7 @@ pub async fn verify_status_lattice_image(kubeconfig: &str) -> Result<(), String>
     let image = wait_for_condition(
         "status.latticeImage to be set",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             async move {
@@ -126,7 +124,7 @@ pub async fn verify_operator_upgrade(
     wait_for_condition(
         "operator Deployment to update to new image",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let target = target.clone();
@@ -163,7 +161,7 @@ pub async fn verify_operator_upgrade(
     wait_for_condition(
         "status.latticeImage to reflect new image",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let target = target.clone();
@@ -213,7 +211,7 @@ pub async fn verify_operator_upgrade(
     wait_for_condition(
         "operator to restore to original image",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let orig = orig.clone();

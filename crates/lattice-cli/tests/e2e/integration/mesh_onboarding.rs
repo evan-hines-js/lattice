@@ -37,7 +37,6 @@
 #![cfg(feature = "provider-e2e")]
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use futures::future::try_join_all;
 use kube::api::Api;
@@ -47,7 +46,7 @@ use tracing::info;
 use super::super::helpers::{
     apply_yaml, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, test_image,
-    wait_for_condition, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
+    wait_for_condition, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 use super::super::mesh_fixtures::{
     build_lattice_service, curl_container, inbound_allow, nginx_container, outbound_dep,
@@ -175,7 +174,7 @@ spec:
     wait_for_condition(
         "LatticeMeshMember external-nginx to be Ready",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             let output = run_kubectl(&[
                 "--kubeconfig",
@@ -333,7 +332,7 @@ stringData:
     wait_for_condition(
         "external-nginx deployment available",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             let output = run_kubectl(&[
                 "--kubeconfig",

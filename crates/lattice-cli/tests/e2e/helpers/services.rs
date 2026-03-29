@@ -14,7 +14,8 @@ use super::cluster::load_registry_credentials;
 use super::docker::run_kubectl;
 use super::kubernetes::{client_from_kubeconfig, create_with_retry};
 use super::{
-    wait_for_condition, BUSYBOX_IMAGE, DEFAULT_TIMEOUT, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    wait_for_condition, BUSYBOX_IMAGE, DEFAULT_TIMEOUT, POLL_INTERVAL, REGCREDS_PROVIDER,
+    REGCREDS_REMOTE_KEY,
 };
 
 // =============================================================================
@@ -267,7 +268,7 @@ pub async fn wait_for_service_phase(
         None => format!("LatticeService {}/{} to reach {}", namespace, name, phase),
     };
 
-    wait_for_condition(&desc, timeout, Duration::from_secs(5), || {
+    wait_for_condition(&desc, timeout, POLL_INTERVAL, || {
         let kc = kc.clone();
         let ns = ns.clone();
         let svc_name = svc_name.clone();
@@ -699,7 +700,7 @@ pub async fn verify_pod_env_var(
     wait_for_condition(
         &format!("env var {} = '{}'", var_name, expected_value),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let ns = ns.clone();
@@ -763,7 +764,7 @@ pub async fn verify_pod_file_content(
     wait_for_condition(
         &format!("file {} contains '{}'", file_path, expected_substr),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let ns = ns.clone();
@@ -857,7 +858,7 @@ pub async fn wait_for_pod_running(
             label_selector, namespace
         ),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             let output = run_kubectl(&[
                 "--kubeconfig",
@@ -933,7 +934,7 @@ pub async fn verify_synced_secret_keys(
     wait_for_condition(
         &format!("secret {} in {} to be synced", secret_name, namespace),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             let output = run_kubectl(&[
                 "--kubeconfig",

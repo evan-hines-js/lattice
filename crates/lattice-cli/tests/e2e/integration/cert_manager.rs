@@ -26,7 +26,9 @@ use tracing::info;
 use super::super::helpers::cedar::apply_yaml;
 use super::super::helpers::docker::run_kubectl;
 use super::super::helpers::pihole::{pihole_resolver, pihole_url, PIHOLE_PASSWORD};
-use super::super::helpers::{wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT};
+use super::super::helpers::{
+    wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT, POLL_INTERVAL,
+};
 
 // =============================================================================
 // Constants
@@ -230,7 +232,7 @@ async fn test_cluster_issuer_materialization(kubeconfig: &str) -> Result<(), Str
     wait_for_condition(
         &format!("ClusterIssuer '{}' to exist", EXPECTED_CLUSTER_ISSUER),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             async move {
@@ -325,7 +327,7 @@ spec:
     wait_for_condition(
         "Certificate 'e2e-test-cert' to be Ready",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             async move {
@@ -407,7 +409,7 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
     wait_for_condition(
         &format!("external-dns-{PIHOLE_DNS_PROVIDER} deployment to be available"),
         Duration::from_secs(120),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             async move {
@@ -592,7 +594,7 @@ async fn test_cluster_issuer_cleanup(kubeconfig: &str) -> Result<(), String> {
     wait_for_condition(
         &format!("ClusterIssuer '{}' to be GC'd", EXPECTED_CLUSTER_ISSUER),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             async move {

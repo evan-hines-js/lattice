@@ -19,7 +19,6 @@
 #![cfg(feature = "provider-e2e")]
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use futures::future::try_join_all;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -34,8 +33,8 @@ use tracing::info;
 use super::super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
-    with_diagnostics, CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT, REGCREDS_PROVIDER,
-    REGCREDS_REMOTE_KEY,
+    with_diagnostics, CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT, POLL_INTERVAL,
+    REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 use super::super::mesh_fixtures::{
     curl_container, inbound_allow, nginx_container, outbound_dep, postgres_container, postgres_port,
@@ -234,7 +233,7 @@ async fn verify_postgres_ready(kubeconfig: &str) -> Result<(), String> {
     wait_for_condition(
         "postgres pg_isready",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             let result = run_kubectl(&[
                 "--kubeconfig",
@@ -274,7 +273,7 @@ async fn verify_env_vars(kubeconfig: &str) -> Result<(), String> {
             wait_for_condition(
                 &format!("app-server env {}={}", var, expected),
                 DEFAULT_TIMEOUT,
-                Duration::from_secs(5),
+                POLL_INTERVAL,
                 || async move {
                     let result = run_kubectl(&[
                         "--kubeconfig",

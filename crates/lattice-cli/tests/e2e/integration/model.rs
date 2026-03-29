@@ -23,7 +23,7 @@ use super::super::helpers::{
     ensure_fresh_namespace, load_fixture_config, resolve_model_serving_name, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, with_diagnostics,
     DiagnosticContext, TestHarness, CURL_IMAGE, CYCLE_END_MARKER, CYCLE_START_MARKER,
-    DEFAULT_TIMEOUT,
+    DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 use super::super::mesh_helpers::parse_traffic_result;
 
@@ -34,8 +34,6 @@ const MODEL_NAME: &str = "llm-serving";
 const PHASE_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 /// Timeout for longer operations (Serving phase, init container completion)
 const LONG_TIMEOUT: Duration = DEFAULT_TIMEOUT;
-/// Interval between polls when waiting for a condition
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Expected HuggingFace model ID used in model-serving fixture
 const EXPECTED_MODEL_ID: &str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
 

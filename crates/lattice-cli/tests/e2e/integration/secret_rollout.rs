@@ -29,7 +29,7 @@ use super::super::helpers::{
     client_from_kubeconfig, create_service_with_secrets, create_with_retry,
     delete_cedar_policies_by_label, delete_namespace, ensure_fresh_namespace, run_kubectl,
     seed_local_secret, setup_regcreds_infrastructure, wait_for_condition, wait_for_service_phase,
-    with_diagnostics, with_run_as_root, DiagnosticContext, DEFAULT_TIMEOUT,
+    with_diagnostics, with_run_as_root, DiagnosticContext, DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 
 const TEST_NAMESPACE: &str = "secret-rollout-test";
@@ -131,7 +131,7 @@ pub async fn run_secret_rollout_tests(kubeconfig: &str) -> Result<(), String> {
             let new_hash = wait_for_condition(
                 "config-hash annotation to change after secret rotation",
                 DEFAULT_TIMEOUT,
-                Duration::from_secs(5),
+                POLL_INTERVAL,
                 || {
                     let kc = kubeconfig.to_string();
                     let prev = initial_hash.clone();
@@ -279,7 +279,7 @@ async fn wait_for_new_pods(
     wait_for_condition(
         "new pods after rollout",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let ns = ns.clone();
@@ -350,7 +350,7 @@ async fn wait_for_synced_secret(
     wait_for_condition(
         &format!("Secret {}/{} to be synced by ESO", namespace, secret_name),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let ns = ns.clone();
@@ -395,7 +395,7 @@ async fn wait_for_secret_content(
             namespace, secret_name, key, expected_value
         ),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let ns = ns.clone();
@@ -444,7 +444,7 @@ async fn wait_for_deployment_ready(
     wait_for_condition(
         &format!("Deployment {}/{} to be ready", namespace, name),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let ns = ns.clone();

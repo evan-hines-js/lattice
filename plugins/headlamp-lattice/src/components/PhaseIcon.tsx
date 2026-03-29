@@ -1,3 +1,5 @@
+import type { ServicePhase } from '../types';
+
 const PHASE_CONFIG: Record<string, { symbol: string; color: string; label: string }> = {
   Ready: { symbol: '\u2713', color: '#4caf50', label: 'Ready' },
   Pending: { symbol: '\u25cb', color: '#ff9800', label: 'Pending' },
@@ -7,7 +9,7 @@ const PHASE_CONFIG: Record<string, { symbol: string; color: string; label: strin
 };
 
 interface PhaseIconProps {
-  phase: string;
+  phase: ServicePhase | 'Unknown' | string;
   showLabel?: boolean;
 }
 
@@ -15,8 +17,12 @@ export default function PhaseIcon({ phase, showLabel = true }: PhaseIconProps) {
   const config = PHASE_CONFIG[phase] ?? PHASE_CONFIG.Unknown;
 
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-      <span style={{ color: config.color, fontSize: 16, fontWeight: 'bold' }}>
+    <span
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+      role="status"
+      aria-label={`Phase: ${config.label}`}
+    >
+      <span style={{ color: config.color, fontSize: 16, fontWeight: 'bold' }} aria-hidden="true">
         {config.symbol}
       </span>
       {showLabel && <span style={{ color: config.color }}>{config.label}</span>}

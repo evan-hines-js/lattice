@@ -19,7 +19,7 @@ use tracing::info;
 use super::super::helpers::{
     apply_apparmor_override_policy, apply_yaml, delete_namespace, ensure_fresh_namespace,
     run_kubectl, wait_for_condition, wait_for_resource_phase, with_diagnostics, DiagnosticContext,
-    DEFAULT_TIMEOUT,
+    DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 
 const COST_NAMESPACE: &str = "cost-test";
@@ -249,7 +249,7 @@ async fn test_cost_without_configmap(kubeconfig: &str) -> Result<(), String> {
     wait_for_condition(
         "cost to be cleared after ConfigMap removal",
         Duration::from_secs(60),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             async move {

@@ -15,7 +15,6 @@
 #![cfg(feature = "provider-e2e")]
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use tracing::info;
 
@@ -23,7 +22,7 @@ use super::super::helpers::{
     delete_namespace, deploy_and_wait_for_phase, ensure_fresh_namespace, run_kubectl,
     service_pod_selector, setup_regcreds_infrastructure, verify_pod_env_var,
     verify_pod_file_content, wait_for_condition, wait_for_pod_running, with_diagnostics,
-    DiagnosticContext, BUSYBOX_IMAGE, DEFAULT_TIMEOUT,
+    DiagnosticContext, BUSYBOX_IMAGE, DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 
 const WORKLOAD_NS: &str = "workload-test";
@@ -285,7 +284,7 @@ async fn test_emptydir_writable(kubeconfig: &str) -> Result<(), String> {
     wait_for_condition(
         "emptyDir writable at /scratch",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let sel = sel.clone();

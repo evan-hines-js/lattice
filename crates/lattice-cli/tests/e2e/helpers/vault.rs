@@ -21,7 +21,7 @@ use super::{dev_service_reachable, dev_service_url, wait_for_condition};
 // =============================================================================
 
 fn vault_url() -> String {
-    dev_service_url("LATTICE_VAULT_URL", "http://127.0.0.1:8200")
+    dev_service_url("LATTICE_VAULT_URL")
 }
 
 /// Dev-mode root token (set via VAULT_DEV_ROOT_TOKEN_ID in docker-compose)

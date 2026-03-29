@@ -1,7 +1,7 @@
 //! PiHole dev service helpers for e2e tests.
 //!
 //! PiHole runs in docker-compose and is accessible from the host and K8s nodes.
-//! Configure via `LATTICE_PIHOLE_URL` env var or use the default.
+//! Configure via `LATTICE_PIHOLE_URL` and `LATTICE_PIHOLE_RESOLVER` env vars.
 
 use super::dev_service_url;
 
@@ -10,10 +10,10 @@ pub const PIHOLE_PASSWORD: &str = "lattice";
 
 /// PiHole URL (web admin + API).
 pub fn pihole_url() -> String {
-    dev_service_url("LATTICE_PIHOLE_URL", "http://127.0.0.1:8053")
+    dev_service_url("LATTICE_PIHOLE_URL")
 }
 
 /// PiHole DNS resolver address (IP:port) for CoreDNS forwarding.
 pub fn pihole_resolver() -> String {
-    dev_service_url("LATTICE_PIHOLE_RESOLVER", "127.0.0.1:5353")
+    dev_service_url("LATTICE_PIHOLE_RESOLVER")
 }

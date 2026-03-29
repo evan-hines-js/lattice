@@ -101,14 +101,22 @@ async fn test_add_autoscaling_pool(kubeconfig: &str) -> Result<(), String> {
     });
 
     run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "patch", "latticecluster", &cluster_name,
-        "--type=merge", "-p", &patch.to_string(),
+        "--kubeconfig",
+        kubeconfig,
+        "patch",
+        "latticecluster",
+        &cluster_name,
+        "--type=merge",
+        "-p",
+        &patch.to_string(),
     ])
     .await
     .map_err(|e| format!("Failed to add autoscaling pool: {e}"))?;
 
-    info!("[NodeAutoscaling] Pool '{}' added (min=0, max=2)", AUTOSCALE_POOL);
+    info!(
+        "[NodeAutoscaling] Pool '{}' added (min=0, max=2)",
+        AUTOSCALE_POOL
+    );
 
     // Wait for MachineDeployment to be created by the operator
     let kc = kubeconfig.to_string();
@@ -122,11 +130,18 @@ async fn test_add_autoscaling_pool(kubeconfig: &str) -> Result<(), String> {
             let md_name = md_name.clone();
             async move {
                 Ok(run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "machinedeployment", &md_name,
-                    "-n", &format!("capi-{}", get_workload_cluster_name()),
-                    "-o", "name",
-                ]).await.is_ok())
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "machinedeployment",
+                    &md_name,
+                    "-n",
+                    &format!("capi-{}", get_workload_cluster_name()),
+                    "-o",
+                    "name",
+                ])
+                .await
+                .is_ok())
             }
         },
     )
@@ -148,11 +163,17 @@ async fn test_verify_md_annotations(kubeconfig: &str) -> Result<(), String> {
     let capi_ns = format!("capi-{}", cluster_name);
 
     let annotations = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "machinedeployment", &md_name,
-        "-n", &capi_ns,
-        "-o", "jsonpath={.metadata.annotations}",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "machinedeployment",
+        &md_name,
+        "-n",
+        &capi_ns,
+        "-o",
+        "jsonpath={.metadata.annotations}",
+    ])
+    .await?;
 
     // Verify autoscaler min/max
     if !annotations.contains("autoscaler-node-group-min-size") {
@@ -167,16 +188,24 @@ async fn test_verify_md_annotations(kubeconfig: &str) -> Result<(), String> {
         return Err(format!("MD missing cpu capacity annotation: {annotations}"));
     }
     if !annotations.contains("node-template/resources/memory") {
-        return Err(format!("MD missing memory capacity annotation: {annotations}"));
+        return Err(format!(
+            "MD missing memory capacity annotation: {annotations}"
+        ));
     }
 
     // Verify replicas is 0
     let replicas = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "machinedeployment", &md_name,
-        "-n", &capi_ns,
-        "-o", "jsonpath={.spec.replicas}",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "machinedeployment",
+        &md_name,
+        "-n",
+        &capi_ns,
+        "-o",
+        "jsonpath={.spec.replicas}",
+    ])
+    .await?;
 
     if replicas.trim() != "0" {
         return Err(format!("MD replicas should be 0, got: {}", replicas.trim()));
@@ -223,15 +252,22 @@ spec:
     wait_for_condition(
         "trigger pod to become Pending",
         Duration::from_secs(30),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             async move {
                 let phase = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "pod", "trigger-scaleup", "-n", TEST_NAMESPACE,
-                    "-o", "jsonpath={.status.phase}",
-                ]).await;
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "pod",
+                    "trigger-scaleup",
+                    "-n",
+                    TEST_NAMESPACE,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ])
+                .await;
                 Ok(phase.map(|p| p.trim() == "Pending").unwrap_or(false))
             }
         },
@@ -252,10 +288,17 @@ spec:
             let kc = kc.clone();
             async move {
                 let phase = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "pod", "trigger-scaleup", "-n", TEST_NAMESPACE,
-                    "-o", "jsonpath={.status.phase}",
-                ]).await;
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "pod",
+                    "trigger-scaleup",
+                    "-n",
+                    TEST_NAMESPACE,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ])
+                .await;
                 let running = phase.map(|p| p.trim() == "Running").unwrap_or(false);
                 if !running {
                     // Log current MD replicas for visibility
@@ -263,10 +306,18 @@ spec:
                     let md = format!("{}-pool-{}", cluster, AUTOSCALE_POOL);
                     let capi_ns = format!("capi-{}", cluster);
                     if let Ok(r) = run_kubectl(&[
-                        "--kubeconfig", &kc,
-                        "get", "machinedeployment", &md, "-n", &capi_ns,
-                        "-o", "jsonpath={.spec.replicas}/{.status.readyReplicas}",
-                    ]).await {
+                        "--kubeconfig",
+                        &kc,
+                        "get",
+                        "machinedeployment",
+                        &md,
+                        "-n",
+                        &capi_ns,
+                        "-o",
+                        "jsonpath={.spec.replicas}/{.status.readyReplicas}",
+                    ])
+                    .await
+                    {
                         info!("[NodeAutoscaling] MD replicas: {}", r.trim());
                     }
                 }
@@ -280,25 +331,42 @@ spec:
 
     // Verify the node has the pool label
     let node_name = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "pod", "trigger-scaleup", "-n", TEST_NAMESPACE,
-        "-o", "jsonpath={.spec.nodeName}",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "pod",
+        "trigger-scaleup",
+        "-n",
+        TEST_NAMESPACE,
+        "-o",
+        "jsonpath={.spec.nodeName}",
+    ])
+    .await?;
 
     let pool_label = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "node", node_name.trim(),
-        "-o", "jsonpath={.metadata.labels['lattice\\.dev/pool']}",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "node",
+        node_name.trim(),
+        "-o",
+        "jsonpath={.metadata.labels['lattice\\.dev/pool']}",
+    ])
+    .await?;
 
     if pool_label.trim() != AUTOSCALE_POOL {
         return Err(format!(
             "Node '{}' has wrong pool label: expected '{}', got '{}'",
-            node_name.trim(), AUTOSCALE_POOL, pool_label.trim()
+            node_name.trim(),
+            AUTOSCALE_POOL,
+            pool_label.trim()
         ));
     }
 
-    info!("[NodeAutoscaling] Node '{}' has correct pool label", node_name.trim());
+    info!(
+        "[NodeAutoscaling] Node '{}' has correct pool label",
+        node_name.trim()
+    );
     Ok(())
 }
 
@@ -311,10 +379,17 @@ async fn test_scale_down_to_zero(kubeconfig: &str) -> Result<(), String> {
 
     // Delete the trigger pod — the node should become unneeded
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "delete", "pod", "trigger-scaleup", "-n", TEST_NAMESPACE,
-        "--grace-period=0", "--force",
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "pod",
+        "trigger-scaleup",
+        "-n",
+        TEST_NAMESPACE,
+        "--grace-period=0",
+        "--force",
+    ])
+    .await;
 
     info!("[NodeAutoscaling] Trigger pod deleted, waiting for scale-down...");
 
@@ -334,14 +409,24 @@ async fn test_scale_down_to_zero(kubeconfig: &str) -> Result<(), String> {
             let capi_ns = capi_ns.clone();
             async move {
                 let replicas = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "machinedeployment", &md_name, "-n", &capi_ns,
-                    "-o", "jsonpath={.spec.replicas}",
-                ]).await;
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "machinedeployment",
+                    &md_name,
+                    "-n",
+                    &capi_ns,
+                    "-o",
+                    "jsonpath={.spec.replicas}",
+                ])
+                .await;
                 match &replicas {
                     Ok(r) if r.trim() == "0" => Ok(true),
                     Ok(r) => {
-                        info!("[NodeAutoscaling] MD replicas still at {}, waiting...", r.trim());
+                        info!(
+                            "[NodeAutoscaling] MD replicas still at {}, waiting...",
+                            r.trim()
+                        );
                         Ok(false)
                     }
                     Err(_) => Ok(false),
@@ -368,11 +453,16 @@ async fn cleanup(kubeconfig: &str) {
     let cluster_name = get_workload_cluster_name();
     // Use JSON patch to remove the pool key
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "patch", "latticecluster", &cluster_name,
+        "--kubeconfig",
+        kubeconfig,
+        "patch",
+        "latticecluster",
+        &cluster_name,
         "--type=json",
-        "-p", &format!(r#"[{{"op":"remove","path":"/spec/nodes/workerPools/{AUTOSCALE_POOL}"}}]"#),
-    ]).await;
+        "-p",
+        &format!(r#"[{{"op":"remove","path":"/spec/nodes/workerPools/{AUTOSCALE_POOL}"}}]"#),
+    ])
+    .await;
 
     info!("[NodeAutoscaling] Cleanup complete");
 }

@@ -29,7 +29,7 @@ use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     get_or_create_proxy, get_sa_token, get_workload2_cluster_name, get_workload_cluster_name,
     http_get_with_retry, run_kubectl, truncate, with_diagnostics, DiagnosticContext,
-    DEFAULT_TIMEOUT,
+    DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 use super::cedar::{apply_e2e_default_policy, delete_cedar_policy, E2E_DEFAULT_POLICY_NAME};
 
@@ -66,7 +66,7 @@ pub async fn wait_for_agent_ready(
     wait_for_condition(
         &format!("cluster {} to reach Ready/Pivoted", child_cluster_name),
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || async move {
             let phase_trimmed = match run_kubectl(&[
                 "--kubeconfig",

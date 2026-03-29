@@ -11,14 +11,12 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::time::Duration;
-
 use tracing::info;
 
 use super::super::helpers::{
     apply_yaml, delete_namespace, ensure_fresh_namespace, load_fixture_config, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, with_diagnostics,
-    DiagnosticContext, DEFAULT_TIMEOUT,
+    DiagnosticContext, DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 
 const JOB_NAMESPACE: &str = "batch";
@@ -159,7 +157,7 @@ async fn test_tracing_policies_created(kubeconfig: &str) -> Result<(), String> {
     wait_for_condition(
         "TracingPolicyNamespaced resources to exist",
         DEFAULT_TIMEOUT,
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let expected = expected_clone.clone();

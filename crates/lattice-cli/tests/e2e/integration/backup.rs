@@ -21,7 +21,7 @@ use tracing::info;
 use super::super::helpers::{
     apply_yaml, delete_namespace, ensure_fresh_namespace, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_resource_phase, with_diagnostics,
-    DiagnosticContext, VELERO_NAMESPACE,
+    DiagnosticContext, POLL_INTERVAL, VELERO_NAMESPACE,
 };
 
 const BACKUP_NAMESPACE: &str = "lattice-system";
@@ -398,7 +398,7 @@ spec:
     wait_for_condition(
         "latticerestore controller to process",
         Duration::from_secs(120),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             async move {
@@ -571,7 +571,7 @@ spec:
     wait_for_condition(
         "service backup schedule",
         Duration::from_secs(120),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kc.clone();
             let name = sched_name.clone();

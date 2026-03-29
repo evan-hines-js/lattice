@@ -36,7 +36,7 @@ use super::cedar::apply_cedar_policy_allow_group;
 // =============================================================================
 
 fn keycloak_url() -> String {
-    dev_service_url("LATTICE_KEYCLOAK_URL", "http://127.0.0.1:8080")
+    dev_service_url("LATTICE_KEYCLOAK_URL")
 }
 
 /// Keycloak realm

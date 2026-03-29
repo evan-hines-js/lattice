@@ -17,7 +17,7 @@ use tracing::info;
 
 use super::super::helpers::{
     apply_apparmor_override_policy, apply_yaml, ensure_namespace, run_kubectl, wait_for_condition,
-    with_diagnostics, DiagnosticContext,
+    with_diagnostics, DiagnosticContext, POLL_INTERVAL,
 };
 
 const WEBHOOK_TEST_NS: &str = "webhook-test";
@@ -140,7 +140,7 @@ async fn wait_for_webhook_ready(kubeconfig: &str) -> Result<(), String> {
     wait_for_condition(
         "ValidatingWebhookConfiguration to exist",
         Duration::from_secs(120),
-        Duration::from_secs(5),
+        POLL_INTERVAL,
         || {
             let kc = kubeconfig.to_string();
             async move {
