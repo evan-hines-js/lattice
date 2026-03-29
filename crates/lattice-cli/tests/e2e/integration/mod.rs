@@ -51,6 +51,7 @@ pub mod oidc;
 pub mod parent_delete;
 pub mod pivot;
 pub mod proxy;
+pub mod quota;
 pub mod recreate;
 pub mod route_discovery;
 pub mod scaling;

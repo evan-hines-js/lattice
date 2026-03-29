@@ -310,6 +310,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Quota: enforcement, usage tracking, per-workload caps
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Quota",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::quota::run_quota_tests(&kc).await
+            }),
+        ));
+    }
+
     // Gateway API: ingress routing through Istio gateway
     {
         let kc = ctx.require_workload()?.to_string();
