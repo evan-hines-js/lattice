@@ -529,9 +529,12 @@ pub fn generate_machine_deployment_for_pool(
     };
     let version = format_capi_version(config.k8s_version, &config.bootstrap);
 
-    let spec = serde_json::json!({
+    // When autoscaling is enabled (min/max set), omit replicas so the
+    // cluster-autoscaler owns that field. Including replicas on every
+    // reconcile via server-side apply would fight the autoscaler.
+    let has_autoscaling = pool.spec.is_autoscaling_enabled();
+    let mut spec = serde_json::json!({
         "clusterName": config.name,
-        "replicas": 0,  // Always 0 initially - scaling happens after pivot
         "selector": {
             "matchLabels": {}
         },
@@ -554,6 +557,12 @@ pub fn generate_machine_deployment_for_pool(
             }
         }
     });
+
+    // Set replicas only when autoscaling is disabled — otherwise the
+    // autoscaler owns this field and we must not overwrite it.
+    if !has_autoscaling {
+        spec["replicas"] = serde_json::json!(pool.spec.replicas);
+    }
 
     // Build annotations for autoscaler if min/max are set
     let mut annotations = std::collections::BTreeMap::new();

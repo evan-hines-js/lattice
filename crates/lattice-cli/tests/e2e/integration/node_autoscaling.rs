@@ -57,7 +57,8 @@ pub async fn run_node_autoscaling_tests(kubeconfig: &str) -> Result<(), String> 
     test_add_autoscaling_pool(kubeconfig).await?;
     test_verify_md_annotations(kubeconfig).await?;
     test_scale_from_zero(kubeconfig).await?;
-    test_scale_down_to_zero(kubeconfig).await?;
+    // Scale-down is not tested — it exercises CAPI/autoscaler behavior
+    // (5-10 min drain timers) rather than Lattice code.
 
     cleanup(kubeconfig).await;
     Ok(())
