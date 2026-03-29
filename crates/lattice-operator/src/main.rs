@@ -271,15 +271,24 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
                     let self_cluster_name = config.cluster_name.clone();
-                    // Wait for cell infra to publish parent_servers
-                    let parent_servers = loop {
-                        if let Some(ref ps) = *parent_servers_rx.borrow_and_update() {
-                            break Some(ps.clone());
-                        }
-                        if parent_servers_rx.changed().await.is_err() {
-                            break None; // sender dropped
-                        }
-                    };
+                    // Use parent_servers if cell infra is running on this pod,
+                    // otherwise proceed with None (cell is on another pod).
+                    // Wait briefly since cell and cluster start concurrently.
+                    let parent_servers = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        async {
+                            loop {
+                                if let Some(ref ps) = *parent_servers_rx.borrow_and_update() {
+                                    return Some(ps.clone());
+                                }
+                                if parent_servers_rx.changed().await.is_err() {
+                                    return None; // sender dropped
+                                }
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap_or(None);
                     controller_runner::build_cluster_controller(
                         client,
                         self_cluster_name,
