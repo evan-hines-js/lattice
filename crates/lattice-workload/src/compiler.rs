@@ -225,7 +225,7 @@ impl<'a> WorkloadCompiler<'a> {
                 lattice_common::resources::compute_workload_demand(self.workload, self.replicas)
                     .map_err(|e| CompilationError::quota_exceeded(e.to_string()))?;
             budget
-                .check(&demand)
+                .check(&demand, None)
                 .map_err(CompilationError::quota_exceeded)?;
         }
 

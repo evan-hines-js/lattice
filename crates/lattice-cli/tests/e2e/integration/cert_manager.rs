@@ -91,7 +91,8 @@ async fn test_dns_provider_lifecycle(kubeconfig: &str) -> Result<(), String> {
     let pihole = pihole_url();
     let resolver = pihole_resolver();
 
-    // Create the PiHole credentials secret first
+    // Create the PiHole credentials secret in lattice-system (next to the CRD).
+    // The external-dns reconciler syncs it to the external-dns namespace automatically.
     let secret_yaml = format!(
         r#"apiVersion: v1
 kind: Secret

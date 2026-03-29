@@ -100,14 +100,25 @@ impl QuotaBudget {
 
     /// Check if a workload demand fits within this budget.
     ///
+    /// `hourly_cost` is the workload's estimated hourly cost (if cost rates are
+    /// available). Pass `None` to skip cost enforcement.
+    ///
     /// Returns `Ok(())` if the workload fits, or `Err(reason)` with a
     /// human-readable explanation of which limit was exceeded.
-    pub fn check(&self, demand: &WorkloadResourceDemand) -> Result<(), String> {
+    pub fn check(
+        &self,
+        demand: &WorkloadResourceDemand,
+        hourly_cost: Option<f64>,
+    ) -> Result<(), String> {
         if self.remaining.is_empty() && self.max_per_workload.is_empty() {
             return Ok(()); // No constraints
         }
 
-        let raw = demand.to_raw_map();
+        let mut raw = demand.to_raw_map();
+        if let Some(cost) = hourly_cost {
+            // Cost is stored as millicents (x1000) for integer comparison
+            raw.insert("cost", (cost * 1000.0) as i64);
+        }
 
         // Check per-workload caps first
         for (key, max) in &self.max_per_workload {
@@ -231,7 +242,7 @@ mod tests {
             cpu_millis: 4000, // 4 cores, 6 remaining
             ..Default::default()
         };
-        assert!(budget.check(&demand).is_ok());
+        assert!(budget.check(&demand, None).is_ok());
     }
 
     #[test]
@@ -248,7 +259,7 @@ mod tests {
             cpu_millis: 4000, // 4 cores, only 2 remaining
             ..Default::default()
         };
-        assert!(budget.check(&demand).is_err());
+        assert!(budget.check(&demand, None).is_err());
     }
 
     #[test]
@@ -265,7 +276,7 @@ mod tests {
             cpu_millis: 16000, // 16 cores, cap is 8
             ..Default::default()
         };
-        let err = budget.check(&demand).unwrap_err();
+        let err = budget.check(&demand, None).unwrap_err();
         assert!(err.contains("per-workload cap"));
     }
 }
