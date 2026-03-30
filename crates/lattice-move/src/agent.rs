@@ -378,12 +378,21 @@ impl AgentMover {
         let mut new_refs = Vec::new();
 
         for owner in source_owners {
-            // Look up the new UID
-            let target_uid = self.uid_map.get(&owner.source_uid).ok_or_else(|| {
-                MoveError::UidMappingNotFound {
-                    source_uid: owner.source_uid.clone(),
+            // Look up the new UID — skip owners not in the move graph
+            // (e.g., ESO ExternalSecrets, cluster-scoped resources).
+            // These will be recreated on the target by their respective controllers.
+            let target_uid = match self.uid_map.get(&owner.source_uid) {
+                Some(uid) => uid,
+                None => {
+                    tracing::debug!(
+                        source_uid = %owner.source_uid,
+                        kind = %owner.kind,
+                        name = %owner.name,
+                        "Skipping ownerReference not in move graph"
+                    );
+                    continue;
                 }
-            })?;
+            };
 
             let mut ref_obj = serde_json::json!({
                 "apiVersion": owner.api_version,
