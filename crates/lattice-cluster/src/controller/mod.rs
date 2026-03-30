@@ -357,7 +357,6 @@ mod tests {
                         bootstrap: BootstrapProvider::default(),
                     },
                     config: ProviderConfig::docker(),
-                    credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
                     control_plane: ControlPlaneSpec {
@@ -413,7 +412,6 @@ mod tests {
             InfraProviderSpec {
                 provider_type: InfraProviderType::Docker,
                 region: None,
-                credentials_secret_ref: None,
                 credentials: None,
                 credential_data: None,
                 aws: None,
@@ -1203,7 +1201,6 @@ mod tests {
                             bootstrap: BootstrapProvider::default(),
                         },
                         config: ProviderConfig::docker(),
-                        credentials_secret_ref: None,
                     },
                     nodes: NodeSpec {
                         control_plane: ControlPlaneSpec {
@@ -1237,7 +1234,9 @@ mod tests {
         }
 
         fn mock_context() -> Arc<Context> {
-            let mock = MockKubeClient::new();
+            let mut mock = MockKubeClient::new();
+            mock.expect_get_cloud_provider()
+                .returning(|_| Ok(Some(sample_docker_provider())));
             let capi_mock = MockCAPIClient::new();
             let mut installer = MockCapiInstaller::new();
             installer.expect_ensure().returning(|_| Ok(()));

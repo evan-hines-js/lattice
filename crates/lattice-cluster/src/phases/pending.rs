@@ -2,7 +2,6 @@
 //!
 //! Handles the initial state where prerequisites are checked before provisioning.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use kube::runtime::controller::Action;
@@ -12,7 +11,6 @@ use tracing::{debug, info, warn};
 
 use lattice_agent::{patch_kubeconfig_for_self_management, InClusterClientProvider};
 use lattice_capi::installer::CapiProviderConfig;
-use lattice_capi::provider::create_provider;
 use lattice_common::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::events::{actions, reasons};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
@@ -177,26 +175,15 @@ async fn handle_child_cluster(
     // Ensure the namespace exists
     ctx.kube.ensure_namespace(&capi_namespace).await?;
 
-    // Copy provider credentials to cluster namespace in parallel
-    let provider = create_provider(cluster.spec.provider.provider_type(), &capi_namespace)?;
-    let secrets: Vec<_> = provider.required_secrets(cluster);
-    if !secrets.is_empty() {
-        let futures: Vec<_> = secrets
-            .into_iter()
-            .map(|(secret_name, source_namespace)| {
-                let kube = Arc::clone(&ctx.kube);
-                let target_namespace = capi_namespace.clone();
-                async move {
-                    kube.copy_secret_to_namespace(
-                        &secret_name,
-                        &source_namespace,
-                        &target_namespace,
-                    )
-                    .await
-                }
-            })
-            .collect();
-        futures::future::try_join_all(futures).await?;
+    // Copy provider credentials to per-cluster CAPI namespace
+    if let Some(ref secret_ref) = cloud_provider.k8s_secret_ref() {
+        ctx.kube
+            .copy_secret_to_namespace(
+                &secret_ref.name,
+                &secret_ref.namespace,
+                &capi_namespace,
+            )
+            .await?;
     }
 
     // Generate CAPI manifests

@@ -14,7 +14,7 @@ use super::{
 };
 use crate::constants::{AWS_API_VERSION, INFRASTRUCTURE_API_GROUP};
 use lattice_common::crd::{AwsConfig, LatticeCluster, ProviderSpec, ProviderType};
-use lattice_common::{Error, Result, AWS_CAPA_CREDENTIALS_SECRET, CAPA_NAMESPACE};
+use lattice_common::{Error, Result};
 
 /// Configuration for generating an AWS machine template
 struct MachineTemplateConfig<'a> {
@@ -314,9 +314,6 @@ impl Provider for AwsProvider {
         Ok(())
     }
 
-    fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
-        super::get_provider_secrets(cluster, AWS_CAPA_CREDENTIALS_SECRET, CAPA_NAMESPACE)
-    }
 }
 
 #[cfg(test)]
@@ -353,7 +350,6 @@ mod tests {
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
                     config: ProviderConfig::aws(test_aws_config()),
-                    credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
                     control_plane: ControlPlaneSpec {
@@ -456,7 +452,6 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::aws(test_aws_config()),
-            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&valid).await.is_ok());
 
@@ -467,7 +462,6 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::aws(test_aws_config()),
-            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&invalid).await.is_err());
     }
@@ -486,7 +480,6 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::aws(cfg),
-            credentials_secret_ref: None,
         };
 
         let result = provider.validate_spec(&spec).await;
@@ -508,7 +501,6 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::aws(cfg),
-            credentials_secret_ref: None,
         };
 
         let result = provider.validate_spec(&spec).await;

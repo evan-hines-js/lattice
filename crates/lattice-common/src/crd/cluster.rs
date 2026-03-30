@@ -501,7 +501,6 @@ mod tests {
                 bootstrap: BootstrapProvider::default(),
             },
             config: ProviderConfig::docker(),
-            credentials_secret_ref: None,
         }
     }
 

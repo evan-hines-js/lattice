@@ -210,8 +210,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{InfraProviderSpec, InfraProviderType, SecretRef};
-    use lattice_common::CAPA_NAMESPACE;
+    use lattice_common::crd::{
+        InfraProviderSpec, InfraProviderType, ResourceParams, ResourceSpec, ResourceType,
+        SecretParams,
+    };
 
     // =========================================================================
     // serialize_for_distribution Tests
@@ -223,7 +225,6 @@ mod tests {
             InfraProviderSpec {
                 provider_type: InfraProviderType::Docker,
                 region: None,
-                credentials_secret_ref: None,
                 credentials: None,
                 credential_data: None,
                 aws: None,
@@ -276,19 +277,23 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_for_distribution_with_credentials_ref() {
+    fn test_serialize_for_distribution_with_eso_credentials() {
         let mut cp = sample_cloud_provider();
-        cp.spec.credentials_secret_ref = Some(SecretRef {
-            name: "my-secret".to_string(),
-            namespace: CAPA_NAMESPACE.to_string(),
+        cp.spec.credentials = Some(ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some("infra/aws/prod".to_string()),
+            params: ResourceParams::Secret(SecretParams {
+                provider: "lattice-local".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
         });
 
         let result = serialize_for_distribution(&cp).unwrap();
         let json = String::from_utf8(result).unwrap();
 
-        // Credentials ref should be preserved
-        assert!(json.contains("my-secret"));
-        assert!(json.contains(CAPA_NAMESPACE));
+        assert!(json.contains("infra/aws/prod"));
+        assert!(json.contains("lattice-local"));
     }
 
     #[test]

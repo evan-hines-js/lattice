@@ -306,6 +306,17 @@ pub async fn generate_capi_manifests(
         }
     }
 
+    // Resolve credentials from InfraProvider for CAPI manifest generation
+    let cloud_provider = ctx
+        .kube
+        .get_cloud_provider(&cluster.spec.provider_ref)
+        .await?;
+    if let Some(ref cp) = cloud_provider {
+        if let Some(ref secret_ref) = cp.k8s_secret_ref() {
+            bootstrap.credentials_secret_name = Some(secret_ref.name.clone());
+        }
+    }
+
     let provider = create_provider(cluster.spec.provider.provider_type(), &capi_ns)?;
     provider.generate_capi_manifests(cluster, &bootstrap).await
 }

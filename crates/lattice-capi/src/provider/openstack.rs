@@ -17,7 +17,7 @@ use crate::constants::{
     OPENSTACK_API_VERSION,
 };
 use lattice_common::crd::{LatticeCluster, OpenStackConfig, ProviderSpec, ProviderType};
-use lattice_common::{Error, Result, CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET};
+use lattice_common::{Error, Result, OPENSTACK_CREDENTIALS_SECRET};
 
 /// Configuration for generating an OpenStack machine template
 struct MachineTemplateConfig<'a> {
@@ -292,9 +292,6 @@ impl Provider for OpenStackProvider {
         Ok(())
     }
 
-    fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
-        super::get_provider_secrets(cluster, OPENSTACK_CREDENTIALS_SECRET, CAPO_NAMESPACE)
-    }
 }
 
 #[cfg(test)]
@@ -332,7 +329,6 @@ mod tests {
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
                     config: ProviderConfig::openstack(test_openstack_config()),
-                    credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
                     control_plane: ControlPlaneSpec {
@@ -413,7 +409,6 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::openstack(test_openstack_config()),
-            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&valid).await.is_ok());
 
@@ -424,7 +419,6 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::openstack(test_openstack_config()),
-            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&invalid).await.is_err());
     }
@@ -443,7 +437,6 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::openstack(cfg),
-            credentials_secret_ref: None,
         };
 
         let result = provider.validate_spec(&spec).await;

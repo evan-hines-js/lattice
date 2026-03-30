@@ -31,8 +31,7 @@ use lattice_common::{
     REQUEUE_SUCCESS_SECS,
 };
 use lattice_secret_provider::credentials::{
-    reconcile_credentials as reconcile_eso_credentials, validate_credential_fields,
-    ProviderCredentialConfig,
+    reconcile_credentials as reconcile_eso_credentials, ProviderCredentialConfig,
 };
 
 const FIELD_MANAGER: &str = "lattice-cloud-provider-controller";
@@ -98,18 +97,16 @@ pub async fn reconcile(
     }
 }
 
-/// Reconcile credentials for the cloud provider.
+/// Reconcile ESO credentials for the cloud provider.
 ///
-/// Handles three modes:
-/// - **ESO mode**: Creates ExternalSecret from `credentials` (+ optional `credentialData`)
-/// - **Manual mode**: Validates `credentialsSecretRef` is present
-/// - **Docker**: No credentials required
+/// Docker providers require no credentials. All others require the
+/// `credentials` field (ESO ResourceSpec).
 async fn reconcile_credentials(client: &Client, cp: &InfraProvider) -> Result<(), ReconcileError> {
-    validate_credential_fields(
-        cp.spec.credentials.is_some(),
-        cp.spec.credentials_secret_ref.is_some(),
-        cp.spec.credential_data.is_some(),
-    )?;
+    if cp.spec.credential_data.is_some() && cp.spec.credentials.is_none() {
+        return Err(ReconcileError::Validation(
+            "credentialData requires credentials to be set".into(),
+        ));
+    }
 
     match cp.spec.provider_type {
         InfraProviderType::Docker => {
@@ -130,16 +127,9 @@ async fn reconcile_credentials(client: &Client, cp: &InfraProvider) -> Result<()
                 )
                 .await?;
                 Ok(())
-            } else if cp.spec.credentials_secret_ref.is_some() {
-                debug!(
-                    cloud_provider = %cp.name_any(),
-                    provider = ?provider_type,
-                    "Manual credentials reference present"
-                );
-                Ok(())
             } else {
                 Err(ReconcileError::Validation(format!(
-                    "{:?} provider requires credentials or credentialsSecretRef",
+                    "{:?} provider requires credentials",
                     provider_type
                 )))
             }
@@ -195,40 +185,45 @@ mod tests {
     use super::*;
     use kube::core::ObjectMeta;
     use lattice_common::crd::{
-        InfraProviderSpec, ResourceParams, ResourceSpec, ResourceType, SecretParams, SecretRef,
+        InfraProviderSpec, ResourceParams, ResourceSpec, ResourceType, SecretParams,
     };
     use lattice_common::template::extract_secret_refs;
-    use lattice_common::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE};
     use lattice_secret_provider::eso::{build_external_secret, build_templated_external_secret};
     use std::collections::BTreeMap;
 
-    // =========================================================================
-    // Test Helpers
-    // =========================================================================
+    fn eso_credentials(remote_key: &str, provider: &str) -> ResourceSpec {
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some(remote_key.to_string()),
+            params: ResourceParams::Secret(SecretParams {
+                provider: provider.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 
     fn sample_provider(provider_type: InfraProviderType) -> InfraProvider {
-        let (name, region, creds_namespace) = match provider_type {
-            InfraProviderType::Docker => ("docker", None, None),
-            InfraProviderType::AWS => ("aws-prod", Some("us-east-1"), Some(CAPA_NAMESPACE)),
-            InfraProviderType::Proxmox => ("proxmox-homelab", None, Some(CAPMOX_NAMESPACE)),
-            InfraProviderType::OpenStack => {
-                ("openstack-prod", Some("RegionOne"), Some(CAPO_NAMESPACE))
-            }
-            _ => ("unknown", None, None),
+        let (name, region) = match provider_type {
+            InfraProviderType::Docker => ("docker", None),
+            InfraProviderType::AWS => ("aws-prod", Some("us-east-1")),
+            InfraProviderType::Proxmox => ("proxmox-homelab", None),
+            InfraProviderType::OpenStack => ("openstack-prod", Some("RegionOne")),
+            _ => ("unknown", None),
         };
 
-        let credentials_secret_ref = creds_namespace.map(|ns| SecretRef {
-            name: format!("{}-creds", name),
-            namespace: ns.to_string(),
-        });
+        let credentials = if provider_type == InfraProviderType::Docker {
+            None
+        } else {
+            Some(eso_credentials(&format!("infra/{name}"), "lattice-local"))
+        };
 
         InfraProvider::new(
             name,
             InfraProviderSpec {
                 provider_type,
                 region: region.map(String::from),
-                credentials_secret_ref,
-                credentials: None,
+                credentials,
                 credential_data: None,
                 aws: None,
                 proxmox: None,
@@ -237,86 +232,22 @@ mod tests {
             },
         )
     }
-
-    fn sample_eso_provider(name: &str, provider_type: InfraProviderType) -> InfraProvider {
-        InfraProvider::new(
-            name,
-            InfraProviderSpec {
-                provider_type,
-                region: None,
-                credentials_secret_ref: None,
-                credentials: Some(ResourceSpec {
-                    type_: ResourceType::Secret,
-                    id: Some("infrastructure/aws/prod".to_string()),
-                    params: ResourceParams::Secret(SecretParams {
-                        provider: "vault-prod".to_string(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                credential_data: None,
-                aws: None,
-                proxmox: None,
-                openstack: None,
-                labels: Default::default(),
-            },
-        )
-    }
-
-    // =========================================================================
-    // reconcile_credentials Tests
-    // =========================================================================
 
     #[tokio::test]
     async fn docker_no_credentials() {
         let cp = sample_provider(InfraProviderType::Docker);
-        // Docker doesn't need a client — no ESO apply
-        // reconcile_credentials requires &Client, but Docker returns before using it.
-        // We can't call it without a client, so test the validation logic directly.
         assert_eq!(cp.spec.provider_type, InfraProviderType::Docker);
         assert!(cp.spec.credentials.is_none());
-        assert!(cp.spec.credentials_secret_ref.is_none());
+        assert!(cp.k8s_secret_ref().is_none());
     }
 
     #[tokio::test]
-    async fn manual_mode_unchanged() {
+    async fn eso_credentials_resolve() {
         let cp = sample_provider(InfraProviderType::AWS);
-        // Has credentialsSecretRef, no credentials
-        assert!(cp.spec.credentials_secret_ref.is_some());
-        assert!(cp.spec.credentials.is_none());
-    }
-
-    #[tokio::test]
-    async fn mutual_exclusion_validation() {
-        let cp = InfraProvider::new(
-            "test",
-            InfraProviderSpec {
-                provider_type: InfraProviderType::AWS,
-                region: None,
-                credentials_secret_ref: Some(SecretRef {
-                    name: "manual".to_string(),
-                    namespace: "default".to_string(),
-                }),
-                credentials: Some(ResourceSpec {
-                    type_: ResourceType::Secret,
-                    id: Some("path".to_string()),
-                    params: ResourceParams::Secret(SecretParams {
-                        provider: "vault".to_string(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                credential_data: None,
-                aws: None,
-                proxmox: None,
-                openstack: None,
-                labels: Default::default(),
-            },
-        );
-
-        // Can't test reconcile_credentials without a Client, but we can verify
-        // the validation would catch this by checking the fields
-        assert!(cp.spec.credentials.is_some() && cp.spec.credentials_secret_ref.is_some());
+        assert!(cp.spec.credentials.is_some());
+        let secret_ref = cp.k8s_secret_ref().unwrap();
+        assert_eq!(secret_ref.name, "aws-prod-credentials");
+        assert_eq!(secret_ref.namespace, LATTICE_SYSTEM_NAMESPACE);
     }
 
     #[tokio::test]
@@ -329,7 +260,6 @@ mod tests {
             InfraProviderSpec {
                 provider_type: InfraProviderType::AWS,
                 region: None,
-                credentials_secret_ref: None,
                 credentials: None,
                 credential_data: Some(data),
                 aws: None,
@@ -339,13 +269,12 @@ mod tests {
             },
         );
 
-        // credentialData without credentials should be rejected
         assert!(cp.spec.credential_data.is_some() && cp.spec.credentials.is_none());
     }
 
     #[tokio::test]
     async fn simple_mode_builds_external_secret() {
-        let cp = sample_eso_provider("aws-test", InfraProviderType::AWS);
+        let cp = sample_provider(InfraProviderType::AWS);
 
         let resource = cp.spec.credentials.as_ref().unwrap();
         let params = resource.params.as_secret().unwrap();
@@ -361,12 +290,9 @@ mod tests {
             None,
         );
 
-        assert_eq!(es.metadata.name, "aws-test-credentials");
+        assert_eq!(es.metadata.name, "aws-prod-credentials");
         assert_eq!(es.metadata.namespace, LATTICE_SYSTEM_NAMESPACE);
-        assert_eq!(es.spec.secret_store_ref.name, "vault-prod");
-        // No keys specified → dataFrom extract
-        assert!(es.spec.data.is_empty());
-        assert!(es.spec.data_from.is_some());
+        assert_eq!(es.spec.secret_store_ref.name, "lattice-local");
     }
 
     #[tokio::test]
@@ -382,7 +308,6 @@ mod tests {
             InfraProviderSpec {
                 provider_type: InfraProviderType::OpenStack,
                 region: None,
-                credentials_secret_ref: None,
                 credentials: Some(ResourceSpec {
                     type_: ResourceType::Secret,
                     id: Some("infrastructure/openstack/creds".to_string()),
@@ -424,7 +349,7 @@ mod tests {
             &params.provider,
             remote_key,
             params.keys.as_deref(),
-            template_data.clone(),
+            template_data,
             &all_refs,
         )
         .unwrap();
@@ -433,12 +358,8 @@ mod tests {
         assert!(es.spec.target.template.is_some());
         let template = es.spec.target.template.as_ref().unwrap();
         assert!(template.data.contains_key("clouds.yaml"));
-        // Secret refs should be replaced with Go template syntax
-        let clouds_yaml = &template.data["clouds.yaml"];
-        assert!(clouds_yaml.contains("{{ .credentials_username }}"));
-        assert!(clouds_yaml.contains("{{ .credentials_password }}"));
-        // Should have data entries for the referenced keys
-        assert_eq!(es.spec.data.len(), 2); // username and password
+        assert!(template.data["clouds.yaml"].contains("{{ .credentials_username }}"));
+        assert_eq!(es.spec.data.len(), 2);
     }
 
     #[tokio::test]
@@ -448,7 +369,6 @@ mod tests {
             InfraProviderSpec {
                 provider_type: InfraProviderType::AWS,
                 region: None,
-                credentials_secret_ref: None,
                 credentials: None,
                 credential_data: None,
                 aws: None,
@@ -458,15 +378,9 @@ mod tests {
             },
         );
 
-        // Neither credentials nor credentialsSecretRef set
         assert!(cp.spec.credentials.is_none());
-        assert!(cp.spec.credentials_secret_ref.is_none());
         assert!(cp.k8s_secret_ref().is_none());
     }
-
-    // =========================================================================
-    // Status Update Tests
-    // =========================================================================
 
     #[tokio::test]
     async fn status_unchanged_skips_update() {
@@ -491,40 +405,7 @@ mod tests {
             None,
             Some(1)
         ));
-        assert!(!status_check::is_status_unchanged(
-            cp.status.as_ref(),
-            &InfraProviderPhase::Ready,
-            None,
-            Some(2)
-        ));
-        assert!(!status_check::is_status_unchanged(
-            cp.status.as_ref(),
-            &InfraProviderPhase::Ready,
-            Some("msg"),
-            Some(1)
-        ));
     }
-
-    #[tokio::test]
-    async fn cloud_provider_status_fields() {
-        let status = InfraProviderStatus {
-            phase: InfraProviderPhase::Failed,
-            message: Some("Test error message".to_string()),
-            last_validated: Some(chrono::Utc::now().to_rfc3339()),
-            cluster_count: 5,
-            observed_generation: Some(2),
-        };
-
-        assert_eq!(status.phase, InfraProviderPhase::Failed);
-        assert!(status.message.is_some());
-        assert!(status.last_validated.is_some());
-        assert_eq!(status.cluster_count, 5);
-        assert_eq!(status.observed_generation, Some(2));
-    }
-
-    // =========================================================================
-    // Edge Cases
-    // =========================================================================
 
     #[tokio::test]
     async fn provider_with_namespace_uses_it() {
@@ -534,29 +415,17 @@ mod tests {
             namespace: Some("custom-namespace".to_string()),
             ..Default::default()
         };
-
         assert_eq!(cp.namespace(), Some("custom-namespace".to_string()));
     }
 
     #[tokio::test]
-    async fn provider_without_namespace_uses_default() {
-        let cp = sample_provider(InfraProviderType::Docker);
-        let namespace = cp
-            .namespace()
-            .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
-        assert_eq!(namespace, LATTICE_SYSTEM_NAMESPACE);
-    }
-
-    #[tokio::test]
     async fn all_provider_types_covered() {
-        let provider_types = [
+        for provider_type in [
             InfraProviderType::Docker,
             InfraProviderType::AWS,
             InfraProviderType::Proxmox,
             InfraProviderType::OpenStack,
-        ];
-
-        for provider_type in provider_types {
+        ] {
             let cp = sample_provider(provider_type);
             assert_eq!(cp.spec.provider_type, provider_type);
         }

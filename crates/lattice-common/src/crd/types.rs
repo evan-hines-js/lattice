@@ -172,14 +172,6 @@ pub struct ProviderSpec {
 
     /// Provider-specific configuration (determines provider type)
     pub config: ProviderConfig,
-
-    /// Reference to a Secret containing provider credentials
-    ///
-    /// The secret must have the label `lattice.dev/credential-type: provider`
-    /// and contain the appropriate credential fields for the provider type.
-    /// This allows multiple credential sets for the same provider (e.g., multiple AWS accounts).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials_secret_ref: Option<SecretRef>,
 }
 
 impl ProviderSpec {
@@ -1996,7 +1988,6 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
-                credentials_secret_ref: None,
             };
             let json =
                 serde_json::to_string(&spec).expect("ProviderSpec serialization should succeed");

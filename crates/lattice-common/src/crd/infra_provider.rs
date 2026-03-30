@@ -22,8 +22,12 @@ use crate::LATTICE_SYSTEM_NAMESPACE;
 /// spec:
 ///   type: AWS
 ///   region: us-east-1
-///   credentialsSecretRef:
-///     name: aws-prod-creds
+///   credentials:
+///     type: secret
+///     id: infrastructure/aws/prod
+///     params:
+///       provider: lattice-local
+///       keys: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
 ///   aws:
 ///     vpcId: vpc-xxx
 ///     subnetIds: [subnet-a, subnet-b]
@@ -50,15 +54,9 @@ pub struct InfraProviderSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
 
-    /// Reference to secret containing provider credentials.
-    /// Manual mode: operator creates a K8s Secret and references it here.
-    /// Mutually exclusive with `credentials`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials_secret_ref: Option<SecretRef>,
-
     /// ESO-managed credential source. Same ResourceSpec as LatticeService secrets.
     /// The controller creates an ExternalSecret that syncs credentials from a
-    /// ClusterSecretStore. Mutually exclusive with `credentialsSecretRef`.
+    /// ClusterSecretStore into `lattice-system` namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<ResourceSpec>,
 
@@ -219,10 +217,9 @@ impl std::fmt::Display for InfraProviderPhase {
 impl InfraProvider {
     /// Resolve the K8s Secret that contains provider credentials.
     ///
-    /// - ESO mode (`credentials` set): returns a synthetic ref pointing to the
-    ///   ESO-synced secret `{name}-credentials` in `lattice-system`.
-    /// - Manual mode (`credentialsSecretRef` set): returns the user-provided ref.
-    /// - Neither set: returns `None`.
+    /// Returns a synthetic ref pointing to the ESO-synced secret
+    /// `{name}-credentials` in `lattice-system`. Returns `None` if
+    /// no credentials are configured (e.g., Docker provider).
     pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
         if self.spec.credentials.is_some() {
             Some(SecretRef {
@@ -230,7 +227,7 @@ impl InfraProvider {
                 namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
             })
         } else {
-            self.spec.credentials_secret_ref.clone()
+            None
         }
     }
 }
@@ -240,8 +237,16 @@ mod tests {
     use super::*;
     use crate::crd::{ResourceParams, ResourceType, SecretParams};
 
-    fn make_provider(name: &str, spec: InfraProviderSpec) -> InfraProvider {
-        InfraProvider::new(name, spec)
+    fn eso_credentials(remote_key: &str, provider: &str) -> ResourceSpec {
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some(remote_key.to_string()),
+            params: ResourceParams::Secret(SecretParams {
+                provider: provider.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -254,8 +259,11 @@ metadata:
 spec:
   type: aws
   region: us-east-1
-  credentialsSecretRef:
-    name: aws-prod-creds
+  credentials:
+    type: secret
+    id: infra/aws/prod
+    params:
+      provider: lattice-local
   aws:
     vpcId: vpc-xxx
     subnetIds:
@@ -266,6 +274,7 @@ spec:
         let provider: InfraProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type, InfraProviderType::AWS);
         assert_eq!(provider.spec.region, Some("us-east-1".to_string()));
+        assert!(provider.spec.credentials.is_some());
     }
 
     #[test]
@@ -277,8 +286,11 @@ metadata:
   name: proxmox-lab
 spec:
   type: proxmox
-  credentialsSecretRef:
-    name: proxmox-creds
+  credentials:
+    type: secret
+    id: proxmox-creds
+    params:
+      provider: lattice-local
   proxmox:
     serverUrl: https://pve.local:8006
     node: pve1
@@ -287,24 +299,17 @@ spec:
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let provider: InfraProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type, InfraProviderType::Proxmox);
+        assert!(provider.spec.credentials.is_some());
     }
 
-    // =========================================================================
-    // k8s_secret_ref() Tests
-    // =========================================================================
-
     #[test]
-    fn k8s_secret_ref_manual_mode() {
-        let cp = make_provider(
+    fn k8s_secret_ref_with_credentials() {
+        let cp = InfraProvider::new(
             "aws-prod",
             InfraProviderSpec {
                 provider_type: InfraProviderType::AWS,
                 region: None,
-                credentials_secret_ref: Some(SecretRef {
-                    name: "my-manual-secret".to_string(),
-                    namespace: "lattice-system".to_string(),
-                }),
-                credentials: None,
+                credentials: Some(eso_credentials("infra/aws/prod", "vault-prod")),
                 credential_data: None,
                 aws: None,
                 proxmox: None,
@@ -313,49 +318,18 @@ spec:
             },
         );
 
-        let secret_ref = cp.k8s_secret_ref().expect("should have secret ref");
-        assert_eq!(secret_ref.name, "my-manual-secret");
-        assert_eq!(secret_ref.namespace, "lattice-system");
-    }
-
-    #[test]
-    fn k8s_secret_ref_eso_mode() {
-        let cp = make_provider(
-            "aws-prod",
-            InfraProviderSpec {
-                provider_type: InfraProviderType::AWS,
-                region: None,
-                credentials_secret_ref: None,
-                credentials: Some(ResourceSpec {
-                    type_: ResourceType::Secret,
-                    id: Some("infrastructure/aws/prod".to_string()),
-                    params: ResourceParams::Secret(SecretParams {
-                        provider: "vault-prod".to_string(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                credential_data: None,
-                aws: None,
-                proxmox: None,
-                openstack: None,
-                labels: Default::default(),
-            },
-        );
-
-        let secret_ref = cp.k8s_secret_ref().expect("should have secret ref");
+        let secret_ref = cp.k8s_secret_ref().unwrap();
         assert_eq!(secret_ref.name, "aws-prod-credentials");
         assert_eq!(secret_ref.namespace, LATTICE_SYSTEM_NAMESPACE);
     }
 
     #[test]
-    fn k8s_secret_ref_none() {
-        let cp = make_provider(
+    fn k8s_secret_ref_without_credentials() {
+        let cp = InfraProvider::new(
             "docker",
             InfraProviderSpec {
                 provider_type: InfraProviderType::Docker,
                 region: None,
-                credentials_secret_ref: None,
                 credentials: None,
                 credential_data: None,
                 aws: None,
@@ -406,50 +380,12 @@ spec:
 
         let creds = provider.spec.credentials.as_ref().unwrap();
         assert!(creds.type_.is_secret());
-        assert_eq!(
-            creds.id,
-            Some("infrastructure/openstack/credentials".to_string())
-        );
 
         let data = provider.spec.credential_data.as_ref().unwrap();
         assert!(data.contains_key("clouds.yaml"));
         assert!(data["clouds.yaml"].contains("${secret.credentials.username}"));
 
-        // ESO mode should generate synthetic ref
-        let secret_ref = provider.k8s_secret_ref().expect("should have secret ref");
+        let secret_ref = provider.k8s_secret_ref().unwrap();
         assert_eq!(secret_ref.name, "openstack-prod-credentials");
-    }
-
-    #[test]
-    fn eso_credentials_take_priority_over_manual() {
-        let cp = make_provider(
-            "test",
-            InfraProviderSpec {
-                provider_type: InfraProviderType::AWS,
-                region: None,
-                credentials_secret_ref: Some(SecretRef {
-                    name: "manual".to_string(),
-                    namespace: "default".to_string(),
-                }),
-                credentials: Some(ResourceSpec {
-                    type_: ResourceType::Secret,
-                    id: Some("path".to_string()),
-                    params: ResourceParams::Secret(SecretParams {
-                        provider: "vault".to_string(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                credential_data: None,
-                aws: None,
-                proxmox: None,
-                openstack: None,
-                labels: Default::default(),
-            },
-        );
-
-        // ESO mode takes priority
-        let secret_ref = cp.k8s_secret_ref().unwrap();
-        assert_eq!(secret_ref.name, "test-credentials");
     }
 }

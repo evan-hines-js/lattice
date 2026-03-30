@@ -40,7 +40,7 @@ use lattice_cell::bootstrap::{
 };
 use lattice_common::crd::{
     BootstrapProvider, InfraProvider, InfraProviderSpec, InfraProviderType, LatticeCluster,
-    ProviderType, SecretRef,
+    ProviderType,
 };
 use lattice_common::credentials::{
     AwsCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
@@ -859,21 +859,27 @@ impl Installer {
         .await
     }
 
-    /// Apply a credentials secret to the cluster, creating the namespace if needed.
+    /// Apply a credentials secret as an ESO source in `lattice-secrets` namespace.
+    ///
+    /// The local webhook ESO backend serves secrets from this namespace.
+    /// The secret must have the `lattice.dev/secret-source: "true"` label.
     async fn apply_credentials_secret(
         client: &Client,
         secret: &k8s_openapi::api::core::v1::Secret,
     ) -> Result<()> {
         use kube::api::{Api, Patch, PatchParams};
 
-        // Ensure namespace exists
-        kube_utils::ensure_namespace(client, LATTICE_SYSTEM_NAMESPACE, None, "lattice-cli")
-            .await
-            .cmd_err()?;
+        kube_utils::ensure_namespace(
+            client,
+            lattice_common::LOCAL_SECRETS_NAMESPACE,
+            None,
+            "lattice-cli",
+        )
+        .await
+        .cmd_err()?;
 
-        // Apply secret
         let secrets: Api<k8s_openapi::api::core::v1::Secret> =
-            Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+            Api::namespaced(client.clone(), lattice_common::LOCAL_SECRETS_NAMESPACE);
         let name = secret
             .metadata
             .name
@@ -893,7 +899,10 @@ impl Installer {
         Ok(())
     }
 
-    /// Create a InfraProvider CRD referencing credentials
+    /// Create an InfraProvider CRD with ESO credentials.
+    ///
+    /// `secret_name` is the name of the source secret in `lattice-secrets` namespace.
+    /// If empty (Docker provider), no credentials are set.
     async fn create_cloud_provider(
         &self,
         client: &Client,
@@ -901,6 +910,8 @@ impl Installer {
         secret_name: &str,
     ) -> Result<()> {
         use kube::api::{Api, Patch, PatchParams};
+        use lattice_common::crd::{ResourceParams, ResourceType, SecretParams};
+        use lattice_common::crd::workload::resources::ResourceSpec;
 
         let provider_ref = &self.cluster.spec.provider_ref;
         let region = self
@@ -912,13 +923,17 @@ impl Installer {
             .as_ref()
             .map(|aws| aws.region.clone());
 
-        // Only set credentials_secret_ref if a secret name is provided
-        let credentials_secret_ref = if secret_name.is_empty() {
+        let credentials = if secret_name.is_empty() {
             None
         } else {
-            Some(SecretRef {
-                name: secret_name.to_string(),
-                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
+            Some(ResourceSpec {
+                type_: ResourceType::Secret,
+                id: Some(secret_name.to_string()),
+                params: ResourceParams::Secret(SecretParams {
+                    provider: lattice_common::LOCAL_WEBHOOK_STORE_NAME.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
             })
         };
 
@@ -927,8 +942,7 @@ impl Installer {
             InfraProviderSpec {
                 provider_type,
                 region,
-                credentials_secret_ref,
-                credentials: None,
+                credentials,
                 credential_data: None,
                 aws: None,
                 proxmox: None,

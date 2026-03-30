@@ -91,26 +91,6 @@ pub async fn reconcile_credentials(
     Ok(secret_name)
 }
 
-/// Validate mutual exclusion between ESO credentials and manual secret ref.
-///
-/// Returns an error if both are set, or if `credential_data` is set without `credentials`.
-pub fn validate_credential_fields(
-    has_credentials: bool,
-    has_credentials_secret_ref: bool,
-    has_credential_data: bool,
-) -> Result<(), ReconcileError> {
-    if has_credentials && has_credentials_secret_ref {
-        return Err(ReconcileError::Validation(
-            "credentials and credentialsSecretRef are mutually exclusive".into(),
-        ));
-    }
-    if has_credential_data && !has_credentials {
-        return Err(ReconcileError::Validation(
-            "credentialData requires credentials to be set".into(),
-        ));
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -131,36 +111,6 @@ mod tests {
             }),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn validate_mutual_exclusion() {
-        assert!(validate_credential_fields(true, true, false).is_err());
-    }
-
-    #[test]
-    fn validate_credential_data_without_credentials() {
-        assert!(validate_credential_fields(false, false, true).is_err());
-    }
-
-    #[test]
-    fn validate_eso_mode_ok() {
-        assert!(validate_credential_fields(true, false, false).is_ok());
-    }
-
-    #[test]
-    fn validate_eso_mode_with_data_ok() {
-        assert!(validate_credential_fields(true, false, true).is_ok());
-    }
-
-    #[test]
-    fn validate_manual_mode_ok() {
-        assert!(validate_credential_fields(false, true, false).is_ok());
-    }
-
-    #[test]
-    fn validate_neither_ok() {
-        assert!(validate_credential_fields(false, false, false).is_ok());
     }
 
     #[test]

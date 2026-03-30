@@ -23,7 +23,7 @@ use crate::constants::{
 use lattice_common::crd::{
     InstanceType, Ipv4PoolConfig, LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig,
 };
-use lattice_common::{Error, Result, CAPMOX_NAMESPACE, PROXMOX_CREDENTIALS_SECRET};
+use lattice_common::{Error, Result, PROXMOX_CREDENTIALS_SECRET};
 
 /// VM sizing parameters for ProxmoxMachineTemplate
 struct MachineSizing {
@@ -99,7 +99,7 @@ impl ProxmoxProvider {
     }
 
     /// Generate ProxmoxCluster manifest
-    fn generate_proxmox_cluster(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
+    fn generate_proxmox_cluster(&self, cluster: &LatticeCluster, bootstrap: &BootstrapInfo) -> Result<CAPIManifest> {
         let name = get_cluster_name(cluster)?;
         let cfg = Self::get_config(cluster)
             .ok_or_else(|| Error::validation("proxmox config required"))?;
@@ -112,10 +112,9 @@ impl ProxmoxProvider {
 
         let (ip_range, prefix) = parse_ipv4_pool(&cfg.ipv4_pool, "cluster")?;
 
-        // Use credentials_secret_ref from ProviderSpec if set, otherwise default
-        let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
-        let credentials_name = secret_ref
-            .map(|s| s.name.clone())
+        let credentials_name = bootstrap
+            .credentials_secret_name
+            .clone()
             .unwrap_or_else(|| PROXMOX_CREDENTIALS_SECRET.to_string());
 
         let mut spec = serde_json::json!({
@@ -376,7 +375,7 @@ impl Provider for ProxmoxProvider {
 
         let mut manifests = vec![
             generate_cluster(&config, &infra),
-            self.generate_proxmox_cluster(cluster)?,
+            self.generate_proxmox_cluster(cluster, bootstrap)?,
             generate_control_plane(&config, &infra, &cp_config)?,
             self.generate_machine_template(name, cfg, cp_sizing, "control-plane"),
         ];
@@ -414,9 +413,6 @@ impl Provider for ProxmoxProvider {
         validate_k8s_version(&spec.kubernetes.version)
     }
 
-    fn required_secrets(&self, cluster: &LatticeCluster) -> Vec<(String, String)> {
-        super::get_provider_secrets(cluster, PROXMOX_CREDENTIALS_SECRET, CAPMOX_NAMESPACE)
-    }
 }
 
 #[cfg(test)]
@@ -479,7 +475,6 @@ mod tests {
                         bootstrap: BootstrapProvider::Kubeadm,
                     },
                     config: ProviderConfig::proxmox(test_proxmox_config()),
-                    credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
                     control_plane: ControlPlaneSpec {
@@ -587,7 +582,6 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::proxmox(test_proxmox_config()),
-            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&valid).await.is_ok());
 
@@ -598,7 +592,6 @@ mod tests {
                 bootstrap: BootstrapProvider::Kubeadm,
             },
             config: ProviderConfig::proxmox(test_proxmox_config()),
-            credentials_secret_ref: None,
         };
         assert!(provider.validate_spec(&invalid).await.is_err());
     }

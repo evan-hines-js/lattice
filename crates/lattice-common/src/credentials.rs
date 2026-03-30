@@ -16,7 +16,7 @@ use tracing::warn;
 use zeroize::Zeroizing;
 
 use crate::{
-    AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET, PROVIDER_LABEL,
+    AWS_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET, PROVIDER_LABEL,
     PROXMOX_CREDENTIALS_SECRET,
 };
 
@@ -81,11 +81,15 @@ fn build_credential_secret(
 ) -> Secret {
     let mut labels = BTreeMap::new();
     labels.insert(PROVIDER_LABEL.to_string(), provider_type.to_string());
+    labels.insert(
+        "lattice.dev/secret-source".to_string(),
+        "true".to_string(),
+    );
 
     Secret {
         metadata: ObjectMeta {
             name: Some(secret_name.to_string()),
-            namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+            namespace: Some(crate::LOCAL_SECRETS_NAMESPACE.to_string()),
             labels: Some(labels),
             ..Default::default()
         },
@@ -477,7 +481,7 @@ mod tests {
         );
         assert_eq!(
             secret.metadata.namespace,
-            Some(LATTICE_SYSTEM_NAMESPACE.to_string())
+            Some(crate::LOCAL_SECRETS_NAMESPACE.to_string())
         );
 
         let labels = secret.metadata.labels.unwrap();
@@ -583,7 +587,7 @@ mod tests {
         );
         assert_eq!(
             secret.metadata.namespace,
-            Some(LATTICE_SYSTEM_NAMESPACE.to_string())
+            Some(crate::LOCAL_SECRETS_NAMESPACE.to_string())
         );
 
         let labels = secret.metadata.labels.unwrap();
@@ -663,7 +667,7 @@ mod tests {
         );
         assert_eq!(
             secret.metadata.namespace,
-            Some(LATTICE_SYSTEM_NAMESPACE.to_string())
+            Some(crate::LOCAL_SECRETS_NAMESPACE.to_string())
         );
 
         let labels = secret.metadata.labels.unwrap();

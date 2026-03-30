@@ -431,7 +431,6 @@ mod tests {
                         bootstrap: BootstrapProvider::default(),
                     },
                     config: ProviderConfig::docker(),
-                    credentials_secret_ref: None,
                 },
                 nodes: NodeSpec {
                     control_plane: ControlPlaneSpec {
@@ -672,13 +671,12 @@ mod tests {
             );
         }
 
-        /// Story: MachineDeployment is always created with replicas=0 during initial
-        /// provisioning. After pivot, the cluster's local controller will scale up
-        /// to match spec.nodes.worker_pools. This ensures fast cluster creation.
+        /// Story: MachineDeployment uses the configured replicas count when
+        /// autoscaling is disabled. The autoscaler owns the replicas field
+        /// when min/max are set.
         #[tokio::test]
-        async fn worker_deployment_starts_with_zero_replicas() {
+        async fn worker_deployment_uses_configured_replicas() {
             let provider = DockerProvider::new();
-            // Even with spec.nodes.worker_pools[default].replicas=5, MachineDeployment starts at 0
             let cluster = sample_cluster("my-cluster", 5);
             let bootstrap = BootstrapInfo::default();
 
@@ -696,8 +694,7 @@ mod tests {
             assert_eq!(deployment.metadata.name, "my-cluster-pool-default");
 
             let spec = deployment.spec.as_ref().expect("spec should exist");
-            // Always 0 - scaling happens after pivot
-            assert_eq!(spec.get("replicas").expect("replicas should exist"), 0);
+            assert_eq!(spec.get("replicas").expect("replicas should exist"), 5);
             assert_eq!(
                 spec.get("clusterName").expect("clusterName should exist"),
                 "my-cluster"
@@ -876,7 +873,6 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
-                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -895,7 +891,6 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
-                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -914,7 +909,6 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
-                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -933,7 +927,6 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
-                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -956,7 +949,6 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
-                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;
@@ -976,7 +968,6 @@ mod tests {
                     bootstrap: BootstrapProvider::default(),
                 },
                 config: ProviderConfig::docker(),
-                credentials_secret_ref: None,
             };
 
             let result = provider.validate_spec(&spec).await;

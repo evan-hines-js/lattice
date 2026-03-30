@@ -135,6 +135,9 @@ pub struct BootstrapInfo {
     pub registry_mirrors: Vec<registry::ResolvedMirror>,
     /// Directory containing bootstrap scripts
     pub scripts_dir: String,
+    /// Name of the K8s Secret containing provider credentials (ESO-synced).
+    /// Used by CAPI providers to set `credentialsRef` on infrastructure objects.
+    pub credentials_secret_name: Option<String>,
 }
 
 impl Default for BootstrapInfo {
@@ -145,6 +148,7 @@ impl Default for BootstrapInfo {
             ca_cert_pem: None,
             registry_mirrors: Vec::new(),
             scripts_dir: "/scripts".to_string(),
+            credentials_secret_name: None,
         }
     }
 }
@@ -163,6 +167,7 @@ impl BootstrapInfo {
             ca_cert_pem: Some(ca_cert_pem),
             registry_mirrors: Vec::new(),
             scripts_dir,
+            credentials_secret_name: None,
         }
     }
 
@@ -257,24 +262,6 @@ pub fn get_cluster_name(cluster: &LatticeCluster) -> Result<&str> {
         .ok_or_else(|| Error::validation("cluster name required"))
 }
 
-/// Get required secrets for a provider, using cluster's credentials_secret_ref or defaults
-///
-/// Returns a vec of (secret_name, namespace) tuples.
-pub fn get_provider_secrets(
-    cluster: &LatticeCluster,
-    default_name: &str,
-    default_namespace: &str,
-) -> Vec<(String, String)> {
-    let secret_ref = cluster.spec.provider.credentials_secret_ref.as_ref();
-    vec![(
-        secret_ref
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| default_name.to_string()),
-        secret_ref
-            .map(|s| s.namespace.clone())
-            .unwrap_or_else(|| default_namespace.to_string()),
-    )]
-}
 
 // ============================================================================
 // Configuration Structs
@@ -1451,18 +1438,6 @@ pub trait Provider: Send + Sync {
     /// `Ok(())` if the spec is valid, or an error describing what's wrong
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()>;
 
-    /// Get secrets required by this provider in the cluster's namespace
-    ///
-    /// Some providers (like Proxmox, OpenStack, AWS) require credential secrets
-    /// in the cluster's CAPI namespace. Returns secrets to copy from source
-    /// namespace to the cluster namespace before generating CAPI manifests.
-    ///
-    /// # Returns
-    ///
-    /// A vector of (secret_name, source_namespace) tuples
-    fn required_secrets(&self, _cluster: &LatticeCluster) -> Vec<(String, String)> {
-        Vec::new()
-    }
 }
 
 /// Create a provider instance for the given provider type
