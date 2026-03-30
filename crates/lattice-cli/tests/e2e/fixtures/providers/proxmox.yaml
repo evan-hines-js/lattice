@@ -6,9 +6,11 @@ metadata:
   name: proxmox
 spec:
   providerType: proxmox
-  credentialsSecretRef:
-    name: proxmox-credentials
-    namespace: capmox-system
+  credentials:
+    type: secret
+    id: proxmox-credentials
+    params:
+      provider: lattice-local
   proxmox:
     endpoint: "${PROXMOX_URL}"
     allowInsecure: true

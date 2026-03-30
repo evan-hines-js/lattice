@@ -6,9 +6,11 @@ metadata:
   name: openstack
 spec:
   providerType: openstack
-  credentialsSecretRef:
-    name: openstack-credentials
-    namespace: capo-system
+  credentials:
+    type: secret
+    id: openstack-credentials
+    params:
+      provider: lattice-local
   openstack:
     authUrl: "${OS_AUTH_URL}"
     region: "${OS_REGION_NAME}"

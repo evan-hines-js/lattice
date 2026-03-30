@@ -7,9 +7,11 @@ metadata:
 spec:
   providerType: aws
   region: us-east-1
-  credentialsSecretRef:
-    name: aws-credentials
-    namespace: capa-system
+  credentials:
+    type: secret
+    id: aws-credentials
+    params:
+      provider: lattice-local
   aws:
     sshKeyName: lattice-e2e
   labels:
