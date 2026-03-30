@@ -30,9 +30,6 @@ use lattice_common::{
     ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
     REQUEUE_SUCCESS_SECS,
 };
-use lattice_secret_provider::credentials::{
-    reconcile_credentials as reconcile_eso_credentials, ProviderCredentialConfig,
-};
 
 const FIELD_MANAGER: &str = "lattice-cloud-provider-controller";
 
@@ -60,9 +57,9 @@ pub async fn reconcile(
 
     info!(cloud_provider = %name, provider_type = ?cp.spec.provider_type, "Reconciling InfraProvider");
 
-    match reconcile_credentials(client, &cp).await {
+    match validate_credentials(&cp) {
         Ok(()) => {
-            info!(cloud_provider = %name, "Credentials reconciled successfully");
+            info!(cloud_provider = %name, "Credentials validated successfully");
 
             update_status(
                 client,
@@ -97,11 +94,12 @@ pub async fn reconcile(
     }
 }
 
-/// Reconcile ESO credentials for the cloud provider.
+/// Validate credentials for the cloud provider.
 ///
 /// Docker providers require no credentials. All others require the
-/// `credentials` field (ESO ResourceSpec).
-async fn reconcile_credentials(client: &Client, cp: &InfraProvider) -> Result<(), ReconcileError> {
+/// `credentials` field (ESO ResourceSpec). ExternalSecrets are created
+/// by consumers in their target namespaces, not by this controller.
+fn validate_credentials(cp: &InfraProvider) -> Result<(), ReconcileError> {
     if cp.spec.credential_data.is_some() && cp.spec.credentials.is_none() {
         return Err(ReconcileError::Validation(
             "credentialData requires credentials to be set".into(),
@@ -114,18 +112,7 @@ async fn reconcile_credentials(client: &Client, cp: &InfraProvider) -> Result<()
             Ok(())
         }
         provider_type => {
-            if let Some(ref credentials) = cp.spec.credentials {
-                reconcile_eso_credentials(
-                    client,
-                    &ProviderCredentialConfig {
-                        provider_name: &cp.name_any(),
-                        credentials,
-                        credential_data: cp.spec.credential_data.as_ref(),
-                        target_namespace: LATTICE_SYSTEM_NAMESPACE,
-                        field_manager: FIELD_MANAGER,
-                    },
-                )
-                .await?;
+            if cp.spec.credentials.is_some() {
                 Ok(())
             } else {
                 Err(ReconcileError::Validation(format!(

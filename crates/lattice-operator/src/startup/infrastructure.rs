@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use kube::api::ListParams;
-use kube::{Api, Client};
+use kube::{Api, Client, ResourceExt};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{
@@ -15,9 +15,7 @@ use lattice_common::{
     LATTICE_SYSTEM_NAMESPACE,
 };
 
-use lattice_capi::installer::{
-    copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig,
-};
+use lattice_capi::installer::{CapiInstaller, CapiProviderConfig};
 use lattice_common::crd::{
     BackupsConfig, InfraProvider, LatticeCluster, MonitoringConfig, ProviderType,
 };
@@ -239,52 +237,6 @@ async fn apply_eso_phase(client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Wait for a provider's ESO-synced credentials secret to exist.
-///
-/// After the InfraProvider controller creates the ExternalSecret and ESO
-/// syncs it, the K8s Secret appears in the target namespace. Poll until
-/// it exists so the CAPI installer can copy it.
-async fn wait_for_credentials_sync(
-    client: &Client,
-    provider: &InfraProvider,
-) -> anyhow::Result<()> {
-    let secret_ref = match provider.k8s_secret_ref() {
-        Some(r) => r,
-        None => return Ok(()), // Docker — no credentials needed
-    };
-
-    let secrets: Api<k8s_openapi::api::core::v1::Secret> =
-        Api::namespaced(client.clone(), &secret_ref.namespace);
-    let secret_name = secret_ref.name.clone();
-
-    tracing::info!(
-        secret = %secret_name,
-        namespace = %secret_ref.namespace,
-        "Waiting for ESO to sync provider credentials..."
-    );
-
-    wait_for_resource(
-        &format!("ESO-synced secret '{}'", secret_name),
-        DEFAULT_RESOURCE_TIMEOUT,
-        DEFAULT_POLL_INTERVAL,
-        || {
-            let secrets = secrets.clone();
-            let name = secret_name.clone();
-            async move {
-                match secrets.get(&name).await {
-                    Ok(s) => Ok(Some(s)),
-                    Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
-                    Err(e) => Err(format!("API error: {}", e)),
-                }
-            }
-        },
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    tracing::info!(secret = %secret_ref.name, "Provider credentials synced by ESO");
-    Ok(())
-}
 
 /// Check if the `cacerts` Secret already exists in `istio-system`.
 async fn cacerts_exists(client: &Client) -> bool {
@@ -407,11 +359,10 @@ async fn ensure_capi_on_bootstrap(
 
     apply_cert_manager_phase(client).await?;
     apply_eso_phase(client).await?;
-    wait_for_credentials_sync(client, &cp).await?;
     ensure_capi(client, infrastructure, Some(&cp), installer).await
 }
 
-/// Install CAPI providers with optional credential copying.
+/// Install CAPI providers with ESO credential sync to provider namespace.
 async fn ensure_capi(
     client: &Client,
     provider_type: ProviderType,
@@ -421,10 +372,20 @@ async fn ensure_capi(
     tracing::info!(infrastructure = ?provider_type, "Installing CAPI providers");
 
     if let Some(cp) = cloud_provider {
-        if let Some(ref secret_ref) = cp.k8s_secret_ref() {
-            copy_credentials_to_provider_namespace(client, provider_type, secret_ref)
+        if let Some(ref credentials) = cp.spec.credentials {
+            let target_ns = lattice_capi::installer::infra_provider_namespace(provider_type);
+            if let Some(ns) = target_ns {
+                lattice_secret_provider::credentials::ensure_credentials(
+                    client,
+                    &cp.name_any(),
+                    credentials,
+                    cp.spec.credential_data.as_ref(),
+                    ns,
+                    "lattice-operator",
+                )
                 .await
-                .map_err(|e| anyhow::anyhow!("failed to copy provider credentials: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("failed to sync credentials to {ns}: {e}"))?;
+            }
         }
     }
 

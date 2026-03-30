@@ -5,9 +5,8 @@
 
 use tracing::{debug, info};
 
-use lattice_capi::installer::{
-    copy_credentials_to_provider_namespace, CapiInstaller, CapiProviderConfig, NativeInstaller,
-};
+use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
+use kube::ResourceExt;
 use lattice_common::crd::{InfraProvider, LatticeCluster, ProviderType};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
@@ -44,7 +43,7 @@ impl AgentClient {
 
         info!(infrastructure = %provider_str, "Installing CAPI providers");
 
-        // Copy credentials from InfraProvider to CAPI provider namespace
+        // Create ESO ExternalSecret in the CAPI provider namespace
         if infrastructure != ProviderType::Docker {
             let cloud_providers: kube::Api<InfraProvider> =
                 kube::Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
@@ -58,18 +57,22 @@ impl AgentClient {
                     ))
                 })?;
 
-            let secret_ref = cp.k8s_secret_ref().ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "InfraProvider '{}' missing credentials",
-                    cluster.spec.provider_ref
-                ))
-            })?;
-
-            copy_credentials_to_provider_namespace(&client, infrastructure, &secret_ref)
-                .await
-                .map_err(|e| {
-                    std::io::Error::other(format!("Failed to copy provider credentials: {}", e))
-                })?;
+            if let Some(ref credentials) = cp.spec.credentials {
+                if let Some(ns) = lattice_capi::installer::infra_provider_namespace(infrastructure) {
+                    lattice_secret_provider::credentials::ensure_credentials(
+                        &client,
+                        &cp.name_any(),
+                        credentials,
+                        cp.spec.credential_data.as_ref(),
+                        ns,
+                        "lattice-agent",
+                    )
+                    .await
+                    .map_err(|e| {
+                        std::io::Error::other(format!("failed to sync credentials to {ns}: {e}"))
+                    })?;
+                }
+            }
         }
 
         let config = CapiProviderConfig::new(infrastructure)

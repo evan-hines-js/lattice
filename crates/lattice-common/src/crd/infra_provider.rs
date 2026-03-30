@@ -7,9 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::types::SecretRef;
 use super::workload::resources::ResourceSpec;
-use crate::LATTICE_SYSTEM_NAMESPACE;
 
 /// InfraProvider defines a cloud account/region that clusters can be deployed to.
 ///
@@ -215,17 +213,12 @@ impl std::fmt::Display for InfraProviderPhase {
 }
 
 impl InfraProvider {
-    /// Resolve the K8s Secret that contains provider credentials.
-    ///
-    /// Returns a synthetic ref pointing to the ESO-synced secret
-    /// `{name}-credentials` in `lattice-system`. Returns `None` if
-    /// no credentials are configured (e.g., Docker provider).
-    pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
+    /// Returns the ESO-synced credential secret name (`{name}-credentials`).
+    /// `None` if no credentials are configured (e.g., Docker provider).
+    /// Callers create ExternalSecrets in whichever namespace they need.
+    pub fn credential_secret_name(&self) -> Option<String> {
         if self.spec.credentials.is_some() {
-            Some(SecretRef {
-                name: format!("{}-credentials", self.name_any()),
-                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
-            })
+            Some(format!("{}-credentials", self.name_any()))
         } else {
             None
         }

@@ -92,6 +92,51 @@ pub async fn reconcile_credentials(
 }
 
 
+/// Ensure credentials exist in a target namespace via ESO.
+///
+/// Creates the namespace if needed, applies an ExternalSecret, and watches
+/// for ESO to sync the resulting K8s Secret. Single entry point for
+/// "I need these credentials to exist in this namespace."
+pub async fn ensure_credentials(
+    client: &kube::Client,
+    provider_name: &str,
+    credentials: &ResourceSpec,
+    credential_data: Option<&BTreeMap<String, String>>,
+    target_namespace: &str,
+    field_manager: &str,
+) -> Result<String, ReconcileError> {
+    lattice_common::kube_utils::ensure_namespace(client, target_namespace, None, field_manager)
+        .await
+        .map_err(|e| {
+            ReconcileError::Internal(format!(
+                "failed to ensure namespace '{target_namespace}': {e}"
+            ))
+        })?;
+
+    let secret_name = reconcile_credentials(
+        client,
+        &ProviderCredentialConfig {
+            provider_name,
+            credentials,
+            credential_data,
+            target_namespace,
+            field_manager,
+        },
+    )
+    .await?;
+
+    lattice_common::kube_utils::wait_for_secret(
+        client,
+        &secret_name,
+        target_namespace,
+        std::time::Duration::from_secs(120),
+    )
+    .await
+    .map_err(|e| ReconcileError::Internal(e.to_string()))?;
+
+    Ok(secret_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

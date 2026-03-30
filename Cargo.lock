@@ -2576,6 +2576,7 @@ dependencies = [
  "lattice-infra",
  "lattice-move",
  "lattice-proto",
+ "lattice-secret-provider",
  "mockall",
  "moka",
  "prost-types",

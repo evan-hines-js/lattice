@@ -143,7 +143,7 @@ async fn handle_child_cluster(
 
     // Validate InfraProvider has credentials for non-Docker providers
     if provider_type != lattice_common::crd::ProviderType::Docker
-        && cloud_provider.k8s_secret_ref().is_none()
+        && cloud_provider.spec.credentials.is_none()
     {
         return Err(Error::validation(format!(
             "InfraProvider '{}' requires credentials for {} provider",
@@ -151,16 +151,30 @@ async fn handle_child_cluster(
         )));
     }
 
-    // Copy provider credentials from InfraProvider's secret to provider namespace
-    if let (Some(ref client), Some(ref secret_ref)) =
-        (&ctx.client, &cloud_provider.k8s_secret_ref())
+    // Sync provider credentials via ESO to namespaces that need them
+    if let (Some(ref client), Some(ref credentials)) =
+        (&ctx.client, &cloud_provider.spec.credentials)
     {
-        lattice_capi::installer::copy_credentials_to_provider_namespace(
-            client,
-            provider_type,
-            secret_ref,
+        let provider_name = cloud_provider.name_any();
+        let credential_data = cloud_provider.spec.credential_data.as_ref();
+
+        // CAPI provider namespace (e.g., capmox-system)
+        if let Some(ns) = lattice_capi::installer::infra_provider_namespace(provider_type) {
+            lattice_secret_provider::credentials::ensure_credentials(
+                client, &provider_name, credentials, credential_data, ns,
+                "lattice-cluster-controller",
+            )
+            .await
+            .map_err(|e| Error::internal(e.to_string()))?;
+        }
+
+        // Per-cluster CAPI namespace (e.g., capi-{cluster})
+        lattice_secret_provider::credentials::ensure_credentials(
+            client, &provider_name, credentials, credential_data, &capi_namespace(name),
+            "lattice-cluster-controller",
         )
-        .await?;
+        .await
+        .map_err(|e| Error::internal(e.to_string()))?;
     }
 
     // Ensure CAPI is installed before provisioning
@@ -174,17 +188,6 @@ async fn handle_child_cluster(
 
     // Ensure the namespace exists
     ctx.kube.ensure_namespace(&capi_namespace).await?;
-
-    // Copy provider credentials to per-cluster CAPI namespace
-    if let Some(ref secret_ref) = cloud_provider.k8s_secret_ref() {
-        ctx.kube
-            .copy_secret_to_namespace(
-                &secret_ref.name,
-                &secret_ref.namespace,
-                &capi_namespace,
-            )
-            .await?;
-    }
 
     // Generate CAPI manifests
     let manifests = super::generate_capi_manifests(cluster, ctx).await?;

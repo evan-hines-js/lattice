@@ -13,6 +13,7 @@ fips = ["lattice-infra/fips", "lattice-common/fips"]
 lattice-capi = { workspace = true }
 lattice-common = { workspace = true }
 lattice-infra = { workspace = true }
+lattice-secret-provider = { workspace = true }
 lattice-move = { workspace = true }
 lattice-proto = { workspace = true }
 

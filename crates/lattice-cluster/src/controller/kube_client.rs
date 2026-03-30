@@ -4,7 +4,6 @@
 //! for the LatticeCluster controller, plus the concrete implementation.
 
 use async_trait::async_trait;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::{Client, Resource};
 use serde::de::DeserializeOwned;
@@ -86,17 +85,6 @@ pub trait KubeClient: Send + Sync {
         grpc_port: u16,
         proxy_port: u16,
         provider_type: &lattice_common::crd::ProviderType,
-    ) -> Result<(), Error>;
-
-    /// Copy a secret from one namespace to another
-    ///
-    /// If the secret already exists in the target namespace, this is a no-op.
-    /// Used to copy provider credentials to each cluster's CAPI namespace.
-    async fn copy_secret_to_namespace(
-        &self,
-        name: &str,
-        source_namespace: &str,
-        target_namespace: &str,
     ) -> Result<(), Error>;
 
     /// Add a finalizer to a LatticeCluster
@@ -256,66 +244,6 @@ impl KubeClient for KubeClientImpl {
         use k8s_openapi::api::core::v1::Secret;
         let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
         get_optional(&api, name).await
-    }
-
-    async fn copy_secret_to_namespace(
-        &self,
-        name: &str,
-        source_namespace: &str,
-        target_namespace: &str,
-    ) -> Result<(), Error> {
-        use k8s_openapi::api::core::v1::Secret;
-
-        let target_api: Api<Secret> = Api::namespaced(self.client.clone(), target_namespace);
-
-        // Check if secret already exists in target namespace
-        if get_optional(&target_api, name).await?.is_some() {
-            debug!(
-                secret = %name,
-                source = %source_namespace,
-                target = %target_namespace,
-                "secret already exists in target namespace"
-            );
-            return Ok(());
-        }
-
-        // Get the source secret
-        let source_secret = self
-            .get_secret(name, source_namespace)
-            .await?
-            .ok_or_else(|| {
-                Error::bootstrap(format!(
-                    "source secret {}/{} not found",
-                    source_namespace, name
-                ))
-            })?;
-
-        // Create a copy in the target namespace (strip server-managed fields)
-        let target_secret = Secret {
-            metadata: ObjectMeta {
-                name: Some(name.to_string()),
-                namespace: Some(target_namespace.to_string()),
-                labels: source_secret.metadata.labels.clone(),
-                annotations: source_secret.metadata.annotations.clone(),
-                ..Default::default()
-            },
-            type_: source_secret.type_.clone(),
-            data: source_secret.data.clone(),
-            string_data: source_secret.string_data.clone(),
-            immutable: source_secret.immutable,
-        };
-
-        info!(
-            secret = %name,
-            source = %source_namespace,
-            target = %target_namespace,
-            "copying secret to target namespace"
-        );
-        target_api
-            .create(&PostParams::default(), &target_secret)
-            .await?;
-
-        Ok(())
     }
 
     async fn ensure_cell_service(

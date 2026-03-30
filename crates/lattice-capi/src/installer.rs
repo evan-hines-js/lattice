@@ -14,13 +14,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Namespace;
-use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::Client as KubeClient;
 #[cfg(test)]
 use mockall::automock;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{ProviderType, SecretRef};
+use lattice_common::crd::ProviderType;
 use lattice_common::credentials::{AwsCredentials, CredentialProvider};
 use lattice_common::kube_utils::{self, ApplyOptions};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
@@ -386,79 +386,17 @@ fn compute_provider_actions(
 
 /// Copy credentials from InfraProvider's secret reference to the CAPI provider namespace.
 ///
-/// CAPI providers expect credentials in specific namespaces with specific names.
-/// This copies the source secret to the location expected by each CAPI provider.
-pub async fn copy_credentials_to_provider_namespace(
-    client: &KubeClient,
-    provider: ProviderType,
-    secret_ref: &SecretRef,
-) -> Result<(), Error> {
-    use k8s_openapi::api::core::v1::{Namespace, Secret};
-
-    let (target_namespace, target_name) = match provider {
-        ProviderType::Aws => (CAPA_NAMESPACE, AWS_CAPA_CREDENTIALS_SECRET),
-        ProviderType::Proxmox => (CAPMOX_NAMESPACE, PROXMOX_CREDENTIALS_SECRET),
-        ProviderType::OpenStack => (CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET),
-        _ => return Ok(()),
-    };
-
-    let source_api: Api<Secret> = Api::namespaced(client.clone(), &secret_ref.namespace);
-    let source = match source_api.get(&secret_ref.name).await {
-        Ok(s) => s,
-        Err(kube::Error::Api(e)) if e.code == 404 => {
-            return Err(Error::validation(format!(
-                "Credentials secret '{}/{}' not found",
-                secret_ref.namespace, secret_ref.name
-            )));
-        }
-        Err(e) => return Err(e.into()),
-    };
-
-    let ns_api: Api<Namespace> = Api::all(client.clone());
-    let ns = Namespace {
-        metadata: kube::core::ObjectMeta {
-            name: Some(target_namespace.to_string()),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let _ = ns_api.create(&PostParams::default(), &ns).await;
-
-    let target_api: Api<Secret> = Api::namespaced(client.clone(), target_namespace);
-    let target = Secret {
-        metadata: kube::core::ObjectMeta {
-            name: Some(target_name.to_string()),
-            namespace: Some(target_namespace.to_string()),
-            ..Default::default()
-        },
-        data: source.data.clone(),
-        string_data: source.string_data.clone(),
-        type_: source.type_.clone(),
-        ..Default::default()
-    };
-
-    target_api
-        .patch(
-            target_name,
-            &PatchParams::apply("lattice-capi-installer").force(),
-            &Patch::Apply(&target),
-        )
-        .await
-        .map_err(|e| {
-            Error::capi_installation(format!(
-                "Failed to copy credentials to {}/{}: {}",
-                target_namespace, target_name, e
-            ))
-        })?;
-
-    info!(
-        source = format!("{}/{}", secret_ref.namespace, secret_ref.name),
-        target = format!("{}/{}", target_namespace, target_name),
-        "Copied provider credentials"
-    );
-
-    Ok(())
+/// Returns the CAPI infrastructure provider namespace for a given type.
+/// `None` for Docker (no credentials needed).
+pub fn infra_provider_namespace(provider: ProviderType) -> Option<&'static str> {
+    match provider {
+        ProviderType::Aws => Some(CAPA_NAMESPACE),
+        ProviderType::Proxmox => Some(CAPMOX_NAMESPACE),
+        ProviderType::OpenStack => Some(CAPO_NAMESPACE),
+        _ => None,
+    }
 }
+
 
 // =============================================================================
 // Public types

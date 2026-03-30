@@ -272,27 +272,65 @@ pub async fn secret_exists(client: &Client, name: &str, namespace: &str) -> Resu
     }
 }
 
-/// Wait for a secret to exist
+/// Wait for a secret to exist using a K8s watch.
+///
+/// If the secret already exists, returns immediately. Otherwise sets up
+/// a watch and waits for the ADDED event. Times out if the secret doesn't
+/// appear within the given duration.
 pub async fn wait_for_secret(
     client: &Client,
     name: &str,
     namespace: &str,
     timeout: Duration,
 ) -> Result<(), Error> {
-    let client_clone = client.clone();
-    let name_owned = name.to_string();
-    let namespace_owned = namespace.to_string();
+    use futures::{StreamExt, TryStreamExt};
+    use kube::runtime::watcher::{self, Event};
 
-    poll_until(
-        timeout,
-        DEFAULT_POLL_INTERVAL,
-        format!("Timeout waiting for secret {}/{}", namespace, name),
-        || {
-            let client = client_clone.clone();
-            let name = name_owned.clone();
-            let namespace = namespace_owned.clone();
-            async move { secret_exists(&client, &name, &namespace).await }
-        },
-    )
-    .await
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+
+    // Fast path: already exists
+    match secrets.get(name).await {
+        Ok(_) => return Ok(()),
+        Err(kube::Error::Api(e)) if e.code == 404 => {}
+        Err(e) => {
+            return Err(Error::internal_with_context(
+                "wait_for_secret",
+                format!("failed to check secret {namespace}/{name}: {e}"),
+            ))
+        }
+    }
+
+    info!(secret = %name, namespace = %namespace, "Watching for secret...");
+
+    let field_selector = format!("metadata.name={name}");
+    let watch_config = watcher::Config::default().fields(&field_selector);
+    let mut stream = watcher::watcher(secrets, watch_config).boxed();
+
+    let result = tokio::time::timeout(timeout, async {
+        while let Some(event) = stream.try_next().await.map_err(|e| {
+            Error::internal_with_context(
+                "wait_for_secret",
+                format!("watch error for {namespace}/{name}: {e}"),
+            )
+        })? {
+            if let Event::Apply(secret) | Event::InitApply(secret) = event {
+                if secret.metadata.name.as_deref() == Some(name) {
+                    return Ok(());
+                }
+            }
+        }
+        Err(Error::internal_with_context(
+            "wait_for_secret",
+            format!("watch stream ended for {namespace}/{name}"),
+        ))
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => Err(Error::internal_with_context(
+            "wait_for_secret",
+            format!("Timeout waiting for secret {namespace}/{name}"),
+        )),
+    }
 }
