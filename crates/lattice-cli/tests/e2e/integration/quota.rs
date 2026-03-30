@@ -163,11 +163,11 @@ spec:
           limits:
             cpu: "500m"
             memory: "512Mi"
-  service:
-    ports:
-      http:
-        port: 8080
-        targetPort: 8080"#
+    service:
+      ports:
+        http:
+          port: 8080
+          targetPort: 8080"#
     );
 
     apply_yaml(kubeconfig, &svc_yaml).await?;
@@ -266,11 +266,11 @@ spec:
           limits:
             cpu: "3"
             memory: "1Gi"
-  service:
-    ports:
-      http:
-        port: 8080
-        targetPort: 8080"#
+    service:
+      ports:
+        http:
+          port: 8080
+          targetPort: 8080"#
     );
 
     apply_yaml(kubeconfig, &big_svc_yaml).await?;
