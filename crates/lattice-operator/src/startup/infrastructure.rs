@@ -42,7 +42,7 @@ pub async fn ensure_capi_infrastructure(
         let cluster = find_lattice_cluster(client, capi_installer.is_some()).await?;
 
         if let (Some(installer), Some(c)) = (capi_installer, &cluster) {
-            apply_cert_manager_phase(client).await?;
+            apply_prereqs_phase(client).await?;
             let provider_type = c.spec.provider.provider_type();
             let cloud_providers: Api<InfraProvider> =
                 Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
@@ -191,49 +191,46 @@ async fn resolve_infra_config(
     }
 }
 
-/// Apply the cert-manager phase (phase 0) with health gate.
+/// Apply cert-manager and ESO concurrently, then create the local webhook store.
 ///
-/// Cert-manager must be ready before ESO (webhook certificates) and CAPI.
-async fn apply_cert_manager_phase(client: &Client) -> anyhow::Result<()> {
+/// Both are independent — ESO manages its own webhook certs. Deploying them
+/// in a single phase lets them start in parallel, reducing bootstrap time.
+/// CAPI depends on both being ready (cert-manager for CAPI webhooks, ESO for
+/// credential sync).
+async fn apply_prereqs_phase(client: &Client) -> anyhow::Result<()> {
+    use lattice_infra::bootstrap::{eso, InfraComponent, InfraPhase};
+
     let config = InfrastructureConfig::default();
     let phases = bootstrap::generate_phases(&config)
         .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
 
-    let cert_manager_phase = phases
+    let cert_manager_component = phases
         .first()
-        .ok_or_else(|| anyhow::anyhow!("no phases generated"))?;
-
-    debug_assert_eq!(cert_manager_phase.name, "cert-manager");
-
-    bootstrap::apply_phase(client, cert_manager_phase).await?;
-    Ok(())
-}
-
-/// Apply ESO and create the local webhook ClusterSecretStore.
-///
-/// ESO must be running before CAPI so that InfraProvider ESO credentials
-/// can be synced to K8s Secrets for the CAPI installer to read.
-async fn apply_eso_phase(client: &Client) -> anyhow::Result<()> {
-    use lattice_infra::bootstrap::{eso, InfraComponent, InfraPhase};
+        .ok_or_else(|| anyhow::anyhow!("no phases generated"))?
+        .components
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("cert-manager phase has no components"))?;
 
     let phase = InfraPhase {
-        name: "eso",
-        components: vec![InfraComponent {
-            name: "eso",
-            version: eso::eso_version(),
-            manifests: eso::generate_eso().to_vec(),
-            health_namespace: Some("external-secrets"),
-        }],
+        name: "prereqs",
+        components: vec![
+            cert_manager_component.clone(),
+            InfraComponent {
+                name: "eso",
+                version: eso::eso_version(),
+                manifests: eso::generate_eso().to_vec(),
+                health_namespace: Some("external-secrets"),
+            },
+        ],
     };
 
     bootstrap::apply_phase(client, &phase).await?;
 
-    // Create the lattice-local ClusterSecretStore so ESO can sync secrets
     lattice_secret_provider::controller::ensure_local_webhook_infrastructure(client)
         .await
         .map_err(|e| anyhow::anyhow!("failed to create local webhook infrastructure: {}", e))?;
 
-    tracing::info!("ESO and local webhook ClusterSecretStore ready");
+    tracing::info!("cert-manager, ESO, and local webhook ClusterSecretStore ready");
     Ok(())
 }
 
@@ -357,8 +354,7 @@ async fn ensure_capi_on_bootstrap(
     .await
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    apply_cert_manager_phase(client).await?;
-    apply_eso_phase(client).await?;
+    apply_prereqs_phase(client).await?;
     ensure_capi(client, infrastructure, Some(&cp), installer).await
 }
 
