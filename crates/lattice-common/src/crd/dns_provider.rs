@@ -318,8 +318,7 @@ impl DNSProviderSpec {
     }
 }
 
-/// Namespace where external-dns pods run. ESO-synced secrets must land here.
-const EXTERNAL_DNS_NAMESPACE: &str = "external-dns";
+use crate::EXTERNAL_DNS_NAMESPACE;
 
 impl DNSProvider {
     /// Resolve the K8s Secret that contains provider credentials.

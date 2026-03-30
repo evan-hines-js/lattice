@@ -25,8 +25,7 @@ use lattice_secret_provider::credentials::{
 
 const FIELD_MANAGER: &str = "lattice-dns-provider-controller";
 
-/// Namespace where external-dns pods run. ESO-synced secrets must land here.
-const EXTERNAL_DNS_NAMESPACE: &str = "external-dns";
+use lattice_common::EXTERNAL_DNS_NAMESPACE;
 
 /// Reconcile a DNSProvider
 ///

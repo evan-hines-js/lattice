@@ -19,8 +19,6 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::time::Duration;
-
 use tracing::info;
 
 use super::super::helpers::cedar::apply_yaml;

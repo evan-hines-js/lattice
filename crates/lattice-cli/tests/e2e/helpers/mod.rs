@@ -253,8 +253,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Standard poll interval for `wait_for_condition` loops.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Velero namespace — used by cluster backup tests.
-pub const VELERO_NAMESPACE: &str = "velero";
+pub use lattice_common::VELERO_NAMESPACE;
 
 /// Cycle markers emitted by traffic generators to indicate test progress.
 /// Used by both mesh and gateway traffic generators.

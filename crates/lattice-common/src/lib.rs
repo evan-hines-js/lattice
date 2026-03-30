@@ -277,6 +277,11 @@ impl ParentConnectionConfig {
 
 // CAPI provider namespaces
 /// Target namespace for CAPA (AWS) provider
+/// Namespace where external-dns deployments run
+pub const EXTERNAL_DNS_NAMESPACE: &str = "external-dns";
+/// Namespace where Velero backup resources live
+pub const VELERO_NAMESPACE: &str = "velero";
+/// Target namespace for CAPA (AWS) provider
 pub const CAPA_NAMESPACE: &str = "capa-system";
 /// Target namespace for CAPMOX (Proxmox) provider
 pub const CAPMOX_NAMESPACE: &str = "capmox-system";
