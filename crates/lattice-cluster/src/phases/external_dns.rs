@@ -819,4 +819,168 @@ mod tests {
             .unwrap();
         assert_eq!(image, EXTERNAL_DNS_IMAGE);
     }
+
+    // =========================================================================
+    // Credential key mapping: ESO secret keys must match deployment secretKeyRef
+    // =========================================================================
+
+    /// Extract all secretKeyRef key names from deployment env vars
+    fn env_secret_keys(deployment: &Value) -> Vec<String> {
+        deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v["valueFrom"]["secretKeyRef"]["key"].as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Extract the secret name from a volume mount
+    fn volume_secret_name(deployment: &Value) -> Option<String> {
+        deployment["spec"]["template"]["spec"]["volumes"]
+            .as_array()
+            .and_then(|vols| vols.first())
+            .and_then(|v| v["secret"]["secretName"].as_str())
+            .map(String::from)
+    }
+
+    #[test]
+    fn pihole_eso_keys_match_deployment() {
+        // User declares: keys: [EXTERNAL_DNS_PIHOLE_PASSWORD]
+        // ESO syncs that key into the secret
+        // Deployment reads: secretKeyRef.key = "EXTERNAL_DNS_PIHOLE_PASSWORD"
+        let eso_keys = vec!["EXTERNAL_DNS_PIHOLE_PASSWORD"];
+
+        let sr = SecretRef {
+            name: "pihole-e2e-credentials".to_string(),
+            namespace: "external-dns".to_string(),
+        };
+        let spec = DNSProviderSpec {
+            pihole: Some(PiholeConfig { url: "http://pihole.home".to_string() }),
+            ..make_spec(DNSProviderType::Pihole, "home.local")
+        };
+        let manifests = build_external_dns_manifests(&spec, "pihole-e2e", "cluster", Some(&sr));
+        let dep = find_deployment(&manifests);
+
+        let dep_keys = env_secret_keys(dep);
+        for key in &eso_keys {
+            assert!(dep_keys.contains(&key.to_string()),
+                "deployment expects key '{key}' but ESO would sync keys: {eso_keys:?}, deployment reads: {dep_keys:?}");
+        }
+        assert_eq!(dep["spec"]["template"]["spec"]["containers"][0]["env"][0]
+            ["valueFrom"]["secretKeyRef"]["name"], "pihole-e2e-credentials");
+    }
+
+    #[test]
+    fn route53_eso_keys_match_deployment() {
+        let eso_keys = vec!["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
+
+        let sr = SecretRef {
+            name: "route53-prod-credentials".to_string(),
+            namespace: "external-dns".to_string(),
+        };
+        let spec = make_spec(DNSProviderType::Route53, "example.com");
+        let manifests = build_external_dns_manifests(&spec, "route53-prod", "cluster", Some(&sr));
+        let dep = find_deployment(&manifests);
+
+        let dep_keys = env_secret_keys(dep);
+        for key in &eso_keys {
+            assert!(dep_keys.contains(&key.to_string()),
+                "deployment expects key '{key}' from ESO secret");
+        }
+    }
+
+    #[test]
+    fn cloudflare_eso_keys_match_deployment() {
+        let eso_keys = vec!["CF_API_TOKEN"];
+
+        let sr = SecretRef {
+            name: "cf-prod-credentials".to_string(),
+            namespace: "external-dns".to_string(),
+        };
+        let spec = DNSProviderSpec {
+            cloudflare: Some(CloudflareConfig { proxied: false }),
+            ..make_spec(DNSProviderType::Cloudflare, "example.com")
+        };
+        let manifests = build_external_dns_manifests(&spec, "cf-prod", "cluster", Some(&sr));
+        let dep = find_deployment(&manifests);
+
+        let dep_keys = env_secret_keys(dep);
+        for key in &eso_keys {
+            assert!(dep_keys.contains(&key.to_string()),
+                "deployment expects key '{key}' from ESO secret");
+        }
+    }
+
+    #[test]
+    fn google_eso_secret_mounted_as_volume() {
+        // Google uses a volume mount, not env secretKeyRef
+        let sr = SecretRef {
+            name: "google-prod-credentials".to_string(),
+            namespace: "external-dns".to_string(),
+        };
+        let spec = DNSProviderSpec {
+            google: Some(GoogleDnsConfig { project: "my-project".to_string() }),
+            ..make_spec(DNSProviderType::Google, "example.com")
+        };
+        let manifests = build_external_dns_manifests(&spec, "google-prod", "cluster", Some(&sr));
+        let dep = find_deployment(&manifests);
+
+        // Volume references the ESO-synced secret
+        assert_eq!(volume_secret_name(dep).as_deref(), Some("google-prod-credentials"));
+        // GOOGLE_APPLICATION_CREDENTIALS points to the mount
+        let env_names = deployment_env(dep);
+        assert!(env_names.contains(&"GOOGLE_APPLICATION_CREDENTIALS"));
+    }
+
+    #[test]
+    fn designate_eso_keys_match_deployment() {
+        let eso_keys = vec![
+            "OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD",
+            "OS_PROJECT_NAME", "OS_USER_DOMAIN_NAME", "OS_PROJECT_DOMAIN_NAME",
+        ];
+
+        let sr = SecretRef {
+            name: "designate-prod-credentials".to_string(),
+            namespace: "external-dns".to_string(),
+        };
+        let spec = DNSProviderSpec {
+            designate: Some(DesignateConfig {
+                zone_id: Some("zone-abc".to_string()),
+                region: Some("RegionOne".to_string()),
+            }),
+            ..make_spec(DNSProviderType::Designate, "internal.cloud")
+        };
+        let manifests = build_external_dns_manifests(&spec, "designate-prod", "cluster", Some(&sr));
+        let dep = find_deployment(&manifests);
+
+        let dep_keys = env_secret_keys(dep);
+        for key in &eso_keys {
+            assert!(dep_keys.contains(&key.to_string()),
+                "deployment expects key '{key}' from ESO secret");
+        }
+    }
+
+    #[test]
+    fn azure_eso_secret_mounted_as_volume() {
+        let sr = SecretRef {
+            name: "azure-prod-credentials".to_string(),
+            namespace: "external-dns".to_string(),
+        };
+        let spec = DNSProviderSpec {
+            azure: Some(AzureDnsConfig {
+                subscription_id: "sub-123".to_string(),
+                resource_group: "rg-dns".to_string(),
+            }),
+            ..make_spec(DNSProviderType::Azure, "example.com")
+        };
+        let manifests = build_external_dns_manifests(&spec, "azure-prod", "cluster", Some(&sr));
+        let dep = find_deployment(&manifests);
+
+        assert_eq!(volume_secret_name(dep).as_deref(), Some("azure-prod-credentials"));
+        let env_names = deployment_env(dep);
+        assert!(env_names.contains(&"AZURE_AUTH_LOCATION"));
+    }
 }
