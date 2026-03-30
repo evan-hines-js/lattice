@@ -1,8 +1,8 @@
 //! Phased infrastructure installation
 //!
 //! Infrastructure is installed in two stages:
-//! - `ensure_capi_infrastructure`: blocking — applies cert-manager phase + CAPI
-//! - `spawn_general_infrastructure`: background — applies remaining phases with health gates
+//! - `ensure_capi_infrastructure`: blocking — cert-manager, ESO, credential sync, CAPI
+//! - `spawn_general_infrastructure`: background — remaining phases with health gates
 
 use std::time::Duration;
 
@@ -195,10 +195,8 @@ async fn resolve_infra_config(
 
 /// Apply the cert-manager phase (phase 0) with health gate.
 ///
-/// This is the only phase that runs in the blocking path because CAPI
-/// depends on cert-manager webhooks being ready.
+/// Cert-manager must be ready before ESO (webhook certificates) and CAPI.
 async fn apply_cert_manager_phase(client: &Client) -> anyhow::Result<()> {
-    // Generate a minimal config — cert-manager phase doesn't depend on cluster config
     let config = InfrastructureConfig::default();
     let phases = bootstrap::generate_phases(&config)
         .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
@@ -210,6 +208,81 @@ async fn apply_cert_manager_phase(client: &Client) -> anyhow::Result<()> {
     debug_assert_eq!(cert_manager_phase.name, "cert-manager");
 
     bootstrap::apply_phase(client, cert_manager_phase).await?;
+    Ok(())
+}
+
+/// Apply ESO and create the local webhook ClusterSecretStore.
+///
+/// ESO must be running before CAPI so that InfraProvider ESO credentials
+/// can be synced to K8s Secrets for the CAPI installer to read.
+async fn apply_eso_phase(client: &Client) -> anyhow::Result<()> {
+    use lattice_infra::bootstrap::{eso, InfraComponent, InfraPhase};
+
+    let phase = InfraPhase {
+        name: "eso",
+        components: vec![InfraComponent {
+            name: "eso",
+            version: eso::eso_version(),
+            manifests: eso::generate_eso().to_vec(),
+            health_namespace: Some("external-secrets"),
+        }],
+    };
+
+    bootstrap::apply_phase(client, &phase).await?;
+
+    // Create the lattice-local ClusterSecretStore so ESO can sync secrets
+    lattice_secret_provider::controller::ensure_local_webhook_infrastructure(client)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to create local webhook infrastructure: {}", e))?;
+
+    tracing::info!("ESO and local webhook ClusterSecretStore ready");
+    Ok(())
+}
+
+/// Wait for a provider's ESO-synced credentials secret to exist.
+///
+/// After the InfraProvider controller creates the ExternalSecret and ESO
+/// syncs it, the K8s Secret appears in the target namespace. Poll until
+/// it exists so the CAPI installer can copy it.
+async fn wait_for_credentials_sync(
+    client: &Client,
+    provider: &InfraProvider,
+) -> anyhow::Result<()> {
+    let secret_ref = match provider.k8s_secret_ref() {
+        Some(r) => r,
+        None => return Ok(()), // Docker — no credentials needed
+    };
+
+    let secrets: Api<k8s_openapi::api::core::v1::Secret> =
+        Api::namespaced(client.clone(), &secret_ref.namespace);
+    let secret_name = secret_ref.name.clone();
+
+    tracing::info!(
+        secret = %secret_name,
+        namespace = %secret_ref.namespace,
+        "Waiting for ESO to sync provider credentials..."
+    );
+
+    wait_for_resource(
+        &format!("ESO-synced secret '{}'", secret_name),
+        DEFAULT_RESOURCE_TIMEOUT,
+        DEFAULT_POLL_INTERVAL,
+        || {
+            let secrets = secrets.clone();
+            let name = secret_name.clone();
+            async move {
+                match secrets.get(&name).await {
+                    Ok(s) => Ok(Some(s)),
+                    Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
+                    Err(e) => Err(format!("API error: {}", e)),
+                }
+            }
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    tracing::info!(secret = %secret_ref.name, "Provider credentials synced by ESO");
     Ok(())
 }
 
@@ -296,8 +369,12 @@ async fn find_lattice_cluster(
 
 /// Install CAPI on the bootstrap cluster.
 ///
-/// Waits for the InfraProvider CRD (created by `lattice install` after the
-/// operator starts) before installing providers.
+/// Bootstrap sequence:
+/// - Wait for InfraProvider (created by `lattice install`)
+/// - cert-manager (ESO and CAPI depend on it)
+/// - ESO + local webhook ClusterSecretStore (InfraProvider credentials flow through ESO)
+/// - Wait for ESO to sync the InfraProvider's credentials secret
+/// - CAPI providers (reads the ESO-synced credentials)
 async fn ensure_capi_on_bootstrap(
     client: &Client,
     installer: &dyn CapiInstaller,
@@ -329,6 +406,8 @@ async fn ensure_capi_on_bootstrap(
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     apply_cert_manager_phase(client).await?;
+    apply_eso_phase(client).await?;
+    wait_for_credentials_sync(client, &cp).await?;
     ensure_capi(client, infrastructure, Some(&cp), installer).await
 }
 
