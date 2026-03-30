@@ -566,10 +566,15 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
             None
         };
 
+        let dns_secret_ref = dns_provider.as_ref().and_then(|dp| dp.k8s_secret_ref());
+        let resolved_dp = dns_provider.as_ref().map(|dp| builder::ResolvedDnsProvider {
+            spec: &dp.spec,
+            secret_name: dns_secret_ref.as_ref().map(|r| r.name.as_str()),
+        });
         let issuer_json = match builder::build_cluster_issuer(
             key,
             &issuer_crd.spec,
-            dns_provider.as_ref().map(|dp| &dp.spec),
+            resolved_dp.as_ref(),
         ) {
             Ok(json) => json,
             Err(e) => {

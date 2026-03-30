@@ -37,7 +37,9 @@ use super::super::helpers::{
 const TEST_ZONE: &str = "e2e.local";
 const CERT_TEST_NAMESPACE: &str = "cert-manager-test";
 const LATTICE_NS: &str = "lattice-system";
+const SECRETS_NS: &str = "lattice-secrets";
 const PIHOLE_DNS_PROVIDER: &str = "pihole-e2e";
+const PIHOLE_SECRET_REMOTE_KEY: &str = "dns/pihole/credentials";
 const SELF_SIGNED_ISSUER: &str = "e2e-selfsigned";
 const ACME_HTTP_ISSUER: &str = "e2e-acme-http";
 const EXPECTED_CLUSTER_ISSUER: &str = "lattice-dev";
@@ -91,22 +93,25 @@ async fn test_dns_provider_lifecycle(kubeconfig: &str) -> Result<(), String> {
     let pihole = pihole_url();
     let resolver = pihole_resolver();
 
-    // Create the PiHole credentials secret in lattice-system (next to the CRD).
-    // The external-dns reconciler syncs it to the external-dns namespace automatically.
+    // Create the source secret in lattice-secrets namespace for the local
+    // webhook ESO backend. The webhook serves secrets with the source label.
     let secret_yaml = format!(
         r#"apiVersion: v1
 kind: Secret
 metadata:
-  name: pihole-api-key
-  namespace: {LATTICE_NS}
+  name: {PIHOLE_SECRET_REMOTE_KEY}
+  namespace: {SECRETS_NS}
+  labels:
+    lattice.dev/secret-source: "true"
 type: Opaque
 stringData:
   EXTERNAL_DNS_PIHOLE_PASSWORD: "{PIHOLE_PASSWORD}""#
     );
     apply_yaml(kubeconfig, &secret_yaml).await?;
 
-    // Create a PiHole DNSProvider pointing at the actual PiHole instance.
-    // resolver field enables CoreDNS forwarding for the zone.
+    // Create a PiHole DNSProvider with ESO-managed credentials.
+    // The DNS provider controller creates an ExternalSecret in the
+    // external-dns namespace; ESO syncs it so the pod can read it.
     let dns_yaml = format!(
         r#"apiVersion: lattice.dev/v1alpha1
 kind: DNSProvider
@@ -117,16 +122,20 @@ spec:
   type: pihole
   zone: {TEST_ZONE}
   resolver: "{resolver}"
-  credentialsSecretRef:
-    name: pihole-api-key
-    namespace: {LATTICE_NS}
+  credentials:
+    type: secret
+    id: {PIHOLE_SECRET_REMOTE_KEY}
+    params:
+      provider: lattice-local
+      keys:
+        - EXTERNAL_DNS_PIHOLE_PASSWORD
   pihole:
     url: "{pihole}""#
     );
 
     apply_yaml(kubeconfig, &dns_yaml).await?;
     info!(
-        "[DNS] DNSProvider '{}' created, waiting for Ready...",
+        "[DNS] DNSProvider '{}' created with ESO credentials, waiting for Ready...",
         PIHOLE_DNS_PROVIDER
     );
 
@@ -678,6 +687,19 @@ async fn cleanup_test_resources(kubeconfig: &str) {
         "delete",
         "clusterissuer",
         EXPECTED_CLUSTER_ISSUER,
+        "--ignore-not-found",
+    ])
+    .await;
+
+    // Clean up ESO source secret
+    let _ = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "secret",
+        PIHOLE_SECRET_REMOTE_KEY,
+        "-n",
+        SECRETS_NS,
         "--ignore-not-found",
     ])
     .await;

@@ -9,8 +9,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::Secret;
-use kube::api::Api;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
@@ -22,8 +20,7 @@ use lattice_common::{
     REQUEUE_SUCCESS_SECS,
 };
 use lattice_secret_provider::credentials::{
-    reconcile_credentials as reconcile_eso_credentials, validate_credential_fields,
-    ProviderCredentialConfig,
+    reconcile_credentials as reconcile_eso_credentials, ProviderCredentialConfig,
 };
 
 const FIELD_MANAGER: &str = "lattice-dns-provider-controller";
@@ -99,59 +96,36 @@ async fn validate_provider(client: &Client, provider: &DNSProvider) -> Result<()
         .validate()
         .map_err(|e| ReconcileError::Validation(e.to_string()))?;
 
-    // Validate mutual exclusion of credential modes
-    validate_credential_fields(
-        provider.spec.credentials.is_some(),
-        provider.spec.credentials_secret_ref.is_some(),
-        provider.spec.credential_data.is_some(),
-    )?;
-
-    match provider.spec.provider_type {
-        DNSProviderType::Pihole => {
-            // Pi-hole only needs spec validation (URL presence), no secret check
-            debug!(dns_provider = %provider.name_any(), "Pi-hole provider requires no credentials secret");
-            Ok(())
-        }
-        _ => {
-            if let Some(ref credentials) = provider.spec.credentials {
-                reconcile_eso_credentials(
-                    client,
-                    &ProviderCredentialConfig {
-                        provider_name: &provider.name_any(),
-                        credentials,
-                        credential_data: provider.spec.credential_data.as_ref(),
-                        target_namespace: EXTERNAL_DNS_NAMESPACE,
-                        field_manager: FIELD_MANAGER,
-                    },
-                )
-                .await?;
-                Ok(())
-            } else if let Some(ref secret_ref) = provider.spec.credentials_secret_ref {
-                // Manual mode: verify the referenced secret exists
-                let ns = &secret_ref.namespace;
-                let secret_name = &secret_ref.name;
-
-                let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
-                secrets
-                    .get(secret_name)
-                    .await
-                    .map_err(ReconcileError::Kube)?;
-
-                debug!(
-                    dns_provider = %provider.name_any(),
-                    secret = %secret_name,
-                    namespace = %ns,
-                    "Credentials secret verified"
-                );
-                Ok(())
-            } else {
-                Err(ReconcileError::Validation(format!(
-                    "{} provider requires credentials or credentialsSecretRef",
-                    provider.spec.provider_type
-                )))
-            }
-        }
+    // Validate credentialData requires credentials
+    if provider.spec.credential_data.is_some() && provider.spec.credentials.is_none() {
+        return Err(ReconcileError::Validation(
+            "credentialData requires credentials to be set".into(),
+        ));
     }
+
+    // Reconcile ESO credentials for all provider types.
+    // Pihole credentials are optional (some setups have no password),
+    // all other providers require credentials.
+    if let Some(ref credentials) = provider.spec.credentials {
+        reconcile_eso_credentials(
+            client,
+            &ProviderCredentialConfig {
+                provider_name: &provider.name_any(),
+                credentials,
+                credential_data: provider.spec.credential_data.as_ref(),
+                target_namespace: EXTERNAL_DNS_NAMESPACE,
+                field_manager: FIELD_MANAGER,
+            },
+        )
+        .await?;
+    } else if provider.spec.provider_type != DNSProviderType::Pihole {
+        return Err(ReconcileError::Validation(format!(
+            "{} provider requires credentials",
+            provider.spec.provider_type
+        )));
+    }
+
+    Ok(())
 }
 
 /// Update DNSProvider status
@@ -201,21 +175,26 @@ mod tests {
     use super::*;
     use lattice_common::crd::{
         AzureDnsConfig, CloudflareConfig, DNSProviderSpec, GoogleDnsConfig, PiholeConfig,
-        ResourceParams, ResourceSpec, ResourceType, Route53Config, SecretParams, SecretRef,
+        ResourceParams, ResourceSpec, ResourceType, Route53Config, SecretParams,
     };
 
-    // =========================================================================
-    // Test Helpers
-    // =========================================================================
+    fn eso_credentials(remote_key: &str, provider: &str, keys: &[&str]) -> ResourceSpec {
+        ResourceSpec {
+            type_: ResourceType::Secret,
+            id: Some(remote_key.to_string()),
+            params: ResourceParams::Secret(SecretParams {
+                provider: provider.to_string(),
+                keys: Some(keys.iter().map(|k| k.to_string()).collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 
     fn sample_pihole_provider() -> DNSProvider {
         DNSProvider::new(
             "pihole-local",
             DNSProviderSpec {
-                credentials_secret_ref: Some(SecretRef {
-                    name: "pihole-api-key".to_string(),
-                    namespace: "lattice-system".to_string(),
-                }),
                 pihole: Some(PiholeConfig {
                     url: "http://pihole.local".to_string(),
                 }),
@@ -228,10 +207,11 @@ mod tests {
         DNSProvider::new(
             "route53-prod",
             DNSProviderSpec {
-                credentials_secret_ref: Some(SecretRef {
-                    name: "aws-dns-creds".to_string(),
-                    namespace: "lattice-system".to_string(),
-                }),
+                credentials: Some(eso_credentials(
+                    "dns/aws/prod",
+                    "vault-prod",
+                    &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+                )),
                 route53: Some(Route53Config {
                     region: Some("us-east-1".to_string()),
                     hosted_zone_id: Some("Z1234567890".to_string()),
@@ -245,10 +225,11 @@ mod tests {
         DNSProvider::new(
             "cloudflare-prod",
             DNSProviderSpec {
-                credentials_secret_ref: Some(SecretRef {
-                    name: "cf-api-token".to_string(),
-                    namespace: "lattice-system".to_string(),
-                }),
+                credentials: Some(eso_credentials(
+                    "dns/cloudflare/prod",
+                    "vault-prod",
+                    &["CF_API_TOKEN"],
+                )),
                 cloudflare: Some(CloudflareConfig { proxied: true }),
                 ..DNSProviderSpec::new(DNSProviderType::Cloudflare, "example.com")
             },
@@ -335,64 +316,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route53_requires_some_credentials() {
+    async fn route53_requires_credentials() {
         let provider = DNSProvider::new(
             "route53-no-creds",
             DNSProviderSpec::new(DNSProviderType::Route53, "example.com"),
         );
-        // Spec validation passes (credentials are not checked there)
         assert!(provider.spec.validate().is_ok());
-        // But the provider has neither credentials mode set
-        assert!(provider.spec.credentials_secret_ref.is_none());
         assert!(provider.spec.credentials.is_none());
+        assert!(provider.k8s_secret_ref().is_none());
     }
 
     #[tokio::test]
-    async fn mutual_exclusion_validation() {
-        // Both credentials and credentialsSecretRef set — should fail
-        assert!(validate_credential_fields(true, true, false).is_err());
-    }
-
-    #[tokio::test]
-    async fn credential_data_without_credentials_is_invalid() {
-        assert!(validate_credential_fields(false, false, true).is_err());
-    }
-
-    #[tokio::test]
-    async fn eso_credentials_fields_present() {
-        let provider = DNSProvider::new(
-            "route53-eso",
-            DNSProviderSpec {
-                credentials: Some(ResourceSpec {
-                    type_: ResourceType::Secret,
-                    id: Some("dns/aws/prod".to_string()),
-                    params: ResourceParams::Secret(SecretParams {
-                        provider: "vault-prod".to_string(),
-                        keys: Some(vec![
-                            "AWS_ACCESS_KEY_ID".to_string(),
-                            "AWS_SECRET_ACCESS_KEY".to_string(),
-                        ]),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..DNSProviderSpec::new(DNSProviderType::Route53, "example.com")
-            },
-        );
-
-        assert!(provider.spec.credentials.is_some());
-        assert!(provider.spec.credentials_secret_ref.is_none());
+    async fn eso_credentials_resolve_to_external_dns_namespace() {
+        let provider = sample_route53_provider();
         let secret_ref = provider.k8s_secret_ref().unwrap();
-        assert_eq!(secret_ref.name, "route53-eso-credentials");
+        assert_eq!(secret_ref.name, "route53-prod-credentials");
         assert_eq!(secret_ref.namespace, EXTERNAL_DNS_NAMESPACE);
     }
 
     #[tokio::test]
-    async fn cloudflare_has_credentials() {
+    async fn cloudflare_has_eso_credentials() {
         let provider = sample_cloudflare_provider();
-        assert!(provider.spec.credentials_secret_ref.is_some());
-        let secret_ref = provider.spec.credentials_secret_ref.as_ref().unwrap();
-        assert_eq!(secret_ref.name, "cf-api-token");
+        assert!(provider.spec.credentials.is_some());
+        let secret_ref = provider.k8s_secret_ref().unwrap();
+        assert_eq!(secret_ref.name, "cloudflare-prod-credentials");
     }
 
     // =========================================================================
@@ -485,10 +432,7 @@ mod tests {
         let provider = DNSProvider::new(
             "google-prod",
             DNSProviderSpec {
-                credentials_secret_ref: Some(SecretRef {
-                    name: "gcp-dns-creds".to_string(),
-                    namespace: "lattice-system".to_string(),
-                }),
+                credentials: Some(eso_credentials("dns/gcp/prod", "vault-prod", &["key.json"])),
                 google: Some(GoogleDnsConfig {
                     project: "my-project".to_string(),
                 }),
@@ -503,10 +447,7 @@ mod tests {
         let provider = DNSProvider::new(
             "azure-prod",
             DNSProviderSpec {
-                credentials_secret_ref: Some(SecretRef {
-                    name: "azure-dns-creds".to_string(),
-                    namespace: "lattice-system".to_string(),
-                }),
+                credentials: Some(eso_credentials("dns/azure/prod", "vault-prod", &["azure.json"])),
                 azure: Some(AzureDnsConfig {
                     subscription_id: "sub-123".to_string(),
                     resource_group: "rg-dns".to_string(),
