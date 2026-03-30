@@ -248,6 +248,56 @@ pub async fn patch_kubeconfig_for_self_management(
 // Distributed Resources
 // =============================================================================
 
+/// Apply secrets to their target namespaces.
+///
+/// Each secret carries its target namespace in `metadata.namespace`.
+/// Secrets labeled `lattice.dev/distribute` come from the parent with
+/// their original namespace preserved. The agent ensures the namespace
+/// exists and applies the secret there.
+async fn apply_secrets_to_namespaces(
+    client: &Client,
+    secrets_bytes: &[Vec<u8>],
+    params: &PatchParams,
+) -> Result<(), PivotError> {
+    for bytes in secrets_bytes {
+        let json_str = String::from_utf8(bytes.clone())
+            .map_err(|e| PivotError::Internal(format!("Secret contains invalid UTF-8: {e}")))?;
+        let value = lattice_common::yaml::parse_yaml(&json_str)
+            .map_err(|e| PivotError::Internal(format!("failed to parse Secret JSON: {e}")))?;
+        let secret: Secret = serde_json::from_value(value)
+            .map_err(|e| PivotError::Internal(format!("failed to deserialize Secret: {e}")))?;
+
+        let name = secret
+            .metadata
+            .name
+            .as_ref()
+            .ok_or_else(|| PivotError::Internal("Secret has no name".into()))?;
+        let namespace = secret
+            .metadata
+            .namespace
+            .as_deref()
+            .unwrap_or(LATTICE_SYSTEM_NAMESPACE);
+
+        lattice_common::kube_utils::ensure_namespace(client, namespace, None, "lattice-pivot")
+            .await
+            .map_err(|e| {
+                PivotError::Internal(format!("failed to ensure namespace {namespace}: {e}"))
+            })?;
+
+        let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
+        api.patch(name, params, &Patch::Apply(&secret))
+            .await
+            .map_err(|e| {
+                PivotError::Internal(format!(
+                    "failed to apply Secret {namespace}/{name}: {e}"
+                ))
+            })?;
+
+        info!(secret = %name, namespace = %namespace, "applied distributed secret");
+    }
+    Ok(())
+}
+
 /// Apply a list of serialized resources to the cluster using server-side apply.
 async fn apply_resources<T>(
     api: &Api<T>,
@@ -297,9 +347,9 @@ pub async fn apply_distributed_resources(
 
     let params = PatchParams::apply("lattice-pivot").force();
 
-    // Apply secrets first (credentials needed by providers)
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    apply_resources(&secret_api, &resources.secrets, &params, "Secret").await?;
+    // Apply secrets to their target namespaces (read from metadata.namespace).
+    // Secrets labeled lattice.dev/distribute carry their target namespace.
+    apply_secrets_to_namespaces(client, &resources.secrets, &params).await?;
 
     // Apply InfraProviders
     let cp_api: Api<InfraProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);

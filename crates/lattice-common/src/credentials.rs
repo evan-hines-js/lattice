@@ -85,6 +85,7 @@ fn build_credential_secret(
         "lattice.dev/secret-source".to_string(),
         "true".to_string(),
     );
+    labels.insert("lattice.dev/distribute".to_string(), "true".to_string());
 
     Secret {
         metadata: ObjectMeta {

@@ -1024,6 +1024,7 @@ impl Installer {
                 "lattice.dev/secret-source".to_string(),
                 "true".to_string(),
             );
+            labels.insert("lattice.dev/distribute".to_string(), "true".to_string());
 
             info!(
                 "Applying registry credential secret '{}' from {}",

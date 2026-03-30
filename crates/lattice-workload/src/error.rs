@@ -259,6 +259,11 @@ impl CompilationError {
                 | Self::ExternalEndpointAccessDenied { .. }
         )
     }
+
+    /// Returns true if this error is a quota exceeded error.
+    pub fn is_quota_exceeded(&self) -> bool {
+        matches!(self, Self::QuotaExceeded { .. })
+    }
 }
 
 impl From<TemplateError> for CompilationError {

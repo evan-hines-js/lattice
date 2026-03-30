@@ -19,13 +19,8 @@ use lattice_common::{
     ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
     REQUEUE_SUCCESS_SECS,
 };
-use lattice_secret_provider::credentials::{
-    reconcile_credentials as reconcile_eso_credentials, ProviderCredentialConfig,
-};
 
 const FIELD_MANAGER: &str = "lattice-dns-provider-controller";
-
-use lattice_common::EXTERNAL_DNS_NAMESPACE;
 
 /// Reconcile a DNSProvider
 ///
@@ -51,7 +46,7 @@ pub async fn reconcile(
 
     info!(dns_provider = %name, provider_type = ?provider.spec.provider_type, "Reconciling DNSProvider");
 
-    match validate_provider(client, &provider).await {
+    match validate_provider(&provider) {
         Ok(()) => {
             info!(dns_provider = %name, "DNSProvider validated successfully");
 
@@ -88,36 +83,22 @@ pub async fn reconcile(
 }
 
 /// Validate a DNSProvider's spec and credentials.
-async fn validate_provider(client: &Client, provider: &DNSProvider) -> Result<(), ReconcileError> {
-    // Validate the spec itself (zone, provider-specific config)
+///
+/// Validation only — no ESO ExternalSecret creation. The external-dns
+/// reconciler creates ExternalSecrets when it deploys external-dns.
+fn validate_provider(provider: &DNSProvider) -> Result<(), ReconcileError> {
     provider
         .spec
         .validate()
         .map_err(|e| ReconcileError::Validation(e.to_string()))?;
 
-    // Validate credentialData requires credentials
     if provider.spec.credential_data.is_some() && provider.spec.credentials.is_none() {
         return Err(ReconcileError::Validation(
             "credentialData requires credentials to be set".into(),
         ));
     }
 
-    // Reconcile ESO credentials for all provider types.
-    // Pihole credentials are optional (some setups have no password),
-    // all other providers require credentials.
-    if let Some(ref credentials) = provider.spec.credentials {
-        reconcile_eso_credentials(
-            client,
-            &ProviderCredentialConfig {
-                provider_name: &provider.name_any(),
-                credentials,
-                credential_data: provider.spec.credential_data.as_ref(),
-                target_namespace: EXTERNAL_DNS_NAMESPACE,
-                field_manager: FIELD_MANAGER,
-            },
-        )
-        .await?;
-    } else if provider.spec.provider_type != DNSProviderType::Pihole {
+    if provider.spec.credentials.is_none() && provider.spec.provider_type != DNSProviderType::Pihole {
         return Err(ReconcileError::Validation(format!(
             "{} provider requires credentials",
             provider.spec.provider_type

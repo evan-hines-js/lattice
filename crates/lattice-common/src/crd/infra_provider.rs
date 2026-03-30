@@ -299,13 +299,12 @@ spec:
             },
         );
 
-        let secret_ref = cp.k8s_secret_ref().unwrap();
-        assert_eq!(secret_ref.name, "aws-prod-credentials");
-        assert_eq!(secret_ref.namespace, LATTICE_SYSTEM_NAMESPACE);
+        let name = cp.credential_secret_name().unwrap();
+        assert_eq!(name, "aws-prod-credentials");
     }
 
     #[test]
-    fn k8s_secret_ref_without_credentials() {
+    fn credential_secret_name_without_credentials() {
         let cp = InfraProvider::new(
             "docker",
             InfraProviderSpec {
@@ -320,7 +319,7 @@ spec:
             },
         );
 
-        assert!(cp.k8s_secret_ref().is_none());
+        assert!(cp.credential_secret_name().is_none());
     }
 
     #[test]
@@ -366,7 +365,7 @@ spec:
         assert!(data.contains_key("clouds.yaml"));
         assert!(data["clouds.yaml"].contains("${secret.credentials.username}"));
 
-        let secret_ref = provider.k8s_secret_ref().unwrap();
-        assert_eq!(secret_ref.name, "openstack-prod-credentials");
+        let name = provider.credential_secret_name().unwrap();
+        assert_eq!(name, "openstack-prod-credentials");
     }
 }

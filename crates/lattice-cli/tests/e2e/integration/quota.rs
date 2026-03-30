@@ -155,7 +155,7 @@ spec:
     containers:
       main:
         image: busybox:1.36
-        command: ["sleep", "3600"]
+        command: ["/bin/sleep", "3600"]
         resources:
           requests:
             cpu: "500m"
@@ -258,7 +258,7 @@ spec:
     containers:
       main:
         image: busybox:1.36
-        command: ["sleep", "3600"]
+        command: ["/bin/sleep", "3600"]
         resources:
           requests:
             cpu: "3"

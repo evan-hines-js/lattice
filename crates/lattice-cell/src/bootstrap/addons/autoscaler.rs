@@ -84,6 +84,26 @@ fn cluster_role() -> ClusterRole {
                     "persistentvolumeclaims".to_string(),
                     "persistentvolumes".to_string(),
                     "namespaces".to_string(),
+                    "configmaps".to_string(),
+                ]),
+                verbs: vec!["get".to_string(), "list".to_string(), "watch".to_string()],
+                ..Default::default()
+            },
+            // Batch resources (autoscaler checks for jobs on nodes)
+            PolicyRule {
+                api_groups: Some(vec!["batch".to_string()]),
+                resources: Some(vec!["jobs".to_string()]),
+                verbs: vec!["get".to_string(), "list".to_string(), "watch".to_string()],
+                ..Default::default()
+            },
+            // Storage resources (autoscaler checks volume bindings)
+            PolicyRule {
+                api_groups: Some(vec!["storage.k8s.io".to_string()]),
+                resources: Some(vec![
+                    "storageclasses".to_string(),
+                    "csinodes".to_string(),
+                    "csidrivers".to_string(),
+                    "csistoragecapacities".to_string(),
                 ]),
                 verbs: vec!["get".to_string(), "list".to_string(), "watch".to_string()],
                 ..Default::default()
@@ -115,6 +135,24 @@ fn cluster_role() -> ClusterRole {
                 api_groups: Some(vec!["policy".to_string()]),
                 resources: Some(vec!["poddisruptionbudgets".to_string()]),
                 verbs: vec!["get".to_string(), "list".to_string(), "watch".to_string()],
+                ..Default::default()
+            },
+            // ConfigMap write (autoscaler stores status in kube-system/cluster-autoscaler-status)
+            PolicyRule {
+                api_groups: Some(vec![String::new()]),
+                resources: Some(vec!["configmaps".to_string()]),
+                verbs: vec![
+                    "create".to_string(),
+                    "update".to_string(),
+                    "patch".to_string(),
+                ],
+                ..Default::default()
+            },
+            // Pod eviction (required for scale-down)
+            PolicyRule {
+                api_groups: Some(vec![String::new()]),
+                resources: Some(vec!["pods/eviction".to_string()]),
+                verbs: vec!["create".to_string()],
                 ..Default::default()
             },
             // Events

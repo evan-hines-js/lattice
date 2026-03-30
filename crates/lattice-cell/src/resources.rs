@@ -105,16 +105,40 @@ pub async fn fetch_distributable_resources(
         }
     }
 
-    // Always include the root CA so children share the same trust root.
+    // The root CA must be distributed so children share the same trust root.
     // This enables cross-cluster mTLS via Istio's cacerts intermediate CA chain.
     secret_names.insert(lattice_common::CA_SECRET.to_string());
 
-    // Fetch referenced secrets
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    // Collect all secrets labeled for distribution across all namespaces.
+    // The `lattice.dev/distribute: "true"` label marks any secret for
+    // propagation to child clusters. The agent applies each secret to the
+    // namespace specified in its metadata.
+    let all_secrets: Api<Secret> = Api::all(client.clone());
+    let distribute_lp = ListParams::default()
+        .labels("lattice.dev/distribute=true");
     let mut secrets = Vec::new();
+    if let Ok(secret_list) = all_secrets.list(&distribute_lp).await {
+        for secret in &secret_list.items {
+            secrets.push(serialize_for_distribution(secret)?);
+        }
+    }
+
+    // Also include explicitly referenced secrets (OIDC client secrets, etc.)
+    // that may not have the distribute label yet
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     for name in &secret_names {
         match secret_api.get(name).await {
-            Ok(secret) => secrets.push(serialize_for_distribution(&secret)?),
+            Ok(secret) => {
+                let already_included = secrets.iter().any(|s| {
+                    serde_json::from_slice::<serde_json::Value>(s)
+                        .ok()
+                        .and_then(|v| v["metadata"]["name"].as_str().map(|n| n == name))
+                        .unwrap_or(false)
+                });
+                if !already_included {
+                    secrets.push(serialize_for_distribution(&secret)?);
+                }
+            }
             Err(kube::Error::Api(e)) if e.code == 404 => {
                 debug!(secret = %name, "Referenced secret not found, skipping");
             }

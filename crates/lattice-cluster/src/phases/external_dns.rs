@@ -61,6 +61,22 @@ pub async fn reconcile_external_dns(
             }
         };
 
+        // Create ESO ExternalSecret for the provider's credentials in external-dns namespace
+        if let Some(ref credentials) = provider.spec.credentials {
+            lattice_secret_provider::credentials::ensure_credentials(
+                client,
+                &provider.name_any(),
+                credentials,
+                provider.spec.credential_data.as_ref(),
+                EXTERNAL_DNS_NAMESPACE,
+                "lattice-cluster-controller",
+            )
+            .await
+            .map_err(|e| Error::internal(format!(
+                "failed to sync DNS credentials for {provider_name}: {e}"
+            )))?;
+        }
+
         let resolved_secret_ref = provider.k8s_secret_ref();
         let manifests = build_external_dns_manifests(
             &provider.spec,

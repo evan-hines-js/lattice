@@ -112,6 +112,17 @@ pub trait ServiceKubeClient: Send + Sync {
         namespace: &str,
     ) -> Result<(), Error>;
 
+    /// Scale a Deployment to the given replica count.
+    ///
+    /// Used to scale down to 0 when a quota check fails, so no pods run
+    /// while the service is over budget.
+    async fn scale_deployment(
+        &self,
+        name: &str,
+        namespace: &str,
+        replicas: i32,
+    ) -> Result<(), Error>;
+
     /// Hash the `.data` field of all K8s Secrets owned by a service.
     ///
     /// Lists Secrets labeled `lattice.dev/service={service_name}` in the given namespace,
@@ -398,6 +409,32 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             }
         }
 
+        Ok(())
+    }
+
+    async fn scale_deployment(
+        &self,
+        name: &str,
+        namespace: &str,
+        replicas: i32,
+    ) -> Result<(), Error> {
+        use k8s_openapi::api::apps::v1::Deployment;
+
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
+        let patch = serde_json::json!({ "spec": { "replicas": replicas } });
+        api.patch(
+            name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&patch),
+        )
+        .await
+        .map_err(|e| {
+            Error::internal_with_context(
+                "scale_deployment",
+                format!("failed to scale {namespace}/{name} to {replicas}: {e}"),
+            )
+        })?;
+        info!(deployment = %name, namespace = %namespace, replicas = replicas, "Scaled deployment for quota enforcement");
         Ok(())
     }
 
@@ -953,6 +990,15 @@ async fn compile_and_apply(
                     .await
                 {
                     warn!(error = %cleanup_err, "failed to delete revoked ExternalSecrets (non-fatal)");
+                }
+            }
+
+            // When quota is exceeded, scale the existing Deployment to 0 so no
+            // pods run while over budget. The Deployment stays so it can scale
+            // back up when quota frees.
+            if e.is_quota_exceeded() {
+                if let Err(scale_err) = ctx.kube.scale_deployment(name, namespace, 0).await {
+                    warn!(error = %scale_err, "failed to scale down over-quota deployment (non-fatal)");
                 }
             }
 

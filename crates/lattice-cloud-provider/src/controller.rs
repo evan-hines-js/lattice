@@ -214,16 +214,15 @@ mod tests {
         let cp = sample_provider(InfraProviderType::Docker);
         assert_eq!(cp.spec.provider_type, InfraProviderType::Docker);
         assert!(cp.spec.credentials.is_none());
-        assert!(cp.k8s_secret_ref().is_none());
+        assert!(cp.credential_secret_name().is_none());
     }
 
     #[tokio::test]
     async fn eso_credentials_resolve() {
         let cp = sample_provider(InfraProviderType::AWS);
         assert!(cp.spec.credentials.is_some());
-        let secret_ref = cp.k8s_secret_ref().unwrap();
-        assert_eq!(secret_ref.name, "aws-prod-credentials");
-        assert_eq!(secret_ref.namespace, LATTICE_SYSTEM_NAMESPACE);
+        let name = cp.credential_secret_name().unwrap();
+        assert_eq!(name, "aws-prod-credentials");
     }
 
     #[tokio::test]
@@ -355,7 +354,7 @@ mod tests {
         );
 
         assert!(cp.spec.credentials.is_none());
-        assert!(cp.k8s_secret_ref().is_none());
+        assert!(cp.credential_secret_name().is_none());
     }
 
     #[tokio::test]
