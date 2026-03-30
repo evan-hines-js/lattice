@@ -238,7 +238,7 @@ fn download_providers(
     }
 
     if Command::new("curl").arg("--version").output().is_err() {
-        eprintln!("curl not found, skipping provider download");
+        eprintln!("WARNING: curl not found, skipping provider download — providers may be missing at runtime");
         return Ok(());
     }
 
@@ -310,9 +310,20 @@ fn download_file(url: &str, dest: &Path) {
     if dest.exists() {
         return;
     }
-    let _ = Command::new("curl")
-        .args(["-fsSL", "-o"])
+    let status = Command::new("curl")
+        .args(["-fsSL", "--retry", "3", "--retry-delay", "2", "-o"])
         .arg(dest)
         .arg(url)
-        .status();
+        .status()
+        .unwrap_or_else(|e| panic!("failed to execute curl for {}: {}", url, e));
+    if !status.success() {
+        panic!(
+            "failed to download {}: curl exited with {}",
+            url,
+            status.code().unwrap_or(-1)
+        );
+    }
+    if !dest.exists() {
+        panic!("download succeeded but file missing: {}", dest.display());
+    }
 }
